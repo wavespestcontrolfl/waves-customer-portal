@@ -1576,6 +1576,26 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
 // The account-scoped kinds together: the appointment gate is re-read at the
 // send (every /appointment route 404s the moment it is off — r2 P1), then
 // each kind binds to the recipient's account.
+// A moving page link (GATE_MOVING_FLOW) shows the customer's first name, plan
+// services and move details, and its holder can change the move: bound to
+// the recipient's account at the send like a report link (GH Codex security
+// review on #7486). A short link arrives expanded to its /moving/ target
+// (expandedView). A token with no move fails closed; a look-alike host is not
+// a Waves link and is not judged.
+async function checkMovingLinks(ctx) {
+  const onRecipientAccount = recipientAccountBinder(ctx);
+  for (const run of linkRuns(ctx.runs, /\/moving\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, MOVING_PATH_RE, ANY_SCHEME);
+    if (!token) continue;
+    const ownerId = await movingLinkOwner(db, token);
+    if (!ownerId) return refuseSend('This moving link no longer resolves — remove it and insert a fresh one.');
+    const bad = await onRecipientAccount(ownerId, 'moving link');
+    if (bad) return bad;
+    ctx.bearers += 1;
+  }
+  return null;
+}
+
 async function checkAccountBoundLinks(ctx, projectReports) {
   // ANY_SCHEME here too: an http://<owned>/l/<code> run must not vanish from
   // the seam (nothing later sees the /l/ occurrence) — it is judged, and its
@@ -2044,7 +2064,8 @@ async function visitCardRequestLinked(runs, hosts, conn) {
  * READ-ONLY owner of every generated bearer the composer's seam does not
  * itself verify: reschedule and track (scheduled_services tokens), re-service
  * (customers.reservice_token), pay (invoices.token), estimate
- * (estimates.token) and referral (the public /r/ resolver's three paths), owned-host
+ * (estimates.token), referral (the public /r/ resolver's three paths) and the
+ * moving page (customer_moves.token, GATE_MOVING_FLOW), owned-host
  * links only. Short codes are judged by their stored target as well as by the
  * in-place expansion (which leaves an unpaid invoice's /pay target wrapped —
  * Codex r5 on #6266 P1), and a code with no row is unresolved. The
@@ -2054,6 +2075,10 @@ async function visitCardRequestLinked(runs, hosts, conn) {
  * an owned-host link of these shapes that matches no row is `unresolved`
  * (the caller fails closed).
  */
+// The moving page (routes/moving-public.js, 48 lowercase hex). A pasted
+// upper-case token is looked up lower-cased, so it is judged, never skipped.
+const MOVING_PATH_RE = /^\/moving\/([a-f0-9]{48})$/i;
+const movingLinkOwner = async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).first('customer_id'))?.customer_id;
 const ownedBearerShapes = () => [
   ['reschedule', /\/reschedule\//i, RESCHEDULE_PATH_RE,
     async (conn, t) => (await conn('scheduled_services').where({ reschedule_token: t }).first('customer_id'))?.customer_id],
@@ -2066,6 +2091,7 @@ const ownedBearerShapes = () => [
   ['estimate', /\/estimate\//i, /^\/estimate\/([A-Za-z0-9_-]{8,})$/i,
     async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
   ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
+  ['moving', /\/moving\//i, MOVING_PATH_RE, movingLinkOwner],
 ];
 // The public /r/:code resolver's own three paths (routes/referral-links.js):
 // an active promoter, a merged-away promoter whose code survives as an alias
@@ -2134,6 +2160,7 @@ async function bearerLinkSendCheck(body, toLast10, {
     () => checkPrepLinks(ctx, preps),
     () => checkStatementLinks(ctx, statements),
     () => checkAccountBoundLinks(ctx, projectReports),
+    () => checkMovingLinks(ctx),
     () => checkCardLinks(ctx, cards),
     // Pre-push Codex P1: consultation is lead-bound, not account-bound —
     // checked by destination phone alone (ctx.toLast10), independent of

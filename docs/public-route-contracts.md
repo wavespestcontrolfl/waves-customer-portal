@@ -6986,12 +6986,14 @@ the current street address, a phone, an email or money. `/check` takes
 `{ address }` (5-200 chars) and makes one paid Google address check: the
 same text is answered from `customer_moves.last_check` for 24 hours, and a
 link gets at most 10 paid checks per Eastern day (claimed atomically in SQL;
-the 11th is a 429). It answers `{ typed, normalized, verdict }` for the NEW
-address only. `/submit` takes `{ useCheckedAddress, moveOutDate,
-moveInDate }`: the browser never sends an address or a verdict, and
-`useCheckedAddress: true` uses only the address the server last checked for
-this link, read under the move's row lock. It needs a checked address or a
-move-out date; dates must be real and inside 60 days back to 400 days
+the 11th is a 429). It answers `{ typed, normalized, verdict, checkId }` for
+the NEW address only; `checkId` is an opaque 16-hex id of that check.
+`/submit` takes `{ checkId, moveOutDate, moveInDate }`: the browser never
+sends an address or a verdict. A `checkId` uses the address of that check,
+and only while it is still the check the server holds (read under the move's
+row lock); a check replaced since (another tab or device) is a 409, never
+swapped in. No `checkId` keeps the address already saved. It needs a checked
+address or a move-out date; dates must be real and inside 60 days back to 400 days
 ahead. A submit writes one `service_requests` row (`category` `moving`,
 reused and reopened on a resubmit), an `activity_log` row and one admin
 alert (deduped per move), and answers `{ ok, receipt, view }` with fixed

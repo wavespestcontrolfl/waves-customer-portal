@@ -224,10 +224,10 @@ maybeDescribe('moving flow (live Postgres)', () => {
 
   test('submit needs a checked address or a move-out date, and uses only the server-checked address', async () => {
     const move = await Moves.openMoveForCustomer(customerId);
-    await expect(Moves.submitMove(move, { useCheckedAddress: false })).rejects.toMatchObject({ code: 'need_something' });
-    await expect(Moves.submitMove(move, { useCheckedAddress: true })).rejects.toMatchObject({ code: 'no_checked_address' });
+    await expect(Moves.submitMove(move, {})).rejects.toMatchObject({ code: 'need_something' });
+    await expect(Moves.submitMove(move, { checkId: 'abcdef0123456789' })).rejects.toMatchObject({ code: 'no_checked_address' });
     // A verdict or address the browser sends is never read.
-    await expect(Moves.submitMove(move, { useCheckedAddress: false, address: '1 Forged St', verdict: 'in_area', moveInDate: '2026-12-20' }, { now: NOW }))
+    await expect(Moves.submitMove(move, { address: '1 Forged St', verdict: 'in_area', moveInDate: '2026-12-20' }, { now: NOW }))
       .rejects.toMatchObject({ code: 'need_something' });
     expect(await db('service_requests').where({ customer_id: customerId }).count('* as n').first()).toEqual({ n: '0' });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
@@ -251,8 +251,8 @@ maybeDescribe('moving flow (live Postgres)', () => {
     const before = await counts();
     const move = await Moves.openMoveForCustomer(customerId);
     validateAddress.mockResolvedValueOnce(inArea());
-    await Moves.checkMoveAddress(move, '12 Example Way, Parrish FL');
-    const first = await Moves.submitMove(move, { useCheckedAddress: true, moveOutDate: '2026-11-15', moveInDate: '' }, { now: NOW });
+    const checked = await Moves.checkMoveAddress(move, '12 Example Way, Parrish FL');
+    const first = await Moves.submitMove(move, { checkId: checked.checkId, moveOutDate: '2026-11-15', moveInDate: '' }, { now: NOW });
 
     const requests = await db('service_requests').where({ customer_id: customerId });
     expect(requests).toHaveLength(1);
@@ -276,8 +276,8 @@ maybeDescribe('moving flow (live Postgres)', () => {
     // The office closes it, then the customer adds a move-in date and a new address.
     await db('service_requests').where({ id: requests[0].id }).update({ status: 'resolved', resolved_at: new Date() });
     validateAddress.mockResolvedValueOnce(inArea({ normalized: { street_line_1: '40 Other Rd', city: 'Palmetto', state: 'FL', postal_code: '34221' } }));
-    await Moves.checkMoveAddress(first.move, '40 Other Rd, Palmetto FL');
-    await Moves.submitMove(first.move, { useCheckedAddress: true, moveOutDate: '2026-11-15', moveInDate: '2026-11-20' }, { now: NOW });
+    const rechecked = await Moves.checkMoveAddress(first.move, '40 Other Rd, Palmetto FL');
+    await Moves.submitMove(first.move, { checkId: rechecked.checkId, moveOutDate: '2026-11-15', moveInDate: '2026-11-20' }, { now: NOW });
     const after = await db('service_requests').where({ customer_id: customerId });
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ id: requests[0].id, status: 'new', subject: 'Moving: Palmetto', resolved_at: null, status_version: 1 });
@@ -287,7 +287,7 @@ maybeDescribe('moving flow (live Postgres)', () => {
     expect(raiseAdminAlert.mock.calls[1][2].metadata.requestId).toBe(requests[0].id);
 
     // Dates-only resubmit keeps the stored address.
-    const dated = await Moves.submitMove(after && (await db('customer_moves').where({ id: move.id }).first()), { useCheckedAddress: false, moveOutDate: '2026-11-18' }, { now: NOW });
+    const dated = await Moves.submitMove(after && (await db('customer_moves').where({ id: move.id }).first()), { moveOutDate: '2026-11-18' }, { now: NOW });
     expect(dated.view).toMatchObject({ newCity: 'Palmetto', moveOutDate: '2026-11-18' });
 
     // A move changes no property, visit or primary.
@@ -330,11 +330,11 @@ maybeDescribe('moving flow (live Postgres)', () => {
     validateAddress.mockResolvedValueOnce(inArea());
     const check = await request(app).post(`/api/public/moving/${move.token}/check`).send({ address: '12 Example Way, Parrish FL' });
     expect(check.status).toBe(200);
-    expect(check.body).toEqual({ typed: '12 Example Way, Parrish FL', normalized: { line1: '12 Example Way', line2: null, city: 'Parrish', state: 'FL', zip: '34219' }, verdict: 'in_area' });
+    expect(check.body).toEqual({ typed: '12 Example Way, Parrish FL', normalized: { line1: '12 Example Way', line2: null, city: 'Parrish', state: 'FL', zip: '34219' }, verdict: 'in_area', checkId: expect.stringMatching(/^[a-f0-9]{16}$/) });
     expect((await request(app).post(`/api/public/moving/${move.token}/check`).send({ address: 'x' })).status).toBe(400);
 
     const soon = etDateString(addETDays(new Date(), 13));
-    const submit = await request(app).post(`/api/public/moving/${move.token}/submit`).send({ useCheckedAddress: true, moveOutDate: soon, moveInDate: '' });
+    const submit = await request(app).post(`/api/public/moving/${move.token}/submit`).send({ checkId: check.body.checkId, moveOutDate: soon, moveInDate: '' });
     expect(submit.status).toBe(200);
     expect(submit.body.receipt).toEqual(['Thanks, Pat. We have your move. We will price your new home and send it to you to review. Nothing changes until you approve it.']);
     expect(JSON.stringify(submit.body)).not.toMatch(/Old Street|Bradenton|555|\$/);
@@ -360,6 +360,37 @@ maybeDescribe('moving flow (live Postgres)', () => {
     expect(await Moves.publicMoveView(again)).toMatchObject({ moveOutDate: '2026-11-15', moveInDate: '2026-11-20' });
     const [listed] = await Moves.recentMoves(customerId, 1);
     expect(listed).toMatchObject({ move_out_date: '2026-11-15', move_in_date: '2026-11-20' });
+  });
+
+  test('a submit names the check it confirmed: a check replaced in another window is refused, never swapped in', async () => {
+    const move = await Moves.openMoveForCustomer(customerId);
+    validateAddress.mockResolvedValueOnce(inArea());
+    const tabA = await Moves.checkMoveAddress(move, '12 Example Way, Parrish FL');
+    validateAddress.mockResolvedValueOnce(inArea({ normalized: { street_line_1: '40 Other Rd', city: 'Palmetto', state: 'FL', postal_code: '34221' } }));
+    const tabB = await Moves.checkMoveAddress(move, '40 Other Rd, Palmetto FL');
+    expect(tabA.checkId).not.toBe(tabB.checkId);
+    await expect(Moves.submitMove(move, { checkId: tabA.checkId, moveOutDate: '2026-11-15' }, { now: NOW }))
+      .rejects.toMatchObject({ code: 'stale_check', status: 409 });
+    expect(await db('service_requests').where({ customer_id: customerId }).count('* as n').first()).toEqual({ n: '0' });
+    const saved = await Moves.submitMove(move, { checkId: tabB.checkId, moveOutDate: '2026-11-15' }, { now: NOW });
+    expect(saved.move).toMatchObject({ typed_address: '40 Other Rd, Palmetto FL' });
+    // The same text again inside 24 hours is the same check, with the same id.
+    expect((await Moves.checkMoveAddress(move, '40 Other Rd, Palmetto FL'))).toMatchObject({ reused: true, checkId: tabB.checkId });
+  });
+
+  test('each submit moves the alert\'s close boundary with the request, so an answer resolves both', async () => {
+    const move = await Moves.openMoveForCustomer(customerId);
+    const first = await Moves.submitMove(move, { moveOutDate: '2026-11-15' }, { now: NOW });
+    const firstOpts = raiseAdminAlert.mock.calls[0][2];
+    expect(firstOpts).toMatchObject({ dedupeVersion: NOW.toISOString(), metadata: expect.objectContaining({ askedAt: NOW.toISOString() }) });
+    const later = new Date('2026-11-03T15:00:00Z');
+    await Moves.submitMove(first.move, { moveOutDate: '2026-11-15', moveInDate: '2026-11-20' }, { now: later });
+    const secondOpts = raiseAdminAlert.mock.calls[1][2];
+    expect(secondOpts).toMatchObject({ dedupeVersion: later.toISOString(), metadata: expect.objectContaining({ askedAt: later.toISOString() }) });
+    const { resolveRequestQuietly } = require('../services/portal-inbox');
+    // The first boundary no longer covers the resubmitted request; the new one does.
+    expect(await resolveRequestQuietly(first.request.id, customerId, 'Answered', { notAfter: firstOpts.metadata.askedAt })).toBe(0);
+    expect(await resolveRequestQuietly(first.request.id, customerId, 'Answered', { notAfter: secondOpts.metadata.askedAt })).toBe(1);
   });
 
   test('a resubmit makes the one office item fresh for the Portal inbox', async () => {

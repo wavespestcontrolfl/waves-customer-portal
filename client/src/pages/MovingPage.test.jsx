@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 // Moving page (GATE_MOVING_FLOW): the customer checks a new address, confirms
 // it, gives dates and sends. The page never posts an address or a verdict on
-// submit (only useCheckedAddress), shows no price, and answers a dead link
-// with the not-found card.
+// submit (only the confirmed check's id), shows no price, and answers a dead
+// link with the not-found card.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -67,13 +67,14 @@ describe('MovingPage', () => {
     expect(screen.getByRole('button', { name: 'Send my move' })).toBeDisabled();
   });
 
-  it('checks the address, asks to confirm, and submits only useCheckedAddress with the dates', async () => {
+  it('checks the address, asks to confirm, and submits only the confirmed check id with the dates', async () => {
     const calls = renderPage([
       [`/public/moving/${TOKEN}`, () => jsonResponse(OPEN_VIEW)],
       [`/public/moving/${TOKEN}/check`, () => jsonResponse({
         typed: '12 Example Way, Parrish FL',
         normalized: { line1: '12 Example Way', line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
         verdict: 'in_area',
+        checkId: 'abcdef0123456789',
       })],
       [`/public/moving/${TOKEN}/submit`, () => jsonResponse({
         ok: true,
@@ -97,7 +98,7 @@ describe('MovingPage', () => {
     const check = calls.find((c) => c.url.endsWith('/check'));
     expect(check.body).toEqual({ address: '12 Example Way, Parrish FL' });
     const submit = calls.find((c) => c.url.endsWith('/submit'));
-    expect(submit.body).toEqual({ useCheckedAddress: true, moveOutDate: '2026-11-15', moveInDate: '' });
+    expect(submit.body).toEqual({ checkId: 'abcdef0123456789', moveOutDate: '2026-11-15', moveInDate: '' });
   });
 
   it('sends dates only when the address is not known yet', async () => {
@@ -115,7 +116,7 @@ describe('MovingPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send my move' }));
     expect(await screen.findByText(/We have your move dates/)).toBeInTheDocument();
     const submit = calls.find((c) => c.url.endsWith('/submit'));
-    expect(submit.body).toEqual({ useCheckedAddress: false, moveOutDate: '2026-11-15', moveInDate: '' });
+    expect(submit.body).toEqual({ moveOutDate: '2026-11-15', moveInDate: '' });
   });
 
   it('an out-of-area check shows the fixed sentence before the customer confirms', async () => {
@@ -142,6 +143,23 @@ describe('MovingPage', () => {
     expect(document.body.textContent).toContain('New home: Parrish');
     fireEvent.click(screen.getByRole('button', { name: 'Add or change details' }));
     expect(screen.getByRole('heading', { level: 1, name: 'Moving, Pat?' })).toBeInTheDocument();
+  });
+
+  it('a check replaced in another window (409) shows the words and asks for a new check', async () => {
+    renderPage([
+      [`/public/moving/${TOKEN}`, () => jsonResponse(OPEN_VIEW)],
+      [`/public/moving/${TOKEN}/check`, () => jsonResponse({
+        typed: '12 Example Way, Parrish FL', normalized: { line1: '12 Example Way', city: 'Parrish', state: 'FL', zip: '34219' }, verdict: 'in_area', checkId: 'abcdef0123456789',
+      })],
+      [`/public/moving/${TOKEN}/submit`, () => jsonResponse({ error: 'That address changed in another window. Check it again, then confirm it.' }, 409)],
+    ]);
+    await screen.findByRole('heading', { level: 1, name: 'Moving, Pat?' });
+    fireEvent.change(screen.getByLabelText('New address'), { target: { value: '12 Example Way, Parrish FL' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check address' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Yes, that/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send my move' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('That address changed in another window.'));
+    expect(screen.getByRole('button', { name: 'Check address' })).toBeInTheDocument();
   });
 
   it('a dead link shows the not-found card', async () => {

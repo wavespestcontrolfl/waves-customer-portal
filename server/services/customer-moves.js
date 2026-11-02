@@ -181,10 +181,10 @@ function normalizedFrom(verdict, typed) {
 // the provider actually answered (an outage is not worth keeping).
 function reusableCheck(move, key, now) {
   const last = parseJson(move.last_check);
-  if (!last || last.key !== key || !last.result || last.providerAnswered !== true) return null;
+  if (!last || last.key !== key || !last.id || !last.result || last.providerAnswered !== true) return null;
   const age = now.getTime() - new Date(last.checked_at).getTime();
   if (!Number.isFinite(age) || age < 0 || age >= REUSE_WINDOW_MS) return null;
-  return last.result;
+  return last;
 }
 
 // Claim one check slot for today (ET), atomically, before the paid call. The
@@ -213,7 +213,7 @@ async function checkMoveAddress(move, rawAddress, { now = new Date() } = {}) {
   const key = typedKey(typed);
   const fresh = await db('customer_moves').where({ id: move.id }).first('id', 'last_check');
   const reused = fresh ? reusableCheck(fresh, key, now) : null;
-  if (reused) return { ...reused, reused: true };
+  if (reused) return { ...reused.result, checkId: reused.id, reused: true };
 
   const today = etDateString(now);
   if (!(await claimCheckSlot(move.id, today))) {
@@ -224,11 +224,14 @@ async function checkMoveAddress(move, rawAddress, { now = new Date() } = {}) {
   const label = moveVerdictLabel(verdict, STATUSES);
   const providerAnswered = !!verdict && verdict.status !== STATUSES.API_UNAVAILABLE && verdict.status !== STATUSES.NOT_ATTEMPTED;
   const result = { typed, normalized: normalizedFrom(verdict, typed), verdict: label };
+  // The page confirms THIS check and names it on submit, so a check made later
+  // in another tab never stands in for the one the customer saw.
+  const checkId = crypto.randomBytes(8).toString('hex');
   await db('customer_moves').where({ id: move.id }).update({
-    last_check: JSON.stringify({ key, checked_at: now.toISOString(), providerAnswered, result }),
+    last_check: JSON.stringify({ id: checkId, key, checked_at: now.toISOString(), providerAnswered, result }),
     updated_at: new Date(),
   });
-  return { ...result, reused: false };
+  return { ...result, checkId, reused: false };
 }
 
 // ── Public view ─────────────────────────────────────────────────────────────
@@ -313,11 +316,19 @@ function requestSubject(normalized, hasAddress) {
 
 // What the submit will store: the server-checked address when the customer used
 // it, else whatever an earlier submit already stored.
-function addressForSubmit(move, useCheckedAddress) {
-  if (useCheckedAddress) {
+const CHECK_ID_RE = /^[a-f0-9]{16}$/;
+
+// checkId = "use the address check I confirmed". It must be the check the
+// server holds now; one replaced since (another tab or device) is refused,
+// never swapped in. No checkId keeps the address already saved.
+function addressForSubmit(move, checkId) {
+  if (checkId) {
     const last = parseJson(move.last_check);
-    if (!last || !last.result || !last.result.typed) {
+    if (!CHECK_ID_RE.test(String(checkId)) || !last || !last.result || !last.result.typed) {
       throw new MoveError('no_checked_address', 'Check the address first, then confirm it.', 400);
+    }
+    if (last.id !== checkId) {
+      throw new MoveError('stale_check', 'That address changed in another window. Check it again, then confirm it.', 409);
     }
     return { typed: last.result.typed, normalized: last.result.normalized, verdict: last.result.verdict };
   }
@@ -342,6 +353,8 @@ async function writeOfficeItem(trx, { move, subject, description, now }) {
       urgency: 'routine',
       status: 'new',
       metadata: JSON.stringify({ moveId: move.id }),
+      created_at: now,
+      updated_at: now,
     }).returning('*');
     return row;
   }
@@ -357,7 +370,7 @@ async function writeOfficeItem(trx, { move, subject, description, now }) {
     ...(reopen
       ? { status: 'new', resolved_at: null, status_version: trx.raw('status_version + 1') }
       : {}),
-    updated_at: new Date(),
+    updated_at: now,
   }).returning('*');
   return row;
 }
@@ -369,7 +382,7 @@ function alertWhy(normalized, hasAddress, verdict) {
   return cutAtWord(`${city}${area}.`, MAX_WHY_CHARS);
 }
 
-async function raiseMoveAlert({ move, customer, request, normalized, hasAddress, verdict, description }) {
+async function raiseMoveAlert({ move, customer, request, normalized, hasAddress, verdict, description, submittedAt = new Date() }) {
   const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'a customer';
   const action = `review ${name}'s move`;
   const notif = await raiseAdminAlert('service', {
@@ -390,7 +403,15 @@ async function raiseMoveAlert({ move, customer, request, normalized, hasAddress,
     icon: '🚚',
     dedupeKey: `moving:${move.id}`,
     refreshOnDedupe: true,
+    // Each submit is a new revision of the one request (its created_at and
+    // updated_at = this submit): the version makes the standing alert refresh
+    // and ring, and askedAt moves its close boundary to this submit, so an
+    // answer to this revision resolves both the alert and the request
+    // (admin-alert-relevance resolveRequestOf -> portal-inbox
+    // resolveRequestQuietly: updated_at <= askedAt).
+    dedupeVersion: submittedAt.toISOString(),
     metadata: {
+      askedAt: submittedAt.toISOString(),
       requestId: request.id,
       customerId: move.customer_id,
       moveId: move.id,
@@ -411,14 +432,14 @@ function checkSubmitInput({ typed, moveOut }) {
   }
 }
 
-async function saveSubmit(move, { useCheckedAddress, moveOut, moveIn, services, now }) {
+async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
   return db.transaction(async (trx) => {
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
     if (!locked || locked.status === 'closed') throw new MoveError('closed', 'This link is no longer open.', 404);
     // Read the checked address from the LOCKED row, never from the copy loaded
     // at the start of the request: a check that landed in between is the one
     // the customer just confirmed.
-    const address = addressForSubmit(locked, useCheckedAddress);
+    const address = addressForSubmit(locked, checkId);
     checkSubmitInput({ typed: address.typed, moveOut });
     const customer = await trx('customers').where({ id: locked.customer_id }).first('id', 'first_name', 'last_name');
     const hasAddress = !!address.typed;
@@ -447,15 +468,15 @@ async function saveSubmit(move, { useCheckedAddress, moveOut, moveIn, services, 
 }
 
 /**
- * Save the customer's move. `useCheckedAddress` means "use the address the
- * server last checked for this link"; the browser never sends an address or a
+ * Save the customer's move. `checkId` names the address check the customer
+ * confirmed (the /check answer); the browser never sends an address or a
  * verdict. Returns { move, request, view }.
  */
-async function submitMove(move, { useCheckedAddress = false, moveOutDate, moveInDate } = {}, { now = new Date() } = {}) {
+async function submitMove(move, { checkId = null, moveOutDate, moveInDate } = {}, { now = new Date() } = {}) {
   const moveOut = cleanDate(moveOutDate, 'move-out date', now);
   const moveIn = cleanDate(moveInDate, 'move-in date', now);
   const services = await planServiceNames(move.customer_id);
-  const saved = await saveSubmit(move, { useCheckedAddress: useCheckedAddress === true, moveOut, moveIn, services, now });
+  const saved = await saveSubmit(move, { checkId: checkId || null, moveOut, moveIn, services, now });
   try {
     await raiseMoveAlert({
       move: saved.updated,
@@ -465,6 +486,7 @@ async function submitMove(move, { useCheckedAddress = false, moveOutDate, moveIn
       hasAddress: !!saved.address.typed,
       verdict: saved.address.verdict,
       description: saved.description,
+      submittedAt: now,
     });
   } catch (err) {
     logger.error(`[customer-moves] alert failed for move ${move.id}: ${err.message}`);

@@ -67,13 +67,14 @@ describe('typed address', () => {
 
 describe('the 24 hour reuse of a paid check', () => {
   const result = { typed: '12 Example Way', normalized: {}, verdict: 'in_area' };
-  const move = (over) => ({ last_check: JSON.stringify({ key: '12 example way', checked_at: '2026-11-02T10:00:00.000Z', providerAnswered: true, result, ...over }) });
+  const move = (over) => ({ last_check: JSON.stringify({ id: 'abcdef0123456789', key: '12 example way', checked_at: '2026-11-02T10:00:00.000Z', providerAnswered: true, result, ...over }) });
 
-  test('the same text within 24 hours is reused', () => {
-    expect(P.reusableCheck(move(), '12 example way', NOW)).toEqual(result);
+  test('the same text within 24 hours is reused, with its check id', () => {
+    expect(P.reusableCheck(move(), '12 example way', NOW)).toMatchObject({ id: 'abcdef0123456789', result });
   });
 
-  test('other text, an old answer or a provider failure is asked again', () => {
+  test('other text, an old answer, a provider failure or a check with no id is asked again', () => {
+    expect(P.reusableCheck(move({ id: undefined }), '12 example way', NOW)).toBeNull();
     expect(P.reusableCheck(move(), '14 example way', NOW)).toBeNull();
     expect(P.reusableCheck(move({ checked_at: '2026-11-01T14:00:00.000Z' }), '12 example way', NOW)).toBeNull();
     expect(P.reusableCheck(move({ providerAnswered: false }), '12 example way', NOW)).toBeNull();

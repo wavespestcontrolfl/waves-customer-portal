@@ -173,7 +173,7 @@ function useMoveForm(view) {
 async function postJson(url, body) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Something went wrong. Please try again.');
+  if (!res.ok) throw Object.assign(new Error(data.error || 'Something went wrong. Please try again.'), { status: res.status });
   return data;
 }
 
@@ -247,11 +247,16 @@ function MoveForm({ token, view, onDone }) {
     setBusy('submit'); setError('');
     try {
       onDone(await postJson(`${base}/submit`, {
-        useCheckedAddress: f.confirmed,
+        // The check the customer confirmed; none keeps the saved address.
+        checkId: f.confirmed ? f.check.checkId : undefined,
         moveOutDate: f.outUnsure ? '' : f.moveOut,
         moveInDate: f.inUnsure ? '' : f.moveIn,
       }));
-    } catch (e) { setError(e.message); } finally { setBusy(''); }
+    } catch (e) {
+      setError(e.message);
+      // 409: another window checked a different address since; check again.
+      if (e.status === 409) { f.setCheck(null); f.setConfirmed(false); }
+    } finally { setBusy(''); }
   };
 
   return (

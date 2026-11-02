@@ -13,7 +13,8 @@
  * GET  /:token         the page's data (services/customer-moves publicMoveView)
  * POST /:token/check   check a typed address (paid Google call: 10 per link per
  *                      Eastern day, the same text reused for 24 hours)
- * POST /:token/submit  save the move; answers the fixed receipt sentences
+ * POST /:token/submit  save the move; a checkId names the address check the
+ *                      customer confirmed. Answers the fixed receipt sentences
  *
  * Gate off, a malformed token, an unknown token and a closed move all answer
  * the same 404. This route sends no message and changes no visit, price or
@@ -110,7 +111,7 @@ router.post('/:token/check', checkLimiter, async (req, res) => {
     // The page confirms the address with the customer, so it gets the typed
     // text, Google's version and the verdict. Never a street address of the
     // CURRENT home.
-    return res.json({ typed: result.typed, normalized: result.normalized, verdict: result.verdict });
+    return res.json({ typed: result.typed, normalized: result.normalized, verdict: result.verdict, checkId: result.checkId });
   } catch (err) {
     return sendFailure(res, err, 'check');
   }
@@ -122,7 +123,7 @@ router.post('/:token/submit', submitLimiter, async (req, res) => {
     if (!move) return undefined;
     const body = req.body || {};
     const saved = await Moves.submitMove(move, {
-      useCheckedAddress: body.useCheckedAddress === true,
+      checkId: typeof body.checkId === 'string' && body.checkId ? body.checkId : null,
       moveOutDate: body.moveOutDate,
       moveInDate: body.moveInDate,
     });

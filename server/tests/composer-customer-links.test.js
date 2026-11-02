@@ -3471,6 +3471,57 @@ describe('wrappedOwnedLinkIn', () => {
   });
 });
 
+describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at every send check (GH Codex security review on #7486)', () => {
+  const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+  const MOVE_TOKEN = 'ab'.repeat(24);
+  const acct = (id, account_id = 'acct') => ({ id, account_id });
+  function wireMoving({ move = { customer_id: 'c2' }, recipientRows = [acct('c1')], owner = acct('c2'), shortRow = null } = {}) {
+    mockBuilders = {
+      customer_moves: chainBuilder({ firstRow: move }),
+      customers: chainBuilder({ firstRow: owner, rows: recipientRows }),
+      short_codes: chainBuilder({ firstRow: shortRow }),
+    };
+  }
+
+  test('linkOwnersInBody names the move\'s customer, reports an unknown token, and ignores a look-alike host', async () => {
+    wireMoving();
+    expect(await linkOwnersInBody(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))
+      .toEqual({ owners: [{ kind: 'moving', token: MOVE_TOKEN, customerId: 'c2' }], unresolved: [] });
+    expect(mockBuilders.customer_moves.where).toHaveBeenCalledWith({ token: MOVE_TOKEN });
+    wireMoving({ move: null });
+    expect(await linkOwnersInBody(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))
+      .toEqual({ owners: [], unresolved: [{ kind: 'moving', token: MOVE_TOKEN }] });
+    expect(await linkOwnersInBody(`Tips: https://example.com/moving/${MOVE_TOKEN}`)).toEqual({ owners: [], unresolved: [] });
+  });
+
+  test('the /sms seam passes a household sibling on the same account and adopts the one live row on the number', async () => {
+    wireMoving({ recipientRows: [acct('c1')], owner: acct('c2') });
+    expect(await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null }))
+      .toEqual({ ok: true, customerId: 'c1' });
+  });
+
+  test('the /sms seam refuses another account\'s moving link, long or short, and an unknown token', async () => {
+    wireMoving({ recipientRows: [acct('c1')], owner: acct('c9', 'other-acct'), move: { customer_id: 'c9' } });
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link belongs to a different customer/);
+    wireMoving({
+      recipientRows: [acct('c1')], owner: acct('c9', 'other-acct'), move: { customer_id: 'c9' },
+      shortRow: { code: 'mv1', kind: 'moving', target_url: `https://portal.wavespestcontrol.com/moving/${MOVE_TOKEN}` },
+    });
+    expect((await bearerLinkSendCheck('Moving? wavespest.co/l/mv1', '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link belongs to a different customer/);
+    wireMoving({ move: null });
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link no longer resolves/);
+  });
+
+  test('a look-alike host is not a Waves link and is not judged', async () => {
+    wireMoving();
+    expect(await bearerLinkSendCheck(`Tips: https://example.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+    expect(mockBuilders.customer_moves.where).not.toHaveBeenCalled();
+  });
+});
+
 describe('linkOwnersInBody', () => {
   test('resolves each generated bearer to its customer, owned hosts only, and reports what it cannot match', async () => {
     mockBuilders = {

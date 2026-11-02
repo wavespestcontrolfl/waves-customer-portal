@@ -3,7 +3,7 @@
  * The service is mocked here; moving-flow-postgres.test.js runs it for real.
  * Pins: dark = 404 everywhere, malformed/unknown tokens = the same 404, only
  * the allowed fields leave the check route, a MoveError keeps its status and
- * words, and submit reads useCheckedAddress only when it is exactly true.
+ * words, and submit passes a checkId only when it is a non-empty string.
  */
 let mockGateOn = true;
 jest.mock('../config/feature-gates', () => ({ movingFlowLive: () => mockGateOn }));
@@ -108,11 +108,11 @@ test('GET answers the public view with no-store headers', async () => {
   expect(res.headers['referrer-policy']).toBe('no-referrer');
 });
 
-test('check passes only a string address and returns only typed, normalized and verdict', async () => {
-  Moves.checkMoveAddress.mockResolvedValue({ typed: '12 Example Way', normalized: { city: 'Parrish' }, verdict: 'in_area', reused: false, extra: 'x' });
+test('check passes only a string address and returns only typed, normalized, verdict and checkId', async () => {
+  Moves.checkMoveAddress.mockResolvedValue({ typed: '12 Example Way', normalized: { city: 'Parrish' }, verdict: 'in_area', checkId: 'abcdef0123456789', reused: false, extra: 'x' });
   const res = await request(app()).post(`/api/public/moving/${TOKEN}/check`).send({ address: '12 Example Way' });
   expect(res.status).toBe(200);
-  expect(res.body).toEqual({ typed: '12 Example Way', normalized: { city: 'Parrish' }, verdict: 'in_area' });
+  expect(res.body).toEqual({ typed: '12 Example Way', normalized: { city: 'Parrish' }, verdict: 'in_area', checkId: 'abcdef0123456789' });
   expect(Moves.checkMoveAddress).toHaveBeenCalledWith(MOVE, '12 Example Way');
   await request(app()).post(`/api/public/moving/${TOKEN}/check`).send({ address: { nested: true } });
   expect(Moves.checkMoveAddress).toHaveBeenLastCalledWith(MOVE, '');
@@ -129,13 +129,20 @@ test('a MoveError keeps its status and plain words; anything else is a generic 5
   expect(broken.body.error).not.toMatch(/db exploded/);
 });
 
-test('submit uses the checked address only on a literal true and answers the receipt', async () => {
+test('submit passes a checkId only as a non-empty string and answers the receipt', async () => {
   Moves.submitMove.mockResolvedValue({ view: { firstName: 'Chris', status: 'submitted' } });
   const res = await request(app()).post(`/api/public/moving/${TOKEN}/submit`)
-    .send({ useCheckedAddress: 'true', moveOutDate: '2026-11-15', moveInDate: '' });
+    .send({ checkId: true, moveOutDate: '2026-11-15', moveInDate: '' });
   expect(res.status).toBe(200);
   expect(res.body).toEqual({ ok: true, receipt: ['Thanks, Chris. We have your move.'], view: { firstName: 'Chris', status: 'submitted' } });
-  expect(Moves.submitMove).toHaveBeenCalledWith(MOVE, { useCheckedAddress: false, moveOutDate: '2026-11-15', moveInDate: '' });
-  await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ useCheckedAddress: true });
-  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { useCheckedAddress: true, moveOutDate: undefined, moveInDate: undefined });
+  expect(Moves.submitMove).toHaveBeenCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-15', moveInDate: '' });
+  await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ checkId: 'abcdef0123456789' });
+  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: 'abcdef0123456789', moveOutDate: undefined, moveInDate: undefined });
+});
+
+test('a stale check is a 409 with plain words', async () => {
+  Moves.submitMove.mockRejectedValueOnce(new Moves.MoveError('stale_check', 'That address changed in another window. Check it again, then confirm it.', 409));
+  const res = await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ checkId: 'abcdef0123456789' });
+  expect(res.status).toBe(409);
+  expect(res.body).toEqual({ error: 'That address changed in another window. Check it again, then confirm it.' });
 });
