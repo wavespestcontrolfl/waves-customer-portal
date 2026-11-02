@@ -110,6 +110,38 @@ export function usablePick(options, reason) {
   return pick?.available && reason !== CUSTOM_REASON_CODE && pick.previewByReason?.[reason] ? pick : null;
 }
 
+// The options a technician whose "Can move visits" switch is off gets when the
+// options GET answers 403 with customerPickOnly (GATE_TECH_MOVE_SWITCH): the
+// hand-off only, no day rows.
+export function pickOnlyOptions(data) {
+  return {
+    customerPickOnly: true,
+    customerPick: data.customerPick,
+    extraReasonsEnabled: !!data.extraReasonsEnabled,
+    sameDay: [],
+    days: [],
+    remainingRouteCount: 0,
+  };
+}
+
+// A GET rain-out-options answer as a sheet's first state: the options and the
+// row that starts selected. Throws the server's message on a refusal. Both
+// Quick Move sheets read the answer this one way.
+export function readOptionsAnswer(res, data) {
+  if (res.status === 403 && data.customerPickOnly) {
+    // No pick on offer: today's refusal stands ("Ask the office to move this
+    // visit."); unavailableReason is a machine code, never shown.
+    if (!data.customerPick?.available) throw new Error(data.error || 'HTTP 403');
+    return { options: pickOnlyOptions(data), selectedKey: PICK_KEY };
+  }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  const pickOn = !!data.customerPick?.available;
+  // With the pick row on, the day rows are replaced by it.
+  const first = data.sameDay?.[0] || (pickOn ? null : data.days?.[0]);
+  if (first) return { options: data, selectedKey: `${first.kind}:${first.date}:${first.window.start}` };
+  return { options: data, selectedKey: pickOn ? PICK_KEY : null };
+}
+
 export const pickSentMessage = (first, { offRoute } = {}) => (
   `Texted ${first} to pick a day.${offRoute ? ' Stop taken off your route.' : ''}`
 );

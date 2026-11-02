@@ -80,7 +80,7 @@ import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag'
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 import {
-  PICK_KEY, customerFirstName, customerLastName, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
+  PICK_KEY, customerFirstName, customerLastName, readOptionsAnswer, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
 } from '../../lib/quickMoveResult';
 import {
   closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
@@ -1663,34 +1663,6 @@ function PickSwap({ label, onClick }) {
 
 // The 403 a technician without "Can move visits" gets when the pick option is
 // on: no time options, only the hand-off.
-function pickOnlyOptions(data) {
-  return {
-    customerPickOnly: true,
-    customerPick: data.customerPick,
-    extraReasonsEnabled: !!data.extraReasonsEnabled,
-    sameDay: [],
-    days: [],
-    remainingRouteCount: 0,
-  };
-}
-
-// A GET rain-out-options answer as the sheet's first state: the options and
-// the row that starts selected. Throws the server's message on a refusal.
-function readOptionsAnswer(res, data) {
-  if (res.status === 403 && data.customerPickOnly) {
-    // No pick on offer: today's refusal stands ("Ask the office to move this
-    // visit."); unavailableReason is a machine code, never shown.
-    if (!data.customerPick?.available) throw new Error(data.error || 'HTTP 403');
-    return { options: pickOnlyOptions(data), selectedKey: PICK_KEY };
-  }
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  const pickOn = !!data.customerPick?.available;
-  // With the pick row on, the day rows are replaced by it.
-  const first = data.sameDay?.[0] || (pickOn ? null : data.days?.[0]);
-  if (first) return { options: data, selectedKey: `${first.kind}:${first.date}:${first.window.start}` };
-  return { options: data, selectedKey: pickOn ? PICK_KEY : null };
-}
-
 function RainOutSheet({ service, stopName, onClose, onDone }) {
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');

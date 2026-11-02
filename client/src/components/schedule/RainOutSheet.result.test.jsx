@@ -21,14 +21,17 @@ let commitBody;
 let optionsExtra;
 let pickBody;
 let fetchMock;
+let optionsRefusal;
 
 beforeEach(() => {
   optionsExtra = {};
+  optionsRefusal = null;
   pickBody = null;
   localStorage.setItem('waves_admin_token', 'fixture-only');
   fetchMock = vi.fn(async (url, init) => {
     const path = String(url);
     if (path.endsWith('/rain-out-options')) {
+      if (optionsRefusal) return { ok: false, status: 403, json: async () => optionsRefusal };
       return json({
         sameDay: [], days: [{ kind: 'day', date: '2099-01-02', window: { start: '09:00', end: '10:00' }, display: 'Fri, Jan 2, 9:00 AM-10:00 AM' }],
         service: { window: { start: '10:00', end: '11:00' } }, remainingRouteCount: 0,
@@ -176,5 +179,28 @@ describe('RainOutSheet: let the customer pick a day', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Text Fixture to pick a day' }));
     expect(await screen.findByText('Already handed off')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Text Fixture to pick a day' })).toBeEnabled();
+  });
+
+  it('opens with the hand-off only for a technician whose Can move visits switch is off (403 customerPickOnly)', async () => {
+    optionsRefusal = { error: 'Ask the office to move this visit.', code: 'move_not_allowed', customerPickOnly: true, customerPick };
+    pickBody = { status: 200, body: { ok: true, dueDate: '2099-01-03', pickBy: customerPick.pickBy, textSent: true } };
+    const onDone = vi.fn();
+    render(<RainOutSheet service={{ id: 'visit-1', customerName: 'Fixture Customer' }} onClose={vi.fn()} onDone={onDone} />);
+    expect(await screen.findByText('Let Fixture pick a day')).toBeInTheDocument();
+    expect(screen.getByText('Moving this visit to a set time needs the office.')).toBeInTheDocument();
+    expect(screen.queryByText('Ask the office to move this visit.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Custom time')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Move appointment' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Text Fixture to pick a day' }));
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
+    expect(picks()).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([path]) => String(path).endsWith('/rain-out'))).toBe(false);
+  });
+
+  it("keeps today's error box for a 403 that is not a pick-only refusal", async () => {
+    optionsRefusal = { error: 'Ask the office to move this visit.', code: 'move_not_allowed' };
+    render(<RainOutSheet service={{ id: 'visit-1', customerName: 'Fixture Customer' }} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(await screen.findByText('Ask the office to move this visit.')).toBeInTheDocument();
+    expect(screen.queryByText(/pick a day/i)).not.toBeInTheDocument();
   });
 });

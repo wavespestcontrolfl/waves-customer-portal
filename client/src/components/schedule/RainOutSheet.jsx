@@ -19,7 +19,7 @@ import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import {
-  PICK_KEY, customerFirstName, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
+  PICK_KEY, customerFirstName, readOptionsAnswer, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
 } from '../../lib/quickMoveResult';
 import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
@@ -394,14 +394,12 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
           headers: authHeaders(),
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        // A technician whose "Can move visits" switch is off reaches this sheet
+        // too: a 403 with customerPickOnly opens it with the hand-off only.
+        const answer = readOptionsAnswer(res, data);
         if (!cancelled) {
-          setOptions(data);
-          const pickOn = !!data.customerPick?.available;
-          // With the pick row on, the day rows are replaced by it.
-          const first = data.sameDay?.[0] || (pickOn ? null : data.days?.[0]);
-          if (first) setSelectedKey(`${first.kind}:${first.date}:${first.window.start}`);
-          else setSelectedKey(pickOn ? PICK_KEY : null);
+          setOptions(answer.options);
+          setSelectedKey(answer.selectedKey);
         }
       } catch (err) {
         if (!cancelled) setError(err.message || 'Failed to load options');
@@ -894,7 +892,8 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
 
               {/* Custom on-the-hour time — for when none of the presets is the
                   time the dispatcher agreed on with the customer ("let's do
-                  3 PM today"). */}
+                  3 PM today"). Never for a technician who may only hand off. */}
+              {!options.customerPickOnly && (
               <button
                 type="button"
                 onClick={pickCustom}
@@ -912,7 +911,12 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                   </span>
                 )}
               </button>
+              )}
             </div>
+
+            {options.customerPickOnly && (
+              <div style={{ fontSize: 14, color: '#71717A', marginBottom: 16 }}>Moving this visit to a set time needs the office.</div>
+            )}
 
             {isCustom && (
               <div style={{ display: 'flex', gap: 10, marginBottom: 18 }}>
