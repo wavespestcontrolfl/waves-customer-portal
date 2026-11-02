@@ -3938,7 +3938,22 @@ them, and an enforced verdict never creates a suppression row. The
 unanswered digest omits a thread only when its latest eligible inbound has
 an enforced verdict, so a later genuine message resurfaces.
 Verdict attachment merges metadata without replacing unrelated fields. Failed
-verdict attachment bypasses enforcement. Provider request/auth contracts are unchanged. The SMS operational extension
+verdict attachment bypasses enforcement.
+`GATE_SMS_SPAM_TAG=true` (dark; strict `true`, read at call time) adds a manual
+spam tag the admin inbox sets (`sms_spam_senders`, `services/sms-spam-tag.js`):
+a new text from a tagged sender takes the same enforced path as a confident
+screen verdict, with a manual verdict (`method: 'manual'`, `enforced: true`)
+and no model call, whatever `GATE_SMS_SPAM_CLASSIFIER` is set to. Both message
+stores keep the text, it is marked read, and the webhook returns empty TwiML
+before lead creation, quoting, alerts or auto-replies. A tag never applies to
+a staff sender, the AI assistant line, a reaction, a message with media, an
+empty body, an applicant reply, a carrier keyword (STOP, START, HELP, YES and
+the like) or any text the webhook treats as an opt-out or opt-in command, a
+sender with a customer record or a failed customer lookup, or a sender with an
+open lead: those keep ordinary handling, and consent handling is unchanged. A
+failed tag lookup or a failed verdict write also means ordinary handling. Off =
+no tag lookup and byte-identical behavior.
+Provider request/auth contracts are unchanged. The SMS operational extension
 runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin

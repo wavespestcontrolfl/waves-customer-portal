@@ -396,6 +396,21 @@ function smsMessageMatchesLine(message, lineNumber) {
   return phoneKey(messageLine) === lineKey;
 }
 
+// One log response from several refreshed pages. It keeps the page-level
+// flags the inbox reads (GATE_SMS_LIKE's smsLike, GATE_SMS_SPAM_TAG's
+// smsSpamTag): a rebuilt response without smsSpamTag would turn Mark spam
+// back into the block while the gate is on.
+export function mergeRefreshedLogPages(pages, loadedPageCount) {
+  return {
+    messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
+    hasMore: !!pages.at(-1)?.hasMore,
+    page: pages.at(-1)?.page || loadedPageCount,
+    // GATE_SMS_LIKE: every page answers it; the combined result keeps it.
+    smsLike: pages.every((pageData) => pageData.smsLike === true),
+    ...(pages.some((pageData) => pageData?.smsSpamTag === true) ? { smsSpamTag: true } : {}),
+  };
+}
+
 function mergeSmsMessages(existing, incoming) {
   return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
@@ -652,6 +667,33 @@ function SmsLogItemV2({ msg: m, onReply }) {
   );
 }
 
+// GATE_SMS_SPAM_TAG: a thread whose inbound texts carry an enforced spam
+// verdict (tagged here, or silenced by the auto screen) offers "Not spam"
+// instead of "Mark spam"; the tag keeps the texts and only silences alerts.
+// A tagged sender counts even when no text carries a verdict (a photo-only
+// thread: photos are never stamped), so the tag can always be undone.
+function spamTagState(thread, { spamTagOn, canAct }) {
+  const spamTagged = spamTagOn && Array.isArray(thread.messages)
+    && thread.messages.some((m) => m.senderSpamTagged === true
+      || (m.direction === "inbound" && m.spamEnforced === true));
+  // Not spam is offered even once the number belongs to a customer (Codex P2 on
+  // #7457): the webhook stops silencing a customer's new texts, but texts
+  // silenced before the link stay silenced until someone undoes them. Only
+  // Mark spam is limited to threads with no customer.
+  return { spamTagged, canNotSpam: spamTagged && canAct };
+}
+
+// GATE_SMS_SPAM_TAG: the label on a received text the spam check or a tag
+// silenced (display only; any enforced verdict sets it).
+function SpamLabel({ message }) {
+  if (message.direction === "outbound" || message.spamEnforced !== true) return null;
+  return (
+    <span className="text-ui-body uppercase tracking-label text-ink-tertiary">
+      Spam · no alert sent
+    </span>
+  );
+}
+
 function ConversationViewV2({
   thread,
   messages,
@@ -660,6 +702,8 @@ function ConversationViewV2({
   onBack,
   onOpenProfile,
   onMarkSpam,
+  onNotSpam,
+  spamTagOn = false,
   smsLike = false,
   onLiked,
 }) {
@@ -675,6 +719,7 @@ function ConversationViewV2({
   // unlinked number (outbound only, nothing ever received) does not offer it.
   const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
   const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
+  const { spamTagged, canNotSpam } = spamTagState(thread, { spamTagOn, canAct: !!contactPhone && typeof onNotSpam === "function" });
   // GATE_SMS_LIKE: customer likes become badges on our quoted text, and the
   // customer's newest text gets the like button. Off: the list is unchanged.
   const likeView = smsLikeThread(messages, smsLike);
@@ -708,12 +753,25 @@ function ConversationViewV2({
           </div>{" "}
         </div>{" "}
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
-          {canMarkSpam ? (
+          {canNotSpam ? (
             <Button
               size="sm"
               variant="secondary"
               className="flex-1 md:flex-none"
-              title="Block this number and mark the thread read"
+              title="Bring this number's texts back as needing a reply"
+              onClick={() => onNotSpam(thread)}
+            >
+              <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Not spam
+            </Button>
+          ) : canMarkSpam && !spamTagged ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="flex-1 md:flex-none"
+              title={spamTagOn
+                ? "Tag this number as spam: its texts stay here, marked read, with no alerts"
+                : "Block this number and mark the thread read"}
               onClick={() => onMarkSpam(thread)}
             >
               <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -802,6 +860,7 @@ function ConversationViewV2({
                       {m.messageType.replace(/_/g, " ")}
                     </span>
                   )}
+                  <SpamLabel message={m} />
                   {receipt && (
                     <span
                       className={cn(
@@ -1332,6 +1391,9 @@ export function SmsTab({
   // full digits so a foreign block can never hide a NANP thread sharing
   // its suffix (the server enforces the same split).
   const [blocked, setBlocked] = useState(() => new Set());
+  // GATE_SMS_SPAM_TAG, from the /log payload: Mark spam tags the sender (texts
+  // stay, no alerts) instead of blocking it.
+  const [spamTagOn, setSpamTagOn] = useState(false);
   const blockedFromNumbers = (numbers) => {
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
@@ -1490,13 +1552,7 @@ export function SmsTab({
       })).then((pages) => {
         const hasInvalidPage = pages.some((pageData) => !Array.isArray(pageData?.messages) || pageData.error);
         if (hasInvalidPage) return { error: "One or more message pages could not be refreshed." };
-        return {
-          messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
-          hasMore: !!pages.at(-1)?.hasMore,
-          page: pages.at(-1)?.page || loadedPageCount,
-          // GATE_SMS_LIKE: every page answers it; the combined result keeps it.
-          smsLike: pages.every((pageData) => pageData.smsLike === true),
-        };
+        return mergeRefreshedLogPages(pages, loadedPageCount);
       })
       : adminFetch(logUrl, { signal: controller.signal });
     const logRequest = Promise.resolve(loadedPagesRequest).then(async (logData) => {
@@ -1555,6 +1611,7 @@ export function SmsTab({
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
+        setSpamTagOn(logData.smsSpamTag === true);
         const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
         if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
@@ -3234,6 +3291,7 @@ export function SmsTab({
   const handleMarkSpam = async (thread) => {
     const number = thread?.contactPhone;
     if (!number) return;
+    if (spamTagOn) return handleTagSpam(number);
     if (!window.confirm(`Block ${number} as spam? Future texts AND calls from this number are rejected before they reach anyone, and this thread is marked read.`)) return;
     try {
       await adminFetch(`/admin/communications/blocked-numbers`, {
@@ -3261,6 +3319,44 @@ export function SmsTab({
     } catch (e) {
       alert(`${number} is blocked, but marking the thread read failed: ${e.message}. Its messages may still show as unread if this number is ever unblocked.`);
     }
+  };
+
+  // GATE_SMS_SPAM_TAG: tag the sender. Nothing is removed: its texts stay in
+  // the inbox, marked read with a Spam tag and no alerts, and calls still ring.
+  // The server refuses a customer's or an open lead's number.
+  const handleTagSpam = async (number) => {
+    if (!window.confirm(`Mark ${number} as spam? Its texts stay in the inbox with a Spam tag and no alerts. Calls are not blocked.`)) return;
+    try {
+      const result = await adminFetch(`/admin/communications/spam-senders`, {
+        method: "POST",
+        body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
+      });
+      if (result?.readFailed) {
+        alert(`${number} is tagged as spam, but marking its texts read failed. They may still show as unread.`);
+      }
+    } catch (e) {
+      alert(`Could not mark spam: ${e.message}`);
+      return;
+    }
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
+  };
+
+  // GATE_SMS_SPAM_TAG: undo the tag. The number's texts come back as needing a reply.
+  const handleNotSpam = async (thread) => {
+    const number = thread?.contactPhone;
+    if (!number) return;
+    if (!window.confirm(`Bring ${number}'s texts back as needing a reply?`)) return;
+    try {
+      await adminFetch(`/admin/communications/spam-senders/${encodeURIComponent(number)}`, { method: "DELETE" });
+    } catch (e) {
+      alert(`Could not undo spam: ${e.message}`);
+      return;
+    }
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
   };
 
   // GATE_SMS_LIKE: the thumbs-up went out. Show the like now, then reload so
@@ -4101,6 +4197,8 @@ export function SmsTab({
             // Blocking a number is owner-only (2026-10-02); the server
             // refuses a technician, so the button is not offered.
             onMarkSpam={smsIsAdminRole ? handleMarkSpam : undefined}
+            onNotSpam={smsIsAdminRole ? handleNotSpam : undefined}
+            spamTagOn={spamTagOn}
             smsLike={smsLike}
             onLiked={handleLiked}
           />{" "}
