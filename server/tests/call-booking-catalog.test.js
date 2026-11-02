@@ -503,6 +503,9 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       reServiceLanes: ['pest'],
       coarseServiceLabel: 'General Pest Control',
     });
+    // German roach stays a paid specialty cleanout even for a plan customer
+    // (owner ruling 2026-11-02); the plain-roach case flips to the free
+    // re-service in the 'plan-covered pest' describe below.
     expect(roach?.service_key).toBe('cockroach_control');
   });
 
@@ -1957,5 +1960,86 @@ describe('loadBookableCallServices (catalog order feeds the prompt hash)', () =>
     await loadBookableCallServices(jest.fn(() => chain));
     expect(chain.where).toHaveBeenCalledWith({ is_active: true, booking_enabled: true });
     expect(chain.whereNotIn).toHaveBeenCalledWith('service_key', expect.arrayContaining(['tree_shrub_quarterly']));
+  });
+});
+
+describe('plan-covered pest one-time rows → free Pest Control Re-Service (owner 2026-11-02, call 534ea913)', () => {
+  const ROACH_ROW = { id: 'svc-roach-ot', service_key: 'cockroach_control', name: 'Cockroach Treatment Service', short_name: 'Cockroach', billing_type: 'one_time', pricing_type: 'fixed', base_price: '350.00', default_duration_minutes: 60, requires_follow_up: true, follow_up_interval_days: 14 };
+  const ONE_TIME_ROW = { id: 'svc-ot-pest', service_key: 'one_time_pest_control', name: 'One-Time Pest Control Service', short_name: 'One-Time Pest', billing_type: 'one_time', pricing_type: 'fixed', base_price: '199.00', default_duration_minutes: 60 };
+  const RODENT_INSPECTION = CATALOG.find((s) => s.service_key === 'rodent_inspection');
+  const PLAN_ROW = CATALOG.find((s) => s.service_key === 'pest_general_quarterly');
+  const SERVICES = [ROACH_ROW, ONE_TIME_ROW, RODENT_INSPECTION, PLAN_ROW];
+  const RE_SERVICES = [
+    { id: 'svc-pest-re', service_key: 'pest_re_service', name: 'Pest Control Re-Service', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+    { id: 'svc-lawn-re', service_key: 'lawn_re_service', name: 'Lawn Care Re-Service', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+  ];
+  const resolve = (extracted, reServiceLanes, extra = {}) => resolveCallBookingCatalogService({
+    extracted, services: SERVICES, reServices: RE_SERVICES, reServiceLanes, coarseServiceLabel: 'General Pest Control', ...extra,
+  })?.service_key;
+
+  const INCIDENT = {
+    specific_service_name: 'Cockroach Treatment Service',
+    matched_service: 'Cockroach Treatment Service',
+    requested_service: 'Cockroach reservice',
+    pain_points: 'live cockroaches in the house',
+  };
+
+  test('incident shape: Cockroach Treatment pick + "Cockroach reservice" + live pest lane → re-service', () => {
+    expect(resolve(INCIDENT, ['pest'])).toBe('pest_re_service');
+  });
+
+  test('same call with no live pest lane books the paid cockroach row', () => {
+    expect(resolve(INCIDENT, [])).toBe('cockroach_control');
+    expect(resolve(INCIDENT, undefined)).toBe('cockroach_control');
+    expect(resolve(INCIDENT, ['lawn'])).toBe('cockroach_control');
+  });
+
+  test('a lane-incompatible coarse label keeps the paid pick', () => {
+    expect(resolve(INCIDENT, ['pest'], { coarseServiceLabel: 'Mosquito Control' })).toBe('cockroach_control');
+  });
+
+  test('keyword-only roach wording + affirmative re-service + pest lane → re-service', () => {
+    expect(resolve({ requested_service: 'roach re-treatment', pain_points: 'roaches in the kitchen' }, ['pest'])).toBe('pest_re_service');
+  });
+
+  test('keyword-only roach wording with a NEGATED re-service stays the paid cockroach row', () => {
+    expect(resolve({ requested_service: 'roaches in the kitchen', call_summary: 'this is not a re-service, it is a new problem' }, ['pest'])).toBe('cockroach_control');
+  });
+
+  test('historical re-service mention does not convert a roach booking', () => {
+    expect(resolve({ requested_service: 'roaches in the kitchen', call_summary: 'last month the re-service worked great, now new roaches' }, ['pest'])).toBe('cockroach_control');
+  });
+
+  test('One-Time Pest Control pick + re-service + pest lane → re-service; lawn-only lane keeps the pick', () => {
+    const extracted = { specific_service_name: 'One-Time Pest Control Service', requested_service: 'pest control re-service' };
+    expect(resolve(extracted, ['pest'])).toBe('pest_re_service');
+    expect(resolve(extracted, ['lawn'])).toBe('one_time_pest_control');
+    expect(resolve(extracted, [])).toBe('one_time_pest_control');
+  });
+
+  test('a covered pick without re-service intent is untouched', () => {
+    expect(resolve({ specific_service_name: 'Cockroach Treatment Service', requested_service: 'cockroach treatment' }, ['pest'])).toBe('cockroach_control');
+  });
+
+  test('rodent inspection re-visit stays the paid inspection (unchanged)', () => {
+    expect(resolve({ requested_service: 'rodent inspection re-visit' }, ['pest'], { transcription: 'the rats are back, we need the rodent inspection re-visit', coarseServiceLabel: 'Rodent Control' })).toBe('rodent_inspection');
+    expect(resolve({ specific_service_name: 'Rodent Inspection Service', requested_service: 'rodent re-visit' }, ['pest'])).toBe('rodent_inspection');
+  });
+
+  test('roach plus rodent wording keeps suppressing the override (rodent stays paid)', () => {
+    expect(resolve({ requested_service: 'roach re-treatment', pain_points: 'roaches and rats, need a rodent inspection' }, ['pest'])).toBe('cockroach_control');
+  });
+
+  test('german roach stays a paid cleanout even for a plan customer', () => {
+    expect(resolve({ specific_service_name: 'Cockroach Treatment Service', requested_service: 'german roach re-service' }, ['pest'])).toBe('cockroach_control');
+    expect(resolve({ requested_service: 'german roach re-treatment' }, ['pest'])).toBe('cockroach_control');
+  });
+
+  test('dual-lane customer (pest + lawn) on a roach pick: the pick pins the pest lane', () => {
+    expect(resolve(INCIDENT, ['pest', 'lawn'])).toBe('pest_re_service');
+  });
+
+  test('the recurring plan pick still converts as before', () => {
+    expect(resolve({ specific_service_name: 'General Pest Control (Quarterly)', requested_service: 'pest control re-service' }, ['pest'])).toBe('pest_re_service');
   });
 });
