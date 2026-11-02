@@ -262,6 +262,12 @@ describe('prompt hygiene', () => {
       expect(text).not.toMatch(/seafoam|cw63|jimenez|bivona/i);
     }
   });
+
+  test('the decoder reads a transcribed initial\'s period as punctuation, not a dot, and splits a doubt into both forms', () => {
+    const prompt = buildDecoderPrompt({ transcript: 'x' });
+    expect(prompt).toContain('That period is punctuation, not a spoken "dot": in the local part the letter joins the next word with no dot');
+    expect(prompt).toContain('When you cannot tell, return both forms, the form without the dot first, with needs_confirmation true.');
+  });
 });
 
 describe('applyEmailDictationPolicy — risk-flagged candidates are never adopted', () => {
