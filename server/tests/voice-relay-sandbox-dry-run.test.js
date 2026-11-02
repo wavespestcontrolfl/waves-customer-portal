@@ -180,6 +180,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/property-role-proposals.js': 'keyed by id / ownership token',
     'services/notification-service.js': 'keyed by CallSid',
     'services/customer-dedupe.js': 'keyed by customer_id (never stamped on a sandbox row)',
+    'services/customer-intelligence/quiet-customers.js': 'contactTouchSql: correlated per customer (cl.customer_id = the customer row), never stamped on a sandbox row',
     'services/completion-comms-context.js': 'keyed by customer_id',
     'services/outbound-review-confirm.js': 'keyed by id',
     'services/customer-email-fanout.js': 'writer keyed by id',
