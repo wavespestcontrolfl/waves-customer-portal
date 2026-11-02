@@ -138,6 +138,16 @@ describe('pickStop', () => {
     expect((await pickStop(conn, 'tech-1', NOW)).id).toBe('new-arrival');
   });
 
+  test('the tracker\'s on_property counts as at the stop even while the status still reads an earlier state', async () => {
+    const conn = fakeConn([
+      visit({ id: 'earlier-open', route_order: 1 }),
+      visit({ id: 'tracker-arrived', status: 'confirmed', track_state: 'on_property', route_order: 2, arrived_at: '2026-11-02T14:40:00Z' }),
+    ]);
+    expect((await pickStop(conn, 'tech-1', NOW)).id).toBe('tracker-arrived');
+    deterministicVisitFacts.mockResolvedValue({ access: null, last_visit: null });
+    expect((await answer(conn, 'next_stop', { technicianId: 'tech-1', now: NOW })).title).toBe('Current stop');
+  });
+
   test('without an on_site stop, takes the first stop in day-plan order', async () => {
     const conn = fakeConn([
       visit({ id: 'late-window', window_start: '13:00:00' }),

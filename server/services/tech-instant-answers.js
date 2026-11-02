@@ -30,6 +30,13 @@ const INSTANT_ANSWER_KINDS = {
   last_treatment: 'Last treatment',
 };
 
+// At the stop: the operational status says on_site, or the tracker says
+// on_property (track-transitions.js maps on_property to on_site, but commits
+// it on its own and the status sync can lag or fail).
+function atStop(row) {
+  return row.status === 'on_site' || row.track_state === 'on_property';
+}
+
 function arrivedMs(row) {
   const t = row && row.arrived_at ? new Date(row.arrived_at).getTime() : NaN;
   return Number.isFinite(t) ? t : -Infinity;
@@ -55,6 +62,7 @@ async function pickStop(conn, technicianId, now = new Date()) {
       'scheduled_services.customer_id',
       'scheduled_services.technician_id',
       'scheduled_services.status',
+      'scheduled_services.track_state',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
       'scheduled_services.window_start',
@@ -67,7 +75,7 @@ async function pickStop(conn, technicianId, now = new Date()) {
       conn.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city')
     );
   const list = Array.isArray(rows) ? rows : [];
-  const onSite = list.filter((r) => r.status === 'on_site');
+  const onSite = list.filter(atStop);
   if (onSite.length) return onSite.reduce((best, r) => (arrivedMs(r) > arrivedMs(best) ? r : best));
   return list[0] || null;
 }
@@ -136,7 +144,7 @@ function lastTreatmentLines(facts) {
 
 async function stopAnswer(conn, kind, stop) {
   if (kind === 'next_stop') {
-    return { title: stop.status === 'on_site' ? 'Current stop' : 'Next stop', lines: nextStopLines(stop) };
+    return { title: atStop(stop) ? 'Current stop' : 'Next stop', lines: nextStopLines(stop) };
   }
   const facts = await deterministicVisitFacts(stop, conn);
   return {
