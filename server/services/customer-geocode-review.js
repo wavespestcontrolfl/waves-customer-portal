@@ -298,6 +298,60 @@ async function filterServiceReviewBlocks(rows, conn = db) {
   });
 }
 
+// Google's permanent "no street-level pin" answers: the county roll may still know the lot.
+const COUNTY_FALLBACK_REASON = /^(?:partial_match|no_result|coarse_result:)/;
+
+/** { lot, checked } from the county roll, or null (gate off, not eligible, or a county outage: nothing is learned). */
+async function countyLotLookup(customer, result = { location: null, permanent: true }) {
+  if (result.location || !result.permanent || require('../config/feature-gates').geocodeCountyFallbackLive?.() !== true
+    || !COUNTY_FALLBACK_REASON.test(result.reason || '') || !completeAddress(customer)) return null;
+  try {
+    const lot = await require('./property-lookup/county-lot-pin').countyLotPinForAddress(customer);
+    return { lot, checked: true };
+  } catch (err) {
+    // Counts only: an address never goes in a log.
+    require('./logger').warn(`[geocode-review] county lot lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
+const countyMissEvidence = () => JSON.stringify({ county_checked_at: new Date().toISOString() });
+
+/** What to save for one attempt: the pin (or none) and the review row that goes with it. */
+function geocodeOutcome(result, county) {
+  if (county?.lot) {
+    const { lat, lng, parcelId, county: name } = county.lot;
+    return { location: { lat, lng }, review: { status: 'geocoded', reason: 'county_parcel', source: 'county_parcel',
+      evidence: JSON.stringify({ county: name, parcel_id: parcelId, checked_at: new Date().toISOString() }), latitude: lat, longitude: lng } };
+  }
+  const location = result.location;
+  const status = location ? 'geocoded' : !result.permanent ? 'provider_unavailable'
+    : result.reason === 'incomplete_address' ? 'needs_details' : result.reason === 'outside_service_area' ? 'outside_area' : 'needs_pin';
+  return { location, review: { status, reason: result.reason || (location ? 'provider_match' : 'geocode_unavailable'), source: 'google',
+    evidence: county?.checked ? countyMissEvidence() : undefined, latitude: location?.lat, longitude: location?.lng } };
+}
+
+/** The one write path for a reviewed geocode: customer pin, primary mirror and review row, under the revision guard.
+ * Resolves to { location } once written, or null when the guard saw a concurrent change. */
+async function commitReviewedGeocode(conn, snapshot, outcome) {
+  const { customer, review, primary } = snapshot;
+  return conn.transaction(async trx => {
+    const current = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
+    const latestReview = await trx('customer_geocode_reviews').where({ customer_id: customer.id }).first();
+    const currentPrimary = await trx('customer_properties')
+      .where({ customer_id: customer.id, active: true, is_primary: true }).forShare().first();
+    if (!current || !reviewEnabled()
+      || reviewRevision(current, latestReview, currentPrimary) !== reviewRevision(customer, review, primary)) return null;
+    const { location } = outcome;
+    if (location) {
+      await trx('customers').where({ id: customer.id }).update({ latitude: location.lat, longitude: location.lng, updated_at: trx.fn.now() });
+      await require('./customer-properties').syncPrimaryCoordsFromCustomer(customer.id, trx);
+    }
+    await saveReview(trx, current, outcome.review);
+    return { location };
+  });
+}
+
 async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesCommitted } = {}) {
   const customer = await conn('customers').where({ id: customerId }).whereNull('deleted_at').first();
   if (!customer) return null;
@@ -314,26 +368,62 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
   const geocoder = require('./geocoder');
   const result = completeAddress(customer) ? await geocoder.geocodeAddressWithStatus(geocoder.buildAddress(customer))
     : { location: null, permanent: true, reason: 'incomplete_address' };
-  const committed = await conn.transaction(async trx => {
-    const current = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
-    const latestReview = await trx('customer_geocode_reviews').where({ customer_id: customerId }).first();
-    const currentPrimary = await trx('customer_properties')
-      .where({ customer_id: customerId, active: true, is_primary: true }).forShare().first();
-    if (!current || !reviewEnabled()
-      || reviewRevision(current, latestReview, currentPrimary) !== reviewRevision(customer, review, primary)) return null;
-    const location = result.location;
-    const status = location ? 'geocoded' : !result.permanent ? 'provider_unavailable'
-      : result.reason === 'incomplete_address' ? 'needs_details' : result.reason === 'outside_service_area' ? 'outside_area' : 'needs_pin';
-    if (location) {
-      await trx('customers').where({ id: customerId }).update({ latitude: location.lat, longitude: location.lng, updated_at: trx.fn.now() });
-      await require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId, trx);
-    }
-    await saveReview(trx, current, { status, reason: result.reason || (location ? 'provider_match' : 'geocode_unavailable'), source: 'google',
-      latitude: location?.lat, longitude: location?.lng });
-    return location;
-  });
+  // The county call, like the Google call, happens before the transaction.
+  const county = await countyLotLookup(customer, result);
+  const committed = (await commitReviewedGeocode(conn, { customer, review, primary }, geocodeOutcome(result, county)))?.location ?? null;
   if (committed && onCoordinatesCommitted) await onCoordinatesCommitted();
   return committed;
+}
+
+const RETRY_REASON_SQL = "(r.reason IN ('partial_match', 'no_result') OR r.reason LIKE 'coarse\\_result:%')";
+const COUNTY_CHECKED_SQL = "substring(r.evidence from '\"county_checked_at\":\"([0-9T:.Z-]+)\"')";
+const COUNTY_RETRY_DAYS = 7;
+const COUNTY_RETRY_BATCH = 10;
+
+/** True when evidence already records a county check newer than `cutoff` (ISO text). */
+function countyCheckedSince(evidence, cutoff) {
+  const checked = /"county_checked_at":"([0-9T:.Z-]+)"/.exec(String(evidence || ''))?.[1];
+  return !!checked && checked >= cutoff;
+}
+
+/**
+ * County retry for rows already on the needs_pin list (no Google call). A hit
+ * saves the pin exactly like the first attempt; a miss only records the check;
+ * an outage writes nothing. Returns { checked, pinned, customerIds }.
+ */
+async function retryCountyNeedsPin({ limit = COUNTY_RETRY_BATCH, now = new Date(), conn = db } = {}) {
+  const results = { checked: 0, pinned: 0, customerIds: [] };
+  if (!reviewEnabled() || require('../config/feature-gates').geocodeCountyFallbackLive?.() !== true) return results;
+  const cutoff = new Date(now.getTime() - COUNTY_RETRY_DAYS * 86400000).toISOString();
+  const rows = await conn('customer_geocode_reviews as r').join('customers as c', 'c.id', 'r.customer_id')
+    .whereNull('c.deleted_at').where('r.status', 'needs_pin')
+    .whereRaw(RETRY_REASON_SQL).whereRaw(ADDRESS_MATCH_SQL)
+    .whereRaw(`(r.evidence IS NULL OR ${COUNTY_CHECKED_SQL} IS NULL OR ${COUNTY_CHECKED_SQL} < ?)`, [cutoff])
+    .orderBy('r.updated_at', 'asc').limit(limit).select('r.customer_id');
+  for (const row of rows) {
+    const pinned = await retryCountyForCustomer(row.customer_id, cutoff, conn);
+    if (pinned === undefined) continue;
+    results.checked += 1;
+    if (pinned) { results.pinned += 1; results.customerIds.push(row.customer_id); }
+  }
+  return results;
+}
+
+// undefined = skipped (no longer eligible, or an outage); true = pinned; false = recorded a miss.
+async function retryCountyForCustomer(customerId, cutoff, conn) {
+  const customer = await conn('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  const [review, primary] = customer ? await Promise.all([
+    conn('customer_geocode_reviews').where({ customer_id: customerId }).first(),
+    conn('customer_properties').where({ customer_id: customerId, active: true, is_primary: true }).first(),
+  ]) : [];
+  if (!customer || review?.status !== 'needs_pin' || !sameAddress(customer, review) || !completeAddress(customer)
+    || review.reviewed_by || hasPin(effectiveCustomer(customer, primary)) || countyCheckedSince(review.evidence, cutoff)) return undefined;
+  const county = await countyLotLookup(customer, { location: null, permanent: true, reason: review.reason });
+  if (!county) return undefined;
+  const outcome = county.lot ? geocodeOutcome({}, county) : { location: null, review: {
+    status: review.status, reason: review.reason, source: review.source, evidence: countyMissEvidence(),
+    latitude: review.latitude, longitude: review.longitude } };
+  return (await commitReviewedGeocode(conn, { customer, review, primary }, outcome)) ? !!county.lot : undefined;
 }
 
 module.exports = { reviewEnabled, effectiveCustomer, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
@@ -341,6 +431,6 @@ module.exports = { reviewEnabled, effectiveCustomer, addressSnapshot, reviewRevi
   reviewedCustomerLocation, withCustomerReviewWriteFence, effectiveReview, blocksAutomaticGeocode,
   needsCoordinatePairRepair,
   filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision, serviceReviewContexts,
-  excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId,
+  excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId, retryCountyNeedsPin,
   // A primary saved address `p` that is the customer `c`'s address and pinned: its pin is the customer's effective pin.
-  PRIMARY_HAS_PIN_SQL };
+  PRIMARY_HAS_PIN_SQL, PRIMARY_ADDRESS_MATCH_SQL };
