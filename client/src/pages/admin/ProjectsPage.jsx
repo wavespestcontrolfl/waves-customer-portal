@@ -8,6 +8,7 @@ import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import { IssueWarrantyAction } from "../../components/admin/IssueWarrantyDialog";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
+import SentAnotherWayAction from "../../components/admin/SentAnotherWayAction";
 import useIsMobile from "../../hooks/useIsMobile";
 import useDictationPending from "../../hooks/dictationPending";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
@@ -3313,6 +3314,13 @@ export function ProjectDetail({
               Send report + invoice
             </button>
           )}
+        {canAdminActions && project.project_type === WDO_TYPE && (
+          <SentAnotherWayAction
+            key={project.id}
+            project={project}
+            onMarked={() => load({ preserveEdits: true, background: true })}
+          />
+        )}
         <IssueWarrantyAction
           project={project}
           findings={editFindings}

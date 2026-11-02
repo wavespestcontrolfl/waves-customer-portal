@@ -283,3 +283,23 @@ describe('noteRingEnded', () => {
     expect(mockBell).not.toHaveBeenCalled();
   });
 });
+
+// The Call button (alert-call-button.js, GATE_ALERT_CALL_BUTTON): a lead's call-back bells carry Call, naming the
+// lead's customer row, which the tap reads again.
+describe('Call on the lead call-back bells', () => {
+  const LEAD_CUSTOMER = '00000000-0000-4000-8000-0000000000b1';
+  const CALL = { kind: 'call_back', items: [{ id: 'call', label: 'Call', prompt: 'Waves rings your phone first, then you press 1 to connect.', args: { customerId: LEAD_CUSTOMER } }] };
+
+  test('the missed call request bell', async () => {
+    mockBell.mockClear();
+    await _test.raiseMissedBell({ customerId: LEAD_CUSTOMER, name: 'Pat Sample', firstName: 'Pat', leadId: 'lead-1', callLogId: 'log-1' }, [0]);
+    expect(mockBell.mock.calls[0][3].metadata.buttons).toEqual(CALL);
+  });
+
+  test('the after-hours follow-up and booked-call bells', async () => {
+    mockBell.mockClear();
+    const { _shared: { raiseLeadBell } } = require('../services/lead-call-text-followup');
+    await raiseLeadBell({ customer: { id: LEAD_CUSTOMER, first_name: 'Pat', last_name: 'Sample' }, leadId: 'lead-1', requestId: 'req-1', why: 'Asked for a call after hours and never sent a time.' }, [0]);
+    expect(mockBell.mock.calls[0][3].metadata.buttons).toEqual(CALL);
+  });
+});
