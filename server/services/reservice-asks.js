@@ -15,13 +15,14 @@
  */
 
 const db = require('../models/db');
+const { officeOnlyReason } = require('./reservice-office-only');
 const logger = require('./logger');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
 const { normalizeRequestPests, pestLabels } = require('./reservice-request');
-const { smsSuggestionText, callSuggestionText } = require('./reservice-office-request');
+const { smsSuggestionText, callSuggestionText, callRequestQuotes } = require('./reservice-office-request');
 const { scrubCustomerText } = require('./completion-comms-context');
 const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
 
@@ -149,11 +150,18 @@ function pestsIn(text) {
 
 // A raw customer line to a finished item, or null when nothing relevant is
 // left after the scrub. `lead` and `quoted` come from the source's rules.
-function buildItem({ id, source, at, text, quoted, lead = null }) {
+// `officeOnly` (only when set) is the office-only screen's verdict on the
+// ORIGINAL words: the scrub keeps pest talk only and the caps cut the tail, so
+// "Ants are back. I want a refund." would reach a later screen as "Ants are
+// back." (reservice-office-only.js). `screenText` is the source's whole text
+// when its reader already capped `text` (a text's body, a call's quotes). It
+// freezes with the item.
+function buildItem({ id, source, at, text, quoted, lead = null, screenText = null }) {
   const iso = toIso(at);
   if (!iso) return null;
   const scrubbed = capWords(compact(scrubCustomerText(text, { lane: 'reservice' })));
   if (!scrubbed) return null;
+  const officeOnly = officeOnlyReason(screenText || text);
   return {
     id,
     source,
@@ -163,6 +171,7 @@ function buildItem({ id, source, at, text, quoted, lead = null }) {
     lead,
     kind: scrubbed.includes('?') ? 'question' : 'problem',
     pests: pestsIn(scrubbed),
+    ...(officeOnly ? { officeOnly } : {}),
   };
 }
 
@@ -232,7 +241,7 @@ async function readTexts(knex, customerId, window, bookingKeys) {
   for (const row of rows || []) {
     const text = smsSuggestionText(row);
     if (!text || bookingKeys.has(normalizedWords(text))) continue;
-    candidates.push({ id: `text:${row.id}`, source: 'text', at: row.created_at, text, quoted: true });
+    candidates.push({ id: `text:${row.id}`, source: 'text', at: row.created_at, text, quoted: true, screenText: row.message_body });
   }
   return candidates;
 }
@@ -253,6 +262,7 @@ async function readCalls(knex, customerId, window) {
     if (!text) continue;
     candidates.push({
       id: `call:${row.id}`, source: 'call', at: row.created_at, text, quoted: false, lead: `On your call on ${callDay(row.created_at)}, you mentioned`,
+      screenText: callRequestQuotes(row),
     });
   }
   return candidates;
@@ -280,6 +290,18 @@ async function readEmails(knex, customerId, window) {
 // booking words above.
 
 // One failed channel logs its error code and yields nothing; the rest stand.
+// A text, a call or an email names no property, so unless the account provably has ONE premises it may be about
+// another one (a rental): such items stay on the sheet and the office bell but never print on this property's report
+// (Codex security review on #7502; reservice-property-scope.js). An unproven account or a failed read is several.
+async function accountMayHaveSeveralPremises(knex, customerId) {
+  try {
+    return !(await require('./reservice-property-scope').accountProvesSinglePremises(knex, customerId));
+  } catch (err) {
+    logger.warn(`[reservice-asks] premises proof unavailable: ${err?.code || err?.name || 'Error'}`);
+    return true;
+  }
+}
+
 async function safeChannel(name, read) {
   try {
     return await read();
@@ -343,7 +365,10 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
     safeChannel('email', () => readEmails(knex, customerId, window)),
   ]) : [];
 
-  const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean);
+  // `accountWide` (only when set): the visit's own booking words are this property's; the rest may not be.
+  const severalProperties = customerId ? await accountMayHaveSeveralPremises(knex, customerId) : false;
+  const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean)
+    .map((item) => (severalProperties && item.id !== bookingId ? { ...item, accountWide: true } : item));
   return {
     ok: true,
     lane,

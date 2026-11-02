@@ -241,6 +241,74 @@ is the pure builder.
 The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
 when the card is present.
 
+Re-service asks report (owner-approved design 2026-11-02, consolidated re-service
+report step S3a; `GATE_RESERVICE_ASKS` — dark, off unless exactly `'true'`, read
+at call time): on the same service-report payload (`/api/reports/:token/data` and
+the PDF, which share `buildReportV1Data`), gate on adds an optional
+`data.reserviceAsksReport` when the record carries a version-2
+`service_records.service_data.reserviceAsks` block (version 2 is the first
+to mark account-wide items; a version-1 freeze never renders) (frozen at completion: pest /
+lawn re-services completed as performed on a live closeout), the report's
+`reserviceReport` copy block, when composed, reads a performed (`treated`)
+outcome, and at least one item shows. When the key is present
+`data.reserviceReportCard` is omitted: the block replaces the card on the web
+page and the PDF. Gate off, no freeze, a not-performed outcome, or nothing to
+show: the key is omitted (never `null`), and the payload, the card and every PDF
+key are byte-identical to before.
+`server/services/service-report/reservice-asks-report.js` is the pure builder.
+Shape: `{ version: 1, title: 'Your re-service', lane, summary, told: [{ label,
+words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
+}], expectation, stillSeeing }`.
+- Which items: an item shows only with a technician answer that is not
+  `hidden`, and only when `officeOnlyReason`
+  (`server/services/reservice-office-only.js`: a health complaint after a
+  treatment or a person or pet that ate, licked, touched or got into our
+  product, damage we caused, money, a
+  complaint about the service, a missed or late visit) passes it: the verdict
+  on the customer's ORIGINAL words is frozen as the item's `officeOnly` (the
+  scrub keeps only pest talk, so it would hide "I want a refund"), and the
+  shown words are screened again. Unless the account provably has one
+  premises (`reservice-property-scope.js`, the shared fail-closed proof in
+  `visit-property-scope.js`), texts, calls and emails name no property and may
+  be about another one: they are frozen `accountWide` and never print; only
+  the visit's own booking words do (an unproven account or a failed read
+  counts as several).
+  The office's not-today reasons (`officeNotes`) are never read; no item ids
+  are exposed.
+- `told`: `label` is `<Source> · <Mon D>` (Eastern date; a question reads
+  `Your question · <Mon D>`); `words` are quoted words in curly quotes, or a
+  call / office lead plus the words. At render they pass the card's own
+  egress screens (a sentence saying where a key, lockbox, remote or fob is, or
+  making any pesticide-safety claim, is dropped; a third-person paraphrase
+  never sits under a lead), then a private-topic rule (a sentence that names a
+  pet or another person, a bait, poison, granule, dust, gel, station or trap,
+  or a health or safety word is dropped, whatever the office-only screen
+  found), and then `customerCopyViolations`; `null` (label only) when the
+  frozen item is not `printable` or nothing passes. The technician's own
+  answer keeps only the card's screens.
+- `did`: one row per shown item, in card 1's order. `subject` names the
+  message: card 1's label plus its first six printed words ("Text · Oct 30 ·
+  “Ants are back in the kitchen”"; a label-only message keeps its label).
+  The line is fixed wording from the technician's tap: `Treated` (`We treated it
+  with <products>.` from the record's product rows the answer names, plus
+  `Where: …` on lawn reports only, since pest reports name no treated areas,
+  owner 2026-10-05), `Checked`, `Noted`, `Follow-up` (`We will follow up on
+  this one.`) or `Answered` (the technician's sentence, re-screened at render
+  with the same egress screens; it prints whole or its row is dropped).
+- `products`: the visit's product rows once each (termite and rodent
+  monitoring stations and bait left out), `where` on lawn reports only, and `how` = the approved
+  `how_it_works` line (`report-product-copy.js`) only while
+  `GATE_REPORT_PRODUCT_COPY` is on. The report's standard products section is
+  unchanged.
+- `expectation`: the copy block's expectation line, or `null`. `stillSeeing`:
+  the card's topic rule and the same `/?tab=schedule` button rule (live view
+  only, `reserviceEligible === true`; no token or new route).
+The PDF prints the four cards (no button). Its cache key part `-ras1` (`-ras1p`
+with `GATE_REPORT_PRODUCT_COPY` on) takes the card's `-rcd1` place, and stands
+alone when the copy block is `null`; the render fence
+(`reserviceCardRenderFence`) appends `|asks:0` / `|asks:1` only while the gate
+is on.
+
 **Owner 2026-10-05: the `rain` key and the `pestWeekWeatherUncacheable` /
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;

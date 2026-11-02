@@ -5,6 +5,9 @@
  * A fake knex serves each table's rows; synthetic names only.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The single-premises proof has its own suite: here an account proves one premises unless a test says otherwise.
+const mockSinglePremises = jest.fn(async () => true);
+jest.mock('../services/reservice-property-scope', () => ({ accountProvesSinglePremises: (...args) => mockSinglePremises(...args) }));
 
 const logger = require('../services/logger');
 const {
@@ -199,6 +202,79 @@ describe('texts', () => {
     expect(items).toEqual([{
       id: 'text:s1', source: 'text', at: at.toISOString(), text: 'The ants came back after the spray.', quoted: true, lead: null, kind: 'problem', pests: ['Ants'],
     }]);
+  });
+
+  test('the office-only screen reads the original words, before the scrub keeps only the pest talk', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const { items } = await gather({ sms: [sms('s2', 'The ants came back after the spray. I want a refund.', at)] });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'text:s2', officeOnly: 'billing' });
+    expect(items[0].text).not.toMatch(/refund/);
+  });
+
+  test('a text longer than the 400-character cap is screened whole: a refund at its end still counts', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const long = `${'The ants came back after the spray, all along the kitchen counter and the back door. '.repeat(6)}I want a refund.`;
+    expect(long.length).toBeGreaterThan(400);
+    const { items } = await gather({ sms: [sms('s3', long, at)] });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'text:s3', officeOnly: 'billing' });
+  });
+
+  test('an account not proven to have one premises: the channel items are account-wide, the booking words are not', async () => {
+    const visit = baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' });
+    const texts = [sms('s7', 'Roaches are back at the rental')];
+    mockSinglePremises.mockResolvedValueOnce(false);
+    const several = await gather({ visit, sms: texts });
+    expect(several.items.map((item) => [item.id, item.accountWide || false])).toEqual([['booking:visit-1', false], ['text:s7', true]]);
+    expect(mockSinglePremises).toHaveBeenLastCalledWith(expect.any(Function), 'cust-1');
+    const one = await gather({ visit, sms: texts });
+    expect(one.items.some((item) => item.accountWide)).toBe(false);
+    // A failed proof counts as several: nothing account-wide can print.
+    mockSinglePremises.mockRejectedValueOnce(new Error('db down'));
+    const failed = await gather({ visit, sms: texts });
+    expect(failed.items.find((item) => item.id === 'text:s7').accountWide).toBe(true);
+  });
+
+  test('a first-person health complaint is office-only even when its pest words survive the scrub', async () => {
+    const { items } = await gather({ sms: [
+      sms('s8', 'I got sick after your spray. Ants are still in the kitchen.'),
+      sms('s9', 'Ants are still in the kitchen. I could not breathe after your spray.', new Date(NOW - DAY)),
+    ] });
+    expect(items.map((item) => [item.id, item.officeOnly])).toEqual([['text:s8', 'health'], ['text:s9', 'health']]);
+  });
+
+  test('end to end: a pet that ate our bait is office-only at gather, and the public report never prints it', async () => {
+    const prior = process.env.GATE_RESERVICE_ASKS;
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    try {
+      const { buildReserviceAsksFreeze } = require('../services/reservice-answers');
+      const { buildReserviceAsksReport } = require('../services/service-report/reservice-asks-report');
+      const gathered = await gather({ sms: [
+        sms('s10', 'My dog ate your bait. Ants are still in the kitchen.'),
+        sms('s11', 'Our dog walked through the granules. Roaches are back in the garage.', new Date(NOW - DAY)),
+      ] });
+      expect(gathered.items.map((item) => [item.id, item.officeOnly])).toEqual([['text:s10', 'health'], ['text:s11', 'health']]);
+      const { freeze } = buildReserviceAsksFreeze({
+        gathered,
+        answers: gathered.items.map((item) => ({ itemId: item.id, answer: 'treated', productIds: ['prod-1'] })),
+        gatheredAt: NOW,
+      });
+      const record = {
+        id: 'svc-e2e', customer_id: 'cust-1', service_line: 'pest', service_type: 'Pest Control Re-Service', service_date: '2026-11-02',
+        is_callback: true, service_data: JSON.stringify({ reserviceAsks: freeze }),
+      };
+      const products = [{ id: 'sp1', product_id: 'prod-1', product_name: 'Taurus SC', application_area: 'Outside', targets: JSON.stringify(['Ants']) }];
+      const block = { serviceLine: 'pest', outcome: 'treated', expectation: 'Treatments can take several days.' };
+      expect(buildReserviceAsksReport(record, { block, products })).toBeNull();
+      // With the screen's verdict lost, the render rule alone still keeps the pet and the product off the page.
+      const unflagged = { ...freeze, items: freeze.items.map(({ officeOnly, ...item }) => item) };
+      const report = buildReserviceAsksReport({ ...record, service_data: JSON.stringify({ reserviceAsks: unflagged }) }, { block, products });
+      expect(JSON.stringify(report || {})).not.toMatch(/dog|bait|granules/i);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_RESERVICE_ASKS;
+      else process.env.GATE_RESERVICE_ASKS = prior;
+    }
   });
 
   test('tapbacks, STOP and empty texts are dropped', async () => {

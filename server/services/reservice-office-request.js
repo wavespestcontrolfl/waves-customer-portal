@@ -86,7 +86,10 @@ function parseExtraction(value) {
 // transcript, never v1), so the V1 pain_points / call_summary interpretation
 // is never restored. No valid V2 = no call suggestion. Spam / voicemail /
 // misdial rows carry no customer words.
-function callSuggestionText(row) {
+// The caller's own service-request quotes, joined and NOT capped, or null (the
+// same eligibility as the suggestion). callSuggestionText caps them; the
+// re-service office-only screen (reservice-asks.js) reads them whole.
+function callRequestQuotes(row) {
   if (!row || String(row.v2_extraction_status || '') !== 'valid') return null;
   // The voice pipeline records a voicemail in processing_status, call_outcome
   // or answered_by; a misdial / spam outcome lives in call_outcome.
@@ -110,7 +113,11 @@ function callSuggestionText(row) {
     seen.add(quote.toLowerCase());
     quotes.push(quote);
   }
-  return cleanRequestText(quotes.join(' ... '));
+  return quotes.length ? quotes.join(' ... ') : null;
+}
+
+function callSuggestionText(row) {
+  return cleanRequestText(callRequestQuotes(row));
 }
 
 function toIso(value) {
@@ -204,6 +211,7 @@ module.exports = {
   cleanRequestText,
   smsSuggestionText,
   callSuggestionText,
+  callRequestQuotes,
   pickSuggestion,
   resolveCustomerRequest,
 };
