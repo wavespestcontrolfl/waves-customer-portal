@@ -590,6 +590,11 @@ async function sendSmsHandler(req, res, next) {
       if (barPins) {
         return res.status(409).json({ error: 'This number belongs to an active job applicant. Handle it from the Communications page.', code: 'needs_communications_page' });
       }
+      // The office's like is for customer texts: the applicant rail sends (now or deferred) without the
+      // like's provider-boundary check. Refused before any send or write.
+      if (likeTarget) {
+        return res.status(409).json({ error: 'A job applicant\'s text cannot get a like. Reply from the recruiting queue.', code: 'like_applicant_thread' });
+      }
       // A translation card's reply is a customer-service reply: the applicant rail sends without its
       // freshness, fact and claim checks, so it never goes out there.
       if (translationTrialId) {
@@ -2583,13 +2588,11 @@ router.post('/messages/:id/like', async (req, res, next) => {
 });
 
 // What the like's send did, from the handler's answer or its error: 'sent',
-// 'uncertain' (it may have left, or it waits in a queue) or 'not_sent'. A 200
-// alone proves nothing: a suppressed send answers 200 with a sentinel id, so
-// the provider outcome decides. An error with no provider outcome may come
-// after the provider took the text. The applicant rail answers 200 with its
-// own outcome: sent, uncertain or deferred (queued, not yet sent).
+// 'uncertain' (it may have left) or 'not_sent'. A 200 alone proves nothing: a
+// suppressed send answers 200 with a sentinel id, so the provider outcome
+// decides. An error with no provider outcome may come after the provider took
+// the text. (A like never reaches the applicant rail: the handler refuses it.)
 function officeLikeSendVerdict(reply, err = null) {
-  if (!err && reply.json?.recruiting) return reply.json.outcome === 'sent' ? 'sent' : 'uncertain';
   const outcome = err ? err.providerOutcome : reply.json;
   if (autoSendExecutor.isRealProviderSend(outcome)) return 'sent';
   if (autoSendExecutor.isAmbiguousProviderOutcome(outcome) || (err && !outcome)) return 'uncertain';

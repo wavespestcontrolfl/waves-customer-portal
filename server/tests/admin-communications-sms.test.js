@@ -4432,14 +4432,24 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
     ['a suppressed send', { status: 200, json: { sent: true, providerMessageId: 'owner-silence' } }, null, 'not_sent'],
     ['a blocked send', { status: 422, json: { sent: false, blocked: true, code: 'SMS_OPTED_OUT' } }, null, 'not_sent'],
     ['an uncertain outcome', { status: 422, json: { sent: false, retryable: true, deliveryOutcome: 'uncertain' } }, null, 'uncertain'],
-    ['an applicant text sent', { status: 200, json: { success: true, recruiting: true, outcome: 'sent' } }, null, 'sent'],
-    ['an applicant text queued', { status: 200, json: { success: true, recruiting: true, outcome: 'deferred' } }, null, 'uncertain'],
-    ['a failed applicant text', { status: 422, json: { error: 'Applicant text failed' } }, null, 'not_sent'],
+    ['a refusal before any send', { status: 409, json: { error: 'refused', code: 'like_applicant_thread' } }, null, 'not_sent'],
     ['an error with no provider outcome', null, new Error('socket hang up'), 'uncertain'],
     ['an error after a definite non-send', null, Object.assign(new Error('rejected'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }), 'not_sent'],
     ['an error after the provider took it', null, Object.assign(new Error('late'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-2' } }), 'sent'],
   ])('the send verdict for %s', (_label, reply, err, verdict) => {
     expect(communicationsRouter._officeLikeSendVerdict(reply, err)).toBe(verdict);
+  });
+
+  test('a job applicant thread refuses the like before any send, and hands the like back', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValueOnce(true);
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('like_applicant_thread');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'not_sent');
   });
 
   test('a technician gets the composer\'s own scope answer before any write', async () => {
