@@ -363,6 +363,9 @@ router.post('/:id/interest', async (req, res, next) => {
         relationship: currentCount > 0 ? 'add' : 'start',
         previousTier: customer.waveguard_tier || null,
         refreshed: false,
+        // GATE_PORTAL_ITEM_CLOSE (bundleRequestAlert reads it): the request row this bell is about, so the
+        // Portal tab's Mark handled closes it and the relevance sweep tracks it, as for every add-a-service ask.
+        requestId: request.id,
       });
     } catch (bellErr) {
       logger.error(`Promotion interest bell failed for request ${request.id}: ${bellErr.message}`);

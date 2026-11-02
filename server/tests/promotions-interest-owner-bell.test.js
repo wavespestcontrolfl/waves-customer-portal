@@ -73,6 +73,8 @@ test('a tap rings the add-a-service bell for the customer and texts the owner no
     relationship: 'add',
     previousTier: 'Silver',
     refreshed: false,
+    // The request row, so Mark handled closes the bell (GATE_PORTAL_ITEM_CLOSE, read by bundleRequestAlert).
+    requestId: 'req-1',
   });
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   // The customer's own confirmation is unchanged.
