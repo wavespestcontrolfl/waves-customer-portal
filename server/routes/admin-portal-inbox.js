@@ -36,7 +36,9 @@ router.get('/summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/portal-inbox -> { enabled, cutoff, items, older: { chats, requests } }
+// GET /api/admin/portal-inbox -> { enabled, cutoff, items, olderItems, total, older: { chats, requests } }
+// `items` = open, last 14 days; `olderItems` = open at or before the cutoff, listed one by one;
+// `older` = their true totals.
 router.get('/', requireLive, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'private, no-store');

@@ -86,11 +86,12 @@ describe('admin portal inbox routes', () => {
   test('gate on: summary and list return the service answer', async () => {
     process.env.GATE_PORTAL_INBOX = 'true';
     mockService.summary.mockResolvedValue({ count: 5 });
-    mockService.list.mockResolvedValue({ cutoff: daysAgo(14), items: [], older: { chats: 2, requests: 3 } });
+    const olderItems = [{ kind: 'chat', id: 'esc-old', createdAt: daysAgo(20) }];
+    mockService.list.mockResolvedValue({ cutoff: daysAgo(14), items: [], olderItems, older: { chats: 2, requests: 3 } });
     await withServer(async (base) => {
       expect(await (await fetch(`${base}/summary`, { headers: auth('admin') })).json()).toEqual({ enabled: true, count: 5 });
       const body = await (await fetch(base, { headers: auth('admin') })).json();
-      expect(body).toMatchObject({ enabled: true, items: [], older: { chats: 2, requests: 3 } });
+      expect(body).toMatchObject({ enabled: true, items: [], olderItems, older: { chats: 2, requests: 3 } });
     });
   });
 

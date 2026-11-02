@@ -24,8 +24,22 @@ const request = {
   requestedService: "", source: "portal", urgency: "routine", status: "new",
 };
 
+const olderChat = {
+  ...chat, id: "esc-old", createdAt: "2026-09-20T15:00:00.000Z",
+  customer: { id: "cust-5", firstName: "Dana", lastName: "Backlog", phone: "+19415550105", hasTexts: true },
+  customerMessage: "Do you treat for chinch bugs?", summary: "", assistantReply: "",
+};
+const olderRequest = {
+  ...request, id: "req-old", createdAt: "2026-08-02T15:00:00.000Z",
+  customer: { id: "cust-6", firstName: "Rey", lastName: "Archive", phone: "+19415550106", hasTexts: false },
+  subject: "Gate code changed",
+};
+
 function listing(overrides = {}) {
-  return { enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: [chat, request], total: 2, older: { chats: 3, requests: 2 }, ...overrides };
+  return {
+    enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: [chat, request], olderItems: [olderChat, olderRequest],
+    total: 2, older: { chats: 3, requests: 2 }, ...overrides,
+  };
 }
 
 function Where() {
@@ -232,8 +246,103 @@ describe("Portal inbox tab", () => {
     expect(screen.getByRole("button", { name: "Close them" })).toBeInTheDocument();
   });
 
+  it("lists older open items one by one under the Older line, with the same row actions", async () => {
+    mount();
+    const list = await screen.findByTestId("portal-older-list");
+    const chatRow = within(list).getByText("Dana Backlog").closest("[data-testid]");
+    expect(within(chatRow).getByText("Chat")).toBeInTheDocument();
+    expect(within(chatRow).getByText(/Do you treat for chinch bugs/)).toBeInTheDocument();
+    const requestRow = within(list).getByText("Rey Archive").closest("[data-testid]");
+    expect(within(requestRow).getByText("Gate code changed")).toBeInTheDocument();
+    // Recent rows stay in their own list.
+    expect(within(list).queryByText("Pat Synthetic")).not.toBeInTheDocument();
+    // 2 of 5 older items are listed, so the tab says so.
+    expect(screen.getByText("Showing 2 of 5 older items, newest first.")).toBeInTheDocument();
+    fireEvent.click(within(chatRow).getByRole("button", { name: "Reply by text" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/admin/communications?thread=cust-5#tab=sms");
+    cleanup();
+    mount();
+    const again = within(await screen.findByTestId("portal-older-list")).getByText("Rey Archive").closest("[data-testid]");
+    fireEvent.click(within(again).getByRole("button", { name: "Open customer" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/admin/customers?customerId=cust-6");
+  });
+
+  it("marks an older row handled: the row goes, the matching older count drops, the recent total stays", async () => {
+    const onCount = vi.fn();
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ older: { chats: 1, requests: 1 } }) : updated(url)));
+    mount(onCount);
+    const row = within(await screen.findByTestId("portal-older-list")).getByText("Dana Backlog").closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Dana Backlog")).not.toBeInTheDocument());
+    expect(adminFetch).toHaveBeenCalledWith("/ai/admin/escalations/esc-old", {
+      method: "PUT",
+      body: JSON.stringify({ status: "resolved", resolution_notes: "Handled in Communications → Portal" }),
+    });
+    expect(screen.getByText("Older than 14 days: 0 chat hand-offs and 1 request")).toBeInTheDocument();
+    expect(screen.getByText("Rey Archive")).toBeInTheDocument();
+    expect(screen.getByText("Pat Synthetic")).toBeInTheDocument();
+    expect(onCount).toHaveBeenLastCalledWith(2);
+
+    fireEvent.click(within(screen.getByText("Rey Archive").closest("[data-testid]")).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Rey Archive")).not.toBeInTheDocument());
+    expect(adminFetch).toHaveBeenCalledWith("/admin/requests/req-old", { method: "PATCH", body: JSON.stringify({ status: "resolved", quiet: true }) });
+    // Nothing older left: the Older line goes away.
+    expect(screen.queryByText(/Older than 14 days/)).not.toBeInTheDocument();
+  });
+
+  it("loads the next older rows once the listed ones are all handled (the older list is capped)", async () => {
+    let lists = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url !== "/admin/portal-inbox") return updated(url);
+      lists += 1;
+      // First load: 1 of 2 older requests listed. Second load: the next one.
+      return lists === 1
+        ? listing({ olderItems: [olderRequest], older: { chats: 0, requests: 2 } })
+        : listing({ olderItems: [{ ...olderRequest, id: "req-next", subject: "Next one" }], older: { chats: 0, requests: 1 } });
+    });
+    mount();
+    const row = within(await screen.findByTestId("portal-older-list")).getByText("Rey Archive").closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    expect(await screen.findByText("Next one")).toBeInTheDocument();
+    expect(lists).toBe(2);
+  });
+
+  it("keeps an older row when its resolve lost a race", async () => {
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox"
+      ? listing()
+      : { request: { id: "req-old", status: "acknowledged" }, statusChanged: false }));
+    mount();
+    const row = within(await screen.findByTestId("portal-older-list")).getByText("Rey Archive").closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    expect(await within(row).findByRole("alert")).toHaveTextContent("It is still open.");
+    expect(screen.getByText("Rey Archive")).toBeInTheDocument();
+    expect(screen.getByText("Older than 14 days: 3 chat hand-offs and 2 requests")).toBeInTheDocument();
+  });
+
+  it("Close all older clears the older rows too", async () => {
+    mount();
+    await screen.findByTestId("portal-older-list");
+    adminFetch.mockImplementation(async () => ({ closed: { chats: 3, requests: 2 } }));
+    fireEvent.click(screen.getByRole("button", { name: "Close all older" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close them" }));
+    expect(await screen.findByText("Closed 5 items.")).toBeInTheDocument();
+    expect(screen.queryByTestId("portal-older-list")).not.toBeInTheDocument();
+    expect(screen.queryByText("Dana Backlog")).not.toBeInTheDocument();
+    expect(screen.queryByText("Rey Archive")).not.toBeInTheDocument();
+  });
+
+  it("treats a response with no olderItems as none (an older server)", async () => {
+    adminFetch.mockImplementation(async () => {
+      const { olderItems: _olderItems, ...rest } = listing();
+      return rest;
+    });
+    mount();
+    expect(await screen.findByText("Older than 14 days: 3 chat hand-offs and 2 requests")).toBeInTheDocument();
+    expect(screen.queryByTestId("portal-older-list")).not.toBeInTheDocument();
+  });
+
   it("shows an empty state, and no Older line, when nothing is open", async () => {
-    adminFetch.mockImplementation(async () => listing({ items: [], total: 0, older: { chats: 0, requests: 0 } }));
+    adminFetch.mockImplementation(async () => listing({ items: [], olderItems: [], total: 0, older: { chats: 0, requests: 0 } }));
     mount();
     expect(await screen.findByText(/Nothing open/)).toBeInTheDocument();
     expect(screen.queryByText(/Older than 14 days/)).not.toBeInTheDocument();
