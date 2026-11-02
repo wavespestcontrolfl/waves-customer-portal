@@ -37,6 +37,12 @@
  * OWNER_SMS_DISABLED still applies. A tech marked out for today
  * (technician_absences) is skipped, and members of one visit group count as
  * one stop.
+ *
+ * Carry-over (owner 2026-11-02): GATE_RESERVICE_OPEN_CARRYOVER, strict
+ * 'true', read at call time and only when the nudge itself runs. On, the same
+ * text also names every re-service (callback or pest/lawn re-service) still
+ * open from the last 30 days before today, until it is closed. Off, nothing
+ * changes. The dedupe key stays one claim per technician per ET day.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -47,6 +53,9 @@ const { etDateString, etParts } = require('../utils/datetime-et');
 const { publicPortalUrl } = require('../utils/portal-url');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
+const CARRYOVER_GATE = 'GATE_RESERVICE_OPEN_CARRYOVER';
+const CARRYOVER_DAYS = 30;
+const RESERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
 // Same allowlist the stale-visit sweep rings the admin about — every status
 // that still means "not done." completed/cancelled/skipped/rescheduled/
 // no_show are excluded on purpose; a visit that ended has nothing left to
@@ -65,6 +74,31 @@ function enabled() {
   return process.env[GATE] === 'true';
 }
 
+function carryoverEnabled() {
+  return process.env[CARRYOVER_GATE] === 'true';
+}
+
+const VISIT_COLUMNS = [
+  's.id as visit_id',
+  's.visit_id as stop_id',
+  's.status',
+  's.window_start',
+  's.service_type',
+  's.technician_id',
+  't.name as tech_name',
+  't.employment_status',
+  't.field_dispatchable',
+  't.phone as tech_phone',
+  'c.first_name as cust_first_name',
+  'c.last_name as cust_last_name',
+];
+
+// An uncommitted slot hold (public-estimate reservation: no customer + a
+// reservation stamp) is not a booking — same filter as occupancy.js.
+function notSlotHold(q) {
+  return q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at');
+}
+
 // Today's open visits with a technician assigned, joined to the technician
 // and customer rows the message needs. Ordered by window so a tech's list
 // reads chronologically and the "+N more" tail drops the latest stops. A
@@ -81,25 +115,39 @@ async function findOpenVisitsToday(now, technicianId = null) {
     .whereIn('s.status', OPEN_STATUSES)
     .whereNotNull('s.technician_id')
     .where((q) => q.whereNull('s.window_start').orWhere('s.window_start', '<=', nowHHMM))
-    // An uncommitted slot hold (public-estimate reservation: no customer +
-    // a reservation stamp) is not a booking — same filter as occupancy.js.
-    .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'))
+    .where(notSlotHold)
     .orderBy('s.window_start', 'asc');
   if (technicianId) query = query.where('s.technician_id', technicianId);
-  return query.select(
-    's.id as visit_id',
-    's.visit_id as stop_id',
-    's.status',
-    's.window_start',
-    's.service_type',
-    's.technician_id',
-    't.name as tech_name',
-    't.employment_status',
-    't.field_dispatchable',
-    't.phone as tech_phone',
-    'c.first_name as cust_first_name',
-    'c.last_name as cust_last_name',
-  );
+  return query.select(...VISIT_COLUMNS);
+}
+
+// "today minus 30 days" from the ET date string itself, so a DST change never
+// shifts the floor by a day.
+function carryoverFloor(today) {
+  const d = new Date(`${today}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - CARRYOVER_DAYS);
+  return d.toISOString().slice(0, 10);
+}
+
+// Re-services still open from an earlier day (last 30 ET days): a callback
+// visit, or one whose catalog service is a pest/lawn re-service. Same joins
+// and slot-hold filter as today's query; oldest first.
+async function findCarryoverVisits(now, technicianId = null) {
+  const today = etDateString(now);
+  let query = db('scheduled_services as s')
+    .join('technicians as t', 's.technician_id', 't.id')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .leftJoin('services', 's.service_id', 'services.id')
+    .where('s.scheduled_date', '<', today)
+    .where('s.scheduled_date', '>=', carryoverFloor(today))
+    .whereIn('s.status', OPEN_STATUSES)
+    .whereNotNull('s.technician_id')
+    .where((q) => q.where('s.is_callback', true).orWhereIn('services.service_key', RESERVICE_KEYS))
+    .where(notSlotHold)
+    .orderBy('s.scheduled_date', 'asc')
+    .orderBy('s.window_start', 'asc');
+  if (technicianId) query = query.where('s.technician_id', technicianId);
+  return query.select(...VISIT_COLUMNS, db.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_day"));
 }
 
 // Flat rows -> one entry per technician, in first-seen (= earliest window)
@@ -139,6 +187,7 @@ function groupByTechnician(rows) {
       ids: [row.visit_id],
       status: row.status,
       windowStart: row.window_start,
+      day: row.scheduled_day,
       serviceTypes: row.service_type ? [row.service_type] : [],
       customerFirst: row.cust_first_name,
       customerLast: row.cust_last_name,
@@ -196,11 +245,61 @@ function visitLines(visits) {
   return lines;
 }
 
-function buildMessage(visits) {
-  const count = visits.length;
+// "Mon Oct 27" from a YYYY-MM-DD string. Built from noon UTC and formatted in
+// UTC, so no timezone can move the day.
+function dayLabel(day) {
+  const d = new Date(`${day}T12:00:00Z`);
+  if (!day || Number.isNaN(d.getTime())) return 'Earlier';
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' })
+      .formatToParts(d).map((p) => [p.type, p.value]),
+  );
+  return `${parts.weekday} ${parts.month} ${parts.day}`;
+}
+
+function carryoverLine(stop) {
+  const services = (stop.serviceTypes || []).join(' + ') || 'Service';
+  const line = `${dayLabel(stop.day)} - ${customerLabel(stop)} - ${services}`;
+  return NOT_STARTED.has(stop.status) ? `${line} (not started)` : line;
+}
+
+function carryoverLines(stops) {
+  const shown = stops.slice(0, MAX_LISTED);
+  const lines = shown.map(carryoverLine);
+  const overflow = stops.length - shown.length;
+  if (overflow > 0) lines.push(`+${overflow} more`);
+  return lines;
+}
+
+// Body under the header: today's lines, then (when both exist) the
+// carry-over sub-header and its lines.
+function bodyLines(visits, carryovers) {
+  if (!carryovers.length) return visitLines(visits);
+  if (!visits.length) return carryoverLines(carryovers);
+  return [...visitLines(visits), 'Re-services still open from earlier days:', ...carryoverLines(carryovers)];
+}
+
+function buildMessage(visits, carryovers = []) {
   const link = `${publicPortalUrl()}/tech`;
-  const header = `Waves: ${count} visit${count === 1 ? '' : 's'} from today are still open. Tap to close out: ${link}`;
-  return [header, ...visitLines(visits)].join('\n');
+  let header;
+  if (visits.length) {
+    header = `Waves: ${visits.length} visit${visits.length === 1 ? '' : 's'} from today are still open. Tap to close out: ${link}`;
+  } else {
+    const n = carryovers.length;
+    const verb = n === 1 ? 'is' : 'are';
+    header = `Waves: ${n} re-service${n === 1 ? '' : 's'} from earlier days ${verb} still open. Tap to close out: ${link}`;
+  }
+  return [header, ...bodyLines(visits, carryovers)].join('\n');
+}
+
+// Stored with the claim row and the card: the stop ids behind the text.
+function nudgePayload(visits, carryovers) {
+  const payload = { visit_ids: visits.flatMap((v) => v.ids), count: visits.length };
+  if (carryovers) {
+    payload.carryover_ids = carryovers.flatMap((v) => v.ids);
+    payload.carryover_count = carryovers.length;
+  }
+  return payload;
 }
 
 function dedupeKeyFor(technicianId, etDate) {
@@ -301,15 +400,18 @@ async function smsNudge(tech, cell, message, etDate) {
 // becomes a tech-home card, kept until "Got it", then one best-effort push.
 // The card is the durable copy, so a push that reaches no device still
 // leaves the reminder on the tech home.
-async function cardNudge(tech, visits, etDate) {
+async function cardNudge(tech, visits, etDate, carryovers = null) {
+  const carry = carryovers || [];
   const count = visits.length;
-  const headline = `${count} visit${count === 1 ? '' : 's'} from today still open`;
+  const headline = count
+    ? `${count} visit${count === 1 ? '' : 's'} from today still open`
+    : `${carry.length} re-service${carry.length === 1 ? '' : 's'} from earlier days still open`;
   try {
     const updated = await db('tech_notifications')
       .where({ dedupe_key: dedupeKeyFor(tech.id, etDate), type: NOTIFICATION_TYPE })
       .update({
-        message: [`${headline}.`, ...visitLines(visits)].join('\n'),
-        payload: JSON.stringify({ headline, visit_ids: visits.flatMap((v) => v.ids), count }),
+        message: [`${headline}.`, ...bodyLines(visits, carry)].join('\n'),
+        payload: JSON.stringify({ headline, ...nudgePayload(visits, carryovers) }),
         read: false,
         dismissed_at: null,
         updated_at: new Date(),
@@ -334,16 +436,29 @@ async function cardNudge(tech, visits, etDate) {
   return true;
 }
 
+// Today's stops (and, gate on, the carry-over stops) one technician holds
+// right now. Null when both are empty. `carryovers` is only set with the gate.
+async function readLiveStops(techId, now, withCarryover) {
+  const pick = (rows) => groupByTechnician(rows).find((g) => g.tech.id === String(techId));
+  const today = pick(await findOpenVisitsToday(now, techId));
+  const carry = withCarryover ? pick(await findCarryoverVisits(now, techId)) : null;
+  const base = today || carry;
+  if (!base) return null;
+  const live = { tech: base.tech, visits: today ? today.visits : [] };
+  if (withCarryover) live.carryovers = carry ? carry.visits : [];
+  return live;
+}
+
 // Re-read at the send boundary: a visit finished or reassigned, a phone
 // changed, or the tech marked out (tech-out.js leaves an absent tech's stops
 // assigned for redistribution) after the sweep read must not be listed or
-// sent. Nothing to nudge gives the slot back.
-async function deliverNudge(techId, etDate, now) {
+// sent. Nothing to nudge gives the slot back. Gate on, both today's stops and
+// the carry-over stops are re-read.
+async function deliverNudge(techId, etDate, now, withCarryover = carryoverEnabled()) {
   let live;
   let absent;
   try {
-    live = groupByTechnician(await findOpenVisitsToday(now, techId))
-      .find((g) => g.tech.id === String(techId));
+    live = await readLiveStops(techId, now, withCarryover);
     // includeOffDays: false - an open visit a technician really holds on a day
     // they do not work (an office placement) still gets its nudge.
     absent = await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: [techId], includeOffDays: false });
@@ -361,8 +476,20 @@ async function deliverNudge(techId, etDate, now) {
   }
   const cell = ownerCell(live.tech);
   return cell
-    ? smsNudge(live.tech, cell, buildMessage(live.visits), etDate)
-    : cardNudge(live.tech, live.visits, etDate);
+    ? smsNudge(live.tech, cell, buildMessage(live.visits, live.carryovers), etDate)
+    : cardNudge(live.tech, live.visits, etDate, live.carryovers);
+}
+
+// One entry per technician: today's stops first, then technicians who only
+// have carry-over stops. Each entry is { tech, visits, carryovers }.
+function mergeGroups(todayGroups, carryGroups) {
+  const byId = new Map(todayGroups.map((g) => [g.tech.id, { ...g, carryovers: [] }]));
+  for (const g of carryGroups) {
+    const entry = byId.get(g.tech.id);
+    if (entry) entry.carryovers = g.visits;
+    else byId.set(g.tech.id, { tech: g.tech, visits: [], carryovers: g.visits });
+  }
+  return [...byId.values()];
 }
 
 /**
@@ -376,26 +503,25 @@ async function deliverNudge(techId, etDate, now) {
 async function runTechOpenVisitNudge({ now = new Date() } = {}) {
   if (!enabled()) return { status: 'gate_off' };
 
+  const withCarryover = carryoverEnabled();
   const etDate = etDateString(now);
   const rows = await findOpenVisitsToday(now);
-  const groups = groupByTechnician(rows);
+  const carryRows = withCarryover ? await findCarryoverVisits(now) : [];
+  const groups = mergeGroups(groupByTechnician(rows), groupByTechnician(carryRows));
 
   let sent = 0;
   let skipped = 0;
 
-  for (const { tech, visits } of groups) {
+  for (const { tech, visits, carryovers } of groups) {
     if (!isAssignable(tech)) {
       logger.info(`[tech-open-visit-nudge] skip ${tech.id}: not assignable`);
       skipped += 1;
       continue;
     }
-    const message = buildMessage(visits);
+    const message = buildMessage(visits, carryovers);
     let claimed;
     try {
-      claimed = await claimToday(tech.id, etDate, message, {
-        visit_ids: visits.flatMap((v) => v.ids),
-        count: visits.length,
-      });
+      claimed = await claimToday(tech.id, etDate, message, nudgePayload(visits, withCarryover ? carryovers : null));
     } catch (err) {
       logger.error(`[tech-open-visit-nudge] claim failed for ${tech.id}: ${errTag(err)}`);
       skipped += 1;
@@ -407,11 +533,13 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
       continue;
     }
 
-    if (await deliverNudge(tech.id, etDate, now)) sent += 1;
+    if (await deliverNudge(tech.id, etDate, now, withCarryover)) sent += 1;
     else skipped += 1;
   }
 
-  return { status: 'ok', techs: groups.length, sent, skipped, visits: rows.length };
+  const result = { status: 'ok', techs: groups.length, sent, skipped, visits: rows.length };
+  if (withCarryover) result.carryover = carryRows.length;
+  return result;
 }
 
 module.exports = {
@@ -420,6 +548,9 @@ module.exports = {
   isEnabled: enabled,
   _test: {
     findOpenVisitsToday,
+    findCarryoverVisits,
+    carryoverEnabled,
+    dayLabel,
     groupByTechnician,
     customerLabel,
     clock12,
