@@ -181,6 +181,29 @@ describe('replay safety', () => {
   });
 });
 
+test('the replay login reuses the copy\'s own row for the owner email, else adds one', async () => {
+  const inserts = [];
+  const fakeDb = (row) => (table) => {
+    const query = {
+      where: () => query, whereIn: () => query, whereRaw: () => query,
+      update: async () => 0,
+      insert: async (values) => { inserts.push([table, values]); },
+      first: async () => (table === 'knex_migrations' ? { name: 'latest' } : row),
+    };
+    return query;
+  };
+  const existing = await replay.prepareDatabase(fakeDb({ id: 'u1', name: 'Owner', email: 'Owner@Example.com ' }), [], 'owner@example.com');
+  expect(existing).toEqual({ id: 'u1', name: 'Owner', email: 'Owner@Example.com ', role: 'admin' });
+  expect(inserts).toEqual([]);
+
+  const added = await replay.prepareDatabase(fakeDb(undefined), ['Tech One'], 'owner@example.com');
+  expect(added).toMatchObject({ name: 'Replay owner', email: 'owner@example.com', role: 'admin' });
+  expect(inserts).toEqual([
+    ['technicians', { name: 'Tech One', employment_status: 'active', field_dispatchable: true }],
+    ['technicians', added],
+  ]);
+});
+
 test('compare lists the cases whose verdict changed', () => {
   const run = (verdicts) => ({ results: verdicts.map((verdict, i) => ({ id: `c${i}`, kind: 'read', expected: 'get_schedule', verdict, actual: verdict === 'pass' ? 'get_schedule' : 'read_admin_data' })) });
   const report = lib.compareRuns(run(['pass', 'pass', 'fail']), run(['pass', 'fail', 'pass']));

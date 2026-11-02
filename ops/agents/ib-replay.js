@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * ib-replay.js — the Intelligence Bar replay test (first-tool check). It
+ * ib-replay.js — READ-ONLY. It writes only its result file and a throwaway
+ * copy of its local ib_replay* database, which it drops at the end; with
+ * --execute it makes paid model calls (one per case).
+ *
+ * The Intelligence Bar replay test (first-tool check). It
  * sends saved bar requests (ops/agents/ib-replay-export.js) through the real
  * bar route on this Mac and checks the FIRST tool the model picks against the
  * tool the bar picked when the request ran. Use it before a change to the
@@ -136,16 +140,14 @@ function installModel(state, execute) {
   require.cache[sdkPath].exports = ReplayAnthropic;
 }
 
-// The owner's admin login with full access (ib-access.js), as a local row.
-function installLogin(email) {
-  const technician = { id: OWNER_ID, name: 'Replay owner', email, role: 'admin' };
+// The owner's admin login with full access (ib-access.js).
+function installLogin(technician) {
   const auth = require(fromServer('middleware', 'admin-auth'));
   auth.adminAuthenticate = (req, _res, next) => {
-    Object.assign(req, { technician, technicianId: OWNER_ID, techRole: 'admin' });
+    Object.assign(req, { technician, technicianId: technician.id, techRole: 'admin' });
     next();
   };
   auth.requireTechOrAdmin = (_req, _res, next) => next();
-  return technician;
 }
 
 // The named customer resolves to what the request resolved to when it ran.
@@ -154,7 +156,10 @@ function installTarget(state) {
   TaskContext.resolve = async () => state.current?.target || {};
 }
 
-async function prepareDatabase(db, roster, owner) {
+// Readies the run's copy and returns the login to replay as: the copy's own
+// row for the full-access email when it has one (staff email is unique on
+// LOWER(BTRIM(email)), technicians_staff_email_canonical_uidx), else a new row.
+async function prepareDatabase(db, roster, email) {
   const latest = fs.readdirSync(fromServer('models', 'migrations')).filter((f) => /^\d+_.+\.js$/.test(f)).sort().pop();
   if (!(await db('knex_migrations').where({ name: latest }).first())) {
     throw new Error(`the replay database is behind this checkout (no ${latest}): run DATABASE_URL=<it> npm run db:migrate`);
@@ -164,7 +169,12 @@ async function prepareDatabase(db, roster, owner) {
     const updated = await db('technicians').where({ name }).update({ employment_status: 'active', field_dispatchable: true });
     if (!updated) await db('technicians').insert({ name, employment_status: 'active', field_dispatchable: true });
   }
-  await db('technicians').insert({ id: owner.id, name: owner.name, email: owner.email, role: 'admin' }).onConflict('id').ignore();
+  const existing = await db('technicians').whereIn('role', ['admin', 'technician'])
+    .whereRaw('LOWER(BTRIM(email)) = ?', [String(email).trim().toLowerCase()]).first('id', 'name', 'email');
+  if (existing) return { ...existing, role: 'admin' };
+  const owner = { id: OWNER_ID, name: 'Replay owner', email, role: 'admin' };
+  await db('technicians').insert(owner);
+  return owner;
 }
 
 function requestBody(c) {
@@ -246,14 +256,15 @@ async function replayAll(args, file, profile, { databaseUrl, apiKey }) {
 
   const state = { current: null };
   installModel(state, args.execute);
-  const owner = installLogin(require(fromServer('services', 'intelligence-bar', 'ib-access')).fullAccessAllowlist()[0]);
   installTarget(state);
   const db = require(fromServer('models', 'db'));
   const express = require(require.resolve('express', { paths: [SERVER] }));
   const results = [];
   let server = null;
   try {
-    await prepareDatabase(db, file.roster || [], owner);
+    const email = require(fromServer('services', 'intelligence-bar', 'ib-access')).fullAccessAllowlist()[0];
+    // Before the route loads: it takes the login middleware when required.
+    installLogin(await prepareDatabase(db, file.roster || [], email));
     const app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/bar', require(fromServer('routes', 'admin-intelligence-bar')));
@@ -293,7 +304,7 @@ async function main(argv) {
   throw new Error('usage: ib-replay.js run --cases <file> --out <file> [--set KEY=value] [--limit N] [--max-usd N] [--execute] | compare <before> <after>');
 }
 
-module.exports = { parseArgs, overrides, stopReply, measure, requestBody };
+module.exports = { parseArgs, overrides, stopReply, measure, requestBody, prepareDatabase };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then(() => process.exit(0), (err) => {
