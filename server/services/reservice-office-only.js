@@ -35,6 +35,10 @@ const HARM = '(?:kill(?:ed|ing|s)?|damag\\w*|dead|died|dying|broke|broken|break|
 const THING = `(?:my|our|the|all\\s+(?:my|our|the)|some\\s+of\\s+(?:my|our|the))\\s+(?:\\w+\\s+)?${THINGS}`;
 // Within one sentence, never across a negation: "the spray didn't hurt my dog" is not a damage report.
 const NEAR = "(?:(?!\\b(?:not|never|no)\\b|n['’]t\\b)[^.?!]){0,60}?";
+// A word that puts a strong feeling on US, not on the pests: "the worst service", "your tech was rude", "unhappy with
+// the last visit". Never a bare "you": "the worst you have ever seen" is about the ants.
+const SERVICE = '(?:you\\s+guys|waves|your\\s+(?:service|company|tech\\w*|team|crew|guys?|treatment|visit|spray\\w*)|(?:the|this|that)\\s+(?:last\\s+|recent\\s+|latest\\s+)?(?:service|company|tech\\w*|treatment|visit|crew|team))';
+const FEELING = '(?:worst|unhappy|unacceptable|unprofessional|rude|furious|fed\\s+up|never\\s+again|horrible|terrible|awful|disappointed|disappointing|not\\s+(?:happy|satisfied|pleased))';
 const PERSON = '(?:you|your\\s+(?:guys?|tech\\w*|crew|team|worker|man)|(?:the\\s+)?tech(?:nician)?s?|no\\s*one|nobody|anyone|anybody|someone|somebody)';
 const NOT = "(?:did\\s*n[o']?t|didn['’]t|never|has\\s*n[o']?t|hasn['’]t|have\\s*n[o']?t|haven['’]t|won['’]t|will\\s+not)";
 
@@ -59,11 +63,16 @@ const SCREENS = [
     '\\bmoney\\s+back\\b|\\bcredit\\s+(?:me|us|back|my|our)\\b',
   ].join('|'), 'i')],
   ['complaint', new RegExp([
-    '\\b(?:complain\\w*|unhappy|unacceptable|unprofessional|rude|furious|fed\\s+up|worst|never\\s+again)\\b',
-    '\\b(?:lawyers?|attorneys?|sue|sued|suing|legal\\s+action|bbb|better\\s+business)\\b',
+    // Words that are a complaint on their own.
+    '\\b(?:complain\\w*|lawyers?|attorneys?|sue|sued|suing|legal\\s+action|bbb|better\\s+business)\\b',
     '\\bmad\\s+at\\s+(?:you|your|waves)\\b',
-    '\\b(?:not|never)\\s+(?:happy|satisfied|pleased)\\s+with\\s+(?:you|your|the\\s+(?:service|tech\\w*|treatment|company|visit))\\b',
-    '\\bdisappointed\\s+(?:in|with)\\s+(?:you|your|the\\s+(?:service|tech\\w*|treatment|company|visit))\\b',
+    // A strong feeling counts only beside a word for us, in the same sentence ("the ants are the worst they have
+    // ever been" is the pest problem; "the worst service I have had" is a complaint).
+    `\\b${FEELING}\\b[^.?!]{0,40}?\\b${SERVICE}\\b`,
+    `\\b${SERVICE}\\b[^.?!]{0,40}?\\b${FEELING}\\b`,
+    // "worst service", "terrible pest company", "awful customer service"
+    `\\b${FEELING}\\s+(?:pest\\s+|customer\\s+)?(?:service|company|treatment|tech\\w*|visit|crew|team|experience)\\b`,
+    '\\b(?:not|never)\\s+(?:happy|satisfied|pleased)\\s+with\\s+you\\b|\\bdisappointed\\s+(?:in|with)\\s+you\\b',
     '\\bcancel\\w*\\s+(?:my|our|the)\\s+(?:service|account|contract|plan|membership|subscription)\\b',
     '\\b(?:bad|negative|1[-\\s]?star|one[-\\s]?star)\\s+review\\b',
     '\\bwaste\\s+of\\s+(?:money|time)\\b',
