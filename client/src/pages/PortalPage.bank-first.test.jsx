@@ -6,7 +6,7 @@
 // Element 'change' event (Codex #2706 r3 invariant, kept the new way).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
@@ -125,5 +125,34 @@ describe('Billing tab Add Payment Method modal — bank first', { timeout: 30000
     expect(screen.getByRole('button', { name: 'Save Card' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save Bank Account' })).toBeNull();
     expect(text(dialog.textContent)).toContain(text(getConsentText('card')));
+  });
+});
+
+// UI audit 2026-11-02 (UI-06): Close, the scrim and Escape stayed live while
+// the save ran, so the customer could dismiss the dialog mid-save and lose
+// its result while the save went on.
+describe('Billing tab Add Payment Method modal — no close while saving', { timeout: 30000 }, () => {
+  it('Close, Escape and the scrim leave the dialog open until the save settles', async () => {
+    let settle;
+    const confirmSetup = vi.fn(() => new Promise((resolve) => { settle = resolve; }));
+    api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
+    getStripe.mockResolvedValue({ ...fakeStripe(), confirmSetup });
+    render(<BillingTab customer={customer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Add payment' }, SETTLE));
+    const dialog = await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    await waitFor(() => expect(handlers.ready).toBeTypeOf('function'), { timeout: 2000 });
+    await act(async () => { handlers.ready(); });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Card' }));
+    await waitFor(() => expect(confirmSetup).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    fireEvent.click(dialog.parentElement);
+    expect(screen.getByRole('dialog', { name: 'Add payment method' })).toBeInTheDocument();
+    // The result lands in the dialog the customer is still looking at.
+    await act(async () => { settle({ error: { message: 'Your card was declined.' } }); });
+    expect(within(screen.getByRole('dialog', { name: 'Add payment method' })).getByText('Your card was declined.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog', { name: 'Add payment method' })).toBeNull();
   });
 });
