@@ -3,7 +3,6 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { publicSelectableService } = require('../services/public-services-menu');
-const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const LeadScorer = require('../services/lead-scorer');
@@ -59,10 +58,6 @@ const leadAttribution = require('../services/lead-attribution');
 const { determineLeadSource } = require('../services/lead-source-classify');
 const { GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
 const { sanitizeHeardAbout, sanitizeHeardAboutPrompt } = require('../services/heard-about');
-
-// Adam's personal cell for new-lead alerts — must be a real cell, never one
-// of our own Twilio numbers (same-from/to sends fail with Twilio error 21266).
-const ADAM_CELL = process.env.ADAM_PHONE || '+19415993489';
 
 function applyLeadEstimateAutomationGate(readiness = {}) {
   if (isEnabled('leadEstimateAutomation')) return readiness;
@@ -1012,18 +1007,29 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
     } catch (e) { logger.error(`[notifications] new_lead trigger failed: ${e.message}`); }
 
-    // Last-resort delivery only: the legacy SMS becomes an
-    // internal_admin_alert bell for owner phones, so sending it alongside a
-    // delivered new_lead bell raised two notifications for the same lead
-    // (2026-07-30 audit: two bells one second apart per web lead).
+    // Last-resort delivery only, when the new_lead bell did not land (sending
+    // it beside a delivered bell made two notifications per lead, 2026-07-30
+    // audit). It was a text to the owner's phone that reached nobody since
+    // about 2026-09-01; now a ringing owner alert (services/owner-alerts.js).
     if (!leadBellDelivered) {
       try {
-        await TwilioService.sendSMS(ADAM_CELL,
-          `New lead!\n${firstName} ${lastName}\nPhone: ${phoneFormatted}\nAddress: ${fullAddress || 'No address'}${additionalPropertiesNote ? `\n${additionalPropertiesNote}` : ''}\nSource: ${leadSource.detail || leadSource.source}${utmCampaign ? '\nCampaign: ' + utmCampaign : ''}`,
-          { messageType: 'internal_alert' }
-        );
-      } catch (smsErr) {
-        logger.error(`[lead-webhook] fallback lead alert SMS failed: ${smsErr.message}`);
+        const { fitAction } = require('../services/admin-alert-names');
+        const name = `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted || 'a new lead';
+        const leadId = leadRecord?.id;
+        await require('../services/owner-alerts').recordOwnerAlert('web-lead', {
+          action: fitAction('Leads', name, [(who) => `call new lead ${who}`]),
+          why: 'A new lead came in and the regular new-lead alert did not go through.',
+          link: leadId
+            ? `/admin/leads?lead=${encodeURIComponent(leadId)}`
+            : `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+          subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customer.id) },
+          text: `New lead: ${name}. Phone: ${phoneFormatted}. Address: ${fullAddress || 'No address'}.${additionalPropertiesNote ? ` ${additionalPropertiesNote}` : ''} Source: ${leadSource.detail || leadSource.source}.${utmCampaign ? ` Campaign: ${utmCampaign}.` : ''}`,
+          dedupeKey: `owner-alert:web-lead:${leadId || customer.id}`,
+          itemKeys: [String(leadId || customer.id)],
+          metadata: { customerId: customer.id },
+        });
+      } catch (alertErr) {
+        logger.error(`[lead-webhook] fallback lead owner alert failed: ${alertErr.message}`);
       }
     }
 

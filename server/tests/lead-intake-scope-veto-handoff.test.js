@@ -17,7 +17,7 @@
 
 let mockCustomerUpdates;
 let mockEstimateInserts;
-let mockSmsSends;
+let mockOwnerAlerts;
 // An open unpriced intake shell for the customer, when set — the branch
 // that used to bypass the scope guards entirely.
 let mockShellRow;
@@ -71,9 +71,12 @@ jest.mock('../models/db', () => {
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-jest.mock('../services/twilio', () => ({
-  sendSMS: (...args) => { mockSmsSends.push(args); return Promise.resolve({ sid: 'SM1' }); },
+// The owner alert notifyAdam writes (services/owner-alerts.js); it was a text to the owner's phone that
+// reached nobody since about 2026-09-01.
+jest.mock('../services/owner-alerts', () => ({
+  recordOwnerAlert: (...args) => { mockOwnerAlerts.push(args); return Promise.resolve({ ok: true, channel: 'in_app', id: 'n-1' }); },
 }));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 
 const mockClassify = jest.fn();
 jest.mock('../services/sms-service-intent', () => ({
@@ -105,7 +108,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockCustomerUpdates = [];
   mockEstimateInserts = [];
-  mockSmsSends = [];
+  mockOwnerAlerts = [];
   mockShellRow = null;
   mockEstimateUpdates = [];
   mockClassify.mockResolvedValue({ interest: 'pest', method: 'regex' });
@@ -125,7 +128,7 @@ describe('terminal scope veto', () => {
       expect(result.terminal).toBe(true);
       // The legacy fallback must not have run.
       expect(mockEstimateInserts).toHaveLength(0);
-      expect(mockSmsSends).toHaveLength(0);
+      expect(mockOwnerAlerts).toHaveLength(0);
       // …and the lead is NOT falsely stamped as drafted.
       expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(false);
     });
@@ -142,7 +145,8 @@ describe('operational failure', () => {
       expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
       // A lead is never lost: the estimate was drafted and the owner told.
       expect(mockEstimateInserts.length).toBeGreaterThan(0);
-      expect(mockSmsSends.length).toBeGreaterThan(0);
+      expect(mockOwnerAlerts.length).toBeGreaterThan(0);
+      expect(mockOwnerAlerts[0][0]).toBe('sms-lead');
       expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(true);
     });
   }
@@ -181,7 +185,7 @@ describe('address-LESS replies get the scope check BEFORE anything records', () 
     expect(mockCustomerUpdates).toHaveLength(0);
     expect(mockEstimateInserts).toHaveLength(0);
     expect(mockEstimateUpdates).toHaveLength(0);
-    expect(mockSmsSends).toHaveLength(0);
+    expect(mockOwnerAlerts).toHaveLength(0);
   });
 
   test('address-less in-scope reply still records interest and advances to awaiting_address', async () => {
@@ -236,7 +240,7 @@ describe('awaiting_address replies get the scope check BEFORE any persist', () =
     expect(mockCustomerUpdates).toHaveLength(0);
     expect(mockEstimateInserts).toHaveLength(0);
     expect(mockEstimateUpdates).toHaveLength(0);
-    expect(mockSmsSends).toHaveLength(0);
+    expect(mockOwnerAlerts).toHaveLength(0);
   });
 
   test('in-scope address reply still persists and drafts', async () => {
@@ -267,7 +271,7 @@ describe('open-shell branch still runs the scope check', () => {
     expect(result.handled).toBe(true);
     expect(mockEstimateUpdates).toHaveLength(0);
     expect(mockEstimateInserts).toHaveLength(0);
-    expect(mockSmsSends).toHaveLength(0);
+    expect(mockOwnerAlerts).toHaveLength(0);
     expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(false);
   });
 
@@ -282,7 +286,7 @@ describe('open-shell branch still runs the scope check', () => {
     // advanced — exactly the pre-existing shell behavior.
     expect(mockEstimateUpdates.length).toBeGreaterThan(0);
     expect(mockEstimateInserts).toHaveLength(0);
-    expect(mockSmsSends.length).toBeGreaterThan(0);
+    expect(mockOwnerAlerts.length).toBeGreaterThan(0);
     expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(true);
   });
 });
@@ -295,7 +299,7 @@ describe('successful handoff', () => {
 
     expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
     expect(mockEstimateInserts).toHaveLength(0);
-    expect(mockSmsSends).toHaveLength(0);
+    expect(mockOwnerAlerts).toHaveLength(0);
     expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(true);
   });
 });

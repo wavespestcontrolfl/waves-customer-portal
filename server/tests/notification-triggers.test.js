@@ -58,6 +58,13 @@ describe('notification trigger push tags', () => {
     expect(__private.pushTagFor('relay_hot_lead', {})).not.toBe(__private.pushTagFor('relay_hot_lead', {}));
   });
 
+  // GATE_PORTAL_ASK_PUSH: one banner per ask, so a repeat collapses and a second customer's ask does not replace the first.
+  test('portal_ask gets a per-ask push tag', () => {
+    expect(__private.pushTagFor('portal_ask', { itemKey: 'request:r-1' })).toBe('waves-portal_ask-request:r-1');
+    expect(__private.pushTagFor('portal_ask', { itemKey: 'late:n-9' })).not.toBe(__private.pushTagFor('portal_ask', { itemKey: 'request:r-1' }));
+    expect(__private.pushTagFor('portal_ask', {})).not.toBe(__private.pushTagFor('portal_ask', {}));
+  });
+
   it('customer_landline_from_call gets a per-customer push tag so concurrent alerts do not collapse', () => {
     const a = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-a' });
     const b = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-b' });
@@ -415,6 +422,44 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  test('portal_ask is a pushOnly page: it writes no bell row and pushes one banner tagged by the ask', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const trigger = TRIGGER_REGISTRY.portal_ask;
+    expect(trigger).toEqual(expect.objectContaining({ label: 'Customer asked in the app', priority: 'high', group: 'Communication', adminRoleOnly: true }));
+    expect(trigger.rule).toEqual({ area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true });
+    const payload = { itemKey: 'request:r-1', title: 'Answer a portal request', body: 'Pat S. sent a pest control request', link: '/admin/customers?customerId=c-1' };
+    await triggerNotification('portal_ask', payload, { pushOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    const sent = PushService.sendToAdminUsers.mock.calls[0][1]('admin-1');
+    expect(sent.tag).toBe('waves-portal_ask-request:r-1');
+    expect(sent.title).toBe('Answer a portal request');
+    expect(sent.body).toBe('Pat S. sent a pest control request');
+    // A fallback link when the payload carries none.
+    expect(trigger.build({ title: 't' }).link).toBe('/admin/communications');
+  });
+
+  test('portal_ask re-alerts on a repeat ask in the same chat: same banner tag, renotify on', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const payload = { itemKey: 'portal-chat-escalation:esc-7', title: 'Reply to a portal chat', body: 'Pat S. asked about scheduling' };
+    await triggerNotification('portal_ask', payload, { pushOnly: true });
+    await triggerNotification('portal_ask', { ...payload, body: 'Pat S. asked about pricing' }, { pushOnly: true });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    for (const [, build] of PushService.sendToAdminUsers.mock.calls) {
+      expect(build('admin-1')).toMatchObject({ tag: 'waves-portal_ask-portal-chat-escalation:esc-7', renotify: true });
+    }
+  });
+
+  test('portal_ask redacts a phone number or email that slipped into the text', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('portal_ask', { itemKey: 'request:r-2', title: 'Answer a portal request', body: 'Pat S. wrote pat@example.com or 941-555-0100' }, { pushOnly: true });
+    const sent = PushService.sendToAdminUsers.mock.calls[0][1]('admin-1');
+    expect(sent.body).not.toMatch(/pat@example\.com|941-555-0100/);
+  });
+
   test('a keyed SMS replay reuses its committed bell and does not push again', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
     expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
@@ -505,6 +550,36 @@ describe('triggerNotification bell outcome', () => {
       const took = await refresh(row, { payload: { twilioSid: 'SM-held', textCount: 1 } });
       expect(took.title).toBe('Wants a call: Dana Example (2 texts)');
       expect(took.metadata.payload.leadPreference).toBe('call');
+    });
+
+    // The buttons follow the text the row shows (alert-call-button.js): a CALL text's emission carries Call into the
+    // row's metadata, and an older late text leaves the row the buttons of the text it still shows. Checked on the
+    // metadata notifyAdmin writes: the refresh's metadata merged over the emission's (notification-service.js).
+    test('Call rides with the CALL text the row shows; an older late text never moves the buttons', async () => {
+      const LEAD = '00000000-0000-4000-8000-0000000000e1';
+      const HANDLED = { id: 'handled', label: 'Handled' };
+      const HANDLED_ONLY = { kind: 'close_note', items: [HANDLED] };
+      const CALL_AND_HANDLED = { kind: 'call_back', items: [expect.objectContaining({ id: 'call', label: 'Call', args: { customerId: LEAD } }), HANDLED] };
+      const { mergeRefreshMetadata } = jest.requireActual('../services/notification-service')._private;
+      // What notifyAdmin stores for this emission on the standing row: useMeta = { ...metadata, ...adjusted.metadata }.
+      const written = async (emission, keepOlder, existingMeta) => {
+        const refresh = await ring(emission, keepOlder);
+        const { metadata } = NotificationService.notifyAdmin.mock.calls.at(-1)[3];
+        const adjusted = await refresh(row, existingMeta);
+        return mergeRefreshMetadata(existingMeta, { ...metadata, ...adjusted.metadata }, false);
+      };
+      const plain = { fromName: 'Dana Example', threadId: LEAD, twilioSid: 'SM-held', textCount: 1 };
+      const callText = { ...plain, leadPreference: 'call' };
+
+      // A newer CALL text: Call, then Handled. A newer plain text: Handled only.
+      expect((await written({ threadId: LEAD, twilioSid: 'SM-new', message: 'Call', leadPreference: 'call' }, false, { payload: plain, buttons: HANDLED_ONLY })).buttons).toEqual(CALL_AND_HANDLED);
+      expect((await written({ threadId: LEAD, twilioSid: 'SM-new', message: 'ants again' }, false, { payload: callText, buttons: CALL_AND_HANDLED })).buttons).toEqual(HANDLED_ONLY);
+      // An older late CALL text on a row showing a plain text, with or without stored buttons: no Call.
+      const olderCall = { threadId: LEAD, twilioSid: 'SM-old', message: 'Call', leadPreference: 'call' };
+      expect((await written(olderCall, true, { payload: plain, buttons: HANDLED_ONLY })).buttons).toEqual(HANDLED_ONLY);
+      expect((await written(olderCall, true, { payload: plain })).buttons).toEqual(HANDLED_ONLY);
+      // An older late plain text on a row showing the CALL text: Call stays.
+      expect((await written({ threadId: LEAD, twilioSid: 'SM-old', message: 'hello' }, true, { payload: callText, buttons: CALL_AND_HANDLED })).buttons).toEqual(CALL_AND_HANDLED);
     });
 
     test('an OLDER late text cannot change the title: not add a label, not remove one', async () => {

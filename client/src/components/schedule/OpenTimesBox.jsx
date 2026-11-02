@@ -13,7 +13,7 @@
 //   6. Tech pick: every technician's route is ranked and the best per date
 //      listed; "Tech" narrows to one person (shown once there are two).
 // Warn-only like the strip it replaces: a tap only fills the fields (onPick),
-// never saves. No onPick = display only (the drag-and-drop confirm).
+// never saves. No onPick = display only.
 
 import { useEffect, useRef, useState } from 'react';
 import { fmtDay, fmtHour, EstimateLegend } from './AvailabilityStrip';

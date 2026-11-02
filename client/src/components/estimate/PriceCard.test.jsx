@@ -374,6 +374,32 @@ describe('PriceCard — manual discount is not double-reported in-card', () => {
     expect(screen.getByText('Spring promo')).toBeInTheDocument();
     expect(screen.getByText(/\$66.00 \/ application/)).toBeInTheDocument();
   });
+
+  it('pest-only row: leads with the price net of the credit listed under it', () => {
+    // The server's pest-only shape: the row's displayPrice is net of the $48/yr
+    // credit ($120 − $12 a visit); perVisit stays the list price.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'quarterly',
+          label: 'Quarterly',
+          monthly: 36,
+          perVisit: 120,
+          perTreatment: 120,
+          visitsPerYear: 4,
+          manualDiscount: { amount: 48, recurringAmount: 48, label: 'Military Discount' },
+          perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 108, perTreatment: 120, visitsPerYear: 4 }],
+        }}
+        waveGuardTier="Bronze"
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getAllByText('$108.00').length).toBeGreaterThan(0);
+    expect(screen.queryByText('$120.00')).toBeNull();
+    expect(screen.getByText('Military Discount')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$12\.00/)).toBeInTheDocument();
+  });
 });
 
 describe('PriceCard — a discount reads in the unit of the price it reduces (owner 2026-08-01)', () => {

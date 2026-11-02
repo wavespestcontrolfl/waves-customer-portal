@@ -24,6 +24,12 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn().mockResolvedValue({ success: true }) }));
+// The field-lead owner alert (services/owner-alerts.js): it was a text to the owner's phone that reached nobody
+// since about 2026-09-01. Only the row write is replaced; the rest of the module is real.
+jest.mock('../services/owner-alerts', () => ({
+  ...jest.requireActual('../services/owner-alerts'),
+  recordOwnerAlert: jest.fn().mockResolvedValue({ ok: true, channel: 'in_app', id: 'n-1' }),
+}));
 jest.mock('../services/geocoder', () => ({ geocodeAddressWithStatus: jest.fn() }));
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(), PutObjectCommand: jest.fn(), GetObjectCommand: jest.fn(), DeleteObjectCommand: jest.fn(),
@@ -34,6 +40,7 @@ const { randomUUID } = require('node:crypto');
 const express = require('express');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const TwilioService = require('../services/twilio');
+const { recordOwnerAlert } = require('../services/owner-alerts');
 const { autoFillSoldBy, setEstimateSoldBy, loadSoldByForList } = require('../services/estimate-sold-by');
 const { describeGpsCheck } = require('../services/field-lead-gps');
 const { createOrReuseAdminEstimate, reviseAdminEstimate } = require('../services/admin-estimate-persistence');
@@ -326,10 +333,14 @@ postgres('commission sold by', () => {
       expect(await trx('leads').where({ assigned_to: mine }).first()).toBeUndefined();
     });
 
-    it('keeps the owner alert text', async () => {
+    it('keeps the owner alert text, now as an owner alert row instead of a text', async () => {
       await run({ arrivalHoursAgo: 1 });
-      expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-      expect(TwilioService.sendSMS.mock.calls[0][1]).toBe('🔔 Field Lead: Sample Alpha flagged Lawn opportunity at Sample Customer.\nNotes: Chinch bugs');
+      expect(recordOwnerAlert).toHaveBeenCalledTimes(1);
+      const [kind, alert] = recordOwnerAlert.mock.calls[0];
+      expect(kind).toBe('field-lead');
+      expect(alert.action).toBe('follow up on a field lead at Sample Customer');
+      expect(alert.text).toBe('Field lead: Sample Alpha flagged Lawn opportunity at Sample Customer. Notes: Chinch bugs');
+      expect(TwilioService.sendSMS).not.toHaveBeenCalled();
     });
   });
 
@@ -363,7 +374,10 @@ postgres('commission sold by', () => {
       expect(lead.gps_check.technician_id).toBe(id);
       expect((await activityFor(lead.id)).description).toMatch(/ · GPS: verified, \d+ m$/);
       // The owner's alert names the Neighbor (first name, last initial), not "Unknown customer".
-      expect(TwilioService.sendSMS.mock.calls.at(-1)[1]).toBe('🔔 Field Lead: Sample Alpha flagged Pest opportunity at Neighbor S. (neighbor).\nNotes: Ants');
+      const [kind, alert] = recordOwnerAlert.mock.calls.at(-1);
+      expect(kind).toBe('field-lead');
+      expect(alert.action).toBe('follow up on a field lead at Neighbor S (neighbor)');
+      expect(alert.text).toBe('Field lead: Sample Alpha flagged Pest opportunity at Neighbor S. (neighbor). Notes: Ants');
     });
 
     it('never counts a point from before the device was moved to this technician', async () => {

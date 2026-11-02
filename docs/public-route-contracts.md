@@ -997,7 +997,9 @@ Visits handed to the customer by Quick Move (owner 2026-11-01; the hand-off is
 behind `GATE_QUICKMOVE_CUSTOMER_PICK`, but everything below is keyed on the
 column and is NOT gated). Quick Move's "let the customer pick a day" parks a
 recurring plan visit with no window at a placeholder date about a week out and
-sets `scheduled_services.customer_pick_by` (timestamptz: 8 PM ET the next day).
+sets `scheduled_services.customer_pick_by` (timestamptz: 24 hours after the
+hand-off text, rounded up to the quarter hour; owner 2026-11-02, before which
+it was 8 PM ET the next day).
 For a row with `customer_pick_by` set:
 - **Not refused for having no time.** The self-serve notice rule
   (`services/scheduling/self-serve-notice.js visitInsideMoveNoticeWindow`)
@@ -1051,7 +1053,8 @@ read from `scheduled_services.customer_pick_by`, not behind
 set and no `window_start` (handed to the customer, waiting) carries
 `customerPick: { pickBy, pickByLabel, deadlinePassed, originalDate,
 originalWindowStart, reasonCode }`: `pickBy` is the marker as an ISO instant,
-`pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM"), `deadlinePassed` is
+`pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM", "Wed, Nov 4 at 11:15 AM";
+the minutes show only when not :00), `deadlinePassed` is
 `now >= pickBy`, and the other three come from the visit's newest hand-off
 `reschedule_log` row, the row with `notes = 'customer_pick'` (`original_date`,
 `original_window`'s start as `HH:MM`, and the Quick Move reason code in
@@ -6315,7 +6318,11 @@ the public `POST /login/mfa` (a generic 404 while the gate is dark, answered in
 prefix, a 5-wrong-code per-account lockout and no-store/noindex headers; a malformed body and an
 unknown, expired, revoked or ineligible challenge all answer the same generic
 404, only a wrong code for a live challenge answers 401 `MFA_INVALID`) takes that challenge plus an authenticator or recovery
-code and is the only path that mints an access token carrying `mfa: true`;
+code, mints an access token carrying `mfa: true` and sets `waves_staff_device`
+(a 90-day HttpOnly, SameSite=Strict signed cookie on path
+`/api/admin/auth/google`, bound to the token version and the enrollment time);
+the only other path to `mfa: true` is `/google/finish` from a device with that
+cookie;
 `/reset-password` on an enrolled account returns `{ passwordReset,
 signInRequired }` with no session. The native WavesPay app (`ios/WavesPay`,
 `API.login` / `API.loginMfa`) decodes the challenge and asks for the code; an
@@ -6362,9 +6369,12 @@ pins `google_sub` with a compare-and-set under the partial unique indexes.
 `POST /google/finish { result, verifier }` burns the result first (single use,
 valid 2 minutes after the callback), then compares SHA-256(verifier) with the
 page challenge and re-reads the staff row (still active, same pinned
-`google_sub`); it then answers exactly like `/login`: `{ mfaRequired,
-challengeToken }` for an account enrolled under `GATE_ADMIN_MFA`, else
-`{ token, refreshToken, user }` plus the `waves_admin` marker cookie. Every
+`google_sub`); it then answers `{ token, refreshToken, user }` plus the
+`waves_admin` marker cookie, or `{ mfaRequired, challengeToken }` for an
+account enrolled under `GATE_ADMIN_MFA` when the request carries no valid
+`waves_staff_device` cookie for that staff row. A remembered device (owner
+2026-11-02, option A: the code once per device) gets the session with the `mfa`
+mark; a Google session used anywhere else still meets the code step. Every
 finish refusal is the same 401 `GOOGLE_SIGNIN_EXPIRED`, a deliberate exception
 to the generic-404 token baseline: the sign-in page restarts on it. The Team tab
 link `PUT /api/admin/timetracking/technicians/:id/google-signin` is not public

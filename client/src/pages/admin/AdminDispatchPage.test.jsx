@@ -143,20 +143,19 @@ describe("AdminDispatchPage", () => {
     for (const label of ["Board", "Schedule", "Protocols"]) {
       expect(screen.getByRole("button", { name: label })).not.toHaveClass("hidden");
     }
-    for (const label of ["Scores", "Insights"]) {
-      const button = screen.getByRole("button", { name: label });
-      expect(button).not.toHaveClass("hidden");
-      fireEvent.click(button);
-      expect(button).toHaveAttribute("aria-current", "page");
-    }
+    const scores = screen.getByRole("button", { name: "Scores" });
+    expect(scores).not.toHaveClass("hidden");
+    fireEvent.click(scores);
+    expect(scores).toHaveAttribute("aria-current", "page");
   });
 
-  it.each(["match", "csr"])("has no Matching or Booking tab, and an old ?tab=%s link opens Board (schedule audit S2/S3)", async (oldTab) => {
-    // Both tabs showed fixed example slots and rules that never ran; the
-    // owner chose to hide them (2026-10-31).
+  it.each(["match", "csr", "insights"])("has no Matching, Booking or Insights tab, and an old ?tab=%s link opens Board", async (oldTab) => {
+    // Matching and Booking showed fixed example slots and rules that never
+    // ran (schedule audit S2/S3, hidden 2026-10-31); Insights showed a fixed
+    // drive share and miscounted rates (hidden 2026-11-02).
     renderSchedule(`/admin/dispatch?tab=${oldTab}`);
 
-    for (const label of ["Matching", "Booking"]) {
+    for (const label of ["Matching", "Booking", "Insights"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
     expect(await screen.findByText("Dispatch board workspace")).toBeInTheDocument();
@@ -168,7 +167,7 @@ describe("AdminDispatchPage", () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
     renderSchedule("/admin/dispatch?tab=csr");
 
-    // Board and Insights are requireAdmin routes too (codex #5683 r1).
+    // Board is a requireAdmin route too (codex #5683 r1).
     for (const label of ["Board", "Matching", "Booking", "Insights"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }

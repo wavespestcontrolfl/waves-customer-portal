@@ -56,6 +56,26 @@ quote in `detail`. `server/services/admin-alert-names.js` has the helpers (`fitA
 long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
 alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
 
+**The bell names the customer and says what to do** (owner 2026-11-02, `GATE_ALERT_EXPLAINER`, admin logins
+only). Many rows still never name the customer (an older raw emitter, an ops check), and a long body cut into
+`detail` read back as raw check output. Two things cover every row, whatever its emitter wrote:
+- The bell list serves the customer a row is about (`customer: { id, name }`), read by
+  `server/services/admin-alert-customer.js` from the record behind it: a customer id (subject, top level,
+  trigger payload, SMS thread, a customer page link), else the visit, estimate, invoice, lead or call it names,
+  in one query per table for the page. An estimate or lead with no customer keeps its own name. The bell shows
+  "Customer: Name" under the title unless the title already carries the whole name.
+- "Show full text" becomes **What to do**: what happened, one to three steps, and whether the owner or Claude
+  fixes it. `server/services/admin-alert-explainer.js` asks an AI for it the first time an admin opens it
+  (`POST /api/admin/notifications/:id/explain`, `TEXT_POLICIES.routineAnswer`, lane `alert_explainer`), from the
+  row's title, body, detail and page (phone numbers, emails and street addresses masked, as in every bell body) and
+  the customer's name, and saves it on the row (`notifications.explainer`)
+  for the content version it was written from. The summary is not part of the version, so saving it never
+  fences a Done or a tap; a row whose text changes gets a new one. A stamped `who` decides the fixer. When both
+  providers fail the panel shows the row's own words, marked as such, nothing is saved, and the row is not asked
+  about again for a minute. The original text
+  stays one tap further ("Show original text"). Emitters change nothing: a good headline and why still matter,
+  because the bell is read before anything is opened.
+
 ### A ninth part: Buttons (optional; owner 2026-10-29)
 
 A row may carry up to three buttons, so a person can act from the bell without opening the page.
@@ -71,7 +91,11 @@ The owner's rules ("ok go" on the plan, Oct 29):
    a tap names a button the row carries, and nothing else runs.
 5. A tap records who pressed what and when (`metadata.buttonTaps`, one entry per tap), and
    closes the row. One tap runs at a time: it claims the row in one conditional write against the
-   version the bell served, so a second tap at the same moment, or after, does nothing.
+   version the bell served, so a second tap at the same moment, or after, does nothing. The one
+   exception is **Call** (kind `call_back` below): a call can ring out, so its step answers
+   `keepOpen`, the row stays open (the bell reads its list again for the new version), and the row
+   closes by its own done-when, its close button or Done. A later tap calls again, as the page's own
+   button would.
 
 How: `buttons: { kind, items: [{ id, label, prompt?, args? }] }` in the spec, kept as
 `metadata.buttons`. `kind` names a handler in `server/services/admin-alert-buttons.js` (`KINDS`).
@@ -112,6 +136,24 @@ Kinds today:
   desk's own save step (`saveBidUpdate` in `server/routes/admin-bid-desk.js`, behind the page's Save
   decision) with the same checks again under its row lock: still new, and a confirmed date for Bid.
   It sends nothing to a buyer or customer and moves no money. Off unless `GATE_BID_DESK` is on too.
+- `call_back` (`server/services/alert-call-button.js`, `GATE_ALERT_CALL_BUTTON`; owner 2026-11-02:
+  "for the voicemail, or missed call notifications, or any other related to calls, cant we add a call
+  button, where we can call them from the admin notification", and a lead's CALL reply): **Call** on a
+  row about one caller. The owner's ruling for this kind under rule 3: a tap places a call, and only
+  after the owner presses 1 on their own phone does it ring the customer. The row names one record in
+  `args`: its call (`callLogId`, or `callSid` for an urgent Sandy caller raised during the call) on a
+  missed call, a voicemail, a promise chaser, a repeat caller and a Sandy hand-off; its customer
+  (`customerId`) on a landline, a lead's call-back bells, a text call-back follow-up and a lead's bare
+  CALL text. The tap reads that record again and runs the handler behind
+  `POST /api/admin/communications/call` in-process (`placeCallFromAlert`) with the body the linked
+  page's own button sends: the Call Log's "Call back" (the caller's number, else the linked customer's,
+  `source: 'call-log-callback'`, `relatedCallId`), or the customer page's Call (`customerIdHint`). The
+  step's own refusal (a callback already ringing) is shown as it reads. The row stays open (rule 5).
+  A row that had a close button keeps it after Call (**Called back** on a missed call and a text
+  call-back follow-up, **Handled** on the CALL text); that button is the `close_note` step itself and
+  follows `GATE_ALERT_CLOSE_BUTTONS`, so each button is served while its own gate is on
+  (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
+  emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
 
 ## 3. Never in a headline or a why
 
@@ -169,6 +211,10 @@ customer's message by this rule.
    rollback = unset): a visit a person booked in the admin, or a payment a person recorded,
    for the text's customer (by customer id) within 24 hours after the text. In `true` the Messages
    reader counts the text as answered too, so the Unanswered filter and the evening digest agree.
+   A text-note bell (the SMS reader's "Comms — check <name>'s text note", `doneWhen: 'text_note_checked'`)
+   closes by itself under `GATE_ALERT_CONTACT_CLOSE` alone (owner 2026-11-02), once both hold after the
+   bell: a person answered that customer (a text that reached them, a call a person made or took, or a
+   person's email) and a visit of that customer was completed, on any day. Either alone leaves it open.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
@@ -233,6 +279,13 @@ belong in the owner's bell, because the owner would only relay them to Claude:
   the 8:05 AM list of AI-test cases with no grade yet (`typed-decisions-review:`,
   `server/services/typed-decisions/daily-review-item.js`), an `fyi` the Claude labeler grades
   each night (owner 2026-11-02: plain words, not the owner's to-do).
+- work a job on the owner's Mac already does (owner 2026-11-02, "A"): the daily list of website
+  posts that wait for a terminal draft (`Content — write N website posts in the terminal`,
+  `metadata.terminalDue` `claude`, class `content-terminal-due`). The 9:15 AM blog-run job on the
+  Mac writes those drafts, so the row is `fyi`. Its emitter stamps it only while
+  `AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET` is not `false`; the owner's bell gets its own row,
+  `Content — blog-run left N website posts for 2 days` (`content-terminal-stalled:<ET date>`, never
+  routed), when rows wait 44 hours on the same brief with no draft.
 The routing is server-side, in `NotificationService.create` and `notifyAdmin`: no emitter and no
 Mac code decides it. A routed row is written Activity-only (`metadata.feed = 'activity'`) and
 stamped `who = 'claude'`, so `needs-me --who claude` lists it. It is written even when the
@@ -265,14 +318,15 @@ launcher opens one Claude tab per `broken` queue row.
 | Forbidden tokens in headline and why | `composeAdminAlert` throws | enforced for every caller of the helper |
 | New code must use the helper | `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file against a checked-in ceiling; a file may not gain one | ratchet |
 | No emoji in admin text | `notification-service.js` | enforced, all categories |
-| Done state: a done row is hidden from the bell list, its unread count and mark-all-read (the Activity feed keeps it, marked Done). Every id-addressed done write is `NotificationService.markAdminDone`; emitters that close inside their own fenced update spread `doneColumns` into it. Auto-done sources: episode closes (`closeAdminAlertKeys`, `done_by` `episodes`), the relevance sweep (`relevance`; also the customer-contact bells once a person answered, behind `GATE_ALERT_CONTACT_CLOSE`: a text no longer needing a reply, a voicemail callback request after a person called back or texted or a visit or quote followed, and, closed by `missed-call-bell.js` instead (`done_by` `supersede`), a missed call after a person texted the caller or a visit or quote followed, an email a person replied to, a lead a person contacted), an ops-digest fall-off resolve, a superseded missed-call bell (a voicemail on the same call, or the caller got through on a later call within 7 days: `retireCalledBackMissedCalls`, 2-minute call-alert cron), a retired missing-deduction bell, a superseded promise-chaser bell, a resolved no-show dispatch tracking bell, a booking-miss bell once its visit is booked, done on another day, or 14 days after its agreed day (`call-booking-miss-watchdog.js`; a visit booked on another day turns the bell into a date check), a logged-delivery bell once no live restock request may cover it (`purchase-receipts/sweep.js`; a delivery with no such request writes none), and every other system retire (a newer bell replaced it, a batch absorbed it, the work was done: the call-commitments watchdog, the follow-up pager, procurement, collections cards, the setup-fee and first-application alerts, the cancellation review bell). A system writer never retires an alert with `read_at` alone; `server/tests/notification-system-retire-closes-done-contract.test.js` fails any non-null `read_at` write that does not also close done, unless it is a named person's read or another table. Not done: any mark-read by a person (a thread open, mark-all-read, a dashboard dismiss). | `PUT /api/admin/notifications/:id/done` (same role scope as mark-read) and `/:id/reopen` (admin only; body `{ doneAt }` is the `done_at_token` the Recently-done list served, a row done again since answers 409 `changed`, and only a row a person closed (`done_by` a technician id or `claude`) can be reopened, a system close answers 409 `not_reopenable`); the bell's Done control | enforced |
+| Done state: a done row is hidden from the bell list, its unread count and mark-all-read (the Activity feed keeps it, marked Done). Every id-addressed done write is `NotificationService.markAdminDone`; emitters that close inside their own fenced update spread `doneColumns` into it. Auto-done sources: episode closes (`closeAdminAlertKeys`, `done_by` `episodes`), the relevance sweep (`relevance`; also the customer-contact bells once a person answered, behind `GATE_ALERT_CONTACT_CLOSE`: a text-note bell once a person answered the customer and a visit of theirs was completed after it, a text no longer needing a reply, a voicemail callback request after a person called back or texted or a visit or quote followed, and, closed by `missed-call-bell.js` instead (`done_by` `supersede`), a missed call after a person texted the caller or a visit or quote followed, an email a person replied to, a lead a person contacted), an ops-digest fall-off resolve, a superseded missed-call bell (a voicemail on the same call, or the caller got through on a later call within 7 days: `retireCalledBackMissedCalls`, 2-minute call-alert cron), a retired missing-deduction bell, a superseded promise-chaser bell, a resolved no-show dispatch tracking bell, a booking-miss bell once its visit is booked, done on another day, or 14 days after its agreed day (`call-booking-miss-watchdog.js`; a visit booked on another day turns the bell into a date check), a logged-delivery bell once no live restock request may cover it (`purchase-receipts/sweep.js`; a delivery with no such request writes none), and every other system retire (a newer bell replaced it, a batch absorbed it, the work was done: the call-commitments watchdog, the follow-up pager, procurement, collections cards, the setup-fee and first-application alerts, the cancellation review bell). A system writer never retires an alert with `read_at` alone; `server/tests/notification-system-retire-closes-done-contract.test.js` fails any non-null `read_at` write that does not also close done, unless it is a named person's read or another table. Not done: any mark-read by a person (a thread open, mark-all-read, a dashboard dismiss). | `PUT /api/admin/notifications/:id/done` (same role scope as mark-read) and `/:id/reopen` (admin only; body `{ doneAt }` is the `done_at_token` the Recently-done list served, a row done again since answers 409 `changed`, and only a row a person closed (`done_by` a technician id or `claude`) can be reopened, a system close answers 409 `not_reopenable`); the bell's Done control | enforced |
 | Claude's own reminders, our engineering faults and the AI-test list leave the bell: an admin row with `metadata.opsJob` (unless `opsWho` is `person`) or in a named class is written Activity-only and stamped `who = claude`, `severity` `broken` for a fault and `fyi` for the AI-test list; customer-contact categories, registry events, customer-tied rows and `ops_digest` rows are never routed | `server/services/admin-alert-routing.js`, applied in `NotificationService.create` and `notifyAdmin`; `server/scripts/reroute-claude-queue-rows.js` moves rows already open | enforced while `GATE_ALERT_CLAUDE_QUEUE` is on (dark by default) |
 | A fault the code marks "Claude fixes this" that the bell policy would drop is written to Claude's queue instead (Activity-only, `who = claude`, `broken`, no push): the registry alerts in `CLAUDE_FAULT_TRIGGERS` and `token_alert` rows; customer-tied alerts and the `CLAUDE_FAULT_TRIGGERS_LEFT_OUT` triggers stay dropped | `rescueClaudeFault` in `server/services/admin-alert-routing.js`, called at the drop in `NotificationService.create` and `triggerNotification` | enforced while `GATE_ALERT_CLAUDE_FAULTS` is on (dark by default) |
 | Retention: a bell row idle 30 days, and an `fyi` row idle 7 days, is marked done (never deleted, read state kept). Not built: the 14-day Monday summary for an unread `needs-you` row | `runAdminAlertRetention` in `server/services/admin-alert-retention.js`, nightly 1:32 AM ET, gate `GATE_ALERT_RETENTION` (`shadow` records one audit_log summary, `true` expires); undo with `server/scripts/undo-admin-alert-retention.js` | enforced when the gate is `true` |
 | Catalog (owner 2026-10-29, step D1): every `TRIGGER_REGISTRY` type declares a `rule`: area, severity, who, and either `doneWhen` + `closedBy` (the module that marks its rows done) or `expiryDays` (30 for needs-you and broken, 7 for fyi; only the retention sweep closes it). Severity `fyi` replaces the old `informational` flag. In watch mode a muted alert is countable: when the bell policy silences an admin row, one `audit_log` row per Eastern day per distinct alert records its category, trigger key and digit-free title stem, and for a composer alert its declared area, severity and who, with its kind (the dedupe key's class prefix). Nothing is refused | `server/tests/admin-alert-catalog-contract.test.js` fails a type with no valid rule; `auditBellPolicyMuted` in `server/services/audit-log.js`, called at both silence points (`NotificationService.create`, and `triggerNotification`, which checks the policy itself and returns before create), action `notification.bell_policy.muted` | contract enforced; watch mode behind `GATE_ALERT_CATALOG=watch` (dark by default) |
 | Customer declaration (owner 2026-10-29, "small" E1): a registry `rule` or a composed spec may declare `contact: true` (a customer reached us) or `promise: true` (a follow-up we owe a customer): only `true`, never both, and only on a `needs-you` type for a person. A declared alert rings whatever the bell policy's later steps say (a site's explicit `bell: false` still wins), and a customer's failed invoice payment (`bill_payment_error`) rings beside `payment_failed` | `bellAllowed` in `server/services/notification-bell-policy.js` (step 1b), fed by `triggerNotification` (the type's rule; its bell write then carries `bell: true`) and `NotificationService.create` (the row's metadata); the shape is checked by `server/tests/admin-alert-catalog-contract.test.js` and `composeAdminAlert` | enforced while `GATE_CUSTOMER_ALERTS_RING` is on (dark by default) |
-| Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
-| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default) |
+| Body over 110 chars moves to `detail`, read from the bell's "Show full text" (with `GATE_ALERT_EXPLAINER` on: "What to do", the original under "Show original text") | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
+| The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced while `GATE_ALERT_EXPLAINER` is on (dark by default) |
+| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.

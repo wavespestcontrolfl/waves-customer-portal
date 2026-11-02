@@ -257,8 +257,14 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(body).toBe("“please call me back about the gate” (Sep 29) — can't tell if it was done.");
   });
 
-  test('a call-back promise carries the Called back button; any other row clears it', async () => {
-    const CALLED_BACK = { kind: 'close_note', items: [{ id: 'called_back', label: 'Called back' }] };
+  test('a call-back promise carries Call and Called back; any other row clears them', async () => {
+    const CALLED_BACK = {
+      kind: 'call_back',
+      items: [
+        { id: 'call', label: 'Call', prompt: 'Waves rings your phone first, then you press 1 to connect.', args: { customerId: CUSTOMER_ID } },
+        { id: 'called_back', label: 'Called back' },
+      ],
+    };
     await ring({ row: { kind: 'callback', evidence: [{ quote: 'please call me back about the gate' }] } });
     expect(lastCall()[3].metadata.buttons).toEqual(CALLED_BACK);
     await ring({ row: { kind: 'send_estimate', evidence: [{ quote: 'send me the price for the lawn' }] } });
@@ -283,6 +289,30 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
       .toEqual({ buttons: { kind: 'close_note', items: [{ id: 'handled', label: 'Handled' }] } });
     expect(TRIGGER_REGISTRY.customer_missed_call.build({ name: 'Albert Clark', phone: '+19415550188' }).alert)
       .toEqual({ buttons: { kind: 'close_note', items: [{ id: 'called_back', label: 'Called back' }] } });
+  });
+
+  test('a row about one caller puts Call first, naming the call or the customer to read again at the tap', () => {
+    const CALL_ID = '00000000-0000-4000-8000-0000000000d1';
+    const call = (args) => ({ id: 'call', label: 'Call', prompt: 'Waves rings your phone first, then you press 1 to connect.', args });
+    const HANDLED = { id: 'handled', label: 'Handled' };
+    const CALLED_BACK = { id: 'called_back', label: 'Called back' };
+    const callRow = { name: 'Albert Clark', phone: '+19415550188', callLogId: CALL_ID, count: 3, unanswered: 2 };
+    expect(TRIGGER_REGISTRY.customer_missed_call.build(callRow).alert)
+      .toEqual({ buttons: { kind: 'call_back', items: [call({ callLogId: CALL_ID }), CALLED_BACK] } });
+    for (const key of ['customer_voicemail_callback', 'repeat_caller', 'promise_chaser', 'relay_unbooked_call']) {
+      expect(TRIGGER_REGISTRY[key].build(callRow).alert).toEqual({ buttons: { kind: 'call_back', items: [call({ callLogId: CALL_ID })] } });
+      // No call named: the row is written as before, with no button.
+      expect(TRIGGER_REGISTRY[key].build({ ...callRow, callLogId: undefined }).alert).toBeUndefined();
+    }
+    expect(TRIGGER_REGISTRY.customer_landline_from_call.build({ customerId: CUSTOMER_ID, name: 'Albert Clark' }).alert)
+      .toEqual({ buttons: { kind: 'call_back', items: [call({ customerId: CUSTOMER_ID })] } });
+    // A lead's CALL reply: Call, then Handled, for the text that carried it; an unknown sender keeps Handled only.
+    expect(TRIGGER_REGISTRY.sms_reply.build({ threadId: CUSTOMER_ID, message: 'Call', leadPreference: 'call' }).alert)
+      .toEqual({ buttons: { kind: 'call_back', items: [call({ customerId: CUSTOMER_ID }), HANDLED] } });
+    expect(TRIGGER_REGISTRY.sms_reply.build({ threadId: CUSTOMER_ID, message: 'Text', leadPreference: 'text' }).alert)
+      .toEqual({ buttons: { kind: 'close_note', items: [HANDLED] } });
+    expect(TRIGGER_REGISTRY.sms_reply.build({ threadId: null, message: 'Call', leadPreference: 'call' }).alert)
+      .toEqual({ buttons: { kind: 'close_note', items: [HANDLED] } });
   });
 
   test('scheduling kinds land in Schedule', async () => {

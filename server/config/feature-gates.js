@@ -114,6 +114,7 @@
  *   GATE_PORTAL_ITEM_CLOSE=true (owner 2026-11-01, "do the fixes" after the inbound-requests audit: portal items close the way chat items do, and "Mark handled" in the Portal tab stops emailing the customer. (1) The Portal tab sends `quiet: true` on its request PATCH and the route then skips the customer's "Your Waves request was updated" email; Customer 360 sends no `quiet`, so its email is unchanged. (2) The admin bell raised for a portal request (doneWhen `request_answered`) closes once a person texted, called back, answered the call of, or emailed that customer after the bell. (3) The bell for an add-service request (trigger `bundle_quote_requested`) now carries its request id at the top of its metadata, so Mark handled closes it, and it closes once an estimate was handed to that customer after the bell. When the sweep closes a bell it also resolves that request row quietly (status resolved, an admin note such as "Answered by text"); it never sends the customer anything. Rides on GATE_ALERT_CONTACT_CLOSE for the contact close. Read at call time via portalItemCloseLive(), strict 'true', dark by default; off = today's behavior, byte for byte.)
  *   GATE_PORTAL_LATE_RERING=true (owner 2026-11-01, same audit: the portal tells the customer to expect a reply within one business hour (8 AM to 8 PM ET) and nothing rang when that hour passed. An open portal item bell (chat hand-off, portal request, add-service request) whose ask is past that hour with no person's contact since is rung ONE more time, on the same row: the body leads with "Still waiting: no reply after 1 business hour", it moves to the top, and it is stamped metadata.lateReRungAt so it never re-rings twice. Only asks from the last 24 hours. Sends nothing to a customer. Reuses the follow-up SLA clock (followUpDueAt) and runs inside the existing alert-relevance sweep. Read at call time via portalLateReringLive(), strict 'true', dark by default; off = the sweep does nothing extra.)
  *   GATE_PORTAL_ESTIMATE_RERING=true (owner 2026-11-02, "remind", after an outside review of the late re-ring: GATE_PORTAL_LATE_RERING is a first-reply reminder, so any person's "we're working on it" silences it while the customer is still owed an estimate. An open add-a-service request bell (trigger bundle_quote_requested) that is 2 business days past its ask (24 hours of the 8 AM to 8 PM ET follow-up clock) and still has no estimate for the requested service, whatever a person has said since, is rung ONE more time on the same row: the body leads with "Estimate still owed: no estimate for this service after 2 business days.", it moves to the top, unread, and is stamped metadata.estimateReRungAt so it never re-rings twice. Only asks from the last 14 days. A bell the first-reply re-ring already rang still gets this one. Sends nothing to a customer. Runs inside the existing alert-relevance sweep. Read at call time via portalEstimateReringLive(), strict 'true', dark by default; off = the sweep does nothing extra.)
+ *   GATE_PORTAL_ASK_PUSH=true (owner 2026-11-02: a customer's ask inside the app now rings the admin phones, the way a customer text does. Today an app chat hand-off, a service-request form and the late "Still waiting" re-ring write an admin bell row and nothing else, so three new leads asked 10 times in the app and the bells sat unread for weeks. On: after the bell row really exists and the ask is new or rang again (never for a silent dedupe, a withheld or demo-account bell, or a rolled-back transaction), the portal sends ONE push through the portal_ask trigger, pushOnly so the bell keeps its single row, to every admin phone and the web admin that has push on. Callers: portal chat hand-offs (ai-assistant/assistant.js, pushed after the turn commits), customer service requests (routes/requests.js), the late re-ring (portal-late-rering.js), and an estimate page's change or call request (estimate-measurement-review.js sendOfficeNotification). The push names the customer by first name and last initial and the ask in a few words, with no phone or email. Sends nothing to a customer. Read at call time via portalAskPushLive(), strict 'true', dark by default; off = no push, byte-identical to today.)
  *   GATE_MESSENGER_INBOX=true (owner 2026-10-31: a Messenger tab in Admin > Communications for the Facebook page's Messenger messages. Every 3 minutes the portal reads new messages from the Facebook page into the unified messages store (first run: last 6 months), rings one admin bell per thread with a new customer message, and closes it when someone replies. Staff reply from the tab through Facebook's Send API inside Meta's 24-hour window; past it the tab links to Facebook. Free API. Read at call time via messengerInboxLive(), strict 'true', dark by default; off = the poller does nothing, the routes answer enabled:false / 404 and the tab is hidden. The owner turns it on: it adds a customer-message path.)
  *   GATE_ROUTE_ENGINE_SUMMARY=true (owner 2026-10-31: the admin Day Scorecard payload also carries an `engine` block, a plain summary of the nightly auto-dispatch run over the last 7 ET nights: moves made, visits the per-run cap held back and how many of those moved later, and nights that failed or finished with errors; counts only, no drive-time estimate. Read-only over auto_dispatch_runs and auto_dispatch_audit_logs; sends nothing. Strict opt-in: exactly 'true', read at call time via routeEngineSummaryLive() by server/routes/admin-route-scorecard.js; dark by default; off = the scorecard payload is unchanged, with no engine key.)
  *   GATE_INSPECTION_REUSE_LEAD_SHELL=true (owner 2026-10-31: the public consultation page (routes/inspection-public.js) reuses the customer row the web form created for the lead, instead of minting a second customer row for the same person. Reused only when that row is still the lead's own untouched intake shell: stage new_lead, active, created at most 10 minutes before the lead, the lead is the first on it, no billing, login, visit, invoice or merge history, same phone and email as the lead, and no other lead's consultation provenance names it; a stored address that clearly differs falls back to a new prospect. A reused shell is booked as an outright prospect; the reuse changes nothing on its profile except to fill missing map coordinates. Read at call time via inspectionReuseLeadShellLive(), strict 'true', dark by default; off = the page creates the new prospect row exactly as before. Kill switch = unset the variable. Sends nothing to a customer.)
@@ -322,6 +323,7 @@
  *   GATE_REFERRAL_INBOUND_CONFIRM=true (owner 2026-10-26 "YES GO": the Referrals Queue lists plan customers who came in through a referral link (?ref=CODE on their landing page) or named a referrer on their first call, with the likely referrer; the office confirms the referrer or marks "not a referral". Confirm makes the referral row and runs the existing conversion; when a performed recurring visit is on record, both $25 credits post at once, otherwise at the next performed recurring visit as today; either way the referrer gets one thank-you email at the next 9:00 AM ET and no reward text (owner 2026-10-29). Read at call time via referralInboundConfirmLive(), strict 'true', dark by default; off = the list and both actions are hidden.)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Acts only while GATE_REFERRAL_INBOUND_CONFIRM is on. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CLOSE_BUTTONS=true (owner 2026-10-29 "ok go", PR 2 of the bell buttons: close-only buttons the server sets on three admin bell rows, Handled on a customer's texts and Called back on a call-back follow-up and a missed call; a tap is the bell's own Done with that note and sends no reply and places no call. Read at call time via alertCloseButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
+ *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button keeps following GATE_ALERT_CLOSE_BUTTONS.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -468,7 +470,7 @@
  *   GATE_PAYROLL_MERCURY_PAY=true (basic payroll option A, owner plan 2026-10-30. Needs GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS. Turns on Send to Mercury and Send again on a finalized pay run: for each bank-transfer paycheck with a Mercury recipient id the portal asks Mercury for an APPROVAL REQUEST (POST request-send-money); no money moves until a different Mercury user approves it in the Mercury app, and the portal never calls Mercury's direct send. A request is never sent twice by code: a lost answer becomes an 'unknown' payment the owner resolves. Read at call time via payrollMercuryPayLive(), strict 'true', dark by default; off = no request is ever made; rollback = unset (existing payment rows stay and still block a void).)
  *   GATE_BUG_ID_EXTENSION=true (owner 2026-10-31, "Let's do the insect identification": the Chrome extension's bug identifier, POST /api/public/bug-id-extension/identify. Anonymous and worldwide, so no lead capture, no pricing, no row and no stored photo; 1–3 photos go to the v2 species-catalog pest engine (identifyPestV2, Gemini-only ladder, as the customer app) and only its customer-facing v2 answer comes back. Paid vision per request, bounded by 6/hour and 15/day per IP plus one worldwide daily cap of its own (PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, default 100, bucket bug-id-extension) that counts whatever GATE_PUBLIC_LLM_SHARED_CAP says and fails closed. Read at call time via bugIdExtensionLive(), strict 'true', dark by default; off = the whole /api/public/bug-id-extension surface answers 404 before cors(), any limiter or body parser. Sends nothing to anyone. Kill switch: unset.)
  *   GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ=true (owner 2026-11-01, Action inbox agents A, "yes do this": the 3:45 AM ET inventory unit sweep also converts a DRY product whose unit is a bare ounce (oz, Ounces) to g, or to lb from 16 oz of stock up, with its stock, low-stock level, reorder quantity and per-visit usage converted by the exact weight factor. A product counts as dry only when its formulation says so (WDG, WG, WSG, granular, powder, dust, paste, gel bait) and nothing says liquid or count (no liquid code or word, no liquid look on the Unit Review page, no volume rate or default unit, no station, cartridge, tablet or trap in the name, category or any unit field, no per-item rate unit) and its price has an explicit cost unit when it has a price, and any cost unit is a weight unit or a bare ounce, and it has no per-visit supplies usage. Everything else stays in the Unit Review queue as before. Needs GATE_INVENTORY_UNIT_AUTOFIX ON too. Every fix leaves a movement audit row (source inventory_unit_review_autofix_dry_oz) and rings no bell; the alias digest keeps its old wording. Strict opt-in, read at call time via inventoryUnitAutofixDryOzLive(); off = oz rows stay parked exactly as before. Kill switch: unset.)
- *   GATE_QUICKMOVE_CUSTOMER_PICK=true (owner 2026-11-01: Quick Move gets a "let the customer pick a day" option for a recurring plan visit. The visit leaves its route, the customer gets one text with their reschedule link and picks a route-fit time by 8 PM the next day, and Auto-Dispatch books it if they do not. A technician whose Can move visits switch is off may use this option only. Nothing is sent until a person taps the option; off = the option does not appear and the routes answer disabled)
+ *   GATE_QUICKMOVE_CUSTOMER_PICK=true (owner 2026-11-01: Quick Move gets a "let the customer pick a day" option for a recurring plan visit. The visit leaves its route, the customer gets one text with their reschedule link and picks a route-fit time within 24 hours of the text (rounded up to the quarter hour; owner 2026-11-02), and Auto-Dispatch books it if they do not. A technician whose Can move visits switch is off may use this option only. Nothing is sent until a person taps the option; off = the option does not appear and the routes answer disabled)
  *   GATE_RAINOUT_KEEP_RAIN_OK=true (owner 2026-11-01 "build both", after the wider rain-OK list in #7381: a Rain-out Move on "this + rest of route" for a RAIN reason (weather_rain only; every other reason, and a request with no reason yet, keeps the full route) leaves a stop OUT of the rest-of-route list when every service at that stop is rain-OK by rain-fit rainClassOf (a grouped stop moves as one: if any live member is outdoor, every member stays in), so that stop is neither moved nor texted; the tapped stop and its own visit group are never filtered. The moved-visit text also drops its "Why the move? Treatments need a few rain-free hours..." sentence (GATE_RAINOUT_EFFICACY_NOTE) when the moved service is rain-OK. Strict opt-in (exactly 'true'), read at call time by server/services/rain-out.js via rainoutKeepRainOkLive(); ships DARK; off = byte-identical list, queries and text. Customer-facing (it decides who gets a move text), so the owner flips it; unset = kill switch. The tech-facing storm-watch nudge skips all-rain-OK stops with no gate.)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -2970,6 +2972,8 @@ const gates = {
   referralInboundBell: process.env.GATE_REFERRAL_INBOUND_BELL === 'true',
   // GATE_ALERT_CLOSE_BUTTONS (Handled / Called back buttons on text, follow-up and missed-call bell rows, dark). Boot-log entry only; the call-time reader is alertCloseButtonsLive().
   alertCloseButtons: process.env.GATE_ALERT_CLOSE_BUTTONS === 'true',
+  // GATE_ALERT_CALL_BUTTON (a Call button on bell rows about one caller, dark). Boot-log entry only; the call-time reader is alertCallButtonLive().
+  alertCallButton: process.env.GATE_ALERT_CALL_BUTTON === 'true',
   // GATE_BID_ALERT_BUTTONS (No bid / Bid buttons on a new bid invite's bell row, dark trial). Boot-log entry only; the call-time reader is bidAlertButtonsLive().
   bidAlertButtons: process.env.GATE_BID_ALERT_BUTTONS === 'true',
 
@@ -4700,6 +4704,10 @@ const gates = {
   // service reads process.env directly (strict '==='), so a flip needs no
   // redeploy; this entry is for logGateStatus.
   techOpenVisitNudge: process.env.GATE_TECH_OPEN_VISIT_NUDGE === 'true',
+  // Owner 2026-11-02: the same 7 PM text also lists re-services still open
+  // from earlier days (last 30). Strict 'true'; the nudge service reads
+  // process.env directly at call time; this entry is for logGateStatus.
+  reserviceOpenCarryover: process.env.GATE_RESERVICE_OPEN_CARRYOVER === 'true',
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
@@ -7082,6 +7090,13 @@ function alertCloseButtonsLive() {
   return process.env.GATE_ALERT_CLOSE_BUTTONS === 'true';
 }
 
+// GATE_ALERT_CALL_BUTTON read at CALL time, strict `=== 'true'`, dark by default. The one reader for the Call button
+// of the call_back kind (services/alert-call-button.js): a call through the linked page's own Call step from a bell
+// row about one caller. Off: no Call button is served and a tap answers 409. Kill: unset.
+function alertCallButtonLive() {
+  return process.env.GATE_ALERT_CALL_BUTTON === 'true';
+}
+
 // GATE_BID_ALERT_BUTTONS read at CALL time, strict `=== 'true'`, dark by default. The one reader for the bid_decision
 // button kind (services/bid-desk/alert-buttons.js): No bid on a new bid invite's bell row, Bid once its due date is
 // confirmed. Off: those rows serve no such button and a tap answers 409. Kill: unset.
@@ -9282,6 +9297,8 @@ module.exports.referralInboundConfirmLive = referralInboundConfirmLive;
 module.exports.referralInboundBellLive = referralInboundBellLive;
 // GATE_ALERT_CLOSE_BUTTONS reader, on its own line so gate PRs never conflict.
 module.exports.alertCloseButtonsLive = alertCloseButtonsLive;
+// GATE_ALERT_CALL_BUTTON reader, on its own line so gate PRs never conflict.
+module.exports.alertCallButtonLive = alertCallButtonLive;
 // GATE_BID_ALERT_BUTTONS reader, on its own line so gate PRs never conflict.
 module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
@@ -9665,6 +9682,17 @@ function alertClaudeFaultsLive() {
 }
 // GATE_ALERT_CLAUDE_FAULTS reader, on its own line so gate PRs never conflict.
 module.exports.alertClaudeFaultsLive = alertClaudeFaultsLive;
+
+// GATE_ALERT_EXPLAINER read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02: "I want the
+// show full text to be a brief description that I can understand ... if it's a customer, the customer needs to be
+// named"). On, the admin bell names the customer an alert is about and its "Show full text" becomes "What to do": a
+// plain-words summary (what happened, the steps, who fixes it) an AI writes the first time it is opened and saves on the
+// row (services/admin-alert-explainer.js). Off = the bell is as before and the explain route answers 404.
+function alertExplainerLive() {
+  return process.env.GATE_ALERT_EXPLAINER === 'true';
+}
+// GATE_ALERT_EXPLAINER reader, on its own line so gate PRs never conflict.
+module.exports.alertExplainerLive = alertExplainerLive;
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
 
@@ -9868,6 +9896,12 @@ function portalItemCloseLive() {
 function portalLateReringLive() {
   return process.env.GATE_PORTAL_LATE_RERING === 'true';
 }
+// GATE_PORTAL_ASK_PUSH read at CALL time, strict `=== 'true'`, dark in every environment.
+// Off, a customer's ask inside the app (chat hand-off, service request, late re-ring, estimate change or call request)
+// writes its admin bell row and sends no push, as before.
+function portalAskPushLive() {
+  return process.env.GATE_PORTAL_ASK_PUSH === 'true';
+}
 // GATE_PORTAL_ESTIMATE_RERING read at CALL time, strict `=== 'true'`, dark in every environment.
 // Off, the alert-relevance sweep does not look for add-service requests still owed an estimate.
 function portalEstimateReringLive() {
@@ -9963,6 +9997,14 @@ function techSetTextsLive() {
 function emailDraftFactsLive() {
   return process.env.GATE_EMAIL_DRAFT_FACTS === 'true';
 }
+// GATE_WDO_MARK_SENT_OUTSIDE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02, "build all" B3). On, a signed
+// WDO report that was never sent through the portal shows a "Sent another way" button on the project page; the button
+// calls POST /api/admin/projects/:id/mark-sent-outside, which records who/when/why in projects.sent_outside_portal_*
+// so the nightly WDO attention sweep stops flagging it. Records only: no customer message, no email, no filing
+// archive, sent_at stays NULL. Off = the route 404s and the page shows no button. Kill = unset.
+function wdoMarkSentOutsideLive() {
+  return process.env.GATE_WDO_MARK_SENT_OUTSIDE === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -9971,6 +10013,8 @@ module.exports.emailAuthStrictLive = emailAuthStrictLive;
 module.exports.dedupeNoUnverifiedBackfillLive = dedupeNoUnverifiedBackfillLive;
 // GATE_BUG_ID_EXTENSION reader, on its own line so gate PRs never conflict.
 module.exports.bugIdExtensionLive = bugIdExtensionLive;
+// GATE_WDO_MARK_SENT_OUTSIDE reader, on its own line so gate PRs never conflict.
+module.exports.wdoMarkSentOutsideLive = wdoMarkSentOutsideLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI reader, on its own line so gate PRs never conflict.
@@ -10123,6 +10167,8 @@ module.exports.portalInboxLive = portalInboxLive;
 module.exports.portalItemCloseLive = portalItemCloseLive;
 // GATE_PORTAL_LATE_RERING reader, on its own line so gate PRs never conflict.
 module.exports.portalLateReringLive = portalLateReringLive;
+// GATE_PORTAL_ASK_PUSH reader, on its own line so gate PRs never conflict.
+module.exports.portalAskPushLive = portalAskPushLive;
 // GATE_PORTAL_ESTIMATE_RERING reader, on its own line so gate PRs never conflict.
 module.exports.portalEstimateReringLive = portalEstimateReringLive;
 // GATE_MESSENGER_INBOX reader, on its own line so gate PRs never conflict.

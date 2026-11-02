@@ -392,6 +392,21 @@ async function findHouseholdPromoter(customerId, dbx = db) {
 // shares the household promoter (resolvePromoter) but the friend should hear
 // from the sibling, not the promoter's owner (GH codex #3850 r3 P2).
 // Attribution (promoter, code, link) stays the promoter's.
+// The lead_sources row a referral-program lead attributes to: the seeded
+// 'Customer Referral' row (source_type 'referral'), matched the same way the
+// call pipeline matches a caller who names a referrer (utils/call-lead-source.js).
+// Fail-soft: a missing row or a lookup error leaves the lead unattributed,
+// never uncreated.
+async function findReferralLeadSourceId(conn = db) {
+  try {
+    const row = await conn('lead_sources').where({ source_type: 'referral', is_active: true }).orderBy('created_at').first('id');
+    return row?.id || null;
+  } catch (err) {
+    logger.warn(`[ReferralEngine] referral lead source lookup failed; lead stays unattributed: ${err.message}`);
+    return null;
+  }
+}
+
 async function submitReferral(promoterId, { name, phone, email, address, notes, source = 'portal', referrerName = null }) {
   if (!name || !phone) throw new Error('Name and phone are required');
 
@@ -529,6 +544,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   // --- Create lead via lead-attribution ---
   let leadId = null;
   try {
+    const referralLeadSourceId = await findReferralLeadSourceId();
     const [lead] = await db('leads').insert({
       first_name: firstName,
       last_name: lastName || null,
@@ -539,6 +555,9 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
       service_interest: null,
       first_contact_at: new Date(),
       first_contact_channel: 'referral',
+      // Attribution: without it the lead reads as unattributed in the source
+      // filter, the ROI table and the unattributed-leads alert.
+      ...(referralLeadSourceId ? { lead_source_id: referralLeadSourceId } : {}),
       status: 'new',
     }).returning('*');
     leadId = lead.id;
@@ -1558,6 +1577,7 @@ module.exports = {
   getProgramAnalytics,
   getPromoterReferralLink,
   buildRefereeOfferLine,
+  findReferralLeadSourceId,
   _internals: {
     normalizePhone,
     normalizeReferralBaseUrl,

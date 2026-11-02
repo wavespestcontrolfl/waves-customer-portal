@@ -13,6 +13,7 @@ const SitemapManager = require('../seo/sitemap-manager');
 const IndexNow = require('../seo/indexnow-submit');
 const AiVisibilityGate = require('./ai-visibility-gate');
 const { normalizeUrl } = require('../../utils/normalize-url');
+const { etDateString } = require('../../utils/datetime-et');
 
 async function runForPost(post = {}, options = {}) {
   const url = post.astro_live_url || post.live_url || post.url;
@@ -221,12 +222,12 @@ async function sweepRecentlyPublished({
  * Stuck-PR alert: the 2-minute lifecycle poller retries a parked PR forever
  * and silently — a Codex block, a permanently red build, or a missing
  * production deploy keeps the run parked with no human signal. Once a day
- * (called from the same 5:40am cron as the sweep, which is also the natural
- * dedupe — no per-run alert bookkeeping needed), text ONE summary listing
- * autonomous PRs parked unmerged past the threshold. Default ON; kill via
- * AUTONOMOUS_PR_STUCK_ALERT=false; threshold hours via
- * AUTONOMOUS_PR_STUCK_ALERT_HOURS (default 12). internal_alert routing
- * honors OWNER_SMS_DISABLED.
+ * (called from the same 5:40am cron as the sweep; the alert's dedupe key is
+ * the ET day), ONE owner alert listing autonomous PRs parked unmerged past
+ * the threshold: quiet (services/owner-alerts.js; Activity and the needs-me
+ * list). It was a text to the owner's phone that reached nobody since about
+ * 2026-09-01. Default ON; kill via AUTONOMOUS_PR_STUCK_ALERT=false;
+ * threshold hours via AUTONOMOUS_PR_STUCK_ALERT_HOURS (default 12).
  */
 async function alertStuckAutonomousPrs({ hours = null } = {}) {
   if (String(process.env.AUTONOMOUS_PR_STUCK_ALERT || '').toLowerCase() === 'false') {
@@ -254,15 +255,21 @@ async function alertStuckAutonomousPrs({ hours = null } = {}) {
 
   const urls = [...new Set(stuck.map((r) => r.astro_pr_url))];
   const body = `Waves content engine: ${urls.length} autonomous PR(s) stuck unmerged >${thresholdHours}h — check Codex review / build status. ${urls.slice(0, 3).join(' ')}`;
-  try {
-    const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
-    logger.info(`[post-publish-visibility] stuck-PR alert sent: ${body}`);
-  } catch (err) {
-    logger.warn(`[post-publish-visibility] stuck-PR alert send failed: ${err.message}`);
-    return { alerted: 0, stuck: urls.length, error: err.message };
+  const one = urls.length === 1;
+  const result = await require('../owner-alerts').recordOwnerAlert('content-pr-stuck', {
+    action: one ? 'merge or close a stuck content pull request' : `merge or close ${urls.length} stuck content pull requests`,
+    why: `${one ? 'An autonomous pull request has' : `${urls.length} autonomous pull requests have`} waited over ${thresholdHours} hours to merge.`,
+    link: '/admin/seo',
+    subject: { type: 'check', id: 'content-pr-stuck' },
+    text: body,
+    dedupeKey: `owner-alert:content-pr-stuck:${etDateString()}`,
+    itemKeys: urls,
+  });
+  if (!result?.ok) {
+    logger.warn(`[post-publish-visibility] stuck-PR alert not recorded: ${result?.error || 'unknown'}`);
+    return { alerted: 0, stuck: urls.length, error: result?.error || 'not recorded' };
   }
+  logger.info(`[post-publish-visibility] stuck-PR alert recorded: ${body}`);
   return { alerted: 1, stuck: urls.length };
 }
 
@@ -271,10 +278,12 @@ async function alertStuckAutonomousPrs({ hours = null } = {}) {
  * stays post-publish — but a freshly auto-published blog that lands with a
  * P0 (noindex, robots block, canonical-elsewhere, content not rendered) was
  * previously only logged + flagged 'visibility_review' with nobody notified.
- * With unattended auto-publish live, text the operator so it can be fixed or
- * reverted fast. Default ON for a safety gate on an unattended publisher — set
- * AUTONOMOUS_CONTENT_VISIBILITY_ALERT=false to explicitly silence it. Scoped to
- * engine-published posts, routed as internal_alert (honors OWNER_SMS_DISABLED).
+ * With unattended auto-publish live, alert the owner so it can be fixed or
+ * reverted fast: a quiet owner alert (services/owner-alerts.js; Activity and
+ * the needs-me list), one row per page. It was a text to the owner's phone
+ * that reached nobody since about 2026-09-01. Default ON for a safety gate on
+ * an unattended publisher — set AUTONOMOUS_CONTENT_VISIBILITY_ALERT=false to
+ * explicitly silence it. Scoped to engine-published posts.
  */
 async function maybeAlertVisibilityFailure(url, snapshot, aiResult, post) {
   if (process.env.AUTONOMOUS_CONTENT_VISIBILITY_ALERT === 'false') return;
@@ -287,10 +296,19 @@ async function maybeAlertVisibilityFailure(url, snapshot, aiResult, post) {
     ? `not live (http ${snapshot.http_status || 'n/a'})`
     : `P0 ${p0Codes.join(', ') || 'visibility'}`;
   const body = `Waves content: auto-published page has a visibility problem — ${reason}. ${url}`;
-  const twilio = require('../twilio');
-  const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-  await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
-  logger.info(`[post-publish-visibility] visibility alert sent for ${url}`);
+  const page = String(post.id || url);
+  await require('../owner-alerts').recordOwnerAlert('content-visibility', {
+    action: 'fix or revert an auto-published page',
+    why: snapshot.live_ok
+      ? 'An auto-published page is live with a problem that keeps it out of search.'
+      : 'An auto-published page is not loading.',
+    link: '/admin/seo',
+    subject: { type: 'check', id: 'content-visibility' },
+    text: body,
+    dedupeKey: `owner-alert:content-visibility:${page}`,
+    itemKeys: [page],
+  });
+  logger.info(`[post-publish-visibility] visibility alert recorded for ${url}`);
 }
 
 async function fetchHtml(url, fetchFn) {
@@ -559,6 +577,7 @@ module.exports = {
     fetchHtml,
     fetchRobotsTxt,
     countKnownLiveInboundLinks,
+    maybeAlertVisibilityFailure,
     htmlHasCrawlableLinkTo,
     inboundLinkTargetVariants,
     mergeRawInspection,
