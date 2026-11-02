@@ -220,9 +220,13 @@
     {
       "router": "server/routes/admin-auth.js",
       "mount": "/api/admin/auth",
-      "reason": "Staff login / two-step code step / forgot-password / reset-password — the routes that mint staff credentials cannot require them (login/mfa requires the signed short-lived challenge /login issued after the password, and shares /login's rate limiter)",
+      "reason": "Staff login / two-step code step / forgot-password / reset-password — the routes that mint staff credentials cannot require them (login/mfa requires the signed short-lived challenge /login issued after the password, and shares /login's rate limiter); Sign in with Google (GATE_STAFF_GOOGLE_SIGNIN, owner 2026-11-02, dark = 404): google/status says whether the button shows, google/start and google/callback run Google's code flow (single-use state held in an HttpOnly cookie, nonce, PKCE; the callback accepts only a company-domain ID token linked to an active staff row), google/finish swaps the one-time result for the same answer as /login and needs the starting page's secret",
       "routes": [
+        "GET /api/admin/auth/google/callback",
+        "GET /api/admin/auth/google/start",
+        "GET /api/admin/auth/google/status",
         "POST /api/admin/auth/forgot-password",
+        "POST /api/admin/auth/google/finish",
         "POST /api/admin/auth/login",
         "POST /api/admin/auth/login/mfa",
         "POST /api/admin/auth/reset-password"

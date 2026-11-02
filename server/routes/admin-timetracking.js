@@ -32,7 +32,8 @@ const {
   MAX_STAFF_EMAIL_LENGTH,
   canonicalStaffEmail,
 } = require('../utils/staff-identity');
-const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
+const { assertMayChangeFullAccessEmail, ibFullAccess, isFullAccessEmail } = require('../services/intelligence-bar/ib-access');
+const googleSignin = require('../services/staff-google-signin');
 const analyticsMath = require('../services/time-tracking-analytics');
 const { validDateOnly } = require('../utils/date-only');
 const { recordAuditEvent } = require('../services/audit-log');
@@ -133,6 +134,12 @@ function sanitizeTechForAdmin(tech) {
     if (out && out[f] != null) out[f] = Number(out[f]);
   }
   if (out && !techWorkDaysLive()) delete out.work_days;
+  // Team tab Google sign-in (GATE_STAFF_GOOGLE_SIGNIN): the linked address and
+  // whether its first sign-in pinned a Google account; never Google's id.
+  if (out && googleSignin.staffGoogleSigninLive()) {
+    out.google_email = tech.google_email || null;
+    out.google_linked = Boolean(tech.google_sub);
+  }
   return out;
 }
 
@@ -829,6 +836,7 @@ async function listTechnicians(req, res, next) {
       ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}),
       ...(serviceLineMapOn() ? { serviceLinesEnabled: true } : {}),
       ...(territoryReadoutOn() ? { territoryReadoutEnabled: true } : {}),
+      ...(callerIsAdmin && googleSignin.staffGoogleSigninLive() ? { googleSigninEnabled: true } : {}),
     });
   } catch (err) { next(err); }
 }
@@ -1278,6 +1286,56 @@ async function updateTechnician(req, res, next) {
 }
 
 router.put('/technicians/:id', requireAdmin, updateTechnician);
+
+// PUT /technicians/:id/google-signin { googleEmail } — link (or, with null or
+// '', clear) the company Google account this staff member signs in with
+// (GATE_STAFF_GOOGLE_SIGNIN). A new link waits for its first sign-in to pin
+// Google's account id. Moving or clearing an existing link forgets that id and
+// signs the person out everywhere, like an email change. Only the owner login
+// may change the link on the owner's own row: a link there is a way in.
+async function putTechnicianGoogleSignin(req, res, next) {
+  try {
+    if (!googleSignin.staffGoogleSigninLive()) return res.status(404).json({ error: 'Not found' });
+    const parsed = googleSignin.normalizeLinkedGoogleEmail(req.body?.googleEmail);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    const outcome = await db.transaction(async (trx) => {
+      await lockTechnicianMutations(trx);
+      const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first();
+      if (!target) return { notFound: true };
+      if (isFullAccessEmail(target.email) && !ibFullAccess(req)) return { ownerOnly: true };
+      const current = target.google_email ? target.google_email.toLowerCase() : null;
+      if (current === parsed.value) return { tech: target };
+      if (parsed.value && await trx('technicians')
+        .whereRaw('LOWER(google_email) = ?', [parsed.value])
+        .whereNot({ id: target.id })
+        .first('id')) {
+        return { conflict: true };
+      }
+      const revoke = Boolean(current);
+      await trx('technicians').where({ id: target.id }).update({
+        google_email: parsed.value,
+        google_sub: null,
+        ...(revoke ? { auth_token_version: Number(target.auth_token_version || 0) + 1 } : {}),
+        updated_at: new Date(),
+      });
+      if (revoke) await PushService.deactivateStaffUser(target.id, trx);
+      return { tech: await trx('technicians').where({ id: target.id }).first(), revoke };
+    });
+
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.ownerOnly) return res.status(403).json({ error: 'Only the owner account can change this Google sign-in.' });
+    if (outcome.conflict) return res.status(409).json({ error: 'That Google account is linked to another staff member' });
+    if (outcome.revoke) disconnectRevokedStaffSessions(outcome.tech.id, 'google_signin_changed');
+    logger.info(`[team] Google sign-in ${outcome.tech.google_email ? 'linked' : 'cleared'} for technician id=${outcome.tech.id} (sessions revoked: ${Boolean(outcome.revoke)})`);
+    return res.json({ success: true, technician: sanitizeTechForAdmin(outcome.tech) });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'That Google account is linked to another staff member' });
+    return next(err);
+  }
+}
+
+router.put('/technicians/:id/google-signin', requireAdmin, putTechnicianGoogleSignin);
 
 // =============================================================================
 // HIRED BUTTON (GATE_HIRED_PACKET, owner ruling 2026-10-25 D7)
@@ -2216,6 +2274,7 @@ module.exports._handlers = {
   hireTechnician,
   listTechnicians,
   putTechnicianCapabilities,
+  putTechnicianGoogleSignin,
   putTechnicianVoicePin,
   resendHireLink,
   updateTechnician,
