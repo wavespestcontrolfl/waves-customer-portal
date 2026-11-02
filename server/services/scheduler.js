@@ -8452,11 +8452,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
-  // Refreshes unknown outcome evidence, then raises ONE admin item for
-  // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline
-  // disagreements + 2 spot checks). Gated GATE_TYPED_DECISIONS (checked
-  // inside the service); nothing acts on a Jev answer.
+  // DAILY 8:05 AM ET — Typed-decisions review list (shadow lane, dark).
+  // Raises ONE FYI row in Claude's queue, never the owner's bell (owner
+  // 2026-11-02), listing the AI-test cases still ungraded (up to 8 where
+  // the answers differ + 2 random checks). Gated GATE_TYPED_DECISIONS
+  // (checked inside the service); nothing acts on a test AI's answer.
   // =========================================================================
   cron.schedule('5 8 * * *', async () => {
     await runExclusive('typed-decisions-daily-review', async () => {
