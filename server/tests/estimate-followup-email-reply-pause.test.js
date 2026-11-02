@@ -236,22 +236,28 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
 
   test('email-read failure fails OPEN on the cron path', async () => {
     setGate(true);
-    setRows({ emails: new Error('emails down') });
+    setRows({ emails: Object.assign(new Error('select ... where from_address = any(pat@example.com) - emails down'), { code: '57P01' }) });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('emails down'));
+    // the estimate id and the error code only: never the message, which carries the bindings
+    expect(logger.warn).toHaveBeenCalledWith('[est-followup] reply-pause check skipped for estimate est-1: 57P01');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('pat@example.com');
   });
 
   test('a failed customer-address read fails open on cron and throws on replay', async () => {
     setGate(true);
     setRows({ customers: new Error('customers down'), emails: [CUSTOMER_REPLY] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
-    await expect(hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true })).rejects.toThrow('customers down');
+    await expect(hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true })).rejects.toThrow('reply-pause check failed');
   });
 
   test('email-read failure THROWS on the replay path', async () => {
     setGate(true);
-    setRows({ emails: new Error('emails down') });
-    await expect(hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true })).rejects.toThrow('emails down');
+    setRows({ emails: new Error('select ... any(pat@example.com) - emails down') });
+    const err = await hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    // fails closed, and the thrown message carries no bindings (the replay caller logs it)
+    expect(err.message).toBe('reply-pause check failed: Error');
+    expect(err.message).not.toContain('pat@example.com');
   });
 
   test('gate off: an emails failure is unreachable (replay path still only reads texts)', async () => {

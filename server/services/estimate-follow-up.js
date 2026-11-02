@@ -199,8 +199,13 @@ async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {})
     // unverifiable" is exactly when it must not fire — the caller
     // propagates the error onto the executor's bounded retry rail. The
     // email arm shares this catch, so it fails the same way.
-    if (throwOnError) throw e;
-    logger.warn(`[est-followup] reply-pause check skipped: ${e.message}`);
+    // A knex error message carries the query's bindings (the customer's phone,
+    // email addresses), so neither path passes it on: only the error code or
+    // name, as notification-service.js safeErrorSummary does (AGENTS.md: no
+    // PII in logs). The replay caller logs what it catches.
+    const reason = (e && (e.code || e.name)) || "error";
+    if (throwOnError) throw Object.assign(new Error(`reply-pause check failed: ${reason}`), { code: e && e.code });
+    logger.warn(`[est-followup] reply-pause check skipped for estimate ${est && est.id}: ${reason}`);
     return false; // fail open
   }
 }
