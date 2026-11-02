@@ -83,6 +83,9 @@ const MAX_HOLD_QUESTION_CHARS = 300;
 // One owner item per held row that needs the owner (raiseHoldQuestion).
 const HOLD_KEY_PREFIX = 'content-terminal-hold:';
 const ALERT_KEY_PREFIX = 'content-terminal-due:';
+// The owner's item when the terminal stops handling the list (raiseTerminalStalled).
+const STALL_KEY_PREFIX = 'content-terminal-stalled:';
+const STALL_MS = 44 * 60 * 60 * 1000;
 // How long a claim waits before the runner looks for the draft again.
 const RECHECK_MS = 3 * 60 * 60 * 1000;
 // A post body is a few thousand words. Anything far past that is not a draft.
@@ -320,14 +323,18 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
 async function closeTerminalItems({ now = new Date(), deps = {} } = {}) {
   const episodes = deps.episodes || require('../admin-alert-episodes');
   const conn = deps.db || db;
-  const open = await episodes.openAdminAlertKeys(conn, ALERT_KEY_PREFIX);
-  return episodes.closeAdminAlertKeys(conn, open, 'terminal_writer_off', { now, resolution: 'Cleared: the portal writes these drafts itself again' });
+  const open = new Set();
+  for (const prefix of [ALERT_KEY_PREFIX, STALL_KEY_PREFIX]) {
+    for (const key of await episodes.openAdminAlertKeys(conn, prefix)) open.add(key);
+  }
+  return episodes.closeAdminAlertKeys(conn, [...open], 'terminal_writer_off', { now, resolution: 'Cleared: the portal writes these drafts itself again' });
 }
 
 /**
  * True when a blog waits for its terminal draft AND today's item stands, so
- * the owner has been told. The blog drought alert reads this: "no blog today"
- * is false news then. False when the gate is off, when only other page types
+ * the wait is on record (in the owner's bell, or in Claude's queue while the
+ * Mac job writes the drafts and raiseTerminalStalled watches it). The blog
+ * drought alert reads this: "no blog today" is false news then. False when the gate is off, when only other page types
  * wait, when the item was suppressed or closed, and on any read failure (the
  * drought alert is the fallback signal, so doubt keeps it).
  */
@@ -358,23 +365,86 @@ async function blogDraftRequested({ now = new Date(), deps = {} } = {}) {
 }
 
 const describe = (r) => `${String(r.action_type || 'post').replace(/_/g, ' ')}: ${r.query || r.page_url || [r.service, r.city].filter(Boolean).join(' in ') || 'untitled'}`;
+// What is due, so the same list is a plain dedupe and a changed one is a rewrite.
+const listVersion = (rows) => crypto.createHash('sha1').update(rows.map((r) => `${r.opportunity_id}:${r.brief_id}`).sort().join('|')).digest('hex').slice(0, 16);
+
+/**
+ * Owner 2026-11-02 ("A"): the 9:15 AM blog-run job on the owner's Mac writes
+ * the drafts on this list, so the daily item is Claude's work. While this
+ * switch is on (the default) and Claude's queue is live, the item is stamped
+ * for that queue (admin-alert-routing.js class content-terminal-due: Activity
+ * only, fyi) and the owner's bell rings only for a list the terminal stopped
+ * handling (raiseTerminalStalled). AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET=false
+ * rings the daily item for the owner again, as before; so does Claude's queue
+ * being off, since nothing would take the item off the bell.
+ */
+function dueItemQuiet() {
+  if (/^(0|false|no|off)$/i.test(String(process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET ?? '').trim())) return false;
+  return require('../admin-alert-routing').claudeQueueEnabled();
+}
+
+/**
+ * The owner's bell for a list the terminal stopped handling: rows that waited
+ * STALL_MS on the same brief with no usable draft (two 9:15 AM runs went by,
+ * so the Mac job is down or passes the rows over). One item keyed by ET date,
+ * raised and closed like the daily item. An empty `stalled` only closes.
+ * Returns how many rows stalled.
+ */
+async function raiseTerminalStalled({ due, now, conn, episodes }) {
+  const stalled = due.filter((r) => now.getTime() - new Date(r.brief_created_at).getTime() >= STALL_MS);
+  const n = stalled.length;
+  const todayKey = `${STALL_KEY_PREFIX}${etDateString(now)}`;
+  const stale = (await episodes.openAdminAlertKeys(conn, STALL_KEY_PREFIX)).filter((key) => n === 0 || key !== todayKey);
+  await episodes.closeAdminAlertKeys(conn, stale, 'terminal_caught_up', { now, resolution: 'Cleared: no website post has waited 2 days for the terminal' });
+  if (!n) return 0;
+  const composed = require('../admin-alert-compose').composeAdminAlert({
+    area: 'Content',
+    action: `blog-run left ${n} website post${n === 1 ? '' : 's'} for 2 days`,
+    why: 'The terminal has not handled them in 2 days, so the 9:15 AM blog-run job on the Mac may be down.',
+    severity: 'needs-you',
+    link: '/admin/blog?tab=autopilot',
+    subject: { type: 'check', id: 'content-terminal-stalled' },
+    doneWhen: 'terminal_caught_up',
+    who: 'person',
+  });
+  await episodes.raiseAdminAlertWithReopen('content', composed.headline, composed.why, {
+    link: composed.link,
+    metadata: composed.metadata,
+    // `content` is off the bell policy's default list; this item is the owner's.
+    bellDefault: true,
+    dedupeKey: todayKey,
+    dedupeVersion: listVersion(stalled),
+    refreshOnDedupe: true,
+    ringOnRefresh: () => false,
+    detail: [
+      'Ask Claude to check the blog-run job on the Mac (its log: ~/.claude/logs/blog-run-daily.log).',
+      'Waiting 2 days for a draft:',
+      ...stalled.map((r) => `- ${describe(r)}${r.problem ? ' (the last draft file was rejected)' : ''}`),
+    ].join('\n'),
+  });
+  return n;
+}
 
 /**
  * After a batch with the gate on: one admin item for the rows that wait for a
  * draft, keyed by ET date. Raised through the episode mechanism: a later pass
  * the same day rewrites the item quietly when the list changed, an item that
  * no longer holds is closed, and work that comes back after a close (a draft
- * that failed a gate) reopens the item and rings.
+ * that failed a gate) reopens the item and rings. While dueItemQuiet() the
+ * item goes to Claude's queue and the owner's bell is raiseTerminalStalled.
  */
 async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
   const { due, written, rebrief } = await awaitingTerminalDrafts({ now, deps });
   const n = due.length;
+  const quiet = dueItemQuiet();
   const todayKey = `${ALERT_KEY_PREFIX}${etDateString(now)}`;
   const episodes = deps.episodes || require('../admin-alert-episodes');
   const conn = deps.db || db;
   const stale = (await episodes.openAdminAlertKeys(conn, ALERT_KEY_PREFIX)).filter((key) => n === 0 || key !== todayKey);
   await episodes.closeAdminAlertKeys(conn, stale, 'drafts_written', { now, resolution: 'Cleared: these website posts no longer wait for a draft' });
-  logger.info(`[terminal-writer] ${n} waiting for a draft, ${written.length} written, ${rebrief.length} waiting for a retry brief`);
+  // Not quiet: the daily item rings the owner itself, so a standing stalled item is only closed.
+  const stalled = await raiseTerminalStalled({ due: quiet ? due : [], now, conn, episodes });
+  logger.info(`[terminal-writer] ${n} waiting for a draft (${stalled} for 2 days), ${written.length} written, ${rebrief.length} waiting for a retry brief`);
   const counts = { due: n, written: written.length, rebrief: rebrief.length };
   if (!n) return { ...counts, delivered: false };
 
@@ -390,17 +460,18 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
   });
   const raised = await episodes.raiseAdminAlertWithReopen('content', composed.headline, composed.why, {
     link: composed.link,
-    metadata: composed.metadata,
-    // `content` is not on the bell policy's default list; this item asks the
-    // owner for work, so it rings unless the owner turned the category off.
+    // terminalDue routes the item to Claude's queue (admin-alert-routing.js).
+    metadata: quiet ? { ...composed.metadata, terminalDue: 'claude' } : composed.metadata,
+    // `content` is not on the bell policy's default list. Unrouted, this item
+    // asks the owner for work, so it rings unless the owner turned the
+    // category off; a routed item never rings.
     bellDefault: true,
     dedupeKey: todayKey,
-    // What is due, so the same list is a plain dedupe and a changed one is a rewrite.
-    dedupeVersion: crypto.createHash('sha1').update(due.map((r) => `${r.opportunity_id}:${r.brief_id}`).sort().join('|')).digest('hex').slice(0, 16),
+    dedupeVersion: listVersion(due),
     refreshOnDedupe: true,
     ringOnRefresh: () => false,
     detail: [
-      'Run blog-run in the terminal. Waiting for a draft:',
+      quiet ? 'The 9:15 AM blog-run job on the Mac writes these. Waiting for a draft:' : 'Run blog-run in the terminal. Waiting for a draft:',
       ...due.map((r) => `- ${describe(r)}${r.problem ? ' (the last draft file was rejected)' : ''}`),
       ...(written.length ? ['', `Written and waiting for the next run: ${written.length}`] : []),
       ...(rebrief.length ? ['', `Waiting for a new brief at the next run: ${rebrief.length}`] : []),

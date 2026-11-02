@@ -2,8 +2,8 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // client/src/pages/admin/DispatchPageV2.jsx
 //
 // Mobile-first orchestrator for /admin/dispatch under the dispatch-v2
-// feature flag. Renders the day/week board, sidebars (RevenuePanelV2 /
-// InsightsPanelV2), and on mobile manages
+// feature flag. Renders the day/week board, sidebars (RevenuePanelV2),
+// and on mobile manages
 // the action-sheet stack (MobileAppointmentDetailSheet,
 // MobileCheckoutSheet, MobilePaymentSheet, MobileServicePickerSheet, and
 // the four payment tender sheets). Reuses CompletionPanel /
@@ -113,9 +113,6 @@ import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const RevenuePanel = lazy(
   () => import("../../components/dispatch/RevenuePanelV2"),
-);
-const InsightsPanel = lazy(
-  () => import("../../components/dispatch/InsightsPanelV2"),
 );
 
 const ACTIVE_MOBILE_COMPLETION_STATUSES = new Set(["en_route", "on_site"]);
@@ -245,7 +242,6 @@ const SCHEDULE_TABS = [
   { id: "board", label: "Schedule" },
   { id: "protocols", label: "Protocols" },
   { id: "revenue", label: "Scores", desktopOnly: true },
-  { id: "insights", label: "Insights", desktopOnly: true },
 ];
 
 function MobileScheduleSheet({ children, serviceCount, completedCount }) {
@@ -445,7 +441,7 @@ export default function DispatchPageV2({
   const activeTab = isControlled ? controlledActiveTab : internalActiveTab;
   const setActiveTab = isControlled ? () => {} : setInternalActiveTab;
 
-  // On mobile, desktopOnly tabs (Job Scores / Insights) are
+  // On mobile, desktopOnly tabs (Job Scores) are
   // hidden from both the top row and the More sheet. If a returning user's
   // persisted activeTab is one of those, snap back to 'board' so they don't
   // land on a panel they can't navigate away from. Skip in controlled mode —
@@ -458,8 +454,8 @@ export default function DispatchPageV2({
   // Default desktop to Week (multi-day grid); phones still open on Day,
   // which is what techs and Virginia want when triaging in the field.
   const [viewMode, setViewMode] = useState(() => {
-    // In controlled mode with a non-board sub-tab (Protocols / Tech Match
-    // / CSR / Job Scores / Insights), the panel only renders when
+    // In controlled mode with a non-board sub-tab (Protocols / Job
+    // Scores), the panel only renders when
     // viewMode === 'day'. Initialize to 'day' so deep-linking to those
     // tabs (e.g. /admin/dispatch?tab=protocols) doesn't render the week
     // calendar instead of the requested panel.
@@ -1899,7 +1895,7 @@ export default function DispatchPageV2({
       {/* Recurring-series alerts are office-only on the server. */}
       {viewMode === "day" && verifiedRole === "admin" && <RecurringAlertsBannerV2 />}
 
-      {/* Non-board tabs — V2 monochrome panels (Revenue/Insights/Protocols). */}
+      {/* Non-board tabs — V2 monochrome panels (Revenue/Protocols). */}
       {viewMode === "day" && activeTab === "protocols" && (
         <ProtocolReferenceTabV2 />
       )}
@@ -1912,17 +1908,6 @@ export default function DispatchPageV2({
           }
         >
           <RevenuePanel date={date} />
-        </Suspense>
-      )}
-      {viewMode === "day" && activeTab === "insights" && (
-        <Suspense
-          fallback={
-            <div className="py-10 text-center text-14 text-ink-secondary">
-              Loading…
-            </div>
-          }
-        >
-          <InsightsPanel />
         </Suspense>
       )}
 

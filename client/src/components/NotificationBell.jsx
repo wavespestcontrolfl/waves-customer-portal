@@ -613,8 +613,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     fetchCount();
   };
 
+  // A row a button closed leaves the list, and the badge is re-read.
+  const removeDoneRow = (n) => {
+    setNotifications(prev => prev.filter(x => x.id !== n.id));
+    if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
+    fetchCount();
+  };
+
   // A row button the server set on this row (RowActions): same content fence
-  // as Done. Success removes the row like Done and shows the server's message;
+  // as Done. Success removes the row like Done and shows the server's message
+  // (a step that leaves the row open keeps it and re-reads the list);
   // a 409 re-reads the list with a note; any other failure keeps the row and
   // RowActions shows the inline error. Resolves 'done' | 'refreshed' | 'failed'.
   const runAction = async (e, n, action) => {
@@ -635,9 +643,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       return 'refreshed';
     }
     if (d?.success === false) return 'failed';
-    setNotifications(prev => prev.filter(x => x.id !== n.id));
-    if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
-    fetchCount();
+    // A button that leaves the row open (Call): the row stays and the list is re-read for its new version.
+    if (d?.open === true) loadNotifications();
+    else removeDoneRow(n);
     if (typeof d?.message === 'string' && d.message) setActionNote(d.message);
     return 'done';
   };

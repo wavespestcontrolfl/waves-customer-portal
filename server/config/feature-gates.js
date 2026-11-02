@@ -322,6 +322,7 @@
  *   GATE_REFERRAL_INBOUND_CONFIRM=true (owner 2026-10-26 "YES GO": the Referrals Queue lists plan customers who came in through a referral link (?ref=CODE on their landing page) or named a referrer on their first call, with the likely referrer; the office confirms the referrer or marks "not a referral". Confirm makes the referral row and runs the existing conversion; when a performed recurring visit is on record, both $25 credits post at once, otherwise at the next performed recurring visit as today; either way the referrer gets one thank-you email at the next 9:00 AM ET and no reward text (owner 2026-10-29). Read at call time via referralInboundConfirmLive(), strict 'true', dark by default; off = the list and both actions are hidden.)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Acts only while GATE_REFERRAL_INBOUND_CONFIRM is on. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CLOSE_BUTTONS=true (owner 2026-10-29 "ok go", PR 2 of the bell buttons: close-only buttons the server sets on three admin bell rows, Handled on a customer's texts and Called back on a call-back follow-up and a missed call; a tap is the bell's own Done with that note and sends no reply and places no call. Read at call time via alertCloseButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
+ *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button keeps following GATE_ALERT_CLOSE_BUTTONS.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -2971,6 +2972,8 @@ const gates = {
   referralInboundBell: process.env.GATE_REFERRAL_INBOUND_BELL === 'true',
   // GATE_ALERT_CLOSE_BUTTONS (Handled / Called back buttons on text, follow-up and missed-call bell rows, dark). Boot-log entry only; the call-time reader is alertCloseButtonsLive().
   alertCloseButtons: process.env.GATE_ALERT_CLOSE_BUTTONS === 'true',
+  // GATE_ALERT_CALL_BUTTON (a Call button on bell rows about one caller, dark). Boot-log entry only; the call-time reader is alertCallButtonLive().
+  alertCallButton: process.env.GATE_ALERT_CALL_BUTTON === 'true',
   // GATE_BID_ALERT_BUTTONS (No bid / Bid buttons on a new bid invite's bell row, dark trial). Boot-log entry only; the call-time reader is bidAlertButtonsLive().
   bidAlertButtons: process.env.GATE_BID_ALERT_BUTTONS === 'true',
 
@@ -4716,6 +4719,10 @@ const gates = {
   // service reads process.env directly (strict '==='), so a flip needs no
   // redeploy; this entry is for logGateStatus.
   techOpenVisitNudge: process.env.GATE_TECH_OPEN_VISIT_NUDGE === 'true',
+  // Owner 2026-11-02: the same 7 PM text also lists re-services still open
+  // from earlier days (last 30). Strict 'true'; the nudge service reads
+  // process.env directly at call time; this entry is for logGateStatus.
+  reserviceOpenCarryover: process.env.GATE_RESERVICE_OPEN_CARRYOVER === 'true',
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
@@ -7116,6 +7123,13 @@ function alertCloseButtonsLive() {
   return process.env.GATE_ALERT_CLOSE_BUTTONS === 'true';
 }
 
+// GATE_ALERT_CALL_BUTTON read at CALL time, strict `=== 'true'`, dark by default. The one reader for the Call button
+// of the call_back kind (services/alert-call-button.js): a call through the linked page's own Call step from a bell
+// row about one caller. Off: no Call button is served and a tap answers 409. Kill: unset.
+function alertCallButtonLive() {
+  return process.env.GATE_ALERT_CALL_BUTTON === 'true';
+}
+
 // GATE_BID_ALERT_BUTTONS read at CALL time, strict `=== 'true'`, dark by default. The one reader for the bid_decision
 // button kind (services/bid-desk/alert-buttons.js): No bid on a new bid invite's bell row, Bid once its due date is
 // confirmed. Off: those rows serve no such button and a tap answers 409. Kill: unset.
@@ -9316,6 +9330,8 @@ module.exports.referralInboundConfirmLive = referralInboundConfirmLive;
 module.exports.referralInboundBellLive = referralInboundBellLive;
 // GATE_ALERT_CLOSE_BUTTONS reader, on its own line so gate PRs never conflict.
 module.exports.alertCloseButtonsLive = alertCloseButtonsLive;
+// GATE_ALERT_CALL_BUTTON reader, on its own line so gate PRs never conflict.
+module.exports.alertCallButtonLive = alertCallButtonLive;
 // GATE_BID_ALERT_BUTTONS reader, on its own line so gate PRs never conflict.
 module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
@@ -9997,6 +10013,14 @@ function techSetTextsLive() {
 function emailDraftFactsLive() {
   return process.env.GATE_EMAIL_DRAFT_FACTS === 'true';
 }
+// GATE_WDO_MARK_SENT_OUTSIDE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02, "build all" B3). On, a signed
+// WDO report that was never sent through the portal shows a "Sent another way" button on the project page; the button
+// calls POST /api/admin/projects/:id/mark-sent-outside, which records who/when/why in projects.sent_outside_portal_*
+// so the nightly WDO attention sweep stops flagging it. Records only: no customer message, no email, no filing
+// archive, sent_at stays NULL. Off = the route 404s and the page shows no button. Kill = unset.
+function wdoMarkSentOutsideLive() {
+  return process.env.GATE_WDO_MARK_SENT_OUTSIDE === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -10005,6 +10029,8 @@ module.exports.emailAuthStrictLive = emailAuthStrictLive;
 module.exports.dedupeNoUnverifiedBackfillLive = dedupeNoUnverifiedBackfillLive;
 // GATE_BUG_ID_EXTENSION reader, on its own line so gate PRs never conflict.
 module.exports.bugIdExtensionLive = bugIdExtensionLive;
+// GATE_WDO_MARK_SENT_OUTSIDE reader, on its own line so gate PRs never conflict.
+module.exports.wdoMarkSentOutsideLive = wdoMarkSentOutsideLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI reader, on its own line so gate PRs never conflict.

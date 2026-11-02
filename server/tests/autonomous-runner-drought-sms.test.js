@@ -1,7 +1,9 @@
 /**
  * _sendBlogDroughtSms — the operator's target is a blog post every day, but
  * the engine's designed response to thin demand is silence. This alert turns
- * a no-blog day into an SMS with the dominant reason. Default ON, killed by
+ * a no-blog day into an owner alert with the dominant reason (a quiet row,
+ * services/owner-alerts.js; it was a text to the owner's phone that reached
+ * nobody since about 2026-09-01). Default ON, killed by
  * AUTONOMOUS_BLOG_DROUGHT_ALERT=false; a started blog (published, or parked
  * awaiting its PR merge) suppresses it.
  */
@@ -9,16 +11,21 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+// The real owner-alerts composer runs (copy that breaks the notification rule throws under test); only the
+// row write is stubbed.
+jest.mock('../services/ops-digest', () => ({
+  ...jest.requireActual('../services/ops-digest'),
+  deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-1' })),
+}));
 
 const db = require('../models/db');
 const twilio = require('../services/twilio');
+const { deliverOpsDigest } = require('../services/ops-digest');
+const { etDateString } = require('../utils/datetime-et');
 const runner = require('../services/content/autonomous-runner');
 
-// db is a bare jest.fn() in this suite: the sms_log day-dedupe lookup
-// throws synchronously (db('sms_log') → undefined.where) and the sender
-// fails OPEN — which is exactly the prod contract (a dedupe lookup error
-// must never suppress the alert). Tests below that exercise the dedupe
-// give db a chainable implementation, then reset it.
+// db is a bare jest.fn() in this suite: the drought alert reads nothing; one
+// row per ET day comes from its dedupe key.
 afterEach(() => {
   jest.clearAllMocks();
   db.mockReset();
@@ -31,24 +38,30 @@ const blogStarted = {
   skip_reason: 'astro_pr_pending_merge',
 };
 
-test('no runs at all (skipped_no_opportunity day): drought SMS fires with the floor reason', async () => {
+test('no runs at all (skipped_no_opportunity day): drought alert fires with the floor reason', async () => {
   await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
 
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
-  const [, body, opts] = twilio.sendSMS.mock.calls[0];
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  const digest = deliverOpsDigest.mock.calls[0][0];
+  const body = digest.text;
   expect(body).toMatch(/NO blog post today/);
   expect(body).toMatch(/no blog opportunity cleared the score floor/);
-  expect(opts).toMatchObject({ messageType: 'internal_alert' });
+  expect(digest).toMatchObject({
+    headline: 'Content — see why no blog post started today',
+    summary: 'The daily content batch ended without starting a blog post.',
+    audience: 'fyi',
+  });
+  expect(twilio.sendSMS).not.toHaveBeenCalled();
 });
 
-test('batch halted on non-blog failures before any blog attempt: SMS names the halt, not the miner', async () => {
+test('batch halted on non-blog failures before any blog attempt: alert names the halt, not the miner', async () => {
   const cityFail = { action_type: 'create_or_refresh_city_service_page', outcome: 'failed_agent', failure_message: 'streaming_failed: deadline' };
   await runner._sendBlogDroughtSms([cityFail, cityFail], {
     haltBeforeBlog: { failures: 2, lanes: ['create_or_refresh_city_service_page'] },
   });
 
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
-  const [, body] = twilio.sendSMS.mock.calls[0];
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  const body = deliverOpsDigest.mock.calls[0][0].text;
   expect(body).toMatch(/batch halted after 2 failed create_or_refresh_city_service_page run\(s\) before any blog was attempted/);
   expect(body).not.toMatch(/miner found nothing actionable/);
 });
@@ -59,33 +72,33 @@ test('a lone non-blog failure followed by an empty queue is a real drought, not 
     { outcome: 'skipped_no_opportunity' },
   ]);
 
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
-  const [, body] = twilio.sendSMS.mock.calls[0];
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  const body = deliverOpsDigest.mock.calls[0][0].text;
   expect(body).toMatch(/miner found nothing actionable/);
   expect(body).not.toMatch(/batch halted/);
 });
 
-test('a blog parked awaiting PR merge counts as started — no SMS', async () => {
+test('a blog parked awaiting PR merge counts as started — no alert', async () => {
   await runner._sendBlogDroughtSms([blogStarted]);
-  expect(twilio.sendSMS).not.toHaveBeenCalled();
+  expect(deliverOpsDigest).not.toHaveBeenCalled();
 });
 
-test('a directly published blog counts as started — no SMS', async () => {
+test('a directly published blog counts as started — no alert', async () => {
   await runner._sendBlogDroughtSms([
     { action_type: 'new_supporting_blog', outcome: 'completed_published' },
   ]);
-  expect(twilio.sendSMS).not.toHaveBeenCalled();
+  expect(deliverOpsDigest).not.toHaveBeenCalled();
 });
 
-test('blog attempts that all gated/failed: SMS carries the dominant reason', async () => {
+test('blog attempts that all gated/failed: alert carries the dominant reason', async () => {
   await runner._sendBlogDroughtSms([
     { action_type: 'new_supporting_blog', outcome: 'skipped_gate_fail', skip_reason: 'gate_fail' },
     { action_type: 'new_supporting_blog', outcome: 'failed_agent', failure_message: 'BLOG_HERO_IMAGE_FAILED' },
     { action_type: 'refresh_existing_page', outcome: 'completed_pending_review', skip_reason: 'trust_build_1_of_3' },
   ]);
 
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
-  const [, body] = twilio.sendSMS.mock.calls[0];
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  const body = deliverOpsDigest.mock.calls[0][0].text;
   expect(body).toMatch(/gate_fail×1/);
   expect(body).toMatch(/BLOG_HERO_IMAGE_FAILED×1/);
 });
@@ -94,16 +107,16 @@ test('non-blog publishes do NOT suppress the drought alert', async () => {
   await runner._sendBlogDroughtSms([
     { action_type: 'refresh_existing_page', outcome: 'completed_published' },
   ]);
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
 });
 
 test('kill switch AUTONOMOUS_BLOG_DROUGHT_ALERT=false silences it', async () => {
   process.env.AUTONOMOUS_BLOG_DROUGHT_ALERT = 'false';
   await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
-  expect(twilio.sendSMS).not.toHaveBeenCalled();
+  expect(deliverOpsDigest).not.toHaveBeenCalled();
 });
 
-test('gate-failed attempt with reviewer_notes: SMS names the failing checks', async () => {
+test('gate-failed attempt with reviewer_notes: alert names the failing checks', async () => {
   await runner._sendBlogDroughtSms([
     {
       action_type: 'new_supporting_blog',
@@ -113,13 +126,13 @@ test('gate-failed attempt with reviewer_notes: SMS names the failing checks', as
     },
   ]);
 
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
-  const [, body] = twilio.sendSMS.mock.calls[0];
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  const body = deliverOpsDigest.mock.calls[0][0].text;
   expect(body).toMatch(/auto_publish_gate_fail×1/);
   expect(body).toMatch(/Detail: quality: hard=hub_link_present/);
 });
 
-test('reviewer_notes detail is truncated to keep the SMS bounded', async () => {
+test('reviewer_notes detail is truncated to keep the alert bounded', async () => {
   await runner._sendBlogDroughtSms([
     {
       action_type: 'new_supporting_blog',
@@ -129,7 +142,7 @@ test('reviewer_notes detail is truncated to keep the SMS bounded', async () => {
     },
   ]);
 
-  const [, body] = twilio.sendSMS.mock.calls[0];
+  const body = deliverOpsDigest.mock.calls[0][0].text;
   const detail = body.split('Detail: ')[1];
   expect(detail.length).toBeLessThanOrEqual(160);
 });
@@ -139,51 +152,17 @@ test('no reviewer_notes on any attempt: body unchanged (no Detail clause)', asyn
     { action_type: 'new_supporting_blog', outcome: 'skipped_gate_fail', skip_reason: 'gate_fail' },
   ]);
 
-  const [, body] = twilio.sendSMS.mock.calls[0];
+  const body = deliverOpsDigest.mock.calls[0][0].text;
   expect(body).not.toMatch(/Detail:/);
 });
 
-test('day-dedupe: a drought alert already in notifications today suppresses the duplicate', async () => {
-  // internal_alert sends redirect to the in-app notification system and
-  // never reach sms_log — the bell entry in `notifications` is the marker.
-  const chain = {
-    where: jest.fn().mockReturnThis(),
-    first: jest.fn().mockResolvedValue({ id: 7 }),
-  };
-  db.mockImplementation(() => chain);
-
+test('day-dedupe: the key is the ET day, so the 1pm catch-up rewrites the morning row instead of adding one', async () => {
   await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
+  await runner._sendBlogDroughtSms([]);
 
-  expect(twilio.sendSMS).not.toHaveBeenCalled();
-  expect(db).toHaveBeenCalledWith('notifications');
-  expect(chain.where).toHaveBeenCalledWith('recipient_type', 'admin');
-  // The title predicate is a grouped orWhere covering BOTH the short
-  // notificationTitle the bell persists now and the pre-2026-07-30 full-body
-  // title (transition-day dedupe).
-  const titleGroup = chain.where.mock.calls.find((args) => typeof args[0] === 'function')?.[0];
-  expect(titleGroup).toBeInstanceOf(Function);
-  const groupChain = { orWhere: jest.fn().mockReturnThis() };
-  titleGroup.call(groupChain);
-  expect(groupChain.orWhere).toHaveBeenCalledWith('title', 'like', 'Content engine: NO blog post today%');
-  expect(groupChain.orWhere).toHaveBeenCalledWith('title', 'like', 'Waves content engine: NO blog post today%');
-});
-
-test('day-dedupe: no prior SMS in sms_log today → alert sends', async () => {
-  const chain = {
-    where: jest.fn().mockReturnThis(),
-    first: jest.fn().mockResolvedValue(undefined),
-  };
-  db.mockImplementation(() => chain);
-
-  await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
-
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
-});
-
-test('day-dedupe lookup failure fails OPEN — the alert still sends', async () => {
-  db.mockImplementation(() => { throw new Error('db down'); });
-
-  await runner._sendBlogDroughtSms([{ outcome: 'skipped_no_opportunity' }]);
-
-  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
+  expect(deliverOpsDigest).toHaveBeenCalledTimes(2);
+  for (const [digest] of deliverOpsDigest.mock.calls) {
+    expect(digest).toMatchObject({ dedupeKey: `owner-alert:content-drought:${etDateString()}`, refreshOnDedupe: true });
+  }
+  expect(db).not.toHaveBeenCalled();
 });

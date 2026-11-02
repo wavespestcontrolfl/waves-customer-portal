@@ -1,7 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { insertHealthAlert: insertFencedHealthAlert } = require('./health-alert-insert');
-const TwilioService = require('./twilio');
 const { REPLAY_HOLD_CODES, isReplayHold } = require('./messaging/billing-channel-routing');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { logAutopay } = require('./autopay-log');
@@ -130,9 +129,46 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
   return sendResult;
 }
 
-// Admin alert recipient — must be a real cell, never one of our own Twilio
-// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
-const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
+// An owner alert for one of this run's money exceptions (services/owner-alerts.js). Each was a text to the
+// owner's phone that reached nobody since about 2026-09-01: twilio.js turns an owner-phone internal_alert into
+// a bell trigger the bell policy denylists. `key` is the record the alert is about (one row per key). Never
+// throws: a failed alert must not stop the billing run.
+async function alertOwner(kind, customer, { actions, why, text, key }) {
+  try {
+    const { fullName, fitAction } = require('./admin-alert-names');
+    const customerId = String(customer?.id || '');
+    const name = fullName(customer) || 'a customer';
+    await require('./owner-alerts').recordOwnerAlert(kind, {
+      action: fitAction('Billing', name, actions),
+      why,
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'customer', id: customerId },
+      text: text(name),
+      dedupeKey: `owner-alert:${kind}:${key}`,
+      itemKeys: [String(key)],
+      metadata: { customerId: customer?.id },
+    });
+  } catch (err) {
+    logger.error(`[billing-cron] ${kind} owner alert failed: ${err.message}`);
+  }
+}
+
+// Dollars for an owner alert ("$55.30"); the amount fields here arrive as numbers or numeric strings.
+const alertDollars = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : 'an unknown amount';
+};
+
+// A charge Stripe took that our ledger missed (the monthly run and the retry ladder).
+function alertUnrecordedCharge(customer, err, source) {
+  return alertOwner('charge-unrecorded', customer, {
+    actions: [(who) => `reconcile ${who}'s unrecorded charge`, (who) => `reconcile ${who}'s charge`],
+    why: `Stripe took ${alertDollars(err.amount)} but our records do not show it, so do not charge again.`,
+    text: (name) => `Stripe orphan charge (${source}): ${name} — ${alertDollars(err.amount)} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. Do not retry.`,
+    key: err.stripePaymentIntentId || `${customer?.id}:${etDateString()}`,
+  });
+}
+
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
 
 /**
@@ -757,14 +793,7 @@ const BillingCron = {
             logger.error(`[billing-cron] Orphan alert creation failed: ${alertErr.message}`);
           }
 
-          try {
-            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `🚨 Stripe orphan charge: customer id=${customer.id} — $${err.amount} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. DO NOT retry.`,
-              { messageType: 'internal_alert', link: '/admin/revenue' },
-            );
-          } catch (smsErr) {
-            logger.error(`[billing-cron] Office orphan SMS failed: ${smsErr.message}`);
-          }
+          await alertUnrecordedCharge(customer, err, 'autopay');
 
           // Skip the retry-scheduling + customer-facing failure SMS.
           // From the customer's perspective the charge succeeded.
@@ -822,14 +851,12 @@ const BillingCron = {
           } catch (alertErr) {
             logger.error(`[billing-cron] Ambiguous-outcome alert creation failed: ${alertErr.message}`);
           }
-          try {
-            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `⚠️ Ambiguous autopay outcome: ${customer.first_name} ${customer.last_name} — $${customer.monthly_rate}. Stripe request died without a PaymentIntent; verify in the Stripe dashboard before re-charging. Parked, no retry scheduled.`,
-              { messageType: 'internal_alert', link: '/admin/revenue' },
-            );
-          } catch (smsErr) {
-            logger.error(`[billing-cron] Ambiguous-outcome office SMS failed: ${smsErr.message}`);
-          }
+          await alertOwner('autopay-outcome-unknown', customer, {
+            actions: [(who) => `check whether ${who}'s autopay went through`, (who) => `check ${who}'s autopay`],
+            why: `Stripe stopped answering during a ${alertDollars(customer.monthly_rate)} charge, so it may or may not have gone through.`,
+            text: (name) => `Ambiguous autopay outcome: ${name} — ${alertDollars(customer.monthly_rate)}. The Stripe request died without a PaymentIntent; verify in the Stripe dashboard before re-charging. Parked, no retry scheduled.`,
+            key: err.paymentRecord?.id || `${customer.id}:${etDateString()}`,
+          });
           logger.warn(`[billing-cron] AMBIGUOUS outcome for customer id=${customer.id} — parked, no retry`);
           continue;
         }
@@ -1434,14 +1461,12 @@ const BillingCron = {
           }
           if (!orphanDisarmed) {
             logger.error(`[billing-cron] CRITICAL: payment ${payment.id} was charged at Stripe (PI ${err.stripePaymentIntentId}) but could NOT be disarmed — it remains in the retry queue and balance sums`);
-            try {
-              await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-                `🚨🚨 URGENT: payment ${payment.id} (customer id=${payment.customer_id}) was CHARGED at Stripe but could not be removed from the retry queue. It WILL be re-charged and shows as owed. Fix the payments row now (PI ${err.stripePaymentIntentId}).`,
-                { messageType: 'internal_alert', link: '/admin/revenue' },
-              );
-            } catch (smsErr) {
-              logger.error(`[billing-cron] Urgent disarm-failure SMS failed: ${smsErr.message}`);
-            }
+            await alertOwner('charge-will-repeat', customer, {
+              actions: [(who) => `stop a second charge to ${who}`],
+              why: 'Stripe took the retry, but the payment is still queued, so the next run charges it again.',
+              text: (name) => `URGENT: payment ${payment.id} (${name}) was charged at Stripe but could not be removed from the retry queue. It will be re-charged and shows as owed. Fix the payments row now (PI ${err.stripePaymentIntentId}).`,
+              key: payment.id,
+            });
           }
           await logAutopay(payment.customer_id, 'orphan_charge', {
             amountCents: Math.round(parseFloat(payment.amount) * 100),
@@ -1465,14 +1490,7 @@ const BillingCron = {
           } catch (alertErr) {
             logger.error(`[billing-cron] Retry orphan alert creation failed: ${alertErr.message}`);
           }
-          try {
-            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `🚨 Stripe orphan charge (retry): customer id=${payment.customer_id} — $${err.amount} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. DO NOT retry.`,
-              { messageType: 'internal_alert', link: '/admin/revenue' },
-            );
-          } catch (smsErr) {
-            logger.error(`[billing-cron] Office orphan SMS failed: ${smsErr.message}`);
-          }
+          await alertUnrecordedCharge(customer, err, 'retry');
           logger.error(`[billing-cron] ORPHAN on retry: customer id=${customer.id}, PI ${err.stripePaymentIntentId} — ladder stopped`);
           continue;
         }
@@ -1730,16 +1748,19 @@ const BillingCron = {
             logger.error(`[billing-cron] Service pause failed: ${pauseErr.message}`);
           }
 
-          // Alert the office so Virginia can reach out (health alert alone
-          // sat on a dashboard — push-style SMS makes sure it lands).
-          try {
-            await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. ${pauseOutcome === 'applied' ? 'Service paused until card is updated.' : pauseOutcome === 'settlement_veto' ? 'NOT paused — a payment settled during the attempt.' : pauseOutcome === 'already_paused' ? 'Existing pause preserved.' : 'PAUSE WRITE FAILED — customer is NOT paused, check logs.'} Last error: ${err.message}`,
-              { messageType: 'internal_alert', link: '/admin/revenue' },
-            );
-          } catch (officeErr) {
-            logger.error(`[billing-cron] Office alert SMS failed: ${officeErr.message}`);
-          }
+          // Tell the office so Virginia can reach out (the health alert alone sits on a dashboard). Quiet:
+          // Activity and the needs-me list; each failed attempt already rang its own payment-failed bell.
+          const pauseLine = {
+            applied: 'service is paused until the card is updated',
+            settlement_veto: 'a payment settled during the attempt, so service is not paused',
+            already_paused: 'an earlier pause stays in place',
+          }[pauseOutcome] || 'the pause did not save, so service is not paused';
+          await alertOwner('autopay-exhausted', customer, {
+            actions: [(who) => `get an updated card from ${who}`, (who) => `get ${who}'s card updated`],
+            why: `$${amount} failed 3 times and ${pauseLine}.`,
+            text: (name) => `Autopay exhausted: ${name} — $${amount} failed 3x; ${pauseLine}. Last error: ${err.message}`,
+            key: payment.id,
+          });
 
           // Create health alert for admin review
           try {

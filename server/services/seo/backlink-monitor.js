@@ -4,7 +4,7 @@ const dataforseo = require('./dataforseo');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const TOXIC_DOMAINS = /casino|poker|pharma|pills|crypto|bitcoin|adult|xxx|gambling|cheap-/i;
-const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$/i;
+const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$|\.website$|\.space$|\.shop$|\.store$/i;
 
 // Loss verification knobs. A link must be absent from MISS_THRESHOLD consecutive
 // complete scans AND fail an HTTP re-verify before it is marked lost; a source
@@ -756,7 +756,9 @@ class BacklinkMonitor {
     const citations = ['fpma.org', 'npma.org', 'qualitypro.org', 'pestworld.org'];
     const social = ['facebook.com', 'linkedin.com', 'nextdoor.com', 'alignable.com', 'instagram.com'];
 
-    if (directories.some(d => domain.includes(d)) || /\/directory|\/listing|\/business/i.test(url)) return 'directory';
+    // "/dir/" is the short form: one spam directory page cloned on 2,451 domains
+    // (/dir/backlink-building-services-…) rang a "referring domain lost" bell.
+    if (directories.some(d => domain.includes(d)) || /\/directory|\/listing|\/business|\/dir\//i.test(url)) return 'directory';
     if (citations.some(d => domain.includes(d))) return 'citation';
     if (social.some(d => domain.includes(d))) return 'social';
     if (domain.includes('reddit.com') || /\/forum|\/thread|\/discussion/i.test(url)) return 'forum';

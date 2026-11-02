@@ -75,6 +75,12 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../services/prepaid-pi-guard', () => ({ neutralizeOpenPaymentIntent: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(() => Promise.resolve()) }));
+// Owner alerts (services/owner-alerts.js): the real composer runs, so copy that breaks the notification rule
+// throws under test; only the row write is stubbed.
+jest.mock('../services/ops-digest', () => ({
+  ...jest.requireActual('../services/ops-digest'),
+  deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-1' })),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(() => Promise.resolve({ sent: true })),
 }));
@@ -846,5 +852,77 @@ describe('B16: retry rung answered with a 3DS demand', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
     expect(mockHealthInserts).toHaveLength(0);
     expect(result.retried).toBe(2);
+  });
+});
+
+// The retry ladder's money exceptions were texts to the owner's phone that reached nobody since about
+// 2026-09-01. Each is now an owner alert row; the owner chose the first two to ring (2026-11-02).
+describe('retry money exceptions alert the owner', () => {
+  const TwilioService = require('../services/twilio');
+  const { deliverOpsDigest } = require('../services/ops-digest');
+  const ownerAlert = (kind) => deliverOpsDigest.mock.calls.map(([d]) => d).find((d) => d.metadata?.ownerAlert === kind);
+  const orphan = () => Object.assign(new Error('ledger insert failed'), {
+    code: 'STRIPE_CHARGED_DB_FAILED', stripePaymentIntentId: 'pi_orphan_retry', amount: '33.00',
+  });
+  const chargeRejects = (err) => {
+    StripeService.charge.mockRejectedValue(err);
+    StripeService.chargeOneTime.mockRejectedValue(err);
+    StripeService.chargeMonthly.mockRejectedValue(err);
+  };
+
+  test('a retry Stripe took that our ledger missed rings one alert for the customer, keyed by the payment intent', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    chargeRejects(orphan());
+
+    await BillingCron.processPaymentRetries();
+
+    const alert = ownerAlert('charge-unrecorded');
+    expect(alert).toMatchObject({
+      headline: "Billing — reconcile Test Retry's unrecorded charge",
+      summary: 'Stripe took $33.00 but our records do not show it, so do not charge again.',
+      link: '/admin/customers?customerId=cust-1',
+      audience: 'owner',
+      dedupeKey: 'owner-alert:charge-unrecorded:pi_orphan_retry',
+      itemKeys: ['pi_orphan_retry'],
+    });
+    expect(alert.metadata).toMatchObject({ customerId: 'cust-1', subject: { type: 'customer', id: 'cust-1' } });
+    expect(alert.text).toContain('pi_orphan_retry');
+    // Disarmed normally: no second-charge alert.
+    expect(ownerAlert('charge-will-repeat')).toBeUndefined();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('a charged retry that cannot leave the queue also rings a second-charge alert for that payment', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    chargeRejects(orphan());
+    mockParkUpdate = () => Promise.reject(new Error('db down'));
+
+    await BillingCron.processPaymentRetries();
+
+    expect(ownerAlert('charge-will-repeat')).toMatchObject({
+      headline: 'Billing — stop a second charge to Test Retry',
+      summary: 'Stripe took the retry, but the payment is still queued, so the next run charges it again.',
+      audience: 'owner',
+      dedupeKey: 'owner-alert:charge-will-repeat:pay-failed-1',
+    });
+    expect(ownerAlert('charge-unrecorded')).toBeDefined();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('the third failed attempt writes a quiet alert to get the card updated', async () => {
+    mockFailedPayments = [monthlyFailedPayment({ retry_count: 2 })];
+    chargeRejects(Object.assign(new Error('Your card was declined.'), { code: 'card_declined' }));
+
+    await BillingCron.processPaymentRetries();
+
+    const alert = ownerAlert('autopay-exhausted');
+    expect(alert).toMatchObject({
+      headline: 'Billing — get an updated card from Test Retry',
+      audience: 'fyi',
+      dedupeKey: 'owner-alert:autopay-exhausted:pay-failed-1',
+    });
+    expect(alert.summary).toMatch(/^\$33\.00 failed 3 times and /);
+    expect(alert.metadata).toMatchObject({ severity: 'needs-you', customerId: 'cust-1' });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 });
