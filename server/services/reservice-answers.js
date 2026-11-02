@@ -15,7 +15,9 @@
  *   hidden       the tech hid the ask from the customer's report
  *   answered     one free sentence the customer will read
  */
-const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
+// The COMPLETE report-copy screen (AGENTS.md), never the findBannedCustomerCopy subset: a typed answer prints on the
+// customer's report, so a bare "safe", bare "infestation" or a gate code must stop here.
+const { customerCopyViolations } = require('./service-report/technician-report-copy');
 
 const MAX_ANSWERS = 20;
 const MAX_ITEM_ID_CHARS = 120;
@@ -63,7 +65,7 @@ function checkAnswered(entry) {
   if (text.length > MAX_TEXT_CHARS) return fail(`Keep the answer to ${MAX_TEXT_CHARS} characters or fewer.`);
   if (URL_RE.test(text)) return fail('Leave web links out of the answer.');
   if (PHONE_RE.test(text)) return fail('Leave phone numbers out of the answer.');
-  if (findBannedCustomerCopy(text).length) return fail('That wording cannot go to a customer. Rewrite the answer.');
+  if (customerCopyViolations(text).length) return fail('That wording cannot go to a customer. Rewrite the answer.');
   return { ok: true, value: { text } };
 }
 
@@ -135,7 +137,9 @@ function buildReserviceAsksFreeze({ gathered, answers, gatheredAt } = {}) {
       version: FREEZE_VERSION,
       gatheredAt: stamp,
       lane: gathered?.lane ?? null,
-      items,
+      // The customer's words print on their report, so each item carries the complete screen's verdict: a line that
+      // fails it ("is the spray safe for my cat?") stays on the record for the office and never prints as written.
+      items: items.map((item) => ({ ...item, printable: customerCopyViolations(item?.text).length === 0 })),
       answers: kept,
       officeNotes,
     },

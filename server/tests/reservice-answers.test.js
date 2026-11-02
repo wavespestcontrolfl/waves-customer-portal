@@ -174,6 +174,17 @@ describe('validateReserviceAnswers: each answer kind', () => {
       expect(out.ok).toBe(false);
       expect(out.error).toMatch(/cannot go to a customer/);
     });
+
+    // The complete report-copy screen, not the banned-list subset: these pass the subset but must never print.
+    test.each([
+      'This pesticide is safe.',
+      'No signs of an infestation in the garage.',
+      'The gate code is 4821.',
+    ])('the full report-copy screen refuses: %s', (text) => {
+      const out = one({ answer: 'answered', text });
+      expect(out.ok).toBe(false);
+      expect(out.error).toMatch(/cannot go to a customer/);
+    });
   });
 
   test('a good batch keeps its order and only its own keys', () => {
@@ -223,7 +234,7 @@ describe('buildReserviceAsksFreeze', () => {
       version: 1,
       gatheredAt: '2026-11-02T12:00:00.000Z',
       lane: 'pest',
-      items: gathered.items,
+      items: gathered.items.map((item) => ({ ...item, printable: true })),
       answers: {
         'booking:1': { answer: 'treated', productIds: ['prod-a'] },
         'sms:2': { answer: 'not_today' },
@@ -274,6 +285,15 @@ describe('buildReserviceAsksFreeze', () => {
     });
     expect(dropped).toBe(1);
     expect(freeze).toMatchObject({ lane: 'lawn', items: [], answers: {}, gatheredAt: '2026-11-02T12:00:00.000Z' });
+  });
+
+  test.each([
+    ['Is the spray safe for my cat?', false],
+    ['The gate code is 4821, the ants are by the pool', false],
+    ['Ants in the kitchen window again', true],
+  ])('each item carries the full report-copy verdict: %s', (text, printable) => {
+    const { freeze } = buildReserviceAsksFreeze({ gathered: { lane: 'pest', items: [{ id: 'text:9', text }] }, gatheredAt });
+    expect(freeze.items).toEqual([{ id: 'text:9', text, printable }]);
   });
 
   test('the frozen block survives a JSON round trip unchanged', () => {

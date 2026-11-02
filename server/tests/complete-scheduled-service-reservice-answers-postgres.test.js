@@ -168,6 +168,7 @@ postgres('re-service answers frozen on /complete', () => {
         officeNotes: { [bookingId]: 'Dog in the yard' },
       });
       expect(data.reserviceAsks.items.map((item) => item.id)).toContain(bookingId);
+      expect(data.reserviceAsks.items.every((item) => typeof item.printable === 'boolean')).toBe(true);
       expect(Object.keys(data.reserviceAsks.answers)).toEqual([bookingId]);
       expect(Date.parse(data.reserviceAsks.gatheredAt)).not.toBeNaN();
     } finally { await cleanup(f); }
