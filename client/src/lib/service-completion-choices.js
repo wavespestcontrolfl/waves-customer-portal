@@ -60,7 +60,8 @@ const lawn = Object.freeze({
     ["identify-pest-sample", "Homeowner: save a clear photo or sample if live lawn pests reappear.", ["insect", "identification"]],
     ["mark-recurring-weeds", "Homeowner: note where recurring weeds are most concentrated.", ["weed map", "breakthrough"]],
     ["keep-pets-off-sample", "Homeowner: keep people and pets from disturbing a marked sample area.", ["diagnosis", "testing"]],
-    ["soil-test", "Homeowner: consider soil testing if color or rooting problems persist.", ["ph", "nutrients"]],
+    // Waves takes the soil sample itself when a lawn is not responding (owner 2026-10-31), so the homeowner only tells us.
+    ["soil-test", "Homeowner: tell us if color or rooting problems persist so we can take a soil sample.", ["ph", "nutrients", "soil test"]],
     ["professional-drainage", "Homeowner: consult a drainage professional if low areas remain saturated.", ["standing water", "grading"]],
     ["tree-shade-review", "Homeowner: consider a qualified tree-care review where dense shade limits turf growth.", ["canopy", "low light"]],
     ["protect-new-sod", "Homeowner: limit traffic on newly installed sod until it is established.", ["new turf", "rooting"]],

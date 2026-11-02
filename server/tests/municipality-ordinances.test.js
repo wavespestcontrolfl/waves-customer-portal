@@ -74,7 +74,9 @@ describeOrSkip('municipality_ordinances (PR 1.4)', () => {
     expect(r.restricted_end_day).toBe(30);
     expect(r.restricted_nitrogen).toBe(true);
     expect(r.restricted_phosphorus).toBe(true);
-    expect(r.phosphorus_requires_soil_test).toBe(true);
+    // Sec. 54-1026(a) caps phosphorus with no soil test; migration 20261102031500 corrected the seed.
+    expect(r.phosphorus_requires_soil_test).toBe(false);
+    expect(r.notes).toMatch(/Sec\. 54-1026\(a\)/);
   });
 
   test('North Port has BROADER Apr 1 – Sep 30 window (city overlay)', async () => {
@@ -92,6 +94,9 @@ describeOrSkip('municipality_ordinances (PR 1.4)', () => {
     expect(r.restricted_end_month).toBe(9);
     expect(r.restricted_end_day).toBe(30);
     expect(r.applies_to_landscape).toBe(false); // turf-only
+    // Sec. 22-58(1) caps phosphorus with no soil test; migration 20261102031500 corrected the seed.
+    expect(r.phosphorus_requires_soil_test).toBe(false);
+    expect(r.notes).toMatch(/Sec\. 22-58\(1\)/);
   });
 
   test('Manatee County requires soil test for P year-round', async () => {
@@ -161,8 +166,10 @@ describeOrSkip('municipality_ordinances (PR 1.4)', () => {
     // Original 4 jurisdictions were verified 2026-04-30. Charlotte was
     // re-verified 2026-05-28 when migration 20260528000031 corrected its
     // blackout window — still a real, hardcoded verification date (not
-    // new Date()/deploy time), which is what this test guards.
-    const EXPECTED_VERIFIED = { 'Charlotte County': '2026-05-28' };
+    // new Date()/deploy time), which is what this test guards. Sarasota County
+    // (2026-10-31) and North Port (2026-11-01) were re-read when migration
+    // 20261102031500 corrected their phosphorus soil-test flag.
+    const EXPECTED_VERIFIED = { 'Charlotte County': '2026-05-28', 'Sarasota County': '2026-10-31', 'North Port': '2026-11-01' };
     for (const r of rows) {
       const checked = new Date(r.source_checked_at).toISOString().slice(0, 10);
       expect(checked).toBe(EXPECTED_VERIFIED[r.jurisdiction_name] || '2026-04-30');
