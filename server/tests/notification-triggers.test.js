@@ -507,6 +507,24 @@ describe('triggerNotification bell outcome', () => {
       expect(took.metadata.payload.leadPreference).toBe('call');
     });
 
+    // The buttons follow the text the row shows (alert-call-button.js): a CALL text's emission carries Call into the
+    // row's metadata, and an older late text keeps the row's own buttons with its text.
+    test('Call rides with the CALL text the row shows; an older late text keeps the row\'s own buttons', async () => {
+      const LEAD = '00000000-0000-4000-8000-0000000000e1';
+      const HANDLED_ONLY = { kind: 'close_note', items: [{ id: 'handled', label: 'Handled' }] };
+      await ring({ threadId: LEAD, twilioSid: 'SM-new', message: 'Call', leadPreference: 'call' }, false);
+      expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.buttons).toEqual({
+        kind: 'call_back',
+        items: [expect.objectContaining({ id: 'call', label: 'Call', args: { customerId: LEAD } }), { id: 'handled', label: 'Handled' }],
+      });
+      await ring({ threadId: LEAD, twilioSid: 'SM-next', message: 'ants again' }, false);
+      expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.buttons).toEqual(HANDLED_ONLY);
+      const olderCall = await ring({ threadId: LEAD, twilioSid: 'SM-old', message: 'Call', leadPreference: 'call' }, true);
+      const held = { fromName: 'Dana Example', threadId: LEAD, twilioSid: 'SM-held', textCount: 1 };
+      expect((await olderCall(row, { payload: held, buttons: HANDLED_ONLY })).metadata.buttons).toEqual(HANDLED_ONLY);
+      expect((await olderCall(row, { payload: held })).metadata).not.toHaveProperty('buttons');
+    });
+
     test('an OLDER late text cannot change the title: not add a label, not remove one', async () => {
       const olderCall = await ring({ twilioSid: 'SM-old', message: 'Call', leadPreference: 'call' }, true);
       const plainRow = await olderCall(row, { payload: { fromName: 'Dana Example', threadId: 'cust-1', twilioSid: 'SM-held', textCount: 1 } });
