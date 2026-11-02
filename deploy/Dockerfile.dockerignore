@@ -1,0 +1,13 @@
+# Build-context ignore for deploy/Dockerfile only (BuildKit reads <Dockerfile>.dockerignore next
+# to the Dockerfile), so it cannot change today's Nixpacks build. Every pattern here is a file git
+# never tracks: Railway and CI build from git, where none of these exist. It guards a local
+# `docker build` from copying a checkout's dependencies, build output or secrets into the image,
+# where the final `COPY . /app` would overwrite the freshly built client bundle and Linux modules.
+**/node_modules
+client/dist
+**/.env
+**/.env.*
+!.env.example
+.tmp
+coverage
+.git
