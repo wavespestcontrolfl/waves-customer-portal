@@ -328,8 +328,8 @@ trusted facts only (Codex security reviews): when, who sent it, the alert's `kin
 the `customerId` and the ids of the records it names, and the row's own who and severity. No alert text, no customer name
 and no summary go into the handoff: a customer sets their own name, and receipts, model output and record fields can carry
 any words. The Claude tab reads the alert, its summary and its customer itself, read-only, as data, and names the customer
-in its first line. `needs-me` shows a sent row by its kind only ("Sent to Claude from the bell (kind)"), and every
-customer name it prints is reduced to letters (at most four words). While the
+in its first line. `needs-me` shows a sent row by its kind only ("Sent to Claude from the bell (kind)"), and gives each
+alert's customer by id only, never by name. While the
 row is open, a refresh of the same alert updates its text but keeps it in Claude's queue (`keepSentToClaude` in
 `admin-alert-routing.js`); a refresh that rings after it was closed brings it back to the bell without the stamp. The
 write takes the alert's dedupe lock, so a refresh in flight can never undo the send. On the owner's Mac, the
@@ -354,7 +354,7 @@ so the queue tab leaves it to its own tab.
 | Customer declaration (owner 2026-10-29, "small" E1): a registry `rule` or a composed spec may declare `contact: true` (a customer reached us) or `promise: true` (a follow-up we owe a customer): only `true`, never both, and only on a `needs-you` type for a person. A declared alert rings whatever the bell policy's later steps say (a site's explicit `bell: false` still wins), and a customer's failed invoice payment (`bill_payment_error`) rings beside `payment_failed` | `bellAllowed` in `server/services/notification-bell-policy.js` (step 1b), fed by `triggerNotification` (the type's rule; its bell write then carries `bell: true`) and `NotificationService.create` (the row's metadata); the shape is checked by `server/tests/admin-alert-catalog-contract.test.js` and `composeAdminAlert` | enforced while `GATE_CUSTOMER_ALERTS_RING` is on (dark by default) |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" (with `GATE_ALERT_EXPLAINER` on: "What to do", the original under "Show original text") | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 | The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced while `GATE_ALERT_EXPLAINER` is on (dark by default) |
-| Send to Claude (section 5): a bell alert our own code wrote (system with no customer, marked Claude's, or a reviewed check class) can be moved to Claude's queue from "What to do"; fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` names each alert's customer and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | enforced while `GATE_ALERT_SEND_TO_CLAUDE` and `GATE_ALERT_EXPLAINER` are on (dark by default); the `needs-me` CLI always names customers |
+| Send to Claude (section 5): a bell alert our own code wrote (system with no customer, marked Claude's, or a reviewed check class) can be moved to Claude's queue from "What to do"; fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` gives each alert's customer id and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | enforced while `GATE_ALERT_SEND_TO_CLAUDE` and `GATE_ALERT_EXPLAINER` are on (dark by default); the `needs-me` CLI always adds customer ids |
 | Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
@@ -414,9 +414,10 @@ may do), and never resolve a `person` item.
   scoped to the caller's role like the bell list.
 - Intelligence Bar tool: `needs_me` (`server/services/intelligence-bar/needs-me-tools.js`).
 - CLI: `railway run --service Postgres node ops/agents/needs-me.js --who claude`
-  (`--json` for the full object). It always names each alert's customer ("Customer: Name" under the row, `customer`
+  (`--json` for the full object). It always gives each alert's customer id ("Customer id:" under the row, `customer`
   in JSON), read from the record behind the alert; the route and the bar tool do so while `GATE_ALERT_SEND_TO_CLAUDE`
-  is on. A row the owner sent from the bell ("Send to Claude") carries `sent: true`: the Mac launcher gives it its
+  is on. The id only (Codex security review): a customer sets their own name, so a session that reports on an alert
+  reads the name from the record, as data, and names the customer in its report. A row the owner sent from the bell ("Send to Claude") carries `sent: true`: the Mac launcher gives it its
   own tab.
 - All three are one reader, `listNeedsMe` in `server/services/needs-me.js`. It lists open
   admin rows that are not done, including Activity-feed rows (the bell never shows those; they

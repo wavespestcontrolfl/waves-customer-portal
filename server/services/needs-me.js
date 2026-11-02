@@ -141,13 +141,6 @@ function sentAlertView(row, meta) {
   return shown;
 }
 
-// A customer's name for a terminal list, reduced to letters, marks, spaces, apostrophes, hyphens and periods (at most four
-// words, 40 characters). A customer sets their own name: it is data, never an instruction.
-function plainName(name) {
-  const kept = String(name ?? '').normalize('NFKC').replace(/[^\p{L}\p{M} '.-]/gu, ' ').replace(/\s+/g, ' ').trim();
-  return kept.split(' ').slice(0, 4).join(' ').slice(0, 40).trim();
-}
-
 function mapAlertRow(stored) {
   const meta = parseMeta(stored.metadata);
   const row = sentAlertView(stored, meta);
@@ -266,22 +259,21 @@ async function withText(page, rowsById) {
   });
 }
 
-// The returned page's alert items with the customer each is about (`customer: { id, name }`), read from the record behind
-// the alert (admin-alert-customer.js), so a terminal session can say which customer it is working on (owner 2026-11-02:
-// "if it's in the terminal, I still want to be able to say what customer is this"). Only while GATE_ALERT_SEND_TO_CLAUDE
-// is on, or when the caller asks (`customers: true`: ops/agents/needs-me.js, which runs with the database's settings
-// only and so never sees the portal's gates); otherwise the items are as before.
+// The returned page's alert items with the id of the customer each is about (`customer: { id }`), read from the record
+// behind the alert (admin-alert-customer.js): a customer id the row names, else the one behind its visit, estimate,
+// invoice, lead or call. Only the id (Codex security review on #7498): a customer sets their own name, so a name never
+// goes into Claude's context from here. A session that reports on an alert reads the name from the record, as data (owner
+// 2026-11-02: "if it's in the terminal, I still want to be able to say what customer is this"). Only while
+// GATE_ALERT_SEND_TO_CLAUDE is on, or when the caller asks (`customers: true`: ops/agents/needs-me.js, which runs with the
+// database's settings only and so never sees the portal's gates); otherwise the items are as before.
 async function withCustomers(page, rowsById, asked) {
-  const { sendToClaudeLive } = require('./admin-alert-send-to-claude');
-  if (asked !== true && !sendToClaudeLive()) return page;
+  if (asked !== true && !require('./admin-alert-send-to-claude').sendToClaudeLive()) return page;
   const rows = page.filter((item) => item.kind === 'alert').map((item) => rowsById.get(String(item.id))).filter(Boolean);
   if (!rows.length) return page;
   const customers = await customersForAlerts(db, rows);
   return page.map((item) => {
-    const customer = item.kind === 'alert' ? customers.get(String(item.id)) : null;
-    // The name as inert data (letters only, at most four words): a customer sets their own name.
-    const name = customer ? plainName(customer.name) : '';
-    return name ? { ...item, customer: { id: customer.id, name } } : item;
+    const id = item.kind === 'alert' ? customers.get(String(item.id))?.id : null;
+    return id ? { ...item, customer: { id } } : item;
   });
 }
 
@@ -356,8 +348,8 @@ async function listNeedsMe({ who, area, limit, role, after = null, customers = f
     warnings.push({ source: 'notifications', error: 'text_unavailable' });
   }
   try { page = await withCustomers(page, rowsById, customers); } catch (err) {
-    // The list still answers; its alerts just lack the customer's name.
-    logger.error(`[needs-me] customer names for the page failed: ${err.message}`);
+    // The list still answers; its alerts just lack the customer id.
+    logger.error(`[needs-me] customer ids for the page failed: ${err.message}`);
     warnings.push({ source: 'notifications', error: 'customers_unavailable' });
   }
   return {
