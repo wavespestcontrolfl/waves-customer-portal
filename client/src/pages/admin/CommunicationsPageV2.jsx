@@ -665,9 +665,12 @@ function SmsLogItemV2({ msg: m, onReply }) {
 // GATE_SMS_SPAM_TAG: a thread whose inbound texts carry an enforced spam
 // verdict (tagged here, or silenced by the auto screen) offers "Not spam"
 // instead of "Mark spam"; the tag keeps the texts and only silences alerts.
+// A tagged sender counts even when no text carries a verdict (a photo-only
+// thread: photos are never stamped), so the tag can always be undone.
 function spamTagState(thread, { spamTagOn, canAct }) {
   const spamTagged = spamTagOn && Array.isArray(thread.messages)
-    && thread.messages.some((m) => m.direction === "inbound" && m.spamEnforced === true);
+    && thread.messages.some((m) => m.senderSpamTagged === true
+      || (m.direction === "inbound" && m.spamEnforced === true));
   return { spamTagged, canNotSpam: spamTagged && canAct && !thread.customerId && !thread.customerName };
 }
 

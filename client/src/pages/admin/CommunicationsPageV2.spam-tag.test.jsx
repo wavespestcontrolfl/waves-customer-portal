@@ -100,3 +100,41 @@ it("a refresh of several loaded pages keeps the spam-tag flag", () => {
   expect(on.messages.map((m) => m.id)).toEqual(["m2", "m1"]);
   expect(mergeRefreshedLogPages([page(1), page(2)], 2)).not.toHaveProperty("smsSpamTag");
 });
+
+// Codex pre-push P1: photos are never stamped, so a photo-only thread has no
+// verdict to show. The log payload marks the tagged sender instead, and the
+// thread offers Not spam after the tag.
+it("a photo-only thread can be tagged and then undone", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  let tagged = false;
+  const calls = [];
+  vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+    const path = new URL(String(url), "http://localhost").pathname;
+    const method = options.method || "GET";
+    calls.push({ path, method });
+    if (method === "POST" && path.endsWith("/spam-senders")) tagged = true;
+    if (method === "DELETE" && path.includes("/spam-senders/")) tagged = false;
+    const photo = pitch({
+      body: "Look at this", media: [{ url: "https://example.com/p.jpg", contentType: "image/jpeg" }],
+      ...(tagged ? { senderSpamTagged: true } : {}),
+    });
+    const data = path.endsWith("/log") ? { messages: [photo], smsSpamTag: true }
+      : path.endsWith("/blocked-numbers") ? { numbers: [] }
+      : { success: true };
+    return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+  }));
+  vi.stubGlobal("confirm", vi.fn(() => true));
+  render(<SmsTab active />, { wrapper: MemoryRouter });
+  fireEvent.click((await screen.findAllByText("Look at this"))[0]);
+  fireEvent.click(await screen.findByRole("button", { name: /Mark spam/ }));
+  await vi.waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/spam-senders"))).toBe(true));
+  // The inbox reloads after the tag; that reload carries the sender's tag.
+  const postAt = calls.findIndex((c) => c.method === "POST" && c.path.endsWith("/spam-senders"));
+  await vi.waitFor(() => expect(calls.slice(postAt + 1).some((c) => c.path.endsWith("/log"))).toBe(true));
+
+  fireEvent.click((await screen.findAllByText("Look at this"))[0]);
+  fireEvent.click(await screen.findByRole("button", { name: /Not spam/ }));
+  expect(screen.queryByText(/Spam · no alert sent/)).not.toBeInTheDocument();
+  await vi.waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path.endsWith(`/spam-senders/${encodeURIComponent(spammer)}`))).toBe(true));
+  expect(calls.some((c) => c.path.endsWith("/blocked-numbers") && c.method === "POST")).toBe(false);
+});

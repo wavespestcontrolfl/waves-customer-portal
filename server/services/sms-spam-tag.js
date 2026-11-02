@@ -71,6 +71,19 @@ async function findTaggedSender(phone) {
   return row || null;
 }
 
+// Identity keys of every tagged sender, for the inbox payload (the table holds
+// one row per number the office tagged). Fails soft to an empty set: the inbox
+// must load even if this read fails; Mark spam is idempotent.
+async function taggedSenderKeys() {
+  try {
+    const rows = await db('sms_spam_senders').select('phone');
+    return new Set(rows.map((row) => phoneIdentityKey(row.phone)).filter(Boolean));
+  } catch (err) {
+    logger.warn(`[sms-spam-tag] tagged-sender read failed: ${err.code || err.name || 'error'}`);
+    return new Set();
+  }
+}
+
 // An OPEN lead (a quote requester who has not converted) has no customer row
 // yet, so its thread looks unknown in the inbox. Same query the block route
 // uses. No catch: a failing safety check must refuse the tag, not allow it.
@@ -271,6 +284,7 @@ module.exports = {
   spamTagLive,
   manualVerdict,
   findTaggedSender,
+  taggedSenderKeys,
   findOpenLeadByPhone,
   canTagInbound,
   taggedVerdictForInbound,

@@ -158,6 +158,19 @@ let mockDatabase;
     expect((await unified(sid)).metadata.spam_verdict).toMatchObject({ method: 'model' });
   });
 
+  // The inbox payload marks tagged senders (a photo-only thread has no stamped
+  // text): identity keys, NANP by ten digits, others by full digits.
+  test('taggedSenderKeys lists every tagged sender by phone identity', async () => {
+    await tag.tagSpamSender({ number: '(941) 555-0100', adminUserId: ADMIN });
+    await tag.tagSpamSender({ number: '+44 7700 900123', adminUserId: ADMIN });
+    const keys = await tag.taggedSenderKeys();
+    const { phoneIdentityKey } = require('../utils/phone');
+    expect(keys.has(phoneIdentityKey('+19415550100'))).toBe(true);
+    expect(keys.has(phoneIdentityKey('+447700900123'))).toBe(true);
+    expect(keys.has(phoneIdentityKey('+19415550101'))).toBe(false);
+    expect(keys.size).toBe(2);
+  });
+
   // Pre-push audit P1: a tag whose read failed is repaired by the next tag;
   // the verdict already on file stays as it is.
   test('a failed read is repaired when the sender is tagged again', async () => {

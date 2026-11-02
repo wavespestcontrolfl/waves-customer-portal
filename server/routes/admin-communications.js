@@ -2343,8 +2343,11 @@ router.get('/log', async (req, res, next) => {
     // GATE_SMS_LIKE: the office's like on a customer text, and customer likes on ours.
     const officeLike = require('../services/sms-office-like');
     const likesOn = officeLike.likesLive();
-    // GATE_SMS_SPAM_TAG: tells the inbox to offer Mark spam as a tag, not a block.
-    const spamTagOn = require('../services/sms-spam-tag').spamTagLive();
+    // GATE_SMS_SPAM_TAG: tells the inbox to offer Mark spam as a tag, not a block,
+    // and which senders are tagged (a photo-only thread has no stamped text).
+    const spamTag = require('../services/sms-spam-tag');
+    const spamTagOn = spamTag.spamTagLive();
+    const taggedKeys = spamTagOn ? await spamTag.taggedSenderKeys() : null;
 
     const messages = await Promise.all(rows.map(async (m) => {
       const initialContact = m.effective_contact_phone || m.contact_phone || m.customer_phone;
@@ -2398,6 +2401,7 @@ router.get('/log', async (req, res, next) => {
         readAt: m.read_at,
         courtesyOnly,
         spamEnforced,
+        ...(taggedKeys && contactKey && taggedKeys.has(contactKey) ? { senderSpamTagged: true } : {}),
         ...officeLike.likeFieldsForClient({ on: likesOn, direction: m.direction, body: m.body, metadata: m.metadata }),
         media: await signMediaForClient(m.media),
       };
