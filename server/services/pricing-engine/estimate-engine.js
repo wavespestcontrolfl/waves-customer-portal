@@ -751,8 +751,12 @@ function generateEstimate(input) {
   // it to false on every sync when absent, same kill-value pattern as
   // programMinimumMonthly).
   // Cost-plus list price (owner ruling 2026-10-09, GATE_LAWN_COST_PLUS_LIST,
-  // read at call time): same tri-state as the arm switch. A mode-on run
-  // also arms the cost floor so the 35% discount floor is enforced.
+  // read at call time): same tri-state as the arm switch. The mode no longer
+  // arms the cost floor (owner 2026-11-02, "remove this" on the lawn's 35%
+  // margin after discounts): WaveGuard and manual discounts on a cost-plus
+  // lawn line apply in full, and the 35% is a review line (belowMarginFloor,
+  // finalMargin, marginWarnings) like pest and tree & shrub. A saved quote
+  // still replays with its stamped lawnCostFloorArmed (savedFloorReplaySignals).
   const lawnCostPlusListArmed = !!(
     services.lawn?.costPlusList ?? input.lawnCostPlusList
       ?? gateEnvValue('GATE_LAWN_COST_PLUS_LIST')
@@ -767,7 +771,7 @@ function generateEstimate(input) {
   const lawnCostPlusListBasisStamp = lawnCostPlusListBasisResolved && !lawnCostPlusListBasisResolved.error
     ? lawnCostPlusListBasisResolved.basis
     : null;
-  const lawnCostFloorArmed = lawnCostPlusListArmed || !!(
+  const lawnCostFloorArmed = !!(
     services.lawn?.useLawnCostFloor ?? input.useLawnCostFloor
       ?? LAWN_PRICING_V2.useLawnCostFloor ?? false
   );
