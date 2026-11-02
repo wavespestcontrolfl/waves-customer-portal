@@ -59,6 +59,7 @@ const SAY = Object.freeze({
   no_stop: 'You have no open stop today.',
   no_codes: 'There is no code on file for this stop.',
   codes_failed: 'I could not read the codes for this stop. Check the app.',
+  codes_off: 'Access codes are turned off right now. Check the app or call the office.',
   confirm_again: 'Say yes to send it, or no.',
   not_sent: 'Not sent. What next?',
   sent: 'Sent. What next?',
@@ -261,9 +262,12 @@ class TechVoiceConversation {
   }
 
   async _codes() {
+    const access = require('../access-code-capture');
+    // The access-code kill switch the HTTP route honors (GATE_ACCESS_CODES_SECTION):
+    // off, no code row is read or spoken, whatever the voice line's own gate says.
+    if (!access.enabled()) return this.say(SAY.codes_off);
     const stop = await pickStop(db, this.tech.id, this._now());
     if (!stop) return this.say(SAY.no_stop);
-    const access = require('../access-code-capture');
     const out = await access.listForVisit(db, this.actor, stop.id);
     if (!out || !out.ok) return this.say(SAY.codes_failed);
     const spoken = out.codes.filter((c) => c.code || c.instructions);
