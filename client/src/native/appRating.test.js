@@ -97,6 +97,38 @@ describe('store rating pop-up (GATE_APP_RATING_PROMPT)', () => {
     expect(native.requestReview).not.toHaveBeenCalled();
   });
 
+  it('waits while any sheet or dialog is open, without spending the day', async () => {
+    await maybeAskForAppRating({ now: DAY_1 });
+    const sheet = document.createElement('div');
+    sheet.setAttribute('role', 'dialog');
+    sheet.setAttribute('aria-modal', 'true');
+    document.body.appendChild(sheet);
+    // jsdom does no layout; give the open sheet a box the way a browser would.
+    const rects = vi.spyOn(sheet, 'getClientRects').mockReturnValue([{ width: 300, height: 400 }]);
+    try {
+      expect(await maybeAskForAppRating({ now: DAY_2 })).toBe(false);
+      expect(native.request).not.toHaveBeenCalled();
+      rects.mockReturnValue([]); // closed sheets that stay mounted have no box
+      expect(await maybeAskForAppRating({ now: DAY_2 })).toBe(true);
+    } finally {
+      sheet.remove();
+    }
+  });
+
+  it('drops the ask when a sheet opens during the server round trip', async () => {
+    await maybeAskForAppRating({ now: DAY_1 });
+    const sheet = document.createElement('div');
+    sheet.setAttribute('aria-modal', 'true');
+    vi.spyOn(sheet, 'getClientRects').mockReturnValue([{ width: 300, height: 400 }]);
+    native.request.mockImplementation(async () => { document.body.appendChild(sheet); return { ask: true }; });
+    try {
+      expect(await maybeAskForAppRating({ now: DAY_2 })).toBe(false);
+      expect(native.requestReview).not.toHaveBeenCalled();
+    } finally {
+      sheet.remove();
+    }
+  });
+
   it('swallows a store failure', async () => {
     native.requestReview.mockRejectedValue(new Error('no window scene'));
     await maybeAskForAppRating({ now: DAY_1 });
