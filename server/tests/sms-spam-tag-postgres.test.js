@@ -194,6 +194,58 @@ let mockDatabase;
     expect(flags.spamEnforced).toBe(false);
   });
 
+  // Pre-push audit P1 (tag vs undo): one lock per sender. While another
+  // session holds it, each of the three writers waits and writes nothing.
+  test.each([
+    ['Mark spam', async () => tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN }),
+      async () => (await mockDatabase('sms_spam_senders')).length === 0],
+    ['Not spam', async () => tag.untagSpamSender({ number: '+19415550100', adminUserId: ADMIN }),
+      async () => (await mockDatabase('sms_spam_senders')).length === 1],
+    ['the in-flight re-read', async (ids) => tag.releaseIfUntagged({ phone: '+19415550100', messageSid: ids.sid, smsLogId: ids.logId }),
+      async (ids) => (await unified(ids.sid)).metadata.spam_verdict.enforced === true],
+  ])('%s waits for the sender lock', async (label, run, unchanged) => {
+    const sent = await addText({ from: '+19415550100', verdict: tag.manualVerdict({ adminUserId: ADMIN }), read: true });
+    const ids = { sid: sent.sid, logId: (await legacy(sent.sid)).id };
+    if (label === 'Not spam') await mockDatabase('sms_spam_senders').insert({ phone: '+19415550100', marked_by: ADMIN });
+    const { phoneIdentityKey } = require('../utils/phone');
+    let unlock;
+    const held = new Promise((resolve) => { unlock = resolve; });
+    let locked;
+    const lockTaken = new Promise((resolve) => { locked = resolve; });
+    const holder = mockDatabase.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms-spam-tag:${phoneIdentityKey('+19415550100')}`]);
+      locked();
+      await held;
+    });
+    await lockTaken;
+    const pending = run(ids);
+    // Release the lock even when the check fails, so a regression fails here
+    // instead of hanging the suite on an open transaction.
+    try {
+      await new Promise((resolve) => { setTimeout(resolve, 300); });
+      expect(await unchanged(ids)).toBe(true);
+    } finally {
+      unlock();
+      await holder;
+    }
+    await pending;
+    expect(await unchanged(ids)).toBe(false);
+  });
+
+  test('Mark spam and Not spam at the same moment always end consistent', async () => {
+    await addText({ from: '+19415550100', body: 'Need leads?' });
+    await addText({ from: '+19415550100', body: 'Still there?' });
+    for (let round = 0; round < 8; round += 1) {
+      await Promise.all([
+        tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN }),
+        tag.untagSpamSender({ number: '+19415550100', adminUserId: ADMIN }),
+      ]);
+      const tagged = (await mockDatabase('sms_spam_senders')).length === 1;
+      const enforced = await mockDatabase('messages').whereRaw("metadata->'spam_verdict'->>'enforced' = 'true'");
+      expect(enforced).toHaveLength(tagged ? 2 : 0);
+    }
+  });
+
   // Pre-push audit P1: a tag whose read failed is repaired by the next tag;
   // the verdict already on file stays as it is.
   test('a failed read is repaired when the sender is tagged again', async () => {

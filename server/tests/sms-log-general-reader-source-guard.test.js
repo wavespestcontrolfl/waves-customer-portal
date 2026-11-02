@@ -63,7 +63,7 @@ const WINDOW_SPAN = 15;
 const ALLOWLIST = [
   {
     file: 'services/sms-spam-tag.js',
-    snippet: "return db('sms_log')",
+    snippet: "return conn('sms_log')",
     reason: 'legacyRows: scoped to direction inbound (a send reservation is an outbound placeholder, so it can never match) and used only to stamp or clear a spam verdict on one sender\'s texts; it presents rows to nobody.',
   },
   {
