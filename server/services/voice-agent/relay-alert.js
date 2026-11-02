@@ -52,11 +52,30 @@ function pageDelivered(stats) {
 }
 
 /** Why pageDelivered said no, for the log line. */
+const PAGE_MUTED = 'muted by every admin';
 function undeliveredReason(stats) {
   if (stats?.policySilenced) return 'silenced by the bell policy';
-  if (stats?.suppressed) return 'suppressed';
+  if (stats?.suppressed) return PAGE_MUTED; // both channels off for this trigger
   if (stats?.error) return 'notification error';
   return 'no bell row and no push';
+}
+
+/**
+ * ⭐ THE CREATION GATE DOES NOT GOVERN RECOVERY. A persisted obligation was
+ * minted while the lane was live; gating its DELIVERY on the same switch meant
+ * a rollback or gate outage silently discarded owed pages. The sweeps pass
+ * recovery:true and deliver regardless; live callers never do, and new
+ * obligations still cannot be created gate-off (the tools are gate-checked
+ * upstream).
+ */
+function pageLaneOpen(ctx) {
+  const { isContextEnabled } = require('./relay-context');
+  return isContextEnabled() || ctx.recovery === true;
+}
+
+/** Close the session's one-per-call latch (a test ctx may not carry one). */
+function latchOwnerAlerted(ctx) {
+  if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
 }
 
 /**
@@ -280,9 +299,12 @@ async function claimHotAlertForCall(callSid) {
   }
 }
 
-async function markHotAlertSent(callSid, owner) {
+// Both write helpers take the claim: only a DURABLE claim has a call_log row
+// to receipt or release, so each checks that once instead of every caller.
+async function markHotAlertSent(callSid, claim) {
   const key = String(callSid || '').trim();
-  if (!key) return;
+  if (!key || !claim?.durable) return;
+  const { owner } = claim;
   try {
     const db = require('../../models/db');
     // Owner-guarded: a claimant whose lease was reclaimed mid-send must not
@@ -303,9 +325,12 @@ async function markHotAlertSent(callSid, owner) {
   }
 }
 
+// Unreadable reads as STILL HELD: the waiting loser neither confirms nor takes
+// over, and keeps waiting for a state it can read.
+const HOT_ALERT_HELD = Object.freeze({ claimed: true, sent: false });
 async function hotAlertState(callSid) {
   const key = String(callSid || '').trim();
-  if (!key) return null;
+  if (!key) return HOT_ALERT_HELD;
   try {
     const db = require('../../models/db');
     const row = await db('call_log').where({ twilio_call_sid: key }).first('metadata');
@@ -315,13 +340,14 @@ async function hotAlertState(callSid) {
       sent: !!(meta && meta[HOT_ALERT_SENT_KEY]),
     };
   } catch {
-    return null;
+    return HOT_ALERT_HELD;
   }
 }
 
-async function releaseHotAlertClaim(callSid, owner) {
+async function releaseHotAlertClaim(callSid, claim) {
   const key = String(callSid || '').trim();
-  if (!key) return;
+  if (!key || !claim?.durable) return;
+  const { owner } = claim;
   try {
     const db = require('../../models/db');
     // Owner-guarded: only the claimant that still HOLDS the lease may release
@@ -360,18 +386,20 @@ async function dropHotAlertObligation(callSid) {
 // bell row (metadata.dedupeKey) under notifyAdmin's advisory lock, so a retry
 // after an AMBIGUOUS receipt failure (page delivered, receipt write lost) can
 // probe for it instead of paging twice. The CallSid is an opaque id, not PII.
+// No CallSid, no key: the page goes out undeduped (nothing to probe either).
 function hotAlertDedupeKey(callSid) {
-  return `relay-hot-lead:${callSid}`;
+  const key = String(callSid || '').trim();
+  return key ? `relay-hot-lead:${key}` : null;
 }
 
 async function hotAlertAlreadyDelivered(callSid) {
-  const key = String(callSid || '').trim();
-  if (!key) return false;
+  const dedupeKey = hotAlertDedupeKey(callSid);
+  if (!dedupeKey) return false;
   try {
     const db = require('../../models/db');
     const row = await db('notifications')
       .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [hotAlertDedupeKey(key)])
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
       .first('id');
     return !!row;
   } catch {
@@ -383,16 +411,10 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
   // Hoisted so the catch block can give back OUR claim (owner-guarded) and
   // never someone else's.
   let claim = null;
+  const sid = ctx.callSid || 'n/a'; // for log lines only
   try {
-    // ⭐ THE CREATION GATE DOES NOT GOVERN RECOVERY. A persisted
-    // relay_hot_alert_needed obligation was minted while the lane was live;
-    // gating its DELIVERY on the same switch meant a rollback or gate outage
-    // silently discarded owed pages. The sweep passes recovery:true and
-    // delivers regardless — new obligations still cannot be created gate-off
-    // (capture_lead itself is gate-checked upstream).
-    const { isContextEnabled } = require('./relay-context');
-    if (!isContextEnabled() && ctx.recovery !== true) return false;
-    if (String(lead.lead_quality || '').toLowerCase() !== 'hot') return false;
+    if (!pageLaneOpen(ctx)) return false;
+    if (String(lead.lead_quality).toLowerCase() !== 'hot') return false;
     // One per CALL, never per turn. The session exposes a LIVE reader
     // (isOwnerAlerted) because the tool ctx is rebuilt each turn while two
     // capture_lead calls can land inside one turn; a plain `ownerAlerted`
@@ -415,12 +437,12 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       for (let i = 0; i < 3; i += 1) {
         await new Promise((r) => { const t = setTimeout(r, 400); t.unref?.(); });
         const state = await hotAlertState(ctx.callSid);
-        if (state && state.sent) {
-          if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
+        if (state.sent) {
+          latchOwnerAlerted(ctx);
           logger.info(`[voice-relay-alert] hot-lead page already sent for callSid=${ctx.callSid} — not paging twice`);
           return true;
         }
-        if (state && !state.claimed) {
+        if (!state.claimed) {
           claim = await claimHotAlertForCall(ctx.callSid);
           break; // released — the winner failed; try to take over
         }
@@ -440,8 +462,8 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // probe for this call's dedupe key before sending, and a hit just repairs
     // the receipt instead of re-paging.
     if (await hotAlertAlreadyDelivered(ctx.callSid)) {
-      if (claim.durable) await markHotAlertSent(ctx.callSid, claim.owner);
-      if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
+      await markHotAlertSent(ctx.callSid, claim);
+      latchOwnerAlerted(ctx);
       logger.info(`[voice-relay-alert] hot-lead page already delivered for callSid=${ctx.callSid} — receipt repaired, not paging twice`);
       return true;
     }
@@ -450,7 +472,7 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     const sent = await sendWithDeadline(triggerNotification(
       'relay_hot_lead',
       buildHotLeadPage(lead, ctx),
-      ctx.callSid ? { dedupeKey: hotAlertDedupeKey(ctx.callSid) } : {},
+      { dedupeKey: hotAlertDedupeKey(ctx.callSid) },
     ));
     if (sent === SEND_TIMED_OUT) {
       // AMBIGUOUS — the page may still land after this returns. No latch, no
@@ -459,7 +481,7 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       // own and the next claimant's delivery probe settles it.
       logger.error(
         `[voice-relay-alert] hot-lead owner alert timed out after ${ALERT_SEND_DEADLINE_MS}ms `
-        + `callSid=${ctx.callSid || 'n/a'} — leaving the claim to expire (delivery is ambiguous)`
+        + `callSid=${sid} — leaving the claim to expire (delivery is ambiguous)`
       );
       return false;
     }
@@ -470,15 +492,13 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // the caller was told the team was notified. Only a bell row or a push
     // counts.
     if (!pageDelivered(sent)) {
-      logger.error(
-        `[voice-relay-alert] hot-lead owner alert NOT delivered callSid=${ctx.callSid || 'n/a'} `
-        + `(${undeliveredReason(sent)}) — latch left open for a retry`
-      );
+      const reason = undeliveredReason(sent);
+      logger.error(`[voice-relay-alert] hot-lead owner alert NOT delivered callSid=${sid} (${reason}) — latch left open for a retry`);
       // A deliberate mute (every admin turned this page off on both channels)
       // is the owner's choice, not an outage: nothing is owed, so the hourly
       // sweep stops retrying this call. The caller is still promised nothing.
-      if (sent?.suppressed) await dropHotAlertObligation(ctx.callSid);
-      if (claim.durable) await releaseHotAlertClaim(ctx.callSid, claim.owner); // the retry rail stays open
+      if (reason === PAGE_MUTED) await dropHotAlertObligation(ctx.callSid);
+      await releaseHotAlertClaim(ctx.callSid, claim); // the retry rail stays open
       return false;
     }
     // ⭐ THE LATCH IS SET AFTER A SUCCESSFUL SEND, NOT BEFORE IT. Marking first
@@ -488,22 +508,22 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // was never paged at all. The failure path below now leaves the latch open
     // so the next attempt on this call can still get through, and the send
     // itself stays idempotent-by-latch once it succeeds.
-    if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
+    latchOwnerAlerted(ctx);
     // The durable DELIVERY receipt — what a losing claimant on a reconnect
     // needs to see before telling its caller the team was notified.
-    if (claim.durable) await markHotAlertSent(ctx.callSid, claim.owner);
-    logger.info(`[voice-relay-alert] hot-lead owner alert sent callSid=${ctx.callSid || 'n/a'} caller=${maskPhone(lead.phone)}`);
+    await markHotAlertSent(ctx.callSid, claim);
+    logger.info(`[voice-relay-alert] hot-lead owner alert sent callSid=${sid} caller=${maskPhone(lead.phone)}`);
     return true;
   } catch (err) {
     // FAIL-OPEN, loudly: the lead is already written and the caller is still
     // on the line — an alert failure can never surface to either. The
     // one-per-call latch is deliberately NOT set here, so a later attempt on
     // this same call can still page the owner.
-    logger.error(`[voice-relay-alert] hot-lead owner alert FAILED callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    logger.error(`[voice-relay-alert] hot-lead owner alert FAILED callSid=${sid}: ${err.message}`);
     // Give back the durable claim too — a failed page must stay retryable
     // across sessions, not just within this one. Owner-guarded: if we never
     // held a durable claim (or lost it), this touches nothing.
-    if (claim && claim.durable) await releaseHotAlertClaim(ctx.callSid, claim.owner).catch(() => {});
+    await releaseHotAlertClaim(ctx.callSid, claim).catch(() => {});
     return false;
   }
 }
@@ -554,11 +574,8 @@ function buildReservicePage(request) {
  */
 async function alertOwnerReservice(request = {}, ctx = {}) {
   try {
-    // Same recovery carve-out as the hot-lead sender: an obligation persisted
-    // while the lane was live must deliver even after a rollback — the sweep
-    // passes recovery:true; live callers never do.
-    const { isContextEnabled } = require('./relay-context');
-    if (!isContextEnabled() && ctx.recovery !== true) return false;
+    // Same recovery carve-out as the hot-lead sender (pageLaneOpen).
+    if (!pageLaneOpen(ctx)) return false;
     const { triggerNotification } = require('../notification-triggers');
     const sent = await sendWithDeadline(triggerNotification('relay_reservice_filed', buildReservicePage(request), { pushOnly: true }));
     if (sent === SEND_TIMED_OUT) {

@@ -192,6 +192,20 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(out).toBe(false);
   }, 15000);
 
+  // An unreadable claim state reads as STILL HELD: the loser neither takes the
+  // claim over (no parallel page) nor confirms coverage (no false promise).
+  test('an unreadable claim state is treated as still held — no page, no latch', async () => {
+    const builder = primeClaimDb({ claimWins: false });
+    builder.first = jest.fn(async (column) => {
+      if (column === 'metadata') throw new Error('read failed');
+      return { id: 'cl-1' }; // the claim's own "row exists" check still reads
+    });
+    const ctx = { callSid: 'CA-unreadable', markOwnerAlerted: jest.fn() };
+    expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx)).toBe(false);
+    expect(pages()).toHaveLength(0);
+    expect(ctx.markOwnerAlerted).not.toHaveBeenCalled();
+  }, 15000);
+
   test('a claim RELEASED mid-wait (the winner failed) is taken over and paged', async () => {
     // First claim attempt loses; the state read then shows the key gone
     // (winner released); the takeover claim wins.
