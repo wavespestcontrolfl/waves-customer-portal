@@ -291,7 +291,7 @@ function groupedLineItemsTable(doc, groups, x, y, width) {
   return y;
 }
 
-function lineItemsTable(doc, lineItems, x, y, width) {
+function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
   const visibleLineItems = visibleInvoiceLines(lineItems);
   const propertyGroups = groupInvoiceLinesByProperty(lineItems);
   doc.save();
@@ -310,8 +310,9 @@ function lineItemsTable(doc, lineItems, x, y, width) {
   if (propertyGroups) {
     y = groupedLineItemsTable(doc, propertyGroups, x, y, width);
     // The totals block that follows advances the same absolute y: reserve its
-    // height so a long grouped table never leaves TOTAL below the page.
-    y = ensureRoom(doc, y, 170);
+    // height (plus a receipt's surcharge row) so a long grouped table never
+    // leaves TOTAL below the page.
+    y = ensureRoom(doc, y, 170 + extraTotalsHeight);
   } else {
     for (const item of visibleLineItems) y = drawLineItemRow(doc, item, x, y, width);
   }
@@ -376,6 +377,43 @@ function invoiceBreakdownRows(invoice, customer = null) {
   ].filter(Boolean).map(([label, value]) => `${label}: ${value}`);
 }
 
+// A receipt's credit card surcharge row (Visa Core Rules: shown separately on the front of the receipt, same type and size as the
+// other wording), from the payment row's OWN surcharge: a combined payment stamps it on the anchor invoice only, so a sibling's 0
+// prints no row. The label matches the web receipt. includedInTotal: the single-invoice pay paths store the surcharged cash on
+// invoice.total; a combined payment leaves total at the base, so the receipt's TOTAL adds the surcharge back to reconcile.
+const SURCHARGE_ROW_HEIGHT = 14;
+function receiptSurchargeFacts(payment) {
+  const cents = Math.round(Number(payment?.surcharge_amount_cents) || 0);
+  if (!(cents > 0)) return null;
+  const rateBps = Number(payment.surcharge_rate_bps) || 0;
+  let meta = payment.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  return {
+    amount: cents / 100,
+    label: `Credit card surcharge${rateBps > 0 ? ` (${Number((rateBps / 100).toFixed(2))}%)` : ''}`,
+    includedInTotal: meta?.combined_payment !== true,
+  };
+}
+
+// A combined payment leaves invoice.total at the base: add the surcharge back so the rows reconcile to TOTAL.
+function invoiceWithSurchargedTotal(invoice, surcharge) {
+  if (!surcharge || surcharge.includedInTotal) return invoice;
+  return { ...invoice, total: Math.round((Number(invoice.total || 0) + surcharge.amount) * 100) / 100 };
+}
+
+// The rows above the rule and TOTAL, in print order; a receipt's surcharge row sits last, just before the total.
+function totalsRowsAboveTotal(facts, surcharge) {
+  return [
+    ['Subtotal', currency(facts.subtotal)],
+    facts.discount > 0 ? [facts.discountLabel, `− ${currency(facts.discount)}`] : null,
+    facts.showTax ? [facts.taxLabel, currency(facts.tax)] : null,
+    facts.depositCredit > 0 ? ['Deposit paid at acceptance', `− ${currency(facts.depositCredit)}`] : null,
+    surcharge ? [surcharge.label, currency(surcharge.amount)] : null,
+  ].filter(Boolean);
+}
+
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const {
     highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null, partPayments = false,
@@ -385,7 +423,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   y += 10;
 
   const facts = invoiceTotalsFacts(invoice, customer);
-  const { subtotal, discount, tax, total } = facts;
+  const { total } = facts;
 
   const labelX = x + width - 240;
   const valueX = x + width - 70;
@@ -397,11 +435,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     y += 14;
   };
 
-  row('Subtotal', currency(subtotal));
-  if (discount > 0) row(facts.discountLabel, `− ${currency(discount)}`);
-  if (facts.showTax) row(facts.taxLabel, currency(tax));
-  const depositCredit = facts.depositCredit;
-  if (depositCredit > 0) row('Deposit paid at acceptance', `− ${currency(depositCredit)}`);
+  for (const [label, value] of totalsRowsAboveTotal(facts, opts.surcharge)) row(label, value);
 
   y += 2;
   doc.moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
@@ -611,13 +645,15 @@ function generateReceiptPDF(invoice, payment, res) {
   yRight = invoiceMetaBlock(doc, invoice, payment, L + W / 2 + 20, yRight, 'receipt');
 
   let y = Math.max(yLeft, yRight) + 16;
-  y = lineItemsTable(doc, invoice.line_items, L, y, W);
-  y = totalsBlock(doc, invoice, L, y + 8, W, {
+  const surcharge = receiptSurchargeFacts(payment);
+  y = lineItemsTable(doc, invoice.line_items, L, y, W, surcharge ? SURCHARGE_ROW_HEIGHT : 0);
+  y = totalsBlock(doc, invoiceWithSurchargedTotal(invoice, surcharge), L, y + 8, W, {
     highlightTotal: true,
     paidStamp: !refundAmount,
     refundAmount,
     cashPaid,
     customer,
+    surcharge,
   });
 
   // Commercial-only recordkeeping note. Most residential receipts don't
