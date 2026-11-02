@@ -105,7 +105,8 @@ function staffUser(tech) {
   };
 }
 
-// `mfa: true` marks an access token issued after the two-step code passed
+// `mfa: true` marks an access token issued after the two-step code passed, or
+// after a Google sign-in from a device that passed the code before
 // (GATE_ADMIN_MFA); the claim is omitted otherwise, so gate-off tokens are
 // unchanged.
 function mintStaffTokens(tech, { mfa = false, mfaRecoveryUntil = null } = {}) {
@@ -165,6 +166,60 @@ function setAdminMarkerCookie(res, technicianId) {
   });
 }
 
+// Remembered device for Sign in with Google (owner 2026-11-02, option A): a
+// browser or app that passed the authenticator code keeps this cookie, and a
+// Google sign-in from it skips the code. A Google session used on any other
+// device still meets the code step. The claims tie it to the staff row's
+// token version and authenticator enrollment, so a sign-out everywhere, a
+// password change, a Google relink or a new authenticator forgets every
+// device. Sent only to the Google routes.
+const DEVICE_COOKIE = 'waves_staff_device';
+const DEVICE_TRUST_TYPE = 'staff_device_trust';
+const DEVICE_TRUST_DAYS = 90;
+
+function deviceTrustClaims(tech) {
+  return {
+    technicianId: tech.id,
+    tokenVersion: staffTokenVersion(tech),
+    mfaAt: new Date(tech.mfa_enabled_at).getTime(),
+  };
+}
+
+function rememberDevice(res, tech) {
+  const token = jwt.sign(
+    { type: DEVICE_TRUST_TYPE, ...deviceTrustClaims(tech) },
+    config.jwt.secret,
+    { expiresIn: `${DEVICE_TRUST_DAYS}d` },
+  );
+  res.cookie(DEVICE_COOKIE, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: DEVICE_TRUST_DAYS * 24 * 60 * 60 * 1000,
+    path: '/api/admin/auth/google',
+  });
+}
+
+function deviceRemembered(req, tech) {
+  const header = req.headers?.cookie;
+  if (typeof header !== 'string') return false;
+  const prefix = `${DEVICE_COOKIE}=`;
+  const value = header.split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix))?.slice(prefix.length);
+  if (!value || !JWT_SHAPE_RE.test(value)) return false;
+  let claims;
+  try {
+    claims = jwt.verify(value, config.jwt.secret);
+  } catch {
+    return false;
+  }
+  const expected = deviceTrustClaims(tech);
+  return claims?.type === DEVICE_TRUST_TYPE
+    && claims.technicianId === expected.technicianId
+    && claims.tokenVersion === expected.tokenVersion
+    && Number.isFinite(expected.mfaAt)
+    && claims.mfaAt === expected.mfaAt;
+}
+
 async function login(req, res, next) {
   const startedAt = Date.now();
   try {
@@ -214,10 +269,15 @@ async function login(req, res, next) {
 
 // The end of every staff sign-in that proved who the person is (the password
 // here, or Google through /google/finish).
-async function respondWithStaffSession(req, res, tech) {
-  // Two-step sign-in: the first factor alone issues no session for an
-  // enrolled staff member — only a short-lived challenge for POST /login/mfa.
-  if (adminMfaLive() && staffMfa.mfaEnabled(tech)) {
+async function respondWithStaffSession(req, res, tech, { viaGoogle = false } = {}) {
+  const enrolled = adminMfaLive() && staffMfa.mfaEnabled(tech);
+  // A Google sign-in from a remembered device counts as the code and its
+  // session carries the two-step mark (owner 2026-11-02, option A).
+  const rememberedGoogle = viaGoogle && enrolled && deviceRemembered(req, tech);
+  // Two-step sign-in: otherwise the first factor alone issues no session for
+  // an enrolled staff member — only a short-lived challenge for
+  // POST /login/mfa, which then remembers the device.
+  if (enrolled && !rememberedGoogle) {
     // The challenge is a short-lived bearer: same privacy headers as
     // /login/mfa (gate-off answers keep their headers unchanged).
     noStore(req, res, () => {});
@@ -231,7 +291,7 @@ async function respondWithStaffSession(req, res, tech) {
     });
   }
 
-  const { token, refreshToken } = mintStaffTokens(tech);
+  const { token, refreshToken } = mintStaffTokens(tech, { mfa: rememberedGoogle });
 
   await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
   setAdminMarkerCookie(res, tech.id);
@@ -312,7 +372,7 @@ async function googleFinish(req, res, next) {
     if (!tech) {
       return res.status(401).json({ error: 'Your Google sign-in expired. Try again.', code: 'GOOGLE_SIGNIN_EXPIRED' });
     }
-    return await respondWithStaffSession(req, res, tech);
+    return await respondWithStaffSession(req, res, tech, { viaGoogle: true });
   } catch (err) { return next(err); }
 }
 
@@ -381,6 +441,7 @@ async function loginMfa(req, res, next) {
     await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() })
       .catch((stampErr) => logger.warn(`[staff-auth] last_login_at stamp failed after two-step sign-in (${stampErr?.code || 'db_error'})`));
     setAdminMarkerCookie(res, tech.id);
+    rememberDevice(res, tech);
     return res.json({ token, refreshToken, user: staffUser(tech) });
   } catch (err) { return next(err); }
 }
@@ -872,3 +933,4 @@ module.exports._handlers = {
   register,
   resetPassword,
 };
+module.exports._deviceTrust = { DEVICE_COOKIE, rememberDevice };
