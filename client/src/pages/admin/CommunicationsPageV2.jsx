@@ -683,6 +683,17 @@ function spamTagState(thread, { spamTagOn, canAct }) {
   return { spamTagged, canNotSpam: spamTagged && canAct };
 }
 
+// GATE_SMS_SPAM_TAG: the label on a received text the spam check or a tag
+// silenced (display only; any enforced verdict sets it).
+function SpamLabel({ message }) {
+  if (message.direction === "outbound" || message.spamEnforced !== true) return null;
+  return (
+    <span className="text-ui-body uppercase tracking-label text-ink-tertiary">
+      Spam · no alert sent
+    </span>
+  );
+}
+
 function ConversationViewV2({
   thread,
   messages,
@@ -849,11 +860,7 @@ function ConversationViewV2({
                       {m.messageType.replace(/_/g, " ")}
                     </span>
                   )}
-                  {!isOut && m.spamEnforced === true && (
-                    <span className="text-ui-body uppercase tracking-label text-ink-tertiary">
-                      Spam · no alert sent
-                    </span>
-                  )}
+                  <SpamLabel message={m} />
                   {receipt && (
                     <span
                       className={cn(
