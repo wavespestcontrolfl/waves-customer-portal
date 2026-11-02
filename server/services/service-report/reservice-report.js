@@ -286,7 +286,7 @@ function signatureFor(block, cardIncluded = false, asksPart = '') {
  */
 async function reserviceReportPdfSignature(service = {}, { serviceLine = null, knex = null } = {}) {
   const block = await buildReserviceReport(service, { serviceLine, knex });
-  const asksPart = reserviceAsksPdfPart(service);
+  const asksPart = reserviceAsksPdfPart(service, block);
   return signatureFor(block, Boolean(block) && reserviceReportCardGateOn(), asksPart);
 }
 

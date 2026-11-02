@@ -85,6 +85,22 @@ describe('reserviceAsksReport builder', () => {
     expect(reserviceAsksReportApplies(service(none))).toBe(false);
   });
 
+  test.each(['inspection_only', 'customer_declined', 'incomplete'])(
+    'a %s outcome on the copy block: null, so today\'s card (which claims no treatment) stays',
+    (outcome) => {
+      on();
+      expect(buildReserviceAsksReport(service(treatedAsk), { block: { ...BLOCK, outcome }, products: PRODUCTS })).toBeNull();
+      expect(reserviceAsksReportApplies(service(treatedAsk), { ...BLOCK, outcome })).toBe(false);
+      expect(reserviceAsksPdfPart(service(treatedAsk), { ...BLOCK, outcome })).toBe('');
+    },
+  );
+
+  test('no copy block (GATE_RESERVICE_REPORT_COPY off): the freeze rule alone decides, and the block builds', () => {
+    on();
+    expect(buildReserviceAsksReport(service(treatedAsk), { block: null, products: PRODUCTS })).toMatchObject({ version: 1 });
+    expect(reserviceAsksReportApplies(service(treatedAsk), null)).toBe(true);
+  });
+
   test('summary line: singulars, and a clause with a zero count is dropped', () => {
     on();
     const make = (items) => {
@@ -238,6 +254,18 @@ describe('PDF cache key and render fence', () => {
     process.env.GATE_RESERVICE_REPORT_CARD = 'true';
     expect(await reserviceReportPdfSignature(plain, { knex: null })).toBe('-rs2nt-rcd1');
     expect(reserviceReportRenderedSignature({ reserviceReport: block, reserviceReportCard: { version: 1 } }, plain)).toBe('-rs2nt-rcd1');
+  });
+
+  test('gate on, an inspection-only record: no asks part, the card keys stay, lookup and store agree', async () => {
+    on();
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    process.env.GATE_RESERVICE_REPORT_CARD = 'true';
+    const inspected = service(asks, { service_tier: 'Gold', service_tier_source: 'manual', visit_outcome: 'inspection_only' });
+    const lookup = await reserviceReportPdfSignature(inspected, { knex: null });
+    expect(lookup).toBe('-rs2ni-rcd1');
+    expect(reserviceReportRenderedSignature({
+      reserviceReport: { ...block, outcome: 'inspection_only' }, reserviceReportCard: { version: 1 },
+    }, inspected)).toBe(lookup);
   });
 
   test('copy gate off: the asks part stands alone on both sides', async () => {

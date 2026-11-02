@@ -88,9 +88,15 @@ function shownEntries(frozen) {
   return entries;
 }
 
-/** True when this record's report carries the asks block (gate on, v1 freeze, something to show). */
-function reserviceAsksReportApplies(service) {
-  if (!asksGateOn()) return false;
+// A performed visit only. The freeze is completed-only (complete-scheduled-service.js), and this is the render's own
+// check: a record whose outcome reads as an inspection, a decline or an incomplete visit (reservice-report.js
+// outcomeOf, on the report's copy block) keeps today's card, which never claims a treatment for them. No copy block
+// (GATE_RESERVICE_REPORT_COPY off): the freeze rule alone decides.
+const performed = (block) => !block || !block.outcome || block.outcome === 'treated';
+
+/** True when this record's report carries the asks block (gate on, performed, v1 freeze, something to show). */
+function reserviceAsksReportApplies(service, block = null) {
+  if (!asksGateOn() || !performed(block)) return false;
   const frozen = readFrozenReserviceAsks(service);
   return Boolean(frozen) && shownEntries(frozen).length > 0;
 }
@@ -98,8 +104,8 @@ function reserviceAsksReportApplies(service) {
 // PDF cache-key part: '' when the block does not apply (every existing key
 // stays as it was). The approved product wording gate decides whether the
 // "How it helps" lines print, so it moves the key too.
-function reserviceAsksPdfPart(service) {
-  if (!reserviceAsksReportApplies(service)) return '';
+function reserviceAsksPdfPart(service, block = null) {
+  if (!reserviceAsksReportApplies(service, block)) return '';
   return productCopyGateOn() ? '-ras1p' : '-ras1';
 }
 
@@ -259,7 +265,7 @@ function productCards(rows, lane, city) {
  * @param {string} [args.city]       the visit's own city (approved product wording)
  */
 function buildReserviceAsksReport(service = {}, { block = null, products = [], city } = {}) {
-  if (!asksGateOn()) return null;
+  if (!asksGateOn() || !performed(block)) return null;
   const frozen = readFrozenReserviceAsks(service);
   if (!frozen) return null;
   const entries = shownEntries(frozen);
