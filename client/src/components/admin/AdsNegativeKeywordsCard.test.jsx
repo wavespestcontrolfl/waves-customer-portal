@@ -36,6 +36,7 @@ function payload(overrides = {}) {
     log: [
       { id: 'l1', text: 'bats', campaignId: 'c1', campaignName: 'Synthetic Search', source: 'advisor', state: 'active', decidedAt: '2026-11-01T15:00:00Z', pushedAt: '2026-11-01T15:00:01Z', removedAt: null, lastError: null, canUndo: true },
       { id: 'l2', text: 'rats', campaignId: 'c1', campaignName: 'Synthetic Search', source: 'owner_list', state: 'declined', decidedAt: '2026-11-01T14:00:00Z', pushedAt: null, removedAt: null, lastError: null, canUndo: false },
+      { id: 'l3', text: 'moles', campaignId: 'c1', campaignName: 'Synthetic Search', source: 'advisor', state: 'removed', decidedAt: '2026-10-28T15:00:00Z', pushedAt: '2026-10-28T15:00:01Z', removedAt: '2026-11-02T13:00:00Z', lastError: null, canUndo: false },
     ],
     ...overrides,
   };
@@ -217,6 +218,11 @@ describe('AdsNegativeKeywordsCard', () => {
     expect(within(rowRats).getByText('Your list')).toBeInTheDocument();
     expect(within(rowRats).getByText('Declined')).toBeInTheDocument();
     expect(within(rowRats).queryByRole('button', { name: /Undo/ })).toBeNull();
+    // An undone row shows when it was undone, not when it was first added.
+    const rowMoles = within(table).getByText('moles').closest('tr');
+    expect(within(rowMoles).getByText('Undone')).toBeInTheDocument();
+    expect(within(rowMoles).getByText(/Nov 2/)).toBeInTheDocument();
+    expect(within(rowMoles).queryByText(/Oct 28/)).toBeNull();
 
     fireEvent.click(within(rowBats).getByRole('button', { name: 'Undo “bats”' }));
     await waitFor(() => expect(posts()).toHaveLength(1));

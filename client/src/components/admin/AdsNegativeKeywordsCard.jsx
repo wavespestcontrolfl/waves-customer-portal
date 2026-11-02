@@ -53,6 +53,12 @@ const whenET = (value) =>
     ? formatETDateTime(value, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : "—";
 
+// An undone row shows when it was undone; any other row when it was decided or sent.
+const historyDate = (row) =>
+  row.state === "removed"
+    ? row.removedAt || row.decidedAt || row.pushedAt
+    : row.decidedAt || row.pushedAt || row.removedAt;
+
 function failText(res, fallback) {
   return (res.body && res.body.message) || fallback;
 }
@@ -346,7 +352,7 @@ function NegativeKeywordsCard({ highlightId }) {
                       <TD>{row.campaignName}</TD>
                       <TD>{SOURCE_LABEL[row.source] || "Other"}</TD>
                       <TD>{STATE_LABEL[row.state] || "Other"}</TD>
-                      <TD>{whenET(row.decidedAt || row.removedAt || row.pushedAt)}</TD>
+                      <TD>{whenET(historyDate(row))}</TD>
                       <TD>
                         {row.canUndo && (
                           <Button
