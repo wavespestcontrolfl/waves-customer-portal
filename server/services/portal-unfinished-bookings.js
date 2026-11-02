@@ -37,9 +37,12 @@ const logger = require('./logger');
 
 const WINDOW_DAYS = 14;
 const QUIET_MINUTES = 60;
-// Candidates read per source per run, newest first. A key that has its bell drops out of the query, so a
-// busy week is worked off across runs.
-const MAX_PER_SOURCE = 200;
+// Candidates read per page, newest first, keyset-paged on (drop-off time, id). A drop-off a person already followed
+// up never gets a bell, so it never drops out of the query: paging is what lets an older unanswered drop-off behind
+// many contacted ones still ring. At most MAX_PAGES pages per source per run; a run that stops there says so, and
+// the next sweep starts again from the newest.
+const PAGE_SIZE = 200;
+const MAX_PAGES = 10;
 const KEY_PREFIX = 'portal-unfinished-';
 const BOOKING_KEY_PREFIX = 'portal-unfinished-booking:';
 const CHECKOUT_KEY_PREFIX = 'portal-unfinished-checkout:';
@@ -72,8 +75,14 @@ function visitBookedAfter(query, customerColumn, boundarySql) {
   });
 }
 
+// The page after `cursor` ({ at, id }: the last row's drop-off time as the database's own text, so no microsecond is
+// lost, and its id), newest first. `timeColumn` and `idColumn` are this module's own column names.
+function afterCursor(query, timeColumn, idColumn, cursor) {
+  return cursor ? query.whereRaw(`(${timeColumn}, ${idColumn}) < (?::timestamptz, ?::uuid)`, [cursor.at, cursor.id]) : query;
+}
+
 // (A) booking-page drop-offs: not converted, not suppressed, quiet for QUIET_MINUTES, in the window.
-function bookingPageQuery(conn, now) {
+function bookingPageQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = {}) {
   const quietBefore = new Date(now.getTime() - QUIET_MINUTES * MIN_MS);
   const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS);
   const query = conn('booking_intents as bi')
@@ -83,16 +92,16 @@ function bookingPageQuery(conn, now) {
     .where('bi.last_activity_at', '<=', quietBefore)
     .where('bi.last_activity_at', '>', since)
     .whereRaw(`NOT ${KEY_TAKEN_SQL(BOOKING_KEY_PREFIX, 'bi.id')}`);
-  return visitBookedAfter(query, 'bi.customer_id', 'bi.captured_at')
-    .orderBy('bi.last_activity_at', 'desc')
-    .limit(MAX_PER_SOURCE)
+  return afterCursor(visitBookedAfter(query, 'bi.customer_id', 'bi.captured_at'), 'bi.last_activity_at', 'bi.id', cursor)
+    .orderBy([{ column: 'bi.last_activity_at', order: 'desc' }, { column: 'bi.id', order: 'desc' }])
+    .limit(pageSize)
     .select('bi.id', 'bi.customer_id', 'bi.phone', 'bi.service_type', 'bi.slot_date', 'bi.slot_start', 'bi.slot_end',
-      'bi.last_activity_at as drop_off_at', 'bi.pricing_estimate_id',
+      'bi.last_activity_at as drop_off_at', 'bi.pricing_estimate_id', conn.raw('bi.last_activity_at::text AS cursor_at'),
       conn.raw("COALESCE(NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), ''), NULLIF(trim(concat_ws(' ', bi.first_name, bi.last_name)), '')) AS name"));
 }
 
 // (B) estimate card-step drop-offs: one row per estimate (its newest event), the estimate still open.
-function estimateCardQuery(conn, now) {
+function estimateCardQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = {}) {
   const quietBefore = new Date(now.getTime() - QUIET_MINUTES * MIN_MS);
   const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS);
   const latest = conn('estimate_checkout_events')
@@ -107,11 +116,11 @@ function estimateCardQuery(conn, now) {
     .whereNull('e.archived_at')
     .whereRaw("COALESCE(e.status, '') NOT IN ('accepted', 'declined')")
     .whereRaw(`NOT ${KEY_TAKEN_SQL(CHECKOUT_KEY_PREFIX, 'e.id')}`);
-  return visitBookedAfter(query, 'e.customer_id', 'ce.last_at')
-    .orderBy('ce.last_at', 'desc')
-    .limit(MAX_PER_SOURCE)
+  return afterCursor(visitBookedAfter(query, 'e.customer_id', 'ce.last_at'), 'ce.last_at', 'e.id', cursor)
+    .orderBy([{ column: 'ce.last_at', order: 'desc' }, { column: 'e.id', order: 'desc' }])
+    .limit(pageSize)
     .select('e.id', 'e.customer_id', 'e.customer_name', 'e.customer_phone', 'e.estimate_data', 'e.service_interest',
-      'ce.last_at as drop_off_at');
+      'ce.last_at as drop_off_at', conn.raw('ce.last_at::text AS cursor_at'));
 }
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -158,11 +167,18 @@ function estimateItem(row) {
   };
 }
 
-// Every drop-off that could ring now, before the person-contact check.
-async function findDropOffs(now, conn = db) {
-  const [booking, estimates] = await Promise.all([bookingPageQuery(conn, now), estimateCardQuery(conn, now)]);
-  return [...booking.map(bookingItem), ...estimates.map(estimateItem)]
-    .filter((item) => !Number.isNaN(item.dropOffAt.getTime()));
+const SOURCES = [
+  { name: SOURCE_BOOKING_PAGE, query: bookingPageQuery, item: bookingItem },
+  { name: SOURCE_ESTIMATE_CARD, query: estimateCardQuery, item: estimateItem },
+];
+
+// One page of one source's drop-offs that could ring now, before the person-contact check, and the cursor of the
+// next page (null when this was the last one).
+async function findDropOffPage(source, now, { conn = db, cursor = null, pageSize = PAGE_SIZE } = {}) {
+  const rows = await source.query(conn, now, { cursor, pageSize });
+  const items = rows.map(source.item).filter((item) => !Number.isNaN(item.dropOffAt.getTime()));
+  const last = rows[rows.length - 1];
+  return { items, next: rows.length < pageSize || !last ? null : { at: last.cursor_at, id: String(last.id) } };
 }
 
 // A person reached the customer after the drop-off: the witnesses' text, call back, answered call or Gmail send.
@@ -332,21 +348,38 @@ async function raiseAll(items) {
   return raised;
 }
 
-async function runPortalUnfinishedBookings({ now = new Date(), conn = db } = {}) {
-  if (!require('../config/feature-gates').portalBookingItemsLive?.()) return { skipped: true, reason: 'gate_off' };
-  const found = await findDropOffs(now, conn);
-  if (!found.length) return { skipped: false, found: 0, raised: 0 };
-  let waiting;
-  try {
-    waiting = await withoutPersonContact(found, conn);
-  } catch (err) {
-    // A witness read that fails is no verdict: nothing rings, and the next sweep reads again.
-    logger.warn(`[portal-unfinished-bookings] contact witnesses failed to load, nothing raised: ${safeError(err)}`);
-    return { skipped: false, found: found.length, raised: 0 };
+// Every page of one source, up to MAX_PAGES: each page's unanswered drop-offs ring before the next page is read.
+// A witness read that fails is no verdict: it throws, nothing more rings this run, and the next sweep reads again.
+async function sweepSource(source, now, conn, pageSize) {
+  let cursor = null;
+  let found = 0;
+  let raised = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const { items, next } = await findDropOffPage(source, now, { conn, cursor, pageSize });
+    found += items.length;
+    if (items.length) raised += await raiseAll(await withoutPersonContact(items, conn));
+    if (!next) return { found, raised };
+    cursor = next;
   }
-  const raised = await raiseAll(waiting);
+  logger.warn(`[portal-unfinished-bookings] ${source.name}: stopped after ${MAX_PAGES} pages; the next sweep reads the rest`);
+  return { found, raised };
+}
+
+async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSize = PAGE_SIZE } = {}) {
+  if (!require('../config/feature-gates').portalBookingItemsLive?.()) return { skipped: true, reason: 'gate_off' };
+  let found = 0;
+  let raised = 0;
+  try {
+    for (const source of SOURCES) {
+      const result = await sweepSource(source, now, conn, pageSize);
+      found += result.found;
+      raised += result.raised;
+    }
+  } catch (err) {
+    logger.warn(`[portal-unfinished-bookings] stopped, nothing more raised this run: ${safeError(err)}`);
+  }
   if (raised) logger.info(`[portal-unfinished-bookings] raised ${raised} bell(s) for bookings not finished`);
-  return { skipped: false, found: found.length, raised };
+  return { skipped: false, found, raised };
 }
 
 module.exports = {
@@ -357,7 +390,8 @@ module.exports = {
   CHECKOUT_KEY_PREFIX,
   SOURCE_BOOKING_PAGE,
   SOURCE_ESTIMATE_CARD,
-  findDropOffs,
+  SOURCES,
+  findDropOffPage,
   withoutPersonContact,
   slotWords,
   composeWords,

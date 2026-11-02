@@ -98,7 +98,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     customer_id: c.id, scheduled_date: '2026-11-20', service_type: 'Monthly Mosquito Control Service', status: 'pending', created_at: at,
   });
 
-  const run = (now = new Date()) => mod.runPortalUnfinishedBookings({ now });
+  const run = (now = new Date(), pageSize = undefined) => mod.runPortalUnfinishedBookings({ now, ...(pageSize ? { pageSize } : {}) });
   const bellsFor = (key) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]);
   const meta = (row) => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata);
   const intentKey = (i) => `${mod.BOOKING_KEY_PREFIX}${i.id}`;
@@ -140,6 +140,19 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     await run();
     expect(await bellsFor(intentKey(reachedIntent))).toHaveLength(0);
     expect(await bellsFor(intentKey(remindedIntent))).toHaveLength(1);
+  });
+
+  test('an older unanswered drop-off behind newer contacted ones still rings: the sweep pages past them', async () => {
+    const contacted = [];
+    for (let k = 0; k < 3; k += 1) {
+      const c = await customer();
+      contacted.push(await intent(c, { captured_at: ago(80 - k), last_activity_at: ago(70 - k) }));
+      await staffText(c, ago(65 - k));
+    }
+    const older = await intent(await customer(), { captured_at: ago(200), last_activity_at: ago(190) });
+    await run(new Date(), 2);
+    expect(await bellsFor(intentKey(older))).toHaveLength(1);
+    for (const i of contacted) expect(await bellsFor(intentKey(i))).toHaveLength(0);
   });
 
   test('a visit booked after the drop-off stops the bell', async () => {
