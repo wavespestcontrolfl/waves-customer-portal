@@ -44,12 +44,22 @@ const QUIET_MINUTES = 60;
 // the next sweep starts again from the newest.
 const PAGE_SIZE = 200;
 const MAX_PAGES = 10;
-// Bells a day from this module, both sources together (Codex #7489 security review). Nothing proves a visitor owns
-// the phone they typed: the booking page links a customer by that phone alone, and a script can start many
-// bookings. Real days had at most three drop-offs (Jul-Nov 2026), so the cap does not bind in normal use. Past it,
-// one summary bell a day goes to the office instead of a bell per start; the rest wait for a later day's room.
-const MAX_BELLS_PER_DAY = 5;
+// Bells a day from this module, per tier (Codex #7489 security review). Nothing proves a booking-page visitor owns
+// the phone they typed (the page links a customer by that phone alone), so a scripted burst must neither ring a
+// bell per start nor use up the room real drop-offs need:
+// - established: an estimate the office made, or a customer we have served. Their own room, a safety cap only.
+// - unverified: everything else (a typed phone, a website estimate). A small room; past it a drop-off is held and
+//   listed on the day's one summary bell, and a later day's room can still raise it.
+// Real days had at most three drop-offs of any kind (Jul-Nov 2026), so neither cap binds in normal use.
+const ESTABLISHED = 'established';
+const UNVERIFIED = 'unverified';
+const MAX_BELLS_PER_DAY = { [ESTABLISHED]: 10, [UNVERIFIED]: 3 };
 const BURST_KEY_PREFIX = 'portal-booking-burst:';
+const MAX_HELD_LINES = 10;
+// A customer we have served: a completed visit on file. The column is this module's own.
+const SERVED_SQL = (customerColumn) => `EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = ${customerColumn} AND s.status = 'completed')`;
+const tierOf = (item) => (item.established ? ESTABLISHED : UNVERIFIED);
+const TIER_SQL = `COALESCE(metadata->>'trust', '${UNVERIFIED}')`;
 const KEY_PREFIX = 'portal-unfinished-';
 const BOOKING_KEY_PREFIX = 'portal-unfinished-booking:';
 const CHECKOUT_KEY_PREFIX = 'portal-unfinished-checkout:';
@@ -99,11 +109,14 @@ function bookingPageQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = {
     .where('bi.last_activity_at', '<=', quietBefore)
     .where('bi.last_activity_at', '>', since)
     .whereRaw(`NOT ${KEY_TAKEN_SQL(BOOKING_KEY_PREFIX, 'bi.id')}`);
-  return afterCursor(visitBookedAfter(query, 'bi.customer_id', 'bi.captured_at'), 'bi.last_activity_at', 'bi.id', cursor)
+  // Against the latest attempt, not the first capture: /capture-intent reuses an open intent and moves only
+  // last_activity_at, so a visit booked between the two must not hide the newer attempt.
+  return afterCursor(visitBookedAfter(query, 'bi.customer_id', 'bi.last_activity_at'), 'bi.last_activity_at', 'bi.id', cursor)
     .orderBy([{ column: 'bi.last_activity_at', order: 'desc' }, { column: 'bi.id', order: 'desc' }])
     .limit(pageSize)
     .select('bi.id', 'bi.customer_id', 'bi.phone', 'bi.service_type', 'bi.slot_date', 'bi.slot_start', 'bi.slot_end',
       'bi.last_activity_at as drop_off_at', 'bi.pricing_estimate_id', conn.raw('bi.last_activity_at::text AS cursor_at'),
+      conn.raw(`${SERVED_SQL('bi.customer_id')} AS established`),
       conn.raw("COALESCE(NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), ''), NULLIF(trim(concat_ws(' ', bi.first_name, bi.last_name)), '')) AS name"));
 }
 
@@ -127,7 +140,8 @@ function estimateCardQuery(conn, now, { cursor = null, pageSize = PAGE_SIZE } = 
     .orderBy([{ column: 'ce.last_at', order: 'desc' }, { column: 'e.id', order: 'desc' }])
     .limit(pageSize)
     .select('e.id', 'e.customer_id', 'e.customer_name', 'e.customer_phone', 'e.estimate_data', 'e.service_interest',
-      'ce.last_at as drop_off_at', conn.raw('ce.last_at::text AS cursor_at'));
+      'ce.last_at as drop_off_at', conn.raw('ce.last_at::text AS cursor_at'),
+      conn.raw(`(e.created_by_technician_id IS NOT NULL OR ${SERVED_SQL('e.customer_id')}) AS established`));
 }
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -144,6 +158,7 @@ function bookingItem(row) {
     service: text(row.service_type),
     slot: row.slot_date ? { date: String(row.slot_date).slice(0, 10), start: text(row.slot_start), end: text(row.slot_end) } : null,
     estimateId: row.pricing_estimate_id ? String(row.pricing_estimate_id) : null,
+    established: row.established === true,
   };
 }
 
@@ -171,11 +186,12 @@ function estimateItem(row) {
     service: estimateService(row),
     slot: null,
     estimateId: String(row.id),
+    established: row.established === true,
   };
 }
 
-// The estimate card step first: an estimate is mostly one the office made and sent, so under the day's cap its
-// drop-offs come before booking-page starts, which anyone can make.
+// The estimate card step first, then the booking page. Each tier has its own room, so the order decides only which
+// of one tier's drop-offs are raised first on a day it is full.
 const SOURCES = [
   { name: SOURCE_ESTIMATE_CARD, query: estimateCardQuery, item: estimateItem },
   { name: SOURCE_BOOKING_PAGE, query: bookingPageQuery, item: bookingItem },
@@ -308,6 +324,7 @@ function bellMetadata(item) {
     slotStart: item.slot?.start || null,
     slotEnd: item.slot?.end || null,
     dropOffAt: item.dropOffAt.toISOString(),
+    trust: tierOf(item),
     // A visitor with no customer on file: the Portal tab and the contact check read these.
     ...(item.customerId ? {} : { contactName: item.name || null, contactPhone: item.phone || null }),
   };
@@ -344,20 +361,21 @@ async function raiseBell(item) {
 
 // Phone push for an app ask (portal-ask-push.js) is added by another change; this module rings the bell alone.
 
-// Raises each drop-off's bell while the day's room lasts (`room.left`). A drop-off past it is held, not raised; a
-// later run reads it again.
+// Raises each drop-off's bell while its tier's room for the day lasts (`room.left`). A drop-off past it is held,
+// not raised (`room.held`, listed on the summary bell); a later run reads it again.
 async function raiseAll(items, room) {
   let raised = 0;
   for (const item of items) {
-    if (room.left <= 0) {
-      room.held += 1;
+    const tier = tierOf(item);
+    if (room.left[tier] <= 0) {
+      room.held.push(item);
       continue;
     }
     try {
       const done = await raiseBell(item);
       if (done?.isNew) {
         raised += 1;
-        room.left -= 1;
+        room.left[tier] -= 1;
       }
     } catch (err) {
       logger.warn(`[portal-unfinished-bookings] bell for ${item.source} ${item.sourceId} not raised: ${safeError(err)}`);
@@ -383,22 +401,29 @@ async function sweepSource(source, now, conn, pageSize, room) {
   return { found, raised };
 }
 
-// This ET day's bells from this module, open or done. The cap reads the table, so a restart cannot reset it.
+// This ET day's bells from this module per tier, open or done (a bell with no tier counts as unverified). The cap
+// reads the table, so a restart cannot reset it.
 async function bellsRaisedToday(conn, now) {
   const since = parseETDateTime(`${etDateString(now)}T00:00`);
-  const row = await conn('notifications').where({ recipient_type: 'admin' }).where('created_at', '>=', since)
+  const rows = await conn('notifications').where({ recipient_type: 'admin' }).where('created_at', '>=', since)
     .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [KEY_PREFIX.length, KEY_PREFIX])
-    .count({ n: '*' }).first();
-  return Number(row?.n || 0);
+    // One expression, the constant inlined: two bound copies of the default are two parameters to Postgres, so
+    // the SELECT would not match the GROUP BY (42803).
+    .groupByRaw(TIER_SQL)
+    .select(conn.raw(`${TIER_SQL} AS tier`))
+    .count({ n: '*' });
+  const counts = { [ESTABLISHED]: 0, [UNVERIFIED]: 0 };
+  for (const row of rows) if (row.tier in counts) counts[row.tier] = Number(row.n || 0);
+  return counts;
 }
 
-// The day's one summary bell once the cap held a drop-off back. No count in the words: the first bell of the day
-// stands (dedupe), and a count would go stale.
+// The day's one summary bell once a tier's cap held a drop-off back. The words never carry a count; the list of
+// what was held is the bell's detail, newest first.
 function burstAlertSpec(day) {
   return {
     area: 'Customers',
-    action: 'Check for fake booking starts',
-    why: 'More bookings than usual were left unfinished today, so the rest were not raised',
+    action: 'Check unverified booking starts',
+    why: 'More unverified booking starts than usual were left today, so the extra ones are listed here',
     severity: 'needs-you',
     link: '/admin/communications#tab=portal',
     subject: { type: 'check', id: `${BURST_KEY_PREFIX}${day}` },
@@ -407,11 +432,30 @@ function burstAlertSpec(day) {
   };
 }
 
+// One line per held drop-off, newest first, at most MAX_HELD_LINES: who, for what, the time picked, the phone typed.
+function heldLines(held) {
+  const newest = [...held].sort((a, b) => b.dropOffAt.getTime() - a.dropOffAt.getTime());
+  const lines = newest.slice(0, MAX_HELD_LINES).map((item) => {
+    const slot = slotWords(item.slot);
+    return [item.name || 'A visitor', item.service || 'a booking', slot, item.phone].filter(Boolean).join(', ');
+  });
+  if (newest.length > MAX_HELD_LINES) lines.push(`and ${newest.length - MAX_HELD_LINES} more`);
+  return lines.join('\n');
+}
+
+// Rings once a day (the first raise); later runs that hold more rewrite the list quietly, never ring again.
 async function raiseBurstBell(now, held) {
   const day = etDateString(now);
   try {
     const { raiseAdminAlert } = require('./admin-alert-compose');
-    await raiseAdminAlert('alert', burstAlertSpec(day), { bell: true, dedupeKey: `${BURST_KEY_PREFIX}${day}`, metadata: { day, held } });
+    await raiseAdminAlert('alert', burstAlertSpec(day), {
+      bell: true,
+      dedupeKey: `${BURST_KEY_PREFIX}${day}`,
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
+      detail: heldLines(held),
+      metadata: { day, heldCount: held.length },
+    });
   } catch (err) {
     logger.warn(`[portal-unfinished-bookings] summary bell not raised: ${safeError(err)}`);
   }
@@ -423,7 +467,11 @@ async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSi
   let raised = 0;
   let room = null;
   try {
-    room = { left: Math.max(0, MAX_BELLS_PER_DAY - await bellsRaisedToday(conn, now)), held: 0 };
+    const today = await bellsRaisedToday(conn, now);
+    room = {
+      left: { [ESTABLISHED]: Math.max(0, MAX_BELLS_PER_DAY[ESTABLISHED] - today[ESTABLISHED]), [UNVERIFIED]: Math.max(0, MAX_BELLS_PER_DAY[UNVERIFIED] - today[UNVERIFIED]) },
+      held: [],
+    };
     for (const source of SOURCES) {
       const result = await sweepSource(source, now, conn, pageSize, room);
       found += result.found;
@@ -432,13 +480,13 @@ async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSi
   } catch (err) {
     logger.warn(`[portal-unfinished-bookings] stopped, nothing more raised this run: ${safeError(err)}`);
   }
-  const held = room?.held || 0;
-  if (held) {
-    logger.warn(`[portal-unfinished-bookings] day's cap of ${MAX_BELLS_PER_DAY} bells reached: ${held} drop-off(s) held`);
+  const held = room?.held || [];
+  if (held.length) {
+    logger.warn(`[portal-unfinished-bookings] a day's cap was reached: ${held.length} drop-off(s) held and listed on the summary bell`);
     await raiseBurstBell(now, held);
   }
   if (raised) logger.info(`[portal-unfinished-bookings] raised ${raised} bell(s) for bookings not finished`);
-  return { skipped: false, found, raised, held };
+  return { skipped: false, found, raised, held: held.length };
 }
 
 module.exports = {
@@ -450,9 +498,12 @@ module.exports = {
   SOURCE_BOOKING_PAGE,
   SOURCE_ESTIMATE_CARD,
   SOURCES,
+  ESTABLISHED,
+  UNVERIFIED,
   MAX_BELLS_PER_DAY,
   BURST_KEY_PREFIX,
   burstAlertSpec,
+  heldLines,
   findDropOffPage,
   withoutPersonContact,
   slotWords,

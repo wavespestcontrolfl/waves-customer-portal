@@ -7,7 +7,8 @@
  *   - portal-inbox.js: the Communications Portal tab lists the bell as a booking item whose version the bell's
  *     Done accepts.
  *   - admin-alert-relevance.js: the bell closes on a person's text after it, and when the booking was finished.
- *   - the day's cap: past MAX_BELLS_PER_DAY the rest are held and one summary bell rings, once a day.
+ *   - the day's cap per tier: an unverified drop-off past its room is held and listed on one summary bell a day; an
+ *     established one (an estimate the office made, a customer we have served) still rings with that room full.
  * Each test removes everything it made and every bell its sweeps raised, so the next test starts with no drop-off
  * and the day's count at zero (Codex #7489 r2). Every row is synthetic. It refuses any database but a private QA
  * one or CI's.
@@ -26,7 +27,7 @@ afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
   const RUN = randomUUID().slice(0, 8);
   const BIZ = '+15555559300';
-  const made = { sms_log: [], scheduled_services: [], estimate_checkout_events: [], booking_intents: [], estimates: [], customers: [] };
+  const made = { sms_log: [], scheduled_services: [], estimate_checkout_events: [], booking_intents: [], estimates: [], technicians: [], customers: [] };
   let db;
   let mod;
   let portalInbox;
@@ -59,7 +60,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
   const cleanUp = async () => {
     await dropOffBells(db('notifications')).where('created_at', '>=', fileStart).del();
     await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [burstKey()]).del();
-    for (const table of ['sms_log', 'scheduled_services', 'estimate_checkout_events', 'booking_intents', 'estimates', 'customers']) {
+    for (const table of ['sms_log', 'scheduled_services', 'estimate_checkout_events', 'booking_intents', 'estimates', 'technicians', 'customers']) {
       const ids = made[table].splice(0);
       if (ids.length) await db(table).whereIn('id', ids).del();
     }
@@ -103,9 +104,15 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     direction: 'outbound', from_phone: BIZ, to_phone: c.phone, customer_id: c.id, message_body: 'Reminder',
     message_type: 'appointment_reminder', status: 'delivered', twilio_sid: sid('SMO'), metadata: JSON.stringify({}), created_at: at,
   });
-  const visit = (c, at) => insert('scheduled_services', {
-    customer_id: c.id, scheduled_date: '2026-11-20', service_type: 'Monthly Mosquito Control Service', status: 'pending', created_at: at,
+  const visit = (c, at, status = 'pending') => insert('scheduled_services', {
+    customer_id: c.id, scheduled_date: '2026-11-20', service_type: 'Monthly Mosquito Control Service', status, created_at: at,
   });
+  // A customer we have served: a completed visit a month before any drop-off.
+  const servedCustomer = async () => {
+    const c = await customer();
+    await visit(c, ago(30 * 24 * 60), 'completed');
+    return c;
+  };
 
   const run = (now = new Date(), pageSize = undefined) => mod.runPortalUnfinishedBookings({ now, ...(pageSize ? { pageSize } : {}) });
   const bellsFor = (key) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]);
@@ -164,29 +171,53 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     for (const i of contacted) expect(await bellsFor(intentKey(i))).toHaveLength(0);
   });
 
-  test('past the day\'s cap the rest are held and one summary bell rings, once a day', async () => {
+  test('past the unverified room the rest are held, listed on one summary bell a day', async () => {
     const now = new Date();
+    const room = mod.MAX_BELLS_PER_DAY[mod.UNVERIFIED];
     const intents = [];
-    for (let k = 0; k < mod.MAX_BELLS_PER_DAY + 2; k += 1) {
+    for (let k = 0; k < room + 4; k += 1) {
       intents.push(await intent(await customer(), { captured_at: ago(120 + k), last_activity_at: ago(90 + k) }));
     }
     // Totals, not which drop-offs: a row another suite left could take a place under the cap.
     const first = await run(now);
-    expect(first.raised).toBe(mod.MAX_BELLS_PER_DAY);
-    expect(first.held).toBeGreaterThanOrEqual(2);
+    expect(first.raised).toBe(room);
+    expect(first.held).toBeGreaterThanOrEqual(4);
     const { etDateString, parseETDateTime } = require('../utils/datetime-et');
-    const today = await dropOffBells(db('notifications')).where('created_at', '>=', parseETDateTime(`${etDateString(now)}T00:00`)).count({ n: '*' }).first();
-    expect(Number(today.n)).toBe(mod.MAX_BELLS_PER_DAY);
+    const today = await dropOffBells(db('notifications')).where('created_at', '>=', parseETDateTime(`${etDateString(now)}T00:00`))
+      .whereRaw("metadata->>'trust' = ?", [mod.UNVERIFIED]).count({ n: '*' }).first();
+    expect(Number(today.n)).toBe(room);
     let rung = 0;
     for (const i of intents) rung += (await bellsFor(intentKey(i))).length;
     expect(rung).toBeLessThan(intents.length);
     const [summary] = await bellsFor(burstKey(now));
     expect(summary).toEqual(expect.objectContaining({ category: 'alert', link: '/admin/communications#tab=portal' }));
+    // The held drop-offs are listed, one line each: who, for what, the time picked, the phone typed.
+    const lines = summary.detail.split('\n');
+    expect(lines).toHaveLength(first.held);
+    expect(lines[0]).toMatch(/^Pat Synthetic\S*, Mosquito Control, Tue Nov 24, 1-2 PM, \d{10}$/);
     // The summary is not a booking item, and a later run that holds again rings no second one.
     process.env.GATE_PORTAL_INBOX = 'true';
     expect((await portalInbox.list()).items.some((row) => row.id === summary.id)).toBe(false);
     expect(await run(now)).toEqual(expect.objectContaining({ raised: 0, held: first.held }));
     expect(await bellsFor(burstKey(now))).toHaveLength(1);
+  });
+
+  test('an established drop-off still rings when the unverified room is full; its bell says so', async () => {
+    for (let k = 0; k <= mod.MAX_BELLS_PER_DAY[mod.UNVERIFIED]; k += 1) await intent(await customer(), { last_activity_at: ago(90 + k) });
+    const served = await intent(await servedCustomer(), { last_activity_at: ago(200) });
+    const out = await run();
+    expect(out.held).toBeGreaterThanOrEqual(1);
+    const rows = await bellsFor(intentKey(served));
+    expect(rows).toHaveLength(1);
+    expect(meta(rows[0]).trust).toBe(mod.ESTABLISHED);
+  });
+
+  test('a visit booked before the latest attempt does not hide it (the intent was reused)', async () => {
+    const c = await customer();
+    const i = await intent(c, { captured_at: ago(5 * 24 * 60), last_activity_at: ago(90) });
+    await visit(c, ago(3 * 24 * 60));
+    await run();
+    expect(await bellsFor(intentKey(i))).toHaveLength(1);
   });
 
   test('a visit booked after the drop-off stops the bell', async () => {
@@ -207,8 +238,18 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     await run();
     const rows = await bellsFor(estimateKey(open));
     expect(rows).toHaveLength(1);
-    expect(meta(rows[0])).toEqual(expect.objectContaining({ customerId: c.id, checkoutEstimateId: open.id, source: 'estimate_card' }));
+    expect(meta(rows[0])).toEqual(expect.objectContaining({ customerId: c.id, checkoutEstimateId: open.id, source: 'estimate_card', trust: mod.UNVERIFIED }));
     expect(await bellsFor(estimateKey(accepted))).toHaveLength(0);
+  });
+
+  test('an estimate the office made is established', async () => {
+    const tech = await insert('technicians', { name: `Synthetic Tech ${RUN}` });
+    const e = await estimate(await customer(), { created_by_technician_id: tech.id });
+    await cardStep(e, ago(90));
+    await run();
+    const rows = await bellsFor(estimateKey(e));
+    expect(rows).toHaveLength(1);
+    expect(meta(rows[0]).trust).toBe(mod.ESTABLISHED);
   });
 
   test('an estimate with no customer still rings, linked to the estimate, with the visitor\'s name and phone', async () => {
