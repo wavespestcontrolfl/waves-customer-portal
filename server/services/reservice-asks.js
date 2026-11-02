@@ -22,7 +22,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
 const { normalizeRequestPests, pestLabels } = require('./reservice-request');
-const { smsSuggestionText, callSuggestionText } = require('./reservice-office-request');
+const { smsSuggestionText, callSuggestionText, callRequestQuotes } = require('./reservice-office-request');
 const { scrubCustomerText } = require('./completion-comms-context');
 const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
 
@@ -151,15 +151,17 @@ function pestsIn(text) {
 // A raw customer line to a finished item, or null when nothing relevant is
 // left after the scrub. `lead` and `quoted` come from the source's rules.
 // `officeOnly` (only when set) is the office-only screen's verdict on the
-// ORIGINAL words: the scrub keeps pest talk only and the cap cuts the tail, so
+// ORIGINAL words: the scrub keeps pest talk only and the caps cut the tail, so
 // "Ants are back. I want a refund." would reach a later screen as "Ants are
-// back." (reservice-office-only.js). It freezes with the item.
-function buildItem({ id, source, at, text, quoted, lead = null }) {
+// back." (reservice-office-only.js). `screenText` is the source's whole text
+// when its reader already capped `text` (a text's body, a call's quotes). It
+// freezes with the item.
+function buildItem({ id, source, at, text, quoted, lead = null, screenText = null }) {
   const iso = toIso(at);
   if (!iso) return null;
   const scrubbed = capWords(compact(scrubCustomerText(text, { lane: 'reservice' })));
   if (!scrubbed) return null;
-  const officeOnly = officeOnlyReason(text);
+  const officeOnly = officeOnlyReason(screenText || text);
   return {
     id,
     source,
@@ -239,7 +241,7 @@ async function readTexts(knex, customerId, window, bookingKeys) {
   for (const row of rows || []) {
     const text = smsSuggestionText(row);
     if (!text || bookingKeys.has(normalizedWords(text))) continue;
-    candidates.push({ id: `text:${row.id}`, source: 'text', at: row.created_at, text, quoted: true });
+    candidates.push({ id: `text:${row.id}`, source: 'text', at: row.created_at, text, quoted: true, screenText: row.message_body });
   }
   return candidates;
 }
@@ -260,6 +262,7 @@ async function readCalls(knex, customerId, window) {
     if (!text) continue;
     candidates.push({
       id: `call:${row.id}`, source: 'call', at: row.created_at, text, quoted: false, lead: `On your call on ${callDay(row.created_at)}, you mentioned`,
+      screenText: callRequestQuotes(row),
     });
   }
   return candidates;

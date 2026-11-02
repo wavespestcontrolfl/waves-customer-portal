@@ -209,6 +209,15 @@ describe('texts', () => {
     expect(items[0].text).not.toMatch(/refund/);
   });
 
+  test('a text longer than the 400-character cap is screened whole: a refund at its end still counts', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const long = `${'The ants came back after the spray, all along the kitchen counter and the back door. '.repeat(6)}I want a refund.`;
+    expect(long.length).toBeGreaterThan(400);
+    const { items } = await gather({ sms: [sms('s3', long, at)] });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'text:s3', officeOnly: 'billing' });
+  });
+
   test('tapbacks, STOP and empty texts are dropped', async () => {
     const { items } = await gather({
       sms: [

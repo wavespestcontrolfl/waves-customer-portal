@@ -12,6 +12,7 @@ const {
   resolveCustomerRequest,
   cleanRequestText,
   callSuggestionText,
+  callRequestQuotes,
   isOfficeRequestServiceKey,
 } = require('../services/reservice-office-request');
 
@@ -244,6 +245,15 @@ describe('helpers', () => {
     expect(cleanRequestText('  a\r\nb  ')).toBe('a\nb');
     expect(cleanRequestText('')).toBeNull();
     expect(callSuggestionText(null)).toBeNull();
+  });
+
+  test('callRequestQuotes is the same call words, never capped; callSuggestionText caps them at 400', () => {
+    const long = `${'Ants all over the kitchen counter and the back slider. '.repeat(9)}I want a refund for the last visit.`;
+    const row = call(30, CUST, 2, { words: long });
+    expect(callRequestQuotes(row)).toBe(long);
+    expect(callSuggestionText(row)).toBe(long.slice(0, 400).trim());
+    expect(callRequestQuotes(call(31, CUST, 2, { call_summary: 'Left a message', call_outcome: 'voicemail' }))).toBeNull();
+    expect(callRequestQuotes(null)).toBeNull();
   });
 });
 

@@ -13,9 +13,11 @@
  * the report that is meant to answer it ("the ants are terrible this year",
  * "chinch bug damage in the front yard", "dead spots in the lawn"); a wrong
  * "no" prints the line, where the tech's "Not about this visit" still hides
- * it. Damage words count only beside a spill/stain/burn word or a word that
- * points at us (you, your tech, the spray, the treatment, the granules ...),
- * because pests kill grass too. Schedule words count only with a person as
+ * it. Damage counts only as a spill, a fertilizer burn, stains on a hard
+ * surface, or harm to the customer's property, plants, pets or people that a
+ * word points at us for (you, your tech, the spray, the last treatment ...),
+ * never across a "not" and never to a pest or a weed: pests kill grass too,
+ * and "the spray did not kill the ants" is the re-service's own subject. Schedule words count only with a person as
  * the subject ("the tech was late", never "I see them late at night").
  *
  * Pure: no DB, no clock. The report builder leaves an office-only item out
@@ -23,25 +25,32 @@
  */
 'use strict';
 
-// Words that point the damage at us: our people, our products, our visit.
-const OURS = '(?:you|your\\s+(?:guys?|tech\\w*|crew|team|worker|man|company|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison)|(?:the|that)\\s+(?:tech\\w*|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison))';
-const HARM = '(?:kill(?:ed|ing|s)?|damag\\w*|dead|died|dying|broke|broken|break|ruin\\w*|destroy\\w*|hurt|harm\\w*|brown(?:ed)?|yellow(?:ed)?|scratch\\w*|dent\\w*)';
-// Within one sentence.
-const NEAR = '[^.?!]{0,60}?';
+// Words that point the damage at us: our people, our products, our visit ("the last treatment" too).
+const OURS = '(?:you|your\\s+(?:guys?|tech\\w*|crew|team|worker|man|company|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison)|(?:the|that|this)\\s+(?:last\\s+|recent\\s+|latest\\s+|first\\s+|second\\s+)?(?:tech\\w*|spray\\w*|treatment|products?|chemicals?|granules?|fertili[sz]er|herbicide|weed\\s*killer|pesticide|poison))';
+// What we can harm: the customer's property, plants, pets and people. Never a pest or a weed: "the spray killed the
+// weeds" and "the spray did not kill the ants" are the treatment's result, the re-service's own subject.
+const THINGS = '(?:grass|lawn|yard|turf|sod|plants?|shrubs?|bushes|flowers?|trees?|hedges?|palms?|garden|landscap\\w*|roses?|hibiscus|crotons?|sprinklers?|sprinkler\\s+heads?|irrigation|pipes?|hoses?|fences?|gates?|doors?|windows?|screens?|siding|paint|cars?|truck|driveway|patio|pavers?|deck|lanai|pool|furniture|carpets?|floors?|walls?|cushions?|sidewalk|walkway|concrete|house|mailbox|lights?|grill|dogs?|cats?|pets?|puppy|kitten|kids?|child|children|son|daughter|baby|wife|husband|family|fish|birds?|chickens?|horses?)';
+const HARM = '(?:kill(?:ed|ing|s)?|damag\\w*|dead|died|dying|broke|broken|break|ruin\\w*|destroy\\w*|hurt|harm\\w*|brown(?:ed)?|yellow(?:ed)?|scratch\\w*|dent\\w*|burn(?:ed|t)|scorch\\w*|bleach\\w*|stain\\w*|sick|ill|vomit\\w*|rash\\w*)';
+// A possessed or named thing: "my plants", "the sprinkler head", "our dog".
+const THING = `(?:my|our|the|all\\s+(?:my|our|the)|some\\s+of\\s+(?:my|our|the))\\s+(?:\\w+\\s+)?${THINGS}`;
+// Within one sentence, never across a negation: "the spray didn't hurt my dog" is not a damage report.
+const NEAR = "(?:(?!\\b(?:not|never|no)\\b|n['’]t\\b)[^.?!]){0,60}?";
 const PERSON = '(?:you|your\\s+(?:guys?|tech\\w*|crew|team|worker|man)|(?:the\\s+)?tech(?:nician)?s?|no\\s*one|nobody|anyone|anybody|someone|somebody)';
 const NOT = "(?:did\\s*n[o']?t|didn['’]t|never|has\\s*n[o']?t|hasn['’]t|have\\s*n[o']?t|haven['’]t|won['’]t|will\\s+not)";
 
 // Order matters: the first match names the reason. Each entry is [reason, regex].
 const SCREENS = [
   ['damage', new RegExp([
-    // A spill, a stain, bleaching, scorching or a burned lawn is our doing on a re-service. Never a bare "burns" or
-    // "burning": fire ant stings burn.
-    '\\b(?:spill(?:ed|s|ing)?|stain(?:s|ed|ing)?|bleach(?:ed|ing)?|scorch\\w*|burn(?:ed|t))\\b',
-    '\\bburn\\s+(?:marks?|spots?|patches?|lines?|stripes?)\\b|\\b(?:fertili[sz]er|chemical|herbicide)\\s+burn\\b',
-    // "your tech broke my sprinkler head", "the spray turned my shrubs brown"
-    `\\b${OURS}\\b${NEAR}\\b${HARM}\\b`,
-    // "dead spots after the treatment", "brown patches from your fertilizer"
-    `\\b${HARM}\\b${NEAR}\\b(?:from|after|since|by|because\\s+of)\\s+${OURS}\\b`,
+    // A spill is our doing on a re-service; so is a fertilizer or chemical burn.
+    '\\bspill(?:ed|s|ing)?\\b',
+    '\\b(?:fertili[sz]er|chemical|herbicide|weed\\s*killer)\\s+burn\\b|\\bburn\\s+(?:marks?|spots?|patches?|lines?|stripes?)\\b',
+    // Stains on a hard surface ("stains on the patio"), never roach stains in a cabinet.
+    '\\bstain(?:s|ed)?\\s+(?:on|all\\s+over)\\s+(?:the|my|our)\\s+(?:\\w+\\s+)?(?:driveway|patio|pavers?|deck|lanai|pool|walls?|siding|house|cars?|sidewalk|walkway|concrete|floors?|carpets?|furniture|cushions?|screens?|doors?|windows?|fences?|paint)\\b',
+    // "your tech broke my sprinkler head", "the treatment made my dog sick", "the spray turned my shrubs brown"
+    `\\b${OURS}\\b${NEAR}\\b${HARM}\\s+${THING}\\b`,
+    `\\b${OURS}\\b${NEAR}\\b${THING}\\b${NEAR}\\b${HARM}\\b`,
+    // "the lawn looks burned after the last treatment", "my dog got sick after the spray"
+    `\\b${THING}\\b${NEAR}\\b${HARM}\\b${NEAR}\\b(?:from|after|since|by|because\\s+of)\\s+${OURS}\\b`,
   ].join('|'), 'i')],
   ['billing', new RegExp([
     '\\b(?:refunds?|refunded|charges?|charged|charging|overcharg\\w*|invoices?|invoiced|reimburs\\w*)\\b',
