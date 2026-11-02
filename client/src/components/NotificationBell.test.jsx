@@ -1175,6 +1175,20 @@ describe('NotificationBell admin row buttons (actions)', () => {
     }
   });
 
+  it('keeps the row, re-reads the list and shows the message when the step leaves the row open (Call)', async () => {
+    let listCalls = 0;
+    setup({
+      postResponse: () => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }),
+      list: () => { listCalls += 1; return rows(); },
+    });
+    await openBell();
+    fireEvent.click(screen.getByRole('button', { name: 'Not a referral' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
+    await waitFor(() => expect(listCalls).toBe(2));
+    expect(screen.getByText('Possible referral: Fixture Friend')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('on 409 changed, re-reads the list and says the alert changed', async () => {
     let listCalls = 0;
     setup({
