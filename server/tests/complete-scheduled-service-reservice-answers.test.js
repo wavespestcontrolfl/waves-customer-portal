@@ -161,6 +161,16 @@ describe('the reserviceAnswers field on /complete', () => {
     expect(gatherReserviceAsks).not.toHaveBeenCalled();
   });
 
+  test.each(['inspection_only', 'customer_declined', 'follow_up_needed', 'customer_concern'])(
+    'a %s outcome ignores the field and gathers nothing (only a performed completion may say "treated")',
+    async (visitOutcome) => {
+      const result = await complete({ visitOutcome, reserviceAnswers: BAD });
+
+      expect(result.body?.code).not.toBe('reservice_answer_invalid');
+      expect(gatherReserviceAsks).not.toHaveBeenCalled();
+    },
+  );
+
   test('an incomplete visit ignores the field', async () => {
     const result = await complete({ visitOutcome: 'incomplete', reserviceAnswers: BAD });
 

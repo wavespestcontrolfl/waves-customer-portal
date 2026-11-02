@@ -26,6 +26,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { sameGmailInbox } = require('../utils/email-equivalence');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SOURCE_CALL_LOOKBACK_DAYS = 180;
@@ -56,6 +57,12 @@ function levenshtein(a, b) {
  * form built from the caller's own name, propose that form with the same
  * digits and domain. This is what turns "apitz6958" + spelled "Pitts" into
  * apitts6958 — no model involved, so it can't hallucinate.
+ *
+ * Same letters with a different dot is a candidate too: a caller said an
+ * initial and a surname with no "dot" between them, the transcript wrote the
+ * initial as "J.", and j.doe@example.net bounced. Removing the dot keeps every
+ * letter the caller said, so it ranks above dropping one. Gmail ignores dots:
+ * there a dot-only variant is the same mailbox that just bounced, so skip it.
  */
 function nameAnchoredEmailCandidates({ bouncedEmail, firstName = null, lastName = null }) {
   const email = String(bouncedEmail || '').trim().toLowerCase();
@@ -79,11 +86,12 @@ function nameAnchoredEmailCandidates({ bouncedEmail, firstName = null, lastName 
   ].filter(Boolean));
   const out = [];
   for (const form of forms) {
+    // Distance 0 means only a dot differs; with no difference, value === email below.
     const dist = levenshtein(alpha.replace(/\./g, ''), form.replace(/\./g, ''));
-    if (dist === 0 || dist > 2 || dist >= form.length) continue;
+    if (dist > 2 || dist >= form.length) continue;
     const value = `${form}${digits}@${domain}`;
-    if (value === email || !EMAIL_RE.test(value)) continue;
-    out.push({ value, source: 'name_anchor', confidence: dist === 1 ? 'high' : 'medium', edit_distance: dist });
+    if (value === email || !EMAIL_RE.test(value) || sameGmailInbox([value, email])) continue;
+    out.push({ value, source: 'name_anchor', confidence: dist <= 1 ? 'high' : 'medium', edit_distance: dist });
   }
   // Nearest form first.
   out.sort((a, b) => a.edit_distance - b.edit_distance);
@@ -157,7 +165,7 @@ function mergeCandidates({ bouncedEmail, decoderCandidates = [], nameCandidates 
     byValue.set(v, cur);
   };
   for (const c of decoderCandidates) add(c.value, 'audio_decoder', c.confidence);
-  for (const c of nameCandidates) add(c.value, 'name_anchor', c.edit_distance === 1 ? 0.85 : 0.6);
+  for (const c of nameCandidates) add(c.value, 'name_anchor', c.edit_distance === 0 ? 0.9 : (c.edit_distance === 1 ? 0.85 : 0.6));
   const merged = [...byValue.values()];
   for (const c of merged) {
     // Independent agreement (audio + name anchor) is the strongest evidence —

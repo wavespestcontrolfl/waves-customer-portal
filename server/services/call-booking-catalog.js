@@ -13,7 +13,8 @@ const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-d
  *   - resolveCallBookingPrice(): transcript-quoted price first (what the agent
  *     and caller actually agreed to), catalog list price as fallback.
  *   - resolveCallFollowUpPlan(): a second linked visit when the call
- *     specifically discussed a follow-up treatment.
+ *     specifically discussed a follow-up treatment (never for a rodent
+ *     service: its trap check is booked after the visit).
  *
  * Every function fails open to the legacy behavior (null / empty list) so a
  * catalog problem can never block an otherwise-valid booking.
@@ -579,10 +580,14 @@ function catalogIntervalFollowUpDate(parentDate, catalogRow) {
 }
 
 function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, parentWindowStart } = {}) {
+  const serviceKey = catalogRow?.service_key;
   // A follow-up treatment talked about on an assessment call follows the
   // quote, not the assessment (the forced-assessment path clears the same
-  // signals).
-  if (!isValidCalendarDate(parentDate) || isAssessmentCatalogRow(catalogRow)) return null;
+  // signals). A rodent visit's follow-up is the trap check, and it is never
+  // booked at the first booking (owner ruling 2026-11-02): the tech books it
+  // after the visit from what the traps show, so no rodent_* row plans one,
+  // whatever the call said about it (the key family, never the name).
+  if (!isValidCalendarDate(parentDate) || isAssessmentCatalogRow(catalogRow) || /^rodent_/.test(serviceKey)) return null;
 
   // A stated date only counts as a mention signal when it parses as a real
   // calendar date AND falls after the initial visit: the V1 normalizer merely
@@ -598,7 +603,7 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, paren
   // the other booking paths use (package-followup-booking.js).
   const { packageFollowupAutobookLive } = require('../config/feature-gates');
   const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
-  const packageRow = packageFollowupAutobookLive() && isPackageFollowUpServiceKey(catalogRow?.service_key);
+  const packageRow = packageFollowupAutobookLive() && isPackageFollowUpServiceKey(serviceKey);
   const discussed = extracted.follow_up_visit_mentioned === true || statedFutureDate;
   if (!discussed && !packageRow) return null;
 

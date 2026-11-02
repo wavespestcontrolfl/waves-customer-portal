@@ -3974,12 +3974,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       fixedRequested: reserviceFixedRecapRequested,
       fixedHonored: reserviceFixedRecap,
     });
-    // Re-service asks (GATE_RESERVICE_ASKS): a pest / lawn re-service that is really completed on a live (not backdated)
-    // closeout carries the tech's answers and freezes what the customer told us. One predicate (reservice-asks
+    // Re-service asks (GATE_RESERVICE_ASKS): a pest / lawn re-service completed as performed (visitOutcome exactly
+    // 'completed', what every Fast Complete sheet posts) on a live (not backdated) closeout carries the tech's answers
+    // and freezes what the customer told us. An inspection, a decline or any other outcome ignores the field, so no
+    // record can say "We treated it" for a visit that treated nothing. One predicate (reservice-asks
     // isReserviceVisit) decides "a re-service", never the rodent trapping follow-up. Gate off: the field is never read.
     // The answers are checked after the attempt claim, beside the tips check (see below).
     const reserviceAsksWanted = require('../config/feature-gates').reserviceAsksLive()
-      && !isIncompleteVisit && !isBackfillCompletion
+      && visitOutcome === 'completed' && !isIncompleteVisit && !isBackfillCompletion
       && require('./reservice-asks').isReserviceVisit({
         is_callback: svc.is_callback === true, service_key: completionProfile?.serviceKey,
       });

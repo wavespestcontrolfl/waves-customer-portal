@@ -231,6 +231,36 @@ describe('TimeGridDays committed move followed by a failed week read', () => {
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
   });
 
+  // Owner 2026-11-02: a time tapped in the confirm's open-times list is the move.
+  it('saves a time tapped in the confirm in place of the drop, and keeps the visit there when the refresh fails', async () => {
+    const posts = [];
+    let gets = 0;
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === 'POST') { posts.push(JSON.parse(opts.body)); return response({ success: true }); }
+      gets += 1;
+      if (gets > 1) return unavailable;
+      const week = payload([[service], []]);
+      return response({ ...week, days: [...week.days, { date: '2026-11-04', dayOfWeek: 'Wed', dayNum: 4, services: [] }] });
+    });
+    render(<TimeGridDays date="2026-11-02" dayCount={7} />);
+    await screen.findByText('Synthetic Customer');
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service } } },
+      over: { data: { current: { date: '2026-11-03', slotMin: 600 } } },
+    }));
+    expect(modal.props.pickTimes).toBe(true);
+    await act(async () => {
+      await modal.props.onConfirm({ notificationType: 'none', scope: 'this_only', target: { date: '2026-11-04', window: '13:00-14:00' } });
+    });
+    expect(posts).toEqual([expect.objectContaining({ newDate: '2026-11-04', newWindow: '13:00-14:00' })]);
+    expect(screen.getByRole('status')).toHaveTextContent('Moved. Could not refresh the schedule.');
+    // The visit sits at the tapped time on Wednesday: not at the drop, not back on Monday.
+    const column = (label) => screen.getByText(new RegExp(`^${label} `)).closest('.flex-1.relative');
+    expect(within(column('Wed')).getByText('Synthetic Customer')).toBeInTheDocument();
+    expect(within(column('Tue')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+    expect(within(column('Mon')).queryByText('Synthetic Customer')).not.toBeInTheDocument();
+  });
+
   it('still reports a real move failure and reverts when the POST itself fails', async () => {
     vi.stubGlobal('alert', vi.fn());
     fetch.mockImplementation(async (url, opts = {}) => {

@@ -11,7 +11,7 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => w
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence, statesClock } = require('../services/sms-operational-extractor');
-const { eligibleMessage, factVerdict, isQuietTemporaryFact, reviewBellCopy, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
+const { eligibleMessage, factVerdict, isQuietTemporaryFact, reviewBellCopy, withTextNoteSources, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
@@ -1855,6 +1855,54 @@ describe('SMS review bell (owner ruling 2026-10-21)', () => {
     expect(why('uncertain')).toBe('Wanted to save as access note; it is not clear if this is lasting or just for one visit.');
     expect(why('visit_only')).toBe('Wanted to save as access note; the text sounds like a one-time instruction.');
     expect(why('durable')).toBe('Wanted to save as access note; the text sounds like a one-time instruction.');
+  });
+});
+
+describe('review bell source text in the bell list (owner 2026-11-02 "do all")', () => {
+  const SMS = '00000000-0000-4000-8000-0000000000c1';
+  const OTHER_SMS = '00000000-0000-4000-8000-0000000000c2';
+  const CUST = '00000000-0000-4000-8000-0000000000d1';
+  const OTHER_CUST = '00000000-0000-4000-8000-0000000000d2';
+  const noteBell = (over = {}) => ({ id: 'n1', category: 'alert', title: "Comms — check Synthetic Fixture's text note",
+    metadata: { triggerKey: 'sms_operational_exception', sms_log_id: SMS, customerId: CUST, ...over } });
+  const fakeConn = (rows, { fail = false } = {}) => {
+    const calls = [];
+    const conn = jest.fn(() => ({
+      whereIn: (column, ids) => {
+        // The shared reservation filter (excludeUnresolvedSendReservations) adds one whereRaw.
+        const query = { whereRaw: () => query, select: async () => { calls.push(ids); if (fail) throw new Error('read failed'); return rows; } };
+        return query;
+      },
+    }));
+    conn.calls = calls;
+    return conn;
+  };
+
+  test('an admin list gets the bell\'s own text, masked like every bell body, and nothing is stored on the row', async () => {
+    const conn = fakeConn([{ id: SMS, customer_id: CUST, message_body: 'Skip the shed please, call 941-555-0123 first' }]);
+    const plain = { id: 'n2', category: 'inbound_sms', metadata: { triggerKey: 'sms_reply' } };
+    const bell = noteBell();
+    const [served, other] = await withTextNoteSources([bell, plain], { role: 'admin' }, conn);
+    expect(served.source_text).toMatch(/^Skip the shed please, call /);
+    expect(served.source_text).not.toContain('941-555-0123');
+    expect(other).toBe(plain);
+    expect(bell).not.toHaveProperty('source_text');
+    expect(conn.calls).toEqual([[SMS]]);
+  });
+
+  test('a text of another customer, a missing text, another role or a failed read serves the row as it is', async () => {
+    const mismatch = await withTextNoteSources([noteBell()], { role: 'admin' }, fakeConn([{ id: SMS, customer_id: OTHER_CUST, message_body: 'Hello' }]));
+    expect(mismatch[0]).not.toHaveProperty('source_text');
+    const missing = await withTextNoteSources([noteBell({ sms_log_id: OTHER_SMS })], { role: 'admin' }, fakeConn([]));
+    expect(missing[0]).not.toHaveProperty('source_text');
+    const office = fakeConn([{ id: SMS, customer_id: CUST, message_body: 'Hello' }]);
+    expect((await withTextNoteSources([noteBell()], { role: 'technician' }, office))[0]).not.toHaveProperty('source_text');
+    expect(office).not.toHaveBeenCalled();
+    const failed = await withTextNoteSources([noteBell()], { role: 'admin' }, fakeConn([], { fail: true }));
+    expect(failed[0]).not.toHaveProperty('source_text');
+    const noIds = fakeConn([]);
+    await withTextNoteSources([noteBell({ sms_log_id: 'not-a-uuid' })], { role: 'admin' }, noIds);
+    expect(noIds).not.toHaveBeenCalled();
   });
 });
 

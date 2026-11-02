@@ -91,7 +91,7 @@ const PROGRAM_LINES_V13 = {
   12: L('In December the program focuses on a light feeding, plus spot treatment for large patch and weeds where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for large patch and weeds where needed', broadleaf: 'spot treatment for large patch and weeds where needed' }),
 };
 
-// Rounds customers (recurring_pattern 'lawn_rounds_9', GATE_LAWN_9X_ROUNDS): the sentence follows the visit's ROUND
+// Rounds customers (recurring_pattern 'lawn_rounds_9'): the sentence follows the visit's ROUND
 // (lawn-rounds.js roundStepForVisit), not the calendar month, because a round visit takes its round's step on any date
 // inside the round window (round 3 is a feeding all the way from Mar 15 to Apr 23). Words are the owner-approved report
 // sentences of the 9-round scope (2026-10-31). Same rules as the month lines, plus one: no ordinal word, so none says
