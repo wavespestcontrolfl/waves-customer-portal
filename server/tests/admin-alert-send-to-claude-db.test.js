@@ -44,7 +44,7 @@ maybeDescribe('send to Claude (live Postgres)', () => {
 
   test('a send moves the row to Claude\'s queue at the served version only, naming the customer', async () => {
     const jane = await customer('Jane', 'Doe');
-    const key = `${RUN}:plan-a`;
+    const key = `accepted-schedule:${RUN}:plan-a`;
     const alert = await raise(key, 'The plan calls for 4 visits; the schedule has 5.', { customerId: jane });
     const { version } = await served(alert.id);
     expect(await inBell(alert.id)).toBe(true);
@@ -65,7 +65,7 @@ maybeDescribe('send to Claude (live Postgres)', () => {
   });
 
   test('a refresh updates the text of an open sent row and keeps it in Claude\'s queue; after Done a ring brings it back to the bell', async () => {
-    const key = `${RUN}:plan-b`;
+    const key = `accepted-schedule:${RUN}:plan-b`;
     const alert = await raise(key, 'The plan calls for 4 visits; the schedule has 5.');
     expect((await sendAdminAlertToClaude(alert.id, { version: (await served(alert.id)).version, by: 'admin-1', role: 'admin' })).status).toBe(200);
 
@@ -87,8 +87,18 @@ maybeDescribe('send to Claude (live Postgres)', () => {
     expect(await inBell(alert.id)).toBe(true);
   });
 
+  test('a customer-tied alert outside the reviewed checks is not sent (owner 2026-11-02, "A")', async () => {
+    const carla = await customer('Carla', 'Ruiz');
+    const alert = await NotificationService.notifyAdmin('service', 'Service request from Carla Ruiz', 'Please look at the side yard.', {
+      link: '/admin/customers', metadata: { run: RUN, customerId: carla },
+    });
+    expect(await sendAdminAlertToClaude(alert.id, { version: (await served(alert.id)).version, by: 'admin-1', role: 'admin' }))
+      .toEqual({ status: 422, body: { error: 'not_system_written' } });
+    expect(await inBell(alert.id)).toBe(true);
+  });
+
   test('a closed row is not sent', async () => {
-    const alert = await raise(`${RUN}:plan-c`, 'The plan calls for 4 visits; the schedule has 5.');
+    const alert = await raise(`accepted-schedule:${RUN}:plan-c`, 'The plan calls for 4 visits; the schedule has 5.');
     const { version } = await served(alert.id);
     await NotificationService.markAdminDone([alert.id], { by: 'admin-1', role: 'admin' });
     expect((await sendAdminAlertToClaude(alert.id, { version, by: 'admin-1', role: 'admin' })).status).toBe(422);
@@ -96,7 +106,7 @@ maybeDescribe('send to Claude (live Postgres)', () => {
 
   test('needs-me lists a sent row under Claude with the customer\'s name and the sent mark', async () => {
     const bob = await customer('Bob', 'Smith');
-    const alert = await raise(`${RUN}:plan-d`, 'The plan calls for 4 visits; the schedule has 5.', { customerId: bob });
+    const alert = await raise(`accepted-schedule:${RUN}:plan-d`, 'The plan calls for 4 visits; the schedule has 5.', { customerId: bob });
     await sendAdminAlertToClaude(alert.id, { version: (await served(alert.id)).version, by: 'admin-1', role: 'admin' });
 
     const listed = (await listNeedsMe({ who: 'claude', role: 'admin', customers: true })).items.find((i) => i.id === alert.id);

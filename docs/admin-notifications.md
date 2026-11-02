@@ -307,17 +307,23 @@ fails when a registry rule says `who: 'claude'` and neither list names it. On th
 launcher opens one Claude tab per `broken` queue row.
 
 **Send to Claude from the bell** (owner 2026-11-02: "for the stuff that needs to be fixed ... we need to be able to send
-that back to terminal, open a terminal session, to have Claude fix that"; scope "All but customer contact";
+that back to terminal, open a terminal session, to have Claude fix that"; scope narrowed to "A" below;
 `GATE_ALERT_SEND_TO_CLAUDE`, with `GATE_ALERT_EXPLAINER`). The bell's "What to do" panel carries a **Send to Claude**
-button on every open bell row except customer contact: the five customer-contact categories, `review` (it quotes the
-customer's review), `internal_admin_alert` (it can forward a customer's text), and a row whose own metadata or whose
-registry type's `rule` declares `contact: true` or `promise: true` (a self-booked re-service request, a reschedule
-request, an overdue call commitment), whatever its category.
-Those stay with the owner. One tap (`POST /api/admin/notifications/:id/send-to-claude`, admin only, fenced on the
+button only on an alert whose words our own code wrote (owner 2026-11-02, "A": a Claude terminal tab can change code, and
+a customer's words had reached alerts with no contact mark, such as a service request typed in the portal). Offered on:
+a system alert (`system`, `ops_digest`, `inventory`, `llm_cost`, `agents`, `token_alert`) that names no customer record;
+an alert the code marks Claude's (`who = 'claude'`, severity `broken`, or a registry rule that says who `claude`); and the
+reviewed checks on a customer's records in `CHECK_CLASSES` (`admin-alert-send-to-claude.js`, by dedupe-key class: a visit
+auto-dispatch cannot place, a recurring visit with no slot or window or map location, an accepted plan whose visits do not
+match, prepaid coverage, an unpriced series, a combined booking, a rain move, a lawn visit with no watering instruction, a
+series price guard, an unbilled visit, first-application invoices that disagree). Each class's emitter was read first; a
+new class joins only after the same read. Never offered, whatever else the row says: the customer-contact categories,
+`review`, `internal_admin_alert`, and a row whose metadata or registry rule declares `contact: true` or `promise: true`.
+Everything else stays with the owner. One tap (`POST /api/admin/notifications/:id/send-to-claude`, admin only, fenced on the
 version the bell served like Done) moves the row into Claude's queue: Activity-only, `who = 'claude'`, `claudeQueue` =
 `sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp with when, who
 sent it, the customer it is about (read from the record, `admin-alert-customer.js`), the plain-words summary the owner
-saw, and the row's own who and severity before the send. A customer-tied row can be sent: the owner chose to. While the
+saw, and the row's own who and severity before the send. A reviewed check still names its customer in the tab. While the
 row is open, a refresh of the same alert updates its text but keeps it in Claude's queue (`keepSentToClaude` in
 `admin-alert-routing.js`); a refresh that rings after it was closed brings it back to the bell without the stamp. The
 write takes the alert's dedupe lock, so a refresh in flight can never undo the send. On the owner's Mac, the
@@ -342,7 +348,7 @@ so the queue tab leaves it to its own tab.
 | Customer declaration (owner 2026-10-29, "small" E1): a registry `rule` or a composed spec may declare `contact: true` (a customer reached us) or `promise: true` (a follow-up we owe a customer): only `true`, never both, and only on a `needs-you` type for a person. A declared alert rings whatever the bell policy's later steps say (a site's explicit `bell: false` still wins), and a customer's failed invoice payment (`bill_payment_error`) rings beside `payment_failed` | `bellAllowed` in `server/services/notification-bell-policy.js` (step 1b), fed by `triggerNotification` (the type's rule; its bell write then carries `bell: true`) and `NotificationService.create` (the row's metadata); the shape is checked by `server/tests/admin-alert-catalog-contract.test.js` and `composeAdminAlert` | enforced while `GATE_CUSTOMER_ALERTS_RING` is on (dark by default) |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" (with `GATE_ALERT_EXPLAINER` on: "What to do", the original under "Show original text") | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 | The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced while `GATE_ALERT_EXPLAINER` is on (dark by default) |
-| Send to Claude (section 5): a bell row other than customer contact can be moved to Claude's queue from "What to do"; fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` names each alert's customer and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | enforced while `GATE_ALERT_SEND_TO_CLAUDE` and `GATE_ALERT_EXPLAINER` are on (dark by default); the `needs-me` CLI always names customers |
+| Send to Claude (section 5): a bell alert our own code wrote (system with no customer, marked Claude's, or a reviewed check class) can be moved to Claude's queue from "What to do"; fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` names each alert's customer and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | enforced while `GATE_ALERT_SEND_TO_CLAUDE` and `GATE_ALERT_EXPLAINER` are on (dark by default); the `needs-me` CLI always names customers |
 | Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later

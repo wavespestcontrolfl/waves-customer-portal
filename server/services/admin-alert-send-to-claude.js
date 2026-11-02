@@ -11,9 +11,13 @@
 // tab per sent row, and the tab closes the row when its fix is live. A refresh of the same alert keeps it in Claude's
 // queue while it is open (admin-alert-routing.js keepSentToClaude).
 //
-// Never offered on customer contact: a row a customer reached us through or that carries a customer's own words (texts,
-// emails, calls, voicemails, new leads, reviews, the general internal alert that can forward a text), or a contact or a
-// follow-up we owe a customer that the row or its registry type declares. Those stay with the owner. Sends nothing to anyone; the one write is the row's own metadata.
+// Only an alert whose words our own code wrote can be sent (owner 2026-11-02, "A", after Codex found customer-written
+// alerts that carry no contact mark: a service request typed in the portal). A Claude terminal tab can change code, so a
+// customer's own words must never reach it. Offered on (writtenByOurCode): a system alert with no customer record, an
+// alert the code marks Claude's (who 'claude', severity 'broken', or a registry rule that says who 'claude'), and the
+// reviewed checks on a customer's records in CHECK_CLASSES, which still name the customer. Never on customer contact or
+// a follow-up we owe a customer, whatever else the row says. Everything else stays with the owner. Sends nothing to
+// anyone; the one write is the row's own metadata.
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
@@ -38,6 +42,28 @@ function declaredContact(meta) {
   } catch { return false; }
 }
 
+// System alerts: their words come from our code and the Mac ops checks. Offered only when no customer record is named.
+const SYSTEM_CATEGORIES = new Set(['system', 'ops_digest', 'inventory', 'llm_cost', 'agents', 'token_alert']);
+// Checks on a customer's records, by dedupe-key class. Each emitter was read on 2026-11-02: its headline, why and detail
+// come from record fields (the customer's name, dates, services, prices, products), never from a note, a message or a
+// request the customer wrote. A new class joins only after the same read. The AI schedule proofreader is left out: a model
+// writes its text from visit data.
+const CHECK_CLASSES = Object.freeze([
+  'auto-dispatch-needs-person:', // auto-dispatch/needs-person-notice.js: a visit auto-dispatch cannot place
+  'recurring-dispatch:', // auto-dispatch/audit.js: a recurring visit due with no slot
+  'recurring-no-window:', // auto-dispatch/audit.js: a recurring visit with no time window
+  'auto-dispatch-missing-geo:', // auto-dispatch/audit.js: a visit with no map location
+  'accepted-schedule:', // schedule-integrity-watchdog.js: an accepted plan whose visits do not match it
+  'prepay-coverage:', // schedule-integrity-watchdog.js: prepaid coverage needs a review before billing
+  'unpriced-series:', // schedule-integrity-watchdog.js: a recurring series with no price
+  'combined-booking-check:', // combined-booking-check.js: a combined booking that did not book as accepted
+  'rain-pass:', // auto-dispatch/rain-pass.js: a visit the forecast says to move
+  'lawn-watering-no-instruction:', // service-report/lawn-watering-sms.js: a lawn visit froze no watering instruction
+  'series-price-guard:', // series-price-guards.js: a series price over the last paid price
+  'unbilled-completion:', // series-price-guards.js: a completed visit with no invoice
+  'first_application_sibling_divergence:', // first-application-sibling-split.js: first-application invoices disagree
+]);
+
 const metaOf = (value) => {
   if (typeof value === 'string') {
     try { return JSON.parse(value) || {}; } catch { return {}; }
@@ -45,7 +71,29 @@ const metaOf = (value) => {
   return value && typeof value === 'object' ? value : {};
 };
 
-// Why this row cannot be sent, or null when it can. Pure.
+// A customer record the row names by id, top level, in its payload, or as its subject.
+function namesCustomer(meta) {
+  const payload = metaOf(meta.payload);
+  const subject = meta.subject && typeof meta.subject === 'object' ? meta.subject : {};
+  return subject.type === 'customer'
+    || [meta.customerId, meta.customer_id, meta.threadId, meta.scopeCustomerId, payload.customerId, payload.customer_id,
+      payload.threadId, payload.scopeCustomerId].some((v) => v !== undefined && v !== null && String(v).trim() !== '');
+}
+
+const registryRule = (meta) => {
+  if (!meta.triggerKey) return null;
+  try { return require('./notification-triggers').TRIGGER_REGISTRY?.[meta.triggerKey]?.rule || null; } catch { return null; }
+};
+
+// The allow-list (see the header): the code marks it Claude's, or it is a system alert with no customer, or a reviewed check.
+function writtenByOurCode(row, meta) {
+  if (meta.who === 'claude' || meta.severity === 'broken' || registryRule(meta)?.who === 'claude') return true;
+  if (SYSTEM_CATEGORIES.has(row.category) && !namesCustomer(meta)) return true;
+  const key = String(meta.dedupeKey || '');
+  return CHECK_CLASSES.some((prefix) => key.startsWith(prefix));
+}
+
+// Why this row cannot be sent, or null when it can. Pure except for the registry read.
 function sendRefusal(row) {
   if (!row || String(row.id || '').startsWith('live:')) return 'not_found';
   const meta = metaOf(row.metadata);
@@ -53,7 +101,7 @@ function sendRefusal(row) {
   if (row.done_at != null) return 'done';
   // Already off the bell: sent before, routed to Claude's queue, or an Activity-only report.
   if (meta.feed === 'activity') return 'not_in_bell';
-  return null;
+  return writtenByOurCode(row, meta) ? null : 'not_system_written';
 }
 
 // GATE_ALERT_SEND_TO_CLAUDE, read at call time; a missing or throwing reader reads as off.
@@ -81,7 +129,8 @@ function sentPatch(row, { by, customer, summary, at = new Date() }) {
 }
 
 // The send for one row the admin saw at `version`: { status, body }. 404 when the row is gone or out of scope, 422 when
-// it cannot be sent (customer contact, done, already off the bell), 409 when its text changed since the bell read it.
+// it cannot be sent (customer contact, not written by our code, done, already off the bell), 409 when its text changed
+// since the bell read it.
 async function sendAdminAlertToClaude(id, { version, by, role, technicianId = null } = {}) {
   const row = await NotificationService.getAdminNotificationForExplainer(id, { role, technicianId });
   if (!row) return { status: 404, body: { error: 'not_found' } };
@@ -105,4 +154,4 @@ async function sendAdminAlertToClaude(id, { version, by, role, technicianId = nu
   return { status: 200, body: { sent: true, message: 'Sent to Claude. A terminal tab opens for it within about 10 minutes.' } };
 }
 
-module.exports = { sendAdminAlertToClaude, sendRefusal, sendToClaudeLive, sentPatch, CONTACT_CATEGORIES, CONTACT_TRIGGERS };
+module.exports = { sendAdminAlertToClaude, sendRefusal, sendToClaudeLive, sentPatch, CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES };

@@ -15,7 +15,7 @@ jest.mock('../services/admin-alert-customer', () => ({ customersForAlerts: jest.
 
 const NotificationService = require('../services/notification-service');
 const { customersForAlerts } = require('../services/admin-alert-customer');
-const { sendAdminAlertToClaude, sendRefusal, sentPatch } = require('../services/admin-alert-send-to-claude');
+const { sendAdminAlertToClaude, sendRefusal, sentPatch, CHECK_CLASSES } = require('../services/admin-alert-send-to-claude');
 const { keepSentToClaude, SENT_TO_CLAUDE_CLASS } = require('../services/admin-alert-routing');
 const { withExplainerFields } = require('../services/admin-alert-explainer');
 
@@ -84,8 +84,44 @@ describe('sendRefusal', () => {
     expect(sendRefusal(row({ metadata: { feed: 'activity', claudeQueue: SENT_TO_CLAUDE_CLASS } }))).toBe('not_in_bell');
     expect(sendRefusal({ id: 'live:overdue-invoices', category: 'billing' })).toBe('not_found');
     expect(sendRefusal(row())).toBeNull();
-    // A customer-tied fault is the owner's to send: only customer contact stays with the owner.
-    expect(sendRefusal(row({ category: 'schedule', metadata: { customerId: CUSTOMER_ID } }))).toBeNull();
+  });
+});
+
+describe('the allow-list: only alerts our own code writes (owner 2026-11-02, "A")', () => {
+  test('a service request a customer typed in the portal is not offered (Codex r3)', () => {
+    // /api/requests: category service, the customer's subject and description in body/detail, no contact mark, no trigger.
+    expect(sendRefusal(row({ category: 'service', title: 'Service request from a customer', metadata: { customerId: CUSTOMER_ID } })))
+      .toBe('not_system_written');
+    expect(sendRefusal(row({ category: 'cancellation', metadata: { customerId: CUSTOMER_ID } }))).toBe('not_system_written');
+    expect(sendRefusal(row({ category: 'alert', metadata: { customerId: CUSTOMER_ID, dedupeKey: `portal-chat-escalation:${CUSTOMER_ID}` } })))
+      .toBe('not_system_written');
+  });
+
+  test('a system alert is offered with no customer record, and not with one', () => {
+    for (const category of ['system', 'ops_digest', 'inventory', 'llm_cost', 'agents', 'token_alert']) {
+      expect([category, sendRefusal(row({ category, metadata: {} }))]).toEqual([category, null]);
+    }
+    expect(sendRefusal(row({ category: 'system', metadata: { customerId: CUSTOMER_ID } }))).toBe('not_system_written');
+    expect(sendRefusal(row({ category: 'system', metadata: { payload: { customer_id: CUSTOMER_ID } } }))).toBe('not_system_written');
+    expect(sendRefusal(row({ category: 'system', metadata: { subject: { type: 'customer', id: CUSTOMER_ID } } }))).toBe('not_system_written');
+  });
+
+  test('an alert the code marks Claude\'s is offered, customer named or not', () => {
+    const tied = { customerId: CUSTOMER_ID };
+    expect(sendRefusal(row({ category: 'schedule', metadata: { ...tied, who: 'claude' } }))).toBeNull();
+    expect(sendRefusal(row({ category: 'schedule', metadata: { ...tied, severity: 'broken' } }))).toBeNull();
+    // A registry rule that says who 'claude' (the county data check behind "the broken property ID").
+    expect(sendRefusal(row({ category: 'alert', metadata: { triggerKey: 'property_lookup_canary_failed' } }))).toBeNull();
+  });
+
+  test('each reviewed check on a customer\'s records is offered, and still refused when it is customer contact', () => {
+    for (const prefix of CHECK_CLASSES) {
+      const metadata = { customerId: CUSTOMER_ID, dedupeKey: `${prefix}00000000-0000-4000-8000-0000000000d1` };
+      expect([prefix, sendRefusal(row({ category: 'schedule', metadata }))]).toEqual([prefix, null]);
+    }
+    expect(sendRefusal(row({ category: 'inbound_sms', metadata: { dedupeKey: 'rain-pass:x' } }))).toBe('customer_contact');
+    expect(sendRefusal(row({ category: 'schedule', metadata: { customerId: CUSTOMER_ID, dedupeKey: 'auto-dispatch-proofreader:x' } })))
+      .toBe('not_system_written');
   });
 });
 
