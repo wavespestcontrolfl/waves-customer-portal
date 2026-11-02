@@ -216,6 +216,7 @@ function budgetChangesSection(budgetLog) {
 }
 
 const isExcludedTerm = (t) => EXCLUDED_STATUSES.has(String(t.status || '').toLowerCase());
+const excludedKey = (campaignId, text) => `${campaignId}|${text}`;
 
 function searchTermsSection(searchTerms, available = true) {
   // No row refreshed within the freshness window means the sync is down or
@@ -500,12 +501,15 @@ class CampaignAdvisor {
   }
 
   // What add_negative validation needs: the memory table plus the search terms
-  // Google already excludes (normalized).
+  // Google already excludes, per campaign (an exclusion in one campaign says
+  // nothing about another), as "campaign id|normalized term".
   negativeContext(inputs) {
     const negatives = inputs.negatives || { ok: false, rows: [] };
     const excludedTerms = new Set(
       (inputs.searchTerms || []).filter(isExcludedTerm)
-        .map((t) => normalizeNegative(t.search_term)).filter(Boolean),
+        .map((t) => [t.campaign_id, normalizeNegative(t.search_term)])
+        .filter(([campaignId, text]) => campaignId != null && text)
+        .map(([campaignId, text]) => excludedKey(campaignId, text)),
     );
     return { ok: Boolean(negatives.ok), rows: negatives.rows || [], excludedTerms };
   }
@@ -527,7 +531,7 @@ class CampaignAdvisor {
     const runnable = campaign && campaign.platform === 'google_ads' && campaign.platform_campaign_id
       && (!named || String(campaign.campaign_name || '').toLowerCase() === named);
     if (!value || !runnable || !negatives || !negatives.ok || protectedReason(value) || competitorName(value)
-      || negatives.excludedTerms?.has(value)
+      || negatives.excludedTerms?.has(excludedKey(campaign.id, value))
       || negatives.rows.some((r) => normalizeNegative(r.text) === value && String(r.campaign_id) === String(campaign.id))) {
       delete rec.apply_value;
       return true;

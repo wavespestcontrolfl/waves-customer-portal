@@ -236,6 +236,19 @@ describe('add_negative validation after the model answers', () => {
     expect(rec.apply_value).toBeUndefined();
   });
 
+  test('a term excluded in one campaign is still a candidate for another', async () => {
+    const terms = [
+      term('Squirrel Removal', { status: 'excluded', campaign_id: mockOther.id }),
+      term('squirrel removal', { status: 'none' }),
+    ];
+    const [forThis, forOther] = await run([
+      negRec('squirrel removal'),
+      negRec('squirrel removal', { campaign: mockOther.campaign_name, campaign_id: mockOther.id }),
+    ], { terms });
+    expect(forThis.apply_value).toBe('squirrel removal');
+    expect(forOther.apply_value).toBeUndefined();
+  });
+
   test('a failed table read recommends no negatives that run', async () => {
     const [rec] = await run([negRec('squirrel')], { error: new Error('connection lost') });
     expect(rec.apply_value).toBeUndefined();
