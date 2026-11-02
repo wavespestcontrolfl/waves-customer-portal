@@ -14,7 +14,12 @@
  *     a /call-status fallback row is adopted, a row any other source owns is
  *     refused). That source keeps the call out of every customer reader
  *     (relay-protocol.js whereNotSandboxCall / isInternalCallSource);
- *   - its billed minutes are reserved (tech-voice-usage.js).
+ *   - its billed minutes are reserved (tech-voice-usage.js), in the SAME
+ *     transaction as the row, still under the CallSid lock. /call-status
+ *     writes the final status under that lock and settles the minutes only
+ *     after its write commits, so either it settles this reservation or this
+ *     transaction sees the final status first (the caller hung up during
+ *     admission) and reserves nothing.
  */
 const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -24,6 +29,7 @@ const { usableCell } = require('./tech-line');
 const { applyAssignable } = require('./technician-eligibility');
 const { TECH_VOICE_SOURCE } = require('./voice-agent/relay-protocol');
 const { reserveTechVoiceCall } = require('./tech-voice-usage');
+const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 
 // The technician whose own cell placed the call, or null. A cell held by two
 // technician rows is ambiguous and admits nobody.
@@ -35,33 +41,33 @@ async function technicianForCell(conn, from) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-// The call's own call_log row, or false when another source owns the CallSid.
-async function stampTechVoiceCallLog(conn, { callSid, from, to, callStatus, technicianId, stirVerstat }) {
+// The call's own call_log row, written in the caller's transaction under the
+// CallSid lock. Returns null, or the refusal: another source owns the CallSid,
+// or the row already carries a final status (the call ended during admission;
+// the row is still marked internal).
+async function stampTechVoiceCallLog(trx, { callSid, from, to, callStatus, technicianId, stirVerstat }) {
   const meta = { tech_voice: true, technician_id: technicianId, stir_verstat: stirVerstat || null };
-  return conn.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [callSid]);
-    const existing = await trx('call_log').where({ twilio_call_sid: callSid }).first('id', 'source');
-    if (!existing) {
-      await trx('call_log').insert({
-        direction: 'inbound',
-        from_phone: toE164(from) || null,
-        to_phone: toE164(to) || null,
-        twilio_call_sid: callSid,
-        status: callStatus || 'ringing',
-        source: TECH_VOICE_SOURCE,
-        metadata: JSON.stringify(meta),
-      });
-      return true;
-    }
-    if (existing.source != null && existing.source !== TECH_VOICE_SOURCE) return false;
-    await trx('call_log').where({ id: existing.id }).update({
+  const existing = await trx('call_log').where({ twilio_call_sid: callSid }).first('id', 'source', 'status');
+  if (!existing) {
+    await trx('call_log').insert({
+      direction: 'inbound',
+      from_phone: toE164(from) || null,
+      to_phone: toE164(to) || null,
+      twilio_call_sid: callSid,
+      status: callStatus || 'ringing',
       source: TECH_VOICE_SOURCE,
-      customer_id: null,
-      metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(meta)]),
-      updated_at: new Date(),
+      metadata: JSON.stringify(meta),
     });
-    return true;
+    return null;
+  }
+  if (existing.source != null && existing.source !== TECH_VOICE_SOURCE) return 'call_sid_owned_elsewhere';
+  await trx('call_log').where({ id: existing.id }).update({
+    source: TECH_VOICE_SOURCE,
+    customer_id: null,
+    metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(meta)]),
+    updated_at: new Date(),
   });
+  return TERMINAL_CALL_STATUSES.has(existing.status) ? 'call_ended' : null;
 }
 
 /**
@@ -73,13 +79,15 @@ async function admitTechVoiceCall(conn, { callSid, from, to, callStatus, stirVer
   if (!callSid) return { ok: false, reason: 'no_call_sid' };
   const tech = await technicianForCell(conn, from);
   if (!tech) return { ok: false, reason: 'unknown_caller' };
-  if (!(await stampTechVoiceCallLog(conn, { callSid, from, to, callStatus, technicianId: tech.id, stirVerstat }))) {
-    return { ok: false, reason: 'call_sid_owned_elsewhere' };
-  }
-  const reserved = await reserveTechVoiceCall(conn, { callSid, technicianId: tech.id, now });
-  if (!reserved.ok) {
-    logger.info(`[tech-voice] technician ${tech.id} refused: ${reserved.reason}`);
-    return { ok: false, reason: reserved.reason };
+  const admitted = await conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [callSid]);
+    const refused = await stampTechVoiceCallLog(trx, { callSid, from, to, callStatus, technicianId: tech.id, stirVerstat });
+    if (refused) return { ok: false, reason: refused };
+    return reserveTechVoiceCall(trx, { callSid, technicianId: tech.id, now });
+  });
+  if (!admitted.ok) {
+    logger.info(`[tech-voice] technician ${tech.id} refused: ${admitted.reason}`);
+    return { ok: false, reason: admitted.reason };
   }
   return { ok: true, technicianId: tech.id };
 }

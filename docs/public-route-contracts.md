@@ -7314,9 +7314,13 @@ An admitted call first gets its own `call_log` row (`direction` inbound,
 `source` 'tech_voice', no customer link; metadata `tech_voice`,
 `technician_id`, `stir_verstat`) under the same per-CallSid advisory lock
 `/voice` and `/call-status` take — a generic `/call-status` fallback row
-(`source` NULL) is adopted and its customer link cleared — then a
-`tech_voice_usage` reservation of 3 minutes, idempotent per CallSid (a
-Twilio retry adds nothing). The response is a short `<Say>` notice and
+(`source` NULL) is adopted and its customer link cleared — then, in the
+same transaction and still under that lock, a `tech_voice_usage`
+reservation of 3 minutes, idempotent per CallSid (a Twilio retry adds
+nothing). `/call-status` writes the final status under the same lock and
+settles only after that write commits, so a call whose final status is
+already on its row (the caller hung up during admission) is rejected and
+reserves nothing. The response is a short `<Say>` notice and
 `<Hangup/>`: no `<Dial>`, `<Record>`, `<Gather>` or relay, and nothing is
 sent to anyone. `/voice` rejects the number before any customer logic if
 its voice URL is ever pointed there. On `/call-status`, a call to the number

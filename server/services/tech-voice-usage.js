@@ -9,7 +9,9 @@
  *     another call of this technician is live (one call at a time), and refuse
  *     when RESERVE_MINUTES more would pass the daily or monthly limit (ET day
  *     and month). Otherwise insert the reservation. Idempotent on the CallSid
- *     (Twilio retries the voice webhook).
+ *     (Twilio retries the voice webhook). Admission calls it inside its own
+ *     CallSid-locked transaction (tech-voice-line.js), so here it is a
+ *     savepoint and both locks hold until that transaction commits.
  *   - settleTechVoiceCall   on the call's final status callback: a completed
  *     call keeps its billed minutes (ceil of the duration, at least one) and
  *     gives back the rest of the reservation; a call that never connected

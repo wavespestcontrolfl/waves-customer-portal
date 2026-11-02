@@ -43,6 +43,7 @@ function fakeConn({ techs = [], existing } = {}) {
   trx.raw = jest.fn(async (sql, bindings) => { writes.locks.push([sql, bindings]); return {}; });
   conn.transaction = jest.fn(async (fn) => fn(trx));
   conn.writes = writes;
+  conn.trx = trx;
   return conn;
 }
 const TECH = { id: 'tech-1', name: 'Pat Sample', phone: '(941) 555-0101' };
@@ -73,7 +74,8 @@ describe('admitTechVoiceCall', () => {
     expect(row).toMatchObject({ direction: 'inbound', from_phone: CELL, to_phone: LINE, twilio_call_sid: 'CA-1', source: TECH_VOICE_SOURCE });
     // The carrier verdict is logged, never required.
     expect(JSON.parse(row.metadata)).toEqual({ tech_voice: true, technician_id: 'tech-1', stir_verstat: 'No-TN-Validation' });
-    expect(reserveTechVoiceCall).toHaveBeenCalledWith(conn, { callSid: 'CA-1', technicianId: 'tech-1', now: NOW });
+    // The reservation runs in the same CallSid-locked transaction as the row.
+    expect(reserveTechVoiceCall).toHaveBeenCalledWith(conn.trx, { callSid: 'CA-1', technicianId: 'tech-1', now: NOW });
   });
 
   test('an unknown caller, a cell two technicians share, or a Waves line on a technician row admits nobody', async () => {
@@ -93,6 +95,16 @@ describe('admitTechVoiceCall', () => {
     conn = fakeConn({ techs: [TECH], existing: { id: 6, source: 'collections_voice' } });
     expect(await admitTechVoiceCall(conn, args())).toEqual({ ok: false, reason: 'call_sid_owned_elsewhere' });
     expect(conn.writes.update).toHaveLength(0);
+    expect(reserveTechVoiceCall).not.toHaveBeenCalled();
+  });
+
+  test('a final status already on the row (the caller hung up during admission) reserves nothing', async () => {
+    for (const existing of [{ id: 8, source: TECH_VOICE_SOURCE, status: 'canceled' }, { id: 9, source: null, status: 'completed' }]) {
+      const conn = fakeConn({ techs: [TECH], existing });
+      expect(await admitTechVoiceCall(conn, args())).toEqual({ ok: false, reason: 'call_ended' });
+      // The row is still marked internal; only the reservation is skipped.
+      expect(conn.writes.update[0]).toMatchObject({ source: TECH_VOICE_SOURCE, customer_id: null });
+    }
     expect(reserveTechVoiceCall).not.toHaveBeenCalled();
   });
 
