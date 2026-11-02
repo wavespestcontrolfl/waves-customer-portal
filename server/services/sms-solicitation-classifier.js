@@ -58,7 +58,11 @@ async function classifySolicitation({ body, mode }) {
     return { solicitation: true, confidence: 1, method: 'regex', version: CLASSIFIER_VERSION };
   }
   try {
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    // The webhook waits on this read with a 3.5 s budget, so it uses the
+    // interactive policy (Luna). Sol, the fastStructured model since 10-25,
+    // timed out on 2 of 9 production screens; Luna answered the 10-24 replay
+    // of this screen at p50 0.9 s, max 2.2 s.
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructuredInteractive, {
       laneId: 'sms_solicitation',
       system: `A text message arrived on a business phone line of Waves Pest Control, a pest control and lawn care company. The sender is not a known customer.
 

@@ -1,6 +1,6 @@
 const mockDispatch = jest.fn();
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args) }));
-jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'fast-structured-policy' } }));
+jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'fast-structured-policy', fastStructuredInteractive: 'fast-structured-interactive-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
 
 const { screenInboundSms, classifierMode } = require('../services/sms-solicitation-classifier');
@@ -83,7 +83,9 @@ test.each([
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
   expect(await screenInboundSms({ body })).toMatchObject({ solicitation: false, method: 'model', mode: 'shadow' });
   expect(mockDispatch).toHaveBeenCalledTimes(1);
-  expect(mockDispatch).toHaveBeenCalledWith('fast-structured-policy', expect.objectContaining({
+  // The webhook waits on this read (3.5 s budget), so it must use the
+  // interactive policy, not fastStructured.
+  expect(mockDispatch).toHaveBeenCalledWith('fast-structured-interactive-policy', expect.objectContaining({
     laneId: 'sms_solicitation', jsonMode: true, timeoutMs: 3500,
   }));
 });
