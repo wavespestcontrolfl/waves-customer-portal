@@ -126,16 +126,24 @@ router.post('/', async (req, res, next) => {
       });
     } catch {}
 
-    // Send admin SMS notification
+    // A quiet owner alert (services/owner-alerts.js; Activity and the needs-me list). It was a text to the
+    // owner's phone that reached nobody since about 2026-09-01.
     try {
-      const TwilioService = require('../services/twilio');
-      const ADMIN_PHONE = process.env.ADAM_PHONE || '+19415993489';
+      const { fitAction } = require('../services/admin-alert-names');
       const customerLabel = customer ? `${customer.first_name} ${customer.last_name}` : neighborLabel(gpsSetup.prospect);
-      await TwilioService.sendSMS(ADMIN_PHONE,
-        `🔔 Field Lead: ${req.technician.name} flagged ${leadServiceType} opportunity at ${customerLabel}.${notes ? '\nNotes: ' + notes : ''}${urgency === 'high' ? '\n⚡ URGENT' : ''}`,
-        { messageType: 'internal_alert' }
-      );
-    } catch {}
+      await require('../services/owner-alerts').recordOwnerAlert('field-lead', {
+        action: fitAction('Leads', customerLabel, [(who) => `follow up on a field lead at ${who}`, (who) => `follow up with ${who}`]),
+        why: `${req.technician.name} flagged ${String(leadServiceType).replace(/_/g, ' ')}${urgency === 'high' ? ' as urgent' : ''} on the route.`,
+        link: `/admin/leads?lead=${encodeURIComponent(lead.id)}`,
+        subject: { type: 'lead', id: String(lead.id) },
+        text: `Field lead: ${req.technician.name} flagged ${leadServiceType} opportunity at ${customerLabel}.${notes ? ` Notes: ${notes}` : ''}${urgency === 'high' ? ' Urgent.' : ''}`,
+        dedupeKey: `owner-alert:field-lead:${lead.id}`,
+        itemKeys: [String(lead.id)],
+        ...(customer?.id ? { metadata: { customerId: customer.id } } : {}),
+      });
+    } catch (err) {
+      require('../services/logger').error(`[tech-field-lead] owner alert failed: ${err.message}`);
+    }
 
     res.json({ success: true, lead: { id: lead.id, status: lead.status } });
   } catch (err) { next(err); }
