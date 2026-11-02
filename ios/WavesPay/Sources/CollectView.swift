@@ -53,8 +53,15 @@ struct CollectView: View {
                             Text("Credit card: \(currency(creditTotal))")
                                 .font(.system(size: 17, weight: .semibold))
                                 .foregroundStyle(Brand.ink)
+                            // Visa Core Rules 5.5.1.9 (face-to-face): the point-of-transaction notice
+                            // states the rate, that Waves adds the fee to credit only, and that it is
+                            // not more than our cost; 16-point minimum. Same words as the web pay
+                            // pages (client/src/lib/cardSurcharge.js CARD_SURCHARGE_NOTICE).
                             Text("includes \(currency(surcharge)) (2.9%) card surcharge · debit cards pay \(dollarAmount), no surcharge")
-                                .font(.system(size: 15))
+                                .font(.system(size: 16))
+                                .foregroundStyle(Brand.body)
+                            Text("Waves adds this fee to credit card payments only. It is not more than what Waves pays to accept credit cards.")
+                                .font(.system(size: 16))
                                 .foregroundStyle(Brand.body)
                         }
                         .multilineTextAlignment(.center)
