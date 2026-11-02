@@ -48,6 +48,9 @@ function toFiniteNumber(v) {
 // setMode). Matches ad_campaigns.platform's documented set.
 const CAMPAIGN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
 const CAMPAIGN_STATUSES = ['active', 'paused', 'removed'];
+// Campaign metadata keys only the hold routes write: the owner's hold and its
+// release record. Generic campaign writes refuse them and keep the stored ones.
+const HOLD_METADATA_KEYS = ['budget_hold', 'budget_hold_cleared'];
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
 // Identity — settable at creation, never repointed on update.
@@ -98,10 +101,13 @@ function sanitizeCampaignWrite(body, isUpdate) {
   if (out.status !== undefined && !CAMPAIGN_STATUSES.includes(out.status)) {
     return { ok: false, error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` };
   }
-  // metadata.budget_hold is the owner's budget switch. Only the hold routes write
-  // it: they push the held budget and check the end date.
-  if (out.metadata != null && Object.prototype.hasOwnProperty.call(metadataObject(out.metadata), 'budget_hold')) {
-    return { ok: false, error: "budget_hold can't be set here — use the hold switch (POST /campaigns/:id/hold)." };
+  // metadata.budget_hold is the owner's budget switch, and budget_hold_cleared is
+  // its release record. Only the hold routes write them: they push the held
+  // budget, check the end date and stamp the release.
+  if (out.metadata != null) {
+    const meta = metadataObject(out.metadata);
+    const key = HOLD_METADATA_KEYS.find((k) => Object.prototype.hasOwnProperty.call(meta, k));
+    if (key) return { ok: false, error: `${key} can't be set here — use the hold switch (POST/DELETE /campaigns/:id/hold).` };
   }
 
   if (out.monthly_budget !== undefined && out.monthly_budget !== null) {
@@ -230,14 +236,15 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
         .update({ ...clean.value, updated_at: new Date() })
         .returning('*');
     } else {
-      // A metadata replacement keeps the owner's hold: read it under the row lock
-      // so a hold saved meanwhile is not erased.
+      // A metadata replacement keeps the owner's hold and its release record:
+      // read them under the row lock so a hold saved meanwhile is not erased.
       campaign = await db.transaction(async (trx) => {
         const locked = await trx('ad_campaigns').where({ id: req.params.id }).forUpdate().first();
         if (!locked) return null;
         const patch = { ...clean.value, updated_at: new Date() };
-        const hold = metadataObject(locked.metadata).budget_hold;
-        if (hold !== undefined) patch.metadata = JSON.stringify({ ...metadataObject(patch.metadata), budget_hold: hold });
+        const lockedMeta = metadataObject(locked.metadata);
+        const kept = Object.fromEntries(HOLD_METADATA_KEYS.filter((k) => lockedMeta[k] !== undefined).map((k) => [k, lockedMeta[k]]));
+        if (Object.keys(kept).length) patch.metadata = JSON.stringify({ ...metadataObject(patch.metadata), ...kept });
         const [row] = await trx('ad_campaigns').where({ id: req.params.id }).update(patch).returning('*');
         return row;
       });
@@ -302,10 +309,14 @@ router.post('/campaigns/:id/pause', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: `Pause isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
     }
 
-    // Pause on Google Ads if linked
+    // Pause on Google Ads if linked. A linked campaign changes locally ONLY when
+    // Google confirms (a null result is a failed call); otherwise nothing changes.
     let googleAdsResult = null;
     if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
       googleAdsResult = await getGoogleAds().pauseCampaign(campaign.platform_campaign_id);
+      if (!googleAdsResult) {
+        return res.status(502).json({ error: 'Google Ads did not confirm the pause. Nothing changed.' });
+      }
     }
 
     // Update local DB
@@ -327,10 +338,13 @@ router.post('/campaigns/:id/enable', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: `Enable isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
     }
 
-    // Enable on Google Ads if linked
+    // Enable on Google Ads if linked. Same rule as pause: no confirmation, no change.
     let googleAdsResult = null;
     if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
       googleAdsResult = await getGoogleAds().enableCampaign(campaign.platform_campaign_id);
+      if (!googleAdsResult) {
+        return res.status(502).json({ error: 'Google Ads did not confirm the restart. Nothing changed.' });
+      }
     }
 
     // Update local DB
@@ -516,10 +530,18 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
 router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   try {
     if (!requireGapRule(res)) return undefined;
+    // When a hold existed, the same metadata write leaves a release record
+    // (budget_hold_cleared) so "who lifted it and when" survives. No ad_budget_log
+    // row: a no-change row would trip assertNoChangeSince and the advisor's
+    // recent-change checks. With no hold there is nothing to record.
+    const clearedAt = new Date().toISOString();
+    const clearedBy = req.technicianId || null;
     const updated = UUID_RE.test(req.params.id)
       ? await updateCampaignMetadata(req.params.id, (meta) => {
-        const { budget_hold: _removed, ...rest } = meta;
-        return rest;
+        const { budget_hold: removed, ...rest } = meta;
+        if (!removed) return rest;
+        // Replaces any older budget_hold_cleared.
+        return { ...rest, budget_hold_cleared: { at: clearedAt, by: clearedBy, mode: removed.mode || null, until: removed.until || null } };
       })
       : null;
     if (!updated) return res.status(404).json({ error: 'Campaign not found' });

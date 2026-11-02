@@ -30,6 +30,15 @@ const MAX_DAILY_BUDGET = 99999999.99;
 // otherwise-successful change. Bound it up front so the audit insert can't fail
 // on length. Cron-generated reasons are short by construction.
 const MAX_REASON_LEN = 255;
+
+// Physical stops per day for the gap window (see getGapWindow): a visit_id group
+// is one stop; with no visit_id, the same customer + same window_start (time,
+// NULL for a windowless placeholder) is one stop. visit_id is uuid and
+// window_start is time, so both are cast to text.
+const GAP_STOPS_SQL = `COUNT(DISTINCT CASE
+  WHEN visit_id IS NOT NULL THEN 'v:' || visit_id::text
+  ELSE 'c:' || customer_id::text || ':' || COALESCE(window_start::text, '')
+END) AS stops`;
 // Under the caller's campaign row lock: every ad_budget_log writer holds the
 // same lock, so a change logged after this check can't slip in before the push.
 async function assertNoChangeSince(trx, campaign, since) {
@@ -427,19 +436,22 @@ class BudgetManager {
     }
 
     // Record what the gap rule decided (live) or would have decided (shadow).
-    // A recording problem never touches the budgets the loop already settled.
+    // A recording problem never touches the budgets the loop already settled; it
+    // sets summary.recordFailed (only on failure) so the cron can report it.
     if (gapMode === 'shadow') {
       try {
         const shadow = await this.evaluateGapRule(now, targets);
         logger.info(`[ads-gap-rule shadow] open ${shadow.total_open} in ${shadow.window_start}..${shadow.window_end} -> ${shadow.decision}`);
         await this.recordGapRun('shadow', now, shadow, gapCampaigns);
       } catch (err) {
+        summary.recordFailed = true;
         logger.error(`[ads-gap-rule shadow] could not record the decision: ${err.message}`);
       }
     } else if (gapMode === 'live') {
       try {
         await this.recordGapRun('live', now, gap, gapCampaigns);
       } catch (err) {
+        summary.recordFailed = true;
         logger.error(`[ads-gap-rule live] could not record the decision: ${err.message}`);
       }
     }
@@ -449,9 +461,23 @@ class BudgetManager {
 
   /**
    * Gap-fill window: the next window_days ET dates, starting TOMORROW. Per
-   * day, stops = distinct customers on a live route stop (one grouped query
-   * for the whole window — the cron runs every 2 hours), limit = technicians
-   * who work that date × the weekday / Saturday / Sunday limit.
+   * day, stops = PHYSICAL stops on a live route (one grouped query for the
+   * whole window — the cron runs every 2 hours), limit = technicians who work
+   * that date × the weekday / Saturday / Sunday limit.
+   *
+   * Physical stops are counted the way the dispatcher counts them
+   * (auto-dispatch/route-model.js groupUnit / physicalStops): a visit_id group
+   * (a combo visit) is ONE stop; a legacy null-visit_id co-visit (same customer,
+   * same promised window) is ONE stop; one customer with two different windows
+   * is TWO stops. Counting distinct customers undercounted that last case and
+   * overstated room.
+   *
+   * One deliberate difference: the dispatcher leaves windowless placeholders
+   * (window_start NULL, a due-date recurring child not yet placed) out of route
+   * scoring (candidate-slots.js loadDayStopRows). Ads KEEPS them. They are work
+   * due that week, and leaving them out would overstate open room and spend
+   * money on leads the crew cannot take. A customer's windowless rows on one day
+   * count as one stop.
    */
   async getGapWindow(now, settings) {
     const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -467,7 +493,7 @@ class BudgetManager {
       })
       .groupBy('scheduled_date')
       .select(db.raw('scheduled_date::text AS day'))
-      .countDistinct('customer_id as stops');
+      .select(db.raw(GAP_STOPS_SQL));
     const stopsByDay = new Map(rows.map((r) => [String(r.day).slice(0, 10), parseInt(r.stops, 10) || 0]));
 
     const days = [];
