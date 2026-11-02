@@ -50,6 +50,8 @@ import { isNativeApp, nativePlatform } from '../native/platform';
 import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
+import { maybeAskForAppRating } from '../native/appRating';
+import { useBiometricLock } from '../components/BiometricGate';
 import { useGlassSurface } from '../glass/glass-engine';
 import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
 import useSheetViewport from '../hooks/useSheetViewport';
@@ -17281,6 +17283,10 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   );
 }
 
+// Store rating pop-up (GATE_APP_RATING_PROMPT): how long the home tab must stay
+// on screen, unlocked and with no sheet open, before the app asks.
+const APP_RATING_ASK_DELAY_MS = 8000;
+
 export default function PortalPage() {
   const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
@@ -17487,6 +17493,24 @@ export default function PortalPage() {
   const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount && !contactSession);
   const [showPhotoId, setShowPhotoId] = useState(false);
   const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
+  // Store rating pop-up (GATE_APP_RATING_PROMPT, owner 2026-11-02 "do the rating
+  // for everyone"): the native app asks from the home tab once it has been on
+  // screen for a while, after Face ID, so the card never lands on a task.
+  // maybeAskForAppRating also refuses while any sheet or dialog is open (its
+  // page-wide look covers sheets a tab opens itself) and keeps the once-a-day
+  // phone check; the server decides (finished visit, 120-day spacing) and the
+  // store decides last.
+  const biometricLocked = useBiometricLock();
+  const appRatingQuiet = activeTab === 'dashboard' && !cancelledAccount && !contactSession && !biometricLocked;
+  useEffect(() => {
+    if (!appRatingQuiet || !isNativeApp()) return undefined;
+    // Cleanup runs the moment the screen stops being quiet, so a claim still
+    // in flight then never reaches the store.
+    let current = true;
+    const stillQuiet = () => current;
+    const timer = setTimeout(() => { void maybeAskForAppRating({ stillQuiet }); }, APP_RATING_ASK_DELAY_MS);
+    return () => { current = false; clearTimeout(timer); };
+  }, [appRatingQuiet]);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount && !contactSession;
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
   // property/account switch (sessionEpoch — another tab, or this one) does

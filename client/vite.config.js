@@ -21,6 +21,7 @@ const capShimAlias = capShim ? {
   '@capacitor/push-notifications': shim('push.js'),
   '@capacitor/share': shim('share.js'),
   '@aparajita/capacitor-biometric-auth': shim('biometric.js'),
+  '@capacitor-community/in-app-review': shim('in-app-review.js'),
 } : {};
 
 export default defineConfig({

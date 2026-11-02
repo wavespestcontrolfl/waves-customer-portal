@@ -823,6 +823,8 @@ app.use('/api/client-errors', require('./routes/client-errors'));
 app.use('/api/push', require('./routes/push'));
 // Customer activity beacons (GATE_PORTAL_ACTIVITY, dark) — authenticated, writes analytics rows only.
 app.use('/api/customer/activity', require('./routes/customer-activity'));
+// Store rating pop-up claim for the customer app (GATE_APP_RATING_PROMPT, dark) — authenticated.
+app.use('/api/customer/app-rating', require('./routes/customer-app-rating'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
