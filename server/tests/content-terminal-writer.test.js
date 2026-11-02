@@ -396,36 +396,55 @@ describe('a needs_owner hold asks the owner once, and the item closes when the r
     }
   });
 
-  describe('closeAnsweredHoldItems', () => {
+  describe('syncHoldQuestions (each batch end)', () => {
     const saved = { ...process.env };
     beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; });
     afterEach(() => { process.env = { ...saved }; });
-    const latest = (rows) => ({ raw: jest.fn(async () => ({ rows })) });
+    const waitingRow = (id, question = 'Remove the competitor names from the page text?') => ({
+      opportunity_id: id, outcome: tw.HOLD_OUTCOME, skip_reason: 'terminal_hold:needs_owner', action_type: 'refresh_existing_page',
+      query: 'in wall pest control system', draft_payload: { hold: hold(question) },
+    });
+    const conn = (rows) => ({ raw: jest.fn(async () => ({ rows })) });
 
-    test('an item stays while its row is still parked on the owner\'s question; anything else closes it', async () => {
-      const e = episodes([`content-terminal-hold:${OPP}`, `content-terminal-hold:${OTHER}`, 'content-terminal-hold:not-a-row']);
-      const conn = latest([
-        { opportunity_id: OPP, outcome: tw.HOLD_OUTCOME, skip_reason: 'terminal_hold:needs_owner', status: 'pending' },
-        // requeued and briefed again: its latest run waits for a draft now
-        { opportunity_id: OTHER, outcome: tw.AWAITING_OUTCOME, skip_reason: tw.MISSING, status: 'pending' },
-      ]);
-      await tw.closeAnsweredHoldItems({ deps: { episodes: e, db: conn } });
-      expect(conn.raw.mock.calls[0][1]).toEqual([[OPP, OTHER], 'deferred_publish_cap']);
-      expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OTHER}`, 'content-terminal-hold:not-a-row']);
-      expect(e.closeAdminAlertKeys.mock.calls[0][2]).toBe('owner_decided');
+    test('a row that waits on the owner and has no item gets one (a failed raise is made again at the next batch end)', async () => {
+      const e = episodes([]);
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db: conn([waitingRow(OPP)]) } });
+      expect(out).toEqual({ raised: 1, closed: 0 });
+      const [, , why, opts] = e.raiseAdminAlertWithReopen.mock.calls[0];
+      expect(why).toBe('Remove the competitor names from the page text?');
+      expect(opts.dedupeKey).toBe(`content-terminal-hold:${OPP}`);
+      expect(opts.detail).toContain('Post: refresh existing page: in wall pest control system');
     });
 
-    test('a row that left the queue closes its item; with the gate off every item closes, with no read', async () => {
-      const e = episodes([`content-terminal-hold:${OPP}`]);
-      await tw.closeAnsweredHoldItems({ deps: { episodes: e, db: latest([{ opportunity_id: OPP, outcome: tw.HOLD_OUTCOME, skip_reason: 'terminal_hold:needs_owner', status: 'skipped' }]) } });
-      expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OPP}`]);
+    test('an item already open (read, Done by a person, or not) is not raised again; an answered row\'s item closes', async () => {
+      const e = episodes([`content-terminal-hold:${OPP}`, `content-terminal-hold:${OTHER}`]);
+      const db = conn([waitingRow(OPP)]);
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db } });
+      expect(out).toEqual({ raised: 0, closed: 1 });
+      expect(e.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+      expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OTHER}`]);
+      expect(e.closeAdminAlertKeys.mock.calls[0][2]).toBe('owner_decided');
+      expect(db.raw.mock.calls[0][1]).toEqual([31, 'deferred_publish_cap', tw.HOLD_OUTCOME, 'terminal_hold:needs_owner']);
+    });
 
+    test('one failed raise never stops the others; a stored hold with no question raises nothing', async () => {
+      const e = episodes([]);
+      e.raiseAdminAlertWithReopen.mockRejectedValueOnce(new Error('db down'));
+      const noQuestion = { ...waitingRow(OTHER), draft_payload: JSON.stringify({ hold: { reason: 'needs_owner', detail: 'x' } }) };
+      const THIRD = '00000000-0000-4000-8000-0000000000f3';
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db: conn([waitingRow(OPP), noQuestion, waitingRow(THIRD)]) } });
+      expect(out).toEqual({ raised: 1, closed: 0 });
+      expect(e.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).toEqual([`content-terminal-hold:${OPP}`, `content-terminal-hold:${THIRD}`]);
+    });
+
+    test('gate off: every item closes, none is raised, nothing is read', async () => {
       process.env.GATE_CONTENT_WRITER_TERMINAL = 'false';
-      const off = episodes([`content-terminal-hold:${OPP}`]);
-      const conn = latest([]);
-      await tw.closeAnsweredHoldItems({ deps: { episodes: off, db: conn } });
-      expect(conn.raw).not.toHaveBeenCalled();
-      expect(off.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OPP}`]);
+      const e = episodes([`content-terminal-hold:${OPP}`]);
+      const db = conn([waitingRow(OPP)]);
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db } });
+      expect(out).toEqual({ raised: 0, closed: 1 });
+      expect(db.raw).not.toHaveBeenCalled();
+      expect(e.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     });
   });
 });

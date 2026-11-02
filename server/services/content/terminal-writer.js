@@ -40,7 +40,8 @@
  *     { opportunity_id, brief_id, hold: { reason, detail, question? } }
  * The run that reads it records `deferred_terminal_hold` and keeps the row out
  * of the queue for HOLD_MS (the next claim after that composes a new brief);
- * a `needs_owner` hold also asks the owner its question in one admin item.
+ * a `needs_owner` hold also asks the owner its question in one admin item
+ * (syncHoldQuestions, at the end of each batch).
  *
  * The branch lives in the Astro repo itself (ghFetch reads owner/repo from
  * the environment), so only an account with push access can supply a draft.
@@ -411,15 +412,13 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
 }
 
 const holdSkipReason = (reason) => `terminal_hold:${reason}`;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * A needs_owner hold asks the owner its question (owner 2026-11-02: the bell
  * rings when a post needs the owner's decision). One admin item per held row,
- * `content-terminal-hold:<opportunity id>`, raised by the run that reads the
- * hold. It rings once: a raise onto the standing item is a silent dedupe, and
- * a hold that comes back after the item closed rings again.
- * closeAnsweredHoldItems clears it.
+ * `content-terminal-hold:<opportunity id>`. It rings once: a raise onto the
+ * standing item is a silent dedupe, and a hold that comes back after the item
+ * closed rings again. syncHoldQuestions decides when to raise and close.
  */
 async function raiseHoldQuestion({ opportunityId, row = {}, hold, deps = {} }) {
   const episodes = deps.episodes || require('../admin-alert-episodes');
@@ -454,38 +453,69 @@ async function raiseHoldQuestion({ opportunityId, row = {}, hold, deps = {} }) {
   });
 }
 
+// Pending rows whose latest run (pre-draft cap deferrals aside) is a
+// needs_owner hold still inside its hold window, with the hold it stored.
+async function rowsWaitingOnOwner(conn) {
+  const { rows } = await conn.raw(`
+    SELECT * FROM (
+      SELECT DISTINCT ON (r.opportunity_id)
+             r.opportunity_id::text AS opportunity_id, r.outcome, r.skip_reason, r.draft_payload, r.action_type,
+             q.query, q.page_url, q.service, q.city
+        FROM autonomous_runs r
+        JOIN opportunity_queue q ON q.id = r.opportunity_id
+       WHERE q.status = 'pending'
+         AND r.created_at >= now() - (?::int * interval '1 day')
+         AND NOT (r.outcome = ? AND r.agent_id IS NULL)
+       ORDER BY r.opportunity_id, r.created_at DESC
+    ) latest
+    WHERE outcome = ? AND skip_reason = ?`, [Math.ceil(HOLD_MS / 86400000) + 1, PRE_DRAFT_CAP_OUTCOME, HOLD_OUTCOME, holdSkipReason('needs_owner')]);
+  return rows;
+}
+
+const storedHold = (payload) => {
+  let p = payload;
+  if (typeof p === 'string') { try { p = JSON.parse(p); } catch { p = null; } }
+  const hold = isObject(p) ? p.hold : null;
+  return isObject(hold) && hold.question ? hold : null;
+};
+
 /**
- * Closes each raiseHoldQuestion item whose row no longer waits on the owner:
- * its latest run is not a needs_owner hold any more (the row was requeued,
- * briefed again or taken), or the row left the queue. With the gate off every
- * hold item closes: the terminal is out of the loop. Called after each batch
- * (settleTerminalWork). Returns the number of items closed.
+ * The owner questions of needs_owner holds, brought up to date after each
+ * batch (settleTerminalWork): an item is raised for each row that waits on
+ * the owner and has no item yet (so a raise that failed is made again at the
+ * next batch end), and each item whose row no longer waits on the owner (it
+ * was requeued, briefed again, taken, or left the queue) is closed. A
+ * person's own Done stands: an item that is still open by key, read or not,
+ * is never raised again. With the gate off every item closes and none is
+ * raised. One failed raise never stops the others. Returns the counts.
  */
-async function closeAnsweredHoldItems({ now = new Date(), deps = {} } = {}) {
+async function syncHoldQuestions({ now = new Date(), deps = {} } = {}) {
   const episodes = deps.episodes || require('../admin-alert-episodes');
   const conn = deps.db || db;
   const open = await episodes.openAdminAlertKeys(conn, HOLD_KEY_PREFIX);
-  const ids = open.map((key) => key.slice(HOLD_KEY_PREFIX.length)).filter((id) => UUID_RE.test(id));
-  const waiting = new Set();
-  if (ids.length && terminalWriterLive()) {
-    const { rows } = await conn.raw(`
-      SELECT DISTINCT ON (r.opportunity_id) r.opportunity_id::text AS opportunity_id, r.outcome, r.skip_reason, q.status
-        FROM autonomous_runs r
-        JOIN opportunity_queue q ON q.id = r.opportunity_id
-       WHERE r.opportunity_id = ANY(?::uuid[])
-         AND NOT (r.outcome = ? AND r.agent_id IS NULL)
-       ORDER BY r.opportunity_id, r.created_at DESC`, [ids, PRE_DRAFT_CAP_OUTCOME]);
-    for (const r of rows) {
-      if (r.status === 'pending' && r.outcome === HOLD_OUTCOME && r.skip_reason === holdSkipReason('needs_owner')) waiting.add(String(r.opportunity_id).toLowerCase());
+  const waiting = terminalWriterLive() ? await rowsWaitingOnOwner(conn) : [];
+  const keyOf = (id) => `${HOLD_KEY_PREFIX}${String(id).toLowerCase()}`;
+  const waitingKeys = new Set(waiting.map((r) => keyOf(r.opportunity_id)));
+  const answered = open.filter((key) => !waitingKeys.has(key.toLowerCase()));
+  const closed = await episodes.closeAdminAlertKeys(conn, answered, 'owner_decided', { now, resolution: 'Cleared: this website post no longer waits on your decision' });
+  const openKeys = new Set(open.map((key) => key.toLowerCase()));
+  let raised = 0;
+  for (const row of waiting) {
+    const hold = storedHold(row.draft_payload);
+    if (!hold || openKeys.has(keyOf(row.opportunity_id))) continue;
+    try {
+      await raiseHoldQuestion({ opportunityId: row.opportunity_id, row, hold, deps });
+      raised += 1;
+    } catch (err) {
+      logger.warn(`[terminal-writer] the owner question for held row ${row.opportunity_id} was not raised: ${err.message}`);
     }
   }
-  const answered = open.filter((key) => !waiting.has(key.slice(HOLD_KEY_PREFIX.length).toLowerCase()));
-  return episodes.closeAdminAlertKeys(conn, answered, 'owner_decided', { now, resolution: 'Cleared: this website post no longer waits on your decision' });
+  return { raised, closed };
 }
 
 module.exports = {
   terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
-  raiseHoldQuestion, closeAnsweredHoldItems, holdSkipReason,
+  raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
