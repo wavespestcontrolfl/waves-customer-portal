@@ -18,7 +18,8 @@ const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
 const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
 const { specialtyReportVoiceLive, techWorkDaysLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive, reserviceAsksLive } = require('../config/feature-gates');
+const { isReserviceVisit } = require('../services/reservice-asks');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -5730,6 +5731,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
       lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_RESERVICE_ASKS (step S2a): the Fast Complete sheet asks the tech to answer each thing the customer told us.
+      // A pest or lawn re-service only (never the rodent trapping follow-up); the catalog key is the completion profile's.
+      reserviceAsksEnabled: reserviceAsksLive()
+        && isReserviceVisit({ is_callback: service.is_callback === true, service_key: completionProfile?.serviceKey }),
       // GATE_ASSESSMENT_FAST_COMPLETE: Dispatch opens the Waves Assessment's one-screen sheet; only an assessment profile.
       assessmentFastCompleteEnabled: require('../config/feature-gates').assessmentFastCompleteLive()
         && completionProfile?.serviceKey === require('../services/assessment-booking').ASSESSMENT_SERVICE_KEY,
@@ -7098,6 +7103,7 @@ router.get('/', async (req, res, next) => {
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+        reserviceAsksEnabled: projectCompletionContext.reserviceAsksEnabled === true,
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
         // The add-on lookup failed for this batch: the completion form refuses a completed visit until the schedule reloads.
@@ -7770,6 +7776,7 @@ router.get('/week', async (req, res, next) => {
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+          reserviceAsksEnabled: projectCompletionContext.reserviceAsksEnabled === true,
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
           areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,
