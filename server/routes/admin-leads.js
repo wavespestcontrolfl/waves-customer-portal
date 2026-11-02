@@ -230,7 +230,7 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
-const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL, handledStatusRefusal, unlessHandledSince } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, scopeToProspects, handledStatusRefusal, unlessHandledSince } = require('../services/lead-statuses');
 
 // The leads tables (lead_sources, leads, lead_activities, lead_source_costs, marketing_campaigns) and their
 // indexes are created by migrations 20260401000095_lead_attribution and 20260701000004_leads_soft_delete. A request
@@ -557,16 +557,39 @@ router.get('/sources', async (req, res, next) => {
     // The same prospect population the source's ROI and the overview count
     // (scopeToProspects): the client derives the source conversion rate from
     // these raw counts, so a suppressed wizard rerun or a second win must not
-    // dilute it here either (codex #3834 r16 P2).
-    const sources = await db('lead_sources')
+    // dilute it here either (codex #3834 r16 P2). One grouped pass applies
+    // the scope once per lead; four correlated COUNTs per source applied it
+    // four times.
+    const sourceCounts = db('leads')
+      .whereNotNull('leads.lead_source_id')
+      .whereNull('leads.deleted_at')
+      .modify(scopeToProspects)
+      .groupBy('leads.lead_source_id')
       .select(
-        'lead_sources.*',
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.first_contact_at >= ?) as month_leads`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.status = 'won' AND leads.first_contact_at >= ?) as month_conversions`, [monthStart]),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL}) as total_leads`),
-        db.raw(`(SELECT COUNT(*) FROM leads WHERE leads.lead_source_id = lead_sources.id AND leads.deleted_at IS NULL AND ${PROSPECT_SCOPE_SQL} AND leads.status = 'won') as total_conversions`),
+        'leads.lead_source_id',
+        db.raw('COUNT(*) FILTER (WHERE leads.first_contact_at >= ?) AS month_leads', [monthStart]),
+        db.raw("COUNT(*) FILTER (WHERE leads.status = 'won' AND leads.first_contact_at >= ?) AS month_conversions", [monthStart]),
+        db.raw('COUNT(*) AS total_leads'),
+        db.raw("COUNT(*) FILTER (WHERE leads.status = 'won') AS total_conversions"),
       )
-      .orderBy('name');
+      .as('source_counts');
+    // The planner prices this read in the tens of millions (the scope's
+    // recursive walks), so Postgres would JIT-compile it on every call, yet
+    // it reads Waves' leads in tens of milliseconds: JIT only adds compile
+    // time. SET LOCAL lasts until the transaction ends.
+    const sources = await db.transaction(async (trx) => {
+      await trx.raw('SET LOCAL jit = off');
+      return trx('lead_sources')
+        .leftJoin(sourceCounts, 'source_counts.lead_source_id', 'lead_sources.id')
+        .select(
+          'lead_sources.*',
+          trx.raw('COALESCE(source_counts.month_leads, 0) AS month_leads'),
+          trx.raw('COALESCE(source_counts.month_conversions, 0) AS month_conversions'),
+          trx.raw('COALESCE(source_counts.total_leads, 0) AS total_leads'),
+          trx.raw('COALESCE(source_counts.total_conversions, 0) AS total_conversions'),
+        )
+        .orderBy('lead_sources.name');
+    });
 
     res.json({ sources });
   } catch (err) { next(err); }

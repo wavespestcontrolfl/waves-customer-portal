@@ -326,7 +326,7 @@ const FAQ_MORE_ROWS = Object.freeze([
   },
   {
     q: "Do you test my soil?",
-    a: "Only when a lawn is not responding. Then we send one sample to the University of Florida soil lab. If the soil is too acidic or short on magnesium, we add lime or magnesium on a regular visit. Most results change nothing. Topsoil and topdressing are separate work, quoted on their own.",
+    a: "When a lawn is not responding, yes, at no extra charge: we send one sample to the University of Florida soil lab. If the soil is too acidic or short on magnesium, we add lime or magnesium on a regular visit. Most results change nothing. You can also order a soil test any time for an added fee; it comes with the lab results and our notes. Topsoil and topdressing are separate work, quoted on their own.",
     links: []
   },
   {

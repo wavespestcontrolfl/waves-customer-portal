@@ -362,3 +362,47 @@ describe('consent (r4)', () => {
     expect(loads).toBe(1);
   });
 });
+
+describe('unbooked lead status rule (GATE_LEAD_NO_RESPONSE_REASON, owner 2026-11-02 "B")', () => {
+  const knexPg = require('knex')({ client: 'pg' });
+  const { unbookedLeadStatusFilter } = MetaAudiences._private;
+  const leadsBuilder = () => {
+    const i = mockDb.mock.calls.findIndex((c) => c[0] === 'leads');
+    return mockDb.mock.results[i].value;
+  };
+
+  test('gate off: open leads only, the same single clause as before', () => {
+    const { sql, bindings } = unbookedLeadStatusFilter(knexPg('leads'), { keepNoResponse: false }).select('id').toSQL();
+    expect(sql).toMatch(/^select "id" from "leads" where LOWER\(COALESCE\(status, ''\)\) NOT IN \((\?,)+\?\)$/);
+    expect(sql).not.toMatch(/lost_reason/);
+    expect(bindings).toContain('unresponsive');
+  });
+
+  test('gate on: a lead parked unresponsive with reason no_response stays in; other unresponsive leads stay out', () => {
+    const { sql, bindings } = unbookedLeadStatusFilter(knexPg('leads'), { keepNoResponse: true }).select('id').toSQL();
+    expect(sql).toMatch(/where \(LOWER\(COALESCE\(status, ''\)\) NOT IN \((\?,)+\?\) or \(LOWER\(COALESCE\(status, ''\)\) = 'unresponsive' and "lost_reason" = \?\)\)$/);
+    expect(bindings[bindings.length - 1]).toBe('no_response');
+    // 'unresponsive' is still in the closed list: only the no_response branch lets one back in.
+    expect(bindings.slice(0, -1)).toContain('unresponsive');
+  });
+
+  test('the collector reads the gate when it runs', async () => {
+    const prior = process.env.GATE_LEAD_NO_RESPONSE_REASON;
+    try {
+      tableData.leads = [];
+      process.env.GATE_LEAD_NO_RESPONSE_REASON = 'true';
+      mockDb.mockClear();
+      await collectUnbookedLeadMembers();
+      expect(leadsBuilder().where.mock.calls[0][0].name).toBe('openOrQuietNoResponse');
+      expect(leadsBuilder().whereRaw).not.toHaveBeenCalled();
+      delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
+      mockDb.mockClear();
+      await collectUnbookedLeadMembers();
+      expect(leadsBuilder().whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT IN'), expect.any(Array));
+      expect(leadsBuilder().where.mock.calls.some((c) => c[0] && c[0].name === 'openOrQuietNoResponse')).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
+      else process.env.GATE_LEAD_NO_RESPONSE_REASON = prior;
+    }
+  });
+});

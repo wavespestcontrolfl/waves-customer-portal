@@ -6438,6 +6438,10 @@ const InvoiceService = {
       // Set ONLY by createFromService's dues mint when it wrote the stamp
       // itself: any other caller's membership_dues_month is dropped below.
       trustedMembershipDues = false,
+      // Reporting label stored in invoices.service_type for an invoice with no
+      // visit behind it (annual prepay). Written at insert only: it never feeds
+      // the tax-basis lookup, and a linked visit/record's own service_type wins.
+      serviceTypeLabel = null,
     } = createArgs;
     if (!trustedMembershipDues) lineItems = stripMembershipDuesMarkers(lineItems);
     // A visit with no customer yet cannot be billed (invoices.customer_id is NOT NULL).
@@ -7298,6 +7302,11 @@ const InvoiceService = {
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,
+          // After serviceData so a linked visit with a NULL service_type cannot
+          // blank the label; a real service_type from that visit still wins.
+          ...(serviceTypeLabel && !serviceData.service_type
+            ? { service_type: String(serviceTypeLabel) }
+            : {}),
           // The record link identifies a billed member; its treatment is not
           // the whole visit. Keep packet invoice copy neutral after tax used
           // the validated service basis. Each report owns its treatment detail.

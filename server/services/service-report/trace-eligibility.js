@@ -178,6 +178,9 @@ const SERVICE_KEY_RULES = {
   dethatching: { eligible: false, reason: 'mechanical_lawn_lane' },
   plugging: { eligible: false, reason: 'mechanical_lawn_lane' },
   top_dressing: { eligible: false, reason: 'mechanical_lawn_lane' },
+  // Lawn soil test (20261102070000): a sample pulled for the soil lab; nothing is applied, so a coverage trace would
+  // claim treatment that never happened.
+  lawn_soil_test: { eligible: false, reason: 'inspection_lane' },
   bora_care: { eligible: false, reason: 'localized_treatment_lane' },
   // Area add-ons (20261008200000, owner rulings 2026-10-08). The two whole-
   // lawn broadcasts mirror fire_ant (the treated geometry is the lawn); the

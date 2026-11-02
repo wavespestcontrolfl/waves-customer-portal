@@ -124,6 +124,59 @@ describe('proposePatches — threshold + cap + ordering', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toMatch(/facts_block_gap/);
   });
 
+  test('while the rule loop runs (observe or true) a proposal it can take is still parked, with no "parked for review" notice', async () => {
+    const prior = process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
+    const priorReal = process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      for (const mode of ['observe', 'true']) {
+        process.env.GATE_SMS_PROMPT_AUTOPROMOTE = mode;
+        NotificationService.notifyAdmin.mockClear();
+        const dbi = makeProposerDb({
+          cells: [{ surface: 'prompt_discipline', failure_mode: 'invented_commitment', fresh: '6' }],
+          entries: entryRows,
+        });
+        const out = await proposePatches({ dbi, anthropicClient: {} });
+        expect(out.proposed).toBe(1);
+        expect(dbi.inserts).toHaveLength(1);
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      }
+      // Real answers off: createCandidate returns real_answers_off, so the loop would never act; the notice stays.
+      process.env.GATE_SMS_REAL_ANSWERS = 'false';
+      NotificationService.notifyAdmin.mockClear();
+      const offDbi = makeProposerDb({ cells: [{ surface: 'prompt_discipline', failure_mode: 'invented_commitment', fresh: '6' }], entries: entryRows });
+      await proposePatches({ dbi: offDbi, anthropicClient: {} });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
+      else process.env.GATE_SMS_PROMPT_AUTOPROMOTE = prior;
+      if (priorReal === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = priorReal;
+    }
+  });
+
+  test('while the rule loop runs, a proposal it cannot take (a facts gap, an ineligible mode) keeps its notice', async () => {
+    const prior = process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
+    try {
+      process.env.GATE_SMS_PROMPT_AUTOPROMOTE = 'observe';
+      for (const cell of [
+        { surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '7' },
+        { surface: 'verifier_miss', failure_mode: 'invented_commitment', fresh: '6' },
+        { surface: 'prompt_discipline', failure_mode: 'price_quote', fresh: '6' },
+      ]) {
+        NotificationService.notifyAdmin.mockClear();
+        const dbi = makeProposerDb({ cells: [cell], entries: entryRows });
+        const out = await proposePatches({ dbi, anthropicClient: {} });
+        expect(out.proposed).toBe(1);
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+        expect(NotificationService.notifyAdmin.mock.calls[0][1]).toContain(cell.surface);
+      }
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_PROMPT_AUTOPROMOTE;
+      else process.env.GATE_SMS_PROMPT_AUTOPROMOTE = prior;
+    }
+  });
+
   test('the proposer prompt names the LIVE drafter version via currentPromptVersion(), not the frozen PROMPT_VERSION (pre-push audit P1)', async () => {
     const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
     try {

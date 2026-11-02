@@ -2025,7 +2025,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect([fireAnt.visit.visit, fireAnt.lines.map((l) => l.product.id)]).toEqual([3, ['ant']]);
     // Mechanical lawn services: lawn_care by catalog, no chemical plan — the plan is never built.
     const buildPlan = jest.fn();
-    for (const [serviceType, serviceKey] of [['Core Aeration', 'lawn_aeration'], ['Lawn Dethatching', 'dethatching'], ['Lawn Plugging', 'plugging'], ['Top Dressing', 'top_dressing']]) {
+    for (const [serviceType, serviceKey] of [['Core Aeration', 'lawn_aeration'], ['Lawn Dethatching', 'dethatching'], ['Lawn Plugging', 'plugging'], ['Top Dressing', 'top_dressing'], ['Lawn Soil Test Service', 'lawn_soil_test']]) {
       const out = await jobCard.resolveVisitLines({ facts: { isLawn: true, serviceId: 'svc1', serviceType, serviceCategory: 'lawn_care', serviceKey, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
       expect([serviceType, out.lines, out.note]).toEqual([serviceType, [], 'No treatment protocol for this service (lawn_care)']);
     }

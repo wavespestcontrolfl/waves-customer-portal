@@ -25,14 +25,22 @@ const CLASS_ROWS = {
   'ops-reminder-broken': { category: 'system', metadata: { dedupeKey: 'ops-reminder-broken:tech-tips:2026-10-26', opsJob: null, opsKind: 'ask' } },
   'gbp-sync-degraded': { category: 'review', metadata: { locationId: 'venice', reason: 'gbp_sync_degraded', cause: 'no_client' } },
   'gbp-sync-health-escalation': { category: 'review', metadata: { opsKey: 'gbp-sync-health', observedAt: '2026-10-26T10:00:00Z' } },
+  'typed-decisions-review': { category: 'typed_decisions', metadata: { dedupeKey: 'typed-decisions-review:2026-11-02', lane: 'typed_decisions', severity: 'fyi', who: 'claude' } },
 };
+// A fault is broken; the AI-test list the Claude labeler grades is an FYI (owner 2026-11-02).
+const CLASS_SEVERITY = { 'typed-decisions-review': 'fyi' };
 
 describe('routing table', () => {
-  test('every fault class matches its emitter row and is broken', () => {
+  test('every class matches its emitter row, with its severity (a fault is broken)', () => {
     expect(Object.keys(CLASS_ROWS).sort()).toEqual(CLAUDE_QUEUE_CLASSES.map((c) => c.name).sort());
     for (const [name, row] of Object.entries(CLASS_ROWS)) {
-      expect(classifyClaudeQueue(row)).toEqual({ className: name, severity: 'broken' });
+      expect(classifyClaudeQueue(row)).toEqual({ className: name, severity: CLASS_SEVERITY[name] || 'broken' });
     }
+  });
+
+  test('the AI-test list is matched by its own category and key only', () => {
+    expect(classifyClaudeQueue({ category: 'system', metadata: { dedupeKey: 'typed-decisions-review:2026-11-02' } })).toBeNull();
+    expect(classifyClaudeQueue({ category: 'typed_decisions', metadata: { dedupeKey: 'typed-decisions-other:2026-11-02' } })).toBeNull();
   });
 
   test('a Mac reminder job row is Claude\'s; ask is needs-you, fyi is fyi, no kind is needs-you', () => {
@@ -213,5 +221,116 @@ describe("Claude's queue in the Activity feed (buildActivity)", () => {
   test('digests render exactly as before when no routed rows exist', () => {
     const digest = { id: 'd1', title: 'ACT: look', created_at: '2026-10-26T09:00:00Z', read_at: null, done_at: null, metadata: { kind: 'ACT' }, link: '/admin' };
     expect(buildActivity({ digests: [digest] })).toEqual(buildActivity({ digests: [digest], claudeQueue: [] }));
+  });
+});
+
+// GATE_ALERT_CLAUDE_FAULTS (owner 2026-11-02, "build all"): a fault the code marks "Claude fixes this" that the bell
+// policy would drop goes to Claude's queue instead. Only a drop is rescued; nothing that rings changes.
+describe('dropped Claude faults (classifyClaudeFault, rescueClaudeFault)', () => {
+  const { classifyClaudeFault, rescueClaudeFault, CLAUDE_FAULT_TRIGGERS, CLAUDE_FAULT_TRIGGERS_LEFT_OUT, CLAUDE_FAULT_CATEGORIES } = routing;
+  beforeEach(() => { process.env.GATE_ALERT_CLAUDE_FAULTS = 'true'; });
+  afterEach(() => { delete process.env.GATE_ALERT_CLAUDE_FAULTS; });
+
+  test('the two lists cover exactly the registry rules that say who claude, each one broken', () => {
+    const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
+    const markedForClaude = Object.keys(TRIGGER_REGISTRY).filter((k) => TRIGGER_REGISTRY[k].rule?.who === 'claude').sort();
+    const decided = [...CLAUDE_FAULT_TRIGGERS, ...Object.keys(CLAUDE_FAULT_TRIGGERS_LEFT_OUT)].sort();
+    // A new who 'claude' rule fails here until it is rescued or left out with a reason.
+    expect(decided).toEqual(markedForClaude);
+    expect(CLAUDE_FAULT_TRIGGERS.filter((k) => k in CLAUDE_FAULT_TRIGGERS_LEFT_OUT)).toEqual([]);
+    for (const key of CLAUDE_FAULT_TRIGGERS) expect(TRIGGER_REGISTRY[key].rule.severity).toBe('broken');
+    for (const why of Object.values(CLAUDE_FAULT_TRIGGERS_LEFT_OUT)) expect(why).toMatch(/\w{3,}/);
+  });
+
+  test('a rescued registry fault is broken and named by its trigger; a left-out or unmarked trigger is not rescued', () => {
+    for (const key of CLAUDE_FAULT_TRIGGERS) {
+      expect(classifyClaudeFault({ category: 'system', triggerKey: key, payload: { failures: [] } })).toEqual({ className: key, severity: 'broken' });
+    }
+    for (const key of Object.keys(CLAUDE_FAULT_TRIGGERS_LEFT_OUT)) {
+      expect(classifyClaudeFault({ category: 'system', triggerKey: key, payload: {} })).toBeNull();
+    }
+    expect(classifyClaudeFault({ category: 'alert', triggerKey: 'dashboard_alert', payload: {} })).toBeNull();
+    // The trigger key may ride in the row's metadata instead (a registry bell write that reaches create()).
+    expect(classifyClaudeFault({ category: 'system', metadata: { triggerKey: 'seo_sync_failed' } })).toEqual({ className: 'seo_sync_failed', severity: 'broken' });
+  });
+
+  test('an expired-credential alert (token_alert, no metadata at all) is rescued; another raw category is not', () => {
+    expect(Object.keys(CLAUDE_FAULT_CATEGORIES)).toEqual(['token_alert']);
+    expect(classifyClaudeFault({ category: 'token_alert' })).toEqual({ className: 'token-alert', severity: 'broken' });
+    expect(classifyClaudeFault({ category: 'system', metadata: { dedupeKey: 'x' } })).toBeNull();
+    expect(classifyClaudeFault({ category: 'call_pipeline_drift' })).toBeNull();
+  });
+
+  test('a customer-tied alert, a customer-contact category and an ops_digest row are never rescued', () => {
+    const key = 'property_lookup_canary_failed';
+    expect(classifyClaudeFault({ category: 'system', triggerKey: key, payload: { customerId: 'c1' } })).toBeNull();
+    expect(classifyClaudeFault({ category: 'system', triggerKey: key, payload: { scopeCustomerId: 'c1' } })).toBeNull();
+    expect(classifyClaudeFault({ category: 'system', triggerKey: key, payload: { threadId: 't1' } })).toBeNull();
+    expect(classifyClaudeFault({ category: 'system', triggerKey: key, metadata: { payload: { scopeCustomerId: 'c1' } } })).toBeNull();
+    expect(classifyClaudeFault({ category: 'token_alert', metadata: { customerId: 'c1' } })).toBeNull();
+    expect(classifyClaudeFault({ category: 'token_alert', metadata: { scopeCustomerId: 'c1' } })).toBeNull();
+    for (const category of ['inbound_sms', 'inbound_email', 'missed_call', 'voicemail_callback', 'new_lead', 'ops_digest']) {
+      expect(classifyClaudeFault({ category, triggerKey: key })).toBeNull();
+    }
+  });
+
+  test('gate off or not exactly true: nothing is rescued', () => {
+    for (const v of [undefined, 'false', 'TRUE', '1', 'shadow']) {
+      if (v === undefined) delete process.env.GATE_ALERT_CLAUDE_FAULTS; else process.env.GATE_ALERT_CLAUDE_FAULTS = v;
+      expect(classifyClaudeFault({ category: 'token_alert' })).toBeNull();
+      expect(rescueClaudeFault({ category: 'system', triggerKey: 'seo_sync_failed', metadata: {} })).toBeNull();
+    }
+  });
+
+  test('rescueClaudeFault stamps a copy for the queue (create() then skips the policy) and keeps the row fields', () => {
+    const metadata = { triggerKey: 'event_sources_unhealthy', priority: 'normal', payload: { failingCount: 2 } };
+    const out = rescueClaudeFault({ category: 'newsletter', triggerKey: 'event_sources_unhealthy', metadata, payload: metadata.payload });
+    expect(out).toEqual({ ...metadata, feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'event_sources_unhealthy' });
+    expect(out).not.toBe(metadata);
+    // The stamp is the one create() and notifyAdmin already honor: a second stamp returns it unchanged.
+    process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
+    expect(stampClaudeQueue({ category: 'newsletter', metadata: out })).toBe(out);
+  });
+});
+
+describe('create(): a dropped Claude fault is written to the queue instead', () => {
+  const recorder = () => {
+    const inserted = [];
+    const conn = () => ({ insert: (row) => { inserted.push(row); return { returning: async () => [{ id: 'n2', ...row }] }; } });
+    return { conn, inserted };
+  };
+  const make = (over) => ({ recipientType: 'admin', title: 'cloudflare_workers_ai credential expired', body: 'Check token health', link: '/admin/social-media', ...over });
+  afterEach(() => { delete process.env.GATE_ALERT_CLAUDE_FAULTS; bellPolicy.bellAllowed.mockImplementation(async () => false); });
+
+  test('gate on: the policy says drop, so the row is written Activity-only, who claude, broken (no metadata given)', async () => {
+    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
+    const { conn, inserted } = recorder();
+    const out = await NotificationService.create(make({ category: 'token_alert', connection: conn }));
+    expect(out.id).toBe('n2');
+    expect(bellPolicy.bellAllowed).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(inserted[0].metadata)).toEqual({ feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'token-alert' });
+  });
+
+  test('gate off: the same alert is dropped exactly as before (no row)', async () => {
+    const { conn, inserted } = recorder();
+    const out = await NotificationService.create(make({ category: 'token_alert', connection: conn }));
+    expect(out).toMatchObject({ suppressed: true, reason: 'bell_policy' });
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('gate on: an alert the policy lets ring is untouched (a rescue happens only at a drop)', async () => {
+    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
+    bellPolicy.bellAllowed.mockImplementation(async () => true);
+    const { conn, inserted } = recorder();
+    await NotificationService.create(make({ category: 'token_alert', connection: conn, metadata: { source: 'token-health' } }));
+    expect(JSON.parse(inserted[0].metadata)).toEqual({ source: 'token-health' });
+  });
+
+  test('gate on: a dropped alert that is not a Claude fault is still dropped', async () => {
+    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
+    const { conn, inserted } = recorder();
+    const out = await NotificationService.create(make({ category: 'call_pipeline_drift', connection: conn }));
+    expect(out).toMatchObject({ suppressed: true, reason: 'bell_policy' });
+    expect(inserted).toHaveLength(0);
   });
 });

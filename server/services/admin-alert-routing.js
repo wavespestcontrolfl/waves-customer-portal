@@ -1,12 +1,14 @@
 // Which admin rows belong to Claude's queue instead of the owner's bell (owner ruling 2026-10-26,
 // "ok go"; docs/admin-notifications.md section 5, GATE_ALERT_CLAUDE_QUEUE).
 //
-// Two kinds of row go to Claude:
+// Three kinds of row go to Claude:
 //   1. A reminder bell from a Claude job on the owner's Mac (~/ops-oneshots/lib/bell.js stamps
 //      metadata.opsJob). The job marks an owner ask with metadata.opsWho = 'person'; that one stays
 //      in the bell (a gate flip for the owner's gates, a money ask). Every other opsJob row is Claude's.
 //   2. An engineering fault of ours: a table of named classes below, matched by category plus the
 //      emitter's dedupeKey prefix (or a metadata field when the emitter writes no dedupeKey).
+//   3. A list Claude works through by itself, in the same table with its own severity: the daily
+//      AI-test list the Claude labeler grades (owner 2026-11-02, "yes": not the owner's to-do).
 //
 // A routed row is written Activity-only (metadata.feed = 'activity', the marker
 // NotificationService.excludeActivityOnlyFromBell reads), so it never rings or counts in the bell, and
@@ -22,9 +24,10 @@ const CUSTOMER_CONTACT_CATEGORIES = new Set([
   'inbound_sms', 'inbound_email', 'missed_call', 'voicemail_callback', 'new_lead',
 ]);
 
-// Engineering-fault classes. Small and named on purpose: the seed of a later alert catalog.
+// Named classes. Small and named on purpose: the seed of a later alert catalog.
 // A class matches when the row's category equals `category` and either its dedupeKey starts with
-// `dedupeKeyPrefix` or every `meta` field equals the row's metadata field.
+// `dedupeKeyPrefix` or every `meta` field equals the row's metadata field. An engineering fault is
+// broken; a class that is not a fault names its own `severity`.
 const CLAUDE_QUEUE_CLASSES = Object.freeze([
   {
     name: 'sms-draft-canary',
@@ -51,6 +54,14 @@ const CLAUDE_QUEUE_CLASSES = Object.freeze([
     // Its ops_digest twin (category ops_digest) is NOT matched: ops_digest rows stay where they are.
     category: 'review',
     meta: { opsKey: 'gbp-sync-health' },
+  },
+  {
+    name: 'typed-decisions-review',
+    // typed-decisions/daily-review-item.js: the 8:05 AM list of AI-test cases with no grade yet,
+    // dedupeKey 'typed-decisions-review:<day>'. Not a fault: an FYI the Claude labeler works through.
+    category: 'typed_decisions',
+    dedupeKeyPrefix: 'typed-decisions-review:',
+    severity: 'fyi',
   },
 ]);
 
@@ -85,7 +96,7 @@ function classifyClaudeQueue({ category, metadata, dedupeKey } = {}) {
     (c.dedupeKeyPrefix && key.startsWith(c.dedupeKeyPrefix))
     || (c.meta && Object.entries(c.meta).every(([k, v]) => meta[k] === v))
   ));
-  return hit ? { className: hit.name, severity: 'broken' } : null;
+  return hit ? { className: hit.name, severity: hit.severity || 'broken' } : null;
 }
 
 // GATE_ALERT_CLAUDE_QUEUE, read defensively: a test that mocks feature-gates without this reader,
@@ -95,6 +106,57 @@ function claudeQueueEnabled() {
     const gates = require('../config/feature-gates');
     return typeof gates.alertClaudeQueueLive === 'function' && gates.alertClaudeQueueLive() === true;
   } catch { return false; }
+}
+
+// Dropped faults (owner 2026-11-02, "build all"; GATE_ALERT_CLAUDE_FAULTS). The bell policy writes NO row for an
+// alert it silences, so a fault the code itself marks "Claude fixes this" vanished: the property-lookup canary
+// failed for weeks with no row anywhere. With the gate on, the two drop points (NotificationService.create and
+// triggerNotification) write such an alert to Claude's queue instead. Only an alert the policy would drop is
+// rescued: nothing that rings today stops ringing, and nothing new rings.
+//   1. A trigger-registry alert whose rule says who 'claude' (notification-triggers.js). Named here on purpose;
+//      admin-alert-routing.test.js checks the two lists below against the registry, so a new who 'claude' rule
+//      needs a decision here.
+//   2. A category that is our own fault by nature: a platform credential that expired or fails (token-health.js).
+// A customer-tied alert is never rescued, and neither is a customer-contact category.
+const CLAUDE_FAULT_TRIGGERS = Object.freeze([
+  'property_lookup_canary_failed',
+  'seo_sync_failed',
+  'event_sources_unhealthy',
+]);
+// Registry rules that say who 'claude' but stay out, with the reason.
+const CLAUDE_FAULT_TRIGGERS_LEFT_OUT = Object.freeze({
+  internal_admin_alert: 'a general alert: its text can be anything, a forwarded customer text included',
+  service_report_delivery_failed: "about one customer's report: the owner decides what that customer hears",
+  service_report_pdf_failed: "about one customer's report: the owner decides what that customer hears",
+  service_report_token_mint_failed: "about one customer's report: the owner decides what that customer hears",
+});
+const CLAUDE_FAULT_CATEGORIES = Object.freeze({ token_alert: 'token-alert' });
+
+function claudeFaultsEnabled() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.alertClaudeFaultsLive === 'function' && gates.alertClaudeFaultsLive() === true;
+  } catch { return false; }
+}
+
+// A rescue also refuses the technician-scope customer id (scopeCustomerId), top level or in either payload, not only
+// carriesCustomer's ids.
+const tiedToCustomer = (meta, payload) => carriesCustomer(meta)
+  || carriesCustomer({ payload })
+  || [meta.scopeCustomerId, payload.scopeCustomerId, metaOf(meta.payload).scopeCustomerId]
+    .some((v) => v !== undefined && v !== null && String(v).trim() !== '');
+
+// The verdict for an alert the bell policy is about to drop: null = dropped as today, else { className, severity }.
+// `payload` is a registry event's raw payload (before sanitizing). Pure except for the gate read.
+function classifyClaudeFault({ category, triggerKey, metadata, payload } = {}) {
+  if (!claudeFaultsEnabled()) return null;
+  const meta = metaOf(metadata);
+  if (CUSTOMER_CONTACT_CATEGORIES.has(category) || category === 'ops_digest') return null;
+  if (tiedToCustomer(meta, metaOf(payload))) return null;
+  const key = String(triggerKey ?? meta.triggerKey ?? '');
+  if (key) return CLAUDE_FAULT_TRIGGERS.includes(key) ? { className: key, severity: 'broken' } : null;
+  const className = CLAUDE_FAULT_CATEGORIES[category];
+  return className ? { className, severity: 'broken' } : null;
 }
 
 // The fields a routed row carries. `claudeQueue` names the class (audit, and the marker the refresh merge reads).
@@ -113,6 +175,17 @@ function stampClaudeQueue({ category, metadata, dedupeKey }) {
     logger.info('[claude-queue] routed', { category, className: verdict.className });
     return { ...metadata, ...claudeQueuePatch(verdict) };
   } catch { return metadata; }
+}
+
+// At a drop point: the metadata to write instead of dropping (a copy stamped for Claude's queue, so create()
+// writes it Activity-only and never asks the bell policy again), or null = drop as today. Never throws.
+function rescueClaudeFault({ category, triggerKey, metadata, payload }) {
+  try {
+    const verdict = classifyClaudeFault({ category, triggerKey, metadata, payload });
+    if (!verdict) return null;
+    logger.info('[claude-queue] rescued a dropped fault', { category, className: verdict.className });
+    return { ...metaOf(metadata), ...claudeQueuePatch(verdict) };
+  } catch { return null; }
 }
 
 const PAGE = 500;
@@ -176,8 +249,14 @@ async function rerouteOpenRows(conn, { execute = false, onlyIds = null } = {}) {
 module.exports = {
   CLAUDE_QUEUE_CLASSES,
   CUSTOMER_CONTACT_CATEGORIES,
+  CLAUDE_FAULT_TRIGGERS,
+  CLAUDE_FAULT_TRIGGERS_LEFT_OUT,
+  CLAUDE_FAULT_CATEGORIES,
   classifyClaudeQueue,
+  classifyClaudeFault,
   claudeQueueEnabled,
+  claudeFaultsEnabled,
   stampClaudeQueue,
+  rescueClaudeFault,
   rerouteOpenRows,
 };

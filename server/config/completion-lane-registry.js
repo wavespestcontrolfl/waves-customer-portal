@@ -197,6 +197,10 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   // Mosquito misting system install (misting PR 2a, migration 20261023100000): a one-time job reported on the generic Service
   // Report (the install record, calibration and walkthrough are the report).
   'mosquito_misting_install',
+  // Lawn soil test (owner 2026-11-02, migration 20261102070000): one sample pulled for the UF/IFAS soil lab, no product
+  // applied. The typed one_time_lawn_treatment form has no sample-collection choice, and the auto-sent report must record
+  // what was done, so it completes on the generic Service Report.
+  'lawn_soil_test',
   // german_roach / german_roach_initial LEFT this list 2026-08-29 (owner
   // ruling, cockroach report V2): migration 20260830000030 points both at
   // the typed `cockroach` form so every one-time roach job feeds the

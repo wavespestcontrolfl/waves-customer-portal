@@ -109,13 +109,15 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // TRIGGER_BELL_ALLOWLIST (that list is scoped to a customer reaching out on
 // a communication channel, and this notifyAdmin call is direct, outside the
 // trigger registry, so it never pushes).
-// typed_decisions: the one daily "review N AI decisions" item from the dark
-// typed-decisions shadow lane (GATE_TYPED_DECISIONS). The lane's own gate is
-// the switch; once it is on, the item must reach the owner, who can still
-// silence the category.
+// typed_decisions: the daily AI-test list from the dark typed-decisions shadow
+// lane (GATE_TYPED_DECISIONS). Since owner 2026-11-02 it is an FYI that
+// admin-alert-routing.js sends to Claude's queue, which this policy never
+// decides; it stays listed so the owner can still silence it whenever
+// GATE_ALERT_CLAUDE_QUEUE is off.
 // llm_cost: the daily "check AI spend" item (services/llm-cost.js), raised only
-// when a lane's estimated spend spikes. Same treatment as typed_decisions: the
-// dark GATE_LLM_COST_TRACKING is the switch, and the owner can silence it here.
+// when a lane's estimated spend spikes. The dark GATE_LLM_COST_TRACKING is the
+// switch; once it is on, the item must reach the owner, who can still silence
+// the category here.
 // review_low_rating: a new 1-4 star Google review (services/review-low-rating-alert.js,
 // owner CW-D4 2026-10-02). The dark GATE_REVIEW_ALERT is the switch; same treatment.
 // truck_kit: one bell per truck when a technician's truck check finds a tool

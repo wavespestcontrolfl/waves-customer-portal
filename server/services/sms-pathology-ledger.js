@@ -606,18 +606,31 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
       });
       proposed += 1;
 
-      try {
-        const NotificationService = require('./notification-service');
-        await NotificationService.notifyAdmin(
-          'agents',
-          `Patch proposal: ${cell.surface} / ${cell.failure_mode}`,
-          `${cell.fresh} recent failures share this pathology. A concrete harness patch is parked for review in Agents → Shadow Drafts. Nothing changes until you act on it.`,
-          // ?tab=shadow: the bell must land the operator ON the proposal —
-          // bare /admin/agents defaults to the Overview tab.
-          { link: '/admin/agents?tab=shadow' }
-        );
-      } catch (err) {
-        logger.warn(`[pathology] bell notification failed: ${err.message}`);
+      // The rule loop (GATE_SMS_PROMPT_AUTOPROMOTE observe or true) acts on the proposals it can turn into a prompt
+      // rule (surface prompt_discipline and an eligible failure mode, as pickProposal selects), so those get no
+      // "parked for review" notice: it would ask the owner to approve a step his 2026-09-27 ruling removed (owner
+      // 2026-11-02, weekly-loop review item 8). Every other proposal (a facts gap, a verifier miss) still needs
+      // someone to act on it and keeps the notice; with the loop off, nothing changes.
+      // Same preconditions createCandidate checks: the loop is on and real answers are on (it returns
+      // real_answers_off otherwise and the proposal would sit with no notice).
+      const loopTakesIt = require('./sms-prompt-patch').promptAutopromoteMode() !== 'off'
+        && require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS')
+        && cell.surface === 'prompt_discipline'
+        && require('./sms-prompt-autopromote').eligibleFailureModes().includes(cell.failure_mode);
+      if (!loopTakesIt) {
+        try {
+          const NotificationService = require('./notification-service');
+          await NotificationService.notifyAdmin(
+            'agents',
+            `Patch proposal: ${cell.surface} / ${cell.failure_mode}`,
+            `${cell.fresh} recent failures share this pathology. A concrete harness patch is parked for review in Agents → Shadow Drafts. Nothing changes until you act on it.`,
+            // ?tab=shadow: the bell must land the operator ON the proposal —
+            // bare /admin/agents defaults to the Overview tab.
+            { link: '/admin/agents?tab=shadow' }
+          );
+        } catch (err) {
+          logger.warn(`[pathology] bell notification failed: ${err.message}`);
+        }
       }
       logger.info(`[pathology] proposal parked for ${cell.surface}/${cell.failure_mode} (${cell.fresh} fresh, id ${String(insertedId).slice(0, 8)})`);
     } catch (err) {

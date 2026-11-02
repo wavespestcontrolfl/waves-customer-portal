@@ -580,6 +580,25 @@ async function handleNewsletter(email) {
   });
 }
 
+// source_type of the lead_sources row (seeded by migration 20261102080000,
+// name 'Email Inquiry') that email-created leads attribute to. Matched by
+// source_type, like the other non-phone seeds, so an office rename of the row
+// never breaks attribution; no other seed uses 'email'.
+const EMAIL_LEAD_SOURCE_TYPE = 'email';
+
+// Fail-soft: a missing row or a lookup error returns null and the lead is
+// still created, just unattributed. Not cached: email leads are rare, and a
+// null must not stick after the row is seeded.
+async function findEmailLeadSourceId() {
+  try {
+    const row = await db('lead_sources').where({ source_type: EMAIL_LEAD_SOURCE_TYPE }).orderBy('created_at').first('id');
+    return row?.id || null;
+  } catch (err) {
+    logger.warn(`[email-actions] Email Inquiry lead source lookup failed; lead stays unattributed: ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * Lead-creation guards. Prod incidents: a lead was auto-created from a reply
  * to Waves' own auto-acknowledgment ("Re: Thanks for reaching out to Waves,
@@ -1003,6 +1022,8 @@ async function handleLeadInquiry(email, classification) {
   const firstName = nameParts[0] || 'Unknown';
   const lastName = nameParts.slice(1).join(' ') || '';
 
+  const emailLeadSourceId = await findEmailLeadSourceId();
+
   const [lead] = await db('leads').insert({
     first_name: firstName,
     last_name: lastName,
@@ -1012,6 +1033,8 @@ async function handleLeadInquiry(email, classification) {
     address: extracted.address || null,
     service_interest: extracted.service_interest || 'General inquiry',
     lead_type: 'email_inquiry',
+    // Attribution: email-sourced leads read as unattributed without this.
+    ...(emailLeadSourceId ? { lead_source_id: emailLeadSourceId } : {}),
     status: 'new',
     first_contact_at: email.received_at,
     first_contact_channel: 'email',
@@ -1443,6 +1466,7 @@ module.exports = {
   shouldSkipAutoAction,
   // Exported for unit testing the lead-creation guards
   handleLeadInquiry,
+  EMAIL_LEAD_SOURCE_TYPE,
   isHardSkippedLeadSender,
   isAutomatedSender,
   isWavesAutoAckReply,

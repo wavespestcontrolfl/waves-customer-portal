@@ -472,7 +472,8 @@ function turfPriorities(turfType) {
       'Chinch bug scouting',
       'Weed and sedge pressure monitoring',
       'Disease, irrigation, heat, shade, and thatch observations',
-      'Soil-test-gated fertility decisions',
+      // Owner 2026-10-31 / 2026-11-02: a soil test on triggers, or paid on request; feeding is not gated on one.
+      'Soil testing when the lawn is not responding',
     ];
   }
   if (turfType === 'bermuda') {

@@ -18,8 +18,18 @@ Production is deployed by Railway from the GitHub `main` branch for
   reading `railway.toml` on 2026-12-01). Change them in the dashboard or with
   a `railway config plan` / `apply` that declares every variable as
   `preserve()` — a file that leaves a variable out deletes it.
-- Builder: Nixpacks (`nixpacks.toml` adds ffmpeg)
-- Build command: `npm run build && npx playwright install --with-deps chromium`
+- Builder: Dockerfile `deploy/portal.Dockerfile`, selected by the service's
+  Dockerfile path setting. Before 2026-11-02 the portal built with Nixpacks,
+  which writes every variable name on one build-file line; at 65,535
+  characters every build failed. The build now sees only the ARGs the file
+  declares (the `VITE_` names and two Railway markers);
+  `server/tests/portal-dockerfile.test.js` fails when client code reads a
+  `VITE_` name the file lacks. The app still gets every variable at runtime.
+  Rollback: clear the Dockerfile path; the next deploy builds with Nixpacks
+  (`nixpacks.toml` adds ffmpeg; the seo-pipeline-worker still builds that way).
+- Build steps (in the Dockerfile): `npm ci --include=dev`, then
+  `npm run build && npx playwright install --with-deps chromium`, then a
+  smoke check that runs ffmpeg and prints a PDF from Chromium
 - Pre-deploy command: `npm run db:migrate`
 - Start command: `node server/index.js`
 
