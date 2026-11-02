@@ -1448,3 +1448,71 @@ describe('NotificationBell admin row buttons (actions)', () => {
     }
   });
 });
+
+describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', () => {
+  const SUMMARY = {
+    happened: 'The check that reads home details from the county website failed.',
+    steps: ['Nothing for you: Claude can fix this.', 'Fix the county page reader.'],
+    fixer: 'claude',
+  };
+  const VERSION = 'c'.repeat(32);
+  const rows = () => ([
+    { id: 's1', category: 'system', title: 'Estimator data canary: county parser regression', body: 'The county parser failed.',
+      explainable: true, sendToClaude: true, explainer: SUMMARY, version: VERSION,
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/estimates' },
+    { id: 's2', category: 'inbound_sms', title: 'Text from Diane Dizon', body: 'Can you come Tuesday?',
+      explainable: true, explainer: { happened: 'Diane Dizon texted.', steps: ['Reply to Diane Dizon.'], fixer: 'you' }, version: 'd'.repeat(32),
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
+  ]);
+  const setup = ({ send = () => jsonResponse({ sent: true, message: 'Sent to Claude. A terminal tab opens for it within about 10 minutes.' }) } = {}) => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      if (String(url).includes('/send-to-claude')) return send();
+      return jsonResponse({ notifications: rows() });
+    });
+  };
+  const open = () => fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+  const sendCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/send-to-claude'));
+  const listCalls = () => global.fetch.mock.calls.filter(([url]) => /\/admin\/notifications\?/.test(String(url)));
+  const openPanels = async () => {
+    for (const button of await screen.findAllByRole('button', { name: 'What to do' })) fireEvent.click(button);
+  };
+
+  it('shows the button only on a row the server marked, and a tap sends the version and moves the row out', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openPanels();
+    // The customer's text has no button: the server never marks customer contact.
+    expect(screen.getAllByRole('button', { name: 'Send to Claude' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Send to Claude' }));
+    expect(await screen.findByText('Sent to Claude. A terminal tab opens for it within about 10 minutes.')).toBeInTheDocument();
+    expect(sendCalls()).toHaveLength(1);
+    expect(sendCalls()[0][0]).toContain('/admin/notifications/s1/send-to-claude');
+    expect(sendCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ version: VERSION }) }));
+    expect(screen.queryByText('Estimator data canary: county parser regression')).toBeNull();
+    expect(screen.getByText('Text from Diane Dizon')).toBeInTheDocument();
+  });
+
+  it('a row that changed re-reads the list with a note; it stays until the list says otherwise', async () => {
+    setup({ send: () => ({ ok: false, status: 409, json: async () => ({ error: 'changed' }) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openPanels();
+    const before = listCalls().length;
+    fireEvent.click(screen.getByRole('button', { name: 'Send to Claude' }));
+    expect(await screen.findByText('That alert changed — the list was refreshed.')).toBeInTheDocument();
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
+  });
+
+  it('any other failure keeps the row and says so under the button', async () => {
+    setup({ send: () => ({ ok: false, status: 500, json: async () => ({}) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openPanels();
+    fireEvent.click(screen.getByRole('button', { name: 'Send to Claude' }));
+    expect(await screen.findByText("Couldn't send it. Try again.")).toBeInTheDocument();
+    expect(screen.getByText('Estimator data canary: county parser regression')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to Claude' })).not.toBeDisabled();
+  });
+});

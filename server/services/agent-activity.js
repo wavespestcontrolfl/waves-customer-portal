@@ -477,7 +477,10 @@ const PINNED_CAP = 5000;
 async function loadDigestRows(db, since, focusId) {
   const base = () => db('notifications')
     .select(...DIGEST_COLUMNS, db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
-    .where({ recipient_type: 'admin', category: DIGEST_CATEGORY });
+    .where({ recipient_type: 'admin', category: DIGEST_CATEGORY })
+    // A digest the owner sent to Claude from the bell (claudeQueue 'sent-to-claude', admin-alert-send-to-claude.js) is
+    // listed once, under Claude's queue (loadClaudeQueueRows), never here as well.
+    .whereRaw("COALESCE(metadata->>'claudeQueue', '') = ''");
   // Admin-alerts-brevity scope (2026-09-28): new rows carry metadata.kind and
   // no title prefix at all — the title regexes below only still match a
   // pre-scope row that never got a kind stamped.
