@@ -19,6 +19,7 @@ const { deterministicVisitFacts } = require('./previsit-brief');
 const { redactAccessCodes } = require('./context-aggregator');
 
 const ENDED_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
+const TRACKER_DONE_STATES = ['complete', 'cancelled'];
 
 // The tech day plan order: dispatch.js jobs, stops-ahead.js and
 // visit-tech-relay.js sort the same way (route_order, window start, created).
@@ -47,6 +48,12 @@ async function pickStop(conn, technicianId, now = new Date()) {
     .whereRaw(
       `COALESCE(scheduled_services.status, 'pending') NOT IN (${ENDED_STATUSES.map(() => '?').join(', ')})`,
       ENDED_STATUSES
+    )
+    // The tracker can finish a visit before its status moves; the same done
+    // states visit-tech-relay.js leaves out of a tech's current visits.
+    .whereRaw(
+      `(scheduled_services.track_state IS NULL OR scheduled_services.track_state NOT IN (${TRACKER_DONE_STATES.map(() => '?').join(', ')}))`,
+      TRACKER_DONE_STATES
     )
     .orderByRaw(DAY_PLAN_ORDER)
     .select(
@@ -154,4 +161,4 @@ async function answer(conn, kind, { technicianId, now = new Date() } = {}) {
   return { kind, title: body.title, lines: body.lines, visitId: stop.id };
 }
 
-module.exports = { INSTANT_ANSWER_KINDS, pickStop, answer, _test: { DAY_PLAN_ORDER, ENDED_STATUSES } };
+module.exports = { INSTANT_ANSWER_KINDS, pickStop, answer, _test: { DAY_PLAN_ORDER, ENDED_STATUSES, TRACKER_DONE_STATES } };

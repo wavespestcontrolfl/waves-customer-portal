@@ -9820,6 +9820,13 @@ function prepaySeedSeriesSlotLive() {
 function payerPacketAutosendLive() {
   return process.env.GATE_PAYER_PACKET_AUTOSEND === 'true';
 }
+// GATE_TECH_INSTANT_ANSWERS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the tech Intelligence Bar
+// shows three one-tap answers (next stop, access notes, last treatment) served by GET /api/tech/answers from the
+// technician's own visits today (services/tech-instant-answers.js). No model call, no write, no cost. Off = the routes
+// answer 404 and the bar shows no chips. Kill = unset.
+function techInstantAnswersLive() {
+  return process.env.GATE_TECH_INSTANT_ANSWERS === 'true';
+}
 // GATE_RECAP_GLASSES_CLIPS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the visit recap accepts
 // clips from the phone's photo library (camera glasses): a video may run up to 60 s and 200 MB, a clip over 20 s is
 // stored as `processing` (the renderer skips it until it is cut), and a clip added after the recap rendered, but
@@ -9827,13 +9834,6 @@ function payerPacketAutosendLive() {
 // every clip `ready`, no rebuild on a late clip. Kill = unset.
 function recapGlassesClipsLive() {
   return process.env.GATE_RECAP_GLASSES_CLIPS === 'true';
-}
-// GATE_TECH_INSTANT_ANSWERS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the tech Intelligence Bar
-// shows three one-tap answers (next stop, access notes, last treatment) served by GET /api/tech/answers from the
-// technician's own visits today (services/tech-instant-answers.js). No model call, no write, no cost. Off = the routes
-// answer 404 and the bar shows no chips. Kill = unset.
-function techInstantAnswersLive() {
-  return process.env.GATE_TECH_INSTANT_ANSWERS === 'true';
 }
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
@@ -10018,7 +10018,7 @@ module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
 module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
-// GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
-module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 // GATE_TECH_INSTANT_ANSWERS reader, on its own line so gate PRs never conflict.
 module.exports.techInstantAnswersLive = techInstantAnswersLive;
+// GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
+module.exports.recapGlassesClipsLive = recapGlassesClipsLive;

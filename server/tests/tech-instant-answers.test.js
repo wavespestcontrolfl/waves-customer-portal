@@ -31,7 +31,9 @@ function fakeConn(table) {
       },
       whereRaw: (sql, bindings) => {
         calls.whereRaw.push([sql, bindings]);
-        rows = rows.filter((r) => !bindings.includes(r.status || 'pending'));
+        rows = /track_state/.test(sql)
+          ? rows.filter((r) => r.track_state == null || !bindings.includes(r.track_state))
+          : rows.filter((r) => !bindings.includes(r.status || 'pending'));
         return chain;
       },
       orderByRaw: (sql) => {
@@ -80,6 +82,15 @@ beforeEach(() => {
 });
 
 describe('pickStop', () => {
+  test('a visit the tracker already finished is not the stop, even while its status still reads open', async () => {
+    const rows = [
+      { id: 'tracker-done', technician_id: 'tech-1', scheduled_date: TODAY, status: 'on_site', track_state: 'complete', route_order: 1, arrived_at: '2026-11-02T14:00:00Z' },
+      { id: 'tracker-cancelled', technician_id: 'tech-1', scheduled_date: TODAY, status: 'confirmed', track_state: 'cancelled', route_order: 2 },
+      { id: 'still-open', technician_id: 'tech-1', scheduled_date: TODAY, status: 'confirmed', track_state: 'en_route', route_order: 3 },
+    ];
+    expect((await pickStop(fakeConn(rows), 'tech-1', NOW)).id).toBe('still-open');
+  });
+
   test('prefers the on_site stop over earlier route stops, and the newest arrival among on_site rows', async () => {
     const conn = fakeConn([
       visit({ id: 'early', route_order: 1 }),
