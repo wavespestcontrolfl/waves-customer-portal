@@ -612,7 +612,7 @@ async function withTextNoteSources(rows, { role } = {}, conn = db) {
   if (!ids.length) return rows;
   let texts;
   try {
-    texts = await conn('sms_log').whereIn('id', ids).select('id', 'customer_id', 'message_body');
+    texts = await excludeUnresolvedSendReservations(conn('sms_log').whereIn('id', ids)).select('id', 'customer_id', 'message_body');
   } catch (err) {
     logger.warn(`[sms-operations] review bell source texts not read: ${err.message}`);
     return rows;
