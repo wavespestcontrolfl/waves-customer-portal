@@ -1248,8 +1248,10 @@ async function immediateOnlyLinkSendCheck(body) {
   // ...and a consultation credential anywhere in a FOREIGN URL (Codex #4709
   // r12–r15 P1): parked here so the send-time check refuses it.
   if (await strayConsultationCredentialPresent(runs, hosts)) return { present: true, label: 'Consultation link' };
-  // ...and a live moving token outside a canonical moving link (#7486).
-  if (await strayMovingTokenPresent(runs, hosts)) return { present: true, label: 'Moving' };
+  // ...and a live moving token outside a canonical moving link (#7486). A
+  // body too long to scan cannot be sent as an SMS (1,600 characters), and
+  // the send-time seam refuses it with its own words.
+  if ((await strayMovingTokenScan(runs, hosts)) === 'stray') return { present: true, label: 'Moving' };
   return { present: false };
 }
 
@@ -1609,8 +1611,16 @@ function movingGateOn() {
 // 48-hex window is looked up against moves that still open, except each
 // canonical link's own path token, which the owner binding judges. Gate off:
 // every moving page is a 404, so nothing is looked up.
-async function strayMovingTokenPresent(runs, hosts, conn = db) {
-  if (!movingGateOn()) return false;
+// The scan is bounded (GH Codex security review on #7486): an SMS body is at
+// most 1,600 characters (sms-guard validateOutbound), so a longer text can
+// never be sent. Short links expand, so the runs may total 4x that; past it,
+// or past MOVING_SCAN_MAX_WINDOWS candidates, the scan stops before any lookup.
+// Answers 'stray', 'too_long' or null.
+const MOVING_SCAN_MAX_CHARS = 6400;
+const MOVING_SCAN_MAX_WINDOWS = 2000;
+async function strayMovingTokenScan(runs, hosts, conn = db) {
+  if (!movingGateOn()) return null;
+  if (runs.reduce((total, run) => total + run.length, 0) > MOVING_SCAN_MAX_CHARS) return 'too_long';
   const windows = new Set();
   const bound = new Set();
   for (const raw of runs) {
@@ -1619,18 +1629,23 @@ async function strayMovingTokenPresent(runs, hosts, conn = db) {
     if (own) bound.add(own.toLowerCase());
     const decoded = fullyDecoded(ownedHostStripped(run, hosts)).toLowerCase();
     for (const m of decoded.matchAll(/[a-f0-9]{48,}/g)) {
-      for (let i = 0; i + 48 <= m[0].length; i += 1) windows.add(m[0].slice(i, i + 48));
+      for (let i = 0; i + 48 <= m[0].length; i += 1) {
+        windows.add(m[0].slice(i, i + 48));
+        if (windows.size > MOVING_SCAN_MAX_WINDOWS) return 'too_long';
+      }
     }
   }
   const all = [...windows].filter((w) => !bound.has(w));
   for (let i = 0; i < all.length; i += 500) {
-    if (await conn('customer_moves').whereIn('token', all.slice(i, i + 500)).whereNot({ status: 'closed' }).first('id')) return true;
+    if (await conn('customer_moves').whereIn('token', all.slice(i, i + 500)).whereNot({ status: 'closed' }).first('id')) return 'stray';
   }
-  return false;
+  return null;
 }
 
 async function checkMovingLinks(ctx, moveIds) {
-  if (await strayMovingTokenPresent(ctx.runs, ctx.hosts)) {
+  const stray = await strayMovingTokenScan(ctx.runs, ctx.hosts);
+  if (stray === 'too_long') return refuseSend('This text is too long to check for customer links — shorten it and send again.');
+  if (stray === 'stray') {
     return refuseSend('This text carries a moving link outside the Waves portal address — remove it and insert the moving link as itself.');
   }
   const onRecipientAccount = recipientAccountBinder(ctx);

@@ -3585,6 +3585,20 @@ describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at
     expect(await bearerLinkSendCheck(`Tips: https://example.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
   });
 
+  test('the scan is bounded: a body past the SMS size, or a hex run past the candidate cap, is refused before any lookup (GH Codex security review)', async () => {
+    wireMoving();
+    const padded = `Moving? ${'ab'.repeat(3300)}`;
+    expect((await bearerLinkSendCheck(padded, '9415550100', { trustedCustomerId: null })).error).toMatch(/too long to check/);
+    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
+    wireMoving();
+    // 33 chained sha256 digests: one 2,112-char hex run whose 48-char windows are all different.
+    const crypto = require('crypto');
+    let digest = 'seed';
+    const longRun = `Moving? ${Array.from({ length: 33 }, () => { digest = crypto.createHash('sha256').update(digest).digest('hex'); return digest; }).join('')}`;
+    expect((await bearerLinkSendCheck(longRun, '9415550100', { trustedCustomerId: null })).error).toMatch(/too long to check/);
+    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
+  });
+
   test('gate off: no moving lookup at all for a message without a canonical moving link', async () => {
     movingFlowLive.mockReturnValue(false);
     wireMoving();
