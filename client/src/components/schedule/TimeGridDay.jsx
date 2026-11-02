@@ -1338,23 +1338,29 @@ export default function TimeGridDay({
     });
   }, [allServices, technicians]);
 
-  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds, target }) => {
     if (!pending) return;
-    const { svc, toTech, fromMin, toMin, newWindow } = pending;
+    const { svc, toTech, fromMin, toMin } = pending;
     const fromTech = svc.technicianId || '__unassigned__';
+    // A time tapped in the confirm's open-times list replaces the drop, and
+    // may move the visit to another day.
+    const [newDate, newWindow, landMin] = target
+      ? [target.date, target.window, parseHHMM(target.window)]
+      : [date, pending.newWindow, toMin];
+    const moves = newDate !== date || fromMin !== landMin;
     setBusy(true);
     try {
       const techForApi = toTech === '__unassigned__' ? null : toTech;
-      if (fromMin === toMin && fromTech !== toTech) {
+      if (!moves && fromTech !== toTech) {
         await adminFetch(`/admin/schedule/${svc.id}/assign`, {
           method: 'PUT',
           body: JSON.stringify({ technicianId: techForApi }),
         });
       }
-      if (fromMin !== toMin) {
+      if (moves) {
         const notifyCustomer = notificationType === 'sms';
         const body = {
-          newDate: date,
+          newDate,
           newWindow,
           reasonCode: 'dispatch_drag',
           reasonText: 'Rescheduled via drag-and-drop on Day grid',
@@ -1721,6 +1727,7 @@ export default function TimeGridDay({
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
         durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}
         technicianId={pending?.toTech && pending.toTech !== '__unassigned__' ? pending.toTech : undefined}
+        pickTimes
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />
