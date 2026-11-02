@@ -140,6 +140,10 @@ async function loadDraftOnlyVisits({ now = new Date(), database = db } = {}) {
   const rows = await database('invoices as i')
     .join('scheduled_services as ss', 'i.scheduled_service_id', 'ss.id')
     .where('i.status', 'draft')
+    // A delivery can be stamped while the status stays draft (e.g. a summary text the customer accepted), so mirror
+    // the dashboard's stale_draft_invoices guards: a draft that went out by email or text is not unsent work.
+    .whereNull('i.sent_at')
+    .whereNull('i.sms_sent_at')
     .whereNull('i.archived_at')
     .whereNull('i.payer_statement_id')
     .where('i.total', '>', 0)

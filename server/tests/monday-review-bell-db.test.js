@@ -108,6 +108,8 @@ maybeDescribe('monday review bell (live Postgres)', () => {
       await makeInvoice(await makeVisit('completed'), { archived_at: ago(1) }); // archived
       await makeInvoice(await makeVisit('completed'), { created_at: ago(1) }); // under the 3-day floor
       await makeInvoice(await makeVisit('completed'), { total: 0 }); // nothing to bill
+      await makeInvoice(await makeVisit('completed'), { sent_at: ago(4) }); // delivered by email while still a draft
+      await makeInvoice(await makeVisit('completed'), { sms_sent_at: ago(4) }); // delivered by text while still a draft
       const after = await Review._private.loadDraftOnlyVisits({ now: NOW });
       expect(after.count - before.count).toBe(3);
       expect(Math.round((after.total - before.total) * 100) / 100).toBe(100 + 50.25 + 100);
