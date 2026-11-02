@@ -238,6 +238,17 @@ function cappedServiceType(value, fallback = 'Estimate service') {
   return `${label.slice(0, MAX_SERVICE_TYPE_LENGTH - 3).trimEnd()}...`;
 }
 
+// A pest SPECIALTY link may replace the generic one-time pest label. That
+// "Pest Control" label is the one canonicalServiceTypeForProfile documents as
+// deliberately ambiguous for a one-time accept, and the specialty tag is what
+// drives prep/sequence automation in onServiceScheduled (a German roach
+// cleanout stamped "Pest Control" classified 'pest_general' and skipped the
+// cockroach prep). The r20 rename protection is untouched: a rename that
+// drops family tokens classifies 'general', never one of these tags.
+const PEST_SPECIALTY_TAGS = Object.freeze([
+  'german_roach', 'cockroach', 'vehicle_roach', 'bed_bug', 'flea',
+]);
+
 // Catalog row NAMES are admin-mutable, and appointment-tagger's classifier
 // consumes ONLY service_type — an admin rename that drops the family tokens
 // (a WDO row renamed "Real Estate Report") would classify the visit and
@@ -253,7 +264,9 @@ function classifierStableServiceType(linkName, canonicalLabel) {
   const tagger = require('./appointment-tagger');
   const linkTag = tagger.classifyAppointmentType(linkLabel).tag;
   const canonTag = tagger.classifyAppointmentType(canon).tag;
-  return (linkTag === canonTag || canonTag === 'general') ? linkLabel : cappedServiceType(canon);
+  if (linkTag === canonTag || canonTag === 'general') return linkLabel;
+  if (canonTag === 'pest_general' && PEST_SPECIALTY_TAGS.includes(linkTag)) return linkLabel;
+  return cappedServiceType(canon);
 }
 
 function serviceKeyForLabel(value = '') {
