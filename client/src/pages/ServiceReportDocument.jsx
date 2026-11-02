@@ -1158,7 +1158,8 @@ export default function ServiceReportDocument({ data, token }) {
               {reserviceAsks.told.map((row, index) => (row.words ? (
                 <InfoRow key={`told-${index}`} label={row.label}>{row.words}</InfoRow>
               ) : (
-                <p key={`told-${index}`} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{row.label}</p>
+                // A message shown by its label only: the same label style as every other row, never body text.
+                <div key={`told-${index}`} className="field-info-row" style={{ display: 'flex', gap: 8, minWidth: 0 }}><Label>{row.label}</Label></div>
               )))}
             </div>
             {reserviceAsks.did.length > 0 && (

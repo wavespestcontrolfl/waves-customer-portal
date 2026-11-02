@@ -274,7 +274,10 @@ words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
   making any pesticide-safety claim, is dropped; a third-person paraphrase
   never sits under a lead) and then `customerCopyViolations`; `null` (label
   only) when the frozen item is not `printable` or nothing passes.
-- `did`: fixed wording from the technician's tap: `Treated` (`We treated it
+- `did`: one row per shown item, in card 1's order. `subject` names the
+  message: card 1's label plus its first six printed words ("Text · Oct 30 ·
+  “Ants are back in the kitchen”"; a label-only message keeps its label).
+  The line is fixed wording from the technician's tap: `Treated` (`We treated it
   with <products>.` from the record's product rows the answer names, plus
   `Where: …` on lawn reports only, since pest reports name no treated areas,
   owner 2026-10-05), `Checked`, `Noted`, `Follow-up` (`We will follow up on

@@ -185,11 +185,23 @@ describe('reserviceAsksReport builder', () => {
       c: { answer: 'treated', productIds: ['prod-1'] },
     };
     const { did } = buildReserviceAsksReport(service(frozen(items, answers)), { block: BLOCK, products: PRODUCTS });
+    // Each answer names its own message (card 1's label and first words), never only the pest.
     expect(did).toEqual([
-      { chip: 'Treated', subject: 'Ants', line: 'We treated it with Taurus SC and Test Product B.' },
-      { chip: 'Treated', subject: 'Fire ants and spiders', line: 'We treated it today.' },
-      { chip: 'Treated', subject: 'From your text on Oct 30', line: 'We treated it with Taurus SC.' },
+      { chip: 'Treated', subject: 'Text · Oct 30 · “Ants are back in the kitchen”', line: 'We treated it with Taurus SC and Test Product B.' },
+      { chip: 'Treated', subject: 'Text · Oct 30 · “Fire ants and spiders”', line: 'We treated it today.' },
+      { chip: 'Treated', subject: 'Text · Oct 30 · “Ants are back in the kitchen”', line: 'We treated it with Taurus SC.' },
     ]);
+  });
+
+  test('card 2: a long message is cut to its first words; a label-only message keeps only its label', () => {
+    on();
+    const items = [
+      item({ id: 'l', text: 'The ants are back along the kitchen counter and the slider again.' }),
+      item({ id: 'q', kind: 'question', text: 'Is the bait safe for my cat?' }),
+    ];
+    const answers = { l: { answer: 'noted' }, q: { answer: 'answered', text: 'It is a gel bait placed in cracks out of reach.' } };
+    const { did } = buildReserviceAsksReport(service(frozen(items, answers)), { block: BLOCK, products: PRODUCTS });
+    expect(did.map((row) => row.subject)).toEqual(['Text · Oct 30 · “The ants are back along the…”', 'Your question · Oct 30']);
   });
 
   test('card 2: a lawn report adds "Where"; a pest report names no areas (owner 2026-10-05)', () => {
@@ -225,8 +237,9 @@ describe('reserviceAsksReport builder', () => {
       ['Answered', 'They come in after heavy rain and should fade as it dries.'],
       ['Noted', 'We noted this on your service record.'],
     ]);
-    expect(report.did[0].subject).toBe('Millipedes');
-    expect(report.did[4].subject).toBe('From our office notes');
+    // Words that are not quoted (calls, office notes) never get quotation marks in the subject either.
+    expect(report.did[0].subject).toBe('Text · Oct 30 · Ants are back in the kitchen');
+    expect(report.did[4].subject).toBe('Office · Oct 30 · Ants are back in the kitchen');
     // Card 1 still lists all six items.
     expect(report.told).toHaveLength(6);
     expect(JSON.stringify(report)).not.toContain('missed window');
