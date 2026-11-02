@@ -801,6 +801,76 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     }
   });
 
+  // GATE_ALERT_CLAUDE_FAULTS (owner 2026-11-02): a registry fault marked "Claude fixes this" that the bell policy drops
+  // is written to Claude's queue instead: one row, stamped, keyed like the bell write, no push, no muted record.
+  describe('a dropped Claude fault goes to Claude\'s queue (GATE_ALERT_CLAUDE_FAULTS)', () => {
+    const run = async ({ gate = 'true', key = 'property_lookup_canary_failed', payload = { failures: ['golden_addr:Example (no parcel)'] }, opts = {} } = {}) => {
+      const NotificationService = require('../services/notification-service');
+      const PushService = require('../services/push-notifications');
+      const bellPolicy = require('../services/notification-bell-policy');
+      const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+      const allowSpy = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(false);
+      const auditInsert = jest.fn(async () => []);
+      db.mockImplementation((table) => (
+        table === 'audit_log' ? { insert: auditInsert }
+          : table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
+      ));
+      NotificationService.notifyAdmin.mockClear();
+      PushService.sendToAdminUsers.mockClear();
+      if (gate) process.env.GATE_ALERT_CLAUDE_FAULTS = gate;
+      process.env.GATE_ALERT_CATALOG = 'watch';
+      try {
+        const stats = await triggerNotification(key, payload, opts);
+        return { stats, notifyAdmin: NotificationService.notifyAdmin, push: PushService.sendToAdminUsers, auditInsert };
+      } finally {
+        delete process.env.GATE_ALERT_CLAUDE_FAULTS;
+        delete process.env.GATE_ALERT_CATALOG;
+        gateSpy.mockRestore(); allowSpy.mockRestore();
+      }
+    };
+
+    test('gate on: one stamped row, keyed like the bell write, no push and no muted record', async () => {
+      const onBell = jest.fn();
+      const { stats, notifyAdmin, push, auditInsert } = await run({ opts: { dedupeKey: 'property-lookup-canary:2026-11-02', onBell } });
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      const [category, title, , options] = notifyAdmin.mock.calls[0];
+      expect(category).toBe(TRIGGER_REGISTRY.property_lookup_canary_failed.category);
+      expect(title).toBe('Estimator data canary: county parser regression');
+      expect(options.dedupeKey).toBe('property-lookup-canary:2026-11-02');
+      expect(options.metadata).toMatchObject({ triggerKey: 'property_lookup_canary_failed', feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'property_lookup_canary_failed' });
+      expect(push).not.toHaveBeenCalled();
+      expect(auditInsert).not.toHaveBeenCalled();
+      expect(onBell).toHaveBeenCalledWith(true);
+      expect(stats).toEqual({ bellWritten: true, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true });
+    });
+
+    test('gate off: dropped exactly as before', async () => {
+      const { stats, notifyAdmin, auditInsert } = await run({ gate: null });
+      expect(notifyAdmin).not.toHaveBeenCalled();
+      expect(auditInsert).toHaveBeenCalledTimes(1);
+      expect(stats.push).toEqual({ sent: 0, skipped: 'bell_policy' });
+    });
+
+    test('gate on: an unmarked trigger, a left-out trigger and a push-only retry are dropped as before', async () => {
+      for (const args of [
+        { key: 'dashboard_alert', payload: { title: 'x', body: 'y' } },
+        { key: 'service_report_pdf_failed', payload: { scopeCustomerId: 'c-1', customerName: 'Pat Example', serviceLabel: 'Pest', errorMessage: 'render timeout' } },
+        { opts: { pushOnly: true } },
+      ]) {
+        const { stats, notifyAdmin } = await run(args);
+        expect(notifyAdmin).not.toHaveBeenCalled();
+        expect(stats.push).toEqual({ sent: 0, skipped: 'bell_policy' });
+      }
+    });
+
+    test('gate on: a failed write reports bellWritten false (the canary then holds its counters and retries)', async () => {
+      const NotificationService = require('../services/notification-service');
+      NotificationService.notifyAdmin.mockImplementationOnce(async () => null);
+      const { stats } = await run();
+      expect(stats).toMatchObject({ bellWritten: false, claudeQueue: true });
+    });
+  });
+
   // codex review, PR #4341 r1 P1: customer_landline_from_call's category
   // ('alert') default-denies under the gated policy — it must instead ring
   // via its own DEFAULT_ON_CATEGORIES membership (notification-bell-policy.js),

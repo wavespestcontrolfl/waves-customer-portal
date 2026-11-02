@@ -9675,6 +9675,16 @@ function alertClaudeQueueLive() {
 }
 // GATE_ALERT_CLAUDE_QUEUE reader, on its own line so gate PRs never conflict.
 module.exports.alertClaudeQueueLive = alertClaudeQueueLive;
+
+// GATE_ALERT_CLAUDE_FAULTS read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02,
+// "build all"). On, an alert the bell policy would DROP (no row) is written to Claude's queue instead when the code
+// marks it "Claude fixes this": a registry alert named in services/admin-alert-routing.js CLAUDE_FAULT_TRIGGERS, or a
+// token_alert row. Customer-tied alerts are never rescued. Activity-only, no ring, no push. Off = dropped as today.
+function alertClaudeFaultsLive() {
+  return process.env.GATE_ALERT_CLAUDE_FAULTS === 'true';
+}
+// GATE_ALERT_CLAUDE_FAULTS reader, on its own line so gate PRs never conflict.
+module.exports.alertClaudeFaultsLive = alertClaudeFaultsLive;
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
 

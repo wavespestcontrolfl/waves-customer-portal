@@ -108,6 +108,57 @@ function claudeQueueEnabled() {
   } catch { return false; }
 }
 
+// Dropped faults (owner 2026-11-02, "build all"; GATE_ALERT_CLAUDE_FAULTS). The bell policy writes NO row for an
+// alert it silences, so a fault the code itself marks "Claude fixes this" vanished: the property-lookup canary
+// failed for weeks with no row anywhere. With the gate on, the two drop points (NotificationService.create and
+// triggerNotification) write such an alert to Claude's queue instead. Only an alert the policy would drop is
+// rescued: nothing that rings today stops ringing, and nothing new rings.
+//   1. A trigger-registry alert whose rule says who 'claude' (notification-triggers.js). Named here on purpose;
+//      admin-alert-routing.test.js checks the two lists below against the registry, so a new who 'claude' rule
+//      needs a decision here.
+//   2. A category that is our own fault by nature: a platform credential that expired or fails (token-health.js).
+// A customer-tied alert is never rescued, and neither is a customer-contact category.
+const CLAUDE_FAULT_TRIGGERS = Object.freeze([
+  'property_lookup_canary_failed',
+  'seo_sync_failed',
+  'event_sources_unhealthy',
+]);
+// Registry rules that say who 'claude' but stay out, with the reason.
+const CLAUDE_FAULT_TRIGGERS_LEFT_OUT = Object.freeze({
+  internal_admin_alert: 'a general alert: its text can be anything, a forwarded customer text included',
+  service_report_delivery_failed: "about one customer's report: the owner decides what that customer hears",
+  service_report_pdf_failed: "about one customer's report: the owner decides what that customer hears",
+  service_report_token_mint_failed: "about one customer's report: the owner decides what that customer hears",
+});
+const CLAUDE_FAULT_CATEGORIES = Object.freeze({ token_alert: 'token-alert' });
+
+function claudeFaultsEnabled() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.alertClaudeFaultsLive === 'function' && gates.alertClaudeFaultsLive() === true;
+  } catch { return false; }
+}
+
+// A rescue also refuses the technician-scope customer id (scopeCustomerId), top level or in either payload, not only
+// carriesCustomer's ids.
+const tiedToCustomer = (meta, payload) => carriesCustomer(meta)
+  || carriesCustomer({ payload })
+  || [meta.scopeCustomerId, payload.scopeCustomerId, metaOf(meta.payload).scopeCustomerId]
+    .some((v) => v !== undefined && v !== null && String(v).trim() !== '');
+
+// The verdict for an alert the bell policy is about to drop: null = dropped as today, else { className, severity }.
+// `payload` is a registry event's raw payload (before sanitizing). Pure except for the gate read.
+function classifyClaudeFault({ category, triggerKey, metadata, payload } = {}) {
+  if (!claudeFaultsEnabled()) return null;
+  const meta = metaOf(metadata);
+  if (CUSTOMER_CONTACT_CATEGORIES.has(category) || category === 'ops_digest') return null;
+  if (tiedToCustomer(meta, metaOf(payload))) return null;
+  const key = String(triggerKey ?? meta.triggerKey ?? '');
+  if (key) return CLAUDE_FAULT_TRIGGERS.includes(key) ? { className: key, severity: 'broken' } : null;
+  const className = CLAUDE_FAULT_CATEGORIES[category];
+  return className ? { className, severity: 'broken' } : null;
+}
+
 // The fields a routed row carries. `claudeQueue` names the class (audit, and the marker the refresh merge reads).
 const claudeQueuePatch = ({ className, severity }) => ({ feed: 'activity', who: 'claude', severity, claudeQueue: className });
 
@@ -124,6 +175,17 @@ function stampClaudeQueue({ category, metadata, dedupeKey }) {
     logger.info('[claude-queue] routed', { category, className: verdict.className });
     return { ...metadata, ...claudeQueuePatch(verdict) };
   } catch { return metadata; }
+}
+
+// At a drop point: the metadata to write instead of dropping (a copy stamped for Claude's queue, so create()
+// writes it Activity-only and never asks the bell policy again), or null = drop as today. Never throws.
+function rescueClaudeFault({ category, triggerKey, metadata, payload }) {
+  try {
+    const verdict = classifyClaudeFault({ category, triggerKey, metadata, payload });
+    if (!verdict) return null;
+    logger.info('[claude-queue] rescued a dropped fault', { category, className: verdict.className });
+    return { ...metaOf(metadata), ...claudeQueuePatch(verdict) };
+  } catch { return null; }
 }
 
 const PAGE = 500;
@@ -187,8 +249,14 @@ async function rerouteOpenRows(conn, { execute = false, onlyIds = null } = {}) {
 module.exports = {
   CLAUDE_QUEUE_CLASSES,
   CUSTOMER_CONTACT_CATEGORIES,
+  CLAUDE_FAULT_TRIGGERS,
+  CLAUDE_FAULT_TRIGGERS_LEFT_OUT,
+  CLAUDE_FAULT_CATEGORIES,
   classifyClaudeQueue,
+  classifyClaudeFault,
   claudeQueueEnabled,
+  claudeFaultsEnabled,
   stampClaudeQueue,
+  rescueClaudeFault,
   rerouteOpenRows,
 };
