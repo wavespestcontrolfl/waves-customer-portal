@@ -703,12 +703,15 @@ function composeBetterDayClause({
 }
 
 // Explains WHY rain moves a spray visit. Dark until the owner flips
-// GATE_RAINOUT_EFFICACY_NOTE; skipped for work rain doesn't wash away.
+// GATE_RAINOUT_EFFICACY_NOTE; skipped for work rain doesn't wash away. With
+// GATE_RAINOUT_KEEP_RAIN_OK on, any rain-OK service (rain-fit) skips it too.
 const EFFICACY_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
-function composeEfficacyClause({ reasonCode, serviceType }) {
+function composeEfficacyClause({ reasonCode, serviceType, serviceKey = null }) {
   if (process.env.GATE_RAINOUT_EFFICACY_NOTE !== 'true') return '';
   if (reasonCode !== 'weather_rain') return '';
   if (EFFICACY_EXEMPT_SERVICE.test(String(serviceType || ''))) return '';
+  if (rainoutKeepRainOk(reasonCode)
+    && require('./scheduling/rain-fit').rainClassOf({ name: serviceType, serviceKey }) === 'ok') return '';
   return '\n\nWhy the move? Treatments need a few rain-free hours to bond - applying right before rain washes them away before they can work.';
 }
 
@@ -833,6 +836,18 @@ async function loadServiceWithCustomer(serviceId) {
     .first();
 }
 
+// GATE_RAINOUT_KEEP_RAIN_OK (dark; owner 2026-11-01): read at call time. The
+// rain-OK list says rain does not spoil the work, so it answers only a RAIN
+// move: for any other reason (running late, equipment, an emergency, a no-show,
+// wind, lightning, heat) the tech cannot attend at all and the whole route
+// moves. No reason yet (the options fetch comes before the sheet's reason
+// pick) keeps the full list.
+const RAIN_OK_REASONS = new Set(['weather_rain']);
+function rainoutKeepRainOk(reasonCode = null) {
+  return RAIN_OK_REASONS.has(reasonCode)
+    && require('../config/feature-gates').rainoutKeepRainOkLive?.() === true;
+}
+
 // Other not-yet-terminal jobs on this tech's plate today, ordered the
 // way the route actually runs: COALESCE(route_order, 999) then window_start
 // (the canonical dispatch order, admin-dispatch.js).
@@ -843,8 +858,13 @@ async function loadServiceWithCustomer(serviceId) {
 // there; but dispatch can rain-out an arbitrary mid-route stop, and a
 // window-only bound would wrongly sweep stops that share the anchor's
 // window or sit before it under a manual route_order.
-async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null) {
+//
+// With GATE_RAINOUT_KEEP_RAIN_OK on AND a rain move (`reasonCode`), a stop whose
+// services are all rain-OK is left out, so a Move neither moves nor texts it;
+// the anchor's own visit group moves with the anchor and is never filtered.
+async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null, reasonCode = null) {
   if (!technicianId) return [];
+  const keepRainOk = rainoutKeepRainOk(reasonCode);
   const query = db('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: todayStr })
     .whereIn('status', MOVABLE_STATUSES)
@@ -867,6 +887,7 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       // first member; later members of the same visit are skipped.
       'visit_id',
     );
+  if (keepRainOk) query.select('service_key_snapshot');
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
     const anchorOrder = anchor.route_order == null ? 999 : anchor.route_order;
@@ -880,7 +901,12 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       [anchorOrder, anchorWindow],
     );
   }
-  return query;
+  if (!keepRainOk) return query;
+  let keepVisitId = anchor?.visit_id;
+  if (keepVisitId === undefined && excludeServiceId) {
+    keepVisitId = (await db('scheduled_services').where({ id: excludeServiceId }).first('visit_id'))?.visit_id;
+  }
+  return require('./scheduling/rain-fit').outdoorStopRows(await query, db, { keepVisitId });
 }
 
 // "Later today" candidates: now + 2h and now + 4h, snapped to the nearest
@@ -1373,7 +1399,7 @@ function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
  * custom time re-checks on every date/hour change). Never blocks anything —
  * commit's locked probe is the enforcer.
  */
-async function checkTarget({ serviceId, target, caller = null }) {
+async function checkTarget({ serviceId, target, caller = null, reasonCode = null }) {
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
@@ -1387,7 +1413,7 @@ async function checkTarget({ serviceId, target, caller = null }) {
   if (!service) return { ok: false, reason: 'not_found' };
   // Route siblings flagged (not excluded) so one response serves both
   // scopes — the sheet filters by its live scope toggle without refetching.
-  const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service);
+  const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service, reasonCode);
   const targetDate = String(target.date).split('T')[0];
   // Fail-open exactly as before: a snapshot failure hides the badges, it
   // never blocks the sheet.
@@ -1520,9 +1546,11 @@ async function checkSlots({ targets, caller = null } = {}) {
 /**
  * Everything the tech sheet needs in one fetch: same-day windows,
  * route-scored day options with rain badges, the remaining-route count
- * for the scope toggle, and today's outlook for the header.
+ * for the scope toggle, and today's outlook for the header. The sheet fetches
+ * this before the dispatcher picks a reason, so `reasonCode` is optional; none
+ * means the full route list (GATE_RAINOUT_KEEP_RAIN_OK filters a rain move only).
  */
-async function getOptions(serviceId, { caller = null } = {}) {
+async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
 
@@ -1595,7 +1623,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
     };
   });
 
-  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
+  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service, reasonCode);
 
   // Overlap advisory on the same-day presets: +2h/+4h are pure clock
   // offsets with no occupancy input, so they can land on a booked stop.
@@ -1938,7 +1966,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
         reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
         windowChance, windowStart: chosen.window?.start,
       }),
-      efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
+      efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type, serviceKey: job.service_key_snapshot }),
     }, renderContext);
     if (body) renderedKey = 'rain_out_moved_v2';
   }
@@ -2373,7 +2401,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 
   let jobs;
   if (scope === 'route') {
-    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service);
+    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service, reasonCode);
     jobs = [service, ...rest];
   } else {
     jobs = [service];

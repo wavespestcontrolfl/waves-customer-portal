@@ -4779,6 +4779,7 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     // has to come from the CALLER, not the service's technician_id.
     const options = await RainOut.getOptions(req.params.serviceId, {
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+      reasonCode: typeof req.query.reasonCode === 'string' ? req.query.reasonCode : null,
     });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
@@ -4853,7 +4854,7 @@ router.post('/:serviceId/rain-out/sms-preview', async (req, res, next) => {
 // arbitrary probes come back window-only.
 router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
   try {
-    const { target } = req.body || {};
+    const { target, reasonCode } = req.body || {};
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
     }
@@ -4861,6 +4862,7 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
     const result = await RainOut.checkTarget({
       serviceId: req.params.serviceId,
       target,
+      reasonCode: typeof reasonCode === 'string' ? reasonCode : null,
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
     });
     if (!result.ok) {

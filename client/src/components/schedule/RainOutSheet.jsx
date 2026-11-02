@@ -14,7 +14,7 @@
 // Styling matches the light/zinc detail sheet it opens over (not the tech
 // app's dark palette) — neutral chrome only, per the admin design spec.
 
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -386,11 +386,24 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   const [customDate, setCustomDate] = useState(todayStr);
   const [customStart, setCustomStart] = useState('');
 
+  // GATE_RAINOUT_KEEP_RAIN_OK: the server drops all-rain-OK stops from the
+  // "rest of route" count and badges for a RAIN move only, so the fetch says
+  // when the picked reason is rain. Only that bucket change refetches (not
+  // every reason pick); the refetch keeps the highlighted slot. Until the list
+  // for the new bucket arrives the loaded route count and conflicts belong to the
+  // OTHER bucket, so "rest of route" is locked (`routeStale`); a failed refetch
+  // shows a Retry and keeps it locked. This stop alone never depends on it.
+  const rainReason = reason === 'weather_rain';
+  const optionsLoaded = useRef(false);
+  const [optionsRain, setOptionsRain] = useState(null);
+  const [routeLoadError, setRouteLoadError] = useState('');
+  const [routeRetry, setRouteRetry] = useState(0);
   useEffect(() => {
     let cancelled = false;
+    setRouteLoadError('');
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out-options`, {
+        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out-options${rainReason ? '?reasonCode=weather_rain' : ''}`, {
           headers: authHeaders(),
         });
         const data = await res.json().catch(() => ({}));
@@ -399,14 +412,24 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
         const answer = readOptionsAnswer(res, data);
         if (!cancelled) {
           setOptions(answer.options);
-          setSelectedKey(answer.selectedKey);
+          if (!optionsLoaded.current) setSelectedKey(answer.selectedKey);
+          optionsLoaded.current = true;
+          setOptionsRain(rainReason);
+          // A rain list can drop every remaining stop (all rain-OK): the scope
+          // chips then hide, so a "rest of route" pick must not stay behind them.
+          if (!(answer.options?.remainingRouteCount > 0)) setScope('job');
         }
       } catch (err) {
-        if (!cancelled) setError(err.message || 'Failed to load options');
+        if (cancelled) return;
+        if (optionsLoaded.current) setRouteLoadError(err.message || 'Failed to refresh the route');
+        else setError(err.message || 'Failed to load options');
       }
     })();
     return () => { cancelled = true; };
-  }, [service.id]);
+  }, [service.id, rainReason, routeRetry]);
+  const routeStale = !!options && optionsRain !== null && optionsRain !== rainReason;
+  // A rest-of-route Move needs the route list for THIS reason.
+  const routeBlocked = scope === 'route' && routeStale;
 
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
@@ -577,6 +600,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
           signal: controller.signal,
           body: JSON.stringify({
             target: { date: selectedDate, window: { start: selectedStart, end: selectedEnd } },
+            reasonCode: reason,
           }),
         });
         const data = await res.json().catch(() => null);
@@ -586,7 +610,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
       } catch { /* advisory only — commit still rejects real overlaps */ }
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [selectedDate, selectedStart, selectedEnd, service.id]);
+  }, [selectedDate, selectedStart, selectedEnd, service.id, reason]);
   // Advisory availability strip for the landing day in play — the custom
   // picker's date when it's active, otherwise the highlighted preset's day.
   // On a rest-of-route move the hint advises the tapped visit only; that's
@@ -638,7 +662,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   //                    and already texted.
   const conflictsFor = (src) => [
     ...(src?.conflicts || []).filter((c) => !(scope === 'route' && c.isRouteSibling)),
-    ...(scope === 'route' ? (src?.routeConflicts || []) : []),
+    ...(scope === 'route' && !routeStale ? (src?.routeConflicts || []) : []),
   ];
   const activeConflicts = conflictsFor(liveCheck ?? selected);
   const conflictLabel = (c) => {
@@ -685,7 +709,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
 
   const handleCommit = async () => {
     if (pickSelected) { handlePick(); return; }
-    if (!selected || busy || noteBlocked || overBudget) return;
+    if (!selected || busy || noteBlocked || overBudget || routeBlocked) return;
     setBusy(true);
     setError('');
     try {
@@ -733,7 +757,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   // check: the server composes the whole text.
   const moveLocked = pickSelected
     ? busy || committed
-    : !selected || busy || committed || noteBlocked || overBudget;
+    : !selected || busy || committed || noteBlocked || overBudget || routeBlocked;
 
   const chipStyle = (active) => ({
     padding: '7px 14px', borderRadius: 16, fontSize: 14, fontWeight: 500,
@@ -797,6 +821,19 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             background: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C',
           }}>
             {error}
+          </div>
+        )}
+
+        {routeLoadError && (
+          <div style={{
+            marginBottom: 12, fontSize: 14, padding: '8px 10px', borderRadius: 8,
+            background: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C',
+          }}>
+            {`Could not refresh the rest of the route for this reason (${routeLoadError}). This stop alone still works.`}
+            {' '}
+            <button type="button" onClick={() => setRouteRetry((n) => n + 1)} style={{ font: 'inherit', fontWeight: 600, color: 'inherit', textDecoration: 'underline', background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
+              Retry
+            </button>
           </div>
         )}
 
@@ -1015,7 +1052,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                     This stop
                   </button>
                   <button type="button" onClick={() => setScope('route')} style={chipStyle(scope === 'route')}>
-                    This + rest of route ({routeCount})
+                    This + rest of route ({routeStale ? '…' : routeCount})
                   </button>
                 </div>
               </>
