@@ -172,6 +172,8 @@ function requestBody(c) {
     context: c.context,
     pageData: c.pageData,
     ...(c.selectedTarget ? { selected_target: c.selectedTarget } : {}),
+    ...(c.dictationUsed ? { dictation_used: true } : {}),
+    ...(c.pastedText ? { pasted_text: true } : {}),
     session_id: crypto.randomUUID(),
     request_key: `ib-replay-${crypto.randomUUID()}`,
   };
@@ -262,7 +264,7 @@ async function main(argv) {
   throw new Error('usage: ib-replay.js run --cases <file> --out <file> [--set KEY=value] [--limit N] [--max-usd N] [--execute] | compare <before> <after>');
 }
 
-module.exports = { parseArgs, overrides, stopReply, measure };
+module.exports = { parseArgs, overrides, stopReply, measure, requestBody };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then(() => process.exit(0), (err) => {

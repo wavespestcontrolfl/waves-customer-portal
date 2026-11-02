@@ -46,9 +46,20 @@ describe('replay cases from saved bar requests', () => {
     expect(card.kind).toBe('card');
     expect(card.cards).toEqual([{ tool: 'reschedule_visit', params: { visit_id: 'v1' } }]);
 
+    expect(read).toMatchObject({ dictationUsed: false, pastedText: false });
     expect(lib.caseFromTask(task({ cards: [{ tool_name: 'send_sms', params: {}, status: 'expired' }] }))).toBeNull();
     expect(lib.caseFromTask(task({ checkpoint: [{ role: 'assistant', content: [{ type: 'text', text: 'Hi' }] }] }))).toBeNull();
     expect(lib.caseFromTask(task({ request: { prompt: 'p' } })).pageData).toEqual({ page: 'ignored' });
+  });
+
+  test('a replayed request carries the saved dictation and pasted-text flags, with a fresh identity', () => {
+    const c = lib.caseFromTask(task({ request: { prompt: 'Charge sixty one thirty three', context: 'customers', dictation_used: true, pasted_text: true, selectedTarget: { customer_id: 'c1' } } }));
+    expect(c).toMatchObject({ dictationUsed: true, pastedText: true });
+    const body = replay.requestBody(c);
+    expect(body).toMatchObject({ prompt: 'Charge sixty one thirty three', context: 'customers', dictation_used: true, pasted_text: true, selected_target: { customer_id: 'c1' } });
+    expect(body.request_key).toMatch(/^ib-replay-[0-9a-f-]{36}$/);
+    expect(replay.requestBody(c).session_id).not.toBe(body.session_id);
+    expect(replay.requestBody(lib.caseFromTask(task()))).not.toHaveProperty('dictation_used');
   });
 
   test('picking splits card and read cases, and one kind fills the other kind\'s short side', () => {

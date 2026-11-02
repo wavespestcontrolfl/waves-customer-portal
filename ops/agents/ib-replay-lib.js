@@ -68,6 +68,9 @@ function caseFromTask(row) {
     pageData: request.pageData || row.page_context || {},
     conversationHistory: Array.isArray(request.conversationHistory) ? request.conversationHistory : [],
     selectedTarget: request.selectedTarget || null,
+    // The bar's rules change for dictated money amounts and pasted text.
+    dictationUsed: request.dictation_used === true,
+    pastedText: request.pasted_text === true,
     target: row.target || null,
     firstTool: { name: tape[0].name, input: tape[0].input },
     tape,
