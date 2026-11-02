@@ -5,6 +5,9 @@
  * A fake knex serves each table's rows; synthetic names only.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The single-premises proof has its own suite: here an account proves one premises unless a test says otherwise.
+const mockSinglePremises = jest.fn(async () => true);
+jest.mock('../services/reservice-property-scope', () => ({ accountProvesSinglePremises: (...args) => mockSinglePremises(...args) }));
 
 const logger = require('../services/logger');
 const {
@@ -34,10 +37,10 @@ function baseVisit(over = {}) {
 // Chainable stand-in: the visit read ends in first(); every other read is
 // awaited as a list. `fail` makes a table's read reject with that error.
 function fakeKnex({
-  visit = baseVisit(), sms = [], calls = [], emails = [], requests = [], properties = [], fail = {},
+  visit = baseVisit(), sms = [], calls = [], emails = [], requests = [], fail = {},
 } = {}) {
   const rowsByTable = {
-    sms_log: sms, call_log: calls, emails, service_requests: requests, customer_properties: properties,
+    sms_log: sms, call_log: calls, emails, service_requests: requests,
   };
   const seen = [];
   const wheres = [];
@@ -218,15 +221,25 @@ describe('texts', () => {
     expect(items[0]).toMatchObject({ id: 'text:s3', officeOnly: 'billing' });
   });
 
-  test('an account with several properties: the channel items are account-wide, the booking words are not', async () => {
+  test('an account not proven to have one premises: the channel items are account-wide, the booking words are not', async () => {
     const visit = baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' });
-    const several = await gather({ visit, sms: [sms('s7', 'Roaches are back at the rental')], properties: [{ id: 'p1' }, { id: 'p2' }] });
+    const texts = [sms('s7', 'Roaches are back at the rental')];
+    mockSinglePremises.mockResolvedValueOnce(false);
+    const several = await gather({ visit, sms: texts });
     expect(several.items.map((item) => [item.id, item.accountWide || false])).toEqual([['booking:visit-1', false], ['text:s7', true]]);
-    const one = await gather({ visit, sms: [sms('s7', 'Roaches are back at the rental')], properties: [{ id: 'p1' }] });
+    expect(mockSinglePremises).toHaveBeenLastCalledWith(expect.any(Function), 'cust-1');
+    const one = await gather({ visit, sms: texts });
     expect(one.items.some((item) => item.accountWide)).toBe(false);
-    // A failed property read counts as several: nothing account-wide can print.
-    const failed = await gather({ visit, sms: [sms('s7', 'Roaches are back at the rental')], fail: { customer_properties: new Error('db down') } });
+    // A failed proof counts as several: nothing account-wide can print.
+    mockSinglePremises.mockRejectedValueOnce(new Error('db down'));
+    const failed = await gather({ visit, sms: texts });
     expect(failed.items.find((item) => item.id === 'text:s7').accountWide).toBe(true);
+  });
+
+  test('a first-person health complaint is office-only even when its pest words survive the scrub', async () => {
+    const { items } = await gather({ sms: [sms('s8', 'I got sick after your spray. Ants are still in the kitchen.')] });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'text:s8', officeOnly: 'health' });
   });
 
   test('tapbacks, STOP and empty texts are dropped', async () => {

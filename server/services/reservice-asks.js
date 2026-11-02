@@ -290,15 +290,14 @@ async function readEmails(knex, customerId, window) {
 // booking words above.
 
 // One failed channel logs its error code and yields nothing; the rest stand.
-// A customer with more than one property: a text, a call or an email names no property, so it may be about another
-// one (a rental). Such items stay on the sheet and the office bell, but never print on this property's report (Codex
-// security review on #7502). A failed read counts as several properties.
-async function accountHasSeveralProperties(knex, customerId) {
+// A text, a call or an email names no property, so unless the account provably has ONE premises it may be about
+// another one (a rental): such items stay on the sheet and the office bell but never print on this property's report
+// (Codex security review on #7502; reservice-property-scope.js). An unproven account or a failed read is several.
+async function accountMayHaveSeveralPremises(knex, customerId) {
   try {
-    const rows = await knex('customer_properties').where({ customer_id: customerId }).select('id').limit(2);
-    return (rows || []).length > 1;
+    return !(await require('./reservice-property-scope').accountProvesSinglePremises(knex, customerId));
   } catch (err) {
-    logger.warn(`[reservice-asks] property count unavailable: ${err?.code || err?.name || 'Error'}`);
+    logger.warn(`[reservice-asks] premises proof unavailable: ${err?.code || err?.name || 'Error'}`);
     return true;
   }
 }
@@ -367,7 +366,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
   ]) : [];
 
   // `accountWide` (only when set): the visit's own booking words are this property's; the rest may not be.
-  const severalProperties = customerId ? await accountHasSeveralProperties(knex, customerId) : false;
+  const severalProperties = customerId ? await accountMayHaveSeveralPremises(knex, customerId) : false;
   const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean)
     .map((item) => (severalProperties && item.id !== bookingId ? { ...item, accountWide: true } : item));
   return {

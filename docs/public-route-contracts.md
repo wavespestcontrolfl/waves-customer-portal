@@ -261,14 +261,17 @@ words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
 }], expectation, stillSeeing }`.
 - Which items: an item shows only with a technician answer that is not
   `hidden`, and only when `officeOnlyReason`
-  (`server/services/reservice-office-only.js`: damage we caused, money, a
+  (`server/services/reservice-office-only.js`: a health complaint after a
+  treatment, damage we caused, money, a
   complaint about the service, a missed or late visit) passes it: the verdict
   on the customer's ORIGINAL words is frozen as the item's `officeOnly` (the
   scrub keeps only pest talk, so it would hide "I want a refund"), and the
-  shown words are screened again. On an account with more than one
-  property, texts, calls and emails name no property and may be about another
-  one: they are frozen `accountWide` and never print; only the visit's own
-  booking words do (a failed property read counts as several).
+  shown words are screened again. Unless the account provably has one
+  premises (`reservice-property-scope.js`, the shared fail-closed proof in
+  `visit-property-scope.js`), texts, calls and emails name no property and may
+  be about another one: they are frozen `accountWide` and never print; only
+  the visit's own booking words do (an unproven account or a failed read
+  counts as several).
   The office's not-today reasons (`officeNotes`) are never read; no item ids
   are exposed.
 - `told`: `label` is `<Source> · <Mon D>` (Eastern date; a question reads

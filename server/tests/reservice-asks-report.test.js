@@ -113,6 +113,14 @@ describe('reserviceAsksReport builder', () => {
     expect(buildReserviceAsksReport(service(mixed), { block: BLOCK, products: PRODUCTS }).told.map((row) => row.label)).toEqual(['Request form · Oct 30']);
   });
 
+  test('a health complaint never prints: flagged at gather time, or caught again at render', () => {
+    on();
+    const flagged = frozen([item({ officeOnly: 'health', text: 'Ants are still in the kitchen.' })], { 'text:1': { answer: 'treated', productIds: ['prod-1'] } });
+    expect(buildReserviceAsksReport(service(flagged), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    const unflagged = frozen([item({ text: 'I got sick after your spray. Ants are still in the kitchen.' })], { 'text:1': { answer: 'treated', productIds: ['prod-1'] } });
+    expect(buildReserviceAsksReport(service(unflagged), { block: BLOCK, products: PRODUCTS })).toBeNull();
+  });
+
   test('an item frozen as office-only never shows, even when its scrubbed words read clean', () => {
     on();
     const flagged = frozen([item({ officeOnly: 'billing' })], { 'text:1': { answer: 'noted' } });

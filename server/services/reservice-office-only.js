@@ -42,8 +42,22 @@ const FEELING = '(?:worst|unhappy|unacceptable|unprofessional|rude|furious|fed\\
 const PERSON = '(?:you|your\\s+(?:guys?|tech\\w*|crew|team|worker|man)|(?:the\\s+)?tech(?:nician)?s?|no\\s*one|nobody|anyone|anybody|someone|somebody)';
 const NOT = "(?:did\\s*n[o']?t|didn['’]t|never|has\\s*n[o']?t|hasn['’]t|have\\s*n[o']?t|haven['’]t|won['’]t|will\\s+not)";
 
+// People and pets who can be hurt by a treatment, as a subject ("I", "my dog") or an object ("made me", "gave our
+// cat"); and what being hurt sounds like. A health complaint is never the customer's pest problem, so it never prints
+// (Codex security review on #7502: "I got sick after your spray" survived every other screen).
+const PET = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|fish|birds?|chickens?|horses?)';
+const PERSON_OR_PET = `(?:I|we|my\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|son|daughter|baby|wife|husband|family)|our\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|baby|family))`;
+const PERSON_OR_PET_OBJECT = `(?:me|us|my\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|son|daughter|baby|wife|husband|family)|our\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|baby|family))`;
+const SYMPTOM = '(?:sick|ill|nause\\w*|dizzy|rash\\w*|a\\s+rash|headaches?|a\\s+headache|itch\\w*|cough\\w*|vomit\\w*|throwing\\s+up|trouble\\s+breathing|died|dead)';
+
 // Order matters: the first match names the reason. Each entry is [reason, regex].
 const SCREENS = [
+  ['health', new RegExp([
+    // "I got sick after your spray", "my dog has a rash since the treatment"
+    `\\b${PERSON_OR_PET}\\b${NEAR}\\b${SYMPTOM}\\b${NEAR}\\b(?:from|after|since|by|because\\s+of)\\s+${OURS}\\b`,
+    // "the treatment made me sick", "your spray gave our cat a rash"
+    `\\b${OURS}\\b${NEAR}\\b(?:made|makes|making|gave|gives|giving|got)\\s+${PERSON_OR_PET_OBJECT}\\s+(?:\\w+\\s+)?${SYMPTOM}\\b`,
+  ].join('|'), 'i')],
   ['damage', new RegExp([
     // A spill is our doing on a re-service; so is a fertilizer or chemical burn.
     '\\bspill(?:ed|s|ing)?\\b',
@@ -101,7 +115,7 @@ const SCREENS = [
 
 /**
  * @param {*} text the customer's words
- * @returns {'damage'|'complaint'|'billing'|'schedule'|null}
+ * @returns {'health'|'damage'|'complaint'|'billing'|'schedule'|null}
  */
 function officeOnlyReason(text) {
   const value = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
