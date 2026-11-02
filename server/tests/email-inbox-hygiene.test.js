@@ -566,14 +566,17 @@ describe('draftReplyForEmail signature and grounded facts', () => {
   const { draftReplyForEmail } = require('../services/email/email-actions');
   const FACTS_EMAIL = {
     ...EMAIL,
-    from_address: 'jane@customer.example',
+    from_address: 'jane@customer.com',
     from_name: 'Jane Customer',
+    reply_to: null,
+    // aligned DKIM for the From domain: a genuine sender (a forged From fails hasAlignedAuth)
+    authentication_results: 'mx.google.com; dkim=pass header.d=customer.com',
     subject: 'Where is my tech?',
     body_text: 'Are you still coming today?',
     message_id: '<inbound-facts@mail.example>',
     received_at: '2026-11-01T20:07:00Z',
   };
-  const CUSTOMER = { id: 'cust-1', first_name: 'Jane', phone: '+15555550100' };
+  const CUSTOMER = { id: 'cust-1', first_name: 'Jane', phone: '+15555550100', email: 'jane@customer.com' };
   const SYSTEM_BASELINE = [
     'You draft reply emails from Waves Pest Control (a family-owned pest control and lawn care company in SW Florida).',
     'Greeting name: Jane. Tone: warm, professional, concise (under 150 words). Answer what can be answered and offer a concrete next step.',
@@ -636,6 +639,21 @@ describe('draftReplyForEmail signature and grounded facts', () => {
     expect(call.system).toContain("Never write 'sorry we missed your call'.");
     expect(call.text).toContain('Are you still coming today?');
     expect(call.text).not.toContain('FACTS FROM WAVES RECORDS');
+  });
+
+  test.each([
+    ['a forged From (DKIM aligned to another domain)', { authentication_results: 'mx.google.com; dkim=pass header.d=attacker.com' }, {}],
+    ['no authentication results at all', { authentication_results: null }, {}],
+    ['a Reply-To that is not the From address', { reply_to: 'someone@attacker.com' }, {}],
+    ['a matched customer whose email is not the From address', {}, { email: 'other@customer.com' }],
+  ])('gate on, %s: no customer records are read and the prompt is unchanged', async (_label, emailPatch, customerPatch) => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    process.env.GATE_EMAIL_DRAFT_FACTS = 'true';
+    setupDb();
+    buildEmailDraftFacts.mockImplementation(async () => 'Visits:\n- Quarterly Pest Control Service | Tuesday, November 3');
+    await draftReplyForEmail({ ...FACTS_EMAIL, ...emailPatch }, { customer: { ...CUSTOMER, ...customerPatch } });
+    expect(buildEmailDraftFacts).not.toHaveBeenCalled();
+    expect(dispatchWithFallback.mock.calls[0][1].system).toBe(SYSTEM_BASELINE);
   });
 
   test('gate on but no matched customer or empty facts: prompt unchanged', async () => {

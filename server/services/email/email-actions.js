@@ -1095,11 +1095,22 @@ async function signatureHtml(email) {
   }
 }
 
+// Customer records may enter a draft only for mail that provably came from that customer and whose reply goes back to
+// them: the From domain passes aligned authentication (a forged From fails), the reply address IS the From address (a
+// spoofer cannot route the draft to a Reply-To of their own), and the matched customer's email is that address.
+function senderOwnsCustomerFacts(email, customer) {
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  const from = normalizeAddress(email.from_address);
+  if (!from || normalizeAddress(customer.email) !== from) return false;
+  if (normalizeAddress(email.reply_to || email.from_address) !== from) return false;
+  return hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address));
+}
+
 // GATE_EMAIL_DRAFT_FACTS (owner 2026-11-02): two SYSTEM entries, or none. The facts are computed from our records for
 // the address-matched customer; the rules tell the model to use them. Empty facts or a dark gate add nothing.
 async function draftFactsSystemEntries(email, customer) {
   if (!require('../../config/feature-gates').emailDraftFactsLive()) return [];
-  if (!customer) return [];
+  if (!customer || !senderOwnsCustomerFacts(email, customer)) return [];
   const facts = await require('./email-draft-facts').buildEmailDraftFacts({ customer, receivedAt: email.received_at });
   if (!facts) return [];
   const { formatETDay, formatETDate, formatETTime } = require('../../utils/datetime-et');
