@@ -1973,10 +1973,6 @@ class AutonomousRunner {
     }
   }
 
-  async _writtenTerminalDraftIds(actionType = null) {
-    return (await this._terminalFirstIds(actionType)).written;
-  }
-
   async _runDailyInner({ limit = null, actionType = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
@@ -4574,9 +4570,15 @@ class AutonomousRunner {
     try {
       await terminalWriter.cleanupConsumedDrafts(runs);
       await (terminalWriter.terminalWriterLive() ? terminalWriter.raiseTerminalDue() : terminalWriter.closeTerminalItems());
-      await terminalWriter.syncHoldQuestions();
     } catch (err) {
       logger.warn(`[autonomous-runner] terminal writer follow-up failed: ${err.message}`);
+    }
+    // The owner questions read the database only: a GitHub failure while the
+    // item above lists the drafts must not keep a parked row's question unasked.
+    try {
+      await terminalWriter.syncHoldQuestions();
+    } catch (err) {
+      logger.warn(`[autonomous-runner] terminal hold questions were not brought up to date: ${err.message}`);
     }
   }
 

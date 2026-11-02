@@ -1734,12 +1734,13 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     });
   });
 
-  describe('_writtenTerminalDraftIds', () => {
+  describe('_terminalFirstIds', () => {
     const spy = (s) => { spies.push(s); return s; };
     const tw = () => require('../services/content/terminal-writer');
     const runnerFor = () => new (require('../services/content/autonomous-runner').AutonomousRunner)();
+    const none = { written: [], held: [] };
 
-    test('gate on: the written rows only, in the listed order (a scoped pass: its lane only); gate off, kill switch off or a failed read: none', async () => {
+    test('gate on: the written rows and the held rows, each in the listed order (a scoped pass: its lane only); gate off, kill switch off or a failed read: none', async () => {
       process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
       const listing = spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockResolvedValue({
         due: [{ opportunity_id: 'due_1' }],
@@ -1748,18 +1749,18 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
         held: [{ opportunity_id: 'h_1', action_type: 'new_supporting_blog' }],
         rebrief: [{ opportunity_id: 'old_1' }],
       });
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo']);
-      await expect(runnerFor()._writtenTerminalDraftIds('new_supporting_blog')).resolves.toEqual(['w_lo']);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual({ written: ['w_hi', 'w_lo'], held: ['h_1'] });
       await expect(runnerFor()._terminalFirstIds('new_supporting_blog')).resolves.toEqual({ written: ['w_lo'], held: ['h_1'] });
+      await expect(runnerFor()._terminalFirstIds('refresh_existing_page')).resolves.toEqual({ written: ['w_hi'], held: [] });
 
       listing.mockRejectedValueOnce(new Error('GitHub 502'));
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
 
       process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST = 'false';
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
       delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST;
       delete process.env.GATE_CONTENT_WRITER_TERMINAL;
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
       expect(listing).toHaveBeenCalledTimes(4);
     });
 
@@ -1782,7 +1783,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
         },
       };
       spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockImplementation((opts = {}) => real({ ...opts, deps }));
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['fresh']);
+      await expect(runnerFor()._terminalFirstIds()).resolves.toEqual({ written: ['fresh'], held: [] });
     });
   });
 });
@@ -5642,6 +5643,15 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(terminalWriter.syncHoldQuestions).toHaveBeenCalledTimes(2);
 
     terminalWriter.closeTerminalItems.mockRejectedValue(new Error('db down'));
+    await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();
+
+    // A GitHub failure while the item lists the drafts never keeps the owner questions from their sync.
+    terminalWriter.terminalWriterLive = () => true;
+    terminalWriter.raiseTerminalDue.mockRejectedValue(new Error('GitHub 502'));
+    terminalWriter.syncHoldQuestions.mockClear();
+    await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();
+    expect(terminalWriter.syncHoldQuestions).toHaveBeenCalledTimes(1);
+    terminalWriter.syncHoldQuestions.mockRejectedValue(new Error('db down'));
     await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();
   });
 
