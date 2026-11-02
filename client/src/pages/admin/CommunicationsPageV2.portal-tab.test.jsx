@@ -21,7 +21,7 @@ beforeEach(() => {
     if (path.endsWith("/log")) data = { messages: [{ id: "m1", conversationId: "conv1", from: "+15557654321", to: "+19415550199", channel: "sms", direction: "inbound", body: "Synthetic customer text", createdAt: "2024-01-01T12:00:00Z", isRead: false }] };
     else if (path.endsWith("/blocked-numbers")) data = { numbers: [] };
     else if (path.endsWith("/admin/portal-inbox/summary")) data = summary;
-    else if (path.endsWith("/admin/portal-inbox")) data = { enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: [], older: { chats: 0, requests: 0 } };
+    else if (path.endsWith("/admin/portal-inbox")) data = { enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: [], olderItems: [], older: { chats: 0, requests: 0 } };
     return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
   }));
 });

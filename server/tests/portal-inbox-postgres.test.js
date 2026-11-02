@@ -120,6 +120,13 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     const resolvedChat = await chat({ daysOld: 1, status: 'resolved' });
     const recentRequest = await request({ daysOld: 2 });
     const olderRequest = await request({ daysOld: 30 });
+    const oldestChat = await chat({ daysOld: 45 });
+    const oldestRequest = await request({ daysOld: 60 });
+    const olderDoneChat = await chat({ daysOld: 25, alerts: [true] });
+    const olderResolvedChat = await chat({ daysOld: 25, status: 'resolved' });
+    const olderSmsChat = await chat({ daysOld: 25, channel: 'sms' });
+    const olderResolvedRequest = await request({ daysOld: 25, status: 'resolved' });
+    const olderStaffRequest = await request({ daysOld: 25, source: 'admin' });
     const staffRequest = await request({ daysOld: 2, source: 'admin' });
     const closedRequest = await request({ daysOld: 2, status: 'resolved' });
     const cancelledRequest = await request({ daysOld: 2, status: 'cancelled' });
@@ -145,6 +152,21 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     // The older split counts open items past the window; the two older fixtures are in it.
     expect(before.older.chats).toBeGreaterThanOrEqual(1);
     expect(before.older.requests).toBeGreaterThanOrEqual(1);
+    // olderItems lists those open items one by one, newest first, with the same row shape;
+    // done / resolved / staff-made / SMS ones stay out, and `items` stays recent-only.
+    const olderShown = mine(before.olderItems);
+    expect(olderShown.map((i) => i.id)).toEqual([olderChat, olderRequest, oldestChat, oldestRequest]);
+    expect(olderShown.find((i) => i.id === olderChat)).toMatchObject({ kind: 'chat', customer: { id: customerId, firstName: 'Pat' } });
+    expect(olderShown.find((i) => i.id === olderChat).assistantReply).toBe(`Reply to ${olderShown.find((i) => i.id === olderChat).customerMessage}`);
+    expect(olderShown.find((i) => i.id === olderRequest)).toMatchObject({ kind: 'request', status: 'new', description: 'Please call me' });
+    for (const hidden of [olderDoneChat, olderResolvedChat, olderSmsChat, olderResolvedRequest, olderStaffRequest, recentChat, recentRequest, portalRequest]) {
+      expect(olderShown.map((i) => i.id)).not.toContain(hidden);
+    }
+    for (const old of [olderChat, olderRequest, oldestChat, oldestRequest]) {
+      expect(shown.map((i) => i.id)).not.toContain(old);
+    }
+    expect(before.older.chats).toBeGreaterThanOrEqual(2);
+    expect(before.older.requests).toBeGreaterThanOrEqual(2);
     const summary = await portalInbox.summary();
     expect(summary.count).toBeGreaterThanOrEqual(3);
   });

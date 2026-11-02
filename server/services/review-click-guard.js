@@ -32,10 +32,15 @@
  * (services/review-name-match.js). A customer who reviewed under another spelling of their name is
  * not asked again. An "I left a review" text is not read here: one misread text would stop asks for
  * good, so it only counts inside the matcher, next to a real review with a related name.
+ *
+ * Tap pause (GATE_REVIEW_TAP_PAUSE, owner 2026-11-02): tapPauseActive says a tap in the last 180 days
+ * pauses AUTOMATIC asks whatever visit it answered. review-request.js reads it where a visit enrolls
+ * an ask, where an automatic cadence sends, where a queued automatic ask sends (tapPauseForRequest)
+ * and before a Day-3 follow-up; staff sends by hand and a link the customer asked for are untouched.
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
-const { reviewProbableReviewerGuardLive } = require('../config/feature-gates');
+const { reviewProbableReviewerGuardLive, reviewTapPauseLive } = require('../config/feature-gates');
 
 // A date-only visit column is that ET calendar day, so the fallback anchor is
 // ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -101,6 +106,48 @@ async function reviewLinkClickedSince(customerId, since, database = db) {
     .where((b) => b.where('redirected_at', '>=', since).orWhere('last_redirected_at', '>=', since))
     .first('id');
   return Boolean(row);
+}
+
+// GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, D3): a tracked review-link tap in the last
+// REVIEW_TAP_PAUSE_DAYS pauses automatic review asks, whatever visit the tap answered.
+const REVIEW_TAP_PAUSE_DAYS = 180;
+async function tapPauseActive(customerId, database = db) {
+  if (!customerId || !reviewTapPauseLive()) return false;
+  return reviewLinkClickedSince(customerId, new Date(Date.now() - REVIEW_TAP_PAUSE_DAYS * 24 * 60 * 60 * 1000), database);
+}
+// A queued ask row the pause covers: an automatic one (review_requests.triggered_by, default
+// 'auto'). Staff asks (admin, tech, manual, intelligence_bar) never read the pause.
+const AUTOMATIC_ASK_TRIGGERS = new Set(['auto', 'auto_inline', 'sequence']);
+async function tapPauseForRequest(request, database = db) {
+  if (!request?.customer_id || !AUTOMATIC_ASK_TRIGGERS.has(request.triggered_by || 'auto')) return false;
+  if (!await tapPauseActive(request.customer_id, database)) return false;
+  return !await customerAskedForLink({ serviceRecordId: request.service_record_id, sequenceId: request.sequence_id }, database);
+}
+// The pause for an ask known only by its id: a completion text's bundled ask, judged at send time
+// (review-ask-dispatch.js clickGate), where the visit-anchored click guard lets a tap from before
+// this visit through. Off: false before any read.
+async function tapPauseForRequestId(reviewRequestId, database = db) {
+  if (!reviewRequestId || !reviewTapPauseLive()) return false;
+  const request = await database('review_requests').where({ id: reviewRequestId })
+    .first('id', 'customer_id', 'service_record_id', 'sequence_id', 'triggered_by');
+  return tapPauseForRequest(request, database);
+}
+// A link the customer asked for (completion panel "Customer asked for the link") is not an
+// automatic ask, so the pause never holds it. The visit record keeps that request (every member
+// of a combined visit too, whose enrollment carries no customerRequested), and so does a cadence
+// started for it.
+async function customerAskedForLink({ serviceRecordId = null, sequenceId = null } = {}, database = db) {
+  if (serviceRecordId) {
+    const record = await database('service_records').where({ id: serviceRecordId }).first('structured_notes');
+    let notes = record?.structured_notes || {};
+    if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = {}; } }
+    if (notes?.customerRequestedReview && typeof notes.customerRequestedReview === 'object') return true;
+  }
+  if (sequenceId) {
+    const seq = await database('review_sequences').where({ id: sequenceId }).first('customer_requested');
+    if (seq?.customer_requested) return true;
+  }
+  return false;
 }
 
 // Review-matcher decisions that say this customer probably wrote an unlinked live review.
@@ -188,4 +235,4 @@ async function touchSuppressedByClick(customerId, { serviceRecordId = null, sche
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, or probably already left a review, so no further review request is sent.';
 
-module.exports = { reviewLinkClickedSince, probableReviewer, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
+module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, tapPauseForRequest, tapPauseForRequestId, customerAskedForLink, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };

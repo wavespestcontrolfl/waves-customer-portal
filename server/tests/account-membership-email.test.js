@@ -278,6 +278,24 @@ describe('account and membership email sender', () => {
     }));
   });
 
+  test.each(['urgent', 'routine'])('a %s request with no reply time given gets the chat\'s one business hour (owner 2026-11-02, "match")', async (urgency) => {
+    setDbQueues({
+      customers: [chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+
+    await AccountMembershipEmail.sendRequestReceived({
+      customerId: 'cust-1',
+      request: { id: 'req-2', category: 'pest_issue', subject: 'Ants', status: 'new', urgency, created_at: '2026-11-02' },
+    });
+
+    expect(AccountMembershipEmail.REQUEST_RESPONSE_TIME).toBe('one business hour (8 AM to 8 PM)');
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'account.request_received',
+      payload: expect.objectContaining({ response_time: 'one business hour (8 AM to 8 PM)' }),
+    }));
+  });
+
   test('sends membership update with before and after values', async () => {
     setDbQueues({
       customers: [
