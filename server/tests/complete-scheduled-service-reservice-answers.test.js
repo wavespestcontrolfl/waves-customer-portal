@@ -31,6 +31,8 @@ jest.mock('../services/reservice-asks', () => ({
   ...jest.requireActual('../services/reservice-asks'),
   gatherReserviceAsks: jest.fn(async () => ({ ok: true, lane: 'pest', window: {}, items: [{ id: 'booking:1', text: 'Ants' }] })),
 }));
+const mockRaiseOfficeBell = jest.fn(async () => null);
+jest.mock('../services/reservice-office-bell', () => ({ raiseReserviceOfficeBell: (...args) => mockRaiseOfficeBell(...args) }));
 jest.mock('../services/visit-groups', () => ({ lockStopForRow: jest.fn(async () => {}), stopBaseKey: jest.fn(() => 'fixture-stop') }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(async () => null) }));
@@ -132,6 +134,7 @@ describe('the reserviceAnswers field on /complete', () => {
     expect(result).toMatchObject({ status: 422 });
     expect(result.body.code).not.toBe('reservice_answer_invalid');
     expect(gatherReserviceAsks).not.toHaveBeenCalled();
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
   });
 
   test('gate set to anything but true is off', async () => {
@@ -168,6 +171,7 @@ describe('the reserviceAnswers field on /complete', () => {
 
       expect(result.body?.code).not.toBe('reservice_answer_invalid');
       expect(gatherReserviceAsks).not.toHaveBeenCalled();
+      expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
     },
   );
 
@@ -185,6 +189,7 @@ describe('the reserviceAnswers field on /complete', () => {
 
     expect(result.body?.code).not.toBe('reservice_answer_invalid');
     expect(gatherReserviceAsks).not.toHaveBeenCalled();
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
   });
 
   test('a missing field passes (the record still keeps what the customer said): the asks are gathered once, after the claim', async () => {
@@ -214,6 +219,7 @@ describe('the reserviceAnswers field on /complete', () => {
 
     expect(result).toEqual({ status: 200, body: { success: true, serviceRecordId: 'rec-1' } });
     expect(gatherReserviceAsks).not.toHaveBeenCalled();
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
   });
 
   test('a resume of a committed completion is never refused by the answers check and gathers nothing', async () => {
@@ -227,6 +233,7 @@ describe('the reserviceAnswers field on /complete', () => {
       expect.anything(), expect.objectContaining({ message: 'reservice_answer_invalid' }), expect.anything(),
     );
     expect(gatherReserviceAsks).not.toHaveBeenCalled();
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
   });
 
   test('a gather that fails is logged and never refuses the completion', async () => {
@@ -237,5 +244,41 @@ describe('the reserviceAnswers field on /complete', () => {
 
     expect(result?.body?.code).not.toBe('reservice_answer_invalid');
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('re-service asks gather failed'));
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
+  });
+});
+
+// This suite's fake database stops at an early refusal, before the completion transaction, so the bell's wiring is
+// pinned in the source here; the real completion runs it in complete-scheduled-service-reservice-answers-postgres.test.js.
+describe('the re-service office bell wiring (GATE_RESERVICE_ASKS, step S3b)', () => {
+  const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+  const setAt = source.indexOf('reserviceAsksFrozen = asksFreeze.freeze;');
+  const commitAt = source.indexOf('// The durable completion artifacts are committed.');
+  const callAt = source.indexOf("require('./reservice-office-bell').raiseReserviceOfficeBell({");
+  const blockAt = source.lastIndexOf('const committedReserviceAsks', callAt);
+  const block = source.slice(blockAt, source.indexOf('\n    }\n', callAt));
+
+  test('the frozen block is kept where the freeze is written, inside the completion transaction', () => {
+    expect(setAt).toBeGreaterThan(-1);
+    expect(source.indexOf('serviceData.reserviceAsks = asksFreeze.freeze;')).toBeLessThan(setAt);
+    expect(source.indexOf('let reserviceAsksFrozen = null;')).toBeLessThan(source.indexOf('const asksFreeze'));
+    expect(source.match(/reserviceAsksFrozen = /g)).toHaveLength(2); // the declaration and the one assignment
+  });
+
+  test('the bell follows the commit, reads this run\'s freeze or a resume\'s saved one, and is fire and forget with a catch', () => {
+    expect(callAt).toBeGreaterThan(commitAt);
+    expect(commitAt).toBeGreaterThan(setAt);
+    // A fresh run's own freeze, or (a resume: a packet's effects phase, a retry after an early return) the saved
+    // record's, read only while the gate is live.
+    expect(block).toMatch(/reserviceAsksFrozen\s*\|\|\s*\(resumingCommittedCompletion && require\('\.\.\/config\/feature-gates'\)\.reserviceAsksLive\(\)/);
+    expect(block).toContain('parseJsonObject(record?.service_data)?.reserviceAsks');
+    expect(block).toContain('freeze: committedReserviceAsks');
+    expect(block).toContain('.catch(');
+    expect(block).not.toMatch(/await /);
+    expect(source.match(/raiseReserviceOfficeBell\(/g)).toHaveLength(1);
+  });
+
+  test('nothing that can return early sits between the commit and the bell', () => {
+    expect(source.slice(commitAt, callAt)).not.toMatch(/\breturn\b\s*\(?\{/);
   });
 });

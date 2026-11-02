@@ -28,6 +28,7 @@ const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabula
 
 const ASKS_LOOKBACK_DAYS = 10;
 const MAX_ITEMS = 10;
+const MAX_OFFICE_ONLY_ITEMS = 5;
 const MAX_TEXT_CHARS = 280;
 // Rows read per channel (newest first); the item cap applies after the scrub.
 const CHANNEL_ROW_LIMIT = 50;
@@ -159,9 +160,11 @@ function pestsIn(text) {
 function buildItem({ id, source, at, text, quoted, lead = null, screenText = null }) {
   const iso = toIso(at);
   if (!iso) return null;
-  const scrubbed = capWords(compact(scrubCustomerText(text, { lane: 'reservice' })));
-  if (!scrubbed) return null;
   const officeOnly = officeOnlyReason(screenText || text);
+  const scrubbed = capWords(compact(scrubCustomerText(text, { lane: 'reservice' }))) || '';
+  // No pest talk left is no ask, unless the message is one for the office ("I want a refund", "Nobody came today"):
+  // it freezes with no words, so the sheet and the report never show it and the office bell still lists it.
+  if (!scrubbed && !officeOnly) return null;
   return {
     id,
     source,
@@ -170,7 +173,7 @@ function buildItem({ id, source, at, text, quoted, lead = null, screenText = nul
     quoted,
     lead,
     kind: scrubbed.includes('?') ? 'question' : 'problem',
-    pests: pestsIn(scrubbed),
+    pests: scrubbed ? pestsIn(scrubbed) : [],
     ...(officeOnly ? { officeOnly } : {}),
   };
 }
@@ -210,12 +213,15 @@ function bookingWords(visit, lane) {
 // Everything over the cap goes except the booking item and the newest others.
 function limitItems(items, bookingId) {
   const byTime = (a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id.localeCompare(b.id));
-  const sorted = [...items].sort(byTime);
-  if (sorted.length <= MAX_ITEMS) return sorted;
+  // The cap is for what the tech answers (items with words). Office-only messages with no words are only for the
+  // office bell: the newest MAX_OFFICE_ONLY_ITEMS of them ride along and never crowd out an ask.
+  const silent = items.filter((item) => !item.text).sort(byTime).slice(-MAX_OFFICE_ONLY_ITEMS);
+  const sorted = items.filter((item) => item.text).sort(byTime);
+  if (sorted.length <= MAX_ITEMS) return [...sorted, ...silent].sort(byTime);
   const booking = sorted.find((item) => item.id === bookingId);
   const others = sorted.filter((item) => item !== booking);
   const keep = others.slice(others.length - (MAX_ITEMS - (booking ? 1 : 0)));
-  return (booking ? [booking, ...keep] : keep).sort(byTime);
+  return [...(booking ? [booking, ...keep] : keep), ...silent].sort(byTime);
 }
 
 // Mail Waves sent (the SENT label or a Waves address); the query leaves it
@@ -240,7 +246,10 @@ async function readTexts(knex, customerId, window, bookingKeys) {
   const candidates = [];
   for (const row of rows || []) {
     const text = smsSuggestionText(row);
-    if (!text || bookingKeys.has(normalizedWords(text))) continue;
+    // A repeat of the booking words is the same ask, judged on the raw words (the scrub can mask a shouted word),
+    // unless the WHOLE message is one for the office: the 400-character suggestion can match the booking words while
+    // a refund or damage line sits past the cap.
+    if (!text || (bookingKeys.has(normalizedWords(text)) && !officeOnlyReason(row.message_body))) continue;
     candidates.push({ id: `text:${row.id}`, source: 'text', at: row.created_at, text, quoted: true, screenText: row.message_body });
   }
   return candidates;
@@ -333,6 +342,9 @@ function dedupeItems(items, bookingId) {
   const rank = (item) => (item.id === bookingId ? -Infinity : Date.parse(item.at));
   const seen = new Set();
   return [...items].sort((a, b) => rank(a) - rank(b)).filter((item) => {
+    // An office-only message is never folded into another item: "Ants are back. I want a refund." scrubs to the
+    // booking's "Ants are back.", and dropping it would drop the refund from the office bell.
+    if (item.officeOnly) return true;
     const key = normalizedWords(item.text);
     if (!key || seen.has(key)) return false;
     seen.add(key);

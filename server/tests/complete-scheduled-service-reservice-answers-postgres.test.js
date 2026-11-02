@@ -30,6 +30,8 @@ jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
   retrievePaymentIntent: jest.fn(async () => null),
   cancelPaymentIntent: jest.fn(async () => null),
 }));
+const mockRaiseOfficeBell = jest.fn(async () => null);
+jest.mock('../services/reservice-office-bell', () => ({ raiseReserviceOfficeBell: (...args) => mockRaiseOfficeBell(...args) }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
 jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async () => ({ sent: 0 })) }));
@@ -129,6 +131,7 @@ postgres('re-service answers frozen on /complete', () => {
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     mockPg = knex({ client: 'pg', connection: testUrl, pool: { min: 0, max: 4 } });
   });
+  beforeEach(() => { mockRaiseOfficeBell.mockClear(); });
   afterEach(() => { if (gateWas === undefined) delete process.env.GATE_RESERVICE_ASKS; else process.env.GATE_RESERVICE_ASKS = gateWas; });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
 
@@ -202,17 +205,86 @@ postgres('re-service answers frozen on /complete', () => {
     const { result, data } = await run({ gate: false, body: { reserviceAnswers: { items: [{ itemId: 'x', answer: 'treated', productIds: ['not-on-this-visit'] }] } } });
     expect(result.status).toBe(200);
     expect(data).not.toHaveProperty('reserviceAsks');
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
   });
 
   test('gate on, a visit that is not a re-service: the field is ignored and the record has no key', async () => {
     const { result, data } = await run({ seed: { ordinary: true }, body: { reserviceAnswers: ANSWERS } });
     expect(result.status).toBe(200);
     expect(data).not.toHaveProperty('reserviceAsks');
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
   });
 
   test('gate on, a backdated backlog closeout never freezes', async () => {
     const { result, data } = await run({ seed: { daysAgo: 5 }, body: { backfill: true, reserviceAnswers: ANSWERS } });
     expect(result.status).toBe(200);
     expect(data).not.toHaveProperty('reserviceAsks');
+    expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
+  });
+
+  // The office bell (step S3b): one call after the completion commits, with the block the record stored.
+  test('gate on, a not-today answer: the office bell is called once, after the commit, with the frozen block', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const f = await seedVisit();
+    try {
+      const gathered = await require('../services/reservice-asks').gatherReserviceAsks(f.serviceId);
+      const bookingId = gathered.items[0].id;
+      const result = await complete(f, { reserviceAnswers: { items: [{ itemId: bookingId, answer: 'not_today', reason: 'Dog in the yard' }] } });
+      expect(result.status).toBe(200);
+      const data = await savedServiceData(f);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
+      expect(mockRaiseOfficeBell).toHaveBeenCalledTimes(1);
+      const [args] = mockRaiseOfficeBell.mock.calls[0];
+      expect(args.freeze).toEqual(data.reserviceAsks);
+      expect(args).toMatchObject({
+        customer: { id: f.customerId, first_name: 'Fixture', last_name: 'Answers' },
+        scheduledServiceId: f.serviceId, serviceRecordId: record.id,
+      });
+      expect(args.freeze.officeNotes).toEqual({ [bookingId]: 'Dog in the yard' });
+    } finally { await cleanup(f); }
+  });
+
+  test('a resume of a committed completion (a packet\'s effects phase, a retry after an early return) rings from the saved record', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const f = await seedVisit();
+    try {
+      const key = randomUUID();
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const gathered = await require('../services/reservice-asks').gatherReserviceAsks(f.serviceId);
+      const body = { visitOutcome: 'completed', products: [], areasServiced: ['Outside'], technicianNotes: 'Treated the entry points.',
+        sendCompletionSms: false, includePayLink: false, requestReview: false,
+        reserviceAnswers: { items: [{ itemId: gathered.items[0].id, answer: 'not_today', reason: 'Dog in the yard' }] } };
+      const call = () => completeScheduledService({ serviceId: f.serviceId, idempotencyKey: key, actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body });
+      expect((await call()).status).toBe(200);
+      expect(mockRaiseOfficeBell).toHaveBeenCalledTimes(1);
+      // What an early return after the commit leaves (releaseCompletionAttemptForResume): the next call resumes.
+      await mockPg('service_completion_attempts').where('service_id', f.serviceId).update({ status: 'side_effects_pending', updated_at: new Date() });
+      mockRaiseOfficeBell.mockClear();
+      expect((await call()).status).toBe(200);
+      expect(mockRaiseOfficeBell).toHaveBeenCalledTimes(1);
+      expect(mockRaiseOfficeBell.mock.calls[0][0].freeze).toEqual((await savedServiceData(f)).reserviceAsks);
+      // The gate turned off before the resume: the saved freeze is not read, nothing rings.
+      await mockPg('service_completion_attempts').where('service_id', f.serviceId).update({ status: 'side_effects_pending', updated_at: new Date() });
+      mockRaiseOfficeBell.mockClear();
+      delete process.env.GATE_RESERVICE_ASKS;
+      expect((await call()).status).toBe(200);
+      expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
+    } finally { await cleanup(f); }
+  });
+
+  test('a replay of the same completion raises no second bell', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const f = await seedVisit();
+    try {
+      const key = randomUUID();
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const call = () => completeScheduledService({ serviceId: f.serviceId, idempotencyKey: key, actor: { techRole: 'admin', technicianId: f.techId, technician: null },
+        body: { visitOutcome: 'completed', products: [], areasServiced: ['Outside'], technicianNotes: 'Treated the entry points.',
+          sendCompletionSms: false, includePayLink: false, requestReview: false } });
+      expect((await call()).status).toBe(200);
+      expect(mockRaiseOfficeBell).toHaveBeenCalledTimes(1);
+      await call();
+      expect(mockRaiseOfficeBell).toHaveBeenCalledTimes(1);
+    } finally { await cleanup(f); }
   });
 });

@@ -221,6 +221,24 @@ describe('texts', () => {
     expect(items[0]).toMatchObject({ id: 'text:s3', officeOnly: 'billing' });
   });
 
+  test('a message for the office with no pest talk freezes with no words, for the bell only', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const { items } = await gather({ sms: [sms('s4', 'I want a refund.', at), sms('s5', 'Nobody came today.', new Date(NOW - DAY))] });
+    expect(items.map((item) => [item.id, item.text, item.officeOnly, item.pests])).toEqual([
+      ['text:s4', '', 'billing', []],
+      ['text:s5', '', 'schedule', []],
+    ]);
+  });
+
+  test('an office-only message is never folded into an item with the same pest words', async () => {
+    const at = new Date(NOW - 2 * DAY);
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'The ants came back after the spray.', customer_request_source: 'picker' }),
+      sms: [sms('s6', 'The ants came back after the spray. I want a refund.', at)],
+    });
+    expect(items.map((item) => item.officeOnly || null)).toEqual([null, 'billing']);
+  });
+
   test('an account not proven to have one premises: the channel items are account-wide, the booking words are not', async () => {
     const visit = baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' });
     const texts = [sms('s7', 'Roaches are back at the rental')];
@@ -296,6 +314,17 @@ describe('texts', () => {
       sms: [sms('s1', 'ants are BACK in the kitchen!'), sms('s2', 'Also some spiders by the window')],
     });
     expect(items.map((item) => item.id)).toEqual(['booking:visit-1', 'text:s2']);
+  });
+
+  test('a text whose first 400 characters repeat the booking words still counts when the whole message is for the office', async () => {
+    const words = 'The ants came back along the kitchen counter and the back slider and the pantry shelves again this week. '.repeat(4).trim();
+    const body = `${words} I want a refund.`;
+    expect(words.length).toBeGreaterThan(400);
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: words.slice(0, 400), customer_request_source: 'text' }),
+      sms: [sms('s9', body)],
+    });
+    expect(items.map((item) => [item.id, item.officeOnly || null])).toEqual([['booking:visit-1', null], ['text:s9', 'billing']]);
   });
 
   test('a copy is judged on the scrubbed words: the booking words plus an off-topic sentence is one ask', async () => {
@@ -453,6 +482,18 @@ describe('caps and order', () => {
     expect(items.some((item) => item.id === 'booking:visit-1')).toBe(true);
     const others = items.filter((item) => item.id !== 'booking:visit-1').map((item) => item.id);
     expect(others).toEqual(texts.slice(5).map((row) => `text:${row.id}`));
+    expect(items.map((item) => item.at)).toEqual([...items.map((item) => item.at)].sort());
+  });
+
+  test('office-only messages with no words never crowd out an ask: the cap counts asks, and the newest 5 of them ride along', async () => {
+    const asks = Array.from({ length: 14 }, (_, i) => sms(`a${i}`, `Ants again, sighting ${i}`, new Date(BOOKED.getTime() - 9 * DAY + i * DAY / 2)));
+    const office = Array.from({ length: 7 }, (_, i) => sms(`o${i}`, `I want a refund, note ${i}.`, new Date(BOOKED.getTime() - 9 * DAY + i * DAY / 3)));
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker' }),
+      sms: [...asks, ...office],
+    });
+    expect(items.filter((item) => item.text)).toHaveLength(10);
+    expect(items.filter((item) => !item.text).map((item) => item.id)).toEqual(office.slice(2).map((row) => `text:${row.id}`));
     expect(items.map((item) => item.at)).toEqual([...items.map((item) => item.at)].sort());
   });
 
