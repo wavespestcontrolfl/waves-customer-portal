@@ -27,6 +27,9 @@ const logger = require('../services/logger');
 const { movingFlowLive } = require('../config/feature-gates');
 const Moves = require('../services/customer-moves');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+// A knex error message carries the query's bindings (typed addresses, link
+// tokens): log the code only (AGENTS.md, no PII in logs).
+const errCode = (err) => String(err?.code || err?.name || 'error');
 
 const PRIVACY_HEADERS = {
   'Cache-Control': 'private, no-store',
@@ -88,7 +91,7 @@ async function loadMove(req, res) {
 
 function sendFailure(res, err, label) {
   if (err instanceof Moves.MoveError) return res.status(err.status).json({ error: err.message });
-  logger.error(`[moving-public] ${label} failed: ${err.message}`);
+  logger.error(`[moving-public] ${label} failed (${errCode(err)})`);
   return res.status(500).json({ error: 'Something went wrong. Please try again.' });
 }
 

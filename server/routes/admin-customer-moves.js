@@ -21,6 +21,9 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { movingFlowLive } = require('../config/feature-gates');
 const Moves = require('../services/customer-moves');
+// A knex error message carries the query's bindings (typed addresses, link
+// tokens): log the code only (AGENTS.md, no PII in logs).
+const errCode = (err) => String(err?.code || err?.name || 'error');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const adminOnly = [adminAuthenticate, requireAdmin];
@@ -38,7 +41,7 @@ async function liveCustomer(req, res, next) {
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     return next();
   } catch (err) {
-    logger.error(`[admin-customer-moves] customer lookup failed: ${err.message}`);
+    logger.error(`[admin-customer-moves] customer lookup failed (${errCode(err)})`);
     return res.status(500).json({ error: 'Could not load the customer' });
   }
 }
@@ -51,7 +54,7 @@ router.get('/:id/moves', ...adminOnly, async (req, res) => {
     const [moves, text] = await Promise.all([Moves.recentMoves(id, 5), Moves.textTarget(id)]);
     return res.json({ enabled: true, moves, text });
   } catch (err) {
-    logger.error(`[admin-customer-moves] list failed: ${err.message}`);
+    logger.error(`[admin-customer-moves] list failed (${errCode(err)})`);
     return res.status(500).json({ error: 'Could not load moves' });
   }
 });
@@ -62,7 +65,7 @@ router.post('/:id/moving-link', ...adminOnly, gateOn, liveCustomer, async (req, 
     const url = await Moves.movingLinkFor(move);
     return res.json({ url, moveId: move.id, status: move.status });
   } catch (err) {
-    logger.error(`[admin-customer-moves] link failed: ${err.message}`);
+    logger.error(`[admin-customer-moves] link failed (${errCode(err)})`);
     return res.status(500).json({ error: 'Could not make the moving link' });
   }
 });
@@ -72,7 +75,7 @@ router.post('/:id/moving-email', ...adminOnly, gateOn, liveCustomer, async (req,
     const result = await Moves.sendMovingEmail({ customerId: req.params.id, actorId: req.technicianId || null });
     return res.json({ ok: result.ok, sent: result.sent, reason: result.reason, moveId: result.moveId });
   } catch (err) {
-    logger.error(`[admin-customer-moves] email failed: ${err.message}`);
+    logger.error(`[admin-customer-moves] email failed (${errCode(err)})`);
     return res.status(500).json({ error: 'Could not send the moving email' });
   }
 });

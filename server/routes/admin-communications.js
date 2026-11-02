@@ -1578,7 +1578,7 @@ async function sendSmsHandler(req, res, next) {
         const { isRealProviderSend } = require('../services/sms-auto-send');
         if (isRealProviderSend(result)) await require('../services/customer-moves').markLinkSent(movingLinkMoveIds, { channel: 'sms', actorId: req.technicianId || null });
       } catch (stampErr) {
-        logger.warn(`[communications] moving link sent stamp failed (text already sent): ${stampErr.message}`);
+        logger.warn(`[communications] moving link sent stamp failed (text already sent) (${stampErr?.code || stampErr?.name || 'Error'})`);
       }
     }
     // Composer-carried contract signing links: a REAL provider send is the
@@ -1803,7 +1803,7 @@ async function sendSmsHandler(req, res, next) {
       try {
         await require('../services/customer-moves').markLinkSent(movingLinkMoveIds, { channel: 'sms', actorId: req.technicianId || null });
       } catch (stampErr) {
-        logger.warn(`[communications] moving link sent stamp failed after a throw: ${stampErr.message}`);
+        logger.warn(`[communications] moving link sent stamp failed after a throw (${stampErr?.code || stampErr?.name || 'Error'})`);
       }
     }
     // And for the activated contract links: accepted → record, else hand back.
@@ -3282,7 +3282,7 @@ async function movingLinkHandler(req, res) {
       firstName: String(customer.first_name || '').trim().split(/\s+/)[0] || null,
     });
   } catch (err) {
-    logger.error(`moving-link lookup failed: ${err.message}`);
+    logger.error(`moving-link lookup failed (${err?.code || err?.name || 'Error'})`);
     return res.status(500).json({ error: 'Could not make the moving link' });
   }
 }

@@ -24,6 +24,9 @@
  */
 
 const crypto = require('crypto');
+// A knex error message carries the query's bindings (typed addresses, link
+// tokens): log the code only (AGENTS.md, no PII in logs).
+const errCode = (err) => String(err?.code || err?.name || 'error');
 const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
@@ -131,7 +134,7 @@ async function movingLinkFor(move) {
       expiresAt: null,
     });
   } catch (err) {
-    logger.warn(`[customer-moves] short link failed for move ${move.id}: ${err.message}`);
+    logger.warn(`[customer-moves] short link failed for move ${move.id} (${errCode(err)})`);
     return longUrl;
   }
 }
@@ -489,7 +492,7 @@ async function submitMove(move, { checkId = null, moveOutDate, moveInDate } = {}
       submittedAt: now,
     });
   } catch (err) {
-    logger.error(`[customer-moves] alert failed for move ${move.id}: ${err.message}`);
+    logger.error(`[customer-moves] alert failed for move ${move.id} (${errCode(err)})`);
   }
   return { move: saved.updated, request: saved.request, view: await publicMoveView(saved.updated) };
 }
