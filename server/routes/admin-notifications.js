@@ -12,6 +12,7 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 // app-icon badge in notification-triggers so the two counts can't drift.
 const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 const { withAlertButtons, runAlertButton } = require('../services/admin-alert-buttons');
+const { explainAdminAlert, explainerLive, withExplainerFields } = require('../services/admin-alert-explainer');
 
 router.use(adminAuthenticate);
 
@@ -87,9 +88,16 @@ router.get('/', async (req, res, next) => {
     // a page containing only live-alert duplicates must still allow paging.
     const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
     const lastServed = persisted.slice(0, limit).at(-1);
+    const served = await withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole });
+    // An SMS review bell's source text rides as `source_text`, read now and never stored on the row. Added last:
+    // the explainer reads the stored row by id, never this.
+    const { withTextNoteSources } = require('../services/sms-operational-actions');
+    const rows = await withTextNoteSources(await withExplainerFields(served, { role: req.techRole }), { role: req.techRole });
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
-      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...(await withAlertButtons(dedupedPersisted.map(withoutCursorFields), { role: req.techRole }))],
+      // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
+      // admin role while GATE_ALERT_EXPLAINER is on.
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
     });
@@ -482,6 +490,21 @@ router.post('/:id/actions/:actionId', requireAdmin, async (req, res, next) => {
       notificationId: id, actionId: String(req.params.actionId), version: version.toLowerCase(),
       technicianId: req.technicianId, role: req.techRole,
     });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/explain — the bell's "What to do" for one row (GATE_ALERT_EXPLAINER, admin only):
+// { explainer: { happened, steps, fixer, fallback? }, customer: { id, name } | null, version } (`version`: the content
+// version the summary was written for; the bell keeps it only on a row it holds at that version). The first open asks an AI and
+// saves the summary on the row (services/admin-alert-explainer.js); later opens read it back. Sends nothing to anyone.
+// Gate off: 404, the same as an unknown route.
+router.post('/:id/explain', requireAdmin, async (req, res, next) => {
+  try {
+    if (!explainerLive()) return res.status(404).json({ error: 'Not found' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    const { status, body } = await explainAdminAlert(id, { role: req.techRole, technicianId: req.technicianId });
     res.status(status).json(body);
   } catch (err) { next(err); }
 });

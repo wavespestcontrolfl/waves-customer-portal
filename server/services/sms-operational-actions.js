@@ -589,6 +589,43 @@ function reviewBellCopy({ customer, exceptions }) {
   return { action, why, detail: [...lines, 'Open the conversation to check.'].join('\n') };
 }
 
+// The bell list (GET /api/admin/notifications) shows a review bell's source text, read from the text itself
+// while the list is served (owner 2026-11-02 "do all": show the words the way the "SMS from" alert does). The
+// words are never stored on the bell (title, body, detail or metadata): a text can hold a code or a word that
+// opens a door, and no screen catches every form (Codex #6414 r1/r2, #7466 r1/r2), so what the bell keeps, rings
+// on a phone and hands to needs_me stays the reader's own copy above. Admin role only, one read per page, by the
+// bell's own text and customer; masked the way every bell body is (redactedWords), like the "SMS from" row that
+// already shows the same text. A failed read serves the list without it.
+const SOURCE_TEXT_MAX_CHARS = 1600;
+async function withTextNoteSources(rows, { role } = {}, conn = db) {
+  if (role !== 'admin' || !Array.isArray(rows)) return rows;
+  const metaOf = (row) => {
+    if (row?.metadata && typeof row.metadata === 'object') return row.metadata;
+    try { return JSON.parse(row?.metadata || '{}') || {}; } catch { return {}; }
+  };
+  const wanted = rows.map((row) => {
+    const meta = metaOf(row);
+    const ok = meta.triggerKey === 'sms_operational_exception' && isUuid(String(meta.sms_log_id || '')) && isUuid(String(meta.customerId || ''));
+    return ok ? meta : null;
+  });
+  const ids = [...new Set(wanted.filter(Boolean).map((meta) => String(meta.sms_log_id)))];
+  if (!ids.length) return rows;
+  let texts;
+  try {
+    texts = await excludeUnresolvedSendReservations(conn('sms_log').whereIn('id', ids)).select('id', 'customer_id', 'message_body');
+  } catch (err) {
+    logger.warn(`[sms-operations] review bell source texts not read: ${err.message}`);
+    return rows;
+  }
+  const { redactedWords } = require('./admin-alert-names');
+  return rows.map((row, i) => {
+    const meta = wanted[i];
+    const source = meta && texts.find((t) => String(t.id) === String(meta.sms_log_id) && String(t.customer_id) === String(meta.customerId));
+    const text = source ? redactedWords(source.message_body) : '';
+    return text ? { ...row, source_text: cutAtWord(text, SOURCE_TEXT_MAX_CHARS) } : row;
+  });
+}
+
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   const replay = matchedContext.replay === true;
   if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
@@ -1829,4 +1866,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

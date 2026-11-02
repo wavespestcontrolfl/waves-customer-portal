@@ -887,7 +887,12 @@ const PINNED_DISPLAY_BUILDERS = {
   reschedule_appointment: (params, preview) => {
     const a = preview?.pinned_appointment;
     if (!a) return null;
-    return { ...params, appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})` };
+    const plan = preview?.series_move;
+    return {
+      ...params,
+      appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})`,
+      ...(plan ? { recurring_plan: `this visit and ${Math.max((plan.occurrences || []).length - 1, 0)} later visit(s) move together` } : {}),
+    };
   },
   // The operator must see WHICH queued text the irreversible cancel hits —
   // customer, masked recipient, send time and the body preview — not just
@@ -1859,9 +1864,26 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // refusal. Same message, surfaced before the card exists.
       // movesAsSeries carries the recurring + gate checks and the lawn rounds size rule: a one-off
       // is a single move, so the executor takes it.
+      // The plan pin is ROUTE-OWNED: assigned below from the rebooker's own preview and from nowhere else.
+      delete params._series_move;
+      let seriesMove = null;
       if (params.new_date && String(params.new_date) !== String(pin.scheduled_date)
         && require('../services/rebooker').movesAsSeries(pin, params.new_date)) {
-        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. The bar can\'t move a series from here yet. Nothing was proposed.', code: 'collective_move_unsupported' } };
+        if (!require('../config/feature-gates').ibSeriesMoveLive()) {
+          return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. The bar can\'t move a series from here yet. Nothing was proposed.', code: 'collective_move_unsupported' } };
+        }
+        // GATE_IB_SERIES_MOVE (gap #22): the card lists every visit of the plan with its old and new
+        // slot, from the rebooker's own preview; Confirm re-plans, compares and binds the move to it.
+        // A plan move is admin-only, as on the Dispatch board.
+        if (req.techRole !== 'admin') return { failed: true, modelResult: { error: 'Only an admin can move a recurring plan from the bar. Nothing was proposed.', code: 'permission_denied' } };
+        const dateStr = require('../utils/datetime-et').validScheduleDate(params.new_date);
+        if (!dateStr) return { failed: true, modelResult: { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${params.new_date}"). Nothing was proposed.` } };
+        const anchor = require('../services/intelligence-bar/tools').seriesAnchorWindow(pin, params.new_time_window, dateStr);
+        if (anchor.error) return { failed: true, modelResult: anchor };
+        const planned = await require('../services/intelligence-bar/series-move').planSeriesMove({ appointmentId: pin.id, newDate: dateStr, window: anchor.window });
+        if (planned.refusal) return { failed: true, modelResult: planned.refusal };
+        seriesMove = planned.plan;
+        params._series_move = seriesMove;
       }
       if (pin.visit_id) {
         const VisitGroups = require('../services/visit-groups');
@@ -1878,7 +1900,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         if (verdict.frozen) return { failed: true, modelResult: frozenMoveRefusal(verdict.reason) };
       }
       params._appointment_fingerprint = appointmentPinFingerprint(pin);
-      preview = { ...preview, pinned_appointment: pin };
+      preview = { ...preview, pinned_appointment: pin, ...(seriesMove ? { series_move: seriesMove } : {}) };
     }
     if (toolUse.name === 'trigger_review_request' || toolUse.name === 'reply_via_sms') {
       // Same recipient pin send_sms has (codex P1 on #3648): resolve the

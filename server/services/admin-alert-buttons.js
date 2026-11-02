@@ -29,6 +29,9 @@ const KINDS = {
   // Owner 2026-11-02 ("cant we add a call button"): Call on a row about one caller, the linked page's own Call step;
   // the row stays open. A row's close-only button rides along (alert-call-button.js).
   call_back: () => require('./alert-call-button').buttonHandler,
+  // Owner plan A 2026-11-02 "Your word list goes to Google automatically, and the advisor drafts new words for your one-click
+  // yes or no. Every block can be undone.": Add / Decline on an ads-advisor word. The Ads page's own decide step; Undo is on that page.
+  negative_keyword: () => require('./ads/negative-keyword-buttons').buttonHandler,
 };
 
 // Close-only buttons an emitter puts on its row: Handled on a customer's texts, Called back on a call-back

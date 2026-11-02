@@ -17,7 +17,12 @@ vi.mock('./useBestTimes', () => ({
     return { pickedByTech: [], availability: hooks.availability, checking: false };
   },
 }));
-vi.mock('./useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: hooks.conflicts }) }));
+vi.mock('./useSlotConflicts', () => ({
+  useSlotConflicts: (args) => {
+    hooks.conflictsArgs = args;
+    return { conflicts: hooks.conflicts };
+  },
+}));
 
 const DATE = '2035-01-02';
 const hour = (start, over = {}) => ({
@@ -218,6 +223,49 @@ it('open times, drag-drop confirm: the box lists the open times display-only and
   // The drop fixes the technician: this route only.
   expect(hooks.bestTimesArgs).toMatchObject({ openTimes: true, technicianId: 'tech-1' });
   expect(hooks.bestTimesArgs.techPick).toBeFalsy();
+});
+
+// Owner 2026-11-02: "i cannot click the times" when moving an appointment.
+it('open times, drag-drop confirm (pickTimes): a tapped time re-aims the move, and only the confirm saves it', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({ enabled: false })));
+  hooks.availability = openTimesAt();
+  const onConfirm = vi.fn(async () => {});
+  render(
+    <RescheduleConfirmModal
+      open pickTimes customerName="Fixture Customer" fromDate="2035-01-01" fromMinutes={480} toDate={DATE} toMinutes={540}
+      serviceId="svc-1" technicianId="tech-1" toWindow="09:00-10:00" durationMinutes={45} onConfirm={onConfirm} onCancel={vi.fn()}
+    />,
+  );
+  await screen.findByTestId('open-times-box');
+  const onePm = () => screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('1 PM'));
+  expect(onePm()).toBeEnabled();
+  fireEvent.click(onePm());
+  // The summary and the overlap check follow the tapped time, for the visit's length; nothing saved yet.
+  expect(screen.getByText('January 3, 2035 at 1:00 pm')).toBeInTheDocument();
+  expect(hooks.conflictsArgs).toMatchObject({ date: '2035-01-03', windowStart: '13:00', windowEnd: '13:45' });
+  await waitFor(() => expect(onePm()).toHaveAttribute('aria-pressed', 'true'));
+  expect(onConfirm).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Reschedule appointment' }));
+  await waitFor(() => expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({
+    scope: 'this_only', target: { date: '2035-01-03', window: '13:00-13:45' },
+  })));
+});
+
+it('drag-drop confirm (pickTimes): tapping the visit\'s own time leaves nothing to save', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({ enabled: false })));
+  hooks.availability = openTimesAt();
+  const onConfirm = vi.fn(async () => {});
+  render(
+    <RescheduleConfirmModal
+      open pickTimes customerName="Fixture Customer" fromDate={DATE} fromMinutes={660} toDate="2035-01-03" toMinutes={540}
+      serviceId="svc-1" technicianId="tech-1" toWindow="09:00-10:00" durationMinutes={60} onConfirm={onConfirm} onCancel={vi.fn()}
+    />,
+  );
+  await screen.findByTestId('open-times-box');
+  fireEvent.click(screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('11 AM')));
+  expect(screen.getByText('That is the visit’s current time.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reschedule appointment' })).toBeDisabled();
+  expect(onConfirm).not.toHaveBeenCalled();
 });
 
 it('open times, Quick Move: asks for the box on the visit\'s own route', async () => {
