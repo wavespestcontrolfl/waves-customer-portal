@@ -71,6 +71,24 @@ describe('clearQuoteRequirementFlags (authored proposal send gate)', () => {
     expect(data.result.recurring.services[0].requiresCustomQuote).toBe(false);
   });
 
+  it('leaves a delivered sendSnapshot untouched while other nested flags still clear', () => {
+    const snapshot = () => ({ pricingBundle: { quoteRequired: true, services: [{ name: 'Pest', quoteRequired: true }] } });
+    const data = {
+      quoteRequired: true,
+      sendSnapshot: snapshot(),
+      result: { recurring: { services: [{ name: 'Pest', quoteRequired: true }] } },
+      proposal: { enabled: true, sendSnapshot: { quoteRequired: true } },
+    };
+
+    clearQuoteRequirementFlags(data);
+
+    expect(data.sendSnapshot).toEqual(snapshot());
+    expect(data.quoteRequired).toBe(false);
+    expect(data.result.recurring.services[0].quoteRequired).toBe(false);
+    // Only the top-level key is skipped.
+    expect(data.proposal.sendSnapshot.quoteRequired).toBe(false);
+  });
+
   it('is a no-op on data with no quote flags', () => {
     const data = { proposal: { enabled: true, buildings: [] } };
     clearQuoteRequirementFlags(data);

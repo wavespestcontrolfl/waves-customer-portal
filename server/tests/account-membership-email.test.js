@@ -445,6 +445,33 @@ describe('app intro tracker destination', () => {
   });
 });
 
+describe('sendMovingLink (staff click from the Customer 360 Moving card)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('sends the moving_link template with the link; a double click inside one minute is one email', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+    const now = new Date('2026-11-02T15:00:30Z');
+    await AccountMembershipEmail.sendMovingLink({ customerId: 'cust-1', moveId: 'move-1', movingUrl: 'https://wvs.example/m/abc', actorId: 'admin-1', now });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'moving_link',
+      to: 'taylor@example.com',
+      idempotencyKey: `moving_link:move-1:${Math.floor(now.getTime() / 60000)}`,
+      payload: expect.objectContaining({ moving_url: 'https://wvs.example/m/abc' }),
+    }));
+  });
+
+  test('no move or no link sends nothing', async () => {
+    expect(await AccountMembershipEmail.sendMovingLink({ customerId: 'cust-1', moveId: null, movingUrl: 'https://wvs.example/m/abc' }))
+      .toEqual({ ok: false, skipped: true, reason: 'missing_link' });
+    expect(await AccountMembershipEmail.sendMovingLink({ customerId: 'cust-1', moveId: 'move-1', movingUrl: '' }))
+      .toEqual({ ok: false, skipped: true, reason: 'missing_link' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
 describe('sendMembershipRenewalReminder (annual prepay year-end notice)', () => {
   beforeEach(() => jest.clearAllMocks());
 

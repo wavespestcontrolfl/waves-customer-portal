@@ -10,6 +10,7 @@ import {
   buildCustomerLinkPrefill,
   buildReschedulePrefill,
   buildReservicePrefill,
+  buildMovingPrefill,
   CUSTOMER_COMPOSER_LINKS,
 } from "./CommunicationsPageV2";
 
@@ -179,11 +180,28 @@ describe("buildCustomerLinkPrefill", () => {
   });
 });
 
+describe("buildMovingPrefill", () => {
+  it("greets the recipient and asks for the new address and dates, with no price", () => {
+    const text = buildMovingPrefill({ firstName: "PersonA", url: URL });
+    expect(text).toBe(
+      `Hi PersonA, it's Waves. Moving? Tell us your new address and move dates here: ${URL}`,
+    );
+    expect(text).not.toMatch(/\$/);
+    expect(/^[\x00-\x7F]*$/.test(text)).toBe(true);
+  });
+
+  it("falls back to the bare clause (null) with no first name or no link", () => {
+    expect(buildMovingPrefill({ firstName: "", url: URL })).toBeNull();
+    expect(buildMovingPrefill({ firstName: "PersonA", url: "" })).toBeNull();
+  });
+});
+
 describe("CUSTOMER_COMPOSER_LINKS", () => {
   it("carries all nineteen customer rows in the customer category", () => {
     expect(CUSTOMER_COMPOSER_LINKS.map((l) => l.key)).toEqual([
       "reschedule",
       "reservice",
+      "moving",
       "review_request",
       "pay_balance",
       "estimate",

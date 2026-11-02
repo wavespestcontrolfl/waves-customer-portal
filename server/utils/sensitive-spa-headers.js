@@ -104,6 +104,15 @@ function isReservicePath(reqPath = '') {
   return /^\/reservice\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Public moving page (/moving/<48-hex>) — the token is customer_moves.token,
+// a bearer credential the office texts or emails to a customer who is moving;
+// the page shows the customer's first name and plan service names. Same
+// contract as the reservice shell: never indexed/archived, token never leaks
+// via Referer, no caching.
+function isMovingPath(reqPath = '') {
+  return /^\/moving\/[a-f0-9]{48}\/?$/.test(String(reqPath || ''));
+}
+
 // Public lead consultation-booking page (/inspection/<leadId>.<exp>.<sig>) —
 // the token is a signed lead-consultation token (utils/lead-consultation-
 // token.js) carrying the lead id, and the page renders the lead's first
@@ -144,7 +153,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isMovingPath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -166,5 +175,6 @@ module.exports = {
   isContractPath,
   isAppointmentPath,
   isReservicePath,
+  isMovingPath,
   isInspectionPath,
 };

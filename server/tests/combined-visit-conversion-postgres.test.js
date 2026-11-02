@@ -466,7 +466,8 @@ postgres('combined capacity conversion on the migrated application schema', () =
 
   test.each([
     ['standard', 6, 'bimonthly'],
-    ['enhanced', 9, 'every_6_weeks'], ['premium', 12, 'monthly'],
+    // A residential lawn 9x series is written as rounds; its tree & shrub companion keeps every_6_weeks.
+    ['enhanced', 9, 'lawn_rounds_9'], ['premium', 12, 'monthly'],
   ])('generated lawn tier %s survives reserve, acceptance rewrite and conversion with its companion', async (tier, visits, pattern) => {
     const pool = mockPg;
     const trx = await pool.transaction();

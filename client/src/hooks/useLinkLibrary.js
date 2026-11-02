@@ -6,6 +6,7 @@ export default function useLinkLibrary(open) {
   const [links, setLinks] = useState(null);
   const [receiptLinksEnabled, setReceiptLinksEnabled] = useState(false);
   const [consultationLinksEnabled, setConsultationLinksEnabled] = useState(false);
+  const [movingLinksEnabled, setMovingLinksEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [attempt, setAttempt] = useState(0);
@@ -25,6 +26,7 @@ export default function useLinkLibrary(open) {
           setLinks(Array.isArray(data.links) ? data.links : []);
           setReceiptLinksEnabled(data.receiptLinksEnabled === true);
           setConsultationLinksEnabled(data.consultationLinksEnabled === true);
+          setMovingLinksEnabled(data.movingLinksEnabled === true);
         }
       })
       .catch((err) => {
@@ -36,5 +38,5 @@ export default function useLinkLibrary(open) {
     return () => { cancelled = true; };
   }, [open, links, attempt]);
 
-  return { links, loading, error, retry, receiptLinksEnabled, consultationLinksEnabled };
+  return { links, loading, error, retry, receiptLinksEnabled, consultationLinksEnabled, movingLinksEnabled };
 }

@@ -1000,6 +1000,26 @@ const NotificationService = {
     return row ? { done: row.done_at != null, version: row.version } : null;
   },
 
+  // One admin row for the bell's "What to do" (services/admin-alert-explainer.js): the text the bell shows, the
+  // summary stored on it and its content version, role-scoped like the bell list. Null when the row is gone or
+  // out of scope.
+  async getAdminNotificationForExplainer(id, { role, technicianId = null } = {}) {
+    const row = await scopeAdminFeedToRole(
+      db('notifications').where({ id, recipient_type: 'admin' }),
+      role, technicianId,
+    ).first('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', 'explainer',
+      db.raw(`${NOTIFICATION_VERSION_SQL} AS version`));
+    return row || null;
+  },
+
+  // Saves a "What to do" summary on its row only while the row still shows the text it was written from (the
+  // content version is unchanged), so a summary of older text is never kept. Returns the rows written, 0 or 1.
+  async saveAdminExplainer(id, version, explainer) {
+    return db('notifications').where({ id, recipient_type: 'admin' })
+      .whereRaw(`${NOTIFICATION_VERSION_SQL} = ?`, [version])
+      .update({ explainer: JSON.stringify(explainer) });
+  },
+
   // Recently done admin rows (the "Recently done" list, so an accidental Done
   // can be reopened). Role-scoped like the bell list, but Activity-only rows
   // are INCLUDED: Activity has its own Done and this is the one recovery

@@ -158,14 +158,9 @@ function stripHtml(s) {
 // appears on a fully accepted in-area validation (validated_accept /
 // corrected); an accepted OUT-of-area address is the clean-cancel hard stop;
 // anything partial (ambiguous, missing component, confirm-needed,
-// API-unavailable) resolves to null → no card, no hard stop.
-function cancelMoveAddressVerdict(verdict, STATUSES) {
-  if (!verdict) return null;
-  if (verdict.status === STATUSES.OUT_OF_SERVICE_AREA) return false;
-  const accepted = verdict.status === STATUSES.VALIDATED_ACCEPT || verdict.status === STATUSES.CORRECTED;
-  if (!accepted || verdict.inServiceArea !== true) return null;
-  return true;
-}
+// API-unavailable) resolves to null → no card, no hard stop. The rule lives in
+// services/move-address-verdict.js, shared with the moving link flow.
+const { cancelMoveAddressVerdict } = require('../services/move-address-verdict');
 
 // Durable cancellation case (PR E) — idempotent per request id, best-effort:
 // a case failure never blocks or un-reports a cancel. Called from the fresh
@@ -853,6 +848,21 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             `(customer ${req.customer.id}); request is durable in service_requests ` +
             `but may be unsurfaced in the admin feed.`
         );
+      }
+      // GATE_PORTAL_ASK_PUSH: a customer's own submission (this route is customer-authenticated; the office makes
+      // its requests through the admin routes) rings the admin phones once its bell row exists. A withheld bell
+      // (demo account, policy) or a failed write rings nothing. The service-request insert is committed long before
+      // this point. Not awaited: a slow push provider must not hold the customer's submission, and pushPortalAsk
+      // never throws.
+      if (notif?.id && !notif.suppressed) {
+        const { pushPortalAsk, shortName } = require('../services/portal-ask-push');
+        void pushPortalAsk({
+          itemKey: `request:${request.id}`,
+          title: isCancellation ? 'Review a cancellation request' : `Answer ${validUrgency === 'urgent' ? 'an urgent' : 'a'} portal request`,
+          body: `${shortName(req.customer.first_name, req.customer.last_name)} ${isCancellation ? 'asked to cancel service' : `sent a ${categoryLabel} request`}`,
+          link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
+          customerId: req.customer.id,
+        });
       }
     } catch (notifErr) {
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);

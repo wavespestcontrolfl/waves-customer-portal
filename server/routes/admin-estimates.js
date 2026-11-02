@@ -162,7 +162,13 @@ function clearQuoteRequirementFlags(value, depth = 0) {
   if (value.quoteRequired === true) value.quoteRequired = false;
   if (value.requiresCustomQuote === true) value.requiresCustomQuote = false;
   if (value.autoQuoteRequiresAdminApproval === true) value.autoQuoteRequiresAdminApproval = false;
-  for (const v of Object.values(value)) clearQuoteRequirementFlags(v, depth + 1);
+  for (const [key, v] of Object.entries(value)) {
+    // A delivered sendSnapshot records what the customer was sent (the public
+    // page fast-paths its pricingBundle) and the next send rebuilds it, so a
+    // proposal save must not rewrite it. Top-level key only.
+    if (depth === 0 && key === 'sendSnapshot') continue;
+    clearQuoteRequirementFlags(v, depth + 1);
+  }
 }
 
 // Lead-created manual-quote estimates carry a blocking draft/lead automation
@@ -5003,7 +5009,10 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: `The proposal's ${totalLabel} total exceeds $99,999,999.99 — reduce the amounts before saving.` });
       }
     }
-    const existingData = parseEstimateData(estimate.estimate_data) || {};
+    // Deep clone: the cleanups below mutate nested nodes, and pg hands back the
+    // pre-read row's jsonb as the same object. An alias would change the
+    // pre-read's edit version and 409 every save of a sent proposal.
+    const existingData = structuredClone(parseEstimateData(estimate.estimate_data) || {});
     const authoredExpiry = proposalExpiry({ estimate_data: { proposal: normalized } });
     const hadFixedValidity = hasFixedBidValidity(estimate);
     const standardStart = estimate.status === 'scheduled'

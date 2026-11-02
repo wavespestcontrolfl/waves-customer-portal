@@ -109,7 +109,7 @@ function isOwnHost(hostname) {
 // page or redirect addressed by a code or token, whatever its length. Sources:
 //   client/src/App.jsx public routes whose param is a token or code:
 //     appointment, book, card, careers (careers/interview/:token), contract,
-//     estimate, inspection, lawn-report, pay (pay/:token, pay/statement/:token),
+//     estimate, inspection, lawn-report, moving, pay (pay/:token, pay/statement/:token),
 //     pest-report, prep, price-change, rate, recap, receipt, report
 //     (report/:token, report/project/:token), reschedule, reservice, review,
 //     secure, service-outlines, track, visit
@@ -121,7 +121,7 @@ function isOwnHost(hostname) {
 // server/tests/ib-admin-read-tools.test.js reads those two files and fails when
 // a public token route there is missing from this list.
 const PUBLIC_TOKEN_ROUTE_SEGMENTS = Object.freeze([
-  'appointment', 'book', 'card', 'careers', 'contract', 'estimate', 'go', 'inspection', 'l', 'lawn-report', 'og', 'pay',
+  'appointment', 'book', 'card', 'careers', 'contract', 'estimate', 'go', 'inspection', 'l', 'lawn-report', 'moving', 'og', 'pay',
   'pest-report', 'prep', 'price-change', 'r', 'rate', 'recap', 'receipt', 'report', 'reschedule', 'reservice', 'review',
   'secure', 'service-outlines', 'track', 'visit',
 ]);

@@ -211,10 +211,11 @@ const propertyEditRule = input => !String(input?.label ?? '').trim();
 
 // reschedule_appointment on a grouped visit detaches the service or recomputes the
 // parent visit window (the card discloses it; Codex r4), so the pinned appointment the
-// proposal verified must carry no visit_id.
+// proposal verified must carry no visit_id. A recurring-plan move (GATE_IB_SERIES_MOVE)
+// moves every later visit of the plan too: a bulk change, so it keeps its card.
 function rescheduleRule(input, preview) {
   const pin = preview?.pinned_appointment;
-  return Boolean(pin && typeof pin === 'object' && !pin.visit_id);
+  return Boolean(pin && typeof pin === 'object' && !pin.visit_id && !preview.series_move);
 }
 
 function customerUpdateRule(input, preview) {
@@ -250,6 +251,11 @@ const DIRECT_EDIT_STAGES = [directScopeStage, directToolStage, directGroundingSt
 // this covers the general read, because its catalog is broad and grows by
 // review, and (GATE_IB_TARGET_RULES_V2) every read outside TRUSTED_READS below.
 const GENERAL_READ_TOOL = 'read_admin_data';
+// needs_me returns open alerts' why and detail, and those carry customer-written
+// text (the latest text on an "SMS from" row, a customer's request or email), so
+// it taints like the general read and leaves the same thread marker, gate on or
+// off (Codex #7466 r1).
+const ALWAYS_TAINTING_READS = new Set([GENERAL_READ_TOOL, 'needs_me']);
 
 // A general-read result that carries data: a 2xx answer with a `data` field.
 // An error, a refusal or a bare note does not taint.
@@ -264,7 +270,7 @@ function isDataAnswer(result) {
 // outside notes are all reads that can carry a stranger's instructions, and a new
 // read tool is untrusted until someone reads its result shape and lists it here.
 // A write tool's result is not a read, so it taints only when it shows a prior value as text (r45;
-// known write kinds only; a tool the policy does not know taints). Gate off: only `read_admin_data` taints.
+// known write kinds only; a tool the policy does not know taints). Gate off: only ALWAYS_TAINTING_READS taint.
 //
 // TRUSTED_READS lists only tools whose results carry NO customer-entered string:
 // pure numbers and aggregates by service line or period, the pricing config the team
@@ -288,7 +294,7 @@ const TRUSTED_READS = new Set([
 const actionPolicy = require('./action-policy.json');
 // A read the policy knows as a read, or a tool it does not know at all.
 const isReadTool = toolName => !actionPolicy[toolName] || actionPolicy[toolName].kind === 'read';
-const readTaints = toolName => (toolName === GENERAL_READ_TOOL
+const readTaints = toolName => (ALWAYS_TAINTING_READS.has(toolName)
   || (ibTargetRulesV2Live() && isReadTool(toolName) && !TRUSTED_READS.has(toolName)));
 
 // A read that returned rows: an object without an error or a refusal code.
@@ -315,9 +321,10 @@ function noteUntrustedRead(taint, toolName, result) {
   if (!taint || !readTaints(toolName)) return;
   if (!(toolName === GENERAL_READ_TOOL ? isDataAnswer(result) : isReadAnswer(result))) return;
   taint.untrustedRead = true;
-  // Which marker the reply leaves on the thread: read_admin_data keeps the old one, every
-  // v2-only tainting read gets the v2 marker (Codex #6369 r19).
-  if (toolName === GENERAL_READ_TOOL) taint.untrustedGeneral = true;
+  // Which marker the reply leaves on the thread: the reads that taint with the gate off too
+  // (read_admin_data, needs_me) keep the old one, every v2-only tainting read gets the v2
+  // marker (Codex #6369 r19).
+  if (ALWAYS_TAINTING_READS.has(toolName)) taint.untrustedGeneral = true;
   else taint.untrustedV2 = true;
 }
 
@@ -352,7 +359,7 @@ function untrustedReadKindsInHistory(messages) {
     if (!answer) return false;
     try { const parsed = JSON.parse(answer.content); return isReadAnswer(parsed) && carriesPriorText(parsed); } catch { return false; }
   });
-  return { general: returnedReads.some(read => read.name === GENERAL_READ_TOOL), v2: priorTextWrite || returnedReads.some(read => read.name !== GENERAL_READ_TOOL) };
+  return { general: returnedReads.some(read => ALWAYS_TAINTING_READS.has(read.name)), v2: priorTextWrite || returnedReads.some(read => !ALWAYS_TAINTING_READS.has(read.name)) };
 }
 
 const untrustedReadInHistory = messages => Object.values(untrustedReadKindsInHistory(messages)).some(Boolean);

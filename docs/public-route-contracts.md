@@ -997,7 +997,9 @@ Visits handed to the customer by Quick Move (owner 2026-11-01; the hand-off is
 behind `GATE_QUICKMOVE_CUSTOMER_PICK`, but everything below is keyed on the
 column and is NOT gated). Quick Move's "let the customer pick a day" parks a
 recurring plan visit with no window at a placeholder date about a week out and
-sets `scheduled_services.customer_pick_by` (timestamptz: 8 PM ET the next day).
+sets `scheduled_services.customer_pick_by` (timestamptz: 24 hours after the
+hand-off text, rounded up to the quarter hour; owner 2026-11-02, before which
+it was 8 PM ET the next day).
 For a row with `customer_pick_by` set:
 - **Not refused for having no time.** The self-serve notice rule
   (`services/scheduling/self-serve-notice.js visitInsideMoveNoticeWindow`)
@@ -1051,7 +1053,8 @@ read from `scheduled_services.customer_pick_by`, not behind
 set and no `window_start` (handed to the customer, waiting) carries
 `customerPick: { pickBy, pickByLabel, deadlinePassed, originalDate,
 originalWindowStart, reasonCode }`: `pickBy` is the marker as an ISO instant,
-`pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM"), `deadlinePassed` is
+`pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM", "Wed, Nov 4 at 11:15 AM";
+the minutes show only when not :00), `deadlinePassed` is
 `now >= pickBy`, and the other three come from the visit's newest hand-off
 `reschedule_log` row, the row with `notes = 'customer_pick'` (`original_date`,
 `original_window`'s start as `HH:MM`, and the Quick Move reason code in
@@ -3267,8 +3270,7 @@ test, or watering, rain or mowing guidance, and never ordinal or sequence
 wording (first, final, again, re-check) since a customer may join mid-year.
 A visit on a 9-visit rounds series gets the sentence for its lawn round instead
 of its month: when the visit's linked scheduled row has `recurring_pattern`
-`lawn_rounds_9` (only `GATE_LAWN_9X_ROUNDS` creates such rows; nothing here reads
-that gate), the round (1 to 9) is `lawn-rounds.js` `roundOf` of that row's
+`lawn_rounds_9` (a residential lawn 9x series is written that way), the round (1 to 9) is `lawn-rounds.js` `roundOf` of that row's
 `scheduled_date`, and the line is that round's sentence from `lawn-program-line.js`
 `ROUND_PROGRAM_LINES_V13` (nine sentences held to every rule above, so none says
 "round"). Every other visit, including one with no linked scheduled row, keeps the
@@ -6981,6 +6983,39 @@ id, gate off, a non-multipart body (answered by
 `reservicePhotosPreParserGuard` ahead of the shared body parsers), another
 customer's or a non-re-service visit, an ineligible visit — is the generic
 404. Sends nothing to a customer.
+`/api/public/moving/:token` (GET, plus `POST /:token/check` and
+`POST /:token/submit`; the moving page the office sends a customer who is
+moving, by email from the Customer 360 Moving card or by text from the
+Communications composer, always on a staff click). Dark behind
+`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
+the generic 404 before any DB read. 48-hex token format gate on
+`customer_moves.token`; a malformed, unknown or closed move is the same
+generic 404. Privacy headers (`Cache-Control: private, no-store`,
+`X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
+answer, and the `/moving/<token>` SPA shell gets the sensitive-page headers.
+Router limit 60 req/min per IP; `/check` 6 req/min per IP and `/submit` 10
+req/min per IP on top. GET payload (`services/customer-moves.js`
+`publicMoveView`): `firstName`, the plan's recurring service names, `status`
+(`open` | `submitted`), `moveOutDate` / `moveInDate` (`YYYY-MM-DD` or null),
+`newCity` (only the CITY of a submitted new address), `verdict`
+(`in_area` | `out_of_area` | `unverified` | null) and `addressOnFile`. Never
+the current street address, a phone, an email or money. `/check` takes
+`{ address }` (5-200 chars) and makes one paid Google address check: the
+same text is answered from `customer_moves.last_check` for 24 hours, and a
+link gets at most 10 paid checks per Eastern day (claimed atomically in SQL;
+the 11th is a 429). It answers `{ typed, normalized, verdict, checkId }` for
+the NEW address only; `checkId` is an opaque 16-hex id of that check.
+`/submit` takes `{ checkId, moveOutDate, moveInDate }`: the browser never
+sends an address or a verdict. A `checkId` uses the address of that check,
+and only while it is still the check the server holds (read under the move's
+row lock); a check replaced since (another tab or device) is a 409, never
+swapped in. No `checkId` keeps the address already saved. It needs a checked
+address or a move-out date; dates must be real and inside 60 days back to 400 days
+ahead. A submit writes one `service_requests` row (`category` `moving`,
+reused and reopened on a resubmit), an `activity_log` row and one admin
+alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
+receipt sentences. It changes no visit, price, property or primary address
+and sends nothing to a customer.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

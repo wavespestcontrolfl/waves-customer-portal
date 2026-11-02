@@ -25,6 +25,10 @@ jest.mock('../models/db', () => jest.fn());
 const mockHasLivePackageChild = jest.fn(async () => false);
 jest.mock('../services/package-followup-booking', () => ({ hasLivePackageChild: (...a) => mockHasLivePackageChild(...a), assertNoLivePackageChildLocked: async () => {} }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The plan mover (GATE_IB_SERIES_MOVE, gap #22) has its own suite (intelligence-bar-series-move.test.js);
+// here only the hand-over from reschedule_appointment is read.
+const mockRunSeriesMove = jest.fn();
+jest.mock('../services/intelligence-bar/series-move', () => ({ runSeriesMove: (...a) => mockRunSeriesMove(...a) }));
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
@@ -2039,6 +2043,61 @@ describe('reschedule_appointment', () => {
       const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: newDate });
       if (refused) expect(result).toMatchObject({ code: 'collective_move_unsupported' });
       else expect(result.error).toMatch(/changed concurrently/);
+    });
+  });
+
+  describe('collective gate on, plan move switch (GATE_IB_SERIES_MOVE, gap #22)', () => {
+    const planAppt = { ...baseAppt, is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: '2099-03-02', estimated_duration_minutes: 60 };
+    const wirePlan = () => wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(planAppt) })],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Pat', last_name: 'Example' }) })],
+    });
+    beforeEach(() => { process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true'; mockRunSeriesMove.mockReset(); });
+    afterEach(() => { delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; delete process.env.GATE_IB_SERIES_MOVE; });
+
+    test('switch off: the plan move is still refused and nothing is handed over', async () => {
+      wirePlan();
+      const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-03-04' }, { isAdmin: true });
+      expect(result.code).toBe('collective_move_unsupported');
+      expect(mockRunSeriesMove).not.toHaveBeenCalled();
+    });
+
+    test('switch on: the move goes to the plan mover with the anchor window the single move would derive', async () => {
+      process.env.GATE_IB_SERIES_MOVE = 'true';
+      wirePlan();
+      mockRunSeriesMove.mockResolvedValue({ success: true, plan_move: true });
+      const actionContext = { isAdmin: true, technicianId: 'tech-1' };
+      const input = { appointment_id: 'svc-1', new_date: '2099-03-04', new_time_window: '10:00', _series_move: { occurrence_ids: ['svc-1'] } };
+      const result = await executeTool('reschedule_appointment', input, actionContext);
+      expect(result).toEqual({ success: true, plan_move: true });
+      expect(mockRunSeriesMove).toHaveBeenCalledWith(expect.objectContaining({
+        input, actionContext, dateStr: '2099-03-04', window: { start: '10:00', end: '11:00' }, customerName: 'Pat Example',
+      }));
+      expect(mockRunSeriesMove.mock.calls[0][0].appt).toMatchObject({ id: 'svc-1', is_recurring: true });
+    });
+
+    test('a card that showed a plan move never runs as a one-visit move once the plan move is gone', async () => {
+      // Collective moves turned off since the card: movesAsSeries is false now, so without this the
+      // single path would move one visit while the card promised the whole plan.
+      delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+      const updateChain = chain();
+      wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue(planAppt) }), chain(), updateChain] });
+      const result = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-03-04', _series_move: { occurrence_ids: ['svc-1', 'svc-2'] } }, { isAdmin: true });
+      expect(result.preview_changed).toBe(true);
+      expect(updateChain.update).not.toHaveBeenCalled();
+      expect(mockRunSeriesMove).not.toHaveBeenCalled();
+    });
+
+    test('switch on: a date-only move keeps each visit\'s own window; a window past day end is refused first', async () => {
+      process.env.GATE_IB_SERIES_MOVE = 'true';
+      wirePlan();
+      mockRunSeriesMove.mockResolvedValue({ success: true });
+      await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-03-04' }, { isAdmin: true });
+      expect(mockRunSeriesMove.mock.calls[0][0].window).toBeNull();
+      wirePlan();
+      const late = await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-03-04', new_time_window: '11:00 PM' }, { isAdmin: true });
+      expect(late.error).toBeTruthy();
+      expect(mockRunSeriesMove).toHaveBeenCalledTimes(1);
     });
   });
 

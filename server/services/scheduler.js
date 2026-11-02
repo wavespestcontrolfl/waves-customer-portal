@@ -5212,6 +5212,47 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 8:20AM — Follow-up due alerts (GATE_FOLLOWUP_DUE_ALERT; returns before
+  // any read when off). Owner 2026-11-02 (B1): a flagged follow-up that is due
+  // and has no later visit gets one Schedule bell on its due date (link to the
+  // customer page, where the owner books); the ones already more than 3 days
+  // past due share one catch-up bell. Each run closes the bells whose
+  // follow-up got booked. Admin notifications only: books nothing, sends
+  // nothing to a customer.
+  // =========================================================================
+  cron.schedule('20 8 * * *', async () => {
+    if (!require('../config/feature-gates').followupDueAlertLive()) return;
+    try {
+      await runExclusive('followup-due-alerts', async () => {
+        const result = await require('./followup-due-alerts').runFollowupDueAlerts();
+        logger.info(`Follow-up due alerts: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed, ${result.listed ?? 0} on the catch-up list (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Follow-up due alerts failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // MONDAYS 9:20AM — Monday review bell (GATE_MONDAY_REVIEW_BELL; returns before
+  // any read when off). Owner 2026-11-02 ("build all", B2): one needs-you bell a
+  // week for the work that sits: needs-you alerts unread 14+ days, overdue
+  // promises, completed visits with only a draft invoice, open past visits. The
+  // key is the ET Monday date, so a rerun the same day writes nothing; last
+  // week's row closes first. Sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('20 9 * * 1', async () => {
+    if (!require('../config/feature-gates').mondayReviewBellLive()) return;
+    try {
+      await runExclusive('monday-review-bell', async () => {
+        const result = await require('./monday-review-bell').runMondayReview();
+        logger.info(`Monday review bell: ${result.count ?? 0} list(s) (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Monday review bell failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:23AM — Unbilled visits (GATE_UNBILLED_VISITS_LIST; returns before
   // any read when off). Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,
@@ -7599,7 +7640,7 @@ function initScheduledJobs() {
   // =========================================================================
   // runExclusive records job_health ('google-ads-sync'), and the sync functions
   // run with throwOnError so a failed API call fails the job instead of being
-  // swallowed into an empty result that read as success. All three run even if
+  // swallowed into an empty result that read as success. All four run even if
   // one fails; the first error is rethrown at the end. job_health failures
   // surface through ops-queue laneScheduledJobs.
   cron.schedule('0 6 * * *', async () => {
@@ -7614,6 +7655,15 @@ function initScheduledJobs() {
           () => googleAds.syncCampaigns(opts),
           () => googleAds.syncDailyPerformance(7, opts),
           () => googleAds.syncSearchTerms(30, opts),
+          // The owner's negative word list (owner plan A, 2026-11-02; GATE_ADS_NEGATIVES): push new words, retry failed
+          // ones, take removed words out of Google. Off = skipped.
+          async () => {
+            if (!require('../config/feature-gates').adsNegativesLive()) return;
+            const counts = await require('./ads/negative-keyword-actions').syncOwnerWords();
+            // A word held back because a search with it converted is the rule working, not a failure; Google not
+            // answering or refusing a word is, and it shows in job health like the read steps above.
+            if (counts && counts.googleFailed > 0) throw new Error(`negative keywords: Google did not take ${counts.googleFailed} change(s)`);
+          },
         ]) {
           try { await step(); } catch (err) { firstErr = firstErr || err; }
         }

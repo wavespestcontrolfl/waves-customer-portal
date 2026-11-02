@@ -2014,8 +2014,8 @@ async function offeredFamilyMarginPct(database, service, visitsPerYear) {
     .map((row) => row.source_estimate_id || parentById.get(String(row.recurring_parent_id))?.source_estimate_id)
     .filter(Boolean).map(String));
   if (estimateIds.size !== 1) return null;
-  // The stored series, not GATE_LAWN_9X_ROUNDS: the gate decides how NEW
-  // series are written, and a rounds series (lawn_rounds_9) makes 9 visits a
+  // The stored series, not the write rule: lawnRoundsSeriesPattern decides how
+  // NEW series are written, and a rounds series (lawn_rounds_9) makes 9 visits a
   // year. The scheduler's own gap says which rows repeat every 42 days
   // (every_6_weeks, or custom with a 42-day interval). Required at call
   // time, as the cadence read above does.
