@@ -72,7 +72,7 @@ describe('contactTouchSql', () => {
   });
 
   test('counts a completed visit only, as a timestamp, and GREATEST leaves NULL when there is none', () => {
-    expect(sql).toContain("sr.status = 'completed'");
+    expect(sql).toContain("COALESCE(sr.status, 'completed') = 'completed'");
     expect(sql).toContain("(MAX(sr.service_date) + TIME '12:00')::timestamptz");
     expect(sql.startsWith('GREATEST(')).toBe(true);
     expect(sql).not.toContain('COALESCE((SELECT MAX');

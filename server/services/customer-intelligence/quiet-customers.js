@@ -29,7 +29,8 @@ const LAST_TOUCH_SQL = `GREATEST(
 // The value is display-only: nothing sends, pauses or scores from it. Recruiting
 // `job_%` texts are not customer context. Correlated MAX per source, keyed on
 // customer_id (indexed on all four tables). A visit has a date only, so it counts
-// at noon: the same calendar day in Eastern and UTC.
+// at noon: the same calendar day in Eastern and UTC. A NULL status is a legacy
+// completed visit, as the directory's visit count and the detail visitStats read it.
 function contactTouchSql(customerAlias = 'c') {
   const cid = `${customerAlias}.id`;
   return `GREATEST(
@@ -44,7 +45,7 @@ function contactTouchSql(customerAlias = 'c') {
     AND NOT COALESCE((${personSentFilter('em')}), FALSE)
     AND NOT COALESCE(jsonb_exists(em.label_ids::jsonb, 'SPAM'), FALSE) AND em.quarantined_at IS NULL),
   (SELECT (MAX(sr.service_date) + TIME '12:00')::timestamptz FROM service_records sr WHERE sr.customer_id = ${cid}
-    AND sr.status = 'completed')
+    AND COALESCE(sr.status, 'completed') = 'completed')
 )`;
 }
 
