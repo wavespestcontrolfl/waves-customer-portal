@@ -1868,7 +1868,11 @@ describe('review bell source text in the bell list (owner 2026-11-02 "do all")',
   const fakeConn = (rows, { fail = false } = {}) => {
     const calls = [];
     const conn = jest.fn(() => ({
-      whereIn: (column, ids) => ({ select: async () => { calls.push(ids); if (fail) throw new Error('read failed'); return rows; } }),
+      whereIn: (column, ids) => {
+        // The shared reservation filter (excludeUnresolvedSendReservations) adds one whereRaw.
+        const query = { whereRaw: () => query, select: async () => { calls.push(ids); if (fail) throw new Error('read failed'); return rows; } };
+        return query;
+      },
     }));
     conn.calls = calls;
     return conn;
