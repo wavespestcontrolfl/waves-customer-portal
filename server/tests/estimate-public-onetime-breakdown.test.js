@@ -1932,11 +1932,15 @@ describe('public estimate one-time breakdown', () => {
   // A pest-only plan with a 10% credit: the card led with the list price over a
   // "−$12.00" row, and the first application billed the list price.
   // Each case passes its own id: buildPricingBundle caches by estimate id.
-  const pestOnlyManualDiscountEstimate = (id, services = [{ name: 'Pest Control', mo: 40 }], tier = { name: 'Bronze', discount: 0 }) => ({
+  const pestOnlyManualDiscountEstimate = (id, {
+    services = [{ name: 'Pest Control', mo: 40 }],
+    tier = { name: 'Bronze', discount: 0 },
+    manualDiscount = { type: 'PERCENT', value: 10, amount: 48, label: 'Military Discount' },
+  } = {}) => ({
     id,
     estimate_data: {
       result: {
-        manualDiscount: { type: 'PERCENT', value: 10, amount: 48, label: 'Military Discount' },
+        manualDiscount,
         results: {
           pestTiers: [
             { label: 'Quarterly', mo: 40, ann: 480, pa: 120, apps: 4 },
@@ -1952,6 +1956,7 @@ describe('public estimate one-time breakdown', () => {
     annual_total: 432,
     waveguard_tier: tier.name,
   });
+  const quarterlyOf = (payload) => payload.frequencies.find((frequency) => frequency.key === 'quarterly');
 
   test('pest-only tier rows net the manual recurring discount into the per-application price', async () => {
     const payload = await buildPricingBundle(pestOnlyManualDiscountEstimate('estimate-public-pest-only-manual-discount-test'));
@@ -1971,31 +1976,40 @@ describe('public estimate one-time breakdown', () => {
     ]);
     // The first application bills the price the card shows; the invoice grosses
     // its line back up by the $12.00 credit slice to the $120.00 list price.
-    const quarterly = payload.frequencies.find((frequency) => frequency.key === 'quarterly');
+    const quarterly = quarterlyOf(payload);
     expect(sameDayVisitTotalForPricingFrequency(quarterly)).toBe(108);
     expect(resolveRecurringFirstVisitAmountFromFrequency(quarterly)).toBe(108);
     expect(quarterly.manualDiscount).toEqual(expect.objectContaining({ label: 'Military Discount', recurringAmount: 48 }));
 
     // With a 10% WaveGuard tier the credit comes off the tier price: $120 → $108,
     // then 10% of the $432 discounted annual ($10.80 a visit) → $97.20.
-    const tiered = await buildPricingBundle(pestOnlyManualDiscountEstimate(
+    const tiered = quarterlyOf(await buildPricingBundle(pestOnlyManualDiscountEstimate(
       'estimate-public-pest-only-tier-manual-discount-test',
-      undefined,
-      { name: 'Silver', discount: 0.1 },
-    ));
-    const tieredQuarterly = tiered.frequencies.find((frequency) => frequency.key === 'quarterly');
-    expect(tieredQuarterly.monthly).toBe(32.4);
-    expect(tieredQuarterly.perServiceTreatments[0]).toEqual(expect.objectContaining({ displayPrice: 97.2, perTreatment: 120 }));
+      { tier: { name: 'Silver', discount: 0.1 } },
+    )));
+    expect(tiered.monthly).toBe(32.4);
+    expect(tiered.perServiceTreatments[0]).toEqual(expect.objectContaining({ displayPrice: 97.2, perTreatment: 120 }));
+  });
+
+  test('a credit covering the whole application never writes a $0 row the accept reads as unpriced', async () => {
+    // A fixed $1,000 credit caps at the $480 quarterly base: $120 off a $120 visit.
+    const quarterly = quarterlyOf(await buildPricingBundle(pestOnlyManualDiscountEstimate(
+      'estimate-public-pest-only-full-credit-test',
+      { manualDiscount: { type: 'FIXED', value: 1000, amount: 1000, label: 'Comp' } },
+    )));
+    expect(quarterly.manualDiscount).toEqual(expect.objectContaining({ recurringAmount: 480 }));
+    expect(quarterly.perServiceTreatments[0]).toEqual(expect.objectContaining({ displayPrice: 120, perTreatment: 120 }));
   });
 
   test('a multi-service plan keeps pre-credit pest rows (its credit is plan-level)', async () => {
-    const payload = await buildPricingBundle(pestOnlyManualDiscountEstimate('estimate-public-pest-bundle-manual-discount-test', [
-      { name: 'Pest Control', mo: 40 },
-      { service: 'tree_shrub', name: 'Tree & Shrub', mo: 50, perTreatment: 100, visitsPerYear: 6 },
-    ]));
+    const payload = await buildPricingBundle(pestOnlyManualDiscountEstimate('estimate-public-pest-bundle-manual-discount-test', {
+      services: [
+        { name: 'Pest Control', mo: 40 },
+        { service: 'tree_shrub', name: 'Tree & Shrub', mo: 50, perTreatment: 100, visitsPerYear: 6 },
+      ],
+    }));
 
-    const quarterly = payload.frequencies.find((frequency) => frequency.key === 'quarterly');
-    const pestRow = quarterly.perServiceTreatments.find((row) => row.service === 'pest_control');
+    const pestRow = quarterlyOf(payload).perServiceTreatments.find((row) => row.service === 'pest_control');
     expect(pestRow).toEqual(expect.objectContaining({ displayPrice: 120, perTreatment: 120 }));
   });
 

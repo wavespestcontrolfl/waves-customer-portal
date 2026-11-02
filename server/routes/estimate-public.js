@@ -28599,10 +28599,13 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   // A plan with other recurring services keeps pre-credit rows: its credit
   // is plan-level.
   const pestOnlyRow = nonPestServices.length === 0 ? perServiceTreatments[0] : null;
-  const manualRecurringAnnual = Number(manualDiscount?.recurringAmount) || 0;
-  if (pestOnlyRow?.displayPrice > 0 && pestOnlyRow.visitsPerYear > 0 && manualRecurringAnnual > 0) {
-    const slice = Math.round((manualRecurringAnnual / pestOnlyRow.visitsPerYear) * 100) / 100;
-    pestOnlyRow.displayPrice = Math.max(0, Math.round((pestOnlyRow.displayPrice - slice) * 100) / 100);
+  const manualSlice = pestOnlyRow?.visitsPerYear > 0
+    ? Math.round(((Number(manualDiscount?.recurringAmount) || 0) / pestOnlyRow.visitsPerYear) * 100) / 100
+    : 0;
+  // A credit that covers the whole application leaves the row as it was: the
+  // accept reads a $0 row as unpriced and would bill the list price instead.
+  if (manualSlice > 0 && manualSlice < pestOnlyRow.displayPrice) {
+    pestOnlyRow.displayPrice = Math.round((pestOnlyRow.displayPrice - manualSlice) * 100) / 100;
   }
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
     (sum, row) => sum + (Number.isFinite(row.perTreatment) ? row.perTreatment : 0),
