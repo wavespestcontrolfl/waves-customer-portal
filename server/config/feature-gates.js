@@ -4433,6 +4433,10 @@ const gates = {
   // Shared 08:00–18:00 capacity, catalog durations and complete-route booking.
   // Dark in every environment; callers read at operation time. Owner activation.
   schedulingCapacity: gateEnvValue('GATE_SCHEDULING_CAPACITY'),
+  // GATE_SCHEDULING_CAPACITY=plan: plan-only mode (owner 2026-11-01). The
+  // planning-minutes table with one-hour slots and the 8 PM day end; no other
+  // capacity behavior. For logGateStatus only (schedulingPlanMinutesOnly()).
+  schedulingPlanMinutesOnly: String(process.env.GATE_SCHEDULING_CAPACITY || '').trim().toLowerCase() === 'plan',
 
   // Call property-role classification (2026-08-15): the extraction classifies
   // each property a call discusses (occupancy + which one is the caller's
@@ -7076,6 +7080,21 @@ function reserviceRankAfterNewLive() {
 // evaluation only makes sense once the offer itself comes from that model.
 function bookCapacityCommitLive() {
   return gateEnvValue('GATE_BOOK_CAPACITY_COMMIT');
+}
+
+// GATE_SCHEDULING_CAPACITY=plan read at CALL time: plan-only mode (owner
+// 2026-11-01, "A", after a 30-day back-test against truck GPS arrivals). The
+// router plans each stop's on-site minutes from the owner planning table
+// (scheduling/planning-minutes.js) instead of the whole hour, on every route
+// path. Nothing else of capacity mode turns on: the one-hour slots, today's
+// 8 PM day end, the hour grid and the one-stop-per-hour checks stay, with no
+// capacity packing, slot reservations or self-serve grace —
+// scheduling/policy.js capacityEnabled() reads 'plan' as off. 'true' is the
+// full capacity mode, which already plans the table. The one canonical
+// reader; the `schedulingPlanMinutesOnly` gates-map entry above is for
+// logGateStatus only.
+function schedulingPlanMinutesOnly() {
+  return String(process.env.GATE_SCHEDULING_CAPACITY || '').trim().toLowerCase() === 'plan';
 }
 
 // GATE_BOOK_ARRIVAL_GRACE read at CALL time — the one canonical reader
@@ -9989,6 +10008,7 @@ module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
 module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
 module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
+module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
 // GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
