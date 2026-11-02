@@ -59,14 +59,20 @@ function nextValue(fact, before, sourceAt) {
   return sameText(before, value) ? { value: null } : { refusal: 'on_file', field: fact.field };
 }
 
+// The profile row is the customer's, not one property's, so Save writes only for a customer with exactly one
+// active property now, and only facts that name no property or that one: whatever the reader's outcome says
+// (a pet or irrigation review can carry no property), and whatever changed since the text was read.
+const tiedToTheOneProperty = (facts, properties) => properties.length === 1
+  && facts.every((f) => !f.property_id || String(f.property_id) === String(properties[0]));
+
 // What Save would write: { writes: [{ field, value, fact }] } or { refusal, field? }. Pure; the tap runs it again
-// under the lock on what it reads there.
-function planSave({ meta, source, prefs, activeProperties }) {
+// under the lock on what it reads there. `properties`: the customer's active property ids.
+function planSave({ meta, source, prefs, properties = [] }) {
   if (!source) return { refusal: 'gone' };
   const facts = bellFacts(source, meta);
   if (!facts.length) return { refusal: 'nothing_to_save' };
   if (facts.some((f) => NO_SAVE_OUTCOMES.has(f.outcome))) return { refusal: 'open_profile' };
-  if (facts.some((f) => f.outcome === 'property_ambiguous') && activeProperties !== 1) return { refusal: 'property' };
+  if (!tiedToTheOneProperty(facts, properties)) return { refusal: 'property' };
   const { validatePrefsBody, PREFS_FIELD_SCHEMAS, snakeToCamel, transformKeys, camelToSnake, normalizeUpdatesForStorage }
     = require('./property-preferences-schema');
   const writes = [];
@@ -89,7 +95,7 @@ const REFUSALS = {
   gone: () => ({ message: 'The text or the customer is no longer on file.', close: 'Text or customer no longer on file' }),
   nothing_to_save: () => ({ message: 'Nothing in this text is left to save. Open the conversation to check.' }),
   open_profile: () => ({ message: 'This text needs a person to pick what to save. Open the profile to save it.' }),
-  property: () => ({ message: 'This customer has more than one property. Open the profile to save the note there.' }),
+  property: () => ({ message: 'This note is not tied to the customer\'s one property. Open the profile to save it there.' }),
   on_file: (field) => ({ message: `The profile already has a ${label(field)}. Open the profile to change it.` }),
   invalid: (field) => ({ message: `The ${label(field)} cannot take this text. Open the profile to edit it.` }),
 };
@@ -103,12 +109,12 @@ async function loadPlanInputs(conn, metas) {
     smsIds.length ? conn('sms_log').whereIn('id', smsIds).select('id', 'customer_id', 'created_at', 'operational_analysis') : [],
     customerIds.length ? conn('property_preferences').whereIn('customer_id', customerIds).select('*') : [],
     customerIds.length ? conn('customer_properties').whereIn('customer_id', customerIds).where({ active: true })
-      .groupBy('customer_id').select('customer_id', conn.raw('count(*)::int AS n')) : [],
+      .select('id', 'customer_id') : [],
   ]);
   return {
     source: (m) => sources.find((s) => String(s.id) === String(m.sms_log_id) && String(s.customer_id) === String(m.customerId)) || null,
     prefs: (m) => prefs.find((p) => String(p.customer_id) === String(m.customerId)) || null,
-    activeProperties: (m) => properties.find((p) => String(p.customer_id) === String(m.customerId))?.n || 0,
+    properties: (m) => properties.filter((p) => String(p.customer_id) === String(m.customerId)).map((p) => String(p.id)),
   };
 }
 
@@ -118,7 +124,7 @@ async function visibleItems(rows) {
   const inputs = await loadPlanInputs(db, metas);
   return new Map(rows.map((row, i) => {
     const meta = metas[i];
-    const plan = planSave({ meta, source: inputs.source(meta), prefs: inputs.prefs(meta), activeProperties: inputs.activeProperties(meta) });
+    const plan = planSave({ meta, source: inputs.source(meta), prefs: inputs.prefs(meta), properties: inputs.properties(meta) });
     return [row.id, plan.writes?.length ? ['save', 'one_visit'] : ['one_visit']];
   }));
 }
@@ -146,7 +152,7 @@ async function save({ row, technicianId, claimedVersion }) {
       const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
       const inputs = await loadPlanInputs(trx, [meta]);
       const source = customer ? inputs.source(meta) : null;
-      const plan = planSave({ meta, source, prefs: inputs.prefs(meta), activeProperties: inputs.activeProperties(meta) });
+      const plan = planSave({ meta, source, prefs: inputs.prefs(meta), properties: inputs.properties(meta) });
       if (plan.refusal) return refuse(plan);
       let before = inputs.prefs(meta);
       for (const write of plan.writes) {

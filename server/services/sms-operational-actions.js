@@ -10,7 +10,7 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
-const { raiseAdminAlert, cutAtWord, breaksAlertRules, firstSentence, MAX_WHY_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validate: isUuid } = require('uuid');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
@@ -538,10 +538,11 @@ const bellExceptions = (facts) => facts.filter((f) => !SETTLED_OUTCOMES.includes
 
 // Plain words for the review bell (owner ruling 2026-10-21). The title names
 // the customer; the body says what the reader wanted to save and why it
-// stopped, and quotes the text when quotableText allows it (owner 2026-11-02
-// "do all": show the words the way the "SMS from" alert does). The first line
-// is the whole visible bell (the admin brevity guard cuts a multi-line body at
-// its first line and keeps the rest under "Show full text").
+// stopped. It NEVER quotes the customer's text (title, body, detail or
+// metadata): a text can hold a code, a spelled-out code word or an address, and
+// no screen caught them all (Codex #6414 r1/r2). The first line is the whole
+// visible bell (the admin brevity guard cuts a multi-line body at its first
+// line and keeps the rest under "Show full text").
 const REVIEW_FIELD_LABELS = Object.freeze({
   access_notes: 'access note', pet_details: 'pet note', contact_preference: 'contact preference',
   neighborhood_gate_code: 'neighborhood gate code', property_gate_code: 'gate code', lockbox_code: 'lockbox code',
@@ -565,69 +566,67 @@ const REVIEW_REASONS = Object.freeze({
 
 // Why the reader stopped. The verdict code temporary_instruction is also what
 // factVerdict returns for any duration that is not 'durable', so an 'uncertain'
-// label gets its own words (Codex #6414 r3), short so a quoted text fits the why.
-const UNCERTAIN_DURATION_REASON = 'it is not clear if this is lasting';
+// label gets its own words (Codex #6414 r3).
+const UNCERTAIN_DURATION_REASON = 'it is not clear if this is lasting or just for one visit';
 function reviewReason(f) {
   if (f.outcome === 'temporary_instruction' && f.duration === 'uncertain') return UNCERTAIN_DURATION_REASON;
   return REVIEW_REASONS[f.outcome] || 'it needs a person to check it';
 }
 
-// The text the bell may quote, or null. Codex #6414 r1/r2 found a lockbox code,
-// a word code ("Use BLUE at the keypad") and route or PO-box addresses ("8 US
-// 41") that a narrower screen let through, so this one is strict: no digit at
-// all (codes, street and route numbers, PO boxes, phone numbers), no two number
-// words in a row ("four five"), no '@' (an email), nothing the shared
-// access-code screen flags, and never a text the reader read as a code. A word
-// credential needs no code noun ("Use blue to open the gate", Codex #7466 r1),
-// so no credential screen can be complete: a text that names a way in at all
-// (WAY_IN) is never quoted. What passes is still redacted the way every bell
-// body is (redactedWords).
-const CODE_FIELDS = new Set(['neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code']);
-const WAY_IN = /\b(?:gates?|doors?|garages?|keypads?|keys?|locks?|locked|unlock\w*|lock\s?box(?:es)?|codes?|pins?|passwords?|passcodes?|passphrases?|passkeys?|combos?|combinations?|alarms?|entr(?:y|ies|ances?)|enter\w*|access\w*|open\w*|buzz\w*|intercoms?|fobs?|remotes?|clickers?|guards?|call\s?box(?:es)?|panels?|secrets?|words?)\b|\b(?:let|lets|letting|get|gets|getting)\s+(?:\w+\s+){0,2}in\b/i;
-const NUMBER_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)';
-const NUMBER_WORD_RUN = new RegExp(`\\b${NUMBER_WORD}[\\s,-]+${NUMBER_WORD}\\b`, 'i');
-// The same cap as the "SMS from" alert's full text.
-const MAX_DETAIL_QUOTE_CHARS = 1600;
-function quotableText(messageBody, exceptions) {
-  const { containsReportAccessCode } = require('./service-report/technician-report-copy');
-  const raw = String(messageBody || '');
-  if (/[\d@]/.test(raw) || NUMBER_WORD_RUN.test(raw) || WAY_IN.test(raw) || containsReportAccessCode(raw)) return null;
-  if (exceptions.some((f) => CODE_FIELDS.has(f.field))) return null;
-  return require('./admin-alert-names').redactedWords(raw) || null;
-}
-
-// The why with the text's first sentence quoted (cut at a word by the shared
-// whyWithQuote), or null when the quote gets no room or breaks the admin-alert
-// rules (an "!", an emoji): the caller then keeps the unquoted why.
-function quotedWhy(quote, tail) {
-  const { whyWithQuote } = require('./admin-alert-names');
-  const first = firstSentence(quote);
-  const shown = first.length < quote.length ? `${first.replace(/[.?!]+$/, '')}…` : quote;
-  const why = whyWithQuote({ lead: 'Wanted to save ', quote: shown, tail });
-  return why.includes('“') && !breaksAlertRules(why) ? why : null;
-}
-
 // The admin-alert spec parts (docs/admin-notifications.md): a "Comms — ..."
-// headline inside 60 characters, a one-sentence why inside 110, and the
-// quoted text plus the full reason lines in `detail`.
-function reviewBellCopy({ customer, exceptions, messageBody = null }) {
+// headline inside 60 characters, a one-sentence why inside 110, and the full
+// reason lines in `detail`.
+function reviewBellCopy({ customer, exceptions }) {
   const { fitAction, fullName } = require('./admin-alert-names');
   const name = fullName(customer);
   const action = name
     ? fitAction('Comms', name, [(n) => `check ${n}'s text note`, (n) => `check ${n}'s note`])
     : 'check a customer text note';
-  const labelOf = (f) => reviewFieldLabel(f.field);
-  const lines = exceptions.map((f, i) => `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${labelOf(f)}; ${reviewReason(f)}.`);
+  const lines = exceptions.map((f, i) => `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${reviewFieldLabel(f.field)}; ${reviewReason(f)}.`);
   const more = lines.length > 1 ? ` (+${lines.length - 1} more)` : '';
-  const quote = quotableText(messageBody, exceptions);
-  const quoted = quote && quotedWhy(quote, ` as ${labelOf(exceptions[0])}; ${reviewReason(exceptions[0])}.${more}`);
   const first = lines[0].replace(/\.$/, '');
   const room = MAX_WHY_CHARS - more.length - 1;
   const lead = first.length <= room ? `${first}.` : cutAtWord(first, room + 1);
-  let why = quoted || `${lead}${more}`;
+  let why = `${lead}${more}`;
   if (breaksAlertRules(why)) why = 'Part of a customer text needs a person to check it.';
-  const said = quote ? [`Text: “${cutAtWord(quote, MAX_DETAIL_QUOTE_CHARS)}”`] : [];
-  return { action, why, detail: [...said, ...lines, 'Open the conversation to check.'].join('\n') };
+  return { action, why, detail: [...lines, 'Open the conversation to check.'].join('\n') };
+}
+
+// The bell list (GET /api/admin/notifications) shows a review bell's source text, read from the text itself
+// while the list is served (owner 2026-11-02 "do all": show the words the way the "SMS from" alert does). The
+// words are never stored on the bell (title, body, detail or metadata): a text can hold a code or a word that
+// opens a door, and no screen catches every form (Codex #6414 r1/r2, #7466 r1/r2), so what the bell keeps, rings
+// on a phone and hands to needs_me stays the reader's own copy above. Admin role only, one read per page, by the
+// bell's own text and customer; masked the way every bell body is (redactedWords), like the "SMS from" row that
+// already shows the same text. A failed read serves the list without it.
+const SOURCE_TEXT_MAX_CHARS = 1600;
+async function withTextNoteSources(rows, { role } = {}, conn = db) {
+  if (role !== 'admin' || !Array.isArray(rows)) return rows;
+  const metaOf = (row) => {
+    if (row?.metadata && typeof row.metadata === 'object') return row.metadata;
+    try { return JSON.parse(row?.metadata || '{}') || {}; } catch { return {}; }
+  };
+  const wanted = rows.map((row) => {
+    const meta = metaOf(row);
+    const ok = meta.triggerKey === 'sms_operational_exception' && isUuid(String(meta.sms_log_id || '')) && isUuid(String(meta.customerId || ''));
+    return ok ? meta : null;
+  });
+  const ids = [...new Set(wanted.filter(Boolean).map((meta) => String(meta.sms_log_id)))];
+  if (!ids.length) return rows;
+  let texts;
+  try {
+    texts = await conn('sms_log').whereIn('id', ids).select('id', 'customer_id', 'message_body');
+  } catch (err) {
+    logger.warn(`[sms-operations] review bell source texts not read: ${err.message}`);
+    return rows;
+  }
+  const { redactedWords } = require('./admin-alert-names');
+  return rows.map((row, i) => {
+    const meta = wanted[i];
+    const source = meta && texts.find((t) => String(t.id) === String(meta.sms_log_id) && String(t.customer_id) === String(meta.customerId));
+    const text = source ? redactedWords(source.message_body) : '';
+    return text ? { ...row, source_text: cutAtWord(text, SOURCE_TEXT_MAX_CHARS) } : row;
+  });
 }
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
@@ -737,7 +736,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // `dropped` still rides in `operational_analysis` and, when a bell does
     // fire for a real exception, in that bell's `unverified_count`.
     if (exceptions.length) {
-      const copy = reviewBellCopy({ customer, exceptions, messageBody: message.message_body });
+      const copy = reviewBellCopy({ customer, exceptions });
       const notif = await raiseAdminAlert('alert', {
         area: 'Comms', action: copy.action, why: copy.why, severity: 'needs-you',
         link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
@@ -1871,4 +1870,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

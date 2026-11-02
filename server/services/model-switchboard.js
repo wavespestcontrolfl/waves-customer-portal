@@ -405,6 +405,7 @@ const LANES = [
   L('estimator_sms_signal', 'Estimator SMS thread quote signal', 'estimator-engine/sms-thread.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('sms_solicitation', 'SMS solicitation screen', 'sms-solicitation-classifier.js', 'fastText', P('fastStructuredInteractive', 'primary'), P('fastStructuredInteractive', 'fallback'), { inbound: true, note: 'GATE_SMS_SPAM_CLASSIFIER shadow/true' }),
   L('sms_lead_extraction', 'Text-thread lead reader', 'sms-lead-extraction.js', 'qa', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback'), { inbound: true, note: 'GATE_SMS_LEAD_EXTRACTION' }),
+  L('alert_explainer', 'Admin alert "What to do" summary', 'admin-alert-explainer.js', 'qa', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback'), { note: 'GATE_ALERT_EXPLAINER; written when an admin opens it, kept on the row' }),
   L('sms_pathology', 'SMS pathology clustering', 'sms-pathology-ledger.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'summary pass rides DEEP' }),
   L('contact_correction', 'SMS contact-correction extraction', 'contact-correction.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('bounce_rescue', 'Email bounce address decode', 'email-bounce-rescue.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),

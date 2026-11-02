@@ -9,8 +9,8 @@ const source = (facts) => ({ id: 's1', customer_id: 'c1', created_at: SOURCE_AT,
 const meta = (fields) => ({ customerId: 'c1', sms_log_id: 's1', fields });
 const held = (extra) => ({ field: 'special_instructions', value: 'Skip the shed please', outcome: 'temporary_instruction',
   duration: 'uncertain', property_id: 'p1', ...extra });
-const plan = (facts, prefs = {}, activeProperties = 1) => planSave({
-  meta: meta([...new Set(facts.map((f) => f.field))]), source: source(facts), prefs, activeProperties });
+const plan = (facts, prefs = {}, properties = ['p1']) => planSave({
+  meta: meta([...new Set(facts.map((f) => f.field))]), source: source(facts), prefs, properties });
 const writes = (result) => (result.writes || []).map((w) => [w.field, w.value]);
 
 describe('text-note bell buttons (owner 2026-11-02 "C")', () => {
@@ -44,29 +44,34 @@ describe('text-note bell buttons (owner 2026-11-02 "C")', () => {
       expect(plan([held({ outcome })])).toEqual({ refusal: 'open_profile' });
     });
 
-  test('a fact not tied to one property saves only for a customer with exactly one active property', () => {
+  test('Save needs the customer\'s one active property, whatever the outcome; a note naming another property is left', () => {
     const loose = held({ outcome: 'property_ambiguous', property_id: null });
-    expect(writes(plan([loose], {}, 1))).toHaveLength(1);
-    expect(plan([loose], {}, 2)).toEqual({ refusal: 'property' });
+    expect(writes(plan([loose], {}, ['p1']))).toHaveLength(1);
+    expect(writes(plan([held()], {}, ['p1']))).toHaveLength(1);
+    expect(plan([loose], {}, ['p1', 'p2'])).toEqual({ refusal: 'property' });
+    // Pre-push P1: a pet review with no property, on a two-property customer, is not saved either.
+    expect(plan([held({ field: 'pet_details', outcome: 'pet_needs_review', property_id: null })], {}, ['p1', 'p2'])).toEqual({ refusal: 'property' });
+    expect(plan([held({ property_id: 'p9' })], {}, ['p1'])).toEqual({ refusal: 'property' });
+    expect(plan([held()], {}, [])).toEqual({ refusal: 'property' });
   });
 
   test('only the held-back facts in the fields the bell names are saved', () => {
     const facts = [held(), held({ field: 'parking_notes', outcome: 'applied' }),
       held({ field: 'access_notes', outcome: 'temporary_instruction' }), held({ field: 'irrigation_issues' })];
-    const result = planSave({ meta: meta(['special_instructions', 'parking_notes', 'access_notes']), source: source(facts), prefs: {}, activeProperties: 1 });
+    const result = planSave({ meta: meta(['special_instructions', 'parking_notes', 'access_notes']), source: source(facts), prefs: {}, properties: ['p1'] });
     expect(writes(result).map(([field]) => field)).toEqual(['special_instructions']);
   });
 
   test('a replay\'s facts are the ones its bell rang for', () => {
     const replayed = { ...source([held({ field: 'pet_details' })]),
       operational_analysis: { facts: [held({ field: 'pet_details', outcome: 'applied' })], replay: { facts: [held({ field: 'pet_details' })] } } };
-    expect(writes(planSave({ meta: meta(['pet_details']), source: replayed, prefs: {}, activeProperties: 1 })).map(([f]) => f)).toEqual(['pet_details']);
+    expect(writes(planSave({ meta: meta(['pet_details']), source: replayed, prefs: {}, properties: ['p1'] })).map(([f]) => f)).toEqual(['pet_details']);
   });
 
   test('a value the field cannot take refuses; a missing source text or fact is not saved', () => {
     expect(plan([held({ field: 'lockbox_code', value: 'x'.repeat(101) })])).toEqual({ refusal: 'invalid', field: 'lockbox_code' });
     expect(plan([held({ field: 'contact_preference', value: 'pigeon' })])).toEqual({ refusal: 'invalid', field: 'contact_preference' });
-    expect(planSave({ meta: meta(['special_instructions']), source: null, prefs: {}, activeProperties: 1 })).toEqual({ refusal: 'gone' });
-    expect(planSave({ meta: meta(['special_instructions']), source: source([]), prefs: {}, activeProperties: 1 })).toEqual({ refusal: 'nothing_to_save' });
+    expect(planSave({ meta: meta(['special_instructions']), source: null, prefs: {}, properties: ['p1'] })).toEqual({ refusal: 'gone' });
+    expect(planSave({ meta: meta(['special_instructions']), source: source([]), prefs: {}, properties: ['p1'] })).toEqual({ refusal: 'nothing_to_save' });
   });
 });
