@@ -183,4 +183,4 @@ async function relayCustomerTextToVisitTech({ from, body, mediaCount = 0, conn =
   return sent;
 }
 
-module.exports = { relayCustomerTextToVisitTech, visitTechniciansFor, customerForPhone, errorTag };
+module.exports = { relayCustomerTextToVisitTech, visitTechniciansFor, customerForPhone, errorTag, liveStops };

@@ -185,3 +185,65 @@ describe('answers', () => {
     expect(small()).toEqual([]);
   });
 });
+
+describe('instant answers', () => {
+  const KINDS = [
+    { kind: 'next_stop', label: 'Next stop' },
+    { kind: 'access_notes', label: 'Access notes' },
+    { kind: 'last_treatment', label: 'Last treatment' },
+  ];
+  const urls = () => fetchMock.mock.calls.map(([url]) => String(url));
+
+  function answersMock(onKind) {
+    fetchMock.mockImplementation((url) => {
+      if (url.includes('/quick-actions')) return Promise.resolve(ok({ actions: [{ id: 'route', label: "Today's Route", prompt: "What's my route today?" }] }));
+      if (url.endsWith('/tech/answers')) return onKind ? Promise.resolve(ok({ kinds: KINDS })) : Promise.reject(new Error('HTTP 404'));
+      if (url.includes('/tech/answers/')) return onKind(url);
+      return Promise.resolve(ok({}));
+    });
+  }
+
+  async function openBar() {
+    const box = await mount();
+    fireEvent.focus(box);
+    return box;
+  }
+
+  it('shows no chips, and keeps the AI quick actions, when /tech/answers is dark (404)', async () => {
+    answersMock(null);
+    await openBar();
+    expect(await screen.findByText("Today's Route")).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next stop' })).not.toBeInTheDocument();
+  });
+
+  it('shows one chip per kind next to the quick actions when kinds come back', async () => {
+    answersMock(() => Promise.resolve(ok({})));
+    await openBar();
+    for (const { label } of KINDS) expect(await screen.findByRole('button', { name: label })).toBeInTheDocument();
+    expect(screen.getByText("Today's Route")).toBeInTheDocument();
+  });
+
+  it('a tap renders the answer card from /tech/answers/<kind> and never calls the AI query route', async () => {
+    answersMock(() => Promise.resolve(ok({
+      kind: 'next_stop', title: 'Next stop', visitId: 'v1',
+      lines: ['Customer: Pat Sample', 'Address: 12 Example Way, Venice'],
+    })));
+    await openBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Next stop' }));
+    expect(await screen.findByText('Customer: Pat Sample')).toBeInTheDocument();
+    expect(screen.getByText('Address: 12 Example Way, Venice')).toBeInTheDocument();
+    expect(urls().some(u => u.endsWith('/tech/answers/next_stop'))).toBe(true);
+    expect(urls().some(u => u.includes('/intelligence-bar/query'))).toBe(false);
+    expect(queryResolvers).toHaveLength(0);
+    // Close returns to the chips.
+    fireEvent.click(screen.getByRole('button', { name: 'Close answer' }));
+    expect(await screen.findByRole('button', { name: 'Access notes' })).toBeInTheDocument();
+  });
+
+  it('a failed answer shows a plain message, not a crash', async () => {
+    answersMock(() => Promise.reject(new Error('HTTP 500')));
+    await openBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Last treatment' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('This answer could not be loaded');
+  });
+});

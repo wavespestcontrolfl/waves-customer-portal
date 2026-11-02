@@ -54,6 +54,8 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
   // A text the system sent on its own (a reminder): no person wrote it, so it answers nothing.
   const automatedText = (customer, at) => staffText(customer, at, { message_type: 'appointment_reminder', metadata: JSON.stringify({}) });
   const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+  // A delivered estimate that prices one service (estimate-service-lines reads the estimator's svc* input flags).
+  const deliveredFor = (at, flag = 'svcMosquito') => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() }, inputs: { [flag]: true } });
   // Filed long before any bell in these tests (a request is written first, its bell after), untouched since.
   const FILED = new Date(Date.now() - 3 * 24 * 60 * MIN);
   const requestRow = (customer, over = {}) => insert('service_requests', { customer_id: customer.id, category: 'general', subject: 'Fixture request', description: 'Please call', status: 'new', created_at: FILED, updated_at: FILED, ...over });
@@ -157,7 +159,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       expect(await state(nested)).toBeNull();
       expect((await getRequest(request.id)).status).toBe('new');
 
-      await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: delivered(mins(bellAt, 30)) });
+      await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: deliveredFor(mins(bellAt, 30)) });
       await sweep(now);
       expect(await state(asked)).toEqual(['relevance', 'Estimate was sent']);
       const row = await getRequest(request.id);
@@ -173,6 +175,43 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await portalInbox.closeRequestAlertsOnResolve({ id: second.id, status: 'resolved' }, true, { technicianId: 'tech-1', role: 'admin' });
       expect((await get(fresh.id)).done_at).toBeInstanceOf(Date);
       expect((await get(stale.id)).done_at).toBeNull();
+    }, 60000);
+
+    test('an add-service request closes only on an estimate that prices its own service, or its own minted estimate; a request that names no service never closes on an estimate', async () => {
+      const now = new Date();
+      const bellAt = mins(now, -300);
+      const mosquito = await customerWith();
+      const unnamed = await customerWith();
+      const minted = await customerWith();
+      const mosquitoRequest = await requestRow(mosquito, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home' });
+      const mosquitoBell = await bundleBell(mosquito, mosquitoRequest, bellAt);
+      const unnamedRequest = await requestRow(unnamed, { category: 'add_service', requested_service: 'not_stated', source: 'portal_chat' });
+      const unnamedBell = await bundleBell(unnamed, unnamedRequest, bellAt);
+      // Another service delivered after the ask: no answer to the mosquito ask, and never one to a request naming none.
+      await insert('estimates', { status: 'accepted', customer_id: mosquito.id, estimate_data: deliveredFor(mins(bellAt, 20), 'svcPest') });
+      for (const flag of ['svcMosquito', 'svcPest', 'svcLawn']) {
+        await insert('estimates', { status: 'accepted', customer_id: unnamed.id, estimate_data: deliveredFor(mins(bellAt, 20), flag) });
+      }
+      // The request's own minted estimate answers it as made, though its lines name no service.
+      const mintedEstimate = await insert('estimates', { status: 'accepted', customer_id: minted.id, estimate_data: delivered(mins(bellAt, 20)) });
+      const mintedRequest = await requestRow(minted, { category: 'add_service', requested_service: 'lawn_care', source: 'service_report',
+        pricing_revision: JSON.stringify({ mintedEstimate: { id: mintedEstimate.id } }) });
+      const mintedBell = await bundleBell(minted, mintedRequest, bellAt);
+      on();
+      await sweep(now);
+      expect(await state(mosquitoBell)).toBeNull();
+      expect((await getRequest(mosquitoRequest.id)).status).toBe('new');
+      expect(await state(unnamedBell)).toBeNull();
+      expect((await getRequest(unnamedRequest.id)).status).toBe('new');
+      expect(await state(mintedBell)).toEqual(['relevance', 'Estimate was sent']);
+      expect((await getRequest(mintedRequest.id)).status).toBe('resolved');
+
+      // The mosquito estimate arrives: now it is answered.
+      await insert('estimates', { status: 'accepted', customer_id: mosquito.id, estimate_data: deliveredFor(mins(bellAt, 40)) });
+      await sweep(now);
+      expect(await state(mosquitoBell)).toEqual(['relevance', 'Estimate was sent']);
+      expect((await getRequest(mosquitoRequest.id)).status).toBe('resolved');
+      expect(await state(unnamedBell)).toBeNull();
     }, 60000);
 
     test('quiet resolve touches only an open request of that customer', async () => {
@@ -219,7 +258,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const request = await requestRow(customer, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home', updated_at: refreshAt });
       const original = await bundleBell(customer, request, askAt);
       const second = await bundleBell(customer, request, refreshAt);
-      await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: delivered(mins(askAt, 30)) });
+      await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: deliveredFor(mins(askAt, 30)) });
       on();
       await sweep(now);
       expect(await state(original)).toEqual(['relevance', 'Estimate was sent']);
@@ -336,6 +375,21 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       expect((await get(rows.stamped.id)).body).not.toContain('Still waiting');
     }, 60000);
 
+    test('an estimate for another service does not count as the answer to an add-service request: the late re-ring still rings; one for the asked service stops it', async () => {
+      const wrong = await customerWith();
+      const right = await customerWith();
+      const wrongRequest = await requestRow(wrong, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home' });
+      const rightRequest = await requestRow(right, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home' });
+      const wrongBell = await bundleBell(wrong, wrongRequest, ASK);
+      const rightBell = await bundleBell(right, rightRequest, ASK);
+      await insert('estimates', { status: 'accepted', customer_id: wrong.id, estimate_data: deliveredFor(mins(ASK, 30), 'svcPest') });
+      await insert('estimates', { status: 'accepted', customer_id: right.id, estimate_data: deliveredFor(mins(ASK, 30)) });
+      lateOn();
+      await sweep(AFTER_DUE);
+      expect((await get(wrongBell.id)).body).toContain('Still waiting');
+      expect((await get(rightBell.id)).body).not.toContain('Still waiting');
+    }, 60000);
+
     test('the ask stays the boundary after the re-ring: a reply dated between the ask and the re-ring (it landed while the re-ring was being written) still closes the bell, and the re-ring happens once', async () => {
       const customer = await customerWith();
       const other = await customerWith();
@@ -352,7 +406,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       // The replies are dated inside the window the re-ring's own check read as empty.
       await staffText(customer, mins(ASK, 20));
       await staffText(other, mins(ASK, 25));
-      await insert('estimates', { status: 'accepted', customer_id: addCustomer.id, estimate_data: delivered(mins(ASK, 30)) });
+      await insert('estimates', { status: 'accepted', customer_id: addCustomer.id, estimate_data: deliveredFor(mins(ASK, 30)) });
       process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
       process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
       process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';

@@ -463,6 +463,7 @@
  *   GATE_BUG_ID_EXTENSION=true (owner 2026-10-31, "Let's do the insect identification": the Chrome extension's bug identifier, POST /api/public/bug-id-extension/identify. Anonymous and worldwide, so no lead capture, no pricing, no row and no stored photo; 1–3 photos go to the v2 species-catalog pest engine (identifyPestV2, Gemini-only ladder, as the customer app) and only its customer-facing v2 answer comes back. Paid vision per request, bounded by 6/hour and 15/day per IP plus one worldwide daily cap of its own (PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, default 100, bucket bug-id-extension) that counts whatever GATE_PUBLIC_LLM_SHARED_CAP says and fails closed. Read at call time via bugIdExtensionLive(), strict 'true', dark by default; off = the whole /api/public/bug-id-extension surface answers 404 before cors(), any limiter or body parser. Sends nothing to anyone. Kill switch: unset.)
  *   GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ=true (owner 2026-11-01, Action inbox agents A, "yes do this": the 3:45 AM ET inventory unit sweep also converts a DRY product whose unit is a bare ounce (oz, Ounces) to g, or to lb from 16 oz of stock up, with its stock, low-stock level, reorder quantity and per-visit usage converted by the exact weight factor. A product counts as dry only when its formulation says so (WDG, WG, WSG, granular, powder, dust, paste, gel bait) and nothing says liquid or count (no liquid code or word, no liquid look on the Unit Review page, no volume rate or default unit, no station, cartridge, tablet or trap in the name, category or any unit field, no per-item rate unit) and its price has an explicit cost unit when it has a price, and any cost unit is a weight unit or a bare ounce, and it has no per-visit supplies usage. Everything else stays in the Unit Review queue as before. Needs GATE_INVENTORY_UNIT_AUTOFIX ON too. Every fix leaves a movement audit row (source inventory_unit_review_autofix_dry_oz) and rings no bell; the alias digest keeps its old wording. Strict opt-in, read at call time via inventoryUnitAutofixDryOzLive(); off = oz rows stay parked exactly as before. Kill switch: unset.)
  *   GATE_QUICKMOVE_CUSTOMER_PICK=true (owner 2026-11-01: Quick Move gets a "let the customer pick a day" option for a recurring plan visit. The visit leaves its route, the customer gets one text with their reschedule link and picks a route-fit time by 8 PM the next day, and Auto-Dispatch books it if they do not. A technician whose Can move visits switch is off may use this option only. Nothing is sent until a person taps the option; off = the option does not appear and the routes answer disabled)
+ *   GATE_RAINOUT_KEEP_RAIN_OK=true (owner 2026-11-01 "build both", after the wider rain-OK list in #7381: a Rain-out Move on "this + rest of route" for a RAIN reason (weather_rain only; every other reason, and a request with no reason yet, keeps the full route) leaves a stop OUT of the rest-of-route list when every service at that stop is rain-OK by rain-fit rainClassOf (a grouped stop moves as one: if any live member is outdoor, every member stays in), so that stop is neither moved nor texted; the tapped stop and its own visit group are never filtered. The moved-visit text also drops its "Why the move? Treatments need a few rain-free hours..." sentence (GATE_RAINOUT_EFFICACY_NOTE) when the moved service is rain-OK. Strict opt-in (exactly 'true'), read at call time by server/services/rain-out.js via rainoutKeepRainOkLive(); ships DARK; off = byte-identical list, queries and text. Customer-facing (it decides who gets a move text), so the owner flips it; unset = kill switch. The tech-facing storm-watch nudge skips all-rain-OK stops with no gate.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -8938,6 +8939,12 @@ function quickMoveCustomerPickLive() {
   return process.env.GATE_QUICKMOVE_CUSTOMER_PICK === 'true';
 }
 module.exports.quickMoveCustomerPickLive = quickMoveCustomerPickLive;
+// GATE_RAINOUT_KEEP_RAIN_OK read at CALL time (so a flip needs no redeploy); strict 'true', dark.
+function rainoutKeepRainOkLive() {
+  return process.env.GATE_RAINOUT_KEEP_RAIN_OK === 'true';
+}
+// GATE_RAINOUT_KEEP_RAIN_OK reader, on its own line so gate PRs never conflict.
+module.exports.rainoutKeepRainOkLive = rainoutKeepRainOkLive;
 // GATE_REVIEW_ASK_AT_VISIT reader, on its own line so gate PRs never conflict.
 module.exports.reviewAskAtVisitLive = reviewAskAtVisitLive;
 module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
@@ -9828,6 +9835,13 @@ function techVoiceLineLive() {
 function payerPacketAutosendLive() {
   return process.env.GATE_PAYER_PACKET_AUTOSEND === 'true';
 }
+// GATE_TECH_INSTANT_ANSWERS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the tech Intelligence Bar
+// shows three one-tap answers (next stop, access notes, last treatment) served by GET /api/tech/answers from the
+// technician's own visits today (services/tech-instant-answers.js). No model call, no write, no cost. Off = the routes
+// answer 404 and the bar shows no chips. Kill = unset.
+function techInstantAnswersLive() {
+  return process.env.GATE_TECH_INSTANT_ANSWERS === 'true';
+}
 // GATE_RECAP_GLASSES_CLIPS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the visit recap accepts
 // clips from the phone's photo library (camera glasses): a video may run up to 60 s and 200 MB, a clip over 20 s is
 // stored as `processing` (the renderer skips it until it is cut), and a clip added after the recap rendered, but
@@ -9835,6 +9849,14 @@ function payerPacketAutosendLive() {
 // every clip `ready`, no rebuild on a late clip. Kill = unset.
 function recapGlassesClipsLive() {
   return process.env.GATE_RECAP_GLASSES_CLIPS === 'true';
+}
+// GATE_TECH_SET_TEXTS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01, hands-free field voice PR 1). On,
+// the Visit Brief shows set-text buttons (back gate locked, dog outside, garage access) that text the visit's customer
+// fixed wording from the tech's own line, and a Last reply card with the customer's answer
+// (services/tech-set-texts.js, routes/tech-line.js POST /set-text + GET /replies). Off = no buttons, both routes 404.
+// Kill = unset. The owner approves the wording before it is turned on.
+function techSetTextsLive() {
+  return process.env.GATE_TECH_SET_TEXTS === 'true';
 }
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
@@ -10021,5 +10043,9 @@ module.exports.techVoiceLineLive = techVoiceLineLive;
 module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
+// GATE_TECH_INSTANT_ANSWERS reader, on its own line so gate PRs never conflict.
+module.exports.techInstantAnswersLive = techInstantAnswersLive;
 // GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
+// GATE_TECH_SET_TEXTS reader, on its own line so gate PRs never conflict.
+module.exports.techSetTextsLive = techSetTextsLive;

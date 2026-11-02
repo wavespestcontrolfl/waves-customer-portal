@@ -33,7 +33,9 @@ function fakeTrx({ openAlertIds = [], updateReturns = [] } = {}) {
   updateReturns.forEach((rows) => returning.mockResolvedValueOnce(rows));
   if (!updateReturns.length) returning.mockResolvedValue([]);
   const update = jest.fn(() => ({ returning }));
-  const whereNull = jest.fn(() => ({ update }));
+  // `select`: autoResolveUnassignedAlertsForJob reads its open alerts
+  // through where -> whereNull -> select.
+  const whereNull = jest.fn(() => ({ update, select: selectForOpenAlerts }));
   const where = jest.fn(() => ({ whereNull }));
 
   const notificationsChain = { whereIn: () => notificationsChain, whereNull: () => notificationsChain, where: () => notificationsChain, update: jest.fn() };
@@ -111,5 +113,21 @@ describe('autoResolveOverdueAlertsForJob stamps every resolve as automatic', () 
     const result = await dispatchAlerts.autoResolveOverdueAlertsForJob({ jobId: 'visit-1', trx, toStatus: 'rescheduled' });
     expect(result).toEqual({ resolved: 0 });
     expect(trx).not.toHaveBeenCalled();
+  });
+});
+
+describe('autoResolveUnassignedAlertsForJob (a visit gains a technician)', () => {
+  test('resolves the job\'s open unassigned_overdue alerts as automatic, on the caller\'s transaction', async () => {
+    const row = { id: 'alert-1', type: 'unassigned_overdue', payload: { source: 'no_show_detector', tracking_key: 'k' }, resolved_at: 'NOW()' };
+    const { trx, where, update } = fakeTrx({ openAlertIds: ['alert-1'], updateReturns: [[row]] });
+
+    await dispatchAlerts.autoResolveUnassignedAlertsForJob({ jobId: 'visit-1', resolvedBy: 'tech-1', trx });
+
+    expect(where).toHaveBeenCalledWith({ type: 'unassigned_overdue', job_id: 'visit-1' });
+    expect(where).toHaveBeenCalledWith({ id: 'alert-1' });
+    expect(update.mock.calls[0][0]).toEqual(expect.objectContaining({
+      resolved_by: 'tech-1',
+      payload: expect.objectContaining({ __raw: expect.stringContaining("jsonb_build_object('superseded_at'") }),
+    }));
   });
 });

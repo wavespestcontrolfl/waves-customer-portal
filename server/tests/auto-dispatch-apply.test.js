@@ -8,7 +8,10 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
 }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
+// The rebooker's keepStatus contract: the row lands the status its CAS matched.
+jest.mock('../services/rebooker', () => ({
+  reschedule: jest.fn(async (id, date, win, reason, by, opts) => ({ success: true, landedStatus: opts.keepStatus ? opts.expect.status : 'confirmed' })),
+}));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue(),
   REMINDER_BLOCKING_STATUSES: new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show', 'rescheduled']),
@@ -70,7 +73,9 @@ test('applies the move and atomically increments the change count', async () => 
   expect(res).toMatchObject({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
   expect(update.mock.calls[0][0].auto_dispatch_change_count).toEqual({ raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' });
   // reminders re-aligned to the new slot (non-notifying)
-  expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', { sendNotification: false, preserveMoveHold: false });
+  expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', {
+    sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: '2026-08-11', windowStart: '08:00' }, preserveMoveHold: false,
+  });
 });
 
 test('the tapped row\'s bookkeeping is fenced on the landed slot; a miss skips EVERY stamp (local audit)', async () => {
@@ -85,16 +90,18 @@ test('the tapped row\'s bookkeeping is fenced on the landed slot; a miss skips E
     { insert },
   ];
   db.mockImplementation(() => queue.shift());
-  await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
-  // complete landed slot + customer_confirmed=false (codex r17): an admin/customer confirm at the same slot is never rewound
-  expect(tappedWhere).toHaveBeenCalledWith({ id: 's1', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00', customer_confirmed: false });
+  const res = await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
+  // complete landed slot + the status the move landed: a confirm or move at the same slot after the commit is never stamped
+  expect(tappedWhere).toHaveBeenCalledWith({ id: 's1', status: 'pending', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' });
+  // The move itself persisted pending; a newer writer changed the row after it.
+  expect(res.post_status).toBe('pending');
   expect(plain).not.toHaveBeenCalled();  // no unfenced fallback stamp: the operator's newer state is not attributed to this run
   expect(insert).not.toHaveBeenCalled();
 });
 
 test('a sibling reported without a landed slot gets NO bookkeeping (cannot be fenced)', async () => {
   SmartRebooker.reschedule.mockResolvedValueOnce({
-    success: true,
+    success: true, landedStatus: 'confirmed',
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
       { id: 's2', isPrimary: false, previousStatus: 'pending', landed: null },
@@ -114,18 +121,22 @@ test('a sibling reported without a landed slot gets NO bookkeeping (cannot be fe
   expect(insert).not.toHaveBeenCalled();
 });
 
-test('preserves pending: restores pending + writes a compensating history row', async () => {
+test('a rewound pending visit (the move landed confirmed) is restored to pending + gets a compensating history row', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({ success: true, landedStatus: 'confirmed' });
+  const where = jest.fn();
   const update = jest.fn().mockResolvedValue(1);
   const insert = jest.fn().mockResolvedValue();
   const queue = [
     readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'pending', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
-    { where() { return this; }, update },
+    { where(pred) { where(pred); return this; }, update },
     { insert }, // job_status_history compensating row
   ];
   db.mockImplementation(() => queue.shift());
 
   const res = await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
   expect(res.post_status).toBe('pending');
+  // customer_confirmed=false (codex r17): an admin/customer confirm at the same slot is never rewound
+  expect(where).toHaveBeenCalledWith({ id: 's1', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00', customer_confirmed: false });
   expect(update.mock.calls[0][0].status).toBe('pending');
   expect(insert).toHaveBeenCalledWith({ job_id: 's1', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
 });
@@ -143,19 +154,19 @@ test('does not undo a concurrent confirm: scored pending but fresh confirmed sta
   expect(update.mock.calls[0][0].status).toBeUndefined(); // no pending restore
 });
 
-test('re-arms a still-pending creation confirmation after the silent reminder sync', async () => {
+test('a still-pending creation confirmation stays pending inside the reminder sync; no reminder write follows it', async () => {
   AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
-  const stamp = jest.fn().mockResolvedValue(1);
-  const rearm = jest.fn().mockResolvedValue(1);
+  const tables = [];
   const queue = [
     readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
-    { where() { return this; }, update: stamp },     // bookkeeping stamp
-    { where() { return this; }, update: rearm },     // appointment_reminders re-arm
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) }, // bookkeeping stamp
   ];
-  db.mockImplementation(() => queue.shift());
+  const close = { where() { return this; }, whereNot() { return this; }, whereRaw() { return this; }, update: jest.fn().mockResolvedValue(0) };
+  db.mockImplementation((table) => { tables.push(table); return queue.length ? queue.shift() : close; });
 
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
-  expect(rearm).toHaveBeenCalledWith({ confirmation_sent: false, confirmation_sent_at: null });
+  expect(AppointmentReminders.handleReschedule.mock.calls[0][2]).toMatchObject({ keepPendingConfirmation: true });
+  expect(tables).not.toContain('appointment_reminders');
 });
 
 describe('reminder sync failure after a committed move', () => {
@@ -373,40 +384,26 @@ describe('reminder sync failure after a committed move', () => {
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  // The throw can come from the separate confirmation re-arm update, after
-  // handleReschedule already wrote the new time (Codex #6208 r3).
-  test('a failed confirmation re-arm with the reminder already on the new slot raises nothing', async () => {
-    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
-    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+  // A newer move holds another slot: that writer owns the reminder, so this
+  // run neither rings nor closes anything for it.
+  test('a sync skipped as stale (a newer move holds another slot) rings nobody and closes nothing', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ skippedStale: true });
     movableQueue();
-    movableRows.push({ where() { return this; }, update: jest.fn().mockRejectedValue(new Error('re-arm write failed')) });
-    db.mockImplementation(tableReader({
-      appointment_reminders: { appointment_time: '2026-08-11T12:00:00Z' },
-      scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
-    }));
+    const tables = [];
+    const read = db.getMockImplementation();
+    db.mockImplementation((table) => { tables.push(table); return read(table); });
     await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('a failed re-arm with the reminder still on the old time tells staff', async () => {
-    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
-    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
-    movableQueue();
-    movableRows.push({ where() { return this; }, update: jest.fn().mockRejectedValue(new Error('re-arm write failed')) });
-    db.mockImplementation(tableReader({
-      appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
-      scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
-    }));
-    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
-    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(tables).not.toContain('notifications');
+    expect(tables).not.toContain('appointment_reminders');
   });
 
   test('a grouped sibling whose reminder is off its committed slot gets its own notice (Codex #6208 r3)', async () => {
     SmartRebooker.reschedule.mockResolvedValueOnce({
-      success: true,
+      success: true, landedStatus: 'confirmed',
       visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
         { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
-        { id: 's2', isPrimary: false, previousStatus: 'confirmed', landed: { scheduled_date: '2026-08-11', window_start: '09:30', window_end: '10:30' } },
+        { id: 's2', isPrimary: false, previousStatus: 'confirmed', landedStatus: 'confirmed', landed: { scheduled_date: '2026-08-11', window_start: '09:30', window_end: '10:30' } },
       ] },
     });
     AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: true });
@@ -457,38 +454,64 @@ test('aborts when window_end changed since scoring', async () => {
   expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });
 
-test('a grouped stop moved as a unit: every moved sibling gets the same bookkeeping stamp and pending restoration as the tapped row', async () => {
+test('a grouped stop moved as a unit: a pending sibling that landed pending gets the bookkeeping stamp, no status write and no history row', async () => {
   SmartRebooker.reschedule.mockResolvedValueOnce({
-    success: true,
+    success: true, landedStatus: 'confirmed',
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
-      { id: 's2', isPrimary: false, previousStatus: 'pending', landed: { scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' } },
+      { id: 's2', isPrimary: false, previousStatus: 'pending', landedStatus: 'pending', landed: { scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' } },
     ] },
   });
   const updateTapped = jest.fn().mockResolvedValue(1);
+  const sibWhere = jest.fn();
   const updateSib = jest.fn().mockResolvedValue(1);
   const insert = jest.fn().mockResolvedValue();
   const queue = [
     readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
     { where() { return this; }, update: updateTapped },
-    { where() { return this; }, update: updateSib },
-    { insert }, // sibling's compensating confirmed→pending row
+    { where(pred) { sibWhere(pred); return this; }, update: updateSib },
+    { insert },
   ];
   db.mockImplementation(() => queue.shift());
 
   const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
   expect(res).toMatchObject({ ok: true, post_status: 'confirmed' });
   expect(updateTapped.mock.calls[0][0].status).toBeUndefined();
-  expect(updateSib.mock.calls[0][0]).toMatchObject({ status: 'pending', last_auto_dispatch_run_id: 'run1', auto_dispatch_change_count: { raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' } });
+  expect(sibWhere).toHaveBeenCalledWith({ id: 's2', status: 'pending', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' });
+  expect(updateSib.mock.calls[0][0]).toMatchObject({ last_auto_dispatch_run_id: 'run1', auto_dispatch_change_count: { raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' } });
+  expect(updateSib.mock.calls[0][0].status).toBeUndefined();
+  expect(insert).not.toHaveBeenCalled();
+});
+
+test('a grouped pending sibling that the move rewound to confirmed is restored to pending with a compensating history row', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({
+    success: true, landedStatus: 'confirmed',
+    visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
+      { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+      { id: 's2', isPrimary: false, previousStatus: 'pending', landedStatus: 'confirmed', landed: { scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' } },
+    ] },
+  });
+  const updateSib = jest.fn().mockResolvedValue(1);
+  const insert = jest.fn().mockResolvedValue();
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+    { where() { return this; }, update: updateSib },
+    { insert },
+  ];
+  db.mockImplementation(() => queue.shift());
+
+  await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
+  expect(updateSib.mock.calls[0][0]).toMatchObject({ status: 'pending', last_auto_dispatch_run_id: 'run1' });
   expect(insert).toHaveBeenCalledWith({ job_id: 's2', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
 });
 
 test('a grouped sibling whose status moved on after the unit move (cancel/complete/start) is NOT rewound to pending and gets no false history row', async () => {
   SmartRebooker.reschedule.mockResolvedValueOnce({
-    success: true,
+    success: true, landedStatus: 'confirmed',
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
-      { id: 's2', isPrimary: false, previousStatus: 'pending', landed: { scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' } },
+      { id: 's2', isPrimary: false, previousStatus: 'pending', landedStatus: 'confirmed', landed: { scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' } },
     ] },
   });
   const updateTapped = jest.fn().mockResolvedValue(1);
@@ -513,7 +536,7 @@ test('a grouped sibling whose status moved on after the unit move (cancel/comple
 
 test('a grouped visit that only PARTLY moved is an explicit failure carrying movedCount (rows that moved still get bookkeeping)', async () => {
   SmartRebooker.reschedule.mockResolvedValueOnce({
-    success: true,
+    success: true, landedStatus: 'confirmed',
     visitMove: { visitId: 'v1', moved: ['s1'], failed: [{ id: 's2', reason: 'member s2 boom', code: 'SLOT_TAKEN' }], members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
     ] },
@@ -531,7 +554,7 @@ test('a grouped visit that only PARTLY moved is an explicit failure carrying mov
 
 test('a full grouped move reports movedCount = every moved row', async () => {
   SmartRebooker.reschedule.mockResolvedValueOnce({
-    success: true,
+    success: true, landedStatus: 'confirmed',
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
       { id: 's2', isPrimary: false, previousStatus: 'confirmed' },
@@ -549,7 +572,7 @@ test('a full grouped move reports movedCount = every moved row', async () => {
 
 test('a failed visit-parent retarget after a full member move is an explicit failure carrying movedCount', async () => {
   SmartRebooker.reschedule.mockResolvedValueOnce({
-    success: true,
+    success: true, landedStatus: 'confirmed',
     warnings: ['visit parent retarget failed: boom'],
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], parentRetargetFailed: true, members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },

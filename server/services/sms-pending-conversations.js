@@ -92,7 +92,6 @@ async function loadPendingSmsConversations({
   const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
   const callEndedAt = callEndedAtSql('spoken');
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
-  const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed
   // primary phone. Legacy/receipt events still suppress their original peer.
   const stopPeer = phoneIdentitySql("COALESCE(NULLIF(stop_receipt.phone, ''), NULLIF(stop_legacy.from_phone, ''), NULLIF(stop_message.metadata->>'sms_contact_phone', ''), NULLIF(stop_conversation.contact_phone, ''), '')");
@@ -194,7 +193,12 @@ async function loadPendingSmsConversations({
              COALESCE(legacy.metadata->>'draft_id',
                s.canonical_metadata->>'draft_id') AS metadata_draft_id,
              CASE WHEN s.source = 'legacy' THEN s.created_at
-               ELSE COALESCE(legacy.created_at, s.created_at) END AS response_created_at
+               ELSE COALESCE(legacy.created_at, s.created_at) END AS response_created_at,
+             -- inbound_events filters on this boolean, not on direction text:
+             -- a CTE column has no statistics, so Postgres sizes "= 'inbound'"
+             -- at 0.5% of rows and a boolean at 50%. The 0.5% guess (7 rows
+             -- for ~2,000) planned outbound_events as a compare-every-pair loop.
+             s.direction = 'inbound' AS is_inbound
       FROM base_sms s
       LEFT JOIN canonical_legacy_links legacy
         ON s.source = 'canonical' AND legacy.message_id = s.id
@@ -202,7 +206,7 @@ async function loadPendingSmsConversations({
         ON s.direction = 'inbound' AND optout_receipt.message_sid = s.twilio_sid
     ), inbound_events AS MATERIALIZED (
       SELECT * FROM projected_events s
-      WHERE s.direction = 'inbound'
+      WHERE s.is_inbound
         AND (CAST(:cutoff AS timestamptz) IS NULL OR s.created_at <= CAST(:cutoff AS timestamptz))
         AND (CAST(:includeExpired AS boolean) OR s.created_at >= now() - interval '30 days')
         AND (CAST(:since AS timestamptz) IS NULL OR s.created_at >= CAST(:since AS timestamptz))
@@ -338,6 +342,23 @@ async function loadPendingSmsConversations({
     ), latest_stop AS MATERIALIZED (
       SELECT peer, MAX(created_at) AS stopped_at
       FROM all_stop_events WHERE peer <> '' GROUP BY peer
+    ), unique_customer_peer AS MATERIALIZED (
+      -- A number names a customer only when exactly one live customer has
+      -- it. Every customer's number is normalized once here and joined by
+      -- peer; a per-text lookup scanned all customers twice per pending text.
+      SELECT by_peer.peer,
+             (array_agg(by_peer.id))[1] AS id,
+             (array_agg(by_peer.first_name))[1] AS first_name,
+             (array_agg(by_peer.last_name))[1] AS last_name
+      FROM (
+        SELECT ${customerPeer} AS peer, candidate_customer.id,
+               candidate_customer.first_name, candidate_customer.last_name
+        FROM customers candidate_customer
+        WHERE candidate_customer.deleted_at IS NULL
+      ) by_peer
+      WHERE by_peer.peer <> ''
+      GROUP BY by_peer.peer
+      HAVING count(*) = 1
     )
     SELECT li.id, li.source, li.peer, li.endpoint, li.message_body, li.created_at,
            li.enriched_metadata AS metadata, li.media,
@@ -350,19 +371,7 @@ async function loadPendingSmsConversations({
     LEFT JOIN answered_inbound answered ON answered.inbound_id = li.id
     LEFT JOIN latest_stop stop ON stop.peer = li.peer
     LEFT JOIN spoken_inbound spoken ON spoken.inbound_id = li.id${staffActionJoin}
-    LEFT JOIN LATERAL (
-      SELECT candidate_customer.id, candidate_customer.first_name, candidate_customer.last_name
-      FROM customers candidate_customer
-      WHERE candidate_customer.deleted_at IS NULL
-        AND ${customerPeer} = li.peer
-        AND NOT EXISTS (
-          SELECT 1 FROM customers duplicate_customer
-          WHERE duplicate_customer.deleted_at IS NULL
-            AND duplicate_customer.id <> candidate_customer.id
-            AND ${duplicateCustomerPeer} = li.peer
-        )
-      LIMIT 1
-    ) customer_match ON true
+    LEFT JOIN unique_customer_peer customer_match ON customer_match.peer = li.peer
     WHERE answered.inbound_id IS NULL
       AND spoken.inbound_id IS NULL${staffActionFilter}
       AND (stop.stopped_at IS NULL OR stop.stopped_at <= li.created_at)

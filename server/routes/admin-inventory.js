@@ -5,7 +5,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { eligibleVendorPricing } = require('../services/vendor-pricing-eligibility');
 const inventoryOperations = require('../services/inventory-operations');
-const { restockMeta } = require('../services/inventory-restock-queue');
+const { countActiveRestockRequests, restockMeta } = require('../services/inventory-restock-queue');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
@@ -945,7 +945,10 @@ router.get('/', async (req, res, next) => {
     });
     if (category) query = query.where('category', category);
     if (needsPricing === 'true') query = query.where('needs_pricing', true);
-    if (needsPricing === 'false') query = query.where(function () { this.where('needs_pricing', false).orWhere('best_price', '>', 0); });
+    // "Priced" is the card's rule (GET /stats): a reviewed price. A product
+    // flagged for a price review lists under Needs Price, even while an older
+    // best_price remains (metrics audit 2026-11-01).
+    if (needsPricing === 'false') query = query.where('needs_pricing', false);
     if (stock === 'low') {
       query = query
         .whereNotNull('inventory_on_hand')
@@ -2832,35 +2835,17 @@ router.get('/scrape-jobs', async (req, res, next) => {
 });
 
 // =========================================================================
-// POST /scrape-jobs/:vendorId/trigger — manually trigger a scrape
+// POST /scrape-jobs/:vendorId/trigger — manual scrape (no scraper connected)
 // =========================================================================
+// No price scraper is connected. This used to record a job "completed" with
+// zero results and mark the vendor scraped, which counted on the Scrape Jobs
+// card although nothing ran (metrics audit 2026-11-01). It now records nothing
+// and its message (the Scrape tab's toast) says so.
 router.post('/scrape-jobs/:vendorId/trigger', async (req, res, next) => {
   try {
     const vendor = await db('vendors').where({ id: req.params.vendorId }).first();
     if (!vendor) return res.status(404).json({ error: 'Vendor not found' });
-
-    // Create a pending job
-    const [job] = await db('price_scrape_jobs').insert({
-      vendor_id: req.params.vendorId, status: 'pending',
-    }).returning('*');
-
-    // Mark vendor as being scraped
-    await db('vendors').where({ id: req.params.vendorId }).update({
-      last_scrape_at: new Date(), last_scrape_status: 'running',
-    });
-
-    // TODO: Trigger actual Playwright scrape service here
-    // For now, mark as completed with 0 results
-    await db('price_scrape_jobs').where({ id: job.id }).update({
-      status: 'completed', started_at: new Date(), completed_at: new Date(),
-      products_found: 0, prices_updated: 0, duration_ms: 0,
-    });
-    await db('vendors').where({ id: req.params.vendorId }).update({
-      last_scrape_status: 'completed',
-    });
-
-    logger.info(`[inventory] Manual scrape triggered for ${vendor.name}`);
-    res.json({ job, message: `Scrape job created for ${vendor.name}. Playwright service not yet connected.` });
+    res.json({ scraped: false, message: `Price scraping is not connected yet. Nothing was scraped for ${vendor.name}, and no job was recorded.` });
   } catch (err) { next(err); }
 });
 
@@ -2916,35 +2901,28 @@ router.get('/stats', async (req, res, next) => {
       db.raw("COUNT(*) FILTER (WHERE price_scraping_enabled = true) as scraping_enabled"),
     );
 
-    // These tables may not exist yet (migration 061)
-    let approvalStats = { pending: 0, approved: 0, rejected: 0 };
-    let scrapeStats = { total_jobs: 0, completed: 0, failed: 0 };
-    try {
-      const [a] = await db('price_approvals').select(
-        db.raw("COUNT(*) FILTER (WHERE status = 'pending') as pending"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'approved') as approved"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'rejected') as rejected"),
-      );
-      approvalStats = a;
-    } catch { /* table not created yet */ }
-    try {
-      const [s] = await db('price_scrape_jobs').select(
-        db.raw('COUNT(*) as total_jobs'),
-        db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'failed') as failed"),
-      );
-      scrapeStats = s;
-    } catch { /* table not created yet */ }
-    let restockOpen = 0;
-    try {
-      if (await db.schema.hasTable('product_restock_requests')) {
-        const row = await db('product_restock_requests')
-          .whereIn('status', ['open', 'ordered'])
-          .count('* as count')
-          .first();
-        restockOpen = parseInt(row?.count || 0);
+    // A count that cannot be read is null, and the page shows it as unknown:
+    // a zero would read as "nothing waiting" (metrics audit 2026-11-01).
+    const countOrNull = async (label, read) => {
+      try {
+        return await read();
+      } catch (err) {
+        logger.warn(`[inventory] stats: ${label} count failed: ${err.message}`);
+        return null;
       }
-    } catch { /* table not created yet */ }
+    };
+    const approvalStats = await countOrNull('approvals', async () => (await db('price_approvals').select(
+      db.raw("COUNT(*) FILTER (WHERE status = 'pending') as pending"),
+      db.raw("COUNT(*) FILTER (WHERE status = 'approved') as approved"),
+      db.raw("COUNT(*) FILTER (WHERE status = 'rejected') as rejected"),
+    ))[0]);
+    const scrapeStats = await countOrNull('scrape jobs', async () => (await db('price_scrape_jobs').select(
+      db.raw('COUNT(*) as total_jobs'),
+      db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
+      db.raw("COUNT(*) FILTER (WHERE status = 'failed') as failed"),
+    ))[0]);
+    // The badge counts what the Restock tab's active queue lists.
+    const restockOpen = await countOrNull('restock', countActiveRestockRequests);
 
     // Technician projection (codex P2): only what their UI renders —
     // product totals, low stock, and open restock counts. Pricing averages
@@ -2974,8 +2952,8 @@ router.get('/stats', async (req, res, next) => {
         avgPrice: productStats.avg_price,
       },
       vendors: { total: parseInt(vendorStats.total_vendors), scrapingEnabled: parseInt(vendorStats.scraping_enabled) },
-      approvals: { pending: parseInt(approvalStats.pending || 0), approved: parseInt(approvalStats.approved || 0), rejected: parseInt(approvalStats.rejected || 0) },
-      scrapeJobs: { total: parseInt(scrapeStats.total_jobs || 0), completed: parseInt(scrapeStats.completed || 0), failed: parseInt(scrapeStats.failed || 0) },
+      approvals: approvalStats ? { pending: parseInt(approvalStats.pending || 0), approved: parseInt(approvalStats.approved || 0), rejected: parseInt(approvalStats.rejected || 0) } : null,
+      scrapeJobs: scrapeStats ? { total: parseInt(scrapeStats.total_jobs || 0), completed: parseInt(scrapeStats.completed || 0), failed: parseInt(scrapeStats.failed || 0) } : null,
       restockRequests: { open: restockOpen },
     });
   } catch (err) { next(err); }

@@ -73,7 +73,7 @@ jest.mock('../services/call-bridge', () => ({
 jest.mock('../services/lead-estimate-link', () => ({ stampFirstResponseByContact: jest.fn(async () => 1) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: `SM${'a'.repeat(32)}` })) }));
 // gateEnvValue off: the move switch (GATE_TECH_MOVE_SWITCH) has its own suite, tech-move-switch.test.js.
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvTimestamp: jest.fn(() => null), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvTimestamp: jest.fn(() => null), gateEnvValue: jest.fn(() => false), techSetTextsLive: jest.fn(() => false) }));
 jest.mock('../services/sms-suggest-mode', () => ({
   reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: [], reservationId: '22222222-2222-4222-8222-222222222222', autoSendInFlight: false })),
   settleHumanReply: jest.fn(async () => undefined),

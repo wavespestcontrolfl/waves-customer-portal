@@ -364,10 +364,59 @@ async function loadQuoteHandoffs(rows, data, conn) {
     const asked = askedAtOf(row, meta);
     const bellAt = asked ? new Date(asked) : null;
     if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
-    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
-    const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');
-    if (handedOff) data.quoteHandedOff.add(String(row.id));
+    if (await quoteAnswered(conn, { meta, customerId, bellAt })) data.quoteHandedOff.add(String(row.id));
   }
+}
+
+// The coarse service line (call-estimate-service-match.js, the shared estimate-side classifier) an add-service
+// request asks for, by its normalized requested service. A request bell asks for ONE service, so only a delivered
+// estimate that prices that line answers it: a pest estimate never closes a lawn ask (outside review 2026-11-02).
+const REQUEST_LINE = { lawn_care: 'lawn', pest_control: 'pest', mosquito: 'mosquito', tree_shrub: 'tree_shrub', termite_bait: 'termite' };
+
+// The shared `termite` line also covers trenching, Bora-Care, foam and WDO work, so a bait ask also needs bait
+// monitoring itself: the estimator's bait flag, the engine's bait service, or a recurring line named for termite
+// bait / monitoring / stations.
+function termiteBaitPriced(estimate) {
+  const data = require('./estimate-service-lines').parseEstimateData(estimate.estimate_data) || {};
+  const services = data.engineInputs?.services || {};
+  if (data.inputs?.svcTermiteBait === true || services.termite_bait || services.termiteBait) return true;
+  const recurring = data.result?.recurring?.services || data.engineResult?.recurring?.services || [];
+  return (Array.isArray(recurring) ? recurring : []).some((line) => {
+    const words = [line?.service, line?.serviceKey, line?.service_key, line?.name, line?.label].filter((w) => typeof w === 'string').join(' ');
+    return /termite/i.test(words) && /bait|monitor|station/i.test(words);
+  });
+}
+
+// Does a delivered estimate price the request's service line? estimateServiceLines reads an estimate it cannot
+// classify (no structured line, unknown text, a plan with one-time rows beside it) as no lines: here that never
+// answers the ask (fail closed, the opposite default of the call promises, which keep their old close).
+function estimatePricesRequest(estimate, serviceKey) {
+  const { estimateServiceLines } = require('./call-estimate-service-match');
+  if (!estimateServiceLines(estimate).includes(REQUEST_LINE[serviceKey])) return false;
+  return serviceKey !== 'termite_bait' || termiteBaitPriced(estimate);
+}
+
+// Was the quote this bell asks for handed to its customer after `bellAt`? The witness is the promise lane's
+// (handedOffWithin: a real delivery or the customer's acceptance, never sent_at) inside the estimate-ownership
+// fence. An add-service REQUEST bell (bundle_quote_requested with its request id) also needs the estimate to price
+// the request's own service, read from the request row; a request whose service no estimate line can name never
+// closes this way (fail closed: a person marks it handled). The chat and repeat-form classes carry no service and
+// keep the customer-level rule. Also read by the late re-ring (portal-late-rering.js), so an estimate for another
+// service is no answer there either.
+async function quoteAnswered(conn, { meta, customerId, bellAt }) {
+  const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+  const handedOff = () => whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId);
+  if (!isBundleRequestBell(meta)) return Boolean(await handedOff().first('estimates.id'));
+  const request = await conn('service_requests').where({ id: meta.requestId, customer_id: customerId })
+    .first('requested_service', conn.raw("pricing_revision->'mintedEstimate'->>'id' as minted_estimate_id"));
+  const { normalizeRequestedServiceKey } = require('./estimate-add-service-request');
+  const serviceKey = normalizeRequestedServiceKey(request?.requested_service);
+  if (!REQUEST_LINE[serviceKey]) return false;
+  const estimates = await handedOff().select('estimates.*');
+  // The request's own minted estimate answers it as made (its lines need not name the service); any other
+  // estimate must price the requested service.
+  return estimates.some((estimate) => (request.minted_estimate_id && String(estimate.id) === String(request.minted_estimate_id))
+    || estimatePricesRequest(estimate, serviceKey));
 }
 
 // GATE_LEAD_CONTACTED_CLOSE on (shadow or true): was an estimate handed off to each
@@ -1323,6 +1372,7 @@ async function lateReRingPass(now) {
 
 module.exports = {
   runAdminAlertRelevanceSweep,
+  quoteAnswered,
   classify,
   loadSubjects,
   subjectFor,

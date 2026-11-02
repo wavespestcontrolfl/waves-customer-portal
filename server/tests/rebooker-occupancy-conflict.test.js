@@ -370,14 +370,17 @@ describe('reschedule — shared occupancy conflict gate', () => {
 
   test('keepStatus (office Combine): a pending row keeps pending and writes no status history; the default still lands on confirmed', async () => {
     const kept = wireRescheduleMocks(service({ status: 'pending' }));
-    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true, keepStatus: true });
+    const keptResult = await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true, keepStatus: true });
     expect(kept.trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending' }));
     expect(kept.trx.mock.calls.some((c) => c[0] === 'job_status_history')).toBe(false);
+    // The result names the status the move wrote (auto-dispatch reports it).
+    expect(keptResult).toMatchObject({ previousStatus: 'pending', landedStatus: 'pending' });
 
     const flipped = wireRescheduleMocks(service({ status: 'pending' }));
-    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true });
+    const flippedResult = await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true });
     expect(flipped.trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'confirmed' }));
     expect(flipped.trx.mock.calls.some((c) => c[0] === 'job_status_history')).toBe(true);
+    expect(flippedResult).toMatchObject({ previousStatus: 'pending', landedStatus: 'confirmed' });
   });
 
   test('clearWindowEnd: an end of null is WRITTEN as null instead of keeping the row\'s current end (Combine compensation)', async () => {

@@ -12,7 +12,7 @@ const { LABEL_RAIN_RULES, NAMED_RULES, labelRainRuleFor } = require('../config/l
 const { recordSprayRainShadow, _test: shadowTest } = require('../services/spray-rain-rule-shadow');
 
 const { buildSprayCheck } = jobCard;
-const { weatherIssue, wavesRainRule, rainRulesFor } = jobCard._test;
+const { weatherIssue, wavesRainRule, rainRulesFor, lineService } = jobCard._test;
 
 // A 2:00 pm ET start (18:00Z). Hours are the NWS hourly rows the card reads.
 const NOW = new Date('2026-09-04T18:00:00Z');
@@ -84,6 +84,44 @@ describe('the Waves rule of a service (reschedule-rules.js)', () => {
     expect(wavesRainRule([PEST, 'Tree & Shrub Care'])).toEqual({ key: 'tree_shrub_spray', hours: 3 });
     expect(wavesRainRule(['Interior Pest Treatment', PEST])).toEqual({ key: 'pest_exterior', hours: 2 });
     expect(wavesRainRule([])).toBeNull();
+  });
+
+  test('rain-OK work (rain-fit.js, owner 2026-11-01) adds no rule: Bora-Care, termite foam, palm injection, a bait check', () => {
+    expect(wavesRainRule([{ name: 'Bora-Care Termite Treatment', serviceKey: 'bora_care' }])).toBeNull();
+    expect(wavesRainRule([{ name: 'Termite Foam Drill Treatment', serviceKey: 'foam_drill' }])).toBeNull();
+    expect(wavesRainRule([{ name: 'Palm Injection', serviceKey: 'palm_injection' }])).toBeNull();
+    expect(wavesRainRule([{ name: 'Seasonal Mosquito Control Service', serviceKey: 'mosquito_misting_refill' }])).toBeNull();
+    // A name with no key takes the word rules; any other catalog key keeps the name rule.
+    expect(wavesRainRule(['Termite Bait Station Check'])).toBeNull();
+    expect(wavesRainRule([{ name: PEST, serviceKey: 'pest_control_quarterly' }])).toEqual({ key: 'pest_exterior', hours: 2 });
+    expect(wavesRainRule([{ name: 'Seasonal Mosquito Control Service', serviceKey: 'mosquito_seasonal' }])).toEqual({ key: 'mosquito', hours: 2 });
+    // The exterior pest visit with a rain-OK add-on beside it still takes its own 2 h; the add-on's 3 h Tree & Shrub still wins.
+    expect(wavesRainRule([{ name: PEST, serviceKey: 'pest_control_quarterly' }, { name: 'Bora-Care', serviceKey: 'bora_care' }])).toEqual({ key: 'pest_exterior', hours: 2 });
+    expect(wavesRainRule([{ name: PEST, serviceKey: 'pest_control_quarterly' }, { name: 'Tree & Shrub Care', serviceKey: 'tree_shrub_care' }])).toEqual({ key: 'tree_shrub_spray', hours: 3 });
+  });
+
+  test('the services a rule reads stay names, so label lines (Cyper TC wind) keep matching', () => {
+    const rules = rainRulesFor([talak], () => [{ name: 'Termite Treatment', serviceKey: 'termite_liquid' }, 'Tree & Shrub Care']);
+    expect(rules.services).toEqual({ t: ['Termite Treatment', 'Tree & Shrub Care'] });
+    expect(rules.waves.t).toEqual({ key: 'tree_shrub_spray', hours: 3 });
+  });
+
+  test('a card line carries its service\'s key: the visit\'s own, or the add-on its source names', () => {
+    const facts = { serviceType: PEST, serviceKey: 'pest_control_quarterly', addons: [{ name: 'Bora-Care', serviceKey: 'bora_care' }, { name: 'Tree & Shrub Care', serviceKey: null }] };
+    expect(lineService({}, facts)).toEqual({ name: PEST, serviceKey: 'pest_control_quarterly' });
+    expect(lineService({ source: 'Bora-Care' }, facts)).toEqual({ name: 'Bora-Care', serviceKey: 'bora_care' });
+    expect(lineService({ source: 'Tree & Shrub Care' }, facts)).toEqual({ name: 'Tree & Shrub Care', serviceKey: null });
+    expect(lineService({ source: 'Unlisted Add-on' }, facts)).toBe('Unlisted Add-on');
+    expect(lineService({}, { serviceType: PEST })).toEqual({ name: PEST, serviceKey: null });
+  });
+
+  test('on a card, a rain-OK visit\'s product carries no Waves rule and a pest visit\'s keeps it', () => {
+    const lines = [{ product: alpine }];
+    const rulesFor = (facts) => rainRulesFor([alpine], (p) => lines.filter((l) => l.product.id === p.id).map((l) => lineService(l, facts)));
+    expect(rulesFor({ serviceType: 'Bora-Care Termite Treatment', serviceKey: 'bora_care' }).waves.a).toBeNull();
+    expect(rulesFor({ serviceType: PEST, serviceKey: 'pest_control_quarterly' }).waves.a).toEqual({ key: 'pest_exterior', hours: 2 });
+    const viaAddon = { serviceType: PEST, serviceKey: 'pest_control_quarterly', addons: [{ name: 'Bora-Care', serviceKey: 'bora_care' }] };
+    expect(rainRulesFor([alpine], () => [lineService({ source: 'Bora-Care' }, viaAddon)]).waves.a).toBeNull();
   });
 });
 
@@ -378,6 +416,14 @@ describe('the tank search follows the same rule', () => {
     // Named by both, the stricter rule judges it.
     protocols.pest.visits[0] = { visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal' };
     expect((await search()).sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 95% inside 3 h — Waves rule', level: 'warning', action: SKIP });
+  });
+
+  test('a rain-OK visit (Bora-Care by its catalog key) gets no Waves dry time in the search', async () => {
+    process.env.GATE_SPRAY_RAIN_RULES = 'true';
+    const search = () => jobCard.mixForProduct('p1', 2, { serviceId: 'svc1', dbh, deps: { getHourly: async () => hours([0, 95, 95, 0]) }, now: NOW });
+    expect((await search()).sprayCheck).toMatchObject({ verdict: 'caution', reason: 'rain 95% inside 2 h — Waves rule' });
+    tables.scheduled_services = [{ ...visit, service_type: 'Bora-Care Termite Treatment', service_key: 'bora_care' }];
+    expect((await search()).sprayCheck).toEqual({ verdict: 'ok', reason: null });
   });
 
   test('a label line for one kind of job reads the visit\'s services, as on the card (Cyper TC: termite only)', async () => {

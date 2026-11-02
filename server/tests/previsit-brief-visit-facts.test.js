@@ -96,6 +96,7 @@ describe('deterministicVisitFacts', () => {
     expect(facts.access.codes).toEqual({ neighborhoodGate: null, propertyGate: null, garage: null, lockbox: null });
     expect(facts.access.pets).toBeNull();
     expect(facts.last_visit).toBeNull();
+    expect(facts.history_unavailable).toBeUndefined();
   });
 
   test('property_preferences OUTAGE yields access: null (never a codes-cleared block that would suppress cached access)', async () => {
@@ -108,6 +109,8 @@ describe('deterministicVisitFacts', () => {
     const facts = await deterministicVisitFacts(SVC, fakeDbh({ throws: { service_records: true } }));
     expect(facts.access.codes.neighborhoodGate).toBe('9911');
     expect(facts.last_visit).toBeNull();
+    // Readers must not read the outage as "no earlier visit".
+    expect(facts.history_unavailable).toBe(true);
   });
 
   test('product-history outage is fail-soft: last_visit stands with empty products', async () => {

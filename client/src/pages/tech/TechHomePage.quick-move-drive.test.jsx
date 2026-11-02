@@ -60,7 +60,7 @@ beforeEach(() => {
     if (path.includes('/admin/schedule?')) data = { services: [row('one')] };
     if (path.endsWith('/visit-brief')) data = { facts: { access: { accessNotes: 'Use the side gate' } } };
     if (path.includes('/tech/line')) data = { line: null };
-    if (path.endsWith('/rain-out-options')) {
+    if (path.split('?')[0].endsWith('/rain-out-options')) {
       data = { ok: true, sameDay, days: [], remainingRouteCount: 0, service: { window: { start: '09:00', end: '10:00' } }, today: {} };
     }
     return { ok: true, status: 200, json: async () => data };

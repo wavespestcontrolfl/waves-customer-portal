@@ -27,10 +27,13 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { getHourlyRainOutlook } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
+const { outdoorStopRows } = require('./scheduling/rain-fit');
 
 // Jobs a nudge makes sense for. on_site is excluded — the tech is
 // standing in the weather already and has the Rain Out button in hand.
-const NUDGEABLE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route'];
+// 'rescheduled' is excluded too: it is a customer's reschedule REQUEST waiting
+// for staff, with a stale date and window (auto-dispatch apply.js, eligibility.js).
+const NUDGEABLE_STATUSES = ['pending', 'confirmed', 'en_route'];
 
 const SERVICE_HOURS_ET = { start: 7, end: 19 };
 const LOOKAHEAD_MINUTES = 150;          // stops starting within ~2.5h
@@ -85,6 +88,8 @@ async function upcomingStops(todayStr, nowMinutes) {
       'scheduled_services.technician_id',
       'scheduled_services.customer_id',
       'scheduled_services.service_type',
+      'scheduled_services.service_key_snapshot',
+      'scheduled_services.visit_id',
       'scheduled_services.status',
       'scheduled_services.window_start',
       'scheduled_services.window_end',
@@ -93,7 +98,12 @@ async function upcomingStops(todayStr, nowMinutes) {
       'customers.city as customer_city',
     );
 
-  return rows.filter((job) => {
+  // Rain does not spoil rain-OK work (inspections, trapping, bait stations,
+  // indoor work): no nudge for a stop whose services are all of that kind. A
+  // grouped stop with any outdoor service keeps its nudge.
+  const outdoorRows = await outdoorStopRows(rows, db);
+
+  return outdoorRows.filter((job) => {
     const startMin = hhmmToMinutes(job.window_start);
     const endMin = hhmmToMinutes(job.window_end);
     if (startMin == null) return false;

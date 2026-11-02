@@ -506,6 +506,28 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
   return { resolved };
 }
 
+/**
+ * Resolve a job's open unassigned_overdue alerts once it gains a technician:
+ * "unassigned" is stale. Called inside the assignment's own transaction by
+ * every writer that gives an unassigned visit a technician
+ * (dispatch-assignment.js assignDispatchJob, the rebooker's single-row move).
+ *
+ * auto: true — assigning a tech is not the dispatcher acknowledging THIS
+ * alert, it's a side effect that makes "unassigned" stale. If the visit is
+ * later unassigned again under the same promise, a fresh unassigned_overdue
+ * alert must still be raisable under the same tracking_key (codex P1,
+ * pre-push audit on 925e9e977).
+ */
+async function autoResolveUnassignedAlertsForJob({ jobId, resolvedBy, trx } = {}) {
+  const openAlerts = await (trx || db)('dispatch_alerts')
+    .where({ type: 'unassigned_overdue', job_id: jobId })
+    .whereNull('resolved_at')
+    .select('id');
+  for (const { id } of openAlerts) {
+    await resolveAlert({ id, resolvedBy, trx, auto: true });
+  }
+}
+
 module.exports = {
   emitAlert,
   createAlert,
@@ -514,6 +536,7 @@ module.exports = {
   resolveAlertAsDispatcher,
   resolveAllOpenAlerts,
   autoResolveOverdueAlertsForJob,
+  autoResolveUnassignedAlertsForJob,
   OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
   OVERDUE_ALERT_TYPES,
   DECISION_ONLY_ALERT_TYPES,

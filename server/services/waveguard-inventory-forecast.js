@@ -21,6 +21,25 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Demand sums keep full precision and round to 4 decimals once, on the way
+// out: rounding each appointment first turned 100 doses of 1 ml into 0.03 gal,
+// not 0.0264. exact() drops float noise after each sum, so three 0.1 gal
+// doses are 0.3 gal (not 0.30000000000000004) and stock of 0.3 is enough.
+const exact = (n) => Number(n.toPrecision(12));
+const round4 = (n) => Number(n.toFixed(4));
+
+// The forecast window (days) or row limit a caller asked for: absent means the
+// default, a number is held to [1, max], and anything else (a word, "7days")
+// is a 400 rather than a NaN date range or LIMIT.
+function forecastBound(value, { name, fallback, max }) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    throw Object.assign(new Error(`${name} must be a number from 1 to ${max}`), { statusCode: 400, isOperational: true });
+  }
+  return Math.max(1, Math.min(max, Math.floor(n)));
+}
+
 function summarizeForecastStatus(row) {
   if (row.unitMismatchCount > 0) return 'unit_mismatch';
   if (row.onHand == null) return 'not_tracked';
@@ -38,8 +57,8 @@ function forecastPriority(status, firstShortDate) {
 }
 
 async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db } = {}) {
-  const safeDays = Math.max(1, Math.min(90, Number(days || DEFAULT_FORECAST_DAYS)));
-  const safeLimit = Math.max(1, Math.min(300, Number(limit || 150)));
+  const safeDays = forecastBound(days, { name: 'days', fallback: DEFAULT_FORECAST_DAYS, max: 90 });
+  const safeLimit = forecastBound(limit, { name: 'limit', fallback: 150, max: 300 });
   const startDate = etDateString();
   const endDate = etDateString(addETDays(new Date(), safeDays));
   // One schema probe for the whole batch — the planner would otherwise
@@ -172,11 +191,11 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
         appointment.inventoryAmount = conversion.amount;
         appointment.conversionConfidence = conversion.confidence;
         if (conversion.convertible && conversion.amount != null) {
-          row.committedDemand = Number((row.committedDemand + conversion.amount).toFixed(4));
+          row.committedDemand = exact(row.committedDemand + conversion.amount);
           if (conversion.confidence !== 'exact_unit') row.conversionConfidence = conversion.confidence;
           row.appointments.push(appointment);
         } else {
-          row.unconvertedDemand = Number((row.unconvertedDemand + amount).toFixed(4));
+          row.unconvertedDemand = exact(row.unconvertedDemand + amount);
           row.unitMismatchCount += 1;
           row.conversionConfidence = 'needs_review';
           row.mismatchAppointments.push(appointment);
@@ -193,22 +212,27 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
   }
 
   const products = Array.from(productMap.values()).map((row) => {
-    row.projectedRemaining = row.onHand != null ? Number((row.onHand - row.committedDemand).toFixed(4)) : null;
+    const demand = row.committedDemand;
+    row.projectedRemaining = row.onHand != null ? exact(row.onHand - demand) : null;
     let runningDemand = 0;
     for (const appointment of row.appointments.slice().sort((a, b) => String(a.scheduledDate).localeCompare(String(b.scheduledDate)))) {
-      runningDemand = Number((runningDemand + Number(appointment.inventoryAmount || appointment.amount || 0)).toFixed(4));
+      runningDemand = exact(runningDemand + Number(appointment.inventoryAmount || appointment.amount || 0));
       if (row.onHand != null && runningDemand > row.onHand) {
         row.firstShortDate = appointment.scheduledDate;
         break;
       }
     }
+    // Status reads the exact sums; the rounded figures are for display.
     row.status = summarizeForecastStatus(row);
-    row.shortfall = row.onHand != null ? Math.max(0, Number((row.committedDemand - row.onHand).toFixed(4))) : null;
-    const targetBuffer = row.lowStockThreshold != null ? row.lowStockThreshold : Number((row.committedDemand * 0.25).toFixed(4));
-    row.targetStock = Number((row.committedDemand + targetBuffer).toFixed(4));
+    row.committedDemand = round4(demand);
+    row.unconvertedDemand = round4(row.unconvertedDemand);
+    if (row.projectedRemaining != null) row.projectedRemaining = round4(row.projectedRemaining);
+    row.shortfall = row.onHand != null ? Math.max(0, round4(demand - row.onHand)) : null;
+    const targetStock = demand + (row.lowStockThreshold != null ? row.lowStockThreshold : demand * 0.25);
+    row.targetStock = round4(targetStock);
     row.recommendedOrderQuantity = row.onHand != null
-      ? Math.max(0, Number((row.targetStock - row.onHand).toFixed(4)))
-      : Number((row.committedDemand || row.targetStock || 0).toFixed(4));
+      ? Math.max(0, round4(targetStock - row.onHand))
+      : round4(demand || targetStock || 0);
     row.priority = forecastPriority(row.status, row.firstShortDate);
     return row;
   }).sort((a, b) => {

@@ -1113,6 +1113,7 @@ app.use('/api/bouncie', require('./routes/bouncie-webhook'));
 app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/tech/line', require('./routes/tech-line'));
+app.use('/api/tech/answers', require('./routes/tech-answers'));
 app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/tech/dictation', require('./routes/tech-dictation'));
 app.use('/api/tech/truck-check', require('./routes/tech-truck-check'));

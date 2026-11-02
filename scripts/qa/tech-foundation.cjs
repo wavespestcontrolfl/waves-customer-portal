@@ -79,6 +79,7 @@ async function main() {
           '/api/tech/notifications': { notifications: [] },
           '/api/tech/line': { line: null },
           '/api/admin/intelligence-bar/quick-actions': { actions: [] },
+          '/api/tech/answers': { kinds: [] },
           '/api/tech/timetracking/status': { clockedIn: true, currentJob: { jobId: 'visit-a' }, todaySummary: { shiftMinutes: 120, jobCount: 1 } },
           '/api/tech/timetracking/pending-signoff': { pending: false },
         }).map(([endpoint, response]) => [`GET ${endpoint}`, () => ({ response })]));

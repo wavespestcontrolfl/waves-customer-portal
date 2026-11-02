@@ -254,15 +254,25 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
 // technician's day is read whether or not they work it. None, or an
 // unreadable read, FAILS CLOSED (Codex r7): scoring the current day on the
 // unassigned rows alone would understate it the same way, so the evaluation
-// is skipped (CURRENT_DAY_TECH_UNRESOLVED), never guessed.
+// is skipped (CURRENT_DAY_TECH_UNRESOLVED), never guessed. A visit with a
+// territory technician (GATE_TERRITORY_NIGHT_RUN, unitTerritoryTechnician)
+// is read on that technician's day alone, the only technician candidate
+// admission lets it move to: a closer route it may not take must not set the
+// bar a legal move has to beat. An owner who is not assignable, or two owners
+// in one unit (no candidate survives either way), keeps the full list.
 const CURRENT_DAY_TECH_UNRESOLVED = 'CURRENT_DAY_TECH_UNRESOLVED';
 async function currentDayTechs(service, ctx, dateStr, category) {
   if (service.technician_id) return [service.technician_id];
+  const owner = ctx.territoryTechId !== undefined
+    ? ctx.territoryTechId
+    : await unitTerritoryTechnician(service, resolveGeo(service), ctx);
   let ids;
   let away = new Set();
   try {
     const techs = await applyAssignable(ctx.db('technicians')).select('technicians.id');
     ids = Array.isArray(techs) ? techs.map((t) => t.id) : [];
+    const own = owner ? ids.filter((id) => String(id) === String(owner)) : [];
+    if (own.length) ids = own;
     if (ids.length > 1) away = await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: ids });
   } catch (err) {
     throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'The technicians who could work an unassigned visit\'s day could not be read', err);
@@ -1126,8 +1136,13 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // current placement and every candidate (see withGroupContext).
   const grouped = await withGroupContext(service, baseCtx);
   // Read once: candidate generation, the cap and the current placement all
-  // use the same answer. Gate off: null, no read.
-  const ctx = { ...grouped, evalConflict: await readCurrentConflict(service, grouped) };
+  // use the same answer. Gate off: null, no read. The territory technician
+  // likewise: candidate admission and the current day share one answer.
+  const ctx = {
+    ...grouped,
+    evalConflict: await readCurrentConflict(service, grouped),
+    territoryTechId: await unitTerritoryTechnician(service, geo, grouped),
+  };
 
   const { dateFrom, dateTo } = searchWindow(service, ctx);
   if (dateFrom > dateTo) {
@@ -1197,7 +1212,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // better available" rather than an opaque NO_VALID_SLOT.
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
-  const territoryTechId = await unitTerritoryTechnician(service, geo, ctx);
+  const { territoryTechId } = ctx;
   const drops = {
     blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0,
     ...(ctx.keepTech === true ? { other_tech: 0 } : {}),

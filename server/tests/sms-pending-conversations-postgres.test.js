@@ -444,6 +444,21 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(countPendingSmsConversations({ excludePhones: ['+19415550101'] })).resolves.toEqual({ conversations: 1, messages: 1 });
   });
 
+  test('names the one live customer on the number; a shared number names nobody', async () => {
+    const named = await seed({ phone: '+19415550120', customerId: 'new' });
+    await mockTrx('customers').where({ id: named.customerId }).update({ first_name: 'Pending', last_name: 'Texter' });
+    await mockTrx('customers').insert({ id: randomUUID(), phone: '(941) 555-0120', first_name: 'Deleted', last_name: 'Record', deleted_at: tick });
+    const shared = await seed({ phone: '+19415550121' });
+    await mockTrx('customers').insert([
+      { id: randomUUID(), phone: '+19415550121', first_name: 'Shared', last_name: 'One' },
+      { id: randomUUID(), phone: '941-555-0121', first_name: 'Shared', last_name: 'Two' },
+    ]);
+
+    const rows = Object.fromEntries((await loadPendingSmsConversations()).map((row) => [row.id, row]));
+    expect(rows[named.messageId]).toMatchObject({ customer_id: named.customerId, customer_name: 'Pending Texter' });
+    expect(rows[shared.messageId]).toMatchObject({ customer_id: null, customer_name: null });
+  });
+
   test.each(['receipt', 'legacy'])('a canonical STOP stays on its original phone after a customer phone change via %s', async (provenance) => {
     const oldQuestion = await seed({ customerId: 'new', body: 'Old phone question' });
     const newQuestion = await seed({ phone: '+19415550109', ours: '+19415550191', body: 'New phone question' });
@@ -629,7 +644,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     expect(full).toHaveLength(3);
   });
 
-  test('planner materializes outbound history once', async () => {
+  test('planner reads outbound history, events and customers once', async () => {
     const conversations = [];
     const messages = [];
     const legacyRows = [];
@@ -663,6 +678,13 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     expect(nodes.some(node => node['Index Name'] === 'sms_log_twilio_sid_idx'
       && node['Actual Loops'] >= messages.length)).toBe(true);
     expect(nodes.filter(node => node['Node Type'] === 'Seq Scan' && node['Relation Name'] === 'sms_log')
+      .every(node => node['Actual Loops'] <= 1)).toBe(true);
+    // Replies hash-join to the inbound set; a rescan of every event per
+    // inbound text is the compare-every-pair plan.
+    expect(nodes.filter(node => node['CTE Name'] === 'projected_events')
+      .every(node => node['Actual Loops'] <= 1)).toBe(true);
+    // Customer names come from one pass over customers, not one per pending text.
+    expect(nodes.filter(node => node['Node Type'] === 'Seq Scan' && node['Relation Name'] === 'customers')
       .every(node => node['Actual Loops'] <= 1)).toBe(true);
   });
   test('GATE_SMS_STAFF_ACTION_ANSWERS off and shadow: the reader runs the same SQL, with no staff-action CTE, join or filter', async () => {

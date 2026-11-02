@@ -4,8 +4,8 @@
 // unassigned -> assigned reassignment branch through a full integration
 // test is disproportionate to a one-argument fix. The behavior itself
 // (auto: true actually stamps payload.superseded_at) is proven directly by
-// dispatch-alerts-auto-resolve.test.js against the shared resolveAlert
-// primitive this call site invokes.
+// dispatch-alerts-auto-resolve.test.js against the shared
+// autoResolveUnassignedAlertsForJob helper this call site invokes.
 //
 // codex P1, pre-push audit on 925e9e977: assigning a technician to a
 // previously-unassigned job resolves any open unassigned_overdue alerts for
@@ -19,12 +19,13 @@ const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, '../services/dispatch-assignment.js'), 'utf8');
 
 describe('dispatch-assignment.js: reassignment clears unassigned_overdue as an automatic resolve', () => {
-  test('the unassigned_overdue resolve on reassignment passes auto: true', () => {
-    const blockStart = src.indexOf("type: 'unassigned_overdue', job_id: jobId");
+  // The resolve itself (auto: true) lives in the shared helper, proven in
+  // dispatch-alerts-auto-resolve.test.js; the rebooker's single-row move
+  // calls the same helper.
+  test('the unassigned -> assigned branch resolves through the shared automatic helper', () => {
+    const blockStart = src.indexOf('if (!fromTechId && newTechId) {');
     expect(blockStart).toBeGreaterThan(-1);
-    const resolveCallStart = src.indexOf('await resolveAlert(', blockStart);
-    const resolveCallEnd = src.indexOf(');', resolveCallStart);
-    const resolveCall = src.slice(resolveCallStart, resolveCallEnd);
-    expect(resolveCall).toContain('auto: true');
+    const block = src.slice(blockStart, src.indexOf('\n    }', blockStart));
+    expect(block).toContain('autoResolveUnassignedAlertsForJob({ jobId, resolvedBy: actorId, trx: assignmentTrx })');
   });
 });

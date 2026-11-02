@@ -85,6 +85,7 @@ const staticGets = (user) => ({
   '/api/tech/timetracking/status': { status: 'clocked_out', clockedIn: false, shift: null, entries: [], todayMinutes: 0 },
   '/api/tech/timetracking/pending-signoff': { pending: [], entries: [] },
   '/api/admin/intelligence-bar/quick-actions': { actions: [] },
+  '/api/tech/answers': { kinds: [] },
   '/api/admin/leads/sources': { sources: [] },
   '/api/admin/dispatch/technicians': { technicians: [{ id: TECH_USER.id, name: TECH_USER.name, role: 'technician', active: true }] },
   '/api/admin/dispatch/board': { jobs: [], services: [], technicians: [], unassigned: [], date: null },

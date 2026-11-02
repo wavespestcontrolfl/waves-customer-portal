@@ -11,6 +11,7 @@ import { getAdminAuthToken, getAdminDisplayName } from '../../lib/adminAuth';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../../utils/ibImages';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
 import { renderAnswerInline } from '../admin/answerInline';
+import TechInstantAnswers from './TechInstantAnswers';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Waves Admin look (DECISIONS 2026-10-03): ink and stone surfaces; `teal` is the ink accent.
@@ -246,6 +247,9 @@ export default function TechIntelligenceBar() {
           ))}
         </div>
       )}
+
+      {/* Instant answers — deterministic chips, never the AI query route */}
+      <TechInstantAnswers techFetch={techFetch} expanded={expanded} response={response} loading={loading} />
 
       {/* Loading */}
       {loading && (
