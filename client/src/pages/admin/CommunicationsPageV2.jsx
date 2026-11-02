@@ -121,6 +121,8 @@ import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import useSmsDraft from "../../hooks/useSmsDraft";
 import { ActionFeedback } from "../../components/ui/ActionFeedback";
+import { OfficeLikeButton, SmsLikeBadges } from "../../components/admin/SmsLikeControls";
+import { smsLikeThread } from "../../lib/smsLikes";
 import { notifyUnreadChanged } from "../../hooks/useUnreadConversations";
 import {
   MMS_TOTAL_BUDGET_BYTES,
@@ -658,6 +660,8 @@ function ConversationViewV2({
   onBack,
   onOpenProfile,
   onMarkSpam,
+  smsLike = false,
+  onLiked,
 }) {
   // "Call back" rides the owner-only call bridge: a technician gets no button.
   const canCall = useCanAccessCalls();
@@ -671,6 +675,9 @@ function ConversationViewV2({
   // unlinked number (outbound only, nothing ever received) does not offer it.
   const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
   const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
+  // GATE_SMS_LIKE: customer likes become badges on our quoted text, and the
+  // customer's newest text gets the like button. Off: the list is unchanged.
+  const likeView = smsLikeThread(messages, smsLike);
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -738,14 +745,14 @@ function ConversationViewV2({
         </div>{" "}
       </div>{" "}
       <div className="flex-1 md:max-h-[500px] md:overflow-y-auto flex flex-col gap-2">
-        {messages.map((m) => {
+        {likeView.visible.map((m) => {
           const isOut = m.direction === "outbound";
           const receipt = isOut
             ? SmsDeliveryReceiptV2({ status: m.status })
             : SmsDeliveryReceiptV2({ readAt: m.readAt });
           return (
+            <React.Fragment key={m.id}>
             <div
-              key={m.id}
               id={`sms-message-${m.id}`}
               className={cn("flex", isOut ? "justify-end" : "justify-start")}
             >
@@ -809,9 +816,14 @@ function ConversationViewV2({
                       {receipt}
                     </span>
                   )}
+                  <SmsLikeBadges message={m} badges={likeView.badges} />
                 </div>{" "}
               </div>{" "}
             </div>
+            {m.id === likeView.likeMessageId ? (
+              <OfficeLikeButton messageId={m.id} customerName={contactName} onLiked={onLiked} />
+            ) : null}
+            </React.Fragment>
           );
         })}
       </div>{" "}
@@ -1318,6 +1330,8 @@ export function SmsTab({
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
+  // GATE_SMS_LIKE: the log says whether the like button and badges are on.
+  const [smsLike, setSmsLike] = useState(false);
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
@@ -1542,6 +1556,7 @@ export function SmsTab({
         smsPageRef.current = logData.page || page;
         setSmsPage(smsPageRef.current);
         setSmsHasMore(!!logData.hasMore);
+        setSmsLike(logData.smsLike === true);
         smsLoadedSearchRef.current = normalizedSearch;
         smsLoadedStatusFilterRef.current = requestedStatusFilter;
         setSmsLoadError("");
@@ -3126,6 +3141,13 @@ export function SmsTab({
     }
   };
 
+  // GATE_SMS_LIKE: the thumbs-up went out. Show the like now, then reload so
+  // the sent text and the server's record of the like appear in the thread.
+  const handleLiked = (messageId, officeLike) => {
+    if (officeLike) setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, officeLike } : m)));
+    void loadData(smsSearchRef.current, { refresh: true });
+  };
+
   const handleThreadReply = (contactPhone, ourNumber, customerId = null, replyTo = null) => {
     if (sending || uploading || hearing) return;
     selectSmsRecipient(contactPhone, ourNumber, customerId, replyTo);
@@ -3953,6 +3975,8 @@ export function SmsTab({
             // Blocking a number is owner-only (2026-10-02); the server
             // refuses a technician, so the button is not offered.
             onMarkSpam={smsIsAdminRole ? handleMarkSpam : undefined}
+            smsLike={smsLike}
+            onLiked={handleLiked}
           />{" "}
           {renderLoadMore("Load older SMS history")}
         </Card>
