@@ -9999,6 +9999,14 @@ function techSetTextsLive() {
 function emailDraftFactsLive() {
   return process.env.GATE_EMAIL_DRAFT_FACTS === 'true';
 }
+// GATE_WDO_MARK_SENT_OUTSIDE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02, "build all" B3). On, a signed
+// WDO report that was never sent through the portal shows a "Sent another way" button on the project page; the button
+// calls POST /api/admin/projects/:id/mark-sent-outside, which records who/when/why in projects.sent_outside_portal_*
+// so the nightly WDO attention sweep stops flagging it. Records only: no customer message, no email, no filing
+// archive, sent_at stays NULL. Off = the route 404s and the page shows no button. Kill = unset.
+function wdoMarkSentOutsideLive() {
+  return process.env.GATE_WDO_MARK_SENT_OUTSIDE === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -10007,6 +10015,8 @@ module.exports.emailAuthStrictLive = emailAuthStrictLive;
 module.exports.dedupeNoUnverifiedBackfillLive = dedupeNoUnverifiedBackfillLive;
 // GATE_BUG_ID_EXTENSION reader, on its own line so gate PRs never conflict.
 module.exports.bugIdExtensionLive = bugIdExtensionLive;
+// GATE_WDO_MARK_SENT_OUTSIDE reader, on its own line so gate PRs never conflict.
+module.exports.wdoMarkSentOutsideLive = wdoMarkSentOutsideLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI reader, on its own line so gate PRs never conflict.

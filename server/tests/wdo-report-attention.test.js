@@ -56,6 +56,17 @@ describe('itemIds / summarize', () => {
   });
 });
 
+describe('findAttentionItems — reports marked sent another way', () => {
+  test('the signed-unsent query excludes a report marked sent outside the portal', async () => {
+    const projects = chain({ select: jest.fn().mockResolvedValue([]) });
+    db.mockImplementation((table) => (table === 'projects' ? projects : chain()));
+    await _private.findAttentionItems(new Date('2026-11-02T12:00:00Z'));
+    expect(projects.whereNull).toHaveBeenCalledWith('sent_at');
+    expect(projects.whereNull).toHaveBeenCalledWith('sent_outside_portal_at');
+    expect(projects.whereNotNull).toHaveBeenCalledWith('wdo_signature');
+  });
+});
+
 describe('runWdoReportAttentionSweep', () => {
   test('gated off → skipped, no queries', () => {
     isEnabled.mockReturnValue(false);
