@@ -606,10 +606,15 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
       });
       proposed += 1;
 
-      // The rule loop (GATE_SMS_PROMPT_AUTOPROMOTE observe or true) acts on proposals itself, so no "parked for
-      // review" notice then: it would ask the owner to approve a step his 2026-09-27 ruling removed (owner
-      // 2026-11-02, weekly-loop review item 8). Loop off: the notice is unchanged.
-      if (require('./sms-prompt-patch').promptAutopromoteMode() === 'off') {
+      // The rule loop (GATE_SMS_PROMPT_AUTOPROMOTE observe or true) acts on the proposals it can turn into a prompt
+      // rule (surface prompt_discipline and an eligible failure mode, as pickProposal selects), so those get no
+      // "parked for review" notice: it would ask the owner to approve a step his 2026-09-27 ruling removed (owner
+      // 2026-11-02, weekly-loop review item 8). Every other proposal (a facts gap, a verifier miss) still needs
+      // someone to act on it and keeps the notice; with the loop off, nothing changes.
+      const loopTakesIt = require('./sms-prompt-patch').promptAutopromoteMode() !== 'off'
+        && cell.surface === 'prompt_discipline'
+        && require('./sms-prompt-autopromote').eligibleFailureModes().includes(cell.failure_mode);
+      if (!loopTakesIt) {
         try {
           const NotificationService = require('./notification-service');
           await NotificationService.notifyAdmin(
