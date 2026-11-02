@@ -23,9 +23,6 @@ const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-let TwilioService;
-try { TwilioService = require('./twilio'); } catch { TwilioService = null; }
-
 // The weekly report's shape: storeReport persists executive_summary (a report
 // without it is a blank row), stringifies financial_snapshot, and storeReport /
 // the SMS summary iterate every list below and read fields off each entry
@@ -332,11 +329,11 @@ Please search for current FL and federal tax changes, then provide your analysis
 
       await this.storeReport(report, analysisData, rawText);
 
-      // Send SMS summary if critical alerts
+      // Tell the owner when the report has critical alerts or high savings
       const criticalAlerts = (report.compliance_alerts || []).filter(a => a.severity === 'high');
       const highSavings = (report.savings_opportunities || []).filter(s => s.priority === 'high');
       if (criticalAlerts.length > 0 || highSavings.length > 0) {
-        await this.sendSMSSummary(report);
+        await this.recordOwnerSummary(report);
       }
 
       return report;
@@ -586,39 +583,38 @@ Please search for current FL and federal tax changes, then provide your analysis
     }
   }
 
-  // ── SMS Summary ────────────────────────────────────────────
+  // ── Owner summary ──────────────────────────────────────────
+  // A quiet owner alert (services/owner-alerts.js; Activity only), one row per report. It was a text to the
+  // owner's phone (ADMIN_PHONE) that reached nobody since about 2026-09-01. The full report is on the Tax page.
+  // tax_advisor_reports.sms_sent is no longer written: nothing is texted.
 
-  async sendSMSSummary(report) {
-    if (!TwilioService || !process.env.ADMIN_PHONE) return;
-
+  async recordOwnerSummary(report) {
     try {
       const savings = (report.savings_opportunities || [])
         .filter(s => s.priority === 'high')
-        .map(s => (taxAmount(s.estimated_annual_savings) === null ? `• ${s.title}` : `• ${s.title}: ~$${taxAmount(s.estimated_annual_savings)}/yr`))
+        .map(s => (taxAmount(s.estimated_annual_savings) === null ? `- ${s.title}` : `- ${s.title}: ~$${taxAmount(s.estimated_annual_savings)}/yr`))
         .join('\n');
 
       const alerts = (report.compliance_alerts || [])
         .filter(a => a.severity === 'high')
-        .map(a => `⚠️ ${a.alert}`)
+        .map(a => `- ${a.alert}`)
         .join('\n');
 
-      let msg = `📊 Waves Tax Advisor — ${report.period}\nGrade: ${report.grade}\n\n${report.executive_summary}\n`;
-      if (savings) msg += `\n💰 Savings:\n${savings}\n`;
-      if (alerts) msg += `\n${alerts}\n`;
-      msg += `\nFull report in admin portal → Tax Center`;
+      let msg = `Waves Tax Advisor — ${report.period}\nGrade: ${report.grade}\n\n${report.executive_summary}\n`;
+      if (savings) msg += `\nSavings:\n${savings}\n`;
+      if (alerts) msg += `\nAlerts:\n${alerts}\n`;
 
-      await TwilioService.sendSMS(
-        process.env.ADMIN_PHONE,
-        msg.substring(0, 1500),
-        { messageType: 'internal_alert', link: '/admin/tax' },
-      );
-
-      await db('tax_advisor_reports')
-        .where('report_date', report.report_date)
-        .update({ sms_sent: true });
-
+      const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
+      await recordOwnerAlert('tax-weekly-report', {
+        action: 'read the weekly tax report',
+        why: whyFromFreeText(report.executive_summary),
+        link: '/admin/tax',
+        subject: { type: 'check', id: 'tax-weekly-report' },
+        text: msg.substring(0, 1500),
+        dedupeKey: `owner-alert:tax-weekly-report:${report.report_date}`,
+      });
     } catch (err) {
-      logger.error(`[TaxAdvisor] SMS failed: ${err.message}`);
+      logger.error(`[TaxAdvisor] owner summary failed: ${err.message}`);
     }
   }
 

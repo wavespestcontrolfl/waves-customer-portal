@@ -1722,10 +1722,10 @@ class AutonomousRunner {
       return { outcome: 'skipped_blog_already_started', skipped: true, reason: 'blog_already_started', count: 0, runs: [] };
     }
     if (!(await this._queueHasClaimable())) {
-      // The morning batch may have died BEFORE its own drought SMS went out
+      // The morning batch may have died BEFORE its own drought alert
       // (the 06-12 zero-alert shape, Codex r2) — re-trigger the alert rather
-      // than stay silent; the sms_log day-dedupe inside _sendBlogDroughtSms
-      // keeps it to one text per ET day no matter how many passes run.
+      // than stay silent; the ET-day dedupe key inside _sendBlogDroughtSms
+      // keeps it to one row per ET day no matter how many passes run.
       // (_reportBlogDrought: not while a blog waits for its terminal draft —
       // a blog deferred this morning is not claimable yet at 1pm.)
       await this._reportBlogDrought([]);
@@ -2133,11 +2133,13 @@ class AutonomousRunner {
   }
 
   /**
-   * After the daily batch, text the operator a one-line summary so an
-   * unattended auto-publishing engine isn't a black box. Opt-in via
-   * AUTONOMOUS_CONTENT_DIGEST_SMS=true; routed as an internal_alert so it
-   * respects the OWNER_SMS_DISABLED kill switch. Stays silent on a
-   * nothing-happened day (all skipped_no_opportunity) to avoid noise.
+   * After the daily batch, a one-line summary for the owner so an
+   * unattended auto-publishing engine isn't a black box: a quiet owner alert
+   * (services/owner-alerts.js; Activity only), one row per ET day. It was a
+   * text to the owner's phone that reached nobody since about 2026-09-01.
+   * Opt-in via AUTONOMOUS_CONTENT_DIGEST_SMS=true (the name predates the
+   * move). Stays silent on a nothing-happened day (all
+   * skipped_no_opportunity) to avoid noise.
    */
   async _sendDailyDigestSms(runs) {
     if (!envBool('AUTONOMOUS_CONTENT_DIGEST_SMS', false)) return;
@@ -2168,29 +2170,27 @@ class AutonomousRunner {
     if (liveUrls.length) parts.push(`Live: ${liveUrls.slice(0, 2).join(' ')}`);
     const body = parts.join(' ');
 
-    const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    // notificationTitle: without it the redirect-to-bell uses the whole body
-    // as the title, which truncates uselessly in phone banners (owner ruling
-    // 2026-07-30 — titles must identify the alert immediately).
-    await twilio.sendSMS(ownerPhone, body, {
-      messageType: 'internal_alert',
+    await require('../owner-alerts').recordOwnerAlert('content-daily-digest', {
+      action: 'read the content engine daily summary',
+      why: `${published} published, ${review} to review, ${gated} gated and ${failed} failed today.`,
       link: '/admin/seo',
-      notificationTitle: `Content engine: ${published} published, ${review} to review`,
-      notificationBody: body,
+      subject: { type: 'check', id: 'content-daily-digest' },
+      text: body,
+      dedupeKey: `owner-alert:content-daily-digest:${etDateString()}`,
     });
-    logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
+    logger.info(`[autonomous-runner] daily digest recorded: ${body}`);
   }
 
   /**
    * The operator's target is a blog post EVERY day, but the engine's
    * designed response to thin demand is silence (skipped_no_opportunity
    * days send no digest) — which is how a 9-day supply drought went
-   * unnoticed in June 2026. This texts the moment a daily batch ends with
-   * no blog post started, with the dominant reason, so a quiet day is a
-   * deliberate signal instead of dead air. Default ON (it exists to catch
-   * silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false. Routed as
-   * internal_alert so OWNER_SMS_DISABLED still silences everything.
+   * unnoticed in June 2026. This alerts the owner the moment a daily batch
+   * ends with no blog post started, with the dominant reason, so a quiet day
+   * is a deliberate signal instead of dead air: a quiet owner alert
+   * (services/owner-alerts.js; Activity only). It was a text to the owner's
+   * phone that reached nobody since about 2026-09-01. Default ON (it exists
+   * to catch silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false.
    */
   /**
    * The blog drought alert, for the batch and for the catch-up. Terminal
@@ -2202,7 +2202,7 @@ class AutonomousRunner {
     if (await require('./terminal-writer').blogDraftRequested()) return;
     // the caller's own arguments, unchanged
     await this._sendBlogDroughtSms(...args).catch((err) => {
-      logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
+      logger.warn(`[autonomous-runner] blog drought alert failed: ${err.message}`);
     });
   }
 
@@ -2217,37 +2217,9 @@ class AutonomousRunner {
     if (blogStarted) return;
 
     // Day-dedupe (Codex r2+r3): the 1pm catch-up re-triggers this alert when
-    // the morning batch died before ITS send, so without a persisted marker
-    // every drought day double-alerts. internal_alert sends never reach
-    // Twilio or sms_log — TwilioService.sendSMS redirects them to the in-app
-    // admin notification system (redirectInternalAdminSmsToNotification),
-    // whose bell entry persists in `notifications` with recipient_type
-    // 'admin' and title = the first line of the SMS body. THAT row is the
-    // marker: max one drought alert per ET day across the 9am batch, the
-    // 1pm catch-up, and any manual run. Push-only delivery (bell pref off)
-    // leaves no row and lookup errors throw — both fail OPEN, the right
-    // direction for an alert that exists to catch silence.
-    try {
-      // Both titles: the bell now persists the short notificationTitle
-      // ('Content engine: NO blog post today'); the old full-body title is
-      // kept in the match so the transition day still dedupes against a
-      // pre-deploy morning row.
-      const dup = await db('notifications')
-        .where('recipient_type', 'admin')
-        .where('created_at', '>=', startOfEtDay())
-        .where(function droughtTitle() {
-          this.orWhere('title', 'like', 'Content engine: NO blog post today%')
-            .orWhere('title', 'like', 'Waves content engine: NO blog post today%');
-        })
-        .first('id');
-      if (dup) {
-        logger.info('[autonomous-runner] blog drought alert already delivered today; skipping duplicate');
-        return;
-      }
-    } catch (err) {
-      logger.warn(`[autonomous-runner] drought alert dedupe lookup failed (${err.message}); sending anyway`);
-    }
-
+    // the morning batch died before its own alert. The dedupe key is the ET
+    // day, so the 9am batch, the 1pm catch-up and any manual run hold ONE
+    // row; a later run that reaches it rewrites the row with its own reason.
     const blogAttempts = real.filter((r) => r.action_type === 'new_supporting_blog');
     // haltBeforeBlog is _runDailyInner's explicit record that the batch
     // halted on the consecutive-failure cap before reaching a blog — say so,
@@ -2276,16 +2248,15 @@ class AutonomousRunner {
       .map((r) => r.reviewer_notes)
       .find((n) => typeof n === 'string' && n.trim());
     const body = `Waves content engine: NO blog post today — ${why}.${gateDetail ? ` Detail: ${gateDetail.trim().slice(0, 160)}` : ''}`;
-    const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    // Short notificationTitle: banner-truncation ruling, see daily digest.
-    await twilio.sendSMS(ownerPhone, body, {
-      messageType: 'internal_alert',
+    await require('../owner-alerts').recordOwnerAlert('content-drought', {
+      action: 'see why no blog post started today',
+      why: 'The daily content batch ended without starting a blog post.',
       link: '/admin/seo',
-      notificationTitle: 'Content engine: NO blog post today',
-      notificationBody: body,
+      subject: { type: 'check', id: 'content-drought' },
+      text: body,
+      dedupeKey: `owner-alert:content-drought:${etDateString()}`,
     });
-    logger.info(`[autonomous-runner] blog drought SMS sent: ${body}`);
+    logger.info(`[autonomous-runner] blog drought alert recorded: ${body}`);
   }
 
   // ── internals ────────────────────────────────────────────────────
@@ -2725,20 +2696,25 @@ class AutonomousRunner {
 
   /**
    * Surface a hard engine error (a thrown guard, not a by-design skip) to the
-   * operator. Opt-in via AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT=true; routed as
-   * an internal_alert so it respects the OWNER_SMS_DISABLED kill switch. Best
-   * effort — never let an alert failure affect the run.
+   * owner: a quiet owner alert (services/owner-alerts.js; Activity and the
+   * needs-me list), one row per error code per ET day. It was a text to the
+   * owner's phone that reached nobody since about 2026-09-01. Opt-in via
+   * AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT=true. Best effort — never let an
+   * alert failure affect the run.
    */
   async _alertEngineError(code, message) {
     if (!envBool('AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT', false)) return;
     try {
-      const twilio = require('../twilio');
-      const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-      await twilio.sendSMS(ownerPhone, `Waves content engine error [${code}]: ${message}`, {
-        messageType: 'internal_alert',
+      await require('../owner-alerts').recordOwnerAlert('content-engine-error', {
+        action: 'check a content engine error',
+        why: 'The content engine stopped on an error, not on a planned skip.',
         link: '/admin/seo',
+        subject: { type: 'check', id: 'content-engine-error' },
+        text: `Waves content engine error [${code}]: ${message}`,
+        dedupeKey: `owner-alert:content-engine-error:${code}:${etDateString()}`,
+        itemKeys: [String(code)],
       });
-      logger.info(`[autonomous-runner] engine-error alert sent: ${code}`);
+      logger.info(`[autonomous-runner] engine-error alert recorded: ${code}`);
     } catch (err) {
       logger.warn(`[autonomous-runner] engine-error alert failed: ${err.message}`);
     }

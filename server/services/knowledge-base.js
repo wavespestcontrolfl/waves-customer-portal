@@ -859,24 +859,16 @@ const KnowledgeBaseService = {
       }
     }
 
-    // ── Alert on failures ──
+    // ── Failures ──
     // 'error' (invalid credentials, provider/API failure, not configured) is a
     // failure needing attention too — excluding it made an all-error check
-    // report zero failures and send no alert.
+    // report zero failures. This check runs when a person asks for it (the
+    // knowledge-base route), so the result goes back to them; it no longer
+    // texts the owner's phone, which reached nobody since about 2026-09-01.
+    // The 7 AM check writes its own owner alert (scheduler.js, credential-check).
     const failures = results.filter(r => r.status === 'expired' || r.status === 'expiring-soon' || r.status === 'error');
     if (failures.length > 0) {
-      const alertMsg = `Token Alert: ${failures.length} credential(s) need attention:\n${failures.map(f => `- ${f.platform}: ${f.status}${f.error ? ' — ' + f.error.substring(0, 100) : ''}`).join('\n')}`;
-      logger.warn(`[token-health] ${alertMsg}`);
-
-      // SMS alert via Twilio if available
-      try {
-        const twilioService = require('./twilio');
-        const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-        await twilioService.sendSMS(ownerPhone, alertMsg, { messageType: 'internal_alert', link: '/admin/credentials' });
-        logger.info('[token-health] SMS alert sent');
-      } catch {
-        logger.warn('[token-health] Could not send SMS alert — Twilio not available');
-      }
+      logger.warn(`[token-health] ${failures.length} credential(s) need attention: ${failures.map(f => `${f.platform}: ${f.status}`).join(', ')}`);
     }
 
     return { checked: results.length, healthy: results.filter(r => r.status === 'healthy').length, failures: failures.length, results };
