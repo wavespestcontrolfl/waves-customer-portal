@@ -24,23 +24,36 @@ const STREET_SUFFIX_CANON = {
   vw: 'view', view: 'view', vis: 'vista', vista: 'vista', cswy: 'causeway', causeway: 'causeway',
   plz: 'plaza', plaza: 'plaza', pt: 'point', point: 'point', mdw: 'meadow', meadow: 'meadow',
   mdws: 'meadows', meadows: 'meadows', hts: 'heights', heights: 'heights', psge: 'passage', passage: 'passage',
+  // 2026-11-02: the same house arrived as "Sample Bay Lp" and "Sample Bay Loop",
+  // "Grv Wy" and "Grove Way", and minted a second property. These and the USPS
+  // Pub 28 forms below key alike; migration 20261102130000 recomputes keys.
+  lp: 'loop', loop: 'loop', grv: 'grove', grove: 'grove', wy: 'way',
+  cres: 'crescent', crescent: 'crescent', crst: 'crest', crest: 'crest', cmn: 'common', common: 'common',
+  gdn: 'garden', garden: 'garden', gdns: 'gardens', gardens: 'gardens', grn: 'green', green: 'green',
+  hbr: 'harbor', harbor: 'harbor', hl: 'hill', hill: 'hill', hls: 'hills', hills: 'hills', isle: 'isle',
+  knl: 'knoll', knoll: 'knoll', lk: 'lake', lake: 'lake', lks: 'lakes', lakes: 'lakes', mnr: 'manor', manor: 'manor',
+  orch: 'orchard', orchard: 'orchard', pnes: 'pines', pines: 'pines', rnch: 'ranch', ranch: 'ranch',
+  shr: 'shore', shore: 'shore', shrs: 'shores', shores: 'shores', spg: 'spring', spring: 'spring',
+  spgs: 'springs', springs: 'springs', vlg: 'village', village: 'village', vly: 'valley', valley: 'valley',
+  ests: 'estates', estates: 'estates', frst: 'forest', forest: 'forest', bch: 'beach', beach: 'beach',
+  blf: 'bluff', bluff: 'bluff', brk: 'brook', brook: 'brook',
 };
+// Suffix forms only. Applies to a UNIT too when a caller runs a line2 through
+// it (estimate-property-linkage), which is why directionals are not in here.
 const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .split(/\s+/).map((w) => STREET_SUFFIX_CANON[w] || w).join(' ');
 
-// Street DIRECTIONALS, expanded the same way ("Dr E" == "Drive East"). Kept OUT
-// of canonicalizeAddress on purpose: that feeds addressKey, which is stored in
-// customer_properties.address_key under a unique index, so widening it would
-// change stored keys and need a recompute migration. The in-memory property
-// SCOPE keys (estimate-property-linkage normalizedStampedStreet) use this
-// wrapper; both sides of every scope compare run through it, so they agree.
+// Street DIRECTIONALS, expanded the same way ("Dr E" == "Drive East"). They are
+// NOT part of canonicalizeAddress, because callers also run a unit (line 2)
+// through that one and a unit id is data ("Apt E" is not "Apt East"). The
+// STREET key (streetKey, and so addressKey, which is stored in
+// customer_properties.address_key under a unique index) and the in-memory
+// property SCOPE keys (estimate-property-linkage normalizedStampedStreet) all
+// use this wrapper, so they agree. Widening it changed stored keys:
+// migration 20261102130000 recomputes them.
 const DIRECTIONAL_CANON = {
   n: 'north', s: 'south', e: 'east', w: 'west', ne: 'northeast', nw: 'northwest', se: 'southeast', sw: 'southwest',
 };
-// Directionals expand in the STREET words only. A unit identifier is data, not
-// a direction: "100 Main St Apt E" and "Apt East" are different units, so the
-// token right after a unit designator (apt/unit/ste/suite/#) is left exact.
-// A line2 is a unit by definition and goes through canonicalizeAddress alone.
 const UNIT_DESIGNATOR_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', '#']);
 const canonicalizeScopeAddress = (s) => {
   const words = String(s || '').toLowerCase().replace(/[.,]/g, ' ').replace(/#/g, ' # ').split(/\s+/).filter(Boolean);
@@ -58,8 +71,12 @@ const normalizeZip = (z) => (String(z || '').match(/\d{5}/) || [''])[0];
 // "100 Main St Apt 4" and a later "100 Main St" share the same street key.
 const stripTrailingUnit = (s) => String(s || '').replace(/\s+(?:apt|apartment|unit|ste|suite|#)\.?\s*[a-z0-9-]+\s*$/i, '').trim();
 
-/** Suffix-canonical, unit-stripped street key — "123 Main St" == "123 Main Street", but != "123 Main Ave". */
-const streetKey = (s) => canonicalizeAddress(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
+/**
+ * Suffix- and directional-canonical, unit-stripped street key — "123 Main St" ==
+ * "123 Main Street", "61st Ave E" == "61st Avenue East", but "Main St" != "Main Ave"
+ * (nothing is ever stripped). Only STREET words expand; the unit keeps its exact id.
+ */
+const streetKey = (s) => canonicalizeScopeAddress(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
 
 // Interchangeable unit designators are written loosely for the SAME unit, so
 // strip the designator WORD wherever it appears (in line2 OR embedded in line1) —
@@ -75,9 +92,10 @@ const stripUnitDesignators = (s) => String(s || '')
 /**
  * Normalized key for the FULL service address — street + unit + locality — so
  * two units at one street ("100 Main Unit A" vs "Unit B") stay DISTINCT.
- * Suffix-canonical ("123 Main St" == "123 Main Street", "Gln" == "Glen") and
- * ZIP+4-insensitive. Only the STREET words are suffix-mapped; the unit keeps
- * unitKey's normalization, so a unit "PT" is never rewritten.
+ * Suffix- and directional-canonical ("123 Main St" == "123 Main Street", "Gln"
+ * == "Glen", "Ave E" == "Avenue East") and ZIP+4-insensitive. Only the STREET
+ * words are mapped; the unit keeps unitKey's normalization, so a unit "PT" or
+ * "Apt E" is never rewritten.
  *
  * Locality is the 5-digit ZIP when there is one, else the city: one ZIP
  * carries several mailing names (Parrish / Duette 34219, Bradenton /
