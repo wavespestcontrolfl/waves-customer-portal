@@ -265,7 +265,7 @@ describe('a 9-visit rounds estimate', () => {
       expect(faq.items[0].a).toMatch(/^Nine times a year/);
       expect(faq.items[6].a).toContain('In round 4, the sunny turf');
       expect(faq.items[3].a).toContain('On our alkaline soil, yellow St. Augustine is often short on iron, not nitrogen.');
-      expect(faq.more[1].a).toBe('Only when a lawn is not responding. Then we send one sample to the University of Florida soil lab. If the soil is too acidic or short on magnesium, we add lime or magnesium on a regular visit. Most results change nothing. Topsoil and topdressing are separate work, quoted on their own.');
+      expect(faq.more[1].a).toBe('When a lawn is not responding, yes, at no extra charge: we send one sample to the University of Florida soil lab. If the soil is too acidic or short on magnesium, we add lime or magnesium on a regular visit. Most results change nothing. You can also order a soil test any time for an added fee; it comes with the lab results and our notes. Topsoil and topdressing are separate work, quoted on their own.');
       expect(faq.more.map((m) => m.q)).toEqual(expect.arrayContaining(['Why did a visit look like nothing happened?', 'Can every spot be fixed?']));
     });
   });

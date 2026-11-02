@@ -1050,11 +1050,20 @@ describe('nematode lab note (owner 2026-11-01, YouTube lawn-problems read, chang
   test.each(V13_GRASSES)('%s: one nematode note, right after the soil-test note it waits on', (grass) => {
     const notes = v13[grass].notes;
     expect(notes.filter((n) => n.startsWith('Plant-parasitic nematodes'))).toEqual([NEMATODE]);
-    const soil = notes.findIndex((n) => n.startsWith('Soil tests: triggers only'));
+    const soil = notes.findIndex((n) => n.startsWith('Soil tests: included on triggers'));
     expect(soil).toBeGreaterThan(-1);
     expect(notes.indexOf(NEMATODE)).toBe(soil + 1);
     // The soil-test rule (owner 2026-10-31) still orders the labs: soil test first, one lab sample at a time.
     expect(notes[soil]).toContain('A soil test comes before a UF plant lab sample, never both at once.');
+  });
+
+  test.each(V13_GRASSES)('%s: the soil-test note keeps the free trigger tests and adds the paid test (owner 2026-11-02)', (grass) => {
+    const [soil] = v13[grass].notes.filter((n) => n.startsWith('Soil tests:'));
+    expect(soil).toContain('The program takes an included sample, at no charge, only when one of these is true:');
+    expect(soil).toContain('never retest');
+    expect(soil).toContain('Any customer can also order a paid soil test (Lawn Soil Test Service, priced by the office)');
+    expect(soil).toContain('the customer gets the lab results and our notes');
+    expect(soil).toContain('Lab reports from included tests are not sent to customers unless the owner says so.');
   });
 
   test('no program line or visit note sends a nematode sample or sells a nematode product', () => {
