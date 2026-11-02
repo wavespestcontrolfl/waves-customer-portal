@@ -475,6 +475,20 @@ async function createDraft(to, subject, body, threadId = null, inReplyTo = null)
   return res.data;
 }
 
+// The Gmail "send as" signature for the shared inbox (owner-controlled Gmail settings HTML). Cached 60 minutes, and only
+// a NON-EMPTY value: an empty answer or an error is re-read on the next call. Errors propagate so the caller decides.
+const SIGNATURE_CACHE_MS = 60 * 60 * 1000;
+let signatureCache = { value: '', at: 0 };
+
+async function getSendAsSignature() {
+  if (signatureCache.value && Date.now() - signatureCache.at < SIGNATURE_CACHE_MS) return signatureCache.value;
+  const gmail = await getGmail();
+  const res = await gmail.users.settings.sendAs.get({ userId: 'me', sendAsEmail: ownAddress() });
+  const signature = String(res?.data?.signature || '');
+  if (signature) signatureCache = { value: signature, at: Date.now() };
+  return signature;
+}
+
 /**
  * Paginated message listing — walks nextPageToken up to `cap` ids so a
  * burst of junk can't hide older matches behind a single-page limit.
@@ -534,6 +548,7 @@ module.exports = {
   createDraft,
   ensureLabel,
   getThread,
+  getSendAsSignature,
   ownAddress,
   fromHeader,
   getMessageLabels,
