@@ -141,6 +141,31 @@ async function verdictForNewText({ phone, ...context } = {}) {
   }
 }
 
+// "Not spam" can land while a text from that sender is in flight: the webhook
+// read the tag, then the undo deleted it and cleared the texts on file before
+// this text's rows existed. The webhook calls this after BOTH rows are written.
+// Either this read sees the undo and releases the text (true: ordinary
+// handling, unread, verdict cleared), or the undo committed after this read,
+// so its own scan, which runs after its delete, sees and clears these rows. A
+// failed read or write keeps the tag (false); "Not spam" can be pressed again.
+async function releaseIfUntagged({ phone, messageSid, smsLogId = null } = {}) {
+  try {
+    if (await findTaggedSender(phone)) return false;
+    const clearJson = JSON.stringify({ enforced: false, cleared_by: null, cleared_at: new Date().toISOString() });
+    await db('messages').where({ channel: 'sms', twilio_sid: messageSid })
+      .update({ metadata: db.raw(CLEAR_VERDICT_SQL, [clearJson]), is_read: false, read_at: null, updated_at: new Date() });
+    if (smsLogId) {
+      await db('sms_log').where({ id: smsLogId }).update({ metadata: db.raw(CLEAR_VERDICT_SQL, [clearJson]), is_read: false });
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[sms-spam-tag] in-flight release check failed: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
+// Sets spam_verdict.enforced = false (plus who and when) and keeps the rest.
+const CLEAR_VERDICT_SQL = "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{spam_verdict}', COALESCE(metadata->'spam_verdict', '{}'::jsonb) || ?::jsonb)";
 const ENFORCED_SQL = "COALESCE({col}->'spam_verdict'->>'enforced', 'false') = 'true'";
 const enforcedSql = (col) => ENFORCED_SQL.replace('{col}', col);
 // A text with a photo always stays actionable (responseFlags), so a tag never
@@ -266,15 +291,14 @@ async function untagSpamSender({ number, adminUserId = null } = {}) {
   if (!key) throw tagError('INVALID_NUMBER', 'valid number required');
   const removed = await db('sms_spam_senders').whereRaw(`${phoneIdentitySql('phone')} = ?`, [key]).del();
   const clearJson = JSON.stringify({ enforced: false, cleared_by: adminUserId || null, cleared_at: new Date().toISOString() });
-  const clearSql = "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{spam_verdict}', COALESCE(metadata->'spam_verdict', '{}'::jsonb) || ?::jsonb)";
   const legacyIds = await legacyRows(key).whereRaw(enforcedSql('metadata')).pluck('id');
   if (legacyIds.length) {
-    await db('sms_log').whereIn('id', legacyIds).update({ metadata: db.raw(clearSql, [clearJson]) });
+    await db('sms_log').whereIn('id', legacyIds).update({ metadata: db.raw(CLEAR_VERDICT_SQL, [clearJson]) });
   }
   const messageIds = await unifiedRows(key).whereRaw(enforcedSql('m.metadata')).distinct('m.id').pluck('m.id');
   if (messageIds.length) {
     await db('messages').whereIn('id', messageIds)
-      .update({ metadata: db.raw(clearSql, [clearJson]), updated_at: new Date() });
+      .update({ metadata: db.raw(CLEAR_VERDICT_SQL, [clearJson]), updated_at: new Date() });
   }
   return { phone, removed: removed > 0, legacy: legacyIds.length, unified: messageIds.length };
 }
@@ -288,6 +312,7 @@ module.exports = {
   findOpenLeadByPhone,
   canTagInbound,
   taggedVerdictForInbound,
+  releaseIfUntagged,
   verdictForNewText,
   tagSpamSender,
   untagSpamSender,

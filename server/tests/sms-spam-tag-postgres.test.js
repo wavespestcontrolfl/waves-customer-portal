@@ -171,6 +171,29 @@ let mockDatabase;
     expect(keys.size).toBe(2);
   });
 
+  // Pre-push audit P1 (in-flight Not spam): the webhook wrote a manual verdict
+  // after the undo's scan; its re-read finds no tag and releases the text.
+  test('releaseIfUntagged clears an in-flight text once the tag is gone, and only then', async () => {
+    const manual = tag.manualVerdict({ adminUserId: ADMIN });
+    const kept = await addText({ from: '+19415550100', verdict: manual, read: true });
+    await tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
+    const keptLog = await legacy(kept.sid);
+    expect(await tag.releaseIfUntagged({ phone: '+19415550100', messageSid: kept.sid, smsLogId: keptLog.id })).toBe(false);
+    expect((await unified(kept.sid)).metadata.spam_verdict.enforced).toBe(true);
+
+    await tag.untagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
+    const late = await addText({ from: '+19415550100', verdict: manual, read: true });
+    const lateLog = await legacy(late.sid);
+    expect(await tag.releaseIfUntagged({ phone: '+19415550100', messageSid: late.sid, smsLogId: lateLog.id })).toBe(true);
+    for (const row of [await unified(late.sid), await legacy(late.sid)]) {
+      expect(row.is_read).toBe(false);
+      expect(row.metadata.spam_verdict).toMatchObject({ method: 'manual', enforced: false });
+      expect(row.metadata.spam_verdict.cleared_at).toEqual(expect.any(String));
+    }
+    const flags = responseFlags({ direction: 'inbound', body: 'x', media: [], metadata: (await unified(late.sid)).metadata });
+    expect(flags.spamEnforced).toBe(false);
+  });
+
   // Pre-push audit P1: a tag whose read failed is repaired by the next tag;
   // the verdict already on file stays as it is.
   test('a failed read is repaired when the sender is tagged again', async () => {

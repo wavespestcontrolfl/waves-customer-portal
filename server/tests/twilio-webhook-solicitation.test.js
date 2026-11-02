@@ -27,6 +27,8 @@ const mockOptoutReceipts = new Map();
 // GATE_SMS_SPAM_TAG: the sms_spam_senders row the tag lookup finds (null = untagged),
 // whether that lookup throws, and how many times it ran.
 let mockTaggedRow = null;
+// When non-empty, each tag lookup takes the next row from here instead.
+const mockTaggedRowQueue = [];
 let mockTagLookupFails = false;
 let mockTagLookups = 0;
 function mockDb(table) {
@@ -41,6 +43,7 @@ function mockDb(table) {
   // twilio_sid}).first('is_read')`) never do, so this flag alone tells them
   // apart for `mockOutboundHistoryCalls` below.
   query.join = () => { query.usedJoin = true; return query; };
+  query.update = async (patch) => { mockWrites.push({ table, update: patch, filter: query.filter }); return 1; };
   query.whereRaw = (...args) => { mockWhereRawCalls.push({ table, args }); return query; };
   query.insert = (row) => {
     if (table === 'inbound_sms_optout_receipts') mockOptoutReceipts.set(row.message_sid, row);
@@ -55,7 +58,7 @@ function mockDb(table) {
     if (table === 'sms_spam_senders') {
       mockTagLookups += 1;
       if (mockTagLookupFails) throw new Error('tag table unavailable');
-      return mockTaggedRow;
+      return mockTaggedRowQueue.length ? mockTaggedRowQueue.shift() : mockTaggedRow;
     }
     if (table === 'inbound_sms_optout_receipts') return mockOptoutReceipts.get(query.filter.message_sid) || null;
     if (table === 'messages' && query.usedJoin) {
@@ -186,6 +189,7 @@ beforeEach(() => {
   mockCustomersRows = null;
   mockOptoutReceipts.clear();
   mockTaggedRow = null;
+  mockTaggedRowQueue.length = 0;
   mockTagLookupFails = false;
   mockTagLookups = 0;
   delete process.env.GATE_SMS_SPAM_TAG;
@@ -863,7 +867,9 @@ describe('GATE_SMS_SPAM_TAG=true', () => {
   test('a tagged unknown sender is kept, read, and raises nothing', async () => {
     const res = await receive('Can I interest you in a business loan today?');
     expect(res.body).toBe('<Response></Response>');
-    expect(mockTagLookups).toBe(1);
+    // The tag is read once to decide, and once more after both rows are
+    // written (the in-flight "Not spam" check).
+    expect(mockTagLookups).toBe(2);
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     const verdictPatch = updateByTwilioSid.mock.calls[0][1];
     expect(JSON.parse(verdictPatch.metadata.bindings[0]).spam_verdict).toMatchObject({
@@ -882,6 +888,32 @@ describe('GATE_SMS_SPAM_TAG=true', () => {
     expect(deliverOpsDigest).not.toHaveBeenCalled();
     expect(sendSMS).not.toHaveBeenCalled();
     expect(mockWrites.filter(({ table }) => table === 'leads')).toHaveLength(0);
+  });
+
+  // Pre-push audit P1: "Not spam" lands while this text is in flight. The
+  // first read finds the tag; the re-read after both rows are written does not,
+  // so the text is released to ordinary handling and both rows are cleared.
+  test('a tag undone while the text is in flight releases it to ordinary handling', async () => {
+    mockTaggedRowQueue.push(TAG_ROW, null);
+    const res = await receive('Can I interest you in a business loan today?');
+    expect(mockTagLookups).toBe(2);
+    const cleared = mockWrites.filter(({ update }) => update && update.metadata);
+    expect(cleared.map(({ table }) => table).sort()).toEqual(['messages', 'sms_log']);
+    for (const { update } of cleared) {
+      expect(update.is_read).toBe(false);
+      expect(JSON.parse(update.metadata.bindings[0])).toMatchObject({ enforced: false });
+    }
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(200);
+  });
+
+  test('a tag still in place at the re-read keeps the text quiet', async () => {
+    mockTaggedRowQueue.push(TAG_ROW, TAG_ROW);
+    const res = await receive('Can I interest you in a business loan today?');
+    expect(res.body).toBe('<Response></Response>');
+    expect(mockTagLookups).toBe(2);
+    expect(mockWrites.filter(({ update }) => update && update.metadata)).toHaveLength(0);
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
 
   test('an untagged sender keeps ordinary handling', async () => {

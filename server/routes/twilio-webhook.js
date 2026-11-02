@@ -1077,9 +1077,16 @@ router.post('/sms', async (req, res) => {
       });
     }
 
+    // A manual tag (GATE_SMS_SPAM_TAG) can be undone while this text is in
+    // flight. Re-read it now that both rows exist: either this read sees the
+    // undo and the text gets ordinary handling, or the undo's own scan, which
+    // runs after its delete, sees these rows and clears them.
+    const tagReleased = solicitationEnforced && solicitation?.method === 'manual'
+      && await require('../services/sms-spam-tag').releaseIfUntagged({ phone: From, messageSid: MessageSid, smsLogId: smsLogEntry?.id });
+
     // Keep both source rows, then stop before lead creation, quoting,
     // notifications or any auto-reply. This also covers tracking/tech lines.
-    if (solicitationEnforced) return res.type('text/xml').send('<Response></Response>');
+    if (solicitationEnforced && !tagReleased) return res.type('text/xml').send('<Response></Response>');
 
     // Test answer in the customer's language (GATE_SMS_ANY_LANGUAGE_TRIAL, read inside; its own
     // gate): registered here, right after the source row is kept and before any consuming branch
