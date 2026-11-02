@@ -52,6 +52,11 @@ jest.mock('google-ads-api', () => ({
       PAUSED: 3,
       REMOVED: 4,
     },
+    SearchTermTargetingStatus: {
+      2: 'ADDED', 3: 'EXCLUDED', 4: 'ADDED_EXCLUDED', 5: 'NONE',
+      ADDED: 2, EXCLUDED: 3, ADDED_EXCLUDED: 4, NONE: 5,
+    },
+    SearchTermMatchType: { 2: 'BROAD', 3: 'EXACT', 4: 'PHRASE', BROAD: 2, EXACT: 3, PHRASE: 4 },
   },
 }));
 // google-ads-api and uuid are REAL installed packages — these mocks must NOT
@@ -358,6 +363,43 @@ describe('syncSearchTerms retires terms missing from the latest snapshot (Codex 
     expect(mockRaw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), [GoogleAds.SEARCH_TERMS_SYNCED_KEY]);
     expect(mockUpdate).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  describe('targeting status is stored in status, never in match_type', () => {
+    const termRow = (status, extra = {}) => ({
+      campaign: { id: 1 }, search_term_view: { search_term: 'synthetic term', status },
+      metrics: { impressions: 3, clicks: 1, cost_micros: 2_000_000, conversions: 0, conversions_value: 0 },
+      ...extra,
+    });
+    const stored = async (row) => {
+      mockCustomerQuery.mockResolvedValue([row]);
+      // 1st first() = snapshot mark, 2nd = local campaign, 3rd = existing term row.
+      mockQueryFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'camp-1' }).mockResolvedValueOnce(null);
+      await GoogleAds.syncSearchTerms(30, { throwOnError: true });
+      return mockInsert.mock.calls.map((c) => c[0]).find((r) => r?.search_term === 'synthetic term');
+    };
+
+    test.each([
+      [2, 'added'], [3, 'excluded'], [4, 'added_excluded'], [5, 'none'],
+      ['EXCLUDED', 'excluded'], ['NONE', 'none'], [0, 'unknown'], [1, 'unknown'], [99, 'unknown'], [undefined, 'unknown'],
+    ])('Google status %p is stored as %p', async (google, expected) => {
+      const row = await stored(termRow(google));
+      expect(row.status).toBe(expected);
+      expect(row.match_type).toBeNull();
+    });
+
+    test('the query does not segment by match type, so one row per term keeps its full numbers', async () => {
+      mockCustomerQuery.mockResolvedValue([]);
+      await GoogleAds.syncSearchTerms(30);
+      expect(mockCustomerQuery.mock.calls[0][0]).not.toMatch(/search_term_match_type/);
+      expect(mockCustomerQuery.mock.calls[0][0]).toMatch(/search_term_view\.status/);
+    });
+
+    test('a row that carries the match-type segment stores its lowercase name', async () => {
+      const row = await stored(termRow(5, { segments: { search_term_match_type: 4 } }));
+      expect(row.match_type).toBe('phrase');
+      expect(row.status).toBe('none');
+    });
   });
 
   test('records a run-level success, even for an empty snapshot (Codex r9)', async () => {

@@ -301,6 +301,29 @@ async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
   }
 }
 
+// Google's search_term_view.status (SearchTermTargetingStatus) is whether the
+// term is already a keyword and/or an exclusion. The library returns the
+// numeric enum value; ad_search_terms.status stores its lowercase name:
+// added | excluded | added_excluded | none, or unknown for anything else.
+const SEARCH_TERM_STATUSES = new Set(['added', 'excluded', 'added_excluded', 'none']);
+function searchTermStatusName(googleStatus) {
+  const name = typeof googleStatus === 'number'
+    ? enums.SearchTermTargetingStatus?.[googleStatus]
+    : googleStatus;
+  const lower = typeof name === 'string' ? name.toLowerCase() : '';
+  return SEARCH_TERM_STATUSES.has(lower) ? lower : 'unknown';
+}
+
+// segments.search_term_match_type is NOT selected in the GAQL below: it splits
+// each search term into one row per match type, and this sync upserts one row
+// per campaign + term, so the last segment would overwrite the others' numbers.
+// A row that does carry the segment is still stored by name; otherwise null.
+function searchTermMatchTypeName(row) {
+  const raw = row.segments?.search_term_match_type;
+  const name = typeof raw === 'number' ? enums.SearchTermMatchType?.[raw] : raw;
+  return typeof name === 'string' && name ? name.toLowerCase() : null;
+}
+
 // system_settings key holding the last successful search-term sync time.
 const SEARCH_TERMS_SYNCED_KEY = 'ads.search_terms.last_synced_at';
 
@@ -370,7 +393,8 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
         const data = {
           campaign_id: campaign.id,
           search_term: searchTerm,
-          match_type: row.search_term_view.status || null,
+          match_type: searchTermMatchTypeName(row),
+          status: searchTermStatusName(row.search_term_view.status),
           impressions: Number(row.metrics.impressions || 0),
           clicks: Number(row.metrics.clicks || 0),
           cost: costDollars,
@@ -618,6 +642,7 @@ module.exports = {
   enableCampaign,
   updateBudget,
   _private: {
+    searchTermStatusName,
     buildCallViewQuery,
     gaqlDateRange,
   },
