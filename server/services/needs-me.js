@@ -128,16 +128,24 @@ function inferredArea(row) {
 // A row the owner sent from the bell ("Send to Claude") is marked `sent`: the Mac launcher gives it its own terminal tab.
 const sentMark = (meta) => (meta.claudeQueue === SENT_TO_CLAUDE_CLASS ? { sent: true } : {});
 
-// A sent row is read through the inert copy its send stamped (admin-alert-send-to-claude.js: the customer's name masked,
-// phones, emails and addresses masked), never through its own words, so Claude's queue never shows a customer's free text.
-// Only the fields this read carries are replaced (the first pass reads no body or detail).
+// A sent row is shown by trusted facts only (Codex security reviews on #7498): its own text can carry words a customer,
+// a vendor or a model wrote, and Claude's queue never shows them. Its terminal tab reads the alert itself, as data. Only
+// the fields this read carries are replaced (the first pass reads no body or detail).
 function sentAlertView(row, meta) {
-  const alert = meta.claudeQueue === SENT_TO_CLAUDE_CLASS ? meta.sentToClaude?.alert : null;
-  if (!alert || typeof alert !== 'object') return row;
-  const shown = { ...row, title: String(alert.title ?? '') };
-  if ('body' in row) shown.body = alert.body ?? null;
-  if ('detail' in row) shown.detail = alert.detail ?? null;
+  if (meta.claudeQueue !== SENT_TO_CLAUDE_CLASS) return row;
+  const stamped = meta.sentToClaude?.kind;
+  const kind = typeof stamped === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(stamped) ? stamped : row.category;
+  const shown = { ...row, title: `Sent to Claude from the bell (${kind})` };
+  if ('body' in row) shown.body = null;
+  if ('detail' in row) shown.detail = null;
   return shown;
+}
+
+// A customer's name for a terminal list, reduced to letters, marks, spaces, apostrophes, hyphens and periods (at most four
+// words, 40 characters). A customer sets their own name: it is data, never an instruction.
+function plainName(name) {
+  const kept = String(name ?? '').normalize('NFKC').replace(/[^\p{L}\p{M} '.-]/gu, ' ').replace(/\s+/g, ' ').trim();
+  return kept.split(' ').slice(0, 4).join(' ').slice(0, 40).trim();
 }
 
 function mapAlertRow(stored) {
@@ -264,7 +272,7 @@ async function withText(page, rowsById) {
 // is on, or when the caller asks (`customers: true`: ops/agents/needs-me.js, which runs with the database's settings
 // only and so never sees the portal's gates); otherwise the items are as before.
 async function withCustomers(page, rowsById, asked) {
-  const { sendToClaudeLive, inertName } = require('./admin-alert-send-to-claude');
+  const { sendToClaudeLive } = require('./admin-alert-send-to-claude');
   if (asked !== true && !sendToClaudeLive()) return page;
   const rows = page.filter((item) => item.kind === 'alert').map((item) => rowsById.get(String(item.id))).filter(Boolean);
   if (!rows.length) return page;
@@ -272,7 +280,7 @@ async function withCustomers(page, rowsById, asked) {
   return page.map((item) => {
     const customer = item.kind === 'alert' ? customers.get(String(item.id)) : null;
     // The name as inert data (letters only, at most four words): a customer sets their own name.
-    const name = customer ? inertName(customer.name) : '';
+    const name = customer ? plainName(customer.name) : '';
     return name ? { ...item, customer: { id: customer.id, name } } : item;
   });
 }

@@ -321,19 +321,18 @@ new class joins only after the same read. Never offered, whatever else the row s
 `review`, `internal_admin_alert`, and a row whose metadata or registry rule declares `contact: true` or `promise: true`.
 Everything else stays with the owner. One tap (`POST /api/admin/notifications/:id/send-to-claude`, admin only, fenced on the
 version the bell served like Done) moves the row into Claude's queue: Activity-only, `who = 'claude'`, `claudeQueue` =
-`sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp with when, who
-sent it, the customer it is about (read from the record, `admin-alert-customer.js`), the plain-words summary the owner
-saw, and the row's own who and severity before the send. What a Claude tab reads is inert data (Codex security review):
-the stamp's `alert` is the row's title, body and detail with phones, emails and street addresses masked and the customer's
-name replaced by `[customer]`; the stamped name keeps only letters, spaces, apostrophes, hyphens and periods (at most four
-words, 40 characters), since a customer sets their own name; the summary is masked the same way. `needs-me` shows a sent row
-through that copy, and the launcher's tab gets only it. A row linked to any record is sent only once its customer's name was
-read (503 `customer_unresolved` otherwise: an unread name cannot be masked). A reviewed check still names its customer, in that form. While the
+`sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp that holds
+trusted facts only (Codex security reviews): when, who sent it, the alert's `kind` (its trigger key or dedupe-key class),
+the `customerId` and the ids of the records it names, and the row's own who and severity. No alert text, no customer name
+and no summary go into the handoff: a customer sets their own name, and receipts, model output and record fields can carry
+any words. The Claude tab reads the alert, its summary and its customer itself, read-only, as data, and names the customer
+in its first line. `needs-me` shows a sent row by its kind only ("Sent to Claude from the bell (kind)"), and every
+customer name it prints is reduced to letters (at most four words). While the
 row is open, a refresh of the same alert updates its text but keeps it in Claude's queue (`keepSentToClaude` in
 `admin-alert-routing.js`); a refresh that rings after it was closed brings it back to the bell without the stamp. The
 write takes the alert's dedupe lock, so a refresh in flight can never undo the send. On the owner's Mac, the
-notif-dispatch launcher opens one Claude tab per sent row (its own kind, not counted in the daily tab cap). The tab
-gets the customer's name, the summary, the original text and the link; it never texts, emails or calls a customer,
+notif-dispatch launcher opens one Claude tab per sent row (its own kind, not counted in the daily tab cap). Its prompt
+gets the stamp's ids only; it never texts, emails or calls a customer,
 never moves money, and closes the row with what fixed it when the fix is live. `needs-me` marks a sent row `sent: true`,
 so the queue tab leaves it to its own tab.
 

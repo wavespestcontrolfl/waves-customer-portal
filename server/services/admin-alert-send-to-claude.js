@@ -6,10 +6,14 @@
 //
 // The bell's "What to do" panel (admin-alert-explainer.js, GATE_ALERT_EXPLAINER) carries a button that moves one open
 // bell row into Claude's queue: Activity-only (it leaves the bell), who 'claude', class 'sent-to-claude', and a
-// `sentToClaude` stamp with when, who sent it, the customer it is about (read from the record, never guessed) and the
-// plain-words summary the owner saw. The Mac launcher (com.waves.notif-dispatch, outside this repo) opens one terminal
-// tab per sent row, and the tab closes the row when its fix is live. A refresh of the same alert keeps it in Claude's
-// queue while it is open (admin-alert-routing.js keepSentToClaude).
+// `sentToClaude` stamp. The Mac launcher (com.waves.notif-dispatch, outside this repo) opens one terminal tab per sent
+// row, and the tab closes the row when its fix is live. A refresh of the same alert keeps it in Claude's queue while it
+// is open (admin-alert-routing.js keepSentToClaude).
+//
+// The handoff carries trusted facts only (Codex security reviews on #7498): when, who sent it, the alert's kind and the
+// ids of the records it names, all written by our code. No alert text, no customer name, no summary: a customer sets their
+// own name, and receipts, model output and record fields can carry any words, so none of it goes into a Claude tab's
+// instructions. The tab reads the alert, its customer and its summary itself, read-only, as data.
 //
 // Only an alert whose words our own code wrote can be sent (owner 2026-11-02, "A", after Codex found customer-written
 // alerts that carry no contact mark: a service request typed in the portal). A Claude terminal tab can change code, so a
@@ -23,6 +27,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { CUSTOMER_CONTACT_CATEGORIES, SENT_TO_CLAUDE_CLASS } = require('./admin-alert-routing');
 const { alertRecordRefs, customersForAlerts } = require('./admin-alert-customer');
+const { SEVERITIES, WHO } = require('./admin-alert-compose');
 
 // Beyond the contact categories: a review alert quotes the customer's review, and the general internal alert can carry a
 // forwarded customer text.
@@ -63,36 +68,6 @@ const CHECK_CLASSES = Object.freeze([
   'unbilled-completion:', // series-price-guards.js: a completed visit with no invoice
   'first_application_sibling_divergence:', // first-application-sibling-split.js: first-application invoices disagree
 ]);
-
-// What a Claude tab reads about a sent alert is inert data (Codex security review on #7498): a customer sets their own name,
-// and a record's text can carry a phone, an email or an address, so none of it reaches a terminal session as free text.
-const NAME_MAX_WORDS = 4;
-const NAME_MAX_CHARS = 40;
-const TEXT_MAX = Object.freeze({ title: 200, body: 500, detail: 4000, summary: 300 });
-
-// A customer's name reduced to letters, marks, spaces, apostrophes, hyphens and periods: at most four words, 40 characters.
-function inertName(name) {
-  const kept = String(name ?? '').normalize('NFKC').replace(/[^\p{L}\p{M} '.-]/gu, ' ').replace(/\s+/g, ' ').trim();
-  return kept.split(' ').slice(0, NAME_MAX_WORDS).join(' ').slice(0, NAME_MAX_CHARS).trim();
-}
-
-const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const redact = (text) => require('./notification-triggers').__private.redactSensitiveText(text);
-
-// One alert text as inert data: phones, emails and street addresses are masked as in every bell body; then the customer's
-// name (whole, then each word of three or more letters, longest first, as whole words) becomes "[customer]"; control
-// characters go; the length is capped. Null stays null.
-function inertText(text, name, max) {
-  if (text === null || text === undefined || text === '') return text ?? null;
-  const raw = String(name ?? '').trim();
-  const parts = [...new Set([raw, ...raw.split(/\s+/)])].filter((p) => p.length >= 3).sort((x, y) => y.length - x.length);
-  let out = redact(String(text));
-  for (const part of parts) {
-    out = out.replace(new RegExp(`(?<![\\p{L}\\p{M}])${escapeRegExp(part)}(?![\\p{L}\\p{M}])`, 'giu'), '[customer]');
-  }
-  out = out.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ');
-  return out.length > max ? `${out.slice(0, max - 1)}\u2026` : out;
-}
 
 const metaOf = (value) => {
   if (typeof value === 'string') {
@@ -139,12 +114,23 @@ function sendToClaudeLive() {
   try { return require('../config/feature-gates').alertSendToClaudeLive?.() === true; } catch { return false; }
 }
 
-// The fields a sent row carries. `alert` is the inert copy of the row's text a Claude tab and needs-me read instead of the
-// row's own words; `customer` and `summary` are inert too. `was` keeps the row's own who and severity for the record. An
-// fyi row becomes work: the owner asked for it to be worked.
-function sentPatch(row, { by, customer, summary, at = new Date() }) {
+// An alert's kind as our code named it: its registry trigger key, else its dedupe key's class (the part before the first
+// colon). Only a plain lowercase name is kept; anything else is null.
+const KIND_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+function alertKind(meta) {
+  const kind = meta.triggerKey || String(meta.dedupeKey || '').split(':')[0];
+  return KIND_RE.test(String(kind || '')) ? kind : null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const uuidOrNull = (v) => (typeof v === 'string' && UUID_RE.test(v) ? v.toLowerCase() : null);
+
+// The fields a sent row carries. The stamp holds trusted facts only (see the header): `customerId` and `records` are ids
+// read from the row and its records, `kind` is a name our code chose, `was` keeps the row's own who and severity for the
+// record (known values only). An fyi row becomes work: the owner asked for it to be worked.
+function sentPatch(row, { by, customerId = null, at = new Date() }) {
   const meta = metaOf(row.metadata);
-  const name = customer?.name || '';
+  const { customerId: _named, ...records } = alertRecordRefs(row);
   return {
     feed: 'activity',
     who: 'claude',
@@ -152,44 +138,31 @@ function sentPatch(row, { by, customer, summary, at = new Date() }) {
     claudeQueue: SENT_TO_CLAUDE_CLASS,
     sentToClaude: {
       at: at.toISOString(),
-      by: by == null ? null : String(by),
-      customer: customer ? { id: customer.id || null, name: inertName(name) } : null,
-      alert: {
-        title: inertText(row.title, name, TEXT_MAX.title),
-        body: inertText(row.body, name, TEXT_MAX.body),
-        detail: inertText(row.detail, name, TEXT_MAX.detail),
-      },
-      summary: summary ? {
-        happened: inertText(summary.happened, name, TEXT_MAX.summary),
-        steps: (summary.steps || []).map((step) => inertText(step, name, TEXT_MAX.summary)),
-      } : null,
-      was: { who: meta.who ?? null, severity: meta.severity ?? null },
+      by: uuidOrNull(by == null ? null : String(by)) || (by == null ? null : 'admin'),
+      kind: alertKind(meta),
+      customerId: uuidOrNull(customerId),
+      records: Object.fromEntries(Object.entries(records).filter(([, id]) => uuidOrNull(id))),
+      was: { who: WHO.includes(meta.who) ? meta.who : null, severity: SEVERITIES.includes(meta.severity) ? meta.severity : null },
     },
   };
 }
 
 // The send for one row the admin saw at `version`: { status, body }. 404 when the row is gone or out of scope, 422 when
 // it cannot be sent (customer contact, not written by our code, done, already off the bell), 409 when its text changed
-// since the bell read it, 503 when the row is linked to a record whose customer's name could not be read.
+// since the bell read it.
 async function sendAdminAlertToClaude(id, { version, by, role, technicianId = null } = {}) {
   const row = await NotificationService.getAdminNotificationForExplainer(id, { role, technicianId });
   if (!row) return { status: 404, body: { error: 'not_found' } };
   const refusal = sendRefusal(row);
   if (refusal) return { status: 422, body: { error: refusal } };
   if (row.version !== version) return { status: 409, body: { error: 'changed' } };
-  let customer = null;
-  try { customer = (await customersForAlerts(db, [row])).get(String(row.id)) || null; } catch (err) {
+  // The customer's id, so the tab can read the customer: the row's own id, else the one behind the visit, estimate,
+  // invoice, lead or call it names. A failed read leaves it to the row's own id (the tab can still follow the records).
+  let customerId = alertRecordRefs(row).customerId;
+  try { customerId = (await customersForAlerts(db, [row])).get(String(row.id))?.id || customerId; } catch (err) {
     logger.warn(`[send-to-claude] customer not read: ${NotificationService.safeErrorSummary(err)}`);
   }
-  // Fail closed: the name is what the inert copy masks, so a row linked to any record (a customer, visit, estimate,
-  // invoice, lead or call) is sent only once its customer's name was read. A failed read (customersForAlerts turns a
-  // database error into no name) or a record with no name answers 503 and the bell says to try again.
-  if (Object.values(alertRecordRefs(row)).some(Boolean) && !customer?.name) {
-    return { status: 503, body: { error: 'customer_unresolved' } };
-  }
-  const { servedExplainer } = require('./admin-alert-explainer');
-  const summary = servedExplainer(row.explainer, row.version);
-  const written = await NotificationService.markAdminSentToClaude(row.id, version, sentPatch(row, { by, customer, summary }));
+  const written = await NotificationService.markAdminSentToClaude(row.id, version, sentPatch(row, { by, customerId }));
   if (!written) {
     // Changed, closed or moved off the bell between the read and the write.
     const state = await NotificationService.getAdminNotificationState(row.id, { role, technicianId });
@@ -201,6 +174,6 @@ async function sendAdminAlertToClaude(id, { version, by, role, technicianId = nu
 }
 
 module.exports = {
-  sendAdminAlertToClaude, sendRefusal, sendToClaudeLive, sentPatch, inertName, inertText,
+  sendAdminAlertToClaude, sendRefusal, sendToClaudeLive, sentPatch,
   CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES,
 };
