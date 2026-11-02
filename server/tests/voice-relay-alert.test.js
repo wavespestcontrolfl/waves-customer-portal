@@ -233,6 +233,18 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
   // ⭐ THE PAGE'S OWN ROW IS DELIVERY EVIDENCE. A page that landed but whose
   // sent receipt failed to write is found by its per-call dedupe key: the
   // receipt is repaired and nobody is paged twice.
+  // The Call button (alert-call-button.js): the page names this call by its CallSid, which the tap reads again.
+  test('the page carries Call for this call; a call with no usable CallSid carries none', async () => {
+    const SID = `CA${'0123456789abcdef'.repeat(2)}`;
+    primeClaimDb({ claimWins: true });
+    expect(await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: SID, markOwnerAlerted: jest.fn() })).toBe(true);
+    expect(pages()[0][1].alert.buttons).toEqual({ kind: 'call_back', items: [expect.objectContaining({ id: 'call', label: 'Call', args: { callSid: SID } })] });
+    triggerNotification.mockClear();
+    primeClaimDb({ claimWins: true });
+    await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-landing', markOwnerAlerted: jest.fn() });
+    expect(pages()[0][1].alert.buttons).toBeUndefined();
+  });
+
   test('a bell row already under this call\'s dedupe key repairs the receipt and pages nobody', async () => {
     const builder = primeClaimDb({ claimWins: true, deliveredRow: { id: 'n-1' } });
     const ctx = { callSid: 'CA-landed', markOwnerAlerted: jest.fn() };

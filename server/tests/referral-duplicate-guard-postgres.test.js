@@ -48,6 +48,7 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
   let server;
   let base;
   let promoter;
+  let referralSource;
 
   const sent = (delayMs = 150) => async () => {
     await new Promise((r) => setTimeout(r, delayMs));
@@ -98,6 +99,14 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       for (const col of ['first_name', 'last_name', 'phone', 'email', 'address', 'lead_type', 'service_interest', 'first_contact_channel', 'status']) t.string(col);
       t.timestamp('first_contact_at', { useTz: true });
+      t.uuid('lead_source_id');
+    });
+    await s().createTable('lead_sources', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.string('name');
+      t.string('source_type');
+      t.boolean('is_active').defaultTo(true);
+      t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
     await s().createTable('lead_activities', (t) => {
       t.increments('id');
@@ -143,9 +152,10 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
 
   beforeEach(async () => {
     mockSend.mockReset();
-    for (const table of ['referral_invites', 'lead_activities', 'leads', 'referrals', 'referral_promoters', 'customers', 'referral_program_settings']) {
+    for (const table of ['referral_invites', 'lead_activities', 'leads', 'referrals', 'referral_promoters', 'customers', 'referral_program_settings', 'lead_sources']) {
       await db(table).del();
     }
+    [referralSource] = await db('lead_sources').insert({ name: 'Customer Referral', source_type: 'referral', is_active: true }).returning('*');
     await db('referral_program_settings').insert({
       id: 1, program_active: true, base_url: 'https://portal.example.test/r/',
       referrer_reward_cents: 2500, referee_discount_cents: 2500, max_referrals_per_month: 20,
@@ -170,6 +180,13 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
   const count = async (table) => Number((await db(table).count('* as c').first()).c);
 
   describe('submitReferral', () => {
+    test('the referral lead carries the Customer Referral lead source', async () => {
+      mockSend.mockImplementation(sent(0));
+      await expect(submit('+19415550123')).resolves.toMatchObject({ status: 'contacted' });
+      const lead = await db('leads').first();
+      expect(lead).toMatchObject({ lead_type: 'referral', lead_source_id: referralSource.id });
+    });
+
     test('overlapping submits for one phone write one referral, one lead and one text', async () => {
       mockSend.mockImplementation(sent());
       const results = await Promise.allSettled([1, 2, 3, 4].map(() => submit('+19415550123')));

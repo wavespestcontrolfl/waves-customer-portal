@@ -171,6 +171,10 @@ describe('POST /login/mfa', () => {
     expect(jwt.verify(res.body.token, SECRET).mfaRecoveryUntil).toBeUndefined();
     expect(res.body.user.twoStep).toEqual({ enabled: true, enrollmentRequired: false });
     expect(res.cookie).toHaveBeenCalledWith('waves_admin', expect.any(String), expect.any(Object));
+    // The device that passed the code is remembered for Sign in with Google.
+    const [, deviceToken, deviceOptions] = res.cookie.mock.calls.find(([name]) => name === 'waves_staff_device');
+    expect(deviceOptions).toEqual(expect.objectContaining({ httpOnly: true, sameSite: 'strict', path: '/api/admin/auth/google' }));
+    expect(jwt.verify(deviceToken, SECRET)).toMatchObject({ type: 'staff_device_trust', technicianId: 'tech-1', tokenVersion: 3 });
   });
 
   test('the last-login stamp failing never withholds a session whose code was already spent', async () => {

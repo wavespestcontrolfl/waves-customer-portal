@@ -20,7 +20,8 @@ import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
 import { ScheduleAccessLine } from './ScheduleAccess';
-import { openHoursForDay, hourToHHMM, formatOpenHour, useHourClock, NOT_OCCUPYING } from './openHours';
+import { openHoursForDay, hourToHHMM, useHourClock, NOT_OCCUPYING } from './openHours';
+import { formatTimeWindow } from './timeWindow';
 import { directionsHref } from '../../lib/directionsHref';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -57,36 +58,15 @@ function parseHHMM(s) {
   return hh * 60 + mm;
 }
 
-function formatTimeLabel(hhmm, { compact = false } = {}) {
-  const mins = parseHHMM(hhmm);
-  if (mins == null) return '';
-  const h24 = Math.floor(mins / 60);
-  const m = mins % 60;
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-  const ap = h24 < 12 ? 'AM' : 'PM';
-  if (compact && m === 0) return `${h12} ${ap}`;
-  return `${h12}:${String(m).padStart(2, '0')} ${ap}`;
+// "7:00–8:00 AM", "8:00–8:30 AM", "11:00 AM–12:00 PM" (timeWindow.js);
+// '—' for a visit with no start time.
+function formatWindow(svc) {
+  return formatTimeWindow(svc.windowStart, svc.windowEnd) || '—';
 }
 
-// Compact window: "8–9 AM" when both ends are on the hour in the same meridiem;
-// otherwise fall back to the full "8:00 AM – 9:30 AM" form.
-function formatWindow(svc) {
-  const startMins = parseHHMM(svc.windowStart);
-  const endMins = parseHHMM(svc.windowEnd);
-  if (startMins == null) return '—';
-  if (endMins == null) return formatTimeLabel(svc.windowStart);
-  const startOnHour = startMins % 60 === 0;
-  const endOnHour = endMins % 60 === 0;
-  const sameMeridiem = Math.floor(startMins / 60) < 12 === Math.floor(endMins / 60) < 12;
-  if (startOnHour && endOnHour && sameMeridiem) {
-    const h24s = Math.floor(startMins / 60);
-    const h24e = Math.floor(endMins / 60);
-    const h12s = h24s % 12 === 0 ? 12 : h24s % 12;
-    const h12e = h24e % 12 === 0 ? 12 : h24e % 12;
-    const ap = h24s < 12 ? 'AM' : 'PM';
-    return `${h12s}–${h12e} ${ap}`;
-  }
-  return `${formatTimeLabel(svc.windowStart)} – ${formatTimeLabel(svc.windowEnd)}`;
+// An open hour in the same style as the visits around it: "9:00–10:00 AM".
+function formatOpenRow(hour) {
+  return formatTimeWindow(hourToHHMM(hour), hourToHHMM(hour + 1));
 }
 
 // Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
@@ -372,11 +352,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           >
             {formatWindow(service)}
             {/* Rain at this stop: its zone's hourly chance at the window-start
-                hour (server rainAtStop). Exception-based like every rain chip:
-                shown from 40%, alert-red from 50%. */}
-            {Number.isFinite(service.rainAtStop) && service.rainAtStop >= 40 && (
+                hour (server rainAtStop). On every stop that has a forecast
+                (owner 2026-11-02, "leave the rain for all"): plain under 40%,
+                bold from 40%, alert-red from 50%. */}
+            {Number.isFinite(service.rainAtStop) && (
               <span
-                className={service.rainAtStop >= 50 ? 'text-alert-fg font-bold' : 'font-bold'}
+                className={service.rainAtStop >= 50 ? 'text-alert-fg font-bold' : service.rainAtStop >= 40 ? 'font-bold' : undefined}
                 title={`${service.rainAtStop}% chance of rain at this stop`}
               >
                 {` · ${service.rainAtStop}% rain`}
@@ -521,12 +502,12 @@ function OpenHourRow({ hour, onBook, free }) {
         onClick={onBook}
         className="flex items-center w-full text-left rounded-xs border border-dashed border-zinc-300 bg-zinc-50 hover:border-zinc-900 hover:bg-white active:bg-white u-focus-ring"
         style={{ height: 44, padding: '0 12px', gap: 12 }}
-        aria-label={`Book open hour ${formatOpenHour(hour)}`}
+        aria-label={`Book open hour ${formatOpenRow(hour)}`}
         aria-description={names.length ? `Free: ${names.join(', ')}` : undefined}
         title={names.length ? `Free: ${names.join(', ')}` : undefined}
       >
         <span className="u-nums font-medium text-zinc-900" style={{ fontSize: 14, minWidth: 92 }}>
-          {formatOpenHour(hour)}
+          {formatOpenRow(hour)}
         </span>
         {free && free.length > 0 && (
           <span className="flex items-center" style={{ gap: 3 }} aria-hidden>
@@ -619,11 +600,12 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
       >
         {/* A week section names its day and carries that day's rain chance
             (the week feed stamps no per-stop figure); the day list's date
-            strip and weather bar already say both. Rain shows from 40%,
-            alert-red from 50%, like every other rain chip. */}
+            strip and weather bar already say both. Rain shows on every day
+            with a forecast, like the stops (owner 2026-11-02), alert-red
+            from 50%. */}
         <span className="flex items-center min-w-0" style={{ gap: 8 }}>
           {weekDay && <span className="uppercase tracking-label">{headerLabel(dateStr)}</span>}
-          {weekDay && rainChance != null && rainChance >= 40 && (
+          {weekDay && rainChance != null && (
             <span className={rainChance >= 50 ? 'text-alert-fg' : undefined} title={`${rainChance}% chance of rain`}>
               {rainChance}% rain
             </span>

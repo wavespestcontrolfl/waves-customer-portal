@@ -34,10 +34,32 @@ const OWNER_ALERT_KINDS = Object.freeze({
   'seo-toxic-links': Object.freeze({ area: 'Content', severity: 'fyi', doneWhen: 'report_read' }),
   'seo-competitor-gaps': Object.freeze({ area: 'Content', severity: 'fyi', doneWhen: 'report_read' }),
   'seo-weekly-report': Object.freeze({ area: 'Content', severity: 'fyi', doneWhen: 'report_read' }),
+  // The follow-up (2026-11-02): the owner-phone texts #7300 left, under other names for the same number.
+  'charge-unrecorded': Object.freeze({ area: 'Billing', severity: 'needs-you', doneWhen: 'charge_reconciled' }),
+  'charge-will-repeat': Object.freeze({ area: 'Billing', severity: 'needs-you', doneWhen: 'payment_row_fixed' }),
+  'autopay-outcome-unknown': Object.freeze({ area: 'Billing', severity: 'needs-you', doneWhen: 'charge_verified' }),
+  'autopay-exhausted': Object.freeze({ area: 'Billing', severity: 'needs-you', doneWhen: 'card_updated' }),
+  'low-rating': Object.freeze({ area: 'Customers', severity: 'needs-you', doneWhen: 'customer_contacted' }),
+  'rating-no-feedback': Object.freeze({ area: 'Customers', severity: 'needs-you', doneWhen: 'customer_contacted' }),
+  'promotion-interest': Object.freeze({ area: 'Estimates', severity: 'needs-you', doneWhen: 'request_answered' }),
+  'sms-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'estimate_sent' }),
+  'web-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'lead_contacted' }),
+  'field-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'lead_contacted' }),
+  'content-pr-stuck': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'pr_resolved' }),
+  'content-visibility': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'page_fixed' }),
+  'content-engine-error': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'error_resolved' }),
+  'content-drought': Object.freeze({ area: 'Content', severity: 'fyi', doneWhen: 'report_read' }),
+  'content-daily-digest': Object.freeze({ area: 'Content', severity: 'fyi', doneWhen: 'report_read' }),
+  'tax-weekly-report': Object.freeze({ area: 'Billing', severity: 'fyi', doneWhen: 'report_read' }),
 });
 
-// The kinds the owner chose to ring. Empty until the owner picks (asked 2026-10-31).
-const RINGING_KINDS = new Set([]);
+// The kinds the owner chose to ring (owner 2026-11-02): the three money alerts (a charge Stripe took that our
+// records miss, a retry that will charge again, an autopay result nobody knows), and the customer contacts the
+// 08-28 ruling rings (a low satisfaction rating, a web lead whose own new-lead bell failed, a promotion tap).
+// Every other kind is quiet.
+const RINGING_KINDS = new Set([
+  'charge-unrecorded', 'charge-will-repeat', 'autopay-outcome-unknown', 'low-rating', 'web-lead', 'promotion-interest',
+]);
 
 // deliverOpsDigest falls back to email when the in-app row cannot be written. These alerts never had an
 // email, so there is none to send: the fallback reports the miss and recordOwnerAlert logs it.
