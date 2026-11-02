@@ -338,4 +338,32 @@ describe('generic campaign writes cannot touch the hold', () => {
     expect(res.status).toBe(200);
     expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ note: 'new', budget_hold: hold });
   });
+
+  test('POST /campaigns and PUT /campaigns/:id refuse metadata.budget_hold_cleared (object or JSON string)', async () => {
+    const cleared = { at: '2026-11-02T07:00:00.000Z', by: 'x', mode: 'base', until: inDays(3) };
+    const create = await call('POST', '/campaigns', { campaign_name: 'X', platform: 'google_ads', metadata: { budget_hold_cleared: cleared } });
+    expect(create.status).toBe(400);
+    expect(create.body.error).toMatch(/budget_hold_cleared/);
+    const update = await call('PUT', `/campaigns/${CAMPAIGN_ID}`, { metadata: JSON.stringify({ budget_hold_cleared: cleared }) });
+    expect(update.status).toBe(400);
+    expect(update.body.error).toMatch(/budget_hold_cleared/);
+    expect(campaignWrites).toHaveLength(0);
+  });
+
+  test('PUT /campaigns/:id metadata replacement keeps the hold release record', async () => {
+    const cleared = { at: '2026-11-02T07:00:00.000Z', by: 'admin-1', mode: 'base', until: inDays(3) };
+    campaignRow.metadata = { keep: 'me', budget_hold_cleared: cleared };
+    const res = await call('PUT', `/campaigns/${CAMPAIGN_ID}`, { metadata: { note: 'new' } });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ note: 'new', budget_hold_cleared: cleared });
+  });
+
+  test('PUT /campaigns/:id metadata replacement keeps both a hold and an older release record', async () => {
+    const hold = { mode: 'base', until: inDays(4) };
+    const cleared = { at: '2026-11-01T07:00:00.000Z', by: 'admin-1', mode: 'stop', until: inDays(1) };
+    campaignRow.metadata = { budget_hold: hold, budget_hold_cleared: cleared };
+    const res = await call('PUT', `/campaigns/${CAMPAIGN_ID}`, { metadata: { note: 'new' } });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ note: 'new', budget_hold: hold, budget_hold_cleared: cleared });
+  });
 });
