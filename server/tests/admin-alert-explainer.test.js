@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info
 jest.mock('../services/notification-service', () => ({
   getAdminNotificationForExplainer: jest.fn(),
   saveAdminExplainer: jest.fn(async () => 1),
+  safeErrorSummary: jest.fn((err) => (err && err.code) || 'error'),
 }));
 jest.mock('../services/admin-alert-customer', () => ({ customersForAlerts: jest.fn(async () => new Map()) }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
@@ -120,7 +121,7 @@ describe('explainAdminAlert', () => {
   test('a summary saved for this text is served again without a model call', async () => {
     NotificationService.getAdminNotificationForExplainer.mockResolvedValue(row({ explainer: { v: 1, version: VERSION, ...answer } }));
     expect(await explainer.explainAdminAlert(ID, { role: 'admin', technicianId: 'admin-1' })).toEqual({
-      status: 200, body: { explainer: answer, customer: { id: CUSTOMER_ID, name: 'Jane Doe' } },
+      status: 200, body: { explainer: answer, customer: { id: CUSTOMER_ID, name: 'Jane Doe' }, version: VERSION },
     });
     expect(NotificationService.getAdminNotificationForExplainer).toHaveBeenCalledWith(ID, { role: 'admin', technicianId: 'admin-1' });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
@@ -130,7 +131,7 @@ describe('explainAdminAlert', () => {
   test('a summary of older text is written again on the routine lane and saved for the text shown now', async () => {
     NotificationService.getAdminNotificationForExplainer.mockResolvedValue(row({ explainer: { v: 1, version: 'b'.repeat(32), ...answer } }));
     const result = await explainer.explainAdminAlert(ID, { role: 'admin' });
-    expect(result).toEqual({ status: 200, body: { explainer: answer, customer: { id: CUSTOMER_ID, name: 'Jane Doe' } } });
+    expect(result).toEqual({ status: 200, body: { explainer: answer, customer: { id: CUSTOMER_ID, name: 'Jane Doe' }, version: VERSION } });
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy).toBe(MODELS.TEXT_POLICIES.routineAnswer);
     expect(payload).toEqual(expect.objectContaining({ laneId: 'alert_explainer', jsonMode: true, maxTokens: 700 }));
@@ -166,9 +167,25 @@ describe('explainAdminAlert', () => {
           fallback: true,
         },
         customer: { id: CUSTOMER_ID, name: 'Jane Doe' },
+        version: VERSION,
       },
     });
     expect(NotificationService.saveAdminExplainer).not.toHaveBeenCalled();
+  });
+
+  test('a save the version fence refused (the text changed during the call) still names the text it was written for', async () => {
+    NotificationService.getAdminNotificationForExplainer.mockResolvedValue(row());
+    NotificationService.saveAdminExplainer.mockResolvedValueOnce(0);
+    expect((await explainer.explainAdminAlert(ID, { role: 'admin' })).body).toEqual(expect.objectContaining({ explainer: answer, version: VERSION }));
+  });
+
+  test('a failed save logs only the error code, never the database message that carries the summary', async () => {
+    const logger = require('../services/logger');
+    NotificationService.getAdminNotificationForExplainer.mockResolvedValue(row());
+    NotificationService.saveAdminExplainer.mockRejectedValueOnce(Object.assign(new Error('insert into notifications ... "Jane Doe accepted a plan"'), { code: '57014' }));
+    expect((await explainer.explainAdminAlert(ID, { role: 'admin' })).body.explainer).toEqual(answer);
+    expect(logger.warn).toHaveBeenCalledWith('[alert-explainer] summary not saved: 57014');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('Jane Doe');
   });
 
   test('a failed write is not tried again for a minute: opens in that minute get the alert\'s own words at once', async () => {

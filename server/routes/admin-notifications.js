@@ -491,7 +491,8 @@ router.post('/:id/actions/:actionId', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/notifications/:id/explain — the bell's "What to do" for one row (GATE_ALERT_EXPLAINER, admin only):
-// { explainer: { happened, steps, fixer, fallback? }, customer: { id, name } | null }. The first open asks an AI and
+// { explainer: { happened, steps, fixer, fallback? }, customer: { id, name } | null, version } (`version`: the content
+// version the summary was written for; the bell keeps it only on a row it holds at that version). The first open asks an AI and
 // saves the summary on the row (services/admin-alert-explainer.js); later opens read it back. Sends nothing to anyone.
 // Gate off: 404, the same as an unknown route.
 router.post('/:id/explain', requireAdmin, async (req, res, next) => {

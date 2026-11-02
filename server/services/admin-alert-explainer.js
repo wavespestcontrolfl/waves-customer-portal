@@ -143,7 +143,8 @@ async function writeExplainer(row, customer) {
       provider: response.provider || null, model: response.model || null, at: new Date().toISOString(),
     });
   } catch (err) {
-    logger.warn(`[alert-explainer] summary not saved: ${err.message}`);
+    // The error code only: a database error's message carries the summary, and the summary names the customer.
+    logger.warn(`[alert-explainer] summary not saved: ${NotificationService.safeErrorSummary(err)}`);
   }
   return shown;
 }
@@ -161,24 +162,27 @@ function coolingDown(key, now) {
 }
 
 // The bell's "What to do" for one admin row: { status, body }. 404 when the row is gone or out of the caller's scope.
-// body: { explainer: { happened, steps, fixer, fallback? }, customer: { id, name } | null }.
+// body: { explainer: { happened, steps, fixer, fallback? }, customer: { id, name } | null, version }. `version` is the
+// content version the summary was written for: the bell shows and keeps it only on a row it holds at that version, so a
+// summary of text that changed meanwhile (a refresh during the model call, whose save the version fence refused) never
+// lands on the newer text.
 async function explainAdminAlert(id, { role, technicianId = null } = {}) {
   const row = await NotificationService.getAdminNotificationForExplainer(id, { role, technicianId });
   if (!row) return { status: 404, body: { error: 'not_found' } };
   const customer = (await customersForAlerts(db, [row])).get(String(row.id)) || null;
+  const answer = (explainer) => ({ status: 200, body: { explainer, customer, version: row.version } });
   const cached = servedExplainer(row.explainer, row.version);
-  if (cached) return { status: 200, body: { explainer: cached, customer } };
+  if (cached) return answer(cached);
 
   const key = `${row.id}:${row.version}`;
-  if (!inflight.has(key) && coolingDown(key, Date.now())) return { status: 200, body: { explainer: fallbackExplainer(row), customer } };
+  if (!inflight.has(key) && coolingDown(key, Date.now())) return answer(fallbackExplainer(row));
   if (!inflight.has(key)) {
     inflight.set(key, writeExplainer(row, customer)
-      .catch((err) => { logger.warn(`[alert-explainer] model read failed: ${err.message}`); return null; })
+      .catch((err) => { logger.warn(`[alert-explainer] model read failed: ${NotificationService.safeErrorSummary(err)}`); return null; })
       .then((shown) => { if (!shown) recentFailures.set(key, Date.now()); return shown; })
       .finally(() => inflight.delete(key)));
   }
-  const shown = await inflight.get(key);
-  return { status: 200, body: { explainer: shown || fallbackExplainer(row), customer } };
+  return answer((await inflight.get(key)) || fallbackExplainer(row));
 }
 
 // GATE_ALERT_EXPLAINER, read at call time; a missing or throwing reader reads as off.
@@ -195,7 +199,7 @@ async function withExplainerFields(rows, { role } = {}) {
   const bare = list.map(({ explainer: _stored, ...row }) => row);
   if (!list.length || role !== 'admin' || !explainerLive()) return bare;
   let customers = new Map();
-  try { customers = await customersForAlerts(db, list); } catch (err) { logger.warn(`[alert-explainer] names not read: ${err.message}`); }
+  try { customers = await customersForAlerts(db, list); } catch (err) { logger.warn(`[alert-explainer] names not read: ${NotificationService.safeErrorSummary(err)}`); }
   return bare.map((row, i) => {
     const customer = customers.get(String(row.id));
     const explainer = servedExplainer(list[i].explainer, row.version);

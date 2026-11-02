@@ -715,7 +715,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
   // "What to do" (WhatToDo): the server writes the row's summary on its first open and saves it; a real summary is
   // kept on the row in this list so reopening the panel shows it at once (a fallback built from the alert's own words
-  // is shown but not kept, so the next open asks again). Resolves the summary, or null on any failure.
+  // is shown but not kept, so the next open asks again). A summary written for other text (the alert changed since
+  // this list was read) is never shown on this row: the list is read again with a note. Resolves the summary, or
+  // null on any failure.
   const explainRow = async (n) => {
     let d;
     try {
@@ -723,6 +725,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     } catch { return null; }
     const summary = d?.explainer;
     if (!summary || typeof summary.happened !== 'string' || !Array.isArray(summary.steps)) return null;
+    if (d.version !== n.version) {
+      loadNotifications();
+      setActionNote(CHANGED_NOTE);
+      return null;
+    }
     setNotifications(prev => prev.map(x => (x.id === n.id
       ? { ...x, ...(summary.fallback ? {} : { explainer: summary }), ...(d.customer ? { customer: d.customer } : {}) }
       : x)));

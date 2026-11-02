@@ -49,7 +49,8 @@ async function readByIds(conn, table, ids, columns) {
     const rows = await conn(table).whereIn('id', ids).select(columns);
     return new Map(rows.map((r) => [String(r.id), r]));
   } catch (err) {
-    logger.warn(`[alert-customer] ${table} read failed: ${err.message}`);
+    // The error code only: a database error's message carries the query's bound values.
+    logger.warn(`[alert-customer] ${table} read failed: ${require('./notification-service').safeErrorSummary(err)}`);
     return new Map();
   }
 }

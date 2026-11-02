@@ -100,7 +100,8 @@ maybeDescribe('alert explainer (live Postgres)', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: answer, provider: 'anthropic', model: 'routine-model' });
 
     const first = await explainer.explainAdminAlert(row.id, { role: 'admin' });
-    expect(first).toEqual({ status: 200, body: { explainer: answer, customer: { id: jane, name: 'Jane Doe' } } });
+    const { version } = await NotificationService.getAdminNotificationForExplainer(row.id, { role: 'admin' });
+    expect(first).toEqual({ status: 200, body: { explainer: answer, customer: { id: jane, name: 'Jane Doe' }, version } });
     const second = await explainer.explainAdminAlert(row.id, { role: 'admin' });
     expect(second.body.explainer).toEqual(answer);
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);

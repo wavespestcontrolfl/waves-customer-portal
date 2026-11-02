@@ -817,7 +817,7 @@ describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_
     { id: 'w3', category: 'follow_up', title: 'Follow-ups overdue', body: 'Follow-up promises overdue…', detail: 'Full follow-up list',
       created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
   ]);
-  const setup = ({ list = rows(), explain = () => jsonResponse({ explainer: SUMMARY, customer: { id: CUSTOMER_ID, name: 'Jane Doe' } }) } = {}) => {
+  const setup = ({ list = rows(), explain = () => jsonResponse({ explainer: SUMMARY, customer: { id: CUSTOMER_ID, name: 'Jane Doe' }, version: 'a'.repeat(32) }) } = {}) => {
     global.fetch = vi.fn(async (url) => {
       if (String(url).includes('/unread-count')) return jsonResponse({ count: 3 });
       if (String(url).includes('/explain')) return explain();
@@ -913,7 +913,7 @@ describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_
         explain: () => {
           attempt += 1;
           if (attempt === 1) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
-          return jsonResponse({ explainer: { happened: 'The accepted pest control plan calls for…', steps: ['Tap the alert to open the record it is about.'], fixer: 'you', fallback: true }, customer: null });
+          return jsonResponse({ explainer: { happened: 'The accepted pest control plan calls for…', steps: ['Tap the alert to open the record it is about.'], fixer: 'you', fallback: true }, customer: null, version: 'a'.repeat(32) });
         },
       });
       render(<NotificationBell type="admin" />);
@@ -924,6 +924,19 @@ describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_
       expect(await screen.findByText(/this is the alert.s own text/)).toBeInTheDocument();
       expect(screen.getByText('Tap the alert to open the record it is about.')).toBeInTheDocument();
       expect(explainCalls()).toHaveLength(2);
+    });
+  });
+
+  it('a summary written for other text (the alert changed meanwhile) is never shown on this row; the list is read again', async () => {
+    await withWidth(1280, async () => {
+      setup({ explain: () => jsonResponse({ explainer: SUMMARY, customer: null, version: 'f'.repeat(32) }) });
+      render(<NotificationBell type="admin" />);
+      open();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'What to do' }))[0]);
+      expect(await screen.findByText('That alert changed \u2014 the list was refreshed.')).toBeInTheDocument();
+      expect(screen.queryByText(SUMMARY.happened)).toBeNull();
+      const listReads = global.fetch.mock.calls.filter(([url]) => /\/admin\/notifications\?limit=/.test(String(url)));
+      expect(listReads).toHaveLength(2);
     });
   });
 });
