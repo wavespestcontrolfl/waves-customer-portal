@@ -7320,10 +7320,25 @@ reservation of 3 minutes, idempotent per CallSid (a Twilio retry adds
 nothing). `/call-status` writes the final status under the same lock and
 settles only after that write commits, so a call whose final status is
 already on its row (the caller hung up during admission) is rejected and
-reserves nothing. The response is a short `<Say>` notice and
-`<Hangup/>`: no `<Dial>`, `<Record>`, `<Gather>` or relay, and nothing is
-sent to anyone. `/voice` rejects the number before any customer logic if
-its voice URL is ever pointed there. On `/call-status`, a call to the number
+reserves nothing. An admitted call gets `<Connect action="/api/webhooks/
+twilio/tech-voice-complete"><ConversationRelay>` with `dtmfDetection="true"`
+and a per-call minted token (the same `/ws/voice-agent` door), and the
+handler sets a Twilio `TimeLimit` of 180 s on the call (fail-soft; the
+socket for a `tech_voice` row is also capped at 3 minutes). No `<Dial>`,
+`<Record>` or `<Gather>`; the relay not attached ⇒ a spoken notice and
+`<Hangup/>`. On the socket, `relay-server.js` routes a `tech_voice` row
+(proven at the upgrade, never a frame label) to
+`services/voice-agent/tech-voice-conversation.js`, which re-proves the call
+(gate, row, unsettled reservation, assignable technician), takes a keypad
+PIN (`services/tech-voice-pin.js`: salted hash, 3 tries a call, a 15-minute
+lockout after 5 wrong in a row with one admin alert) and then answers fixed
+commands with no model, always in the technician's own scope: next stop,
+access notes, last treatment, the stop's codes (`listForVisit`, one
+`audit_log` row without the codes), the set-text reply, and a set text
+only after a read-back of the name, street and wording and a spoken "yes"
+(`tech-line-texts.js sendSetText`, so `GATE_TECH_SET_TEXTS` and every send
+check apply). Nothing from the call is kept. `/voice` rejects the number
+before any customer logic if its voice URL is ever pointed there. On `/call-status`, a call to the number
 settles its reservation once (a completed call keeps the ceiling of its
 duration in minutes, at least one; a call that never connected keeps zero;
 a call with no final callback keeps its 3), a call with no row (refused
@@ -7335,6 +7350,11 @@ repeat-caller bell, text-back, booking-link text, or "call since the text"
 for an unanswered reply). Gate off ⇒ every request rejected and nothing
 written. Any change to the number, caller or budget checks is security- and
 cost-critical).
+`/api/webhooks/twilio/tech-voice-complete` (POST; machine-to-machine TwiML
+webhook — the `<Connect>` action of a tech voice line call, Twilio's call
+when that relay session ends. Twilio-signature validated at the
+`/api/webhooks/twilio` mount. Payload: standard voice-webhook form fields,
+read for nothing. Always `<Hangup/>`: no transfer, no follow-on step).
 `/api/webhooks/twilio/relay-complete` (POST; machine-to-machine TwiML
 webhook — the `<Connect><ConversationRelay>` action Twilio calls when the
 AI receptionist's relay leg ends. Twilio-signature validated at the

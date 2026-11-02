@@ -70,6 +70,9 @@ jest.mock('../models/db', () => jest.fn((table) => {
 jest.mock('../services/collections/outbound-voice/collections-conversation', () => ({
   CollectionsConversation: jest.fn(() => ({ end: jest.fn(async () => {}) })),
 }));
+jest.mock('../services/voice-agent/tech-voice-conversation', () => ({
+  TechVoiceConversation: jest.fn(() => ({ end: jest.fn(async () => {}) })),
+}));
 
 const { EventEmitter } = require('events');
 const { attachVoiceRelay } = require('../services/voice-agent/relay-server');
@@ -399,6 +402,27 @@ describe('setup frame — bound to the authenticated CallSid', () => {
     });
   });
 
+  describe('tech voice line routing by upgrade-time source proof only', () => {
+    const { CollectionsConversation } = require('../services/collections/outbound-voice/collections-conversation');
+    const { TechVoiceConversation } = require('../services/voice-agent/tech-voice-conversation');
+
+    test('a tech voice call gets the tech session as the authenticated call, whatever label the frame carries', () => {
+      const { setup } = connect('CA-tech-1', { authenticatedTechVoiceCall: true });
+      setup({ callSid: 'CA-tech-1', from: '+19415550101', customParameters: { session_mode: 'collections' } });
+      expect(TechVoiceConversation).toHaveBeenCalledTimes(1);
+      expect(TechVoiceConversation.mock.calls[0][0].callSid).toBe('CA-tech-1');
+      expect(CollectionsConversation).not.toHaveBeenCalled();
+      expect(RelayConversation).not.toHaveBeenCalled();
+    });
+
+    test('no frame label opens the tech session without the proof', () => {
+      const { setup } = connect('CA-inbound-2');
+      setup({ callSid: 'CA-inbound-2', from: '+19415550101', customParameters: { session_mode: 'tech' } });
+      expect(TechVoiceConversation).not.toHaveBeenCalled();
+      expect(RelayConversation).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // The idle/max-session backstops are unref'd real timers armed per socket.
   // They must be CLEARED by close (not merely survive it), and when one does
   // fire it must never throw out of the timer callback — that is exactly how a
@@ -486,6 +510,17 @@ describe('ws upgrade — collections-source resolution', () => {
     const [req] = handleUpgrade.mock.calls[0];
     expect(req.authenticatedSandboxCall).toBe(true);
     expect(req.authenticatedCollectionsCall).toBe(false);
+  });
+
+  test('a tech_voice row stamps authenticatedTechVoiceCall and caps the session at the 3 reserved minutes', async () => {
+    mockCallLogRow = { source: 'tech_voice', created_at: new Date() };
+    const token = mintCallToken(CALL_SID, { secret: SECRET });
+    await upgrade(httpServer, `/ws/voice-agent?callSid=${CALL_SID}&t=${token}`);
+    const [req] = handleUpgrade.mock.calls[0];
+    expect(req.authenticatedTechVoiceCall).toBe(true);
+    expect(req.authenticatedSandboxCall).toBe(false);
+    expect(req.authenticatedCollectionsCall).toBe(false);
+    expect(req.authenticatedSessionBudgetMs).toBeLessThanOrEqual(3 * 60 * 1000);
   });
 
   test('an unreadable source REJECTS the upgrade (fail closed, same envelope as the burn)', async () => {

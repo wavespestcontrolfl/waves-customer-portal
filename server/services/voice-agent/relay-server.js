@@ -25,7 +25,7 @@
 const logger = require('../logger');
 const {
   RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone, verifyCallToken, CALL_TOKEN_TTL_MS,
-  VOICE_RELAY_SANDBOX_SOURCE,
+  VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE,
 } = require('./relay-protocol');
 
 // VOICE_RELAY_ENABLED check lives in relay-protocol (single source of truth,
@@ -50,6 +50,10 @@ const WS_MAX_SESSION_MS = 15 * 60 * 1000; // hard cap on a single call
 // The least a RESUMED socket gets of the call's remaining budget — enough for
 // the resumed greeting and one exchange, never a zero timer.
 const WS_RESUMED_MIN_SESSION_MS = 30 * 1000;
+// A call to the staff-only tech voice line gets 3 minutes: its whole minute
+// reservation (services/tech-voice-usage.js RESERVE_MINUTES) and the TimeLimit
+// /tech-voice sets on the call.
+const TECH_VOICE_SESSION_MS = 3 * 60 * 1000;
 
 /**
  * A reconnected call's socket budget: the hard cap minus what the call has
@@ -217,6 +221,7 @@ function attachVoiceRelay(httpServer) {
       // envelope); the read is idempotent so the ordering is safe.
       let collectionsCall = false;
       let sandboxCall = false;
+      let techVoiceCall = false;
       let sessionBudgetMs = WS_MAX_SESSION_MS;
       try {
         const db = require('../../models/db');
@@ -232,6 +237,11 @@ function attachVoiceRelay(httpServer) {
         // transcript / latency record IS the bake-off); the session that
         // answers them must write nothing else — see RelayConversation.sandbox.
         sandboxCall = Boolean(row && row.source === VOICE_RELAY_SANDBOX_SOURCE);
+        // A technician's call to the tech voice line (its row's source is
+        // written at admission, before Twilio answered): the tech session,
+        // never a customer one, whatever the setup frame says.
+        techVoiceCall = Boolean(row && row.source === TECH_VOICE_SOURCE);
+        if (techVoiceCall) sessionBudgetMs = Math.min(sessionBudgetMs, TECH_VOICE_SESSION_MS);
       } catch (e) {
         logger.warn(`[voice-relay] rejected ws upgrade: source resolution failed callSid=${callSid}: ${e.message}`);
         try { socket.destroy(); } catch { /* socket already gone */ }
@@ -245,6 +255,7 @@ function attachVoiceRelay(httpServer) {
       }
       req.authenticatedCollectionsCall = collectionsCall;
       req.authenticatedSandboxCall = sandboxCall;
+      req.authenticatedTechVoiceCall = techVoiceCall;
       req.authenticatedSessionBudgetMs = sessionBudgetMs;
       // ⭐ THE AUTHENTICATED CallSid RIDES WITH THE SOCKET. The token was
       // verified against THIS CallSid, and the setup frame that follows is
@@ -282,6 +293,8 @@ function attachVoiceRelay(httpServer) {
     const authenticatedCollectionsCall = Boolean(req && req.authenticatedCollectionsCall);
     // Same upgrade-time proof: a sandbox session runs its write tools dry.
     const authenticatedSandboxCall = Boolean(req && req.authenticatedSandboxCall);
+    // Same upgrade-time proof: a call to the staff-only tech voice line.
+    const authenticatedTechVoiceCall = Boolean(req && req.authenticatedTechVoiceCall);
     const relaySessionKey = (req && req.relaySessionKey) || null;
     const relaySessionGeneration = (req && req.relaySessionGeneration) || null;
 
@@ -390,6 +403,22 @@ function attachVoiceRelay(httpServer) {
             logger.warn('[voice-relay] setup frame CallSid does not match the authenticated upgrade — terminating');
             teardown('setup_callsid_mismatch');
             return;
+          }
+          // The tech voice line (GATE_TECH_VOICE_LINE): routed ONLY by the
+          // upgrade-time source proof, never by a frame label, and before the
+          // collections branch so no label can move it. TechVoiceConversation
+          // re-proves the call (row, reservation, technician) itself.
+          if (authenticatedTechVoiceCall) {
+            try {
+              const { TechVoiceConversation } = require('./tech-voice-conversation');
+              convo = new TechVoiceConversation({ callSid: authenticatedCallSid, send, endSession });
+            } catch (e) {
+              logger.error(`[voice-relay] tech voice session load failed — terminating: ${e.message}`);
+              teardown('tech_voice_session_load_failed');
+              return;
+            }
+            logger.info(`[voice-relay] tech voice session setup callSid=${convo.callSid}`);
+            break;
           }
           // Collections session mode (PR B): the outbound late-payment leg's
           // TwiML labels itself via a <Parameter>. The label is UNVERIFIED

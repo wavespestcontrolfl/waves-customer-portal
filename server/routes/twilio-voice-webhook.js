@@ -2244,10 +2244,39 @@ function refuseSandbox(req, res, why) {
 // answers, so every refused call is a <Reject> Twilio does not bill: gate off,
 // another number, an unknown caller, a CallSid another source owns, or a
 // spent minute budget. No press-1 screen, no office ring, no voicemail, no
-// recording. This first cut answers an admitted call with a short notice and
-// hangs up; the tech-mode conversation comes in its own PR. Any error rejects
-// (fail closed: an unchecked call is never answered).
+// recording. An admitted call is handed to the voice relay's tech session
+// (services/voice-agent/tech-voice-conversation.js: PIN, then fixed
+// commands; relay-server.js routes it by the call's tech_voice source), with
+// keypad detection on for the PIN and a Twilio time limit of 3 minutes, the
+// call's whole reservation. Any error rejects (fail closed: an unchecked call
+// is never answered).
 // =========================================================================
+const TECH_VOICE_COMPLETE_ACTION = '/api/webhooks/twilio/tech-voice-complete';
+const TECH_VOICE_TIME_LIMIT_S = 180;
+const TECH_VOICE_GREETING = 'Waves Tech. Enter your PIN, then press pound.';
+
+// Twilio's own stop: the call ends at its 3 reserved minutes even if the
+// relay session never closes. Fail-soft: the relay's own 3-minute session cap
+// (relay-server.js) still ends it.
+function capTechVoiceCall(callSid) {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return;
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  void client.calls(callSid).update({ timeLimit: TECH_VOICE_TIME_LIMIT_S })
+    .catch((err) => logger.warn(`[tech-voice] time limit not set for ${maskSid(callSid)} (${String(err?.code || err?.status || 'error')})`));
+}
+
+function techVoiceRelayXml({ callSid, req }) {
+  const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
+  return buildRelayTwiML({
+    // The host rule /relay-sandbox uses: the socket opens on THIS deploy.
+    wsUrl: `wss://${sandboxRelayHost(req)}${RELAY_WS_PATH}`,
+    callSid,
+    action: TECH_VOICE_COMPLETE_ACTION,
+    welcomeGreeting: TECH_VOICE_GREETING,
+    relayAttrs: { dtmfDetection: 'true' },
+  });
+}
+
 router.post('/tech-voice', async (req, res) => {
   const reject = () => {
     const twiml = new VoiceResponse();
@@ -2263,14 +2292,32 @@ router.post('/tech-voice', async (req, res) => {
       logger.info(`[tech-voice] rejected ${maskSid(CallSid)} (${admitted.reason})`);
       return reject();
     }
-    const twiml = new VoiceResponse();
-    twiml.say({ voice: SAY_VOICE }, 'The Waves tech line is not ready yet. Goodbye.');
-    twiml.hangup();
-    return res.type('text/xml').send(twiml.toString());
+    if (!require('../services/voice-agent/relay-server').isRelayAttached()) {
+      // Admitted but nothing can answer: say so and hang up. The call bills
+      // its first minute, settled from /call-status like any other.
+      logger.error(`[tech-voice] relay not attached — admitted call ${maskSid(CallSid)} gets the notice`);
+      const twiml = new VoiceResponse();
+      twiml.say({ voice: SAY_VOICE }, 'The Waves tech line is not available right now. Goodbye.');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+    const xml = techVoiceRelayXml({ callSid: CallSid, req });
+    capTechVoiceCall(CallSid);
+    return res.type('text/xml').send(xml);
   } catch (err) {
     logger.error(`[tech-voice] admission failed for ${maskSid(CallSid)} (${String(err?.code || err?.name || 'error')})`);
     return reject();
   }
+});
+
+// POST /api/webhooks/twilio/tech-voice-complete — the <Connect action> of a
+// tech voice line call: the relay session ended (the technician said goodbye,
+// a PIN step closed it, the 3-minute cap, or the socket dropped). Nothing
+// follows it: the call hangs up.
+router.post('/tech-voice-complete', (req, res) => {
+  const twiml = new VoiceResponse();
+  twiml.hangup();
+  res.type('text/xml').send(twiml.toString());
 });
 
 router.post('/relay-sandbox', async (req, res) => {
