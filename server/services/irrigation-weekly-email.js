@@ -226,6 +226,13 @@ async function loadSetupAskHistory({ customerId, weekEnding, conn = db }) {
 const MOWING_ASK = "When does your lawn get mowed? Mowing right before or right after a lawn treatment can undo it. Add your mowing days under Mowing in your portal, and we'll plan your lawn treatments around them.";
 const WEEKLY_TEMPLATES = [TEMPLATE_CUT_BACK, TEMPLATE_ADD_WATER, TEMPLATE_ON_TRACK, TEMPLATE_SETUP_SCHEDULE, TEMPLATE_SETUP_SYSTEM, TEMPLATE_RAIN_REPORT, TEMPLATE_CONFIRM_SCHEDULE, TEMPLATE_WEEK_PLAN];
 
+// The frozen answer's key: present only when the ask shows, so a decision
+// without the line (and any snapshot hash built from it) stays byte-identical.
+// Shared by the sweep's inputs and the plan's frozen decisionInputs.
+function mowingAskKey(mowingAsk) {
+  return mowingAsk === true ? { mowingAsk: true } : {};
+}
+
 function mowingAskVariables(on) {
   return on === true
     ? { mowing_ask: MOWING_ASK, mowing_ask_url: buildPortalUrl('/?tab=property') }
@@ -1007,7 +1014,7 @@ function decideWeeklyEmail({
         weekPlan: plan,
         restriction,
         // mowingAsk rides only when true, so a plan without the line hashes as before.
-        decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource, scheduleUnconfirmed, ...(mowingAsk === true ? { mowingAsk: true } : {}) },
+        decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource, scheduleUnconfirmed, ...mowingAskKey(mowingAsk) },
         payload: {
           ...payload,
           // The plan template renders these WITH their unit here (its rows
@@ -1422,7 +1429,7 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     // (and any snapshot hash built from it) stays byte-identical.
     ...(setupAskQuiet === true ? { setupAskQuiet: true } : {}),
     // Likewise only when the mowing ask shows: decided once per customer-week, then frozen.
-    ...(mowingAsk === true ? { mowingAsk: true } : {}),
+    ...mowingAskKey(mowingAsk),
     now,
   };
 }
