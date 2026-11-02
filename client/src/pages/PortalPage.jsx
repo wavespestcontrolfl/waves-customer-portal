@@ -17503,10 +17503,14 @@ export default function PortalPage() {
     && !showMenu && !showReportIssue && !showChat && !showMoreSheet && !showPhotoId;
   useEffect(() => {
     if (!appRatingQuiet || !isNativeApp()) return undefined;
+    // Cleanup runs the moment the screen stops being quiet, so a claim still
+    // in flight then never reaches the store.
+    let current = true;
+    const stillQuiet = () => current && document.visibilityState === 'visible';
     const timer = setTimeout(() => {
-      if (document.visibilityState === 'visible') void maybeAskForAppRating();
+      if (stillQuiet()) void maybeAskForAppRating({ stillQuiet });
     }, APP_RATING_ASK_DELAY_MS);
-    return () => clearTimeout(timer);
+    return () => { current = false; clearTimeout(timer); };
   }, [appRatingQuiet]);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount && !contactSession;
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a

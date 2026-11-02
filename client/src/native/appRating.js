@@ -34,7 +34,11 @@ function claimDue(today) {
   }
 }
 
-export async function maybeAskForAppRating(now = new Date()) {
+// stillQuiet: the caller's check that the screen still allows the card (same
+// tab, no sheet, unlocked, visible). It runs again after the server answers,
+// right before the store is asked, so a sheet opened during the round trip
+// is never covered; that claim is then spent until the next 120-day window.
+export async function maybeAskForAppRating({ now = new Date(), stillQuiet = () => true } = {}) {
   const platform = isNativeApp() ? nativePlatform() : 'web';
   if (platform !== 'ios' && platform !== 'android') return false;
   if (!Capacitor.isPluginAvailable('InAppReview')) return false;
@@ -48,6 +52,7 @@ export async function maybeAskForAppRating(now = new Date()) {
     // Keep the module wrapper: the Capacitor proxy has a callable `then`
     // (nativePush.js), so never resolve a promise with the plugin itself.
     const plugin = await import('@capacitor-community/in-app-review');
+    if (!stillQuiet()) return false;
     await plugin.InAppReview.requestReview();
     return true;
   } catch {
