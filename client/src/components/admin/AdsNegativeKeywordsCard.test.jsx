@@ -180,6 +180,28 @@ describe('AdsNegativeKeywordsCard', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add “free”' })).not.toBeDisabled());
   });
 
+  it('an older reload that answers last never overwrites a newer one', async () => {
+    const reads = [];
+    route({
+      'GET /admin/ads/negatives': () => new Promise((resolve) => { reads.push(resolve); }),
+      [`POST /admin/ads/negatives/${ID_A}/decide`]: () => json({ state: 'active', message: 'Blocked "free" in Google Ads.' }),
+      [`POST /admin/ads/negatives/${ID_B}/decide`]: () => json({ state: 'declined', message: 'Declined "diy".' }),
+    });
+    renderCard();
+    await waitFor(() => expect(reads).toHaveLength(1));
+    reads[0](json(payload()));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add “free”' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Decline “diy”' }));
+    await waitFor(() => expect(reads).toHaveLength(3));
+    // The newest read (both words settled) answers first, then the older read (both still waiting) answers.
+    reads[2](json(payload({ pending: [] })));
+    await waitFor(() => expect(screen.getByText('Nothing is waiting.')).toBeInTheDocument());
+    reads[1](json(payload()));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByText('Nothing is waiting.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add “free”' })).toBeNull();
+  });
+
   it('shows the word list states and removes a word', async () => {
     let loads = 0;
     route({

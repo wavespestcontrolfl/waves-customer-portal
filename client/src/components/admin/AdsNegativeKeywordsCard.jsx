@@ -158,8 +158,13 @@ function NegativeKeywordsCard({ highlightId }) {
   const itemRefs = useRef({});
   const scrolledFor = useRef(null);
 
+  // Reads can overlap (two words decided at once each reload the card) and answer out of order: only the newest
+  // read may set the card, so an older answer never brings back a word another action already settled.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const res = await request("");
+    if (seq !== loadSeq.current) return;
     if (res.status === 404) {
       setPhase("off");
       return;
