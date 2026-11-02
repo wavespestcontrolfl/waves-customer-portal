@@ -11,6 +11,9 @@ jest.mock('../services/referral-inbound-bell', () => ({
 jest.mock('../services/bid-desk/alert-buttons', () => ({
   buttonHandler: { live: jest.fn(() => true), run: jest.fn(), visibleItems: jest.fn() },
 }));
+jest.mock('../services/alert-call-button', () => ({
+  buttonHandler: { live: jest.fn(() => true), run: jest.fn() },
+}));
 jest.mock('../config/feature-gates', () => ({ alertCloseButtonsLive: jest.fn(() => true) }));
 jest.mock('../services/sms-operational-actions', () => ({ settleCommitmentsForDoneAlert: jest.fn(async () => 1) }));
 
@@ -154,6 +157,17 @@ describe('runAlertButton: one tap', () => {
     await expect(tap()).resolves.toEqual({ status: 409, body: { error: 'answered', message: 'This referral was already answered.' } });
     expect(NotificationService.markAdminDone).toHaveBeenCalledWith([ID], { by: 'alert-button', resolution: 'Referrer confirmed' });
     expect(tapOf().outcome).toBe('answered');
+  });
+
+  test('a step that leaves the row open (Call) answers open, records the tap as started, and never closes the row', async () => {
+    const callHandler = require('../services/alert-call-button').buttonHandler;
+    const CALL = { kind: 'call_back', items: [{ id: 'call', label: 'Call', prompt: 'Waves rings your phone first, then you press 1 to connect.', args: { callLogId: 'cl-1' } }] };
+    mockRow = row({ metadata: { buttons: CALL } });
+    callHandler.run.mockResolvedValue({ ok: true, keepOpen: true, message: 'Calling your phone now. Press 1 to connect.' });
+    await expect(tap({ actionId: 'call' })).resolves.toEqual({ status: 200, body: { success: true, message: 'Calling your phone now. Press 1 to connect.', open: true } });
+    expect(callHandler.run).toHaveBeenCalledWith({ row: mockRow, item: CALL.items[0], technicianId: 't-1', claimedVersion: mockClaimedVersion });
+    expect(tapOf()).toMatchObject({ action: 'call', by: 't-1', outcome: 'started' });
+    expect(NotificationService.markAdminDone).not.toHaveBeenCalled();
   });
 
   test('a refusal that leaves the record open keeps the row open', async () => {

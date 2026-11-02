@@ -280,16 +280,16 @@ describe('MobileDispatchList open hours', () => {
     expect(screen.getByText('· 10 open hrs', { exact: false })).toBeInTheDocument();
     const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
     expect(rows.map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Book open hour 7–8 AM',
-      'Book open hour 9–10 AM',
-      'Book open hour 11 AM–12 PM',
-      'Book open hour 12–1 PM',
-      'Book open hour 1–2 PM',
-      'Book open hour 2–3 PM',
-      'Book open hour 3–4 PM',
-      'Book open hour 4–5 PM',
-      'Book open hour 5–6 PM',
-      'Book open hour 6–7 PM',
+      'Book open hour 7:00–8:00 AM',
+      'Book open hour 9:00–10:00 AM',
+      'Book open hour 11:00 AM–12:00 PM',
+      'Book open hour 12:00–1:00 PM',
+      'Book open hour 1:00–2:00 PM',
+      'Book open hour 2:00–3:00 PM',
+      'Book open hour 3:00–4:00 PM',
+      'Book open hour 4:00–5:00 PM',
+      'Book open hour 5:00–6:00 PM',
+      'Book open hour 6:00–7:00 PM',
     ]);
     // The 9 AM block sits between the 8 AM and 10 AM visits.
     const nineAm = rows[1];
@@ -314,7 +314,7 @@ describe('MobileDispatchList week open hours', () => {
         startDate: '2026-07-13',
         days: [
           { date: '2026-07-14', services: [], outTechIds: ['tech-1'], rainChance: 55 },
-          { date: '2026-07-15', services: [], outTechIds: [] },
+          { date: '2026-07-15', services: [], outTechIds: [], rainChance: 20 },
         ],
       }),
     });
@@ -327,9 +327,11 @@ describe('MobileDispatchList week open hours', () => {
       />,
     );
     await waitFor(() => expect(screen.getAllByRole('button', { name: /^Book open hour/ })).toHaveLength(12));
-    // Week sections keep their day label and that day's rain chip.
+    // Week sections keep their day label and that day's rain chip, on every
+    // day with a forecast (owner 2026-11-02).
     expect(screen.getByText('Tomorrow')).toBeInTheDocument();
     expect(screen.getByText('55% rain')).toHaveClass('text-alert-fg');
+    expect(screen.getByText('20% rain')).not.toHaveClass('text-alert-fg');
     vi.useRealTimers();
   });
 });
@@ -349,14 +351,14 @@ describe('MobileDispatchList open hours with two techs', () => {
       />,
     );
     vi.useRealTimers();
-    const nine = screen.getByRole('button', { name: 'Book open hour 9–10 AM' });
+    const nine = screen.getByRole('button', { name: 'Book open hour 9:00–10:00 AM' });
     // Two techs work the day: the block names who is free.
     expect(nine).toHaveAttribute('title', 'Free: B Tech');
     expect(nine).toHaveTextContent('BT');
-    expect(screen.getByRole('button', { name: 'Book open hour 10–11 AM' })).toHaveAttribute('title', 'Free: A Tech, B Tech');
+    expect(screen.getByRole('button', { name: 'Book open hour 10:00–11:00 AM' })).toHaveAttribute('title', 'Free: A Tech, B Tech');
     fireEvent.click(nine);
     expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ windowStart: '09:00', techId: 'tech-b' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 10–11 AM' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 10:00–11:00 AM' }));
     expect(onCreateSlot).toHaveBeenLastCalledWith(expect.objectContaining({ windowStart: '10:00', techId: undefined }));
   });
 });
@@ -387,7 +389,7 @@ describe('MobileDispatchList drive legs', () => {
     expect(screen.getByText(/~1h 15m driving/)).toBeInTheDocument();
   });
 
-  it('counts the day as done / left and shows rain at a stop from 40%, red from 50%', () => {
+  it('counts the day as done / left and shows rain at every stop: plain, bold from 40%, red from 50%', () => {
     render(
       <MobileDispatchList
         mode="day"
@@ -403,9 +405,15 @@ describe('MobileDispatchList drive legs', () => {
     );
     expect(screen.getByText(/1 done · 2 left/)).toBeInTheDocument();
     expect(screen.queryByText(/Today|Tomorrow|July/)).toBeNull();
-    expect(screen.queryByText(/20% rain/)).toBeNull();
+    // Owner 2026-11-02: the chance shows on every stop, under 40% too, and
+    // each window keeps its minutes.
+    const low = screen.getByText('· 20% rain', { exact: false });
+    expect(low).not.toHaveClass('font-bold');
+    expect(low.parentElement).toHaveTextContent(/^8:00–9:00 AM · 20% rain$/);
+    expect(screen.getByText('· 45% rain', { exact: false })).toHaveClass('font-bold');
     expect(screen.getByText('· 45% rain', { exact: false })).not.toHaveClass('text-alert-fg');
     expect(screen.getByText('· 60% rain', { exact: false })).toHaveClass('text-alert-fg');
+    expect(screen.getByText('1:00–2:00 PM', { exact: false })).toBeInTheDocument();
   });
 
   it('hides the day total when a leg could not be measured', () => {
@@ -436,7 +444,7 @@ describe('MobileDispatchList drive legs', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    const line = screen.getByText('23 min drive from Sample One · 2h 36m past the 4–6 PM window');
+    const line = screen.getByText('23 min drive from Sample One · 2h 36m past the 4:00–6:00 PM window');
     expect(line.parentElement.className).toContain('text-alert-fg');
   });
 
@@ -454,7 +462,7 @@ describe('MobileDispatchList drive legs', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText('45 min drive from Sample One · 15 min past the 1–3 PM window')).toBeInTheDocument();
+    expect(screen.getByText('45 min drive from Sample One · 15 min past the 1:00–3:00 PM window')).toBeInTheDocument();
     expect(screen.getByText('20 min drive from Sample Split · 1h past the arrival window')).toBeInTheDocument();
   });
 

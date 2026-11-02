@@ -247,7 +247,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null, terminalHoldPass = false } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -444,8 +444,12 @@ class AutonomousRunner {
     // claimNext() re-serves it when the window reopens and it publishes
     // autonomously then. The step-7 guard remains as the race backstop.
     // Shadow runs are exempt: they exist to exercise drafting and never
-    // publish, so the cap doesn't constrain them.
-    const capDeferral = run.shadow_mode ? null : await this._capDeferralFor(run.action_type);
+    // publish, so the cap doesn't constrain them. So is the batch's pass over
+    // rows whose terminal hold is pushed (terminalHoldPass): a hold publishes
+    // nothing, and deferring it to the next cap window would keep the row on
+    // the list while the caps stay full. Should the file have become a draft
+    // since the listing, the step-7 guard still holds the cap.
+    const capDeferral = run.shadow_mode || terminalHoldPass ? null : await this._capDeferralFor(run.action_type);
     if (capDeferral) {
       const finalized = await finalize(run, t0, {
         outcome: 'deferred_publish_cap',
@@ -755,6 +759,8 @@ class AutonomousRunner {
       await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
       return finalized;
     }
+    // The terminal held the row: it cannot be written as briefed (owner 2026-11-02, "A").
+    if (dispatchResult.held) return this._parkHeldTerminalRow({ queue, opp, run, t0, claimToken, dispatchResult });
     // A terminal draft's branch commit, for the cleanup after this run is
     // stored (settleTerminalWork); undefined for an agent draft. In-memory
     // only, like citability_backfill_brief (finalize persists named columns).
@@ -1716,10 +1722,10 @@ class AutonomousRunner {
       return { outcome: 'skipped_blog_already_started', skipped: true, reason: 'blog_already_started', count: 0, runs: [] };
     }
     if (!(await this._queueHasClaimable())) {
-      // The morning batch may have died BEFORE its own drought SMS went out
+      // The morning batch may have died BEFORE its own drought alert
       // (the 06-12 zero-alert shape, Codex r2) — re-trigger the alert rather
-      // than stay silent; the sms_log day-dedupe inside _sendBlogDroughtSms
-      // keeps it to one text per ET day no matter how many passes run.
+      // than stay silent; the ET-day dedupe key inside _sendBlogDroughtSms
+      // keeps it to one row per ET day no matter how many passes run.
       // (_reportBlogDrought: not while a blog waits for its terminal draft —
       // a blog deferred this morning is not claimable yet at 1pm.)
       await this._reportBlogDrought([]);
@@ -1951,19 +1957,23 @@ class AutonomousRunner {
 
   // The rows whose terminal draft is pushed and usable, best score first
   // (terminal-writer awaitingTerminalDrafts `written`; a row whose brief is
-  // past its age limit is not listed, it is briefed again). With an
-  // actionType (a scoped pass), only that lane's rows: the run that waited
-  // for the draft carries the lane its claim was fenced to. Gate off, kill
-  // switch off or any read failure: none (the batch claims by score as before).
-  async _writtenTerminalDraftIds(actionType = null) {
+  // past its age limit is not listed, it is briefed again), and the rows
+  // whose terminal hold is pushed (`held`, owner 2026-11-02), each list on
+  // its own. With an actionType (a scoped pass), only that lane's rows: the
+  // run that waited for the draft carries the lane its claim was fenced to.
+  // Gate off, kill switch off or any read failure: none (the batch claims by
+  // score as before).
+  async _terminalFirstIds(actionType = null) {
+    const none = { written: [], held: [] };
     const terminalWriter = require('./terminal-writer');
-    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return [];
+    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return none;
     try {
-      const { written } = await terminalWriter.awaitingTerminalDrafts();
-      return written.filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
+      const listing = await terminalWriter.awaitingTerminalDrafts();
+      const ids = (rows) => (rows || []).filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
+      return { written: ids(listing.written), held: ids(listing.held) };
     } catch (err) {
       logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
-      return [];
+      return none;
     }
   }
 
@@ -2039,10 +2049,13 @@ class AutonomousRunner {
     // carry the blog lane, so a non-blog draft id among them matches nothing
     // and the slot returns. No written draft = the batch as before.
     // Kill: AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false.
-    let draftIds = await this._writtenTerminalDraftIds(actionType);
+    // Then the rows whose terminal hold is pushed (owner 2026-11-02), in a
+    // pass of their own so a hold never outranks a written draft; a run that
+    // parks a held row gives its slot back (nothing is written or published).
+    const terminalFirst = await this._terminalFirstIds(actionType);
     for (let i = 0; i < slotBudget; i += 1) {
-      const drafts = draftIds.length > 0;
-      const reserve = !drafts && reservedLeft > 0 && !scopedActionType;
+      const scope = terminalFirstScope(terminalFirst);
+      const reserve = !scope && reservedLeft > 0 && !scopedActionType;
       if (reserve) reservedLeft -= 1;
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
@@ -2050,18 +2063,17 @@ class AutonomousRunner {
       const run = await this.runNext({
         excludeIds: [...failedOppIds],
         ...(scopedActionType ? { actionType: scopedActionType } : {}),
-        ...(drafts ? { onlyIds: [...draftIds] } : {}),
+        ...terminalScopeArgs(scope),
         ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),
       });
-      if (drafts) {
+      if (scope) {
         // None of them is claimable now (deferred, held by a claim rule):
         // the slot returns to the general pool, as an empty reserved slot does.
+        takeFromTerminalScope(terminalFirst, scope, run);
         if (run.outcome === 'skipped_no_opportunity') {
-          draftIds = [];
           i -= 1;
           continue;
         }
-        draftIds = draftIds.filter((id) => id !== run.opportunity_id);
       }
       if (reserve && run.outcome === 'skipped_no_opportunity') {
         // Claimed away since the peek: the slot returns to the general pool.
@@ -2072,6 +2084,12 @@ class AutonomousRunner {
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
+      if (run.outcome === require('./terminal-writer').HOLD_OUTCOME) {
+        // A hold parked its row: no draft, no publish, so no slot used.
+        i -= 1;
+        streakLanes.length = 0;
+        continue;
+      }
       if (run.action_type === 'new_supporting_blog') blogAttempted = true;
       if (!String(run.outcome).startsWith('failed')) {
         streakLanes.length = 0;
@@ -2115,11 +2133,13 @@ class AutonomousRunner {
   }
 
   /**
-   * After the daily batch, text the operator a one-line summary so an
-   * unattended auto-publishing engine isn't a black box. Opt-in via
-   * AUTONOMOUS_CONTENT_DIGEST_SMS=true; routed as an internal_alert so it
-   * respects the OWNER_SMS_DISABLED kill switch. Stays silent on a
-   * nothing-happened day (all skipped_no_opportunity) to avoid noise.
+   * After the daily batch, a one-line summary for the owner so an
+   * unattended auto-publishing engine isn't a black box: a quiet owner alert
+   * (services/owner-alerts.js; Activity only), one row per ET day. It was a
+   * text to the owner's phone that reached nobody since about 2026-09-01.
+   * Opt-in via AUTONOMOUS_CONTENT_DIGEST_SMS=true (the name predates the
+   * move). Stays silent on a nothing-happened day (all
+   * skipped_no_opportunity) to avoid noise.
    */
   async _sendDailyDigestSms(runs) {
     if (!envBool('AUTONOMOUS_CONTENT_DIGEST_SMS', false)) return;
@@ -2150,29 +2170,27 @@ class AutonomousRunner {
     if (liveUrls.length) parts.push(`Live: ${liveUrls.slice(0, 2).join(' ')}`);
     const body = parts.join(' ');
 
-    const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    // notificationTitle: without it the redirect-to-bell uses the whole body
-    // as the title, which truncates uselessly in phone banners (owner ruling
-    // 2026-07-30 — titles must identify the alert immediately).
-    await twilio.sendSMS(ownerPhone, body, {
-      messageType: 'internal_alert',
+    await require('../owner-alerts').recordOwnerAlert('content-daily-digest', {
+      action: 'read the content engine daily summary',
+      why: `${published} published, ${review} to review, ${gated} gated and ${failed} failed today.`,
       link: '/admin/seo',
-      notificationTitle: `Content engine: ${published} published, ${review} to review`,
-      notificationBody: body,
+      subject: { type: 'check', id: 'content-daily-digest' },
+      text: body,
+      dedupeKey: `owner-alert:content-daily-digest:${etDateString()}`,
     });
-    logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
+    logger.info(`[autonomous-runner] daily digest recorded: ${body}`);
   }
 
   /**
    * The operator's target is a blog post EVERY day, but the engine's
    * designed response to thin demand is silence (skipped_no_opportunity
    * days send no digest) — which is how a 9-day supply drought went
-   * unnoticed in June 2026. This texts the moment a daily batch ends with
-   * no blog post started, with the dominant reason, so a quiet day is a
-   * deliberate signal instead of dead air. Default ON (it exists to catch
-   * silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false. Routed as
-   * internal_alert so OWNER_SMS_DISABLED still silences everything.
+   * unnoticed in June 2026. This alerts the owner the moment a daily batch
+   * ends with no blog post started, with the dominant reason, so a quiet day
+   * is a deliberate signal instead of dead air: a quiet owner alert
+   * (services/owner-alerts.js; Activity only). It was a text to the owner's
+   * phone that reached nobody since about 2026-09-01. Default ON (it exists
+   * to catch silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false.
    */
   /**
    * The blog drought alert, for the batch and for the catch-up. Terminal
@@ -2184,7 +2202,7 @@ class AutonomousRunner {
     if (await require('./terminal-writer').blogDraftRequested()) return;
     // the caller's own arguments, unchanged
     await this._sendBlogDroughtSms(...args).catch((err) => {
-      logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
+      logger.warn(`[autonomous-runner] blog drought alert failed: ${err.message}`);
     });
   }
 
@@ -2199,37 +2217,9 @@ class AutonomousRunner {
     if (blogStarted) return;
 
     // Day-dedupe (Codex r2+r3): the 1pm catch-up re-triggers this alert when
-    // the morning batch died before ITS send, so without a persisted marker
-    // every drought day double-alerts. internal_alert sends never reach
-    // Twilio or sms_log — TwilioService.sendSMS redirects them to the in-app
-    // admin notification system (redirectInternalAdminSmsToNotification),
-    // whose bell entry persists in `notifications` with recipient_type
-    // 'admin' and title = the first line of the SMS body. THAT row is the
-    // marker: max one drought alert per ET day across the 9am batch, the
-    // 1pm catch-up, and any manual run. Push-only delivery (bell pref off)
-    // leaves no row and lookup errors throw — both fail OPEN, the right
-    // direction for an alert that exists to catch silence.
-    try {
-      // Both titles: the bell now persists the short notificationTitle
-      // ('Content engine: NO blog post today'); the old full-body title is
-      // kept in the match so the transition day still dedupes against a
-      // pre-deploy morning row.
-      const dup = await db('notifications')
-        .where('recipient_type', 'admin')
-        .where('created_at', '>=', startOfEtDay())
-        .where(function droughtTitle() {
-          this.orWhere('title', 'like', 'Content engine: NO blog post today%')
-            .orWhere('title', 'like', 'Waves content engine: NO blog post today%');
-        })
-        .first('id');
-      if (dup) {
-        logger.info('[autonomous-runner] blog drought alert already delivered today; skipping duplicate');
-        return;
-      }
-    } catch (err) {
-      logger.warn(`[autonomous-runner] drought alert dedupe lookup failed (${err.message}); sending anyway`);
-    }
-
+    // the morning batch died before its own alert. The dedupe key is the ET
+    // day, so the 9am batch, the 1pm catch-up and any manual run hold ONE
+    // row; a later run that reaches it rewrites the row with its own reason.
     const blogAttempts = real.filter((r) => r.action_type === 'new_supporting_blog');
     // haltBeforeBlog is _runDailyInner's explicit record that the batch
     // halted on the consecutive-failure cap before reaching a blog — say so,
@@ -2258,16 +2248,15 @@ class AutonomousRunner {
       .map((r) => r.reviewer_notes)
       .find((n) => typeof n === 'string' && n.trim());
     const body = `Waves content engine: NO blog post today — ${why}.${gateDetail ? ` Detail: ${gateDetail.trim().slice(0, 160)}` : ''}`;
-    const twilio = require('../twilio');
-    const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    // Short notificationTitle: banner-truncation ruling, see daily digest.
-    await twilio.sendSMS(ownerPhone, body, {
-      messageType: 'internal_alert',
+    await require('../owner-alerts').recordOwnerAlert('content-drought', {
+      action: 'see why no blog post started today',
+      why: 'The daily content batch ended without starting a blog post.',
       link: '/admin/seo',
-      notificationTitle: 'Content engine: NO blog post today',
-      notificationBody: body,
+      subject: { type: 'check', id: 'content-drought' },
+      text: body,
+      dedupeKey: `owner-alert:content-drought:${etDateString()}`,
     });
-    logger.info(`[autonomous-runner] blog drought SMS sent: ${body}`);
+    logger.info(`[autonomous-runner] blog drought alert recorded: ${body}`);
   }
 
   // ── internals ────────────────────────────────────────────────────
@@ -2350,6 +2339,30 @@ class AutonomousRunner {
   async _completeClaimOrThrow(queue, opportunityId, payload) {
     const ok = await queue.complete(opportunityId, payload);
     if (!ok) throw new Error('queue_complete_failed_or_stale_claim');
+  }
+
+  /**
+   * A terminal hold (owner 2026-11-02, "A": a live post already covers the
+   * topic, a site rule bars it, the brief cannot pass the portal's own checks,
+   * or it needs the owner). Not a failure: record why (the hold rides the run
+   * as its draft_payload) and keep the row out of the queue for HOLD_MS (the
+   * defer refunds the attempt; the next claim after that composes a new brief,
+   * since this run is not one that waits). The batch end asks the owner a
+   * needs_owner hold's question from the stored run and deletes the branch,
+   * like a taken draft's (settleTerminalWork).
+   */
+  async _parkHeldTerminalRow({ queue, opp, run, t0, claimToken, dispatchResult }) {
+    const terminalWriter = require('./terminal-writer');
+    const { hold } = dispatchResult;
+    run.terminal_draft_revision = dispatchResult.revision;
+    run.draft_payload = { hold };
+    const finalized = await finalize(run, t0, {
+      outcome: terminalWriter.HOLD_OUTCOME,
+      skip_reason: terminalWriter.holdSkipReason(hold.reason),
+      reviewer_notes: hold.question ? `${hold.detail} | Question for the owner: ${hold.question}` : hold.detail,
+    });
+    await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.HOLD_MS), { claimToken });
+    return finalized;
   }
 
   async _skipClaimOrThrow(queue, opportunityId, reason, payload) {
@@ -2683,20 +2696,25 @@ class AutonomousRunner {
 
   /**
    * Surface a hard engine error (a thrown guard, not a by-design skip) to the
-   * operator. Opt-in via AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT=true; routed as
-   * an internal_alert so it respects the OWNER_SMS_DISABLED kill switch. Best
-   * effort — never let an alert failure affect the run.
+   * owner: a quiet owner alert (services/owner-alerts.js; Activity and the
+   * needs-me list), one row per error code per ET day. It was a text to the
+   * owner's phone that reached nobody since about 2026-09-01. Opt-in via
+   * AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT=true. Best effort — never let an
+   * alert failure affect the run.
    */
   async _alertEngineError(code, message) {
     if (!envBool('AUTONOMOUS_CONTENT_ENGINE_ERROR_ALERT', false)) return;
     try {
-      const twilio = require('../twilio');
-      const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-      await twilio.sendSMS(ownerPhone, `Waves content engine error [${code}]: ${message}`, {
-        messageType: 'internal_alert',
+      await require('../owner-alerts').recordOwnerAlert('content-engine-error', {
+        action: 'check a content engine error',
+        why: 'The content engine stopped on an error, not on a planned skip.',
         link: '/admin/seo',
+        subject: { type: 'check', id: 'content-engine-error' },
+        text: `Waves content engine error [${code}]: ${message}`,
+        dedupeKey: `owner-alert:content-engine-error:${code}:${etDateString()}`,
+        itemKeys: [String(code)],
       });
-      logger.info(`[autonomous-runner] engine-error alert sent: ${code}`);
+      logger.info(`[autonomous-runner] engine-error alert recorded: ${code}`);
     } catch (err) {
       logger.warn(`[autonomous-runner] engine-error alert failed: ${err.message}`);
     }
@@ -4521,9 +4539,11 @@ class AutonomousRunner {
   /**
    * Terminal writer, after one or more runs are stored — the daily batch, the
    * admin Run now button and the --live script all end here: delete the
-   * branch of each draft a run took, then bring the admin item up to date
-   * (gate on: the rows that wait; gate off: close what is open). Its own
-   * failure never fails the caller.
+   * branch of each draft or hold a run took, then bring the admin item up to
+   * date (gate on: the rows that wait; gate off: close what is open), then
+   * bring the owner questions of needs_owner holds up to date (raise each
+   * one missing, close each one answered). Its own failure never fails the
+   * caller.
    */
   async settleTerminalWork(runs) {
     const terminalWriter = require('./terminal-writer');
@@ -4532,6 +4552,13 @@ class AutonomousRunner {
       await (terminalWriter.terminalWriterLive() ? terminalWriter.raiseTerminalDue() : terminalWriter.closeTerminalItems());
     } catch (err) {
       logger.warn(`[autonomous-runner] terminal writer follow-up failed: ${err.message}`);
+    }
+    // The owner questions read the database only: a GitHub failure while the
+    // item above lists the drafts must not keep a parked row's question unasked.
+    try {
+      await terminalWriter.syncHoldQuestions();
+    } catch (err) {
+      logger.warn(`[autonomous-runner] terminal hold questions were not brought up to date: ${err.message}`);
     }
   }
 
@@ -5274,6 +5301,27 @@ function isDeterministicPublishError(err) {
     /^autonomous draft canonical points off-site /,
     /^autonomous draft canonical must match slug /,
   ].some((pattern) => pattern.test(message));
+}
+
+// The claim scope for the next batch slot (_terminalFirstIds lists): the
+// written drafts first, then the held rows, then none (score order).
+function terminalFirstScope(lists) {
+  if (lists.written.length) return { kind: 'written', ids: lists.written };
+  if (lists.held.length) return { kind: 'held', ids: lists.held };
+  return null;
+}
+
+// The claim args for a scope: its ids, and for the held rows the pass flag
+// (runNext skips the pre-draft cap check: a hold publishes nothing).
+function terminalScopeArgs(scope) {
+  if (!scope) return {};
+  return scope.kind === 'held' ? { onlyIds: [...scope.ids], terminalHoldPass: true } : { onlyIds: [...scope.ids] };
+}
+
+// After a scoped claim: drop the row it took, or the whole list when none of
+// its rows was claimable.
+function takeFromTerminalScope(lists, scope, run) {
+  lists[scope.kind] = run.outcome === 'skipped_no_opportunity' ? [] : scope.ids.filter((id) => id !== run.opportunity_id);
 }
 
 function envBool(key, defaultValue = false) {

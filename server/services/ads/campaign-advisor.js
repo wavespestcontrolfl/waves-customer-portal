@@ -5,6 +5,9 @@ const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { dispatchWithFallback } = require('../llm/call');
+const {
+  SERVICE_WORDS, CITIES, PROTECTED_BRAND_TERMS, COMPETITOR_NAMES, normalizeNegative, protectedReason, competitorName,
+} = require('./negative-keywords');
 
 // The SDK path ran on its 10-minute default request timeout; keep that as the
 // shared two-leg ceiling.
@@ -16,6 +19,14 @@ const ADVISOR_MAX_TOKENS = 16000;
 // Search terms with spend, passed to the model so waste detection is complete
 // (bounded: the query below also caps the rows it reads).
 const ADVISOR_MAX_SEARCH_TERMS = 100;
+// Handled negatives listed in the prompt, and excluded terms shown beside the
+// candidates (both disclosed when cut).
+const ADVISOR_MAX_HANDLED_NEGATIVES = 300;
+const ADVISOR_MAX_EXCLUDED_TERMS = 20;
+// States that mean "already handled" and are listed to the model. 'failed'
+// rows count for duplicate checks but are not memory the model needs.
+const HANDLED_NEGATIVE_STATES = new Set(['pending', 'active', 'declined', 'removed']);
+const EXCLUDED_STATUSES = new Set(['excluded', 'added_excluded']);
 
 
 let SearchConsole;
@@ -204,6 +215,9 @@ function budgetChangesSection(budgetLog) {
   return JSON.stringify(rows) + note;
 }
 
+const isExcludedTerm = (t) => EXCLUDED_STATUSES.has(String(t.status || '').toLowerCase());
+const excludedKey = (campaignId, text) => `${campaignId}|${text}`;
+
 function searchTermsSection(searchTerms, available = true) {
   // No row refreshed within the freshness window means the sync is down or
   // unconfigured: say the data is missing so an outage never reads as zero spend.
@@ -211,14 +225,43 @@ function searchTermsSection(searchTerms, available = true) {
     return `(UNAVAILABLE: no complete search-term sync in the last ${ADVISOR_SEARCH_TERM_FRESH_MS / 3600000} hours. Search-term data is missing, not zero; draw no conclusions about search-term waste.)`;
   }
   const spent = searchTerms.filter((t) => Number(t.cost) > 0);
-  const rows = JSON.stringify(spent.slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
-    term: t.search_term, clicks: t.clicks, spend: Number(t.cost),
+  // A term Google already excludes is not a candidate: it is listed apart,
+  // marked as already excluded, so it is never proposed again.
+  const candidates = spent.filter((t) => !isExcludedTerm(t));
+  const excluded = spent.filter(isExcludedTerm);
+  const row = (t) => ({
+    term: t.search_term, campaign_id: t.campaign_id, status: t.status || null,
+    clicks: t.clicks, spend: Number(t.cost),
     conversions: Number(t.conversions), convValue: Number(t.conversion_value), roas: Number(t.roas),
-  })), null, 2);
+  });
+  const rows = JSON.stringify(candidates.slice(0, ADVISOR_MAX_SEARCH_TERMS).map(row), null, 2);
   // The query reads one row past the cap so a truncated list is disclosed
   // rather than presented as every term that cost money.
-  return spent.length > ADVISOR_MAX_SEARCH_TERMS
+  let out = spent.length > ADVISOR_MAX_SEARCH_TERMS
     ? `${rows}\n(TRUNCATED: only the ${ADVISOR_MAX_SEARCH_TERMS} highest-spend terms are listed; more terms had spend. Do not conclude there is no other waste.)`
+    : rows;
+  if (excluded.length > 0) {
+    out += `\n\nALREADY EXCLUDED IN GOOGLE (status excluded; NOT candidates, never recommend a negative for these):\n${JSON.stringify(excluded.slice(0, ADVISOR_MAX_EXCLUDED_TERMS).map(row))}`;
+  }
+  return out;
+}
+
+// The advisor's memory of negative keywords. Every state is read (a failed row
+// still blocks a repeat); only the handled states are shown to the model.
+// A failed read is reported, not hidden: with no memory the advisor may not
+// recommend a negative that would run.
+function negativeKeywordsSection(negatives, campaignSummaries = []) {
+  if (!negatives || !negatives.ok) {
+    return '(UNAVAILABLE: the negative-keyword list could not be read. Recommend NO add_negative this run; waste_alerts may still be reported.)';
+  }
+  const names = new Map(campaignSummaries.map((c) => [String(c.id), c.name]));
+  const handled = negatives.rows.filter((r) => HANDLED_NEGATIVE_STATES.has(r.state));
+  if (handled.length === 0) return '(none yet)';
+  const rows = JSON.stringify(handled.slice(0, ADVISOR_MAX_HANDLED_NEGATIVES).map((r) => ({
+    campaign: names.get(String(r.campaign_id)) || null, campaign_id: r.campaign_id, text: r.text, state: r.state,
+  })));
+  return handled.length > ADVISOR_MAX_HANDLED_NEGATIVES
+    ? `${rows}\n(TRUNCATED: only ${ADVISOR_MAX_HANDLED_NEGATIVES} of ${handled.length} are listed. The server still blocks any repeat.)`
     : rows;
 }
 
@@ -266,6 +309,7 @@ PAID ADS RULES:
 - Distinguish between recurring services (judge on LTV, not first-month ROAS) and one-time services (judge on immediate ROAS)
 - NEVER recommend pausing campaigns. Use the three-mode system: Base (full budget), Spent (cap at today's spend), Stop (1% budget). Pausing destroys Quality Score.
 - Flag search terms that are wasting spend (high cost, 0 conversions)
+- NEGATIVE KEYWORD RULES: add_negative needs "apply_value" = the negative word or short phrase to block (1-4 words; prefer the junk token, e.g. "squirrel", not the whole query), and its "reasoning" must cite that term's clicks, cost and conversions. NEVER recommend add_negative for a word or phrase listed under NEGATIVE KEYWORDS ALREADY HANDLED, for a search term Google already shows with status excluded or added_excluded, or for any text that contains "${PROTECTED_BRAND_TERMS.join('", "')}", a service word (${SERVICE_WORDS.join(', ')}) or a city (${CITIES.join(', ')}). NEVER recommend add_negative for a competitor's name (${COMPETITOR_NAMES.join(', ')}): the owner decides competitor blocks on his own word list. Recommend add_negative only for a linked google_ads campaign. If the handled list is UNAVAILABLE, recommend no add_negative. The server removes apply_value from any add_negative that breaks these rules.
 - Flag campaigns where ROAS is declining week-over-week
 - Identify opportunities where impression share is being lost on profitable campaigns
 - Consider capacity — don't recommend scaling ads in areas that are already at 90%+ utilization
@@ -289,7 +333,7 @@ BUSINESS CONTEXT:
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}
 - Competes with Turner, Nozzle Nolen, HomeTeam in SWFL market
 
-Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "campaign_id": "EXACT id from CAMPAIGN PERFORMANCE — REQUIRED for budget/mode actions; omit otherwise", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`;
+Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "campaign_id": "EXACT id from CAMPAIGN PERFORMANCE — REQUIRED for budget/mode actions; omit otherwise", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number), change_mode (base|spent|stop) and add_negative (the negative word or short phrase, 1-4 words); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`;
 }
 
 // The SMS body's actions block: the top recommendations, else (an empty list is
@@ -352,7 +396,7 @@ class CampaignAdvisor {
       );
       const advice = normalizeAdsReport(res.json);
       this.stampProvenance(advice, res, now);
-      this.normalizeRecommendations(advice, campaigns, inputs.recentlyChangedIds);
+      this.normalizeRecommendations(advice, campaigns, inputs.recentlyChangedIds, this.negativeContext(inputs));
       await this.storeReport(advice);
       await this.sendSummary(advice);
 
@@ -413,6 +457,8 @@ class CampaignAdvisor {
         .limit(ADVISOR_MAX_SEARCH_TERMS + 1)
       : [];
 
+    const negatives = await this.loadNegativeKeywords();
+
     const serviceAttribution = await db('ad_service_attribution')
       .where('lead_date', '>=', d30);
 
@@ -438,7 +484,61 @@ class CampaignAdvisor {
     const gscSummary = await loadGscSummary();
     const gbpSummary = await loadGbpSummary(d30);
 
-    return { last7days, last30days, searchTerms, searchTermsAvailable, serviceAttribution, capacity, targets, techCount, budgetLog, recentlyChangedIds, gscSummary, gbpSummary };
+    return { last7days, last30days, searchTerms, searchTermsAvailable, negatives, serviceAttribution, capacity, targets, techCount, budgetLog, recentlyChangedIds, gscSummary, gbpSummary };
+  }
+
+  // Every negative-keyword row, any state. A failed read (table missing before
+  // the migration, database error) returns ok:false, which the prompt reports
+  // and normalizeRecommendations treats as "no negative may carry a value".
+  async loadNegativeKeywords() {
+    try {
+      const rows = await db('ad_negative_keywords').select('campaign_id', 'text', 'match_type', 'state');
+      return { ok: true, rows: Array.isArray(rows) ? rows : [] };
+    } catch (err) {
+      logger.warn(`Negative keywords for advisor: ${err.message}`);
+      return { ok: false, rows: [] };
+    }
+  }
+
+  // What add_negative validation needs: the memory table plus the search terms
+  // Google already excludes, per campaign (an exclusion in one campaign says
+  // nothing about another), as "campaign id|normalized term".
+  negativeContext(inputs) {
+    const negatives = inputs.negatives || { ok: false, rows: [] };
+    const excludedTerms = new Set(
+      (inputs.searchTerms || []).filter(isExcludedTerm)
+        .map((t) => [t.campaign_id, normalizeNegative(t.search_term)])
+        .filter(([campaignId, text]) => campaignId != null && text)
+        .map(([campaignId, text]) => excludedKey(campaignId, text)),
+    );
+    return { ok: Boolean(negatives.ok), rows: negatives.rows || [], excludedTerms };
+  }
+
+  // Owner plan A (2026-11-02): an add_negative keeps its apply_value only when
+  // it is a valid negative, not a brand/service/city word, not a competitor's
+  // name (competitor blocks are the owner's own call), not already in the
+  // memory table (any state, this campaign), not an excluded search term, and
+  // its campaign is a linked Google Ads campaign (the only place a negative
+  // can run; the resolved id is stamped back on). Otherwise the rec stays as
+  // advice and loses the value. PR 1 never makes add_negative auto-applicable:
+  // the page and /advisor/apply treat it as manual.
+  // Returns true when rec is an add_negative (handled here, never auto-applied).
+  sanitizeNegativeRec(rec, resolveCampaign, negatives) {
+    if (!rec || rec.apply_action !== 'add_negative') return false;
+    const value = normalizeNegative(rec.apply_value);
+    const campaign = resolveCampaign(rec);
+    const named = String(rec.campaign || '').trim().toLowerCase();
+    const runnable = campaign && campaign.platform === 'google_ads' && campaign.platform_campaign_id
+      && (!named || String(campaign.campaign_name || '').toLowerCase() === named);
+    if (!value || !runnable || !negatives || !negatives.ok || protectedReason(value) || competitorName(value)
+      || negatives.excludedTerms?.has(excludedKey(campaign.id, value))
+      || negatives.rows.some((r) => normalizeNegative(r.text) === value && String(r.campaign_id) === String(campaign.id))) {
+      delete rec.apply_value;
+      return true;
+    }
+    rec.apply_value = value;
+    rec.campaign_id = campaign.id;
+    return true;
   }
 
   // Aggregate per campaign
@@ -476,6 +576,9 @@ ${JSON.stringify(campaignSummaries, null, 2)}
 
 SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — every term that cost money unless marked TRUNCATED or UNAVAILABLE below):
 ${searchTermsSection(inputs.searchTerms, inputs.searchTermsAvailable)}
+
+NEGATIVE KEYWORDS ALREADY HANDLED (pending, active, declined or removed; never recommend these again):
+${negativeKeywordsSection(inputs.negatives, campaignSummaries)}
 
 SERVICE-LINE ATTRIBUTION (last 30 days):
 ${JSON.stringify(this.groupByService(inputs.serviceAttribution))}
@@ -545,7 +648,7 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
   // shows the "Manual action" hint instead of a button that
   // deterministically 422s. The resolved row's id is stamped back on as the
   // stable campaign_id the route prefers.
-  normalizeRecommendations(advice, campaigns, recentlyChangedIds = new Set()) {
+  normalizeRecommendations(advice, campaigns, recentlyChangedIds = new Set(), negatives = null) {
     if (!advice || !Array.isArray(advice.recommendations)) return advice;
     const AUTO = new Set(['increase_budget', 'decrease_budget', 'change_mode']);
     const adsConfigured = adsClientConfigured();
@@ -555,7 +658,11 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
       const key = String(c.campaign_name || '').toLowerCase();
       byName.set(key, byName.has(key) ? null : c); // null = ambiguous name
     }
+    const resolveCampaign = (rec) => byId.get(String(rec?.campaign_id || ''))
+      || byName.get(String(rec?.campaign || '').toLowerCase())
+      || null;
     for (const rec of advice.recommendations) {
+      if (this.sanitizeNegativeRec(rec, resolveCampaign, negatives)) continue;
       if (!rec || !AUTO.has(rec.apply_action)) continue;
       // Keep the intended action as a marker when stripping automation, so
       // the client can still render its "Manual action" hint — otherwise the

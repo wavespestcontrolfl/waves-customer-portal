@@ -3852,25 +3852,36 @@ const ReviewService = {
       /* satisfaction_responses may not exist */
     }
 
-    // Alert on low scores
+    // Alert on low scores: a customer contact, so it rings (services/owner-alerts.js). It was a text to the
+    // owner's phone that reached nobody since about 2026-09-01. The customer's own words lead the why; the
+    // whole feedback is in the full text. One row per rating.
     if (!isPromoter) {
-      const urgency = isDetractor ? "🚨 URGENT" : "⚠️";
       try {
-        const TwilioService = require("./twilio");
-        const alertPhone = process.env.OWNER_PHONE || "+19415993489";
-        await TwilioService.sendSMS(
-          alertPhone,
-          `${urgency} Review Alert\n\n` +
-            `${customer.first_name} ${customer.last_name} rated ${rating}/10\n` +
-            `Service: ${request.service_type} (${request.service_date})\n` +
-            `Tech: ${request.tech_name}\n` +
-            (feedbackText ? `Feedback: "${feedbackText}"\n` : "") +
-            `Phone: ${customer.phone}\n\n` +
-            (isDetractor ? "Follow up ASAP." : "Follow up within 24 hours."),
-          { messageType: "internal_alert" },
-        );
+        const { fullName, fitAction, redactedWords, whyWithQuote } = require("./admin-alert-names");
+        const { firstSentence } = require("./admin-alert-compose");
+        const name = fullName(customer) || "A customer";
+        const words = feedbackText ? redactedWords(feedbackText) : "";
+        await require("./owner-alerts").recordOwnerAlert("low-rating", {
+          action: fitAction("Customers", name, [
+            (who) => `call ${who} about a ${rating} of 10 rating`,
+            (who) => `call ${who} about a low rating`,
+          ]),
+          why: words
+            ? whyWithQuote({ lead: `Rated us ${rating} of 10: `, quote: firstSentence(words) })
+            : `Rated us ${rating} of 10 and left no comment.`,
+          link: `/admin/customers?customerId=${encodeURIComponent(request.customer_id)}`,
+          subject: { type: "customer", id: String(request.customer_id) },
+          text:
+            `${isDetractor ? "URGENT " : ""}Review alert: ${name} rated ${rating}/10. ` +
+            `Service: ${request.service_type} (${request.service_date}). Tech: ${request.tech_name}.` +
+            (words ? ` Feedback: "${words}"` : "") +
+            (isDetractor ? " Follow up as soon as possible." : " Follow up within 24 hours."),
+          dedupeKey: `owner-alert:low-rating:${request.id}`,
+          itemKeys: [String(request.id)],
+          metadata: { customerId: request.customer_id },
+        });
       } catch (err) {
-        logger.error(`[review] Alert SMS failed: ${err.message}`);
+        logger.error(`[review] Low-rating owner alert failed: ${err.message}`);
       }
     }
 
@@ -4387,15 +4398,25 @@ const ReviewService = {
       const serviceLabel = request.service_type || "service";
 
       try {
-        const TwilioService = require("./twilio");
-        const alertPhone = process.env.OWNER_PHONE || "+19415993489";
-        const result = await TwilioService.sendSMS(
-          alertPhone,
-          `Review follow-up needed: ${customerName} tapped ${request.score}/10 for ${serviceLabel} but did not submit feedback. Reach out before asking for a Google review.`,
-          { messageType: "internal_alert" },
-        );
-        if (!result?.success)
-          throw new Error(result?.error || "SMS send failed");
+        // A quiet owner alert (services/owner-alerts.js; Activity and the needs-me list). It was a text to
+        // the owner's phone that reached nobody since about 2026-09-01, while the row below was still marked
+        // followed up. Now the row is marked only once the alert row is written; otherwise the next run retries.
+        const { fitAction } = require("./admin-alert-names");
+        const result = await require("./owner-alerts").recordOwnerAlert("rating-no-feedback", {
+          action: fitAction("Customers", customerName, [
+            (who) => `call ${who} before any review ask`,
+            (who) => `call ${who} about a low tap`,
+          ]),
+          why: `Tapped ${request.score} of 10 for ${serviceLabel.replace(/_/g, " ")} but left no comment.`,
+          link: `/admin/customers?customerId=${encodeURIComponent(request.customer_id)}`,
+          subject: { type: "customer", id: String(request.customer_id) },
+          text: `Review follow-up needed: ${customerName} tapped ${request.score}/10 for ${serviceLabel} but did not submit feedback. Reach out before asking for a Google review.`,
+          dedupeKey: `owner-alert:rating-no-feedback:${request.id}`,
+          itemKeys: [String(request.id)],
+          metadata: { customerId: request.customer_id },
+        });
+        if (!result?.ok || result.channel !== "in_app")
+          throw new Error(result?.error || "owner alert not written");
 
         await db("activity_log")
           .insert({

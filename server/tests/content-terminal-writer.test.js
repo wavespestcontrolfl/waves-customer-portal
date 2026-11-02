@@ -129,6 +129,44 @@ describe('fetchTerminalDraft', () => {
   });
 });
 
+describe('a hold in place of a draft (owner 2026-11-02): the row cannot be written as briefed', () => {
+  const hold = (over = {}, extra = {}) => ({ opportunity_id: ID, brief_id: BRIEF, hold: { reason: 'duplicate', detail: 'The live termite swarmers post covers this topic.', ...over }, ...extra });
+
+  test('a usable hold is read as HELD, never as a draft, with its text tidied', async () => {
+    const r = await tw.fetchTerminalDraft(ID, { gh: ghWith(hold({ detail: '  The live post\n covers it.\t ' })), expectedBriefId: BRIEF });
+    expect(r).toMatchObject({ ok: false, code: tw.HELD, hold: { reason: 'duplicate', detail: 'The live post covers it.' }, brief_id: BRIEF, revision: 'commit-1', agent_id: 'terminal-writer' });
+    expect(r.draft).toBeUndefined();
+    expect(r.hold.question).toBeUndefined();
+    const owner = await tw.fetchTerminalDraft(ID, { gh: ghWith(hold({ reason: 'needs_owner', question: 'Remove the competitor names from the page text?' })), expectedBriefId: BRIEF });
+    expect(owner.hold).toEqual({ reason: 'needs_owner', detail: 'The live termite swarmers post covers this topic.', question: 'Remove the competitor names from the page text?' });
+  });
+
+  test.each([
+    ['another row', hold({}, { opportunity_id: 'someone-else' }), /opportunity_id does not match/],
+    ['another brief', hold({}, { brief_id: 'brief-before' }), /brief_id is not the brief this row waits on/],
+    ['a draft and a hold at once', hold({}, { body, frontmatter: {} }), /a draft or a hold, not both/],
+    ['a hold that is not an object', { opportunity_id: ID, brief_id: BRIEF, hold: 'duplicate' }, /hold must be an object/],
+    ['an unknown reason', hold({ reason: 'too_hard' }), /hold.reason must be one of duplicate, blocked_by_rule, brief_unusable, needs_owner/],
+    ['no detail', hold({ detail: '   ' }), /hold.detail must be 1 to 500 characters/],
+    ['a detail too long', hold({ detail: 'x'.repeat(501) }), /hold.detail must be 1 to 500 characters/],
+    ['a needs_owner hold with no question', hold({ reason: 'needs_owner' }), /needs a question of 1 to 300 characters/],
+  ])('%s is rejected like a bad draft: the row keeps waiting', async (_name, content, why) => {
+    const r = await tw.fetchTerminalDraft(ID, { gh: ghWith(content), expectedBriefId: BRIEF });
+    expect(r).toMatchObject({ ok: false, code: tw.INVALID });
+    expect(r.reason).toMatch(why);
+  });
+
+  test('the draft source answers a hold with `held`, not `wait`', async () => {
+    process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
+    try {
+      const source = tw.draftSourceFor(ID, { id: BRIEF, action_type: 'new_supporting_blog', page_type: 'supporting-blog' }, { handed: true, gh: ghWith(hold()) });
+      const r = await source.runWithBrief();
+      expect(r).toMatchObject({ held: true, code: tw.HELD, hold: { reason: 'duplicate' }, revision: 'commit-1' });
+      expect(r.wait).toBeUndefined();
+    } finally { delete process.env.GATE_CONTENT_WRITER_TERMINAL; }
+  });
+});
+
 describe('draftSourceFor: the terminal as a draft source with the dispatcher\'s contract', () => {
   const saved = { ...process.env };
   beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; });
@@ -208,7 +246,7 @@ describe('waiting rows and the admin item', () => {
       gh,
       db: { raw: jest.fn(async () => ({ rows })) },
       episodes: {
-        openAdminAlertKeys: jest.fn(async () => openKeys),
+        openAdminAlertKeys: jest.fn(async (_conn, prefix) => openKeys.filter((key) => key.startsWith(prefix))),
         closeAdminAlertKeys: jest.fn(async () => 0),
         raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'n1', rang: true })),
       },
@@ -229,6 +267,13 @@ describe('waiting rows and the admin item', () => {
 
     branches[C] = draftFor(C);
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
+
+    // A hold on the branch: the row is held, neither due nor written.
+    branches[ID] = { opportunity_id: ID, brief_id: 'brief-aa', hold: { reason: 'brief_unusable', detail: 'The brief has no search data, so the quality check fails any draft.' } };
+    const withHold = await tw.awaitingTerminalDrafts({ deps: d });
+    expect(withHold.held.map((r) => [r.opportunity_id, r.hold.reason])).toEqual([[ID, 'brief_unusable']]);
+    expect(withHold.due.map((r) => r.opportunity_id)).toEqual([]);
+    expect(withHold.written.map((r) => r.opportunity_id)).toEqual([B, C]);
   });
 
   test('a waiting row whose brief is too old, or gone, is not offered for writing, nor listed written with its draft pushed: the next run briefs it again', async () => {
@@ -284,13 +329,94 @@ describe('waiting rows and the admin item', () => {
   });
 });
 
-describe('the gate as a kill switch, and the 1pm catch-up', () => {
-  const episodes = (open) => ({ openAdminAlertKeys: jest.fn(async () => open), closeAdminAlertKeys: jest.fn(async () => open.length) });
+describe("owner 2026-11-02: the daily item is Claude's; the owner's bell is a list the terminal stopped handling", () => {
+  const routing = require('../services/admin-alert-routing');
+  const saved = { ...process.env };
+  beforeEach(() => { process.env.GATE_ALERT_CLAUDE_QUEUE = 'true'; delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET; });
+  afterEach(() => { process.env = { ...saved }; });
 
-  test('gate off: every open terminal item is closed, with no GitHub read', async () => {
-    const e = episodes(['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09']);
+  const now = new Date('2026-11-04T14:20:00Z');
+  const hoursAgo = (h) => new Date(now.getTime() - h * 60 * 60 * 1000);
+  const OLD = '00000000-0000-4000-8000-0000000000e1';
+  const NEW = '00000000-0000-4000-8000-0000000000e2';
+  const row = (id, briefAgeHours) => ({ opportunity_id: id, brief_id: `brief-${id.slice(-2)}`, brief_created_at: hoursAgo(briefAgeHours), action_type: 'new_supporting_blog', outcome: tw.AWAITING_OUTCOME, agent_id: tw.TERMINAL_AGENT_ID, skip_reason: tw.MISSING, query: `topic ${id.slice(-2)}`, score: 79 });
+  function deps(rows, openKeys = []) {
+    return {
+      gh: { getBranchSha: jest.fn(async () => null), getFile: jest.fn(async () => null) },
+      db: { raw: jest.fn(async () => ({ rows })) },
+      episodes: {
+        openAdminAlertKeys: jest.fn(async (_conn, prefix) => openKeys.filter((key) => key.startsWith(prefix))),
+        closeAdminAlertKeys: jest.fn(async () => 0),
+        raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'n1', rang: true })),
+      },
+    };
+  }
+  const raises = (d) => Object.fromEntries(d.episodes.raiseAdminAlertWithReopen.mock.calls.map((c) => [c[3].dedupeKey, c]));
+
+  test('the daily item is stamped for Claude\'s queue: Activity only and fyi, so it never rings and opens no Claude tab', async () => {
+    const d = deps([row(NEW, 20)]);
+    await tw.raiseTerminalDue({ now, deps: d });
+    const [, title, , opts] = raises(d)['content-terminal-due:2026-11-04'];
+    expect(title).toBe('Content — write 1 website post in the terminal');
+    expect(opts.metadata).toMatchObject({ terminalDue: 'claude', who: 'claude', doneWhen: 'drafts_written' });
+    expect(opts.detail.split('\n')[0]).toBe('The 9:15 AM blog-run job on the Mac writes these. Waiting for a draft:');
+    expect(routing.stampClaudeQueue({ category: 'content', metadata: { ...opts.metadata, dedupeKey: opts.dedupeKey } }))
+      .toMatchObject({ feed: 'activity', who: 'claude', severity: 'fyi', claudeQueue: 'content-terminal-due' });
+    // A fresh brief has not stalled: no owner item, and nothing to close.
+    expect(Object.keys(raises(d))).toEqual(['content-terminal-due:2026-11-04']);
+  });
+
+  test('a row left on the same brief 44 hours (two 9:15 AM runs) rings the owner once a day; a newer one does not', async () => {
+    const d = deps([row(OLD, 44), row(NEW, 43.5)], ['content-terminal-stalled:2026-11-03']);
+    await tw.raiseTerminalDue({ now, deps: d });
+    const [category, title, why, opts] = raises(d)['content-terminal-stalled:2026-11-04'];
+    expect([category, title]).toEqual(['content', 'Content — blog-run left 1 website post for 2 days']);
+    expect(why).toBe('The terminal has not handled them in 2 days, so the 9:15 AM blog-run job on the Mac may be down.');
+    expect(opts).toMatchObject({ bellDefault: true, refreshOnDedupe: true, link: '/admin/blog?tab=autopilot' });
+    expect(opts.ringOnRefresh()).toBe(false);
+    expect(opts.metadata).toMatchObject({ severity: 'needs-you', who: 'person', doneWhen: 'terminal_caught_up' });
+    expect(opts.metadata.terminalDue).toBeUndefined();
+    // The owner's item is never routed to Claude's queue.
+    expect(routing.classifyClaudeQueue({ category: 'content', metadata: opts.metadata, dedupeKey: opts.dedupeKey })).toBeNull();
+    expect(opts.detail).toContain('- new supporting blog: topic e1');
+    expect(opts.detail).not.toContain('topic e2');
+    // Yesterday's owner item is closed; the daily item still lists both rows.
+    expect(d.episodes.closeAdminAlertKeys.mock.calls.find((c) => c[2] === 'terminal_caught_up')[1]).toEqual(['content-terminal-stalled:2026-11-03']);
+    expect(raises(d)['content-terminal-due:2026-11-04'][1]).toBe('Content — write 2 website posts in the terminal');
+  });
+
+  test('nothing stalled: the owner item standing from earlier today is closed', async () => {
+    const d = deps([row(NEW, 2)], ['content-terminal-stalled:2026-11-04']);
+    await tw.raiseTerminalDue({ now, deps: d });
+    expect(Object.keys(raises(d))).toEqual(['content-terminal-due:2026-11-04']);
+    expect(d.episodes.closeAdminAlertKeys.mock.calls.find((c) => c[2] === 'terminal_caught_up')[1]).toEqual(['content-terminal-stalled:2026-11-04']);
+  });
+
+  test('switch off, or Claude\'s queue off: the daily item rings the owner as before and no owner item is raised', async () => {
+    for (const env of [{ AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET: 'false' }, { GATE_ALERT_CLAUDE_QUEUE: 'false' }]) {
+      Object.assign(process.env, env);
+      const d = deps([row(OLD, 60)], ['content-terminal-stalled:2026-11-04']);
+      await tw.raiseTerminalDue({ now, deps: d });
+      expect(Object.keys(raises(d))).toEqual(['content-terminal-due:2026-11-04']);
+      const opts = raises(d)['content-terminal-due:2026-11-04'][3];
+      expect(opts.metadata.terminalDue).toBeUndefined();
+      expect(opts.detail.split('\n')[0]).toBe('Run blog-run in the terminal. Waiting for a draft:');
+      expect(routing.classifyClaudeQueue({ category: 'content', metadata: opts.metadata, dedupeKey: opts.dedupeKey })).toBeNull();
+      // The daily item rings itself, so a standing owner item is closed.
+      expect(d.episodes.closeAdminAlertKeys.mock.calls.find((c) => c[2] === 'terminal_caught_up')[1]).toEqual(['content-terminal-stalled:2026-11-04']);
+      process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
+      delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET;
+    }
+  });
+});
+
+describe('the gate as a kill switch, and the 1pm catch-up', () => {
+  const episodes = (open) => ({ openAdminAlertKeys: jest.fn(async (_conn, prefix) => open.filter((key) => key.startsWith(prefix))), closeAdminAlertKeys: jest.fn(async () => open.length) });
+
+  test('gate off: every open terminal item is closed, the owner\'s stalled-list item too, with no GitHub read', async () => {
+    const e = episodes(['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09', 'content-terminal-stalled:2026-10-09']);
     await tw.closeTerminalItems({ now: new Date('2026-10-09T13:00:00Z'), deps: { episodes: e, db: {} } });
-    expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09']);
+    expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09', 'content-terminal-stalled:2026-10-09']);
     expect(e.closeAdminAlertKeys.mock.calls[0][2]).toBe('terminal_writer_off');
   });
 
@@ -314,6 +440,92 @@ describe('the gate as a kill switch, and the 1pm catch-up', () => {
       expect(await tw.blogDraftRequested({ now, deps: { episodes: failing, db: withBlog([{}]) } })).toBe(false);
       process.env.GATE_CONTENT_WRITER_TERMINAL = 'false';
       expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: withBlog([{}]) } })).toBe(false);
+    });
+  });
+});
+
+describe('a needs_owner hold asks the owner once, and the item closes when the row no longer waits on the owner', () => {
+  const OPP = '00000000-0000-4000-8000-0000000000f1';
+  const OTHER = '00000000-0000-4000-8000-0000000000f2';
+  const episodes = (open = []) => ({
+    openAdminAlertKeys: jest.fn(async (_conn, prefix) => open.filter((key) => key.startsWith(prefix))),
+    closeAdminAlertKeys: jest.fn(async (_conn, keys) => keys.length),
+    raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'n1', rang: true })),
+  });
+  const hold = (question) => ({ reason: 'needs_owner', detail: 'The live page names a competitor in its text.', question });
+  const row = { action_type: 'refresh_existing_page', query: 'in wall pest control system' };
+
+  test('the question is the why when it fits; the item is the owner\'s, rings by default, one per row', async () => {
+    const e = episodes();
+    await tw.raiseHoldQuestion({ opportunityId: OPP, row, hold: hold('Remove the competitor names from the page text?'), deps: { episodes: e } });
+    const [category, title, why, opts] = e.raiseAdminAlertWithReopen.mock.calls[0];
+    expect([category, title, why]).toEqual(['content', 'Content — a website post needs your decision', 'Remove the competitor names from the page text?']);
+    expect(opts).toMatchObject({ dedupeKey: `content-terminal-hold:${OPP}`, bellDefault: true, link: '/admin/blog?tab=autopilot' });
+    expect(opts.metadata).toMatchObject({ severity: 'needs-you', who: 'person', doneWhen: 'owner_decided', opportunityId: OPP });
+    expect(opts.detail).toContain('Post: refresh existing page: in wall pest control system');
+    expect(opts.detail).toContain('Question: Remove the competitor names from the page text?');
+    expect(opts.detail).toContain('Why the terminal held it: The live page names a competitor in its text.');
+  });
+
+  test('a question that breaks the why rules (two sentences, or too long) moves to the detail under a fixed why', async () => {
+    for (const question of ['Strip the names from the text. Or exempt the page?', `Should the page ${'really '.repeat(20)}keep the names?`]) {
+      const e = episodes();
+      await tw.raiseHoldQuestion({ opportunityId: OPP, row, hold: hold(question), deps: { episodes: e } });
+      const [, , why, opts] = e.raiseAdminAlertWithReopen.mock.calls[0];
+      expect(why).toBe('The terminal held this website post until you decide; the question is in the details.');
+      expect(opts.detail).toContain(`Question: ${question}`);
+    }
+  });
+
+  describe('syncHoldQuestions (each batch end)', () => {
+    const saved = { ...process.env };
+    beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; });
+    afterEach(() => { process.env = { ...saved }; });
+    const waitingRow = (id, question = 'Remove the competitor names from the page text?') => ({
+      opportunity_id: id, outcome: tw.HOLD_OUTCOME, skip_reason: 'terminal_hold:needs_owner', action_type: 'refresh_existing_page',
+      query: 'in wall pest control system', draft_payload: { hold: hold(question) },
+    });
+    const conn = (rows) => ({ raw: jest.fn(async () => ({ rows })) });
+
+    test('a row that waits on the owner and has no item gets one (a failed raise is made again at the next batch end)', async () => {
+      const e = episodes([]);
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db: conn([waitingRow(OPP)]) } });
+      expect(out).toEqual({ raised: 1, closed: 0 });
+      const [, , why, opts] = e.raiseAdminAlertWithReopen.mock.calls[0];
+      expect(why).toBe('Remove the competitor names from the page text?');
+      expect(opts.dedupeKey).toBe(`content-terminal-hold:${OPP}`);
+      expect(opts.detail).toContain('Post: refresh existing page: in wall pest control system');
+    });
+
+    test('an item already open (read, Done by a person, or not) is not raised again; an answered row\'s item closes', async () => {
+      const e = episodes([`content-terminal-hold:${OPP}`, `content-terminal-hold:${OTHER}`]);
+      const db = conn([waitingRow(OPP)]);
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db } });
+      expect(out).toEqual({ raised: 0, closed: 1 });
+      expect(e.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+      expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OTHER}`]);
+      expect(e.closeAdminAlertKeys.mock.calls[0][2]).toBe('owner_decided');
+      expect(db.raw.mock.calls[0][1]).toEqual([31, 'deferred_publish_cap', tw.HOLD_OUTCOME, 'terminal_hold:needs_owner']);
+    });
+
+    test('one failed raise never stops the others; a stored hold with no question raises nothing', async () => {
+      const e = episodes([]);
+      e.raiseAdminAlertWithReopen.mockRejectedValueOnce(new Error('db down'));
+      const noQuestion = { ...waitingRow(OTHER), draft_payload: JSON.stringify({ hold: { reason: 'needs_owner', detail: 'x' } }) };
+      const THIRD = '00000000-0000-4000-8000-0000000000f3';
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db: conn([waitingRow(OPP), noQuestion, waitingRow(THIRD)]) } });
+      expect(out).toEqual({ raised: 1, closed: 0 });
+      expect(e.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).toEqual([`content-terminal-hold:${OPP}`, `content-terminal-hold:${THIRD}`]);
+    });
+
+    test('gate off: every item closes, none is raised, nothing is read', async () => {
+      process.env.GATE_CONTENT_WRITER_TERMINAL = 'false';
+      const e = episodes([`content-terminal-hold:${OPP}`]);
+      const db = conn([waitingRow(OPP)]);
+      const out = await tw.syncHoldQuestions({ deps: { episodes: e, db } });
+      expect(out).toEqual({ raised: 0, closed: 1 });
+      expect(db.raw).not.toHaveBeenCalled();
+      expect(e.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     });
   });
 });

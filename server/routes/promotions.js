@@ -1,17 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+const { etDateString } = require('../utils/datetime-et');
 
 router.use(authenticate);
-
-// Admin alert recipient — must be a real cell, never one of our own Twilio
-// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
-const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 // =========================================================================
 // SERVICE DEFINITIONS & PRICING
@@ -353,25 +349,31 @@ router.post('/:id/interest', async (req, res, next) => {
       svc.keywords.some(kw => serviceTypes.some(st => st.toLowerCase().includes(kw)))
     ).length;
     const newTier = getTierForServiceCount(currentCount + 1);
-    const newDiscount = TIERS[newTier]?.discount || 0;
-    const svc = SERVICES[serviceType] || {};
-    const discountedPrice = svc.monthlyPrice ? (svc.monthlyPrice * (1 - newDiscount)).toFixed(2) : '?';
 
-    // Internal office notification
+    // Tell the office: a ringing owner alert (services/owner-alerts.js). It was a text to the owner's phone that
+    // reached nobody since about 2026-09-01. One row per customer, service and ET day, keyed on the service as
+    // the server names it (never the client's promotion id or labels): a repeat or replayed tap refreshes that
+    // row and rings nothing new, so a customer cannot flood the bell. Owner-alert rows never push.
     try {
-      await TwilioService.sendSMS(
-        ADMIN_ALERT_PHONE,
-        `🎯 Upsell Interest!\n\n` +
-        `${customer.first_name} ${customer.last_name} at ${customer.address_line1}, ${customer.city}\n` +
-        `is interested in adding ${serviceName || serviceType}.\n\n` +
-        `Currently: ${customer.waveguard_tier} WaveGuard (${currentCount} services)\n` +
-        `Adding this → ${newTier} (${newDiscount * 100}% off)\n` +
-        `Their price: $${discountedPrice}/mo\n\n` +
-        `Follow up!`,
-        { messageType: 'internal_alert', link: '/admin/customers' }
-      );
-    } catch (smsErr) {
-      logger.error(`Failed to send upsell notification: ${smsErr.message}`);
+      const { fitAction } = require('../services/admin-alert-names');
+      const { normalizeRequestedServiceKey, requestedServiceLabel } = require('../services/estimate-add-service-request');
+      const serviceKey = normalizeRequestedServiceKey(serviceType) || 'other';
+      const label = serviceKey === 'other' ? 'a service' : requestedServiceLabel(serviceKey);
+      const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'A customer';
+      const item = `${req.customerId}:${serviceKey}:${etDateString()}`;
+      await require('../services/owner-alerts').recordOwnerAlert('promotion-interest', {
+        action: fitAction('Estimates', name, [(who) => `follow up with ${who} about ${label}`, (who) => `follow up with ${who}`]),
+        why: `Tapped interested in ${label} on a portal promotion.`,
+        link: `/admin/customers?customerId=${encodeURIComponent(req.customerId)}`,
+        subject: { type: 'customer', id: String(req.customerId) },
+        // The client's own words, capped (they are not validated server-side).
+        text: `Promotion interest: ${name} wants to add ${String(serviceName || serviceType || '').slice(0, 80)} (promotion ${String(promoId).slice(0, 80)}). The request is open on their profile.`,
+        dedupeKey: `owner-alert:promotion-interest:${item}`,
+        itemKeys: [item],
+        metadata: { customerId: req.customerId },
+      });
+    } catch (alertErr) {
+      logger.error(`Promotion interest owner alert failed for request ${request.id}: ${alertErr.message}`);
     }
 
     // SMS to customer

@@ -1950,8 +1950,9 @@ router.get('/sender', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/communications/call — initiate an outbound call via Twilio
-router.post('/call', async (req, res, next) => {
+// POST /api/admin/communications/call — initiate an outbound call via Twilio.
+// Named so the bell's Call button runs this same handler (placeCallFromAlert below).
+async function callHandler(req, res, next) {
   let attemptedFrom = req.body?.fromNumber || null;
   let attemptedTo = req.body?.to || null;
   try {
@@ -2154,7 +2155,8 @@ router.post('/call', async (req, res, next) => {
     });
     next(err);
   }
-});
+}
+router.post('/call', callHandler);
 
 // GET /api/admin/communications/log — SMS history (reads unified messages
 // table since PR 2; sms_log still gets dual-written for legacy consumers).
@@ -4681,6 +4683,22 @@ function sendSmsFromBar({ body, actor, pins }) {
   });
 }
 module.exports.sendSmsFromBar = sendSmsFromBar;
+// The bell's Call button (services/alert-call-button.js) runs the SAME handler as POST /call, with the body the
+// linked page's own Call button posts, without an HTTP request: its checks, claims, caller ID and bridge are the
+// page's. The bell serves and runs buttons for the admin role only. Resolves { status, json }; an error passed to
+// next() rejects.
+function placeCallFromAlert({ body, technicianId }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = { body: body || {}, technicianId: technicianId || null, techRole: 'admin' };
+    Promise.resolve(callHandler(req, res, reject)).catch(reject);
+  });
+}
+module.exports.placeCallFromAlert = placeCallFromAlert;
 // The like's text (POST /messages/:id/like): the same handler with the fields
 // "Text back" posts for the liked text, run in-process like sendSmsFromBar.
 // req.officeLikeTarget adds the like's provider-boundary check. A line we no
