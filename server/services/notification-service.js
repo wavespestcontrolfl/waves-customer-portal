@@ -12,7 +12,7 @@ function safeErrorSummary(err) {
 }
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
-const { stampClaudeQueue } = require('./admin-alert-routing');
+const { stampClaudeQueue, rescueClaudeFault } = require('./admin-alert-routing');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
   'appointment_confirmation',
@@ -444,6 +444,26 @@ function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
   return { ...existingMeta, ...rest };
 }
 
+// create()'s bell-policy drop (GATE_ADMIN_BELL_POLICY): no row, one log line and the muted record. Pulled out of
+// create() to keep its complexity down.
+async function silenceForBellPolicy({ category, title, metadata }) {
+  // Category + triggerKey only — titles/bodies carry customer
+  // names and addresses, which must not leak into logs.
+  logger.info('[bell-policy] silenced', {
+    category,
+    triggerKey: metadata?.triggerKey || null,
+  });
+  // GATE_ALERT_CATALOG=watch (the helper reads it): leave one audit_log row per Eastern day per distinct
+  // muted alert, so a muted alert can be counted. The module's own db, never `connection` (it may roll
+  // back); a failure costs the record, never the return below, and the log line carries no title text.
+  try {
+    await require('./audit-log').auditBellPolicyMuted({ category, triggerKey: metadata?.triggerKey || null, title, metadata });
+  } catch (auditErr) {
+    logger.warn(`[notifications] muted-alert audit failed: ${safeErrorSummary(auditErr)}`);
+  }
+  return { id: null, suppressed: true, reason: 'bell_policy' };
+}
+
 // notifyAdmin's no-dedupeKey path (admin-alerts-ring scope 2026-09-28):
 // plain create(), unless the caller supplied `ringGate` — see notifyAdmin's
 // own doc comment for the full contract. Pulled out of notifyAdmin to keep
@@ -515,7 +535,7 @@ const NotificationService = {
       // Claude's queue (GATE_ALERT_CLAUDE_QUEUE, services/admin-alert-routing.js): a Mac reminder job's row or one of
       // our own engineering faults is written Activity-only and stamped who 'claude'. It is no longer a ring, so the
       // bell policy below (which decides whether to ring) must not silence it: the row still has to be written.
-      const rowMetadata = recipientType === 'admin' ? stampClaudeQueue({ category, metadata }) : metadata;
+      let rowMetadata = recipientType === 'admin' ? stampClaudeQueue({ category, metadata }) : metadata;
       const routedToClaude = rowMetadata !== metadata || Boolean(rowMetadata?.claudeQueue);
       if (recipientType === 'admin' && !routedToClaude) {
         try {
@@ -529,21 +549,11 @@ const NotificationService = {
               declared: { contact: metadata?.contact === true, promise: metadata?.promise === true },
             });
             if (!allowed) {
-              // Category + triggerKey only — titles/bodies carry customer
-              // names and addresses, which must not leak into logs.
-              logger.info('[bell-policy] silenced', {
-                category,
-                triggerKey: metadata?.triggerKey || null,
-              });
-              // GATE_ALERT_CATALOG=watch (the helper reads it): leave one audit_log row per Eastern day per distinct
-              // muted alert, so a muted alert can be counted. The module's own db, never `connection` (it may roll
-              // back); a failure costs the record, never the return below, and the log line carries no title text.
-              try {
-                await require('./audit-log').auditBellPolicyMuted({ category, triggerKey: metadata?.triggerKey || null, title, metadata });
-              } catch (auditErr) {
-                logger.warn(`[notifications] muted-alert audit failed: ${safeErrorSummary(auditErr)}`);
-              }
-              return { id: null, suppressed: true, reason: 'bell_policy' };
+              // GATE_ALERT_CLAUDE_FAULTS (services/admin-alert-routing.js): a fault the code marks "Claude fixes
+              // this" is written to Claude's queue (Activity-only, who 'claude') instead of the drop below.
+              const rescued = rescueClaudeFault({ category, metadata });
+              if (!rescued) return silenceForBellPolicy({ category, title, metadata });
+              rowMetadata = rescued;
             }
           }
         } catch (err) {

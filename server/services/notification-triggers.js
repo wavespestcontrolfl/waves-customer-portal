@@ -18,6 +18,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
+const { rescueClaudeFault } = require('./admin-alert-routing');
 const PushService = require('./push-notifications');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stripEmoji } = require('../utils/strip-emoji');
@@ -1218,6 +1219,28 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
+// A registry event the bell policy just dropped: when it is a fault marked "Claude fixes this"
+// (GATE_ALERT_CLAUDE_FAULTS, services/admin-alert-routing.js), write the one row to Claude's queue, keyed like the
+// bell write so a retry dedupes, with no push (Claude's queue never pages a phone), and return the stats.
+// `policySilenced` stays true: the policy still kept it off the bell. null = not rescued, drop as before. Never throws.
+async function writeRescuedFault({ trigger, triggerKey, built, payload, safePayload, dedupeKey, onBell, pushOnly, relayFailureCall }) {
+  if (pushOnly || relayFailureCall) return null;
+  const metadata = rescueClaudeFault({ category: trigger.category, triggerKey,
+    metadata: { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload }, payload });
+  if (!metadata) return null;
+  let bellWritten = false;
+  try {
+    const created = await NotificationService.notifyAdmin(trigger.category, built.title, built.body, {
+      link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata, ...(dedupeKey ? { dedupeKey } : {}),
+    });
+    bellWritten = Boolean(created && !created.suppressed);
+  } catch (e) {
+    logger.error(`[notification-triggers] Claude-queue fault write failed: ${e.message}`);
+  }
+  onBell?.(bellWritten);
+  return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
+}
+
 async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
@@ -1332,6 +1355,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       logger.warn(`[notification-triggers] bell policy check failed: ${err.message}; delivering`);
     }
     if (policySilenced) {
+      // GATE_ALERT_CLAUDE_FAULTS (services/admin-alert-routing.js): a fault the registry marks "Claude fixes this" is
+      // written to Claude's queue instead of the drop below: one Activity-only row, no ring, no push.
+      const rescued = await writeRescuedFault({ trigger, triggerKey, built, payload, safePayload, dedupeKey, onBell, pushOnly, relayFailureCall });
+      if (rescued) return rescued;
       logger.info('[bell-policy] silenced (bell + push)', { triggerKey, category: trigger.category });
       // GATE_ALERT_CATALOG=watch: this return skips NotificationService.create, so the muted record is left here,
       // by the same helper (it reads the gate). A failure costs the record, never the silence; the log has no title.
