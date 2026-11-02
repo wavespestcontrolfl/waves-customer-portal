@@ -1133,10 +1133,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               )}
               {!loading && !loadFailed && groupByTime(notifications).map(([group, items]) => (
                 <div key={group}>
+                  {/* The office panel is white: a light gray band with 14px text
+                      (admin minimum), not the old dark one. */}
                   <div style={{
-                    padding: '8px 20px', fontSize: 11, fontWeight: 700, color: colors.muted,
+                    padding: '8px 20px', fontSize: isDark ? 14 : 11, fontWeight: 700, color: isDark ? colors.text : colors.muted,
                     textTransform: 'uppercase', letterSpacing: 0.5,
-                    background: isDark ? '#0f172a' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
+                    background: isDark ? '#F1F5F9' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
                     backdropFilter: isDark ? 'none' : 'blur(8px)', WebkitBackdropFilter: isDark ? 'none' : 'blur(8px)',
                   }}>{group}</div>
                   {items.map(n => {

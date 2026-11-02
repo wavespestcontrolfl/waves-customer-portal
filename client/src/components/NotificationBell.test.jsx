@@ -145,6 +145,13 @@ describe('NotificationBell panel', () => {
   });
 
 
+  it('heads each day in the office panel with a light band and 14px text', async () => {
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    const band = await screen.findByText('Today');
+    expect(band).toHaveStyle({ fontSize: '14px', backgroundColor: '#F1F5F9' });
+  });
+
   it('refetches the authoritative badge after marking one notification read', async () => {
     native.enabled = true;
     let count = 2;

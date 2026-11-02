@@ -115,7 +115,7 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     notifications.notifyAdmin.mockClear();
     await flagUnplacedVisits({ lockWindowDays: 14 }, now);
     expect(notifications.notifyAdmin).toHaveBeenCalledWith(
-      'schedule_conflict', 'Recurring visit still needs a time', expect.any(String),
+      'schedule_conflict', 'Schedule — find a time for a recurring visit', expect.any(String),
       expect.objectContaining({ dedupeKey: `recurring-dispatch:${ids.unplaced}:${due}`, refreshOnDedupe: true }),
     );
   });
