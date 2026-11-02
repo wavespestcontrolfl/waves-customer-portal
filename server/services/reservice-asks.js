@@ -4,7 +4,7 @@
  *
  * Gathers every message in which a customer described the problem behind a
  * pest or lawn re-service: the booking words, inbound texts, calls, emails
- * and portal requests from 10 days before the booking to now. A later step
+ * from 10 days before the booking to now. A later step
  * shows them on the technician's sheet and on the report. Read-only.
  *
  * Every item passes the report writer's customer-words scrub in its
@@ -118,9 +118,19 @@ function buildPestIndex() {
 }
 const PEST_INDEX = buildPestIndex();
 
-const nameRe = (words) => new RegExp(`\\b${words.map((w, i) => (i === words.length - 1 ? `${escapeRe(singular(w))}(?:s|es)?` : escapeRe(w))).join('[\\s-]+')}\\b`, 'i');
+// Every spelling of one pest word: as written, its singular, and that singular's plurals, so "flies" and "fly",
+// "roaches" and "roach" all match (Codex P2 on #7464: "drain flies" once matched nothing, because the singular
+// "fly" plus s/es never spells "flies").
+function wordForms(word) {
+  const one = singular(word);
+  const forms = new Set([word, one, `${one}s`]);
+  if (/(?:s|x|ch|sh|o)$/.test(one)) forms.add(`${one}es`);
+  if (/[^aeiou]y$/.test(one)) forms.add(`${one.slice(0, -1)}ies`);
+  return `(?:${[...forms].sort((a, b) => b.length - a.length).map(escapeRe).join('|')})`;
+}
+const nameRe = (words) => new RegExp(`\\b${words.map((w, i) => (i === words.length - 1 ? wordForms(w) : escapeRe(w))).join('[\\s-]+')}\\b`, 'i');
 const PEST_NAME_RES = [...PEST_INDEX.names].map(([label, words]) => [label, nameRe(words)]);
-const PEST_FAMILY_RES = [...PEST_INDEX.families].map(([key, label]) => [label, new RegExp(`\\b${escapeRe(key)}(?:s|es)?\\b`, 'i')]);
+const PEST_FAMILY_RES = [...PEST_INDEX.families].map(([key, label]) => [label, new RegExp(`\\b${wordForms(key)}\\b`, 'i')]);
 
 function pestsIn(text) {
   const found = [];
@@ -263,22 +273,11 @@ async function readEmails(knex, customerId, window) {
   }));
 }
 
-// A staff row (source 'admin', written by admin-cancellation.js) holds an operator's note, never the customer's
-// words, so it is left out: in the query, NULL-safe as routes/requests.js does (portal rows carry no source), and
-// again on the rows read.
-async function readPortalRequests(knex, customerId, window) {
-  const rows = await knex('service_requests')
-    .where({ customer_id: customerId })
-    .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })
-    .where('created_at', '>=', window.from)
-    .where('created_at', '<=', window.to)
-    .select('id', 'subject', 'description', 'source', 'created_at')
-    .orderBy('created_at', 'desc')
-    .limit(CHANNEL_ROW_LIMIT);
-  return (rows || []).filter((row) => row.source !== 'admin').map((row) => ({
-    id: `portal_request:${row.id}`, source: 'portal_request', at: row.created_at, text: row.description || row.subject, quoted: true,
-  }));
-}
+// No service_requests channel (Codex P2 on #7464): that table mixes the portal form with server-written rows (the
+// cancel flow's re-service request, estimate measurement reviews, promotion interest) in the same categories and
+// without a source, so no column tells the customer's own words apart. A covered pest or lawn problem from the
+// portal form goes to the re-service request form instead (GATE_RESERVICE_STREAMLINE), whose words are the
+// booking words above.
 
 // One failed channel logs its error code and yields nothing; the rest stand.
 async function safeChannel(name, read) {
@@ -342,7 +341,6 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
     safeChannel('sms', () => readTexts(knex, customerId, window, bookingKeys)),
     safeChannel('call', () => readCalls(knex, customerId, window)),
     safeChannel('email', () => readEmails(knex, customerId, window)),
-    safeChannel('portal_request', () => readPortalRequests(knex, customerId, window)),
   ]) : [];
 
   const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean);
@@ -365,6 +363,7 @@ module.exports = {
     legacyRequestText,
     buildItem,
     dedupeItems,
+    wordForms,
     capWords,
     callDay,
     pestsIn,

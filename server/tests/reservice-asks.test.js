@@ -233,7 +233,7 @@ describe('texts', () => {
   test('the same words sent twice, or in two channels, keep only the oldest copy', async () => {
     const { items } = await gather({
       sms: [sms('s1', 'Roaches under the sink.', new Date(NOW - 4 * DAY)), sms('s2', 'Roaches under the sink. Thanks!', new Date(NOW - 2 * DAY))],
-      requests: [{ id: 'r1', created_at: new Date(NOW - DAY), source: null, subject: 'Pests', description: 'Roaches under the sink.' }],
+      emails: [{ id: 'e1', received_at: new Date(NOW - DAY), from_address: 'c@example.com', label_ids: [], body_text: 'Roaches under the sink.' }],
     });
     expect(items.map((item) => item.id)).toEqual(['text:s1']);
   });
@@ -319,31 +319,13 @@ describe('emails and portal requests', () => {
     expect(items).toEqual([]);
   });
 
-  test('a portal request uses the description, else the subject', async () => {
-    const at = new Date(NOW - 5 * DAY);
-    const { items } = await gather({
-      requests: [
-        { id: 'r1', created_at: at, subject: 'Pest question', description: 'Spiders in the lanai every night.' },
-        { id: 'r2', created_at: new Date(NOW - DAY), subject: 'Wasps at the front door', description: null },
-      ],
-    });
-    expect(items.map((item) => [item.id, item.text, item.source, item.quoted])).toEqual([
-      ['portal_request:r1', 'Spiders in the lanai every night.', 'portal_request', true],
-      ['portal_request:r2', 'Wasps at the front door', 'portal_request', true],
-    ]);
-  });
-
-  test("a staff row (source 'admin') is an operator's note, never a quote", async () => {
+  test('the portal request table is never read: it mixes the portal form with server-written rows', async () => {
     const knex = fakeKnex({
-      requests: [
-        { id: 'r1', created_at: new Date(NOW - 3 * DAY), source: 'admin', subject: 'Cancel', description: 'Office note: ants came back, offered a free re-service before cancel.' },
-        { id: 'r2', created_at: new Date(NOW - DAY), source: null, subject: 'Pests', description: 'Ants are back in the kitchen.' },
-      ],
+      requests: [{ id: 'r1', created_at: new Date(NOW - DAY), source: null, subject: 'Re-service requested from the cancel flow', description: 'Customer accepted the free re-service card. Book the callback.' }],
     });
     const { items } = await gatherReserviceAsks('visit-1', { knex, now: NOW });
-    expect(items.map((item) => item.id)).toEqual(['portal_request:r2']);
-    // The query also leaves staff rows out (NULL-safe, as routes/requests.js does).
-    expect(knex.wheres.some(([table, args]) => table === 'service_requests' && typeof args[0] === 'function')).toBe(true);
+    expect(knex.seen).not.toContain('service_requests');
+    expect(items.some((item) => item.source === 'portal_request')).toBe(false);
   });
 });
 
@@ -427,8 +409,8 @@ describe('failed channel', () => {
   });
 
   test('an error without a code logs its name', async () => {
-    await gather({ fail: { service_requests: new TypeError('boom') } });
-    expect(logger.warn).toHaveBeenCalledWith('[reservice-asks] portal_request unavailable: TypeError');
+    await gather({ fail: { emails: new TypeError('boom') } });
+    expect(logger.warn).toHaveBeenCalledWith('[reservice-asks] email unavailable: TypeError');
   });
 });
 
@@ -437,5 +419,19 @@ describe('pestsIn', () => {
     expect(_test.pestsIn('Fire ants by the mailbox')).toEqual(['Fire ants']);
     expect(_test.pestsIn('an ant and a roach')).toEqual(expect.arrayContaining(['Ants', 'Cockroaches']));
     expect(_test.pestsIn('Nothing to see')).toEqual([]);
+  });
+
+  test('plural picker names match as written, not only their singular (flies, roaches)', () => {
+    expect(_test.pestsIn('Drain flies in the guest bath')).toEqual(['Drain flies']);
+    expect(_test.pestsIn('one house fly and many house flies')).toEqual(['House flies']);
+    expect(_test.pestsIn('flies all over the patio')).toEqual(['Flies']);
+    expect(_test.pestsIn('roaches under the sink')).toEqual(['Cockroaches']);
+  });
+
+  test('wordForms spells a singular, its plurals and the word as written', () => {
+    const re = new RegExp(`^${_test.wordForms('flies')}$`, 'i');
+    for (const word of ['fly', 'flies', 'flys']) expect(re.test(word)).toBe(true);
+    const roach = new RegExp(`^${_test.wordForms('roach')}$`, 'i');
+    for (const word of ['roach', 'roaches']) expect(roach.test(word)).toBe(true);
   });
 });
