@@ -24,7 +24,10 @@ const { shortenOrPassthrough } = require("./short-url");
 const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
-const { isEnabled } = require("../config/feature-gates");
+const featureGates = require("../config/feature-gates");
+const { isEnabled } = featureGates;
+const { personSentFilter } = require("./email/email-customer-link");
+const { isInternalEmailRecipient } = require("../utils/internal-email-recipients");
 const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
@@ -89,40 +92,85 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
   return nowMs - ts < hours * 3600000;
 }
 
+// GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE, read at CALL time. Reached through
+// the module object behind a typeof guard so a whole-module feature-gates mock
+// that predates the gate reads as OFF instead of throwing (and an `isEnabled`
+// mock that answers true for every key cannot turn this one on by accident).
+function emailReplyPauseLive() {
+  return typeof featureGates.estimateFollowupEmailReplyPauseLive === "function"
+    && featureGates.estimateFollowupEmailReplyPauseLive() === true;
+}
+
+// SMS arm of the reply-pause: an inbound text (conversation matched by
+// customer_id or phone) inside the window. Unchanged from before the email arm.
+async function hasInboundSmsSince(est, cutoff) {
+  const q = db("messages")
+    .join("conversations", "messages.conversation_id", "conversations.id")
+    .where("messages.direction", "inbound")
+    .where("messages.channel", "sms")
+    // Recruiting replies (job_*, PR #4623) are never customer context.
+    .where((q) => { q.whereNull("messages.message_type").orWhere("messages.message_type", "not like", "job\\_%"); })
+    .where("messages.created_at", ">=", cutoff)
+    .first("messages.id");
+  if (est.customer_id) {
+    q.andWhere(function () {
+      this.where("conversations.customer_id", est.customer_id);
+      if (est.customer_phone)
+        this.orWhere("conversations.contact_phone", est.customer_phone);
+    });
+  } else if (est.customer_phone) {
+    q.andWhere("conversations.contact_phone", est.customer_phone);
+  } else {
+    return false;
+  }
+  return !!(await q);
+}
+
+// Email arm (owner 2026-11-02, option A: an email reply pauses the follow-up
+// engine exactly like a text). Prod evidence, 90 days: 24 of 220 engagement
+// emails went within 14 days after the same person emailed us back about the
+// estimate (11 people); the SMS-only check above never saw those replies.
+// An inbound row in the Gmail sync table (`emails`) inside the window counts
+// when the sync linked it to this customer (customer_id, set from the sender
+// at insert) OR its bare from_address equals the estimate's email (a lead has
+// no customer_id). Never a Gmail SENT row (personSentFilter, negated and
+// COALESCEd so a NULL label_ids row is not dropped by three-valued logic),
+// and never a match on one of OUR addresses: the from_address arm is skipped
+// when the estimate's own email is internal (self-addressed mail, digests).
+async function hasInboundEmailSince(est, cutoff) {
+  const addr = String(est.customer_email || "").trim().toLowerCase();
+  const byAddress = !!addr && !isInternalEmailRecipient(addr);
+  if (!est.customer_id && !byAddress) return false;
+  const q = db("emails")
+    .where("emails.received_at", ">=", cutoff)
+    .whereRaw(`NOT COALESCE((${personSentFilter("emails")}), false)`)
+    .first("emails.id");
+  q.andWhere(function () {
+    if (est.customer_id) this.orWhere("emails.customer_id", est.customer_id);
+    if (byAddress) this.orWhereRaw("LOWER(emails.from_address) = ?", [addr]);
+  });
+  return !!(await q);
+}
+
 // Reply-pause: if the customer has SMS'd Waves in the last N days (via
 // phone match or customer_id), pause the cron touch and let Virginia
-// handle it live. Soft-fails if the messages/conversations tables aren't
+// handle it live. With GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE on, an
+// inbound EMAIL in the same window pauses it too (SMS arm checked first;
+// off = the emails table is never queried). Soft-fails if the tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
 async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {}) {
   const cutoff = new Date(Date.now() - days * 86400000);
   try {
-    const q = db("messages")
-      .join("conversations", "messages.conversation_id", "conversations.id")
-      .where("messages.direction", "inbound")
-      .where("messages.channel", "sms")
-      // Recruiting replies (job_*, PR #4623) are never customer context.
-      .where((q) => { q.whereNull("messages.message_type").orWhere("messages.message_type", "not like", "job\\_%"); })
-      .where("messages.created_at", ">=", cutoff)
-      .first("messages.id");
-    if (est.customer_id) {
-      q.andWhere(function () {
-        this.where("conversations.customer_id", est.customer_id);
-        if (est.customer_phone)
-          this.orWhere("conversations.contact_phone", est.customer_phone);
-      });
-    } else if (est.customer_phone) {
-      q.andWhere("conversations.contact_phone", est.customer_phone);
-    } else {
-      return false;
-    }
-    const row = await q;
-    return !!row;
+    if (await hasInboundSmsSince(est, cutoff)) return true;
+    if (!emailReplyPauseLive()) return false;
+    return await hasInboundEmailSince(est, cutoff);
   } catch (e) {
     // Cron path fails OPEN (a skipped nudge self-heals on the next stage
     // tick). The REPLAY path must fail CLOSED instead (codex #3259 r27):
     // the queued row is a one-shot bearer-link send, and "reply state
     // unverifiable" is exactly when it must not fire — the caller
-    // propagates the error onto the executor's bounded retry rail.
+    // propagates the error onto the executor's bounded retry rail. The
+    // email arm shares this catch, so it fails the same way.
     if (throwOnError) throw e;
     logger.warn(`[est-followup] reply-pause check skipped: ${e.message}`);
     return false; // fail open
