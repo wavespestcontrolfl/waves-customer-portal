@@ -18,45 +18,11 @@ import { adminFetch } from '../../utils/admin-fetch';
 import { etDateString, TIMEZONE } from '../../lib/timezone';
 import { cn } from '../ui';
 import DidYouMean, { isApproximateRow } from '../admin/DidYouMean';
+import { formatTimeWindow } from './timeWindow';
 
-function parseHHMM(s) {
-  if (!s || typeof s !== 'string') return null;
-  const m = s.match(/^(\d{1,2}):(\d{2})/);
-  if (!m) return null;
-  const hh = parseInt(m[1], 10);
-  const mm = parseInt(m[2], 10);
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-  return hh * 60 + mm;
-}
-
-function formatTimeLabel(mins) {
-  if (mins == null) return '';
-  const h24 = Math.floor(mins / 60);
-  const m = mins % 60;
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-  const ap = h24 < 12 ? 'AM' : 'PM';
-  return m === 0 ? `${h12} ${ap}` : `${h12}:${String(m).padStart(2, '0')} ${ap}`;
-}
-
-// "8–9 AM" when both ends are on the hour in the same meridiem; otherwise
-// the full "8:00 AM – 9:30 AM" form.
+// The day list's style: "8:00–9:00 AM" (timeWindow.js); '' with no start.
 function formatWindow(svc) {
-  const startMins = parseHHMM(svc.windowStart);
-  const endMins = parseHHMM(svc.windowEnd);
-  if (startMins == null) return '';
-  if (endMins == null) return formatTimeLabel(startMins);
-  const startOnHour = startMins % 60 === 0;
-  const endOnHour = endMins % 60 === 0;
-  const sameMeridiem = startMins < 12 * 60 === endMins < 12 * 60;
-  if (startOnHour && endOnHour && sameMeridiem) {
-    const h24s = Math.floor(startMins / 60);
-    const h24e = Math.floor(endMins / 60);
-    const h12s = h24s % 12 === 0 ? 12 : h24s % 12;
-    const h12e = h24e % 12 === 0 ? 12 : h24e % 12;
-    const ap = h24s < 12 ? 'AM' : 'PM';
-    return `${h12s}–${h12e} ${ap}`;
-  }
-  return `${formatTimeLabel(startMins)} – ${formatTimeLabel(endMins)}`;
+  return formatTimeWindow(svc.windowStart, svc.windowEnd);
 }
 
 function formatDateLabel(dateStr) {

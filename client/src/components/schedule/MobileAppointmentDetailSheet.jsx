@@ -28,6 +28,7 @@ import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
+import { formatTimeWindow } from './timeWindow';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import BillingLaneCard from './BillingLaneCard';
 import ConsultationOutcomeSheet from '../ConsultationOutcomeSheet';
@@ -89,23 +90,9 @@ function formatBookedOn(iso) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function formatTime(hhmm) {
-  if (!hhmm || typeof hhmm !== 'string') return '';
-  const m = hhmm.match(/^(\d{1,2}):(\d{2})/);
-  if (!m) return '';
-  const h24 = parseInt(m[1], 10);
-  const mm = m[2];
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-  const ap = h24 < 12 ? 'AM' : 'PM';
-  return `${h12}:${mm} ${ap}`;
-}
-
+// The day list's style: "8:00–8:30 AM" (timeWindow.js).
 function formatWindow(svc) {
-  const s = formatTime(svc.windowStart);
-  const e = formatTime(svc.windowEnd);
-  if (!s) return svc.windowDisplay || '';
-  if (!e) return s;
-  return `${s} – ${e}`;
+  return formatTimeWindow(svc.windowStart, svc.windowEnd) || svc.windowDisplay || '';
 }
 
 function durationHrs(svc) {
