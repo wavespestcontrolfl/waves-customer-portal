@@ -14,10 +14,10 @@
  * Only the customer's newest text in its thread qualifies, with nothing after
  * it in either direction: a thumbs-up that lands under a later message answers
  * the wrong thing. The route checks that before it claims the marker, and the
- * send checks it again at the provider boundary for a new customer text
- * (newerThreadMessageExists with inboundOnly). The marker is claimed before
- * the send, so two clicks send one text; a send that surely did not leave
- * hands the claim back, and an uncertain one keeps it.
+ * send checks it again at the provider boundary, under the phone lock, with
+ * only its own reservation row left out (newerThreadMessageExists). The
+ * marker is claimed before the send, so two clicks send one text; a send that
+ * surely did not leave hands the claim back, and an uncertain one keeps it.
  */
 
 const crypto = require('crypto');
@@ -111,18 +111,17 @@ function likeRefusal(target) {
 }
 
 // Is there any text after the liked one with the same customer phone, on any
-// of our lines? Canonical messages and legacy-only log rows both count, and a
-// row stamped at the same instant counts too: in doubt, no like. At the
-// provider boundary only a new customer text is checked (inboundOnly): the
-// send's own reservation row is an outbound log row by then.
-async function newerThreadMessageExists(dbi, target, { inboundOnly = false } = {}) {
+// of our lines? Canonical messages and legacy-only log rows both count, in
+// either direction, and a row stamped at the same instant counts too: in
+// doubt, no like. At the provider boundary the like's own send has already
+// written its reservation log row; excludeLogIds leaves out exactly those rows.
+async function newerThreadMessageExists(dbi, target, { excludeLogIds = [] } = {}) {
   if (!target.peer) return true;
   const { projection } = addressSql();
   const canonical = smsWithAddress(dbi)
     .whereNot('m.id', target.id)
     .where('m.created_at', '>=', target.createdAt)
     .whereRaw(`${projection.peerSql} = ?`, [target.peer]);
-  if (inboundOnly) canonical.where('m.direction', 'inbound');
   if (await canonical.first('m.id')) return true;
   const legacyPeer = phoneIdentitySql("CASE WHEN sl.direction = 'inbound' THEN sl.from_phone ELSE sl.to_phone END");
   const legacy = dbi('sms_log as sl')
@@ -132,7 +131,7 @@ async function newerThreadMessageExists(dbi, target, { inboundOnly = false } = {
   // (a historical backfill has no provider id), and any row with its id.
   if (target.legacyId) legacy.whereNot('sl.id', target.legacyId);
   if (target.twilioSid) legacy.where((q) => q.whereNull('sl.twilio_sid').orWhereNot('sl.twilio_sid', target.twilioSid));
-  if (inboundOnly) legacy.where('sl.direction', 'inbound');
+  if (excludeLogIds.length) legacy.whereNotIn('sl.id', excludeLogIds);
   return Boolean(await legacy.first('sl.id'));
 }
 
