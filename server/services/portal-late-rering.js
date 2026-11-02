@@ -103,13 +103,13 @@ async function stillWaiting(items) {
     // A booked visit is not a reply to a portal ask: the witnesses' visit clause is not read here.
     { conn: db, bookedVisits: async () => new Map() },
   );
-  const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
   const waiting = [];
   for (const item of items) {
     const bundle = bundles.get(String(item.row.id));
     if (!bundle || reached(bundle)) continue;
+    // The close rule's own estimate test: a request bell is answered only by an estimate pricing its service.
     if (QUOTE_CLASSES.has(item.cls.key)
-      && await whereEstimateCustomerOwnership(handedOffWithin(db('estimates'), item.askedAt), item.customerId).first('estimates.id')) continue;
+      && await relevance().quoteAnswered(db, { meta: item.meta, customerId: item.customerId, bellAt: item.askedAt })) continue;
     waiting.push(item);
   }
   return waiting;

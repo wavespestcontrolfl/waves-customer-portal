@@ -364,10 +364,43 @@ async function loadQuoteHandoffs(rows, data, conn) {
     const asked = askedAtOf(row, meta);
     const bellAt = asked ? new Date(asked) : null;
     if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
-    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
-    const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');
-    if (handedOff) data.quoteHandedOff.add(String(row.id));
+    if (await quoteAnswered(conn, { meta, customerId, bellAt })) data.quoteHandedOff.add(String(row.id));
   }
+}
+
+// The estimate lines that answer an add-service request, by its requested service. A request bell asks for ONE
+// service, so only a delivered estimate that prices that service answers it: a pest estimate never closes a
+// lawn ask (outside review 2026-11-02). Keys are estimate-service-lines' inferEstimateServiceLines keys.
+const REQUEST_SERVICE_LINES = {
+  lawn_care: ['lawn', 'commercial_lawn'],
+  pest_control: ['pest', 'commercial_pest'],
+  mosquito: ['mosquito', 'commercial_mosquito'],
+  tree_shrub: ['tree_shrub', 'commercial_tree_shrub'],
+  termite_bait: ['termite', 'commercial_termite_bait'],
+};
+
+// Was the quote this bell asks for handed to its customer after `bellAt`? The witness is the promise lane's
+// (handedOffWithin: a real delivery or the customer's acceptance, never sent_at) inside the estimate-ownership
+// fence. An add-service REQUEST bell (bundle_quote_requested with its request id) also needs the estimate to price
+// the request's own service, read from the request row; a request whose service no estimate line can name never
+// closes this way (fail closed: a person marks it handled). The chat and repeat-form classes carry no service and
+// keep the customer-level rule. Also read by the late re-ring (portal-late-rering.js), so an estimate for another
+// service is no answer there either.
+async function quoteAnswered(conn, { meta, customerId, bellAt }) {
+  const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+  const handedOff = () => whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId);
+  if (!isBundleRequestBell(meta)) return Boolean(await handedOff().first('estimates.id'));
+  const request = await conn('service_requests').where({ id: meta.requestId, customer_id: customerId })
+    .first('requested_service', conn.raw("pricing_revision->'mintedEstimate'->>'id' as minted_estimate_id"));
+  const { normalizeRequestedServiceKey } = require('./estimate-add-service-request');
+  const lines = REQUEST_SERVICE_LINES[normalizeRequestedServiceKey(request?.requested_service)];
+  if (!lines) return false;
+  const { inferEstimateServiceLines } = require('./estimate-service-lines');
+  const estimates = await handedOff().select('estimates.*');
+  // The request's own minted estimate answers it as made (its lines need not name the service); any other
+  // estimate must price the requested service.
+  return estimates.some((estimate) => (request.minted_estimate_id && String(estimate.id) === String(request.minted_estimate_id))
+    || inferEstimateServiceLines(estimate).some((line) => lines.includes(line.key)));
 }
 
 // GATE_LEAD_CONTACTED_CLOSE on (shadow or true): was an estimate handed off to each
@@ -1323,6 +1356,7 @@ async function lateReRingPass(now) {
 
 module.exports = {
   runAdminAlertRelevanceSweep,
+  quoteAnswered,
   classify,
   loadSubjects,
   subjectFor,
