@@ -9702,6 +9702,17 @@ function alertClaudeFaultsLive() {
 }
 // GATE_ALERT_CLAUDE_FAULTS reader, on its own line so gate PRs never conflict.
 module.exports.alertClaudeFaultsLive = alertClaudeFaultsLive;
+
+// GATE_ALERT_EXPLAINER read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02: "I want the
+// show full text to be a brief description that I can understand ... if it's a customer, the customer needs to be
+// named"). On, the admin bell names the customer an alert is about and its "Show full text" becomes "What to do": a
+// plain-words summary (what happened, the steps, who fixes it) an AI writes the first time it is opened and saves on the
+// row (services/admin-alert-explainer.js). Off = the bell is as before and the explain route answers 404.
+function alertExplainerLive() {
+  return process.env.GATE_ALERT_EXPLAINER === 'true';
+}
+// GATE_ALERT_EXPLAINER reader, on its own line so gate PRs never conflict.
+module.exports.alertExplainerLive = alertExplainerLive;
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
 
