@@ -7639,9 +7639,14 @@ office (recap has no pay-link fallback). Source contracts pin the guard
 strings — `admin-dispatch-backfill-completion.test.js` and
 `appointment-card-fees.test.js` must move with any change here.)
 `/api/mcp` (POST; machine-to-machine JSON-RPC — a minimal read-only MCP
-server exposing the knowledge index (hybrid search, catalog service +
-static protocol lookups, corpus stats) to MCP clients such as Claude Code
-sessions and agents. Fail-closed in three ordered layers: 403 unless
+server exposing the knowledge index (hybrid search, whole-entry reads,
+catalog service + static protocol lookups, corpus stats) to MCP clients
+such as Claude Code sessions and agents. A search row's `snippet` is one
+matching chunk cut to 500 characters, and its `partial` is true unless the
+entry is that one short chunk (an unreadable chunk count reads as partial);
+`get_document` returns the entry's chunks in order, the title once, in
+parts of 20,000 characters paged by `offset`/`nextOffset`, and refuses a
+source outside the known corpora. Fail-closed in three ordered layers: 403 unless
 `GATE_MCP_READ_TOOLS=true`, 503 unless `MCP_SERVICE_TOKEN` is configured,
 401 unless the `Authorization: Bearer` / `X-MCP-Token` credential matches
 via constant-time compare — the endpoint is unusable until deliberately
