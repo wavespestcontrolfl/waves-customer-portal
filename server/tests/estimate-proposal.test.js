@@ -686,6 +686,35 @@ describe('pricing authority by estimate state', () => {
     })?.lines ?? null).toBeNull();
   });
 
+  // A v1 cadence annual is its rounded monthly x 12, net of a rounded monthly
+  // credit slice: a $43.33/mo plan with a $26.00 credit reads $41.16/mo,
+  // $493.92/yr, while its rows add up to the cent ($123.50 x 4 = $494.00).
+  // The document printed no plan price for that 8-cent gap.
+  const pestCadence = (displayPrice) => ({
+    key: 'quarterly', label: 'Quarterly', monthly: 41.16, annual: 493.92,
+    manualDiscount: { recurringAmount: 26 },
+    perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice, perTreatment: 130, visitsPerYear: 4 }],
+  });
+  const pestEstimate = { service_interest: 'Pest Control', monthly_total: 41.17, annual_total: 494, estimate_data: {} };
+  const pestLines = (candidate) => perApplicationRecurringResolution(pestEstimate, pestEstimate.estimate_data, {
+    bundle: { frequencies: [candidate] }, defaultCandidate: candidate,
+  })?.lines ?? null;
+
+  it('OUTSTANDING: rows a few cents off the rounded cadence annual still print', () => {
+    const out = pestLines(pestCadence(123.5));
+    expect(out).toHaveLength(1);
+    expect(out[0].unitPrice).toBe(123.5);
+  });
+
+  it('OUTSTANDING: a credit-explained gap a few cents off by rounding still prints', () => {
+    // Pre-credit rows: $130 x 4 = $520, less the $26 credit = $494.00 vs $493.92.
+    expect(pestLines(pestCadence(130))[0].unitPrice).toBe(130);
+  });
+
+  it('OUTSTANDING: a gap of dollars is still a mismatch, not rounding', () => {
+    expect(pestLines(pestCadence(124.5))).toBeNull();
+  });
+
   it('LOCKED + matching snapshot: quotes the frozen snapshot, never today prices', () => {
     // No livePricing => locked. The snapshot reconciles to the frozen columns.
     const out = perApplicationRecurringResolution(base, base.estimate_data)?.lines ?? null;
