@@ -123,6 +123,15 @@ async function tapPauseForRequest(request, database = db) {
   if (!await tapPauseActive(request.customer_id, database)) return false;
   return !await customerAskedForLink({ serviceRecordId: request.service_record_id, sequenceId: request.sequence_id }, database);
 }
+// The pause for an ask known only by its id: a completion text's bundled ask, judged at send time
+// (review-ask-dispatch.js clickGate), where the visit-anchored click guard lets a tap from before
+// this visit through. Off: false before any read.
+async function tapPauseForRequestId(reviewRequestId, database = db) {
+  if (!reviewRequestId || !reviewTapPauseLive()) return false;
+  const request = await database('review_requests').where({ id: reviewRequestId })
+    .first('id', 'customer_id', 'service_record_id', 'sequence_id', 'triggered_by');
+  return tapPauseForRequest(request, database);
+}
 // A link the customer asked for (completion panel "Customer asked for the link") is not an
 // automatic ask, so the pause never holds it. The visit record keeps that request (every member
 // of a combined visit too, whose enrollment carries no customerRequested), and so does a cadence
@@ -226,4 +235,4 @@ async function touchSuppressedByClick(customerId, { serviceRecordId = null, sche
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, or probably already left a review, so no further review request is sent.';
 
-module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, tapPauseForRequest, customerAskedForLink, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
+module.exports = { reviewLinkClickedSince, probableReviewer, tapPauseActive, tapPauseForRequest, tapPauseForRequestId, customerAskedForLink, REVIEW_TAP_PAUSE_DAYS, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };

@@ -8471,6 +8471,25 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     expect(mock.__state.rows.review_requests.find((r) => r.id === queued.id).status).not.toBe('suppressed');
   });
 
+  test('a completion text\'s bundled ask: a tap before this visit drops the review line only with the switch on, and a requested link still rides', async () => {
+    const { withBundledAskGate } = require('../services/review-ask-dispatch');
+    const today = new Date().toISOString().slice(0, 10);
+    const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    const rows = (notes) => ({ customers: [{ id: 'tp-13', first_name: 'Jo', phone: '+12025550113', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'rec-tp13', customer_id: 'tp-13', service_date: today, structured_notes: JSON.stringify(notes) }],
+      review_requests: [tapRow('tp-13', 39), { id: 'rr-inline-tp13', customer_id: 'tp-13', service_record_id: 'rec-tp13', triggered_by: 'auto_inline',
+        status: 'pending', token: 'tp13', created_at: new Date(), scheduled_for: new Date(Date.now() + 7200000) }] });
+    const drops = [];
+    const send = async (drop) => { drops.push(drop); return { sent: true }; };
+    db.mockImplementation(makeMock(rows({ requestReview: true })));
+    await withBundledAskGate('tp-13', 'rr-inline-tp13', send); // switch off: the tap predates this visit
+    mockGates.reviewTapPause = true;
+    await withBundledAskGate('tp-13', 'rr-inline-tp13', send);
+    db.mockImplementation(makeMock(rows({ requestReview: true, customerRequestedReview: asked })));
+    await withBundledAskGate('tp-13', 'rr-inline-tp13', send);
+    expect(drops).toEqual([null, 'clicked', null]);
+  });
+
   test.each([
     ['switch on: the Day-3 follow-up of an older ask stands down after a tap 39 days ago', true, 0],
     ['switch off: the same follow-up goes (control)', false, 1],
