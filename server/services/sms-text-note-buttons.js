@@ -10,6 +10,7 @@
 
 const db = require('../models/db');
 const NotificationService = require('./notification-service');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const KIND = 'text_note';
 const ITEMS = {
@@ -106,7 +107,8 @@ async function loadPlanInputs(conn, metas) {
   const smsIds = [...new Set(metas.map((m) => m.sms_log_id).filter(Boolean).map(String))];
   const customerIds = [...new Set(metas.map((m) => m.customerId).filter(Boolean).map(String))];
   const [sources, prefs, properties] = await Promise.all([
-    smsIds.length ? conn('sms_log').whereIn('id', smsIds).select('id', 'customer_id', 'created_at', 'operational_analysis') : [],
+    smsIds.length ? excludeUnresolvedSendReservations(conn('sms_log').whereIn('id', smsIds))
+      .select('id', 'customer_id', 'created_at', 'operational_analysis') : [],
     customerIds.length ? conn('property_preferences').whereIn('customer_id', customerIds).select('*') : [],
     customerIds.length ? conn('customer_properties').whereIn('customer_id', customerIds).where({ active: true })
       .select('id', 'customer_id') : [],
