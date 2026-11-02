@@ -193,6 +193,14 @@ postgres('re-service answers frozen on /complete', () => {
     expect(attempt).toEqual({ status: 'failed', error: 'reservice_answer_invalid' });
   });
 
+  test('the single-premises proof reads the real tables without a failed read', async () => {
+    const f = await seedVisit();
+    try {
+      const { accountProvesSinglePremises } = require('../services/reservice-property-scope');
+      await expect(accountProvesSinglePremises(mockPg, f.customerId)).resolves.toEqual(expect.any(Boolean));
+    } finally { await cleanup(f); }
+  });
+
   test('gate off: the field is ignored and the record has no key', async () => {
     const { result, data } = await run({ gate: false, body: { reserviceAnswers: { items: [{ itemId: 'x', answer: 'treated', productIds: ['not-on-this-visit'] }] } } });
     expect(result.status).toBe(200);

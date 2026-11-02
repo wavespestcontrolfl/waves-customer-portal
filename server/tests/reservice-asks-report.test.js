@@ -113,6 +113,32 @@ describe('reserviceAsksReport builder', () => {
     expect(buildReserviceAsksReport(service(mixed), { block: BLOCK, products: PRODUCTS }).told.map((row) => row.label)).toEqual(['Request form · Oct 30']);
   });
 
+  test('the quoted words keep only the pest problem: a sentence about a pet, a person, a bait or a health word never prints', () => {
+    on();
+    const asks = frozen([
+      item({ id: 'a', text: 'Our cat gets sick if we let her out on the lanai. Millipedes are all over the lanai.' }),
+      item({ id: 'b', text: 'The bait by the sink is gone. Ants are back by the sink.' }),
+      item({ id: 'c', text: 'My son has a cough.' }),
+    ], { a: { answer: 'noted' }, b: { answer: 'noted' }, c: { answer: 'noted' } });
+    const block = buildReserviceAsksReport(service(asks), { block: BLOCK, products: PRODUCTS });
+    expect(block.told.map((row) => row.words)).toEqual(['“Millipedes are all over the lanai.”', '“Ants are back by the sink.”', null]);
+    // Card 2 names each message by what card 1 printed, never the dropped sentences.
+    expect(block.did.map((row) => row.subject)).toEqual([
+      'Text · Oct 30 · “Millipedes are all over the lanai”', 'Text · Oct 30 · “Ants are back by the sink”', 'Text · Oct 30',
+    ]);
+    expect(JSON.stringify(block)).not.toMatch(/cat|bait|cough|son\b/i);
+  });
+
+  test('a health complaint never prints: flagged at gather time, or caught again at render', () => {
+    on();
+    const flagged = frozen([item({ officeOnly: 'health', text: 'Ants are still in the kitchen.' })], { 'text:1': { answer: 'treated', productIds: ['prod-1'] } });
+    expect(buildReserviceAsksReport(service(flagged), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    const unflagged = frozen([item({ text: 'I got sick after your spray. Ants are still in the kitchen.' })], { 'text:1': { answer: 'treated', productIds: ['prod-1'] } });
+    expect(buildReserviceAsksReport(service(unflagged), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    const breathe = frozen([item({ text: 'Ants are still in the kitchen. I could not breathe after your spray.' })], { 'text:1': { answer: 'treated', productIds: ['prod-1'] } });
+    expect(buildReserviceAsksReport(service(breathe), { block: BLOCK, products: PRODUCTS })).toBeNull();
+  });
+
   test('an item frozen as office-only never shows, even when its scrubbed words read clean', () => {
     on();
     const flagged = frozen([item({ officeOnly: 'billing' })], { 'text:1': { answer: 'noted' } });
