@@ -9,7 +9,8 @@
  *    notifications → 202, unknown method → -32601, batch cap);
  *  - tool behavior: read-only registry only, unknown tool → isError, tool
  *    crash → generic failure (no internals in the response), search degrades
- *    to FTS-only when the embedder is unavailable, snippets truncate.
+ *    to FTS-only when the embedder is unavailable, snippets truncate and say
+ *    when they are not the whole entry, get_document reads the whole entry.
  *
  * The real safeEqual and JSON-RPC plumbing run; feature-gates, db, the
  * embedder, and the logger are stubbed.
@@ -35,18 +36,25 @@ jest.mock('../services/llm/embed', () => ({
 }));
 
 // db stub: chainable builder; every builder resolves to mockRows (thenable)
-// or mockFirstRow (.first). Builders are captured so filter assertions can
-// inspect recorded calls.
+// or mockFirstRow (.first). A builder opened on a table listed in
+// mockTableRows resolves to that entry instead (an Error rejects). Builders
+// are captured so filter assertions can inspect recorded calls.
 let mockRows = [];
+let mockTableRows = {};
 let mockFirstRow = null;
 let mockRejectWith = null;
 const builders = [];
 const CHAIN_METHODS = ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'whereNotNull', 'select', 'from', 'as', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
+const settle = (table) => {
+  const own = table && Object.prototype.hasOwnProperty.call(mockTableRows, table) ? mockTableRows[table] : mockRows;
+  if (mockRejectWith) return Promise.reject(mockRejectWith);
+  return own instanceof Error ? Promise.reject(own) : Promise.resolve(own);
+};
 const makeBuilder = (table) => {
   const b = { table };
   CHAIN_METHODS.forEach((m) => { b[m] = jest.fn(() => b); });
   b.first = jest.fn(() => (mockRejectWith ? Promise.reject(mockRejectWith) : Promise.resolve(mockFirstRow)));
-  b.then = (resolve, reject) => (mockRejectWith ? Promise.reject(mockRejectWith) : Promise.resolve(mockRows)).then(resolve, reject);
+  b.then = (resolve, reject) => settle(table).then(resolve, reject);
   builders.push(b);
   return b;
 };
@@ -81,6 +89,7 @@ beforeEach(() => {
   mockGateOn = true;
   process.env.MCP_SERVICE_TOKEN = TOKEN;
   mockRows = [];
+  mockTableRows = {};
   mockFirstRow = null;
   mockRejectWith = null;
   builders.length = 0;
@@ -175,7 +184,7 @@ describe('JSON-RPC plumbing', () => {
   test('tools/list exposes exactly the read-only registry', async () => {
     const { body } = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const names = body.result.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['get_protocol', 'get_service', 'list_sources', 'search_knowledge', 'search_resolutions']);
+    expect(names).toEqual(['get_document', 'get_protocol', 'get_service', 'list_sources', 'search_knowledge', 'search_resolutions']);
     body.result.tools.forEach((t) => {
       expect(t.inputSchema).toBeDefined();
       expect(t.execute).toBeUndefined(); // implementation never serializes out
@@ -282,6 +291,71 @@ describe('tools', () => {
     expect(result.results[0]).toMatchObject({ source: 'wiki', sourceId: 'chinch-bugs', title: 'Chinch bugs' });
     expect(result.results[0].snippet).toHaveLength(500);
     expect(typeof result.results[0].score).toBe('number');
+  });
+
+  test('a result says when its snippet is not the whole entry', async () => {
+    mockRows = [
+      { source: 'protocol', source_id: 'long-chunk', title: 'Long', content: 'x'.repeat(600) },
+      { source: 'kb', source_id: 'one-short-chunk', title: 'Short', content: 'Short\n\nall of it' },
+      { source: 'lawn_module', source_id: 'many-chunks', title: 'Chinch bugs', content: 'Chinch bugs\n\nArena, then bifenthrin' },
+    ];
+    mockTableRows.knowledge_embeddings = [
+      { source: 'protocol', source_id: 'long-chunk', chunks: '1' },
+      { source: 'kb', source_id: 'one-short-chunk', chunks: '1' },
+      { source: 'lawn_module', source_id: 'many-chunks', chunks: '3' },
+    ];
+    const { body } = await callTool('search_knowledge', { query: 'chinch bug rotation' });
+    const partial = Object.fromEntries(toolResult(body).results.map((r) => [r.sourceId, r.partial]));
+    expect(partial).toEqual({ 'long-chunk': true, 'one-short-chunk': false, 'many-chunks': true });
+    // One grouped read counts the chunks of every result entry.
+    const counts = builders.filter((b) => b.table === 'knowledge_embeddings' && b.groupBy.mock.calls.length);
+    expect(counts).toHaveLength(1);
+    expect(counts[0].whereIn).toHaveBeenCalledWith(['source', 'source_id'], expect.arrayContaining([['kb', 'one-short-chunk']]));
+  });
+
+  test('a failed chunk count marks every result partial and the search still answers', async () => {
+    mockRows = [{ source: 'kb', source_id: 'k1', title: 'T', content: 'short' }];
+    mockTableRows.knowledge_embeddings = new Error('statement timeout');
+    const { body } = await callTool('search_knowledge', { query: 'anything' });
+    expect(body.result.isError).toBe(false);
+    expect(toolResult(body).results[0].partial).toBe(true);
+  });
+
+  test('get_document rebuilds the whole entry from its chunks in order, title once', async () => {
+    mockTableRows.knowledge_embeddings = [
+      { title: 'Chinch bugs', content: 'Chinch bugs\n\nTetrino in May, then Arena.' },
+      { title: 'Chinch bugs', content: 'Chinch bugs\n\nThen bifenthrin, then Dylox 6.2 G.' },
+    ];
+    const { body } = await callTool('get_document', { source: 'lawn_module', source_id: 'chinch-bugs' });
+    expect(body.result.isError).toBe(false);
+    const text = 'Tetrino in May, then Arena.\n\nThen bifenthrin, then Dylox 6.2 G.';
+    expect(toolResult(body)).toEqual({
+      source: 'lawn_module', sourceId: 'chinch-bugs', title: 'Chinch bugs', totalChars: text.length, offset: 0, text, nextOffset: null,
+    });
+    expect(builders[0].where).toHaveBeenCalledWith({ source: 'lawn_module', source_id: 'chinch-bugs' });
+    expect(builders[0].orderBy).toHaveBeenCalledWith('chunk_index');
+  });
+
+  test('get_document answers a long entry in parts that page by offset', async () => {
+    mockTableRows.knowledge_embeddings = [{ title: '', content: `${'a'.repeat(20000)}${'b'.repeat(5000)}` }];
+    const first = toolResult((await callTool('get_document', { source: 'wiki', source_id: 'w' })).body);
+    expect(first).toMatchObject({ totalChars: 25000, offset: 0, nextOffset: 20000 });
+    expect(first.text).toBe('a'.repeat(20000));
+    const second = toolResult((await callTool('get_document', { source: 'wiki', source_id: 'w', offset: first.nextOffset })).body);
+    expect(second).toMatchObject({ offset: 20000, nextOffset: null });
+    expect(second.text).toBe('b'.repeat(5000));
+  });
+
+  test('get_document refuses an unknown source before the db and reports a missing entry', async () => {
+    const bogus = await callTool('get_document', { source: 'customers', source_id: '1' });
+    expect(bogus.body.result.isError).toBe(true);
+    expect(toolResult(bogus.body).error).toBe('unknown source');
+    expect(builders).toHaveLength(0);
+
+    mockTableRows.knowledge_embeddings = [];
+    const missing = await callTool('get_document', { source: 'kb', source_id: 'nope' });
+    expect(missing.body.result.isError).toBe(true);
+    expect(toolResult(missing.body).error).toMatch(/not found/);
   });
 
   test('search fuses vector + FTS when the embedder responds', async () => {
