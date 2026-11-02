@@ -916,6 +916,25 @@ async function sendAppIntro({ customerId, sourceId = null, trackToken = null, tr
   });
 }
 
+// The moving link, sent by hand from the Customer 360 Moving card (owner
+// 2026-11-02, dark behind GATE_MOVING_FLOW). Never sent by a trigger: a staff
+// click is the only caller. The key repeats within a minute (a double click is
+// one email) but a deliberate resend a minute later goes out. The same
+// recipient and "Email Messages" opt-out checks as every other sender here run
+// inside sendTemplate.
+async function sendMovingLink({ customerId, moveId, movingUrl, actorId = null, now = new Date() } = {}) {
+  if (!moveId || !movingUrl) return { ok: false, skipped: true, reason: 'missing_link' };
+  return sendTemplate({
+    customerId,
+    templateKey: 'moving_link',
+    eventType: 'moving.link_sent',
+    payload: { moving_url: movingUrl },
+    idempotencyKey: `moving_link:${moveId}:${Math.floor(now.getTime() / 60000)}`,
+    categories: ['moving'],
+    metadata: { move_id: moveId, sent_by: actorId },
+  });
+}
+
 // The rate-change sentence for every case EXCEPT "billed monthly before and
 // after": it never states a previous monthly figure, and off the monthly lane
 // it states no monthly figure at all. Shared by membership.updated and
@@ -1344,6 +1363,7 @@ module.exports = {
   sendMembershipStarted,
   buildMembershipStartedSection,
   sendAppIntro,
+  sendMovingLink,
   sendMembershipUpdated,
   sendMembershipTierUpgraded,
   sendMembershipRenewalReminder,

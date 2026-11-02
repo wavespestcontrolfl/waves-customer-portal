@@ -25,7 +25,7 @@ const APP_LINK_PATH_PREFIXES = Object.freeze([
   '/l/', '/track', '/pay', '/billing', '/receipt', '/report', '/pest-report', '/rate', '/prep',
   '/reschedule', '/estimate', '/contract', '/recap', '/review', '/book', '/login', '/quote',
   '/lawn-report', '/service-outlines', '/appointment', '/secure', '/visit', '/reservice',
-  '/inspection', '/price-change',
+  '/inspection', '/price-change', '/moving',
 ]);
 
 // Customer-reachable pages that open in the browser on purpose. Android's

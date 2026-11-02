@@ -43,6 +43,8 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)),
   leadInspectionLinkLive: jest.fn(() => true),
+  // Dark by default, as in prod; the moving suites turn it on.
+  movingFlowLive: jest.fn(() => false),
 }));
 jest.mock('../services/appointment-card-request', () => ({
   claimCardLinkSend: jest.fn(),
@@ -190,6 +192,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereIn = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
   b.whereNotNull = jest.fn(() => b);
+  b.whereNot = jest.fn(() => b);
   b.whereRaw = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
@@ -1447,6 +1450,28 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck(`Here is your latest service report: portal.wavespestcontrol.com/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
     mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rep1', kind: 'service_report', target_url: 'https://portal.wavespestcontrol.com/report/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } }) };
     expect(await immediateOnlyLinkSendCheck('Here is your latest service report: wavespest.co/l/rep1')).toEqual({ present: true, label: 'Service report' });
+  });
+
+  test('a moving page link (long, http, or the short form) is immediate-only; a look-alike host is not', async () => {
+    const MOVE = 'ab'.repeat(24);
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE}`)).toEqual({ present: true, label: 'Moving' });
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/moving/${MOVE}/`)).toEqual({ present: true, label: 'Moving' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'mv1', kind: 'moving', target_url: `https://portal.wavespestcontrol.com/moving/${MOVE}` } }) };
+    expect(await immediateOnlyLinkSendCheck('Moving? wavespest.co/l/mv1')).toEqual({ present: true, label: 'Moving' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Tips: https://example.com/moving/${MOVE}`)).toEqual({ present: false });
+    // Gate on: a live moving token outside a canonical link is fenced too.
+    const { movingFlowLive } = require('../config/feature-gates');
+    movingFlowLive.mockReturnValue(true);
+    try {
+      mockBuilders = { short_codes: chainBuilder({ firstRow: null }), customer_moves: chainBuilder({ firstRow: { id: 'move-1' } }) };
+      expect(await immediateOnlyLinkSendCheck(`Moving? https://attacker.example/moving/${MOVE}`)).toEqual({ present: true, label: 'Moving' });
+      mockBuilders = { short_codes: chainBuilder({ firstRow: null }), customer_moves: chainBuilder({ firstRow: null }) };
+      expect(await immediateOnlyLinkSendCheck(`Tips: https://example.com/moving/${MOVE}`)).toEqual({ present: false });
+    } finally {
+      movingFlowLive.mockReturnValue(false);
+    }
   });
 
   test('a project report link (vanity or full-token form) is immediate-only; the project form is not mistaken for a service report', async () => {
@@ -3468,6 +3493,117 @@ describe('wrappedOwnedLinkIn', () => {
     const surfaced = nestedOwnedLinkRuns(link).join(' ');
     expect(surfaced).toContain(`portal.wavespestcontrol.com/pay/${T}`);
     expect((await composerOnlyLinkPresence(`${link} ${surfaced}`, { includeVerifyOnly: true })).present).toBe(true);
+  });
+});
+
+describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at every send check (GH Codex security review on #7486)', () => {
+  const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+  const MOVE_TOKEN = 'ab'.repeat(24);
+  const acct = (id, account_id = 'acct') => ({ id, account_id });
+  function wireMoving({ move = { id: 'move-1', customer_id: 'c2' }, recipientRows = [acct('c1')], owner = acct('c2'), shortRow = null } = {}) {
+    mockBuilders = {
+      customer_moves: chainBuilder({ firstRow: move }),
+      customers: chainBuilder({ firstRow: owner, rows: recipientRows }),
+      short_codes: chainBuilder({ firstRow: shortRow }),
+    };
+  }
+  const { movingFlowLive } = require('../config/feature-gates');
+  beforeEach(() => { movingFlowLive.mockReturnValue(true); });
+  afterEach(() => { movingFlowLive.mockReturnValue(false); });
+
+  test('linkOwnersInBody names the move\'s customer, reports an unknown token, and ignores a look-alike host', async () => {
+    wireMoving();
+    expect(await linkOwnersInBody(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))
+      .toEqual({ owners: [{ kind: 'moving', token: MOVE_TOKEN, customerId: 'c2' }], unresolved: [] });
+    expect(mockBuilders.customer_moves.where).toHaveBeenCalledWith({ token: MOVE_TOKEN });
+    expect(mockBuilders.customer_moves.whereNot).toHaveBeenCalledWith({ status: 'closed' });
+    wireMoving({ move: null });
+    expect(await linkOwnersInBody(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))
+      .toEqual({ owners: [], unresolved: [{ kind: 'moving', token: MOVE_TOKEN }] });
+    expect(await linkOwnersInBody(`Tips: https://example.com/moving/${MOVE_TOKEN}`)).toEqual({ owners: [], unresolved: [] });
+  });
+
+  test('the /sms seam passes a household sibling on the same account, adopts the one live row on the number, and names the move for the sent stamp', async () => {
+    wireMoving({ recipientRows: [acct('c1')], owner: acct('c2') });
+    expect(await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null }))
+      .toEqual({ ok: true, customerId: 'c1', moves: ['move-1'] });
+  });
+
+  test('the /sms seam refuses another account\'s moving link, long or short, and an unknown token', async () => {
+    wireMoving({ recipientRows: [acct('c1')], owner: acct('c9', 'other-acct'), move: { id: 'move-9', customer_id: 'c9' } });
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link belongs to a different customer/);
+    wireMoving({
+      recipientRows: [acct('c1')], owner: acct('c9', 'other-acct'), move: { id: 'move-9', customer_id: 'c9' },
+      shortRow: { code: 'mv1', kind: 'moving', target_url: `https://portal.wavespestcontrol.com/moving/${MOVE_TOKEN}` },
+    });
+    expect((await bearerLinkSendCheck('Moving? wavespest.co/l/mv1', '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link belongs to a different customer/);
+    wireMoving({ move: null });
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link no longer opens/);
+  });
+
+  test('a closed move or a dark gate refuses at the send: the page would answer 404', async () => {
+    wireMoving({ move: { id: 'move-1', customer_id: 'c2', status: 'closed' } });
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link no longer opens/);
+    movingFlowLive.mockReturnValue(false);
+    wireMoving();
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/Moving links are switched off/);
+    expect(mockBuilders.customer_moves.first).not.toHaveBeenCalled();
+  });
+
+  test('a live moving token outside a canonical Waves link (foreign host, nested or encoded) is refused (GH Codex security review)', async () => {
+    wireMoving();
+    expect((await bearerLinkSendCheck(`Moving? https://attacker.example/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link outside the Waves portal address/);
+    expect(mockBuilders.customer_moves.whereIn).toHaveBeenCalledWith('token', expect.arrayContaining([MOVE_TOKEN]));
+    expect(mockBuilders.customer_moves.whereNot).toHaveBeenCalledWith({ status: 'closed' });
+    wireMoving();
+    const nested = `https://evil.example/?next=${encodeURIComponent(encodeURIComponent(`https://portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))}`;
+    expect((await bearerLinkSendCheck(`Moving? ${nested}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link outside the Waves portal address/);
+  });
+
+  test('a canonical moving link carrying another live token in its query is refused; its own path token is the binder\'s', async () => {
+    const OTHER = 'cd'.repeat(24);
+    wireMoving();
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}?shared=${OTHER}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link outside the Waves portal address/);
+    expect(mockBuilders.customer_moves.whereIn).toHaveBeenCalledWith('token', [OTHER]);
+    // The plain canonical link: its own token is never a stray lookup.
+    wireMoving();
+    expect(await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null }))
+      .toEqual({ ok: true, customerId: 'c1', moves: ['move-1'] });
+    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
+  });
+
+  test('a look-alike host whose token opens no move is not a Waves link and passes', async () => {
+    wireMoving({ move: null });
+    expect(await bearerLinkSendCheck(`Tips: https://example.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+  });
+
+  test('the scan is bounded: a body past the SMS size, or a hex run past the candidate cap, is refused before any lookup (GH Codex security review)', async () => {
+    wireMoving();
+    const padded = `Moving? ${'ab'.repeat(3300)}`;
+    expect((await bearerLinkSendCheck(padded, '9415550100', { trustedCustomerId: null })).error).toMatch(/too long to check/);
+    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
+    wireMoving();
+    // 33 chained sha256 digests: one 2,112-char hex run whose 48-char windows are all different.
+    const crypto = require('crypto');
+    let digest = 'seed';
+    const longRun = `Moving? ${Array.from({ length: 33 }, () => { digest = crypto.createHash('sha256').update(digest).digest('hex'); return digest; }).join('')}`;
+    expect((await bearerLinkSendCheck(longRun, '9415550100', { trustedCustomerId: null })).error).toMatch(/too long to check/);
+    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
+  });
+
+  test('gate off: no moving lookup at all for a message without a canonical moving link', async () => {
+    movingFlowLive.mockReturnValue(false);
+    wireMoving();
+    expect(await bearerLinkSendCheck(`Tips: https://example.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
   });
 });
 

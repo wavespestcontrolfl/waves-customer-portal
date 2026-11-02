@@ -158,14 +158,9 @@ function stripHtml(s) {
 // appears on a fully accepted in-area validation (validated_accept /
 // corrected); an accepted OUT-of-area address is the clean-cancel hard stop;
 // anything partial (ambiguous, missing component, confirm-needed,
-// API-unavailable) resolves to null → no card, no hard stop.
-function cancelMoveAddressVerdict(verdict, STATUSES) {
-  if (!verdict) return null;
-  if (verdict.status === STATUSES.OUT_OF_SERVICE_AREA) return false;
-  const accepted = verdict.status === STATUSES.VALIDATED_ACCEPT || verdict.status === STATUSES.CORRECTED;
-  if (!accepted || verdict.inServiceArea !== true) return null;
-  return true;
-}
+// API-unavailable) resolves to null → no card, no hard stop. The rule lives in
+// services/move-address-verdict.js, shared with the moving link flow.
+const { cancelMoveAddressVerdict } = require('../services/move-address-verdict');
 
 // Durable cancellation case (PR E) — idempotent per request id, best-effort:
 // a case failure never blocks or un-reports a cancel. Called from the fresh
