@@ -527,12 +527,25 @@ describe('bellAllowed decision order', () => {
 
   test('customer communication rings; everything else is silent by default (owner ruling 2026-08-28)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
-    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent'], ['schedule', 'reservice_self_booked'], ['payment', 'payment_failed']]) {
+    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent'], ['schedule', 'reservice_self_booked'], ['payment', 'payment_failed'], ['new_lead', 'relay_hot_lead'], ['service', 'relay_reservice_filed']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
     }
     for (const [category, triggerKey] of [['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(false);
     }
+  });
+
+  // Sweep #7303 B1: the voice agent's two pages rode the denylisted
+  // internal_admin_alert redirect. Their own trigger keys ring, and the
+  // re-service push rings over a silenced service category like the
+  // ticket's own bell:true card does; the redirect itself stays silenced.
+  test('the voice agent pages ring over a silenced service category; the internal-alert redirect stays silenced', async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:service', bell_enabled: false }]) });
+    bellPolicy.clearOverrideCache();
+    await expect(bellPolicy.bellAllowed({ category: 'service', triggerKey: 'relay_reservice_filed' })).resolves.toBe(true);
+    await expect(bellPolicy.bellAllowed({ category: 'new_lead', triggerKey: 'relay_hot_lead' })).resolves.toBe(true);
+    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'internal_admin_alert' })).resolves.toBe(false);
+    bellPolicy.clearOverrideCache();
   });
 
   test('payment_failed rings even with the payment category silenced; other payment bells stay behind the toggle (owner ruling 2026-09-11)', async () => {

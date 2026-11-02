@@ -601,6 +601,46 @@ const TRIGGER_REGISTRY = {
       link: callLink(p),
     }),
   },
+  // Sandy flagged a caller HOT on capture_lead (an emergency, a swarm, a
+  // sting, an angry customer): the urgent page services/voice-agent/
+  // relay-alert.js owes the owner, once per call (dedupeKey
+  // relay-hot-lead:<CallSid>). Until sweep #7303 B1 it rode the owner-phone
+  // internal_alert redirect, whose trigger the bell policy denylists, so the
+  // page reached nobody while the caller was told the team was notified.
+  relay_hot_lead: {
+    label: `Urgent caller on a ${agentName()} call`,
+    category: 'new_lead',
+    priority: 'urgent',
+    group: 'Communication',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
+    adminRoleOnly: true,
+    // relay-alert.js composes the page (composeAdminAlert): `alert` carries
+    // its structured parts into the row's metadata and `detail` the full text.
+    build: (p) => ({
+      title: p.title || 'Leads — call back an urgent caller now',
+      body: p.body || null,
+      ...(p.detail ? { detail: p.detail } : {}),
+      link: p.link || '/admin/leads',
+      ...(p.alert ? { alert: p.alert } : {}),
+    }),
+  },
+  // The phone page for a re-service Sandy filed (voice-agent/relay-reservice.js,
+  // sweep #7303 B1). The ticket's own bell card is written there with
+  // bell:true, so relay-alert.js sends this one pushOnly: the bell keeps one
+  // row per ticket and the push is the page.
+  relay_reservice_filed: {
+    label: `${agentName()} filed a re-service`,
+    category: 'service',
+    priority: 'high',
+    group: 'Communication',
+    rule: { area: 'Schedule', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.title || `Schedule — book the re-service ${agentName()} took`,
+      body: p.body || null,
+      link: p.link || '/admin/customers',
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -1087,6 +1127,14 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'relay_unbooked_call') {
     return `waves-relay_unbooked_call-${payload.callSid || payload.callLogId || 'unknown-call'}`;
   }
+  // One banner per call / per ticket: a second urgent caller's page must not
+  // replace the first one's on the phone.
+  if (triggerKey === 'relay_hot_lead') {
+    return `waves-relay_hot_lead-${payload.callSid || crypto.randomUUID()}`;
+  }
+  if (triggerKey === 'relay_reservice_filed') {
+    return `waves-relay_reservice_filed-${payload.requestId || crypto.randomUUID()}`;
+  }
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
   }
@@ -1256,6 +1304,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // hit is the deploy-kill retry of a run that already alerted.
     // reservice_self_booked: keyed per booking, so a hit is the customer's
     // idempotent replay of a booking whose bell already landed.
+    // relay_hot_lead: keyed per call, so a hit is a reconnect's or the
+    // hourly sweep's retry of a page that already landed.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1341,7 +1391,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellWritten = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked')) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

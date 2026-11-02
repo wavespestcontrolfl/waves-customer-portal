@@ -1672,8 +1672,8 @@ async function executeTool(name, input = {}, ctx = {}) {
       // ⭐ THE MODEL ONLY PROMISES A PAGE THAT WENT OUT. The prompt lets her tell
       // a hot caller "a team member is being notified right away" — and this
       // call used to discard the boolean that says whether anyone actually was
-      // (ADAM_PHONE unset, or the internal-alert redirect had nowhere to put
-      // it). A hot lead whose page did not go out — and was not already paged
+      // (the bell policy silenced it, or neither a bell row nor a push landed).
+      // A hot lead whose page did not go out — and was not already paged
       // earlier on this call — gets the promise explicitly withdrawn in the
       // tool result, which is where the model reads what really happened.
       const wasHot = String(input.lead_quality || '').toLowerCase() === 'hot';

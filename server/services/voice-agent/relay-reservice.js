@@ -423,9 +423,9 @@ async function requestReserviceText(input = {}, ctx = {}) {
  * ⭐ OWNER-RULED ROUTING FIX underneath: routes/requests.js 409s a covered
  * pest/lawn ticket precisely because of that black hole; the agent cannot use
  * the streamline's booking half (it fires customer comms, which the agent may
- * NEVER do), so the ticket stays the durable record AND relay-alert's own
- * sender pages a human — internal-only by construction (owner phone +
- * messageType 'internal_alert').
+ * NEVER do), so the ticket stays the durable record AND relay-alert pages a
+ * human — a phone push to admin staff (trigger relay_reservice_filed), never a
+ * customer.
  */
 async function fireReserviceAlertsAndStamp({ row, lane, covered, unverifiedRequester = false, unverifiedNote = null, ctx = {} }) {
   if (!row || !row.id) return false;
