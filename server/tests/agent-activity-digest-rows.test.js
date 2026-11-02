@@ -56,6 +56,16 @@ test('every digest select (pinned, windowed, focus) carries the shared content-v
   }
 });
 
+test('every digest select (pinned, windowed, focus) leaves out a digest in Claude\'s queue, so a sent digest is listed once', async () => {
+  const pinned = builder([]); const windowed = builder([]); const focused = builder([]);
+  mockQueue.push(pinned, windowed, focused);
+  const db = require('../models/db');
+  await _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z'), 'some-id');
+  for (const q of [pinned, windowed, focused]) {
+    expect(q._ops).toContainEqual(['whereRaw', "COALESCE(metadata->>'claudeQueue', '') = ''"]);
+  }
+});
+
 test('the pinned predicate keeps unresolved FIX rows only when something can resolve them (source ops-crons or fallOff), else the read-or-window rule; cleared rows re-enter via resolvedAt', () => {
   const pinned = builder([]); const windowed = builder([]);
   mockQueue.push(pinned, windowed);
