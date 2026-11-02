@@ -289,6 +289,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/knowledge/article` | knowledge |
 | GET | `/api/service/records/:id/validate-photo-chain` | service-records |
 | POST | `/api/stripe/terminal/handoff` | stripe-terminal |
+| GET | `/api/tech/answers` | tech-answers |
+| GET | `/api/tech/answers/:kind` | tech-answers |
 | POST | `/api/tech/dictation` | tech-dictation |
 | GET | `/api/tech/dictation/availability` | tech-dictation |
 | POST | `/api/tech/field-lead` | tech-field-lead |
@@ -589,5 +591,3 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/knowledge/queries/:id/file-back` | knowledge |
 | POST | `/api/knowledge/queries/:id/rate` | knowledge |
 | POST | `/api/knowledge/query` | knowledge |
-| GET | `/api/tech/answers` | tech-answers |
-| GET | `/api/tech/answers/:kind` | tech-answers |
