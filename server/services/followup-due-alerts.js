@@ -17,6 +17,10 @@
 //     joins the list; any other change refreshes it quietly; it closes itself
 //     when the list is empty.
 //   - Every run closes the open alerts whose card is now covered.
+//   - A card that comes back uncovered (its covering visit was cancelled) is not
+//     lost: an own alert this job auto-closed rings again, and one the 30-day
+//     retention sweep expired unanswered goes back on the catch-up list. A
+//     person's own Done stays done.
 //
 // Due date: the card's suggestedFollowupDate (or suggestedDate) when it is a
 // real YYYY-MM-DD, else the card's Eastern created date + 14 days.
@@ -43,7 +47,7 @@ const logger = require('./logger');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS, isInternalTestCustomerId } = require('./internal-test-customers');
 const { FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
-const { MAX_HEADLINE_CHARS, MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
+const { MAX_HEADLINE_CHARS, MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert } = require('./admin-alert-compose');
 
 const CATEGORY = 'schedule';
 const AREA = 'Schedule';
@@ -289,28 +293,39 @@ async function loadVisits(database, cards) {
     );
 }
 
-// Dedupe keys that ever got an alert row (open, read or closed) among `keys`.
-async function loadRaisedKeys(database, keys) {
-  if (!keys.length) return new Set();
+// The newest alert row of each key in `keys` that ever got one (open, read or closed): dedupe key ->
+// { autoCleared, doneBy }. autoCleared = this job closed it because a visit covered the card; doneBy 'retention' =
+// the 30-day sweep expired it unanswered.
+async function loadOwnRowStates(database, keys) {
+  if (!keys.length) return new Map();
   const rows = await database('notifications')
     .where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [keys])
-    .select(database.raw("metadata->>'dedupeKey' AS dedupe_key"));
-  return new Set(rows.map((row) => row.dedupe_key));
+    .orderByRaw("metadata->>'dedupeKey', created_at DESC")
+    .select(database.raw(
+      "DISTINCT ON (metadata->>'dedupeKey') metadata->>'dedupeKey' AS dedupe_key, metadata->>'autoCleared' AS auto_cleared, done_by",
+    ));
+  return new Map(rows.map((row) => [row.dedupe_key, { autoCleared: row.auto_cleared === 'true', doneBy: row.done_by || null }]));
 }
 
 // ------------------------------------------------------------------ writes
 
+// Through the episodes helper: an own alert this job auto-closed (a visit covered the card) rings again once the
+// card is uncovered again (that visit was cancelled), while a standing row or a person's own Done is a silent dedupe.
 async function raiseOwn(item) {
   const { card } = item;
-  const result = await raiseAdminAlert(CATEGORY, ownSpec(item), {
+  const alert = composeAdminAlert(ownSpec(item));
+  const result = await require('./admin-alert-episodes').raiseAdminAlertWithReopen(CATEGORY, alert.headline, alert.why, {
     dedupeKey: `${OWN_PREFIX}${card.id}`,
     // GATE_ADMIN_BELL_POLICY drops an admin row that does not ask to ring.
     bell: true,
-    metadata: { dispatchAlertId: String(card.id), customerId: String(card.customer_id), dueDate: item.due },
+    link: alert.link,
+    metadata: { ...alert.metadata, dispatchAlertId: String(card.id), customerId: String(card.customer_id), dueDate: item.due },
   });
   if (!result) throw new Error('follow-up due alert was not written');
-  return result.suppressed ? 'suppressed' : (result.deduped ? 'unchanged' : 'raised');
+  if (result.suppressed) return 'suppressed';
+  const rang = result.rang === true || (result.rang === undefined && !result.deduped);
+  return rang ? 'raised' : 'unchanged';
 }
 
 async function raiseCatchUp(composed) {
@@ -356,10 +371,10 @@ async function closeCatchUp(database) {
   })) || 0;
 }
 
-// Raise each fresh card's own alert; one failure never stops the rest.
-async function raiseFresh(fresh) {
+// Raise each card's own alert; one failure never stops the rest.
+async function raiseOwnAlerts(items) {
   const tally = { raised: 0, failed: 0 };
-  for (const item of fresh) {
+  for (const item of items) {
     try {
       if ((await raiseOwn(item)) === 'raised') tally.raised += 1;
     } catch (err) {
@@ -370,15 +385,29 @@ async function raiseFresh(fresh) {
   return tally;
 }
 
-// The catch-up list is the older cards with no alert of their own.
+// The older cards, by their own alert's newest row: none, or one the 30-day retention sweep expired unanswered ->
+// the catch-up list; one this job auto-closed (a visit covered the card, and that visit is gone) -> its own alert
+// rings again; a standing row or a person's own Done -> left alone.
+function splitOlder(older, states) {
+  const listed = [];
+  const reopen = [];
+  for (const item of older) {
+    const state = states.get(`${OWN_PREFIX}${item.card.id}`);
+    if (!state || (!state.autoCleared && state.doneBy === 'retention')) listed.push(item);
+    else if (state.autoCleared) reopen.push(item);
+  }
+  return { listed, reopen };
+}
+
 async function catchUpPass(database, older, today) {
-  const raisedKeys = await loadRaisedKeys(database, older.map((item) => `${OWN_PREFIX}${item.card.id}`));
-  const listed = older.filter((item) => !raisedKeys.has(`${OWN_PREFIX}${item.card.id}`));
+  const states = await loadOwnRowStates(database, older.map((item) => `${OWN_PREFIX}${item.card.id}`));
+  const { listed, reopen } = splitOlder(older, states);
+  const reopened = await raiseOwnAlerts(reopen);
   if (!listed.length) {
     const closed = await closeCatchUp(database);
-    return { listed: 0, outcome: closed ? 'closed' : 'clear' };
+    return { listed: 0, outcome: closed ? 'closed' : 'clear', reopened };
   }
-  return { listed: listed.length, outcome: await raiseCatchUp(composeCatchUp(listed, today)) };
+  return { listed: listed.length, outcome: await raiseCatchUp(composeCatchUp(listed, today)), reopened };
 }
 
 /**
@@ -402,10 +431,12 @@ async function runFollowupDueAlerts({ now = new Date(), database = db, gateEnabl
   const visits = await loadVisits(database, cards);
   const { covered, fresh, older } = classify(cards, visits, today);
   const closedOwn = await closeCovered(database, openIds, cards, covered);
-  const own = await raiseFresh(fresh);
+  const own = await raiseOwnAlerts(fresh);
   const catchUp = await catchUpPass(database, older, today);
-  const result = { raised: own.raised, closed: closedOwn, listed: catchUp.listed, outcome: catchUp.outcome };
-  if (own.failed) throw new Error(`${own.failed} follow-up due alert${own.failed === 1 ? '' : 's'} failed to write`);
+  const raised = own.raised + catchUp.reopened.raised;
+  const failed = own.failed + catchUp.reopened.failed;
+  const result = { raised, closed: closedOwn, listed: catchUp.listed, outcome: catchUp.outcome };
+  if (failed) throw new Error(`${failed} follow-up due alert${failed === 1 ? '' : 's'} failed to write`);
   return result;
 }
 
@@ -414,7 +445,7 @@ module.exports = {
   CATCHUP_KEY,
   OWN_PREFIX,
   _private: {
-    dueDay, coverageOf, classify, actionFor, whyFor, ownSpec, composeCatchUp, ringOnNewCard, shortName, shortDay, addDays,
+    dueDay, coverageOf, classify, actionFor, whyFor, ownSpec, composeCatchUp, ringOnNewCard, shortName, shortDay, addDays, splitOlder,
     loadCards, loadVisits, OWN_ALERT_WINDOW_DAYS, BOOKED_GRACE_DAYS, DEFAULT_DUE_DAYS,
   },
 };

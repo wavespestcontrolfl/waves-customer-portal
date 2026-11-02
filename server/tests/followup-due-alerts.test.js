@@ -51,7 +51,10 @@ function fakeDb({ cards = [], visits = [], raised = [] } = {}) {
   const calls = [];
   const database = jest.fn((table) => {
     calls.push(table);
-    const rows = { 'dispatch_alerts as a': cards, 'scheduled_services as v': visits, notifications: raised.map((key) => ({ dedupe_key: key })) }[table];
+    const notifications = raised.map((r) => (typeof r === 'string'
+      ? { dedupe_key: r, auto_cleared: null, done_by: null }
+      : { dedupe_key: r.key, auto_cleared: r.autoCleared ? 'true' : null, done_by: r.doneBy || null }));
+    const rows = { 'dispatch_alerts as a': cards, 'scheduled_services as v': visits, notifications }[table];
     const chain = new Proxy({}, {
       get: (_t, prop) => (prop === 'then' ? (resolve) => resolve(rows) : () => chain),
     });
@@ -63,6 +66,9 @@ function fakeDb({ cards = [], visits = [], raised = [] } = {}) {
 }
 
 const run = (state, opts = {}) => runFollowupDueAlerts({ now: NOW, gateEnabled: true, database: fakeDb(state), ...opts });
+// Own alerts and the catch-up alert both go through the episodes helper; split its calls by dedupe key.
+const ownCalls = () => episodes.raiseAdminAlertWithReopen.mock.calls.filter((c) => String(c[3]?.dedupeKey).startsWith('followup-due:'));
+const catchUpCalls = () => episodes.raiseAdminAlertWithReopen.mock.calls.filter((c) => c[3]?.dedupeKey === 'followup-due-older');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -253,19 +259,28 @@ describe('runFollowupDueAlerts', () => {
   test('a card due today raises its own alert, once, with the ring flag and the customer link', async () => {
     const c = dueOn('2026-11-02');
     await expect(run({ cards: [c] })).resolves.toMatchObject({ raised: 1, closed: 0, listed: 0, outcome: 'clear' });
-    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
-    const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(ownCalls()).toHaveLength(1);
+    const [category, headline, why, opts] = ownCalls()[0];
     expect(category).toBe('schedule');
-    expect(spec).toMatchObject({ link: `/admin/customers?customerId=${c.customer_id}`, promise: true, subject: { type: 'visit', id: c.job_id } });
-    expect(opts).toMatchObject({ dedupeKey: `followup-due:${c.id}`, bell: true });
-    expect(opts.metadata).toMatchObject({ dispatchAlertId: c.id, customerId: c.customer_id });
+    expect(headline).toBe("Schedule — book Pat S.'s follow-up (due Nov 2)");
+    expect(why).toBe('Quarterly Pest Control Service follow-up you flagged on Oct 20; no visit is booked.');
+    expect(opts).toMatchObject({ dedupeKey: `followup-due:${c.id}`, bell: true, link: `/admin/customers?customerId=${c.customer_id}` });
+    expect(opts.metadata).toMatchObject({ dispatchAlertId: c.id, customerId: c.customer_id, dueDate: '2026-11-02', promise: true });
     expect(opts.dedupeOpenOnly).toBeUndefined();
   });
 
   test('a repeat run does not count a deduped alert as raised', async () => {
-    raiseAdminAlert.mockResolvedValue({ id: 'n1', deduped: true });
+    episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n1', deduped: true, rang: false });
     await expect(run({ cards: [dueOn('2026-11-01')] })).resolves.toMatchObject({ raised: 0 });
-    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(ownCalls()).toHaveLength(1);
+  });
+
+  test('a fresh card whose alert auto-closed rings again through the reopen helper', async () => {
+    const c = dueOn('2026-11-01');
+    episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n1', deduped: true, refreshed: true, rang: true });
+    await expect(run({ cards: [c], raised: [{ key: `followup-due:${c.id}`, autoCleared: true }] })).resolves.toMatchObject({ raised: 1 });
+    expect(ownCalls()).toHaveLength(1);
   });
 
   test('a card due in the future raises nothing', async () => {
@@ -278,7 +293,7 @@ describe('runFollowupDueAlerts', () => {
     const booked = dueOn('2026-11-01');
     const gone = dueOn('2026-11-01', { active: false });
     await run({ cards: [booked, gone], visits: [visitFor(booked, { created_at: '2026-10-25T00:00:00Z' })] });
-    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(ownCalls()).toHaveLength(0);
   });
 
   test('cards past the 3-day window go on one catch-up alert; each has no alert of its own', async () => {
@@ -286,9 +301,10 @@ describe('runFollowupDueAlerts', () => {
     const b = dueOn('2026-10-10');
     const fresh = dueOn('2026-11-01');
     await expect(run({ cards: [b, fresh, a] })).resolves.toMatchObject({ raised: 1, listed: 2, outcome: 'raised' });
-    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
-    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
-    const [category, headline, why, opts] = episodes.raiseAdminAlertWithReopen.mock.calls[0];
+    expect(ownCalls()).toHaveLength(1);
+    expect(ownCalls()[0][3].dedupeKey).toBe(`followup-due:${fresh.id}`);
+    expect(catchUpCalls()).toHaveLength(1);
+    const [category, headline, why, opts] = catchUpCalls()[0];
     expect(category).toBe('schedule');
     expect(headline).toBe('Schedule — book 2 older follow-ups');
     expect(why).toContain('the oldest was due Aug 20');
@@ -303,8 +319,35 @@ describe('runFollowupDueAlerts', () => {
     const mine = dueOn('2026-10-20');
     const other = dueOn('2026-10-10');
     await expect(run({ cards: [mine, other], raised: [`followup-due:${mine.id}`] })).resolves.toMatchObject({ listed: 1 });
-    const opts = episodes.raiseAdminAlertWithReopen.mock.calls[0][3];
+    expect(ownCalls()).toHaveLength(0);
+    const opts = catchUpCalls()[0][3];
     expect(opts.metadata.itemKeys).toEqual([other.id]);
+  });
+
+  test('an older card whose own alert auto-closed and is uncovered again rings its own alert, off the catch-up list', async () => {
+    const back = dueOn('2026-10-20');
+    const other = dueOn('2026-10-10');
+    episodes.raiseAdminAlertWithReopen.mockImplementation(async (_c, _h, _w, opts) => (opts.dedupeKey === 'followup-due-older'
+      ? { id: 'n2', deduped: false } : { id: 'n1', deduped: true, refreshed: true, rang: true }));
+    await expect(run({ cards: [back, other], raised: [{ key: `followup-due:${back.id}`, autoCleared: true }] }))
+      .resolves.toMatchObject({ raised: 1, listed: 1 });
+    expect(ownCalls().map((c) => c[3].dedupeKey)).toEqual([`followup-due:${back.id}`]);
+    expect(catchUpCalls()[0][3].metadata.itemKeys).toEqual([other.id]);
+  });
+
+  test('an older card whose own alert the retention sweep expired goes back on the catch-up list', async () => {
+    const expired = dueOn('2026-09-20');
+    await expect(run({ cards: [expired], raised: [{ key: `followup-due:${expired.id}`, doneBy: 'retention' }] }))
+      .resolves.toMatchObject({ listed: 1 });
+    expect(ownCalls()).toHaveLength(0);
+    expect(catchUpCalls()[0][3].metadata.itemKeys).toEqual([expired.id]);
+  });
+
+  test('an older card a person marked done stays off both alerts', async () => {
+    const done = dueOn('2026-10-01');
+    await expect(run({ cards: [done], raised: [{ key: `followup-due:${done.id}`, doneBy: 'tech-1' }] }))
+      .resolves.toMatchObject({ raised: 0, listed: 0 });
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
   test('catch-up outcomes: refreshed quietly, rung again, unchanged, suppressed', async () => {
@@ -349,14 +392,14 @@ describe('runFollowupDueAlerts', () => {
     });
     expect(result.closed).toBe(4);
     // The standing card is still uncovered and due 2 days ago: its alert is deduped, not closed.
-    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
-    expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe(`followup-due:${standing.id}`);
+    expect(ownCalls()).toHaveLength(1);
+    expect(ownCalls()[0][3].dedupeKey).toBe(`followup-due:${standing.id}`);
   });
 
   test('one failed own alert does not stop the others, and the run reports the failure', async () => {
-    raiseAdminAlert.mockRejectedValueOnce(new Error('db down')).mockResolvedValue({ id: 'n2', deduped: false });
+    episodes.raiseAdminAlertWithReopen.mockRejectedValueOnce(new Error('db down')).mockResolvedValue({ id: 'n2', deduped: false });
     await expect(run({ cards: [dueOn('2026-11-01'), dueOn('2026-11-02')] })).rejects.toThrow('1 follow-up due alert failed to write');
-    expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+    expect(ownCalls()).toHaveLength(2);
     expect(logger.warn).toHaveBeenCalledWith('[followup-due-alerts] own alert failed: db down');
   });
 
@@ -366,6 +409,6 @@ describe('runFollowupDueAlerts', () => {
     episodes.openAdminAlertKeys.mockResolvedValue(['followup-due:gone']);
     await expect(runFollowupDueAlerts({ now: NOW, gateEnabled: true, database })).rejects.toThrow('connection reset');
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 });

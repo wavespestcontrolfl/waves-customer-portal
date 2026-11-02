@@ -3,8 +3,8 @@
  * service and the real alert episodes, under the production bell policy (GATE_ADMIN_BELL_POLICY on, so a row lands
  * only because it asks to ring). Proves the SQL side of "covered" (a later visit created after the card, a visit
  * dated inside the due + 7 day window, a visit booked from the card's visit, an inactive customer, a resolved card),
- * one own alert per uncovered card on its due date, the catch-up row for an old card, raise-once on a repeat run, and
- * the close when a visit gets booked. It reads every open follow_up_needed card in the database, so it asserts on
+ * one own alert per uncovered card on its due date, the catch-up row for an old card, raise-once on a repeat run,
+ * the close when a visit gets booked, and the comeback when that visit is cancelled. It reads every open follow_up_needed card in the database, so it asserts on
  * its own cards only. It refuses any database but a private QA one or CI's.
  */
 process.env.GATE_ADMIN_BELL_POLICY = 'true'; // read once, when feature-gates loads
@@ -138,5 +138,16 @@ maybeDescribe('follow-up due alerts (live Postgres)', () => {
     const shrunk = await catchUp();
     expect(shrunk.done_at !== null || !shrunk.metadata.itemKeys.includes(old.cardId)).toBe(true);
     expect(await ownRows(cancelled.cardId)).toHaveLength(1);
+
+    // The visit that covered the due card is cancelled: the card is uncovered again and its own alert comes back
+    // (the same row, unread, not done, next generation), instead of staying hidden behind the auto-close.
+    await db('scheduled_services').where({ customer_id: due.customerId, scheduled_date: '2026-11-10' }).update({ status: 'cancelled' });
+    const fourth = await run(new Date('2026-11-02T15:00:00Z'));
+    expect(fourth.raised).toBeGreaterThanOrEqual(1);
+    const backRows = await ownRows(due.cardId);
+    expect(backRows).toHaveLength(1);
+    expect(backRows[0].read_at).toBeNull();
+    expect(backRows[0].done_at).toBeNull();
+    expect(backRows[0].metadata).toMatchObject({ autoCleared: false, recurrenceGeneration: 1 });
   });
 });
