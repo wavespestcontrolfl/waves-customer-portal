@@ -4713,6 +4713,9 @@ const gates = {
   homeLine: process.env.GATE_HOME_LINE === 'true',
   // GATE_SMS_LIKE: read at CALL time via smsLikeLive(); this entry is for logGateStatus.
   smsLike: process.env.GATE_SMS_LIKE === 'true',
+  // GATE_PORTAL_ASK_PUSH: read at CALL time via portalAskPushLive(); this entry is for logGateStatus, so the boot
+  // log shows the flip.
+  portalAskPush: process.env.GATE_PORTAL_ASK_PUSH === 'true',
 
   // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
   // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because
