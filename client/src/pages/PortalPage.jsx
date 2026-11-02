@@ -15824,7 +15824,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
               </div>
               <div style={{ fontSize: 22, fontWeight: 700, color: B.glassNavy, marginTop: 16 }}>Request sent</div>
               <div style={{ fontSize: 15, color: B.textBody, marginTop: 8, lineHeight: 1.55 }}>
-                Waves will review this and follow up directly.
+                Waves will review this and follow up, usually within one business hour between 8 AM and 8 PM.
                 {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
               </div>
               {submittedNote && (
