@@ -229,6 +229,20 @@ describe('runFollowupDueAlerts', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
+  test('ALERT_EPISODES off: the job stands down before any read', async () => {
+    process.env.ALERT_EPISODES = 'off';
+    try {
+      const database = fakeDb({ cards: [dueOn('2026-11-02')] });
+      await expect(runFollowupDueAlerts({ now: NOW, gateEnabled: true, database })).resolves.toEqual({ skipped: 'episodes_off' });
+      expect(database).not.toHaveBeenCalled();
+      expect(episodes.openAdminAlertKeys).not.toHaveBeenCalled();
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.ALERT_EPISODES;
+    }
+  });
+
   test('gate unset in the environment is off', async () => {
     delete process.env.GATE_FOLLOWUP_DUE_ALERT;
     const database = fakeDb({ cards: [dueOn('2026-11-02')] });

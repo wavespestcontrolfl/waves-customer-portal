@@ -388,8 +388,13 @@ async function catchUpPass(database, older, today) {
  * for tests.
  */
 async function runFollowupDueAlerts({ now = new Date(), database = db, gateEnabled } = {}) {
-  const live = gateEnabled ?? require('../config/feature-gates').followupDueAlertLive();
+  const gates = require('../config/feature-gates');
+  const live = gateEnabled ?? gates.followupDueAlertLive();
   if (!live) return { skipped: 'disabled' };
+  // ALERT_EPISODES off (alertEpisodesLive, the close/reopen kill switch every episodes caller reads): this job closes
+  // and re-rings only through admin-alert-episodes, so it stands down rather than raise bells it could never close.
+  // A test that mocks feature-gates without the reader keeps the default (on).
+  if (typeof gates.alertEpisodesLive === 'function' && !gates.alertEpisodesLive()) return { skipped: 'episodes_off' };
   const today = etDateString(now);
   const episodes = require('./admin-alert-episodes');
   const openIds = (await episodes.openAdminAlertKeys(database, OWN_PREFIX)).map((key) => key.slice(OWN_PREFIX.length));
