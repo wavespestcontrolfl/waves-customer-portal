@@ -23,6 +23,9 @@ const VISIT_LIMIT = 6;
 const SMS_LOOKBACK_HOURS = 72;
 const SMS_LIMIT = 5;
 const SMS_BODY_MAX = 240;
+// A cancelled visit is a fact only when it was cancelled recently; older cancellations are housekeeping (a consolidated
+// duplicate, a hygiene close-out) and would only confuse the reply.
+const RECENT_CANCEL_DAYS = 7;
 
 function etTime(value) {
   if (!value) return '';
@@ -64,6 +67,12 @@ function statusWords(row) {
   return words.filter(Boolean).join(' ');
 }
 
+function isRelevantVisit(row) {
+  if (String(row.status || '').toLowerCase() !== 'cancelled') return true;
+  const at = row.cancelled_at ? new Date(row.cancelled_at) : null;
+  return !!at && !Number.isNaN(at.getTime()) && Date.now() - at.getTime() <= RECENT_CANCEL_DAYS * 86400000;
+}
+
 function firstToken(name) {
   return String(name || '').trim().split(/\s+/)[0] || '';
 }
@@ -87,10 +96,10 @@ async function visitLines(conn, customerId, receivedAt) {
     .limit(VISIT_LIMIT)
     .select(
       'ss.id', 'ss.service_type', 'ss.scheduled_date', 'ss.window_start', 'ss.reservation_service_mix',
-      'ss.status', 'ss.en_route_at', 'ss.arrived_at', 'ss.completed_at', 't.name as tech_name',
+      'ss.status', 'ss.en_route_at', 'ss.arrived_at', 'ss.completed_at', 'ss.cancelled_at', 't.name as tech_name',
     );
   const lines = [];
-  for (const row of rows) {
+  for (const row of rows.filter(isRelevantVisit)) {
     let arrival = '';
     try { arrival = await arrivalPhrase(conn, row); } catch { arrival = ''; }
     const day = parseETDateTime(`${etCalendarDayOf(row.scheduled_date)}T12:00`);
@@ -116,9 +125,15 @@ function formatPhone(number) {
   return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : '';
 }
 
+// Fail-soft on its own: a failed line lookup drops only this fact, never the visits or texts.
 async function wavesLine(customerId) {
-  const number = await require('../twilio').deriveOutboundNumber({ customerId });
-  return formatPhone(number);
+  try {
+    const number = await require('../twilio').deriveOutboundNumber({ customerId });
+    return formatPhone(number);
+  } catch (e) {
+    logger.warn(`[email-draft-facts] Waves line unavailable: ${e.message}`);
+    return '';
+  }
 }
 
 function cleanTextBody(body) {
@@ -142,7 +157,10 @@ async function sentTextLines(conn, customerId) {
     .orderBy('created_at', 'desc')
     .limit(SMS_LIMIT)
     .select('created_at', 'message_body');
+  // A text that carries a gate, door or lockbox code never reaches the model (same detector as the report copy).
+  const { containsReportAccessCode } = require('../service-report/technician-report-copy');
   return rows.reverse()
+    .filter((r) => !containsReportAccessCode(String(r.message_body || '')))
     .map((r) => ({ at: r.created_at, body: cleanTextBody(r.message_body) }))
     .filter((r) => r.body)
     .map((r) => `- ${etWhen(r.at)}: ${r.body}`);
@@ -162,7 +180,10 @@ async function buildEmailDraftFacts({ customer, receivedAt, conn = defaultDb } =
     blocks.push(await section('Visits:', () => visitLines(conn, customer.id, when)));
     const phone = await wavesLine(customer.id);
     if (phone) blocks.push(`Phone for this customer to call or text Waves: ${phone}`);
-    if (customer.phone) blocks.push('When the technician heads out, Waves sends a text with a live tracking link.');
+    // Texts reach a phone on file that is not a known landline (landline numbers get no texts).
+    if (customer.phone && String(customer.line_type || '').toLowerCase() !== 'landline') {
+      blocks.push('When the technician heads out, Waves sends a text with a live tracking link.');
+    }
     blocks.push(await section(
       `Texts Waves already sent this customer in the last ${SMS_LOOKBACK_HOURS} hours (oldest first, ET):`,
       () => sentTextLines(conn, customer.id),

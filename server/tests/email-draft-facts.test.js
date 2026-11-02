@@ -88,7 +88,7 @@ describe('buildEmailDraftFacts', () => {
     [{ status: 'en_route' }, '| technician on the way |'],
     [{ status: 'on_site', arrived_at: '2026-11-03T21:30:00Z' }, '| technician on site since 4:30 PM |'],
     [{ status: 'completed', completed_at: '2026-11-03T22:45:00Z' }, '| completed at 5:45 PM |'],
-    [{ status: 'cancelled' }, '| cancelled |'],
+    [{ status: 'cancelled', cancelled_at: new Date(Date.now() - 86400000).toISOString() }, '| cancelled |'],
     [{ status: 'held' }, '| held |'],
   ])('status words for %j', async (patch, expected) => {
     const { conn } = makeConn({ visits: [{ ...VISIT, ...patch }] });
@@ -144,9 +144,47 @@ describe('buildEmailDraftFacts', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('relation does not exist'));
   });
 
-  test('a failure in any part (here the Waves line lookup) returns an empty string, never half a block', async () => {
+  test('a failed Waves line lookup drops only the phone line; the visits stay', async () => {
     twilio.deriveOutboundNumber.mockRejectedValueOnce(new Error('no line'));
+    const { conn } = makeConn({ visits: [VISIT] });
+    const facts = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
+    expect(facts).toContain('- Quarterly Pest Control Service | Tuesday, November 3');
+    expect(facts).not.toContain('Phone for this customer');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no line'));
+  });
+
+  test('an old cancellation (or one with no cancel time) is housekeeping and is left out; a recent one stays', async () => {
+    const recent = { ...VISIT, id: 'v-2', scheduled_date: '2026-11-04', status: 'cancelled', cancelled_at: new Date(Date.now() - 2 * 86400000).toISOString() };
+    const old = { ...VISIT, id: 'v-3', scheduled_date: '2026-11-02', status: 'cancelled', cancelled_at: '2026-08-06T21:01:00Z' };
+    const noStamp = { ...VISIT, id: 'v-4', scheduled_date: '2026-11-05', status: 'cancelled', cancelled_at: null };
+    const { conn } = makeConn({ visits: [old, VISIT, recent, noStamp] });
+    const facts = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
+    const visitLines = facts.split('\n').filter((l) => l.startsWith('- Quarterly'));
+    expect(visitLines).toHaveLength(2);
+    expect(visitLines[0]).toContain('Tuesday, November 3 | between 4:00 PM and 6:00 PM | scheduled');
+    expect(visitLines[1]).toContain('Wednesday, November 4');
+    expect(visitLines[1]).toContain('| cancelled |');
+    expect(facts).not.toContain('November 2');
+    expect(facts).not.toContain('November 5');
+  });
+
+  test('a sent text that carries a gate or lockbox code never reaches the facts', async () => {
+    const { conn } = makeConn({
+      texts: [
+        { created_at: new Date('2026-11-01T21:09:00Z'), message_body: 'Gate code is 4821, see you Tuesday' },
+        { created_at: new Date('2026-11-01T20:00:00Z'), message_body: 'Hi Jane, we moved your visit to Tue Nov 3.' },
+      ],
+    });
+    const facts = await buildEmailDraftFacts({ customer: CUSTOMER, receivedAt: RECEIVED_AT, conn });
+    expect(facts).toContain('Hi Jane, we moved your visit to Tue Nov 3.');
+    expect(facts).not.toContain('4821');
+    expect(facts).not.toMatch(/gate code/i);
+  });
+
+  test('the tracking-link note is left out for a known landline', async () => {
     const { conn } = makeConn();
-    expect(await buildEmailDraftFacts({ customer: { ...CUSTOMER, phone: null }, receivedAt: RECEIVED_AT, conn })).toBe('');
+    const facts = await buildEmailDraftFacts({ customer: { ...CUSTOMER, line_type: 'landline' }, receivedAt: RECEIVED_AT, conn });
+    expect(facts).toContain('Phone for this customer to call or text Waves');
+    expect(facts).not.toContain('live tracking link');
   });
 });
