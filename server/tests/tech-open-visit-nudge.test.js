@@ -685,7 +685,7 @@ describe('re-service carry-over (GATE_RESERVICE_OPEN_CARRYOVER)', () => {
   }
 
   const carryStop = (id, day, extra = {}) => carryRow({
-    id, techId: 'tech-a', day, custFirst: 'Stan', custLast: 'Turner', serviceType: 'Lawn Care Re-Service', status: 'confirmed', ...extra,
+    id, techId: 'tech-a', day, custFirst: 'Dana', custLast: 'Quill', serviceType: 'Lawn Care Re-Service', status: 'confirmed', ...extra,
   });
 
   test('gate off: one scheduled_services read, no carryover field, message byte-identical to today', async () => {
@@ -731,7 +731,7 @@ describe('re-service carry-over (GATE_RESERVICE_OPEN_CARRYOVER)', () => {
       expect(lines.slice(1)).toEqual([
         '9:00 AM - Ana R. - Pest Control',
         'Re-services still open from earlier days:',
-        'Tue Oct 27 - Stan T. - Lawn Care Re-Service (not started)',
+        'Tue Oct 27 - Dana Q. - Lawn Care Re-Service (not started)',
         'Mon Oct 26 - Bo L. - Pest Re-Service',
       ]);
     });
@@ -743,7 +743,7 @@ describe('re-service carry-over (GATE_RESERVICE_OPEN_CARRYOVER)', () => {
       const lines = TwilioService.sendSMS.mock.calls[0][1].split('\n');
       expect(lines[0]).toMatch(/^Waves: 2 re-services from earlier days are still open\. Tap to close out: .*\/tech$/);
       expect(lines).toHaveLength(3);
-      expect(lines[1]).toBe('Tue Oct 27 - Stan T. - Lawn Care Re-Service (not started)');
+      expect(lines[1]).toBe('Tue Oct 27 - Dana Q. - Lawn Care Re-Service (not started)');
       expect(TwilioService.sendSMS.mock.calls[0][1]).not.toContain('Re-services still open from earlier days:');
     });
 
@@ -785,7 +785,7 @@ describe('re-service carry-over (GATE_RESERVICE_OPEN_CARRYOVER)', () => {
       await runTechOpenVisitNudge({ now: EVE });
       const lines = TwilioService.sendSMS.mock.calls[0][1].split('\n');
       expect(lines[0]).toContain('Waves: 1 re-service from earlier days is still open');
-      expect(lines[1]).toBe('Tue Oct 27 - Stan T. - Pest Re-Service + Lawn Care Re-Service');
+      expect(lines[1]).toBe('Tue Oct 27 - Dana Q. - Pest Re-Service + Lawn Care Re-Service');
     });
 
     test('the carry-over query: before today, 30-day floor, callbacks or the two re-service keys, open statuses, no slot holds', async () => {
@@ -867,7 +867,7 @@ describe('re-service carry-over (GATE_RESERVICE_OPEN_CARRYOVER)', () => {
         '1 visit from today still open.',
         '9:00 AM - Ana R. - Pest Control',
         'Re-services still open from earlier days:',
-        'Tue Oct 27 - Stan T. - Lawn Care Re-Service (not started)',
+        'Tue Oct 27 - Dana Q. - Lawn Care Re-Service (not started)',
       ]);
       expect(JSON.parse(card.payload)).toEqual({
         headline: '1 visit from today still open', visit_ids: ['v1'], count: 1, carryover_ids: ['c1'], carryover_count: 1,
@@ -896,7 +896,7 @@ describe('re-service carry-over (GATE_RESERVICE_OPEN_CARRYOVER)', () => {
       });
       await runTechOpenVisitNudge({ now: EVE });
       const body = TwilioService.sendSMS.mock.calls[0][1];
-      expect(body).toContain('Stan T.');
+      expect(body).toContain('Dana Q.');
       expect(body).not.toContain('Cy D.');
       // sweep: today + carry; send: today + carry, each scoped to the technician
       expect(reads).toHaveLength(4);
