@@ -21,8 +21,11 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Demand sums keep full precision and round once, on the way out: rounding
-// each appointment first turned 100 doses of 1 ml into 0.03 gal, not 0.0264.
+// Demand sums keep full precision and round to 4 decimals once, on the way
+// out: rounding each appointment first turned 100 doses of 1 ml into 0.03 gal,
+// not 0.0264. exact() drops float noise after each sum, so three 0.1 gal
+// doses are 0.3 gal (not 0.30000000000000004) and stock of 0.3 is enough.
+const exact = (n) => Number(n.toPrecision(12));
 const round4 = (n) => Number(n.toFixed(4));
 
 // The forecast window (days) or row limit a caller asked for: absent means the
@@ -188,11 +191,11 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
         appointment.inventoryAmount = conversion.amount;
         appointment.conversionConfidence = conversion.confidence;
         if (conversion.convertible && conversion.amount != null) {
-          row.committedDemand += conversion.amount;
+          row.committedDemand = exact(row.committedDemand + conversion.amount);
           if (conversion.confidence !== 'exact_unit') row.conversionConfidence = conversion.confidence;
           row.appointments.push(appointment);
         } else {
-          row.unconvertedDemand += amount;
+          row.unconvertedDemand = exact(row.unconvertedDemand + amount);
           row.unitMismatchCount += 1;
           row.conversionConfidence = 'needs_review';
           row.mismatchAppointments.push(appointment);
@@ -210,10 +213,10 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
 
   const products = Array.from(productMap.values()).map((row) => {
     const demand = row.committedDemand;
-    row.projectedRemaining = row.onHand != null ? row.onHand - demand : null;
+    row.projectedRemaining = row.onHand != null ? exact(row.onHand - demand) : null;
     let runningDemand = 0;
     for (const appointment of row.appointments.slice().sort((a, b) => String(a.scheduledDate).localeCompare(String(b.scheduledDate)))) {
-      runningDemand += Number(appointment.inventoryAmount || appointment.amount || 0);
+      runningDemand = exact(runningDemand + Number(appointment.inventoryAmount || appointment.amount || 0));
       if (row.onHand != null && runningDemand > row.onHand) {
         row.firstShortDate = appointment.scheduledDate;
         break;

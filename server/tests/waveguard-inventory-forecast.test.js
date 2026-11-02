@@ -194,6 +194,24 @@ test('small doses sum at full precision: 100 x 1 ml against gallon stock is 0.02
   expect(result.products[0].appointments[0].inventoryAmount).toBeCloseTo(0.033814 / 128, 12);
 });
 
+test('float noise never makes exact stock short or hides a low-stock warning: 3 x 0.1 gal fits 0.3 gal on hand', async () => {
+  visits = readQuery([0, 1, 2].map((i) => ({ id: `tenth-${i}`, scheduled_date: '2030-01-10' })));
+  buildPlanForService.mockResolvedValue({
+    propertyGate: { serviceTier: 'Silver' },
+    mixCalculator: { items: [item('exact', 0.1, 'gal', { unit: 'gal', onHand: 0.3 })] },
+  });
+  const exact = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(exact.products[0]).toMatchObject({ committedDemand: 0.3, projectedRemaining: 0, status: 'ok', firstShortDate: null, shortfall: 0 });
+
+  visits = readQuery([{ id: 'tenth-0', scheduled_date: '2030-01-10' }]);
+  buildPlanForService.mockResolvedValue({
+    propertyGate: { serviceTier: 'Silver' },
+    mixCalculator: { items: [item('threshold', 0.1, 'gal', { unit: 'gal', onHand: 0.4, lowStockThreshold: 0.3 })] },
+  });
+  const atThreshold = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(atThreshold.products[0]).toMatchObject({ projectedRemaining: 0.3, status: 'warning' });
+});
+
 test.each([
   [{ days: 'abc' }, 'days must be a number from 1 to 90'],
   [{ limit: '7rows' }, 'limit must be a number from 1 to 300'],

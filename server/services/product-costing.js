@@ -237,10 +237,12 @@ function usageAmountForArea(row, areaSqFt = 0) {
 }
 
 // A count unit's noun: generic counts ("ea", "ct", "count") read as 'each',
-// plurals drop their s ("stations" -> "station").
+// and parsePackCount singularizes the nouns it knows ("boxes" -> "box",
+// "stations" -> "station") before normalizeUnit's plain s-strip, which would
+// turn "boxes" into "boxe".
 function countNoun(unit) {
-  const word = normalizeUnit(unit);
-  return parsePackCount(`1 ${word}`)?.unit || word;
+  const raw = String(unit || '').trim().toLowerCase();
+  return parsePackCount(`1 ${raw}`)?.unit || normalizeUnit(raw);
 }
 
 // The usage amount expressed in cost units, or null when the two units do not

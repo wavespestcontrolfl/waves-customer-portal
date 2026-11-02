@@ -42,6 +42,13 @@ describe('costLineFromUsage prices usage only in a unit its cost converts to', (
       .toMatchObject({ source: 'cost_per_unit', cost: 18 });
   });
 
+  test('a plural container noun is singularized before it is compared: boxes price per box, never per each', () => {
+    expect(costLineFromUsage(row({ usage_unit: 'boxes', cost_per_unit: 7, cost_unit: 'box' })))
+      .toMatchObject({ source: 'cost_per_unit', cost: 14 });
+    expect(costLineFromUsage(row({ usage_unit: 'boxes', cost_per_unit: 7, cost_unit: 'each' })).warning)
+      .toBe('Synthetic product: usage in boxes cannot be priced per each');
+  });
+
   test('compatible measures still convert, and a bare oz stands in for either measure', () => {
     expect(costLineFromUsage(row({ usage_amount: 8, usage_unit: 'oz', cost_per_unit: 4, cost_unit: 'lb' })).cost).toBeCloseTo(2, 10);
     expect(costLineFromUsage(row({ usage_amount: 32, usage_unit: 'fl oz', cost_per_unit: 100, cost_unit: 'gal' })).cost).toBeCloseTo(25, 10);
