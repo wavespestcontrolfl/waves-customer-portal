@@ -517,6 +517,14 @@ describe('moveVisitAsUnit', () => {
     expect(out.visitMove.members.find((m) => m.id === 'b').previousStatus).toBe('confirmed');
   });
 
+  test('each moved member carries the status its own rebooker move wrote (landedStatus)', async () => {
+    db.__script = script({ members: [member('a'), member('b', { status: 'pending' })] });
+    const rebooker = { reschedule: jest.fn(async (id) => ({ success: true, previousStatus: id === 'b' ? 'pending' : 'confirmed', landedStatus: id === 'b' ? 'pending' : 'confirmed' })), rescheduleSeries: jest.fn() };
+    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch', options: { keepStatus: true } });
+    expect(out.landedStatus).toBe('confirmed');
+    expect(out.visitMove.members.find((m) => m.id === 'b')).toMatchObject({ previousStatus: 'pending', landedStatus: 'pending' });
+  });
+
   test('a silently moved sibling keeps a still-pending creation confirmation pending (keepPendingConfirmation) — no supersede, no re-arm write', async () => {
     db.__script = script({ members: [member('a'), member('b')] });
     AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'rem-b', confirmation_sent: false });

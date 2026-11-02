@@ -2671,6 +2671,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // snapshot (codex r6): an operator confirm between plan and move must
       // not be rewound by a caller restoring 'pending'.
       if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
+      // The status the member's move wrote (keepStatus keeps its own; a
+      // rewound lifecycle lands 'confirmed'), for callers that fence on it.
+      if (r && r.landedStatus) target.landedStatus = String(r.landedStatus);
       // The holder on the COMMITTED row (codex r10 P1): a reassignment that
       // raced the plan can have landed a third technician — the fence in
       // alignMember then fails for exactly that reason, and the fallback
@@ -2919,12 +2922,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     logger.info(`[visit-groups] unit move of visit ${plan.visitId} complete — hold retained for the caller's reminder sync to release`);
   }
   // members: per-row pre-move state so a caller with its own post-move
-  // bookkeeping (auto-dispatch restores 'pending' + stamps) can apply it
-  // to EVERY row this move touched, not just the tapped one (codex r4).
+  // bookkeeping (auto-dispatch stamps each row) can apply it to EVERY row
+  // this move touched, not just the tapped one (codex r4).
   // `landed` = the slot the move wrote (date + window bounds the plan asserts)
-  // so a caller's post-move bookkeeping can fence its writes on it (a newer
-  // move/confirm after the unit move must never be rewound — local audit).
-  const members = plan.targets.filter((x) => moved.includes(x.id)).map((x) => ({ id: x.id, isPrimary: x.isPrimary, previousStatus: x.previousStatus, landed: landedState[x.id] || null }));
+  // and `landedStatus` the status it wrote (absent when the rebooker threw
+  // after its commit), so a caller's post-move bookkeeping can fence its
+  // writes on them (a newer move/confirm after the unit move must never be
+  // rewound — local audit).
+  const members = plan.targets.filter((x) => moved.includes(x.id)).map((x) => ({ id: x.id, isPrimary: x.isPrimary, previousStatus: x.previousStatus, landed: landedState[x.id] || null, ...(x.landedStatus ? { landedStatus: x.landedStatus } : {}) }));
   // unchanged: members the plan found already at the target (e.g. a
   // windowless sibling on a same-day window move) — represented by this
   // visit's move without a write, so batch callers treat them as covered

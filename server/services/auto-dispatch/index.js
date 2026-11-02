@@ -186,8 +186,8 @@ function buildPlacementAudit({
     // arithmetic produced the numbers being reviewed.
     model: modelLabelFor(current, candidate),
   };
-  // apply preserves pending (restores it after the rebooker), so the projected
-  // status must reflect that — don't claim a pending visit would be confirmed.
+  // apply keeps pending (the move lands the visit's own status), so the
+  // projected status must reflect that — don't claim a pending visit would be confirmed.
   const projectedStatus = service.status === 'pending' ? 'pending' : 'confirmed';
   const newPlacement = { date: candidate.date, window_start: candidate.start_time, window_end: candidate.end_time, technician_id: candidate.technician_id, status: projectedStatus };
   const constraints = {
