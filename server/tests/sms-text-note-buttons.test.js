@@ -14,6 +14,18 @@ const plan = (facts, prefs = {}, properties = ['p1']) => planSave({
 const writes = (result) => (result.writes || []).map((w) => [w.field, w.value]);
 
 describe('text-note bell buttons (owner 2026-11-02 "C")', () => {
+  const READER_ENV = ['GATE_SMS_OPERATIONAL_ACTIONS', 'GATE_SMS_OPERATIONAL_ACTIONS_SINCE'];
+  const saved = Object.fromEntries(READER_ENV.map((name) => [name, process.env[name]]));
+  beforeEach(() => {
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = '2040-03-01T00:00:00Z';
+  });
+  afterAll(() => {
+    for (const name of READER_ENV) {
+      if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
+    }
+  });
+
   test('the stored buttons pass the admin-alert button rules', () => {
     expect(buttonViolations(textNoteButtons())).toEqual([]);
     expect(textNoteButtons().items.map((i) => i.label)).toEqual(['Save to profile', 'One visit only']);
@@ -43,6 +55,18 @@ describe('text-note bell buttons (owner 2026-11-02 "C")', () => {
     expect(plan([code], { lockbox_code: '#0123' })).toEqual({ refusal: 'on_file', field: 'lockbox_code' });
     expect(plan([held({ field: 'contact_preference', value: 'call' })], { contact_preference: 'text' }))
       .toEqual({ refusal: 'on_file', field: 'contact_preference' });
+  });
+
+  test('Save is off while the SMS reader is off, or for a text from before its activation time (Codex Security r1)', () => {
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'false';
+    expect(plan([held()])).toEqual({ refusal: 'reader_off' });
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
+    delete process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE;
+    expect(plan([held()])).toEqual({ refusal: 'reader_off' });
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = '2040-03-11T00:00:00Z';
+    expect(plan([held()])).toEqual({ refusal: 'reader_off' });
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = SOURCE_AT;
+    expect(writes(plan([held()]))).toHaveLength(1);
   });
 
   test.each(['conflicting_facts', 'mixed_topics', 'value_too_long', 'changed_during_extraction'])(

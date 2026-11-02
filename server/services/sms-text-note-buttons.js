@@ -78,6 +78,9 @@ const tiedToTheOneProperty = (facts, properties) => properties.length === 1
 // under the lock on what it reads there. `properties`: the customer's active property ids.
 function planSave({ meta, source, prefs, properties = [] }) {
   if (!source) return { refusal: 'gone' };
+  // Save writes what the reader held back, so the reader's own off switch and activation time stop it too: the tap
+  // reruns this under the lock, inside the save transaction (Codex Security r1 on #7494).
+  if (!require('./sms-operational-actions').readerWritesTextFrom(source.created_at)) return { refusal: 'reader_off' };
   const facts = bellFacts(source, meta);
   if (!facts.length) return { refusal: 'nothing_to_save' };
   if (facts.some((f) => NO_SAVE_OUTCOMES.has(f.outcome))) return { refusal: 'open_profile' };
@@ -102,6 +105,7 @@ function planSave({ meta, source, prefs, properties = [] }) {
 const label = (field) => require('./sms-operational-actions').reviewFieldLabel(field);
 const REFUSALS = {
   gone: () => ({ message: 'The text or the customer is no longer on file.', close: 'Text or customer no longer on file' }),
+  reader_off: () => ({ message: 'The SMS reader is off for this text, so Save is off. Open the profile to save it.' }),
   nothing_to_save: () => ({ message: 'Nothing in this text is left to save. Open the conversation to check.' }),
   open_profile: () => ({ message: 'This text needs a person to pick what to save. Open the profile to save it.' }),
   property: () => ({ message: 'This note is not tied to the customer\'s one property. Open the profile to save it there.' }),

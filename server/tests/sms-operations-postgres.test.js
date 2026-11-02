@@ -1386,6 +1386,16 @@ postgres('SMS operations on PostgreSQL', () => {
       expect(closed.done_at).not.toBeNull();
     });
 
+    test('the SMS reader switched off after the bell rang: Save is not offered and the tap writes nothing (Codex Security r1)', async () => {
+      const bell = await raiseBell('Skip the shed please', { field: 'special_instructions', value: 'Skip the shed please', duration: 'uncertain' });
+      process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'false';
+      expect(await served(bell)).toEqual(['one_visit']);
+      expect(await tap(bell, 'save')).toMatchObject({ status: 409, body: { error: 'reader_off' } });
+      expect(await mockPg('property_preferences')).toHaveLength(0);
+      expect(await savedAudits()).toHaveLength(0);
+      expect((await mockPg('notifications').where({ id: bell.id }).first()).done_at).toBeNull();
+    });
+
     test('a tap on a bell that changed since it was served saves nothing', async () => {
       const bell = await raiseBell('Skip the shed please', { field: 'special_instructions', value: 'Skip the shed please', duration: 'uncertain' });
       expect(await tap(bell, 'save', 'f'.repeat(32))).toEqual({ status: 409, body: { error: 'changed' } });
