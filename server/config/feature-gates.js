@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_FOLLOWUP_DUE_ALERT=true (owner 2026-11-02, "build all", B1: a visit finished with the outcome "follow-up needed" parks a card on the dispatch board that no bell ever shows, so a follow-up nobody books just sits there. On, a daily 8:20 AM ET job (followup-due-alerts) raises one admin bell per card on its due date (the card's suggested follow-up date, else its Eastern created date + 14 days), titled "Schedule — book <First L.>'s follow-up (due <date>)" and linked to the customer page, where the owner books. A card more than 3 days past due with no alert of its own goes on ONE catch-up bell that rings when it is first raised or when a card joins it, and closes itself when empty. Each run closes the open bells whose card is covered: resolved, customer inactive, or any later live visit (created after the card, dated after it up to due + 7 days, or booked from it). Admin notifications only: books nothing, sends nothing to a customer, calls no paid API, never resolves or edits a card. Read at call time via followupDueAlertLive(), strict 'true', dark by default; off = the job returns before any read.)
  *   GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE=true (owner 2026-11-02, option A: an email reply pauses the estimate follow-up emails the way a text already does. On, hasRepliedRecently also returns true when the customer emailed Waves inside the same 14 days: an inbound row in the Gmail sync table linked to the estimate's customer_id, or whose from_address equals the estimate's email (leads have no customer_id). Gmail SENT rows never count, and the address match is skipped when the estimate's email is one of ours. A failed read fails open on the cron path and holds the replay, same as the text check. Strict `=== 'true'`, read at call time via estimateFollowupEmailReplyPauseLive(); dark by default; off = the emails table is never queried and nothing changes. Sends nothing; it only holds back follow-up emails.)
  *   GATE_SOCIAL_STUDIO_SKIP_META=true (owner 2026-11-01, social audit "studio trim": from Sep 1 to Nov 1 the autonomous Social Studio's Instagram stills reached about 1.5 to 3 people each and gained no followers, so the autonomous studio stops posting to Facebook and Instagram and keeps LinkedIn and Google Business. On, an autonomous run (the 6:30 AM ET cron, the admin Run Draft and Run Publish buttons, and the approval of a queued autonomous draft) drops facebook and instagram from its channel list: no copy or image is made for them, no Veo clip is made, and an old queued draft publishes to its other channels only. A run whose channels were only facebook and instagram is skipped and logged. The manual Social Studio, Campaign Builder, Publish All, blog and RSS shares, testimonial graphics and scheduled posts are NOT touched. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialStudioSkipMetaLive().)
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
@@ -71,6 +72,7 @@
  *   GATE_CALL_PROMISE_LATER_TEXT_CHECK=true (owner 2026-10-25 "build it": a record proof the call-promise AI check accepted is no longer held for good by any later human text. The AI reads the texts that came after the proof and answers one question: does any of them say this promise was not kept, was undone, went wrong or is still needed? Only a clear no lets the proof close the promise; yes, unclear, a failed read, any later message with no words (a photo) or too long to read whole, more later texts than it reads, and card-number fragments it cannot attribute keep it held as before. Needs GATE_CALL_PROMISE_AI_CLOSE. Read at call time via callPromiseLaterTextCheckLive(), strict 'true', dark by default; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
  *   GATE_TECH_LOGIN_PRIVACY=true (owner 2026-10-25, second technician: a login with the technician role sees only its own customers' alerts and promises. Customer-text bells and pushes (sms_reply, reschedule intent, voicemail callback, service report and completion text failures, Twilio failures, job complete, follow-up bells) reach a technician only when the customer is on that technician's route (the same rule the Communications routes use); an alert with no customer keeps today's routing. The Promises tab feeds (proposals, open commitments, auto-closed) list only own-customer rows and closing, dismissing or reopening another customer's promise answers 404. The customer-deleted-account push goes to admin-role staff only. Admin and office logins see everything as before. Read at call time via techLoginPrivacyLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer.)
  *   GATE_ESTIMATE_SLOT_ONE_PER_HOUR=true (owner 2026-10-25, second technician: the estimate time picker lists ONE opening for each date and start time, not one per technician. Of the openings sharing a start the picker keeps the one it sorts first (route-optimal, then the shortest detour to a nearby job, then the slot id); the kept opening is a complete reservable slot with its own technician and hold. The "Only N openings" count and every cut of the list follow the collapsed list, so a repeated time no longer pushes other times out. Same list the page, its search, the fresh recheck, one-tap purchase and the estimate-time text drafts read. Reserve and accept are unchanged. Read at call time via estimateSlotOnePerHourLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer by itself.)
+ *   GATE_MOVING_FLOW=true (owner 2026-11-02, "a moving email where they can do it": the office can send a customer a moving link by email or text (Customer 360 Moving card, Communications composer). The link opens a plain page at /moving/<token> where the customer types a new address (checked once by Google Address Validation, capped at 10 checks per link per day, the last result reused for 24 hours), adds move-out and move-in dates, and sees a fixed receipt. A submit makes one office item (category moving) and one admin alert. It changes no visit, price, property or plan and sends no message by itself; every email and text starts with a staff click. Strict opt-in, read at call time via movingFlowLive(); off = the public page and its routes answer 404, the admin routes answer 404 (the list answers enabled:false) and the admin buttons are hidden. The owner flips it because it adds a customer page and email. Kill switch: unset.)
  *   GATE_SETUP_FEE_SETTLED_ANYWHERE=true (owner 2026-10-24 setup-fee alert audit: the "setup fee never invoiced, bill BOTH" admin alert, the completion hold it starts and the alert reconcile also treat the setup fee as settled when the customer's own invoices show it paid, waived or prepaid even though no invoice cites the accepted estimate: a paid line named setup fee or WaveGuard Membership for at least the frozen fee, a live $0 or waived setup-fee line, or a covered non-termite annual-prepay term or paid annual-prepay invoice. Settled = no alert, no hold, the normal visit invoice is made, and a standing alert is closed instead of reopened when the visit is billed. Read at call time via setupFeeSettledAnywhereLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_SETUP_FEE_APPLICATION_SETTLED=true (owner 2026-10-28, the three false setup-fee alerts of #6830: the setup-fee alert reconcile, which also runs right after a completion parks a new alert, counts a parked visit's application as billed when a prepay year whose bill is live (paid, or awaiting payment on a live prepay invoice) bought that visit, or when the visit's own invoices bill its base line plus its own add-on lines for the frozen visit charge. Billed = the alert closes, or shrinks to the charge still owed, instead of telling staff to bill the visit by hand. Read at call time via setupFeeApplicationSettledLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_SETUP_FEE_OPEN_INVOICE_NOTICE=true (owner 2026-10-31 "do these", the setup fee on an unpaid visit invoice: when the setup-fee alert's fee is not paid yet but the customer's open invoices (scheduled, sent, viewed, overdue or partly paid) carry fee lines that GATE_SETUP_FEE_SETTLED_ANYWHERE counts once they are paid, the alert stays open but says the fee is already on that invoice and must not be billed again, and the morning digest stops listing it as a fee to bill. The fee still counts as covered only once paid: paying the invoice resolves the alert, voiding it brings the fee instruction back. Read at call time via setupFeeOpenInvoiceNoticeLive(), strict 'true', dark by default; off = today's alert text, and a standing notice is rewritten back on the next reconcile. Sends nothing to a customer and creates no invoice.)
@@ -478,6 +480,7 @@
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
+ *   GATE_MONDAY_REVIEW_BELL=true (owner 2026-11-02, "build all", B2: one needs-you bell every Monday 9:20 AM ET for the work that sits, built from the 2026-09-30 rule item 6. Lines, each only when its count is above zero: needs-you alerts unread 14+ days (before the 30-day retention sweep expires them), overdue promises to callers, completed visits whose only invoice is an unsent draft, past-dated visits still open. One row per Monday (dedupeKey monday-review:<ET date>) with a detail line and page for each list; last week's row closes first, and an all-zero week raises nothing. Admin only: sends nothing to a customer, no paid API, writes only admin notifications. Read at call time via mondayReviewBellLive(), strict 'true', dark by default; off = the Monday cron returns before any read. Rollback = unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -8056,6 +8059,13 @@ function leadDraftPropertyLookupLive() {
   return process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true';
 }
 
+// GATE_FOLLOWUP_DUE_ALERT read at CALL time (so a flip needs no redeploy); strict 'true', dark (owner 2026-11-02, B1).
+// On, the daily 8:20 AM ET job in services/followup-due-alerts.js raises one admin bell per flagged follow-up that is due
+// and not booked, plus one catch-up bell for the older ones. Off = the cron returns before any read.
+function followupDueAlertLive() {
+  return process.env.GATE_FOLLOWUP_DUE_ALERT === 'true';
+}
+
 // GATE_QUIET_OVERDUE_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
 function quietOverdueListLive() {
   return process.env.GATE_QUIET_OVERDUE_LIST === 'true';
@@ -9064,6 +9074,14 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.ibSeriesMoveLive = ibSeriesMoveLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
+// GATE_MOVING_FLOW read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02). On, the moving link, the public
+// /moving/:token page and its routes, and the Customer 360 Moving card work (services/customer-moves.js,
+// routes/moving-public.js). Off = every new public and admin route answers 404 and the admin UI hides the card. Kill = unset.
+function movingFlowLive() {
+  return process.env.GATE_MOVING_FLOW === 'true';
+}
+// GATE_MOVING_FLOW reader, on its own line so gate PRs never conflict.
+module.exports.movingFlowLive = movingFlowLive;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
 // GATE_APP_RATING_PROMPT reader, on its own line so gate PRs never conflict.
@@ -10052,6 +10070,11 @@ function techSetTextsLive() {
 function emailDraftFactsLive() {
   return process.env.GATE_EMAIL_DRAFT_FACTS === 'true';
 }
+
+// GATE_MONDAY_REVIEW_BELL read at CALL time (so a flip needs no redeploy); strict 'true'.
+function mondayReviewBellLive() {
+  return process.env.GATE_MONDAY_REVIEW_BELL === 'true';
+}
 // GATE_WDO_MARK_SENT_OUTSIDE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02, "build all" B3). On, a signed
 // WDO report that was never sent through the portal shows a "Sent another way" button on the project page; the button
 // calls POST /api/admin/projects/:id/mark-sent-outside, which records who/when/why in projects.sent_outside_portal_*
@@ -10257,5 +10280,9 @@ module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 module.exports.techSetTextsLive = techSetTextsLive;
 // GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.emailDraftFactsLive = emailDraftFactsLive;
+// GATE_FOLLOWUP_DUE_ALERT reader, on its own line so gate PRs never conflict.
+module.exports.followupDueAlertLive = followupDueAlertLive;
+// GATE_MONDAY_REVIEW_BELL reader, on its own line so gate PRs never conflict.
+module.exports.mondayReviewBellLive = mondayReviewBellLive;
 // GATE_RESERVICE_ASKS reader, on its own line so gate PRs never conflict.
 module.exports.reserviceAsksLive = reserviceAsksLive;
