@@ -227,9 +227,11 @@ async function readTexts(knex, customerId, window, bookingKeys) {
   return candidates;
 }
 
+// Inbound calls only, as the office suggestion reads them (reservice-office-request.js): on a call Waves placed, the
+// extraction's 'caller' speaker is Waves, so its lines are not the customer's words.
 async function readCalls(knex, customerId, window) {
   const rows = await whereNotSandboxCall(knex('call_log')
-    .where({ customer_id: customerId })
+    .where({ customer_id: customerId, direction: 'inbound' })
     .where('created_at', '>=', window.from)
     .where('created_at', '<=', window.to))
     .select(CALL_COLUMNS)

@@ -39,7 +39,13 @@ const ContextAggregator = require('./context-aggregator');
 const { etDateString } = require('../utils/datetime-et');
 const { isSmsReaction } = require('./sms-intent');
 const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
-const { reserviceAsksLive } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+// GATE_RESERVICE_ASKS, read at call time. A partial feature-gates mock (many suites mock the module) lacks the
+// reader, so it reads as off rather than throwing inside every report draft.
+function reserviceAsksLive() {
+  return typeof featureGates.reserviceAsksLive === 'function' && featureGates.reserviceAsksLive() === true;
+}
 
 const { redactAccessCodes } = ContextAggregator;
 

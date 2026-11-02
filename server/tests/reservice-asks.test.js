@@ -40,10 +40,12 @@ function fakeKnex({
     sms_log: sms, call_log: calls, emails, service_requests: requests,
   };
   const seen = [];
+  const wheres = [];
   const knex = (table) => {
     seen.push(table);
     const q = {};
     for (const m of ['where', 'whereRaw', 'leftJoin', 'select', 'orderBy', 'limit', 'modify']) q[m] = (...args) => { if (m === 'modify' && typeof args[0] === 'function') args[0](q); return q; };
+    q.where = (...args) => { wheres.push([table, args]); return q; };
     q.first = async () => visit;
     q.then = (resolve, reject) => (fail[table]
       ? Promise.reject(fail[table])
@@ -51,6 +53,7 @@ function fakeKnex({
     return q;
   };
   knex.seen = seen;
+  knex.wheres = wheres;
   return knex;
 }
 
@@ -250,6 +253,13 @@ describe('calls', () => {
       ],
     });
     expect(items).toEqual([]);
+  });
+
+  test('reads inbound calls only: on a call Waves placed, the caller lines are Waves', async () => {
+    const knex = fakeKnex({ calls: [v2Call('c1', 'Ants in the kitchen')] });
+    await gatherReserviceAsks('visit-1', { knex, now: NOW });
+    const callWheres = knex.wheres.filter(([table, args]) => table === 'call_log' && args[0] && typeof args[0] === 'object');
+    expect(callWheres.some(([, args]) => args[0].direction === 'inbound')).toBe(true);
   });
 
   test('callDay uses the Eastern calendar day', () => {
