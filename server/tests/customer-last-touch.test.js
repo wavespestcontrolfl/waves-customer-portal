@@ -64,7 +64,11 @@ describe('contactTouchSql', () => {
   test('counts inbound mail linked to the customer and never a Gmail SENT row', () => {
     const mail = sql.slice(sql.indexOf('FROM emails'), sql.indexOf('FROM service_records'));
     expect(mail).toContain('em.customer_id = customers.id');
+    // customer_id alone is not sender proof: the sender must be the address on file
+    expect(mail).toContain('LOWER(em.from_address) = LOWER(TRIM(customers.email))');
     expect(mail).toContain("NOT COALESCE((jsonb_exists(em.label_ids::jsonb, 'SENT') AND NOT jsonb_exists(em.label_ids::jsonb, 'INBOX')), FALSE)");
+    // forged-From mail Gmail filed as spam, or the spam blocker quarantined, never moves the date
+    expect(mail).toContain("NOT COALESCE(jsonb_exists(em.label_ids::jsonb, 'SPAM'), FALSE) AND em.quarantined_at IS NULL");
   });
 
   test('counts a completed visit only, as a timestamp, and GREATEST leaves NULL when there is none', () => {

@@ -22,7 +22,11 @@ const LAST_TOUCH_SQL = `GREATEST(
 // epoch): this one also counts a text a person sent that was delivered, a call a
 // person placed and spoke on, an inbound call a human answered and inbound mail
 // (never a Gmail SENT row), and it stays NULL instead of flooring. Automated
-// outbound texts, bare call rows and call durations never count. Recruiting
+// outbound texts, bare call rows and call durations never count. emails.customer_id
+// alone is not sender proof (the classifier also links a row by display NAME), so
+// the sender must be the customer's address on file; a From header can still be
+// forged, so mail Gmail filed as spam or the spam blocker quarantined never counts.
+// The value is display-only: nothing sends, pauses or scores from it. Recruiting
 // `job_%` texts are not customer context. Correlated MAX per source, keyed on
 // customer_id (indexed on all four tables). A visit has a date only, so it counts
 // at noon: the same calendar day in Eastern and UTC.
@@ -36,7 +40,9 @@ function contactTouchSql(customerAlias = 'c') {
     AND ((cl.direction = 'outbound' AND ${personCallBackSql('cl')})
       OR (cl.direction = 'inbound' AND cl.answered_by = 'human'))),
   (SELECT MAX(em.received_at) FROM emails em WHERE em.customer_id = ${cid}
-    AND NOT COALESCE((${personSentFilter('em')}), FALSE)),
+    AND LOWER(em.from_address) = LOWER(TRIM(${customerAlias}.email))
+    AND NOT COALESCE((${personSentFilter('em')}), FALSE)
+    AND NOT COALESCE(jsonb_exists(em.label_ids::jsonb, 'SPAM'), FALSE) AND em.quarantined_at IS NULL),
   (SELECT (MAX(sr.service_date) + TIME '12:00')::timestamptz FROM service_records sr WHERE sr.customer_id = ${cid}
     AND sr.status = 'completed')
 )`;
