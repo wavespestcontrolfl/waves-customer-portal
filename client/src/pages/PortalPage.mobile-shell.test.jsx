@@ -122,11 +122,23 @@ describe('home quick actions on compact widths', () => {
 
     // Compact chips drop the sub-line, so the accessible name is the bare label.
     const request = await screen.findByRole('button', { name: 'Request' });
-    for (const name of ['Message', 'Billing', 'Refer']) {
+    for (const name of ['Text us', 'Billing', 'Refer']) {
       expect(screen.getByRole('button', { name })).toBeInTheDocument();
     }
 
     expect(request.parentElement?.style?.gridTemplateColumns).toContain('repeat(2');
+  });
+
+  // Owner pick 1A (UI audit 2026-11-02): on phones the shortcuts sat above the
+  // next visit and pushed Reschedule under the bottom bar.
+  it('puts the next visit before the shortcuts, and the texting shortcut says Text us', async () => {
+    window.innerWidth = 360;
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+
+    const request = await screen.findByRole('button', { name: 'Request' });
+    const nextVisit = screen.getByText('Next Visit');
+    expect(nextVisit.compareDocumentPosition(request) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Message' })).toBeNull();
   });
 });
 
