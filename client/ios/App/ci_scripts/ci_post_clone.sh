@@ -23,7 +23,7 @@ set -euo pipefail
 
 # The version this repository ships next. Raise it when App Review approves
 # this one; App Store Connect refuses an upload to a closed version.
-DEFAULT_MARKETING_VERSION="1.7"
+DEFAULT_MARKETING_VERSION="1.8"
 # Waves Pest Control LLC. Public: the same id is in ios/WavesPay.
 DEFAULT_TEAM_ID="BMNXJ4Q89M"
 

@@ -7164,6 +7164,19 @@ function reviewProbableReviewerGuardLive() {
   return String(process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD || '').trim().toLowerCase() === 'true';
 }
 
+// GATE_APP_RATING_PROMPT read at CALL time (owner 2026-11-02, "do the rating for everyone"):
+// 'off' | 'shadow' | 'on'. The Waves customer app (a build with the in-app review plugin) asks
+// POST /api/customer/app-rating/claim at most once a day from its home screen; the server answers
+// ask=true at most once per 120 days per customer, and only after a finished visit
+// (services/app-rating-prompt.js). on = the app asks the store for its rating card (the store
+// decides whether it shows; Apple shows it at most three times a year); shadow = record the
+// would-ask row, the app shows nothing. Unset is the kill, no redeploy. Sends no text, email or call.
+function appRatingPromptMode() {
+  const value = String(process.env.GATE_APP_RATING_PROMPT || '').trim().toLowerCase();
+  if (value === 'shadow') return 'shadow';
+  return value === 'true' ? 'on' : 'off';
+}
+
 // GATE_REVIEW_ASK_AT_VISIT read at CALL time (owner 2026-11-01, "every customer gets the review text 10
 // minutes after the visit report"): 'true' = an unpaid invoice no longer holds a visit's review ask; it goes
 // after the report text (or a combined visit's summary) like a paid visit's. Once that visit-time ask has
@@ -8963,6 +8976,8 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
+// GATE_APP_RATING_PROMPT reader, on its own line so gate PRs never conflict.
+module.exports.appRatingPromptMode = appRatingPromptMode;
 // GATE_QUICKMOVE_CUSTOMER_PICK read at CALL time (so a flip needs no redeploy); strict 'true', dark.
 // Kept off the end-of-file append point, where gate PRs keep colliding.
 function quickMoveCustomerPickLive() {
