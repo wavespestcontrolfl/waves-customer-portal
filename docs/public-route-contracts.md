@@ -4308,8 +4308,9 @@ place of the grass) and `turfType: null`; the gate-off packet keeps
 `client/src/pages/ServiceOutlinePage.jsx` maps to icons; an unknown `type` or key
 renders as text. No PII is added. Unsetting the gate changes only packets built
 after it: a stored packet keeps its content until staff regenerate it. A packet
-built while `GATE_LAWN_OUTLINE_DETAIL` was also live (stamped
-`lawn-v13-detail-2`, or `lawn-v13-detail-1` before 2026-11-01) has no `season_focus` section; its `program_year` section
+built while `GATE_LAWN_OUTLINE_DETAIL` was also live before the new layout went live
+on 2026-11-01 (stamped `lawn-v13-detail-1` or `lawn-v13-detail-2`; no new one is
+built, and a stored one renders as below until it expires) has no `season_focus` section; its `program_year` section
 draws `{ type: 'months', months: [{ month, label, name, main: [key],
 asNeeded: [key], limited, visit, atHome, open }], labels: { key: label },
 limitLabel }` (`visit` is the month's report text, `atHome` one thing to do at
@@ -4320,8 +4321,9 @@ and `categories` sections whose keys are `problems`, `products`,
 hides that tile after that ET day (the watering-order tile, which a stored
 packet keeps after the order ends). Product names in `products` are public
 label names with an active ingredient; no rate, price or PII. A packet built
-while `GATE_LAWN_OUTLINE_VISUAL` was also live (stamped `lawn-v13-visual-2`;
-the gate needs `GATE_LAWN_OUTLINE_DETAIL`) has the sections `year_bar`, `rounds`
+while `GATE_LAWN_OUTLINE_DETAIL` is live since 2026-11-01 draws the new layout
+(stamped `lawn-v13-visual-2`; it had its own gate until that gate was removed
+after its flip) and has the sections `year_bar`, `rounds`
 (a 9-visit rounds plan; every other plan keeps the `program_year` month list),
 `typical_visit`, `after_visit_timeline`, `after_visit`, `your_watering`,
 `your_mowing`, `problems`, `products`, `not_included` and `faq`, each with its

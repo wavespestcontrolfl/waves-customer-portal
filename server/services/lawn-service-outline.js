@@ -9,14 +9,11 @@ const { PROGRAM_DETAIL_V13 } = require('./service-report/lawn-program-line');
 const { estimateHasBahiaLawn, estimateLawnGrassValues } = require('./estimate-bahia-review');
 const featureGates = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
-const WATERING_COPY = require('../../shared/watering-copy.json');
-const RAIN_COPY = require('../../shared/lawn-water-rain-copy.json');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
 const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-2';
-const V13_DETAIL_CONTENT_LIBRARY_VERSION = 'lawn-v13-detail-2';
 const V13_VISUAL_CONTENT_LIBRARY_VERSION = 'lawn-v13-visual-2';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
@@ -299,12 +296,6 @@ function outlineDetailLive() {
   return featureGates.lawnOutlineDetailLive?.() === true;
 }
 
-// GATE_LAWN_OUTLINE_VISUAL (live only with GATE_LAWN_OUTLINE_DETAIL): the new layout in lawn-outline-visual.js, for every lawn
-// outline. Off = the detailed v13 outline exactly.
-function outlineVisualLive() {
-  return featureGates.lawnOutlineVisualLive?.() === true;
-}
-
 // The same categories, for every line of the month's step: the 12x step and each plan-size
 // variant (the 9x April bag), so a category one plan size uses is never missing. A fertilizer
 // analysis may have one-digit parts (44-0-0); Headway, Advion and the Topchoice add-on are v13 lines too.
@@ -376,14 +367,13 @@ function protocolVersion() {
   return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
 }
 
-// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13), its detailed
-// version (GATE_LAWN_OUTLINE_DETAIL) and the new layout (GATE_LAWN_OUTLINE_VISUAL) each stamp their own
-// content version, so a flip shows outlines built before it as updated. The Estimates list's stale check reads it, so it reads the gates and
-// the constants only.
+// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13) and its detailed version
+// (GATE_LAWN_OUTLINE_DETAIL, drawn in the new layout since 2026-11-01) each stamp their own content version, so a
+// flip shows outlines built before it as updated. The Estimates list's stale check reads it, so it reads the gates
+// and the constants only.
 function contentLibraryVersion() {
   if (!outlineV13Live()) return CONTENT_LIBRARY_VERSION;
-  if (outlineVisualLive()) return V13_VISUAL_CONTENT_LIBRARY_VERSION;
-  return outlineDetailLive() ? V13_DETAIL_CONTENT_LIBRARY_VERSION : V13_CONTENT_LIBRARY_VERSION;
+  return outlineDetailLive() ? V13_VISUAL_CONTENT_LIBRARY_VERSION : V13_CONTENT_LIBRARY_VERSION;
 }
 
 function protocolVisitForMonth(turfType, month) {
@@ -922,9 +912,6 @@ const tilesSection = (key, title, body, tiles) => makeSection(key, title, body, 
 // stays the report's own (PROGRAM_DETAIL_V13). Still no rate, tier, visit count or visit date; product names come
 // only from the product list below (decision D1-B).
 const V13_DETAIL_COPY = Object.freeze({
-  // v13 confirms chinch bugs at the edge of the damage (the float test only if unsure). "Spot", not "any": May's one
-  // whole-lawn insect pass goes on sunny turf with no count first.
-  confirmedTile: Object.freeze({ icon: 'count', title: 'Confirmed before treating', text: 'Chinch bugs and other insects are confirmed where the damage starts before any spot treatment' }),
   // A 9-visit plan skips some months, so the list says each visit follows its month (the v13 outline's own sentence).
   yearBody: 'Each visit follows the step for the month it falls in. This month and the next two are open. Tap any month to see what a visit then does and one thing to do at home.',
   // One thing to do at home each month, from the v13 visit rules (barrier water-in, holds, storm holds).
@@ -957,22 +944,8 @@ const V13_DETAIL_COPY = Object.freeze({
   ].map((tile) => Object.freeze(tile))),
   productsTitle: 'Products We May Use',
   productsBody: 'Each visit uses only what the lawn needs. Your service report names every product applied, with its EPA number.',
-  afterTreatmentTitle: 'After A Treatment',
-  afterTreatmentBody: 'Your service report lists any instructions for that visit. These are the common ones.',
-  afterTreatmentTiles: Object.freeze([
-    { icon: 'barrier', title: 'Water in the weed barrier', text: 'A weed barrier needs about 1/2 inch of rain or irrigation within 14 days to activate. Your regular watering day counts.' },
-    { icon: 'reentry', title: 'Hold, or water in: your report says which', text: 'Weed sprays and some insect sprays need 24 hours with no sprinklers, and the mole cricket bait needs three days: turn the timer off for that long. If a hold falls on your watering day, skip that run. Some granular fertilizers and insect granules need the opposite: one sprinkler cycle within the time on your report.' },
-    { icon: 'calendar', title: 'Mowing around a treatment', text: 'No mowing two days before or after a weed spray, or for 24 hours after a caterpillar spray.' },
-    { icon: 'weeds', title: 'Leave sprayed weeds in place', text: 'They yellow and curl over one to three weeks; sedge is the slowest. Pulling them early interrupts the treatment.' },
-  ].map((tile) => Object.freeze(tile))),
   wateringTitle: 'Your Part: Watering',
   wateringBody: 'Watering is the biggest part of lawn care you control.',
-  wateringTiles: Object.freeze([
-    { icon: 'dry_spots', title: 'When to water', text: `${WATERING_COPY.deficitAdvice} A full cycle puts down about 1/2 to 3/4 inch.` },
-    { icon: 'rotate', title: 'Reset the timer by season', text: 'Down when the summer rains start, up when they stop, lower in winter. After a soaking rain, skip a run rather than shortening your runs: longer runs reach the roots better than short ones.' },
-    { icon: 'inspection', title: 'Check your coverage', text: 'On your watering day, set a few straight-sided cans in a line, run the zone 15 minutes and measure. Uneven cans mean uneven coverage.' },
-    { icon: 'label', title: 'Rain shutoff device', text: `${RAIN_COPY.sensorLine.split('. ')[0]}. They wear out in about two years: if the sprinklers run in the rain, replace it.` },
-  ].map((tile) => Object.freeze(tile))),
   // Decision D2-A: only where the District's one-day order applies, and never after it ends. Source: the portal fact
   // register's SWFWMD Modified Phase III entry (fact sheet revised Oct. 12, 2026, verified 2026-10-24).
   wateringOrderTile: Object.freeze({ icon: 'calendar', title: 'Your watering day', text: 'Manatee and Sarasota are under a one-day-a-week order through March 31, 2027. Your city or county sets your day by address; check its schedule. Use the 12:01 to 4 a.m. window, not the evening one: blades that stay wet all night help large patch and leaf spot spread. Lots under an acre may use one window only. Reclaimed (purple-pipe) water follows your utility’s rules.' }),
@@ -984,34 +957,16 @@ const V13_DETAIL_COPY = Object.freeze({
     { icon: 'micros', title: 'Leave the clippings', text: 'They feed the lawn and do not add much thatch. Bag them only while caterpillars or leaf spot are active.' },
     { icon: 'disease', title: 'Dry grass, sick spot last', text: 'Mow when the grass is dry; mow a sick spot last and rinse the mower.' },
   ].map((tile) => Object.freeze(tile))),
-  expectTitle: 'What To Expect',
-  expectBody: 'A lawn changes over seasons, not days.',
-  expectTiles: Object.freeze([
-    { icon: 'barrier', title: 'A barrier stops seeds, not weeds already up', text: 'It does not stop sedge or dollarweed either; those get spot treatments. Weeds break through first along drives and walks, and heavy rain can wear a barrier down sooner; we spot treat the breakthrough.' },
-    { icon: 'weeds', title: 'Some weeds wait for cooler months', text: 'Weed sprays have yearly label limits. If your lawn reaches them, weed sprays pause from April through October. Sedge and kyllinga are managed, not cured; thick grass is the long-term fix.' },
-    { icon: 'calendar', title: 'Quiet visits are normal', text: 'A winter weed barrier visit can look like nothing happened; that is the point. While the lawn greens up we spot treat lightly, because heavy spraying delays green-up.' },
-    { icon: 'feeding', title: 'Brown grass takes weeks to regrow', text: 'Once insects or disease are controlled, St. Augustine fills in by runners: a basketball-size patch can take about six weeks in the rainy season. Large thin spots usually do not fill in from November to February.' },
-    { icon: 'barrier', title: 'New sod is handled differently', text: 'No weed barrier goes on sod in its first season, and new sod is where caterpillars show first. Planning sod or plugs? Tell us first.' },
-    { icon: 'area', title: 'Some spots need a different fix', text: 'Deep shade, packed new-build soil, buried debris or a blocked sprinkler head limit any lawn program. Grass that never grew under a tree will not start now; trimming limbs or a planting bed works better.' },
-  ].map((tile) => Object.freeze(tile))),
-  questionsTitle: 'Common Questions',
-  questionsBody: 'The questions we hear most, answered straight.',
-  questionTiles: Object.freeze([
-    { icon: 'micros', title: 'My lawn is yellow. Does it need more fertilizer?', text: 'Often not. On our alkaline soil, yellow St. Augustine is often short on iron, not nitrogen, and extra quick-release nitrogen can feed insects and disease.' },
-    { icon: 'insects', title: 'Why not spray the whole lawn for bugs every visit?', text: 'Blanket sprays breed resistant chinch bugs and kill helpful insects, so we treat where we find them. The one exception is May, peak chinch bug season: one pass on hot, sunny turf, where they start.' },
-    { icon: 'weeds', title: 'Should I put down weed-and-feed between visits?', text: 'Please skip it. The weed killer in it can reach shrub and tree roots, and extra products make it hard to tell what is working.' },
-    { icon: 'area', title: 'Can you get rid of torpedograss?', text: 'Not without killing the St. Augustine around it. The fix is removing the patch and re-sodding, which is not part of the lawn program.' },
-  ].map((tile) => Object.freeze(tile))),
 });
 
 // Decision D2-A: the order tile shows only for these rule areas, and only while the order runs. A stored outline keeps
 // the tile, so the tile carries `until` and the page hides it after that day.
 const WATERING_ORDER = Object.freeze({ jurisdictions: Object.freeze(['manatee_county_fl', 'sarasota_county_fl']), until: '2027-03-31' });
 
-function v13WateringTiles(jurisdictionId, now) {
-  const [whenToWater, ...rest] = V13_DETAIL_COPY.wateringTiles;
+// The one-day watering-order tile, or null outside those rule areas or after the order ends.
+function v13WateringOrderTile(jurisdictionId, now) {
   const orderLive = WATERING_ORDER.jurisdictions.includes(jurisdictionId) && etDateString(now) <= WATERING_ORDER.until;
-  return [whenToWater, ...(orderLive ? [{ ...V13_DETAIL_COPY.wateringOrderTile, until: WATERING_ORDER.until }] : []), ...rest];
+  return orderLive ? { ...V13_DETAIL_COPY.wateringOrderTile, until: WATERING_ORDER.until } : null;
 }
 
 // The month list: the year chart's steps per month, plus the report's "why now" line and the month's thing to do at
@@ -1160,34 +1115,18 @@ function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [
       ...closing,
     ];
   }
-  // GATE_LAWN_OUTLINE_DETAIL: the open month in the month list replaces the Service Focus box.
+  // GATE_LAWN_OUTLINE_DETAIL: the new layout (lawn-outline-visual.js) from the same pieces; it folds the rest into its own
+  // sections. A plan drawn by month keeps the month list, whose open month replaces the Service Focus box.
   const months = v13MonthsVisual(trackKey, jurisdictionRule, month);
-  // GATE_LAWN_OUTLINE_VISUAL: the new layout (lawn-outline-visual.js) from the same pieces; it folds the rest into its own sections.
-  if (visualPlan) {
-    const monthList = () => makeSection('program_year', V13_COPY.yearTitle, V13_DETAIL_COPY.yearBody, v13MonthLines(months), months);
-    return lawnOutlineVisual().visualSections({
-      plan: visualPlan, trackKey, jurisdictionRule, productList, now, kit: visualKit(), parts: { typicalVisit, notIncluded: closing[3], monthList },
-    });
-  }
-  const programTiles = V13_COPY.programTiles.map((tile) => (tile.icon === 'count' ? V13_DETAIL_COPY.confirmedTile : tile));
-  return [
-    tilesSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, programTiles),
-    makeSection('program_year', V13_COPY.yearTitle, V13_DETAIL_COPY.yearBody, v13MonthLines(months), months),
-    tilesSection('problems', V13_DETAIL_COPY.problemsTitle, V13_DETAIL_COPY.problemsBody, V13_DETAIL_COPY.problemTiles),
-    treatments,
-    v13ProductsSection(productList),
-    typicalVisit,
-    tilesSection('after_treatment', V13_DETAIL_COPY.afterTreatmentTitle, V13_DETAIL_COPY.afterTreatmentBody, V13_DETAIL_COPY.afterTreatmentTiles),
-    tilesSection('your_watering', V13_DETAIL_COPY.wateringTitle, V13_DETAIL_COPY.wateringBody, v13WateringTiles(jurisdictionRule?.jurisdiction_id, now)),
-    tilesSection('your_mowing', V13_DETAIL_COPY.mowingTitle, V13_DETAIL_COPY.mowingBody, V13_DETAIL_COPY.mowingTiles),
-    tilesSection('what_to_expect', V13_DETAIL_COPY.expectTitle, V13_DETAIL_COPY.expectBody, V13_DETAIL_COPY.expectTiles),
-    tilesSection('common_questions', V13_DETAIL_COPY.questionsTitle, V13_DETAIL_COPY.questionsBody, V13_DETAIL_COPY.questionTiles),
-    ...closing,
-  ].filter(Boolean);
+  const monthList = () => makeSection('program_year', V13_COPY.yearTitle, V13_DETAIL_COPY.yearBody, v13MonthLines(months), months);
+  return lawnOutlineVisual().visualSections({
+    plan: visualPlan, trackKey, jurisdictionRule, productList, now, kit: visualKit(), parts: { typicalVisit, notIncluded: closing[3], monthList },
+  });
 }
 
-// The new layout lives in its own module, loaded only while GATE_LAWN_OUTLINE_VISUAL is live (it needs the converter and the
-// seeder, which must never load with the gate off). It takes the outline's helpers in `kit` instead of requiring this file back.
+// The new layout lives in its own module, loaded only while the detailed outline (GATE_LAWN_OUTLINE_DETAIL) is live: it needs
+// the converter and the seeder, which must never load for the plain v13 outline. It takes the outline's helpers in `kit`
+// instead of requiring this file back.
 const lawnOutlineVisual = () => require('./lawn-outline-visual');
 
 function visualKit() {
@@ -1200,14 +1139,15 @@ function visualKit() {
     stepLabels: V13_STEP_LABELS,
     notProgramLine: NOT_PROGRAM_LINE_RE,
     productsSection: v13ProductsSection,
-    wateringTiles: v13WateringTiles,
+    wateringOrderTile: v13WateringOrderTile,
     detailCopy: V13_DETAIL_COPY,
   };
 }
 
-// The estimate's lawn plan ('rounds', 'months12' or 'unknown') while the new layout is live; null = the layout is off.
+// The estimate's lawn plan ('rounds', 'months12' or 'unknown') while the detailed outline is live; null = the plain v13 or
+// gate-off outline, which draws no plan.
 function visualPlanFor(estimateData) {
-  return outlineVisualLive() ? lawnOutlineVisual().resolveLawnPlan(estimateData) : null;
+  return outlineDetailLive() ? lawnOutlineVisual().resolveLawnPlan(estimateData) : null;
 }
 
 // The words outside the sections (plan line, rounds intro); a null plan changes nothing.

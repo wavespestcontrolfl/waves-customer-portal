@@ -1,12 +1,13 @@
 // The detailed lawn service outline, behind GATE_LAWN_OUTLINE_DETAIL (owner 2026-10-26: "this needs to be more
 // detailed, and we should be using the protocols, and youtube transcripts to further develop it"; the decision
-// page's choices D1-B, D2-A, "do whatever you recommend"). Synthetic inputs: no database.
+// page's choices D1-B, D2-A, "do whatever you recommend"). Since 2026-11-01 it draws the new layout
+// (lawn-outline-visual.js; its section order is pinned in lawn-outline-visual.test.js). Synthetic inputs: no database.
 //
-// Pins: the gate needs GATE_LAWN_OUTLINE_V13 and is strict; off = the v13 outline exactly; on = the month list (the
-// report's own month text, one thing to do at home, the build month and the next two open) in place of the Service
-// Focus box, the detail sections in order, the corrected chinch bug tile, the product list from the v13 track with
-// the catalog's active ingredient and never a rate, the watering-order tile only for Manatee and Sarasota and only
-// until the order ends, and every word passing the customer-copy checks.
+// Pins: the gate needs GATE_LAWN_OUTLINE_V13 and is strict; off = the v13 outline exactly; on = the layout's content
+// stamp, the month list (the report's own month text, one thing to do at home, the build month and the next two open)
+// for a plan drawn by month, the product list from the v13 track with the catalog's active ingredient and never a
+// rate, the watering-order tile only for Manatee and Sarasota and only until the order ends, and every word passing
+// the customer-copy checks for every grass and month.
 
 const outline = require('../services/lawn-service-outline');
 const { PROGRAM_DETAIL_V13 } = require('../services/service-report/lawn-program-line');
@@ -131,38 +132,16 @@ describe('the gate', () => {
     expect(unset.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
   });
 
-  test('on: its own content version, so outlines built before the flip show as updated', async () => {
+  test('on: the layout\'s own content version, so outlines built before it show as updated', async () => {
     await withGates(DETAIL, async () => {
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-detail-2');
-      expect((await build()).meta.contentLibraryVersion).toBe('lawn-v13-detail-2');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-2');
+      expect((await build()).meta.contentLibraryVersion).toBe('lawn-v13-visual-2');
     });
     await withGates(V13, async () => expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-2'));
   });
 });
 
-describe('the detailed outline', () => {
-  test('sections, in order: the month list replaces the Service Focus box', async () => {
-    await withGates(DETAIL, async () => {
-      const result = await build();
-      expect(result.content.sections.map((s) => s.key)).toEqual([
-        'lawn_program', 'program_year', 'problems', 'treatment_categories', 'products', 'typical_visit',
-        'after_treatment', 'your_watering', 'your_mowing', 'what_to_expect', 'common_questions',
-        'local_rules', 'safety', 'after_visit', 'not_included',
-      ]);
-      expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
-    });
-  });
-
-  test('the chinch bug tile says confirmed before any spot treatment (May has one pass with no count)', async () => {
-    await withGates(DETAIL, async () => {
-      const program = section(await build(), 'lawn_program');
-      expect(program.visual.items.map((t) => t.title)).toEqual([
-        'One whole-lawn pass per visit', 'Spot work, not blanket spraying', 'Confirmed before treating', 'Resistance management',
-      ]);
-      expect(program.bullets).toContain('Confirmed before treating: Chinch bugs and other insects are confirmed where the damage starts before any spot treatment');
-    });
-  });
-
+describe('the month list (a plan drawn by month)', () => {
   test.each(MONTHS)('month %i: the month list carries the report\'s own text and opens this month and the next two', async (month) => {
     await withGates(DETAIL, async () => {
       const result = await build({ month });
@@ -245,30 +224,23 @@ describe('the watering order tile (decision D2-A)', () => {
       expect(tileTitles(await build({ now: new Date('2027-03-31T23:00:00Z') }), 'your_watering')).toContain('Your watering day');
     });
   });
-
-  test('"When to water" is the report\'s approved sentence', async () => {
-    const { deficitAdvice } = require('../../shared/watering-copy.json');
-    await withGates(DETAIL, async () => {
-      const first = section(await build(), 'your_watering').visual.items[0];
-      expect(first.text.startsWith(deficitAdvice)).toBe(true);
-    });
-  });
 });
 
 describe('every word passes the customer-copy checks', () => {
+  const strings = (value, out = []) => {
+    if (typeof value === 'string') out.push(value);
+    else if (Array.isArray(value)) value.forEach((v) => strings(v, out));
+    else if (value && typeof value === 'object') Object.entries(value).forEach(([k, v]) => { if (!['url', 'href', 'image', 'video', 'icon', 'key', 'source', 'until', 'type', 'anchorPrefix', 'imageAlt'].includes(k)) strings(v, out); });
+    return out;
+  };
+
   test('every grass the program covers, every month', async () => {
     await withGates(DETAIL, async () => {
       for (const grass of ['st_augustine', 'bermuda', 'zoysia', 'mixed', 'unknown']) {
         for (const month of MONTHS) {
           const result = await build({ grass, month });
           expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
-          const drawnTexts = (v) => [
-            v?.note, v?.limitLabel, ...Object.values(v?.labels || {}),
-            ...(v?.items || []).flatMap((i) => (typeof i === 'string' ? [i] : [i.title, i.text, i.label])),
-            ...(v?.months || []).flatMap((m) => [m.name, m.visit, m.atHome]),
-          ];
-          const texts = result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets, ...drawnTexts(s.visual)]).filter(Boolean);
-          for (const text of texts) {
+          for (const text of strings(result.content.sections)) {
             expect(findBannedCustomerCopy(text)).toEqual([]);
             expect(validateCustomerCopy(text)).toBe(true);
           }

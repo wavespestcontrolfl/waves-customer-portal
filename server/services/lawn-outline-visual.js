@@ -1,7 +1,8 @@
-// The new lawn outline layout (GATE_LAWN_OUTLINE_VISUAL, owner "build" 2026-10-31, scope page GfPfBfUu): a year bar, round
-// cards (a 9-visit rounds plan) or today's month list (every other plan), an after-a-visit timeline, fact cards, a closed FAQ
-// and a closed problem list. lawn-service-outline.js calls this module only while the gate is live (lazy require, so this file
-// never loads with the gate off) and hands it the outline's own helpers in `kit`, so nothing here requires that file back.
+// The lawn outline layout (owner "build" 2026-10-31, scope page GfPfBfUu; every detailed outline since owner "flip the gate"
+// 2026-11-01): a year bar, round cards (a 9-visit rounds plan) or today's month list (every other plan), an after-a-visit
+// timeline, fact cards, a closed FAQ and a closed problem list. lawn-service-outline.js calls this module only while the
+// detailed outline (GATE_LAWN_OUTLINE_DETAIL) is live (lazy require, so this file never loads for the plain v13 outline) and
+// hands it the outline's own helpers in `kit`, so nothing here requires that file back.
 //
 // The shapes below are the page's contract (client/src/pages/ServiceOutlinePage.jsx): yearBar, rounds, timeline, facts and faq
 // visuals. Every section also keeps text `bullets`, one line per block, round or item, because the stored HTML and the composer
@@ -602,10 +603,10 @@ function afterVisitSection(kit) {
   return factsSection('after_visit', 'After Each Visit', '', AFTER_VISIT_ITEMS.map((item) => ({ ...item })), kit);
 }
 
-// The Monday email card, then the one-day-order tile (Manatee and Sarasota, with its `until`) when the outline's own watering
-// tiles carry it. The other watering tiles live in the FAQ and the timeline.
+// The Monday email card, then the one-day-order tile (Manatee and Sarasota, with its `until`) while the order runs. The rest
+// of the watering advice lives in the FAQ and the timeline.
 function wateringSection(jurisdictionId, now, kit) {
-  const orderTile = kit.wateringTiles(jurisdictionId, now).find((tile) => tile.until);
+  const orderTile = kit.wateringOrderTile(jurisdictionId, now);
   return factsSection('your_watering', kit.detailCopy.wateringTitle, kit.detailCopy.wateringBody, [{ ...EMAIL_CARD }, ...(orderTile ? [{ ...orderTile }] : [])], kit);
 }
 

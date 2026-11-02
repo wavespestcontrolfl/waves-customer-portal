@@ -94,7 +94,7 @@ function v13Content() {
   };
 }
 
-// GATE_LAWN_OUTLINE_VISUAL: the year bar, round cards, timeline, fact tiles and FAQ. Shapes mirror the server's packet: the bar's
+// The lawn outline layout: the year bar, round cards, timeline, fact tiles and FAQ. Shapes mirror the server's packet: the bar's
 // blocks carry MM-DD from/to dates and the words for "now", and the page marks the block that holds today.
 const ROUND_DATES = [
   { key: 1, window: 'Dec 25 – Feb 2', from: '12-25', to: '02-02', main: ['barrier', 'micros'], short: 'Barrier + color' },
@@ -308,7 +308,7 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(within(list).getByText('Local summer limits on nitrogen and phosphorus')).toBeInTheDocument();
   });
 
-  // The new layout (GATE_LAWN_OUTLINE_VISUAL) draws the watering-order tile as a fact card; a stored packet keeps the tile.
+  // The new layout draws the watering-order tile as a fact card; a detailed packet stored before it keeps the tile.
   it.each(['tiles', 'facts'])('hides a %s item whose until day has passed and keeps one whose day has not', async (type) => {
     const content = v13Content();
     content.sections.push({
@@ -464,7 +464,7 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(rows.filter((row) => row.open).map((row) => row.querySelector('summary span').textContent)).toEqual(['Fall']);
     expect(screen.getByText('Fall watch-for line.')).toBeInTheDocument();
   });
-  // GATE_LAWN_OUTLINE_VISUAL: five new drawings; nothing emits them until the server gate is on.
+  // The lawn outline layout: five drawings, emitted for every detailed lawn outline since 2026-11-01.
   describe('visual layout sections', () => {
     it('draws the year bar, marks the block that holds today, and links each block to its round card', async () => {
       setToday('2027-02-10T15:00:00Z');

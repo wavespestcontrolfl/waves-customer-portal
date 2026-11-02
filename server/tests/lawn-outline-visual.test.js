@@ -1,8 +1,9 @@
-// The new lawn outline layout, behind GATE_LAWN_OUTLINE_VISUAL (owner "build" 2026-10-31, the nine-round outline scope
-// page). Synthetic inputs: no database.
+// The lawn outline layout every detailed outline (GATE_LAWN_OUTLINE_DETAIL) draws (owner "build" 2026-10-31, the
+// nine-round outline scope page; owner "flip the gate" 2026-11-01, after which its own gate was removed). Synthetic
+// inputs: no database.
 //
-// Pins: the gate is strict and needs GATE_LAWN_OUTLINE_DETAIL; off = the detailed outline exactly; on = the approved
-// section order; a rounds estimate (its lawn line seeds as lawn_rounds_9, which needs GATE_LAWN_9X_ROUNDS) draws nine
+// Pins: the layout's own content stamp, and none of it on the plain v13 outline; the approved section order; a rounds
+// estimate (its lawn line seeds as lawn_rounds_9, which needs GATE_LAWN_9X_ROUNDS) draws nine
 // year-bar blocks whose main steps are DERIVED from the protocol, the round the visit falls in, the Manatee summer band,
 // and no LESCO 44-0-0 in the products; a monthly estimate draws twelve blocks and today's month list; an estimate whose
 // plan is not known draws the month view and names no plan; every new section keeps text bullets; every word passes the
@@ -12,10 +13,9 @@ const outline = require('../services/lawn-service-outline');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
-const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_OUTLINE_VISUAL', 'GATE_LAWN_9X_ROUNDS', 'GATE_LAWN_BERMUDA_REMOVAL'];
+const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_9X_ROUNDS', 'GATE_LAWN_BERMUDA_REMOVAL'];
 const DETAIL = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true', GATE_LAWN_OUTLINE_DETAIL: 'true' };
-const VISUAL = { ...DETAIL, GATE_LAWN_OUTLINE_VISUAL: 'true' };
-const ROUNDS_ON = { ...VISUAL, GATE_LAWN_9X_ROUNDS: 'true' };
+const ROUNDS_ON = { ...DETAIL, GATE_LAWN_9X_ROUNDS: 'true' };
 const OCT_26 = new Date('2026-10-26T12:00:00Z');
 
 async function withGates(values, fn) {
@@ -115,37 +115,17 @@ const AS_NEEDED = [
 ];
 const DERIVED_MAIN = [['barrier', 'micros'], ['feeding', 'barrier'], ['feeding'], ['insects'], ['micros', 'barrier'], ['micros'], ['micros'], ['feeding', 'barrier'], ['feeding']];
 
-describe('the gate', () => {
-  test('GATE_LAWN_OUTLINE_VISUAL needs GATE_LAWN_OUTLINE_DETAIL and reads strict "true" only', async () => {
-    await withGates({ GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true', GATE_LAWN_OUTLINE_VISUAL: 'true' }, async () => {
-      const result = await build({ line: ROUNDS_LINE });
-      expect(section(result, 'year_bar')).toBeUndefined();
-      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
-    });
-    for (const loose of ['1', 'on', 'TRUE']) {
-      await withGates({ ...DETAIL, GATE_LAWN_OUTLINE_VISUAL: loose, GATE_LAWN_9X_ROUNDS: 'true' }, async () => {
-        const result = await build({ line: ROUNDS_LINE });
-        expect(section(result, 'year_bar')).toBeUndefined();
-        expect(result.meta.contentLibraryVersion).toBe('lawn-v13-detail-2');
-      });
-    }
-  });
-
-  test('off, the detailed outline is exactly what it was, and the stamp changes only with the gate', async () => {
-    await withGates({ ...DETAIL, GATE_LAWN_9X_ROUNDS: 'true' }, async () => {
-      const off = await build({ line: ROUNDS_LINE });
-      expect(keys(off)).toEqual([
-        'lawn_program', 'program_year', 'problems', 'treatment_categories', 'products', 'typical_visit', 'after_treatment',
-        'your_watering', 'your_mowing', 'what_to_expect', 'common_questions', 'local_rules', 'safety', 'after_visit', 'not_included',
-      ]);
-      expect(off.content.property.planLabel).toBeUndefined();
-      expect(off.content.season.roundLabel).toBeUndefined();
-      expect(off.content.intro).toContain('The program follows the time of year.');
-      expect(off.meta.contentLibraryVersion).toBe('lawn-v13-detail-2');
-    });
+describe('the stamp', () => {
+  test('the detailed outline stamps the layout\'s version; the plain v13 outline draws no year bar or plan line', async () => {
     await withGates(ROUNDS_ON, async () => {
       expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-2');
       expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-2');
+    });
+    await withGates({ GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true', GATE_LAWN_9X_ROUNDS: 'true' }, async () => {
+      const plain = await build({ line: ROUNDS_LINE });
+      expect(section(plain, 'year_bar')).toBeUndefined();
+      expect(plain.content.property.planLabel).toBeUndefined();
+      expect(plain.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
     });
   });
 });
@@ -291,7 +271,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('without GATE_LAWN_9X_ROUNDS the same estimate seeds as 42-day visits: the month view, no plan line', async () => {
-    await withGates(VISUAL, async () => {
+    await withGates(DETAIL, async () => {
       const result = await build({ line: ROUNDS_LINE });
       expect(section(result, 'year_bar').visual.blocks).toHaveLength(12);
       expect(section(result, 'rounds')).toBeUndefined();
