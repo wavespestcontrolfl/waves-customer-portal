@@ -10,6 +10,7 @@ const ROOTS = ['services', 'routes', 'jobs'].map((d) => path.join(__dirname, '..
 const EXEMPT = new Set([
   'services/dashboard-alerts.js', // a synthetic in-memory overlay row, never written to notifications
   'services/conversations.js', // writes the messages table's own read_at, not notifications
+  'services/sms-spam-tag.js', // writes the messages table's own read_at (a text released after Not spam), not notifications
 ]);
 
 function* jsFiles(dir) {

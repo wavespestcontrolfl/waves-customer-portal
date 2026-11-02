@@ -1056,6 +1056,8 @@ export default function TechHomePage({ section = 'today' }) {
             // the visit's photos in the note's box (the report flow only;
             // never lawn or tree, shrub & palm, which the payload leaves off).
             noteBoxPhotosEnabled: fastCompleteService.noteBoxPhotosEnabled === true,
+            // GATE_RESERVICE_ASKS rides the same row: only an exact true shows "They told us" on the sheet.
+            reserviceAsksEnabled: fastCompleteService.reserviceAsksEnabled === true,
             technicianName: fastCompleteService.technicianName || fastCompleteService.technician_name || null,
             lat: fastCompleteService.lat ?? null,
             lng: fastCompleteService.lng ?? null,
@@ -1153,6 +1155,8 @@ export default function TechHomePage({ section = 'today' }) {
             routedScheduledDate: lawnReserviceFastService.scheduledDate || lawnReserviceFastService.scheduled_date || null,
             routedPropertyId: 'propertyId' in lawnReserviceFastService ? lawnReserviceFastService.propertyId : undefined,
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
+            // GATE_RESERVICE_ASKS rides the same row: only an exact true shows "They told us" on the sheet.
+            reserviceAsksEnabled: lawnReserviceFastService.reserviceAsksEnabled === true,
           }}
           request={techRequest}
           operatorId={staffIdForDevice}

@@ -32,7 +32,7 @@ vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
 }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, voiceFillEnabled, onClose, onCompleted, onFullForm }) => (
-    <div>
+    <div data-reservice-asks={String(service.reserviceAsksEnabled)}>
       Pest sheet for {service.id} (flow {String(service.reportFlow)}, trace {String(service.traceEligible)}, key {String(service.routedServiceKey)}, voice {String(voiceFillEnabled)}) <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Sheet close refresh</button>
@@ -91,6 +91,21 @@ describe('Dispatch completion routing for regular pest visits', () => {
     mount([visit('svc-pest-re', { traceEligible: false, completionProfile: { category: 'pest_control', serviceKey: 'pest_re_service', findingsType: null } })]);
     await open('svc-pest-re');
     expect(await screen.findByText(/Pest sheet for svc-pest-re \(flow true, trace false, key pest_re_service/)).toBeInTheDocument();
+  });
+
+  // GATE_RESERVICE_ASKS rides the same schedule row (GitHub Codex P1 on #7500): only an exact true reaches the sheet.
+  it.each([
+    [true, 'true'],
+    [undefined, 'false'],
+    ['true', 'false'],
+  ])('passes reserviceAsksEnabled %s to the pest sheet as %s', async (flag, expected) => {
+    mount([visit('svc-pest-asks', {
+      completionProfile: { category: 'pest_control', serviceKey: 'pest_re_service', findingsType: null },
+      ...(flag === undefined ? {} : { reserviceAsksEnabled: flag }),
+    })]);
+    await open('svc-pest-asks');
+    const sheet = (await screen.findByText(/Pest sheet for svc-pest-asks/)).closest('[data-reservice-asks]');
+    expect(sheet.getAttribute('data-reservice-asks')).toBe(expected);
   });
 
   it('"Full form" closes the sheet and opens CompletionPanel for that visit', async () => {
