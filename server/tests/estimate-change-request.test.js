@@ -15,6 +15,9 @@
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
 }));
+jest.mock('../services/notification-triggers', () => ({
+  triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })),
+}));
 jest.mock('../services/estimate-add-service-request', () => {
   const actual = jest.requireActual('../services/estimate-add-service-request');
   return {
@@ -24,6 +27,8 @@ jest.mock('../services/estimate-add-service-request', () => {
 });
 
 const NotificationService = require('../services/notification-service');
+const { triggerNotification } = require('../services/notification-triggers');
+const { sendOfficeNotification } = require('../services/estimate-measurement-review');
 const {
   CHANGE_REQUEST_SERVICE_KEY,
   CHANGE_REQUEST_TOPICS,
@@ -50,6 +55,7 @@ function mockDb({ estimate = ESTIMATE_ROW, dupeRow = null, recentSignal = null }
         }),
       };
     }
+    if (table === 'customers') return { where: () => ({ first: async () => ({ first_name: 'Pat', last_name: 'Sample' }) }) };
     if (table === 'activity_log') {
       return {
         where: () => ({ where: () => ({ first: async () => recentSignal }) }),
@@ -252,5 +258,90 @@ describe('bell policy', () => {
     const overridableBlock = src.slice(overridableStart, src.indexOf('];', overridableStart));
     expect(allowlistBlock).not.toContain("'estimate_change_request'");
     expect(overridableBlock).toContain("'estimate_change_request'");
+  });
+});
+
+// GATE_PORTAL_ASK_PUSH: the estimate page's change and call requests also page the admin phones, after the bell row
+// exists and the delivery stamp is written. The measurement review (same notify core) is not part of this.
+describe('GATE_PORTAL_ASK_PUSH on the estimate page asks', () => {
+  const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'portal_ask');
+  // The push is not awaited by the request (it must not hold the customer): let it settle before reading it.
+  const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; });
+  afterEach(() => { delete process.env.GATE_PORTAL_ASK_PUSH; });
+
+  test('a change request pushes once: first name and last initial, no note, no contact details', async () => {
+    await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Call me at 941-555-0100', database: mockDb(), viewabilityCheck: viewable });
+    await settle();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(pushes()).toHaveLength(1);
+    const [key, payload, opts] = pushes()[0];
+    expect(key).toBe('portal_ask');
+    expect(opts).toEqual({ pushOnly: true });
+    expect(payload).toEqual(expect.objectContaining({
+      itemKey: 'estimate-request:req-1',
+      title: 'Change an estimate for a customer',
+      body: 'Pat S. asked for a change to an estimate',
+      link: '/admin/customers?customerId=cust-1',
+      customerId: 'cust-1',
+    }));
+    expect(JSON.stringify(payload)).not.toMatch(/941|555/);
+  });
+
+  test('a call request pushes once and says so', async () => {
+    await createEstimateOfficeRequest({ kind: 'callback', estimateToken: 'tok-1', database: mockDb(), viewabilityCheck: viewable });
+    await settle();
+    expect(pushes()).toHaveLength(1);
+    expect(pushes()[0][1].title).toBe('Call a customer about an estimate');
+    expect(pushes()[0][1].body).toBe('Pat S. asked for a call about an estimate');
+  });
+
+  test('gate off: the bell rings and no push is sent', async () => {
+    delete process.env.GATE_PORTAL_ASK_PUSH;
+    await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Lower it', database: mockDb(), viewabilityCheck: viewable });
+    await settle();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a bell the policy withheld pushes nothing', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Lower it', database: mockDb(), viewabilityCheck: viewable });
+    await settle();
+    expect(pushes()).toHaveLength(0);
+  });
+
+  test('a bell that failed twice pushes nothing', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Lower it', database: mockDb(), viewabilityCheck: viewable });
+    await settle();
+    expect(pushes()).toHaveLength(0);
+  });
+
+  test('a bell that lands on the second try pushes once', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'notif-2' });
+    await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Lower it', database: mockDb(), viewabilityCheck: viewable });
+    await settle();
+    expect(pushes()).toHaveLength(1);
+  });
+
+  test('a deduped second submission with a delivery stamp writes no bell and pushes nothing', async () => {
+    const dupeRow = { id: 'req-0', subject: 's', description: 'd', customer_id: 'cust-1', pricing_revision: { notifiedAt: '2026-11-01T00:00:00Z' } };
+    await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Lower it', database: mockDb({ dupeRow }), viewabilityCheck: viewable });
+    await settle();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(pushes()).toHaveLength(0);
+  });
+
+  test('a push that throws costs the request nothing', async () => {
+    triggerNotification.mockRejectedValueOnce(new Error('push down'));
+    await expect(createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Lower it', database: mockDb(), viewabilityCheck: viewable }))
+      .resolves.toEqual({ success: true, deduped: false });
+  });
+
+  test('the measurement review kind (same notify core) sends no push', async () => {
+    await sendOfficeNotification(mockDb(), { subject: 'Re-measure lawn for estimate #1', description: 'd', customerId: 'cust-1', estimateId: 'est-1', requestId: 'req-9' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(pushes()).toHaveLength(0);
   });
 });

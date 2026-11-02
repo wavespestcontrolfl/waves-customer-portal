@@ -119,6 +119,45 @@ const waitFor = (work, turn, stage) => turn
   ? turn.waitFor(work, stage)
   : (typeof work === 'function' ? work() : work);
 
+// GATE_PORTAL_ASK_PUSH: did this bell write put the ask in front of the office? A row that exists and was not
+// withheld, and is new or was rung again. A silent dedupe, a quiet refresh and a withheld (demo account or
+// policy) bell are not.
+const bellRangAgain = (result) => Boolean(result?.id) && !result.suppressed
+  && (!result.deduped || (result.refreshed === true && result.rung !== false));
+
+// The phone page for a hand-off that rang. Names the customer by first name and last initial and the ask in a
+// few words; no phone, no email, and none of the customer's own words (a lock screen shows it).
+function handOffPush({ customer, escalation, conversation, topic, newEmail = null, move = null }) {
+  const { shortName } = require('../portal-ask-push');
+  const who = shortName(customer.first_name, customer.last_name);
+  let what = `asked about ${TOPIC_WORDING[topic] || 'a request the assistant could not handle'}`;
+  if (newEmail) what = 'asked to change their email';
+  else if (move) what = 'is moving and asked to transfer service';
+  return {
+    itemKey: bellKey({ escalation, conversation, newEmail }),
+    title: newEmail ? 'Change a customer email' : 'Reply to a portal chat',
+    body: `${who} ${what}`,
+    link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+    customerId: customer.id,
+  };
+}
+
+// Hold a rung hand-off's push until its transaction commits (`pushQueue`, flushed by the caller), or send it now
+// when no transaction is open. Inside a transaction with no queue it is dropped: a push for a bell that may still
+// roll back would page the office for an ask that does not exist.
+async function sendHandOffPush(push, { trx = null, pushQueue = null } = {}) {
+  if (pushQueue) { pushQueue.push(push); return; }
+  if (trx) return;
+  await require('../portal-ask-push').pushPortalAsk(push);
+}
+
+// After the turn's transaction committed: send the queued pushes. Best-effort, bounded by the turn's budget.
+async function flushHandOffPushes(pushQueue, turn) {
+  for (const push of pushQueue.splice(0)) {
+    try { await waitFor(() => require('../portal-ask-push').pushPortalAsk(push), turn, 'portal ask push'); } catch { /* the bell is the record */ }
+  }
+}
+
 // The same assistant serves coordinated portal turns and uncoordinated SMS.
 // Keep the persistence/deadline fork at that boundary so the model/tool loop
 // below follows one path in both channels.
@@ -1158,9 +1197,12 @@ class WavesAssistant {
 
   async escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn }) {
     const priority = escalationPriority(customerMessage);
+    // GATE_PORTAL_ASK_PUSH: the bell's phone page, held until the transaction below commits.
+    const pushQueue = [];
 
     const persisted = await turn.transaction('escalation persistence', async (trx) => {
       turn.assertActive('escalation persistence');
+      pushQueue.length = 0; // a retried transaction body starts clean
       const customer = await escalationCustomer(conversation.customer_id, trx);
       let escalation = await trx('ai_escalations')
         .where({ portal_chat_request_id: turn.requestRowId }).first();
@@ -1187,8 +1229,8 @@ class WavesAssistant {
         updated_at: new Date(),
       });
       const teamNotified = await trx.transaction((bellTrx) => this.notifyTeamOfEscalation({
-        escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, alsoAsked, emailUnchecked, trx: bellTrx,
-      })).catch(() => false);
+        escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, alsoAsked, emailUnchecked, trx: bellTrx, pushQueue,
+      })).catch(() => { pushQueue.length = 0; return false; });
       const reply = escalationReply({
         isPortal: true,
         teamNotified,
@@ -1221,6 +1263,7 @@ class WavesAssistant {
       return { customer, escalation, created, handoff };
     });
     turn.rememberCommittedResult(persisted.handoff);
+    await flushHandOffPushes(pushQueue, turn);
 
     if (gap) {
       try {
@@ -1295,16 +1338,19 @@ class WavesAssistant {
     const priority = escalationPriority(customerMessage);
     const item = { conversation, customerMessage, reason, topic, priority, say, turn };
     let saved;
+    const pushQueue = []; // GATE_PORTAL_ASK_PUSH: held until the turn's transaction commits
     if (turn) {
       saved = await turn.transaction('escalation persistence', async (trx) => {
         turn.assertActive('escalation persistence');
+        pushQueue.length = 0; // a retried transaction body starts clean
         const stored = await this.upsertOpenItem(trx, item);
         await this.markSessionEscalated(trx, conversation, reason);
-        const handoff = await this.completeOpenHandOff(trx, { ...item, ...stored });
+        const handoff = await this.completeOpenHandOff(trx, { ...item, ...stored, pushQueue });
         await turn.persistCommittedResult(trx, handoff);
         return { ...stored, handoff };
       });
       turn.rememberCommittedResult(saved.handoff);
+      await flushHandOffPushes(pushQueue, turn);
     } else {
       const stored = await db.transaction(async (trx) => {
         const row = await this.upsertOpenItem(trx, item);
@@ -1329,9 +1375,9 @@ class WavesAssistant {
   // The bell, the fixed reply and the saved reply row of an opened chat's
   // hand-off. Inside the turn's transaction the bell is a savepoint, so a
   // failed bell leaves the row and the reply standing.
-  async completeOpenHandOff(executor, { conversation, customerMessage, topic, say, turn, customer, escalation }) {
-    const ring = (trx) => this.notifyOpenItem({ escalation, topic, conversation, customer, trx });
-    const teamNotified = turn ? await executor.transaction((bellTrx) => ring(bellTrx)).catch(() => false) : await ring(null);
+  async completeOpenHandOff(executor, { conversation, customerMessage, topic, say, turn, customer, escalation, pushQueue = null }) {
+    const ring = (trx) => this.notifyOpenItem({ escalation, topic, conversation, customer, trx, pushQueue });
+    const teamNotified = turn ? await executor.transaction((bellTrx) => ring(bellTrx)).catch(() => { pushQueue?.splice(0); return false; }) : await ring(null);
     const reply = escalationReply({ isPortal: true, teamNotified, firstName: String(customer?.first_name || '').trim(), say });
     const row = {
       conversation_id: conversation.id,
@@ -1376,16 +1422,20 @@ class WavesAssistant {
       conversation, customerMessage, topic: 'account_change', priority: escalationPriority(customerMessage), move,
       reason: 'Customer is moving and asked the portal assistant to transfer service',
     };
+    const pushQueue = []; // GATE_PORTAL_ASK_PUSH: held until the turn's transaction commits
     const ring = (stored, trx) => this.notifyOpenItem({
-      escalation: stored.escalation, topic: 'account_change', conversation, customer: stored.customer, move, trx,
+      escalation: stored.escalation, topic: 'account_change', conversation, customer: stored.customer, move, trx, pushQueue: turn ? pushQueue : null,
     });
     if (turn) {
-      return turn.transaction('move hand-off', async (trx) => {
+      const savedMove = await turn.transaction('move hand-off', async (trx) => {
         turn.assertActive('move hand-off');
+        pushQueue.length = 0; // a retried transaction body starts clean
         const stored = await this.upsertOpenItem(trx, { ...item, turn });
-        await trx.transaction((bellTrx) => ring(stored, bellTrx)).catch(() => false);
+        await trx.transaction((bellTrx) => ring(stored, bellTrx)).catch(() => { pushQueue.length = 0; return false; });
         return portalOpen.savedMove(stored.escalation.summary);
       });
+      await flushHandOffPushes(pushQueue, turn);
+      return savedMove;
     }
     const stored = await db.transaction((trx) => this.upsertOpenItem(trx, item));
     await ring(stored, null);
@@ -1397,7 +1447,7 @@ class WavesAssistant {
    * notification row exists (new or already standing for this escalation).
    * Never throws: the ai_escalations row is the record, the bell is delivery.
    */
-  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, alsoAsked, emailUnchecked, trx = null }) {
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, alsoAsked, emailUnchecked, trx = null, pushQueue = null }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
@@ -1439,7 +1489,13 @@ class WavesAssistant {
       // notifyAdmin returns the stored row flattened ({ id, …, deduped }),
       // { id: null, suppressed: true } when the bell was withheld (a demo
       // account), and null when the write failed.
-      return Boolean(result?.id) && !result.suppressed;
+      const rowExists = Boolean(result?.id) && !result.suppressed;
+      // GATE_PORTAL_ASK_PUSH: the phone page, only when the ask is new or rang again, and (inside a transaction)
+      // only after it commits. Its own failure never costs the hand-off its bell.
+      if (bellRangAgain(result)) {
+        try { await sendHandOffPush(handOffPush({ customer, escalation, conversation, topic, newEmail }), { trx, pushQueue }); } catch { /* the bell is the record */ }
+      }
+      return rowExists;
     } catch (err) {
       logger.error(`[ai-assistant] escalation bell failed: ${err.message}`, { conversationId: conversation.id });
       if (trx) throw err;
@@ -1454,7 +1510,7 @@ class WavesAssistant {
    * new text and rings it again. Returns true only when a bell row exists.
    * Never throws without a caller transaction (the row is the record).
    */
-  async notifyOpenItem({ escalation, topic, conversation, customer, move = null, trx = null }) {
+  async notifyOpenItem({ escalation, topic, conversation, customer, move = null, trx = null, pushQueue = null }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
@@ -1484,7 +1540,11 @@ class WavesAssistant {
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id, ...(Object.hasOwn(TOPIC_WORDING, topic) ? { topic } : {}) },
         ...(trx ? { trx } : {}),
       });
-      return Boolean(result?.id) && !result.suppressed;
+      const rowExists = Boolean(result?.id) && !result.suppressed;
+      if (bellRangAgain(result)) {
+        try { await sendHandOffPush(handOffPush({ customer, escalation, conversation, topic, move }), { trx, pushQueue }); } catch { /* the bell is the record */ }
+      }
+      return rowExists;
     } catch (err) {
       logger.error(`[ai-assistant] open hand-off bell failed: ${err.message}`, { conversationId: conversation.id });
       if (trx) throw err;

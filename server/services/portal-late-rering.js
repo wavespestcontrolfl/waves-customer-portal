@@ -150,12 +150,34 @@ async function runPage(rows, now) {
   let rung = 0;
   for (const item of waiting) {
     try {
-      rung += await ringAgain(item, now);
+      const landed = await ringAgain(item, now);
+      rung += landed;
+      // Only a row this run really rewrote (the fenced update landed) pages the phones, once: the row is stamped
+      // lateReRungAt in the same statement, so no later sweep reads it again.
+      if (landed) await pushStillWaiting(item);
     } catch (err) {
       logger.warn(`[portal-late-rering] notification ${item.row.id} not rung: ${safeError(err)}`);
     }
   }
   return { due: due.length, rung };
+}
+
+// GATE_PORTAL_ASK_PUSH: the "Still waiting" ring also pages the admin phones. The bell was a row nobody had
+// looked at for an hour; this is the one nudge that reaches a pocket. Never throws.
+async function pushStillWaiting({ row, meta }) {
+  try {
+    const { pushPortalAsk, customerShortName } = require('./portal-ask-push');
+    if (!require('../config/feature-gates').portalAskPushLive?.()) return;
+    await pushPortalAsk({
+      itemKey: `late:${row.id}`,
+      title: 'Still waiting on a reply to a customer',
+      body: `${await customerShortName(meta.customerId)} has waited over 1 business hour for an answer`,
+      link: row.link || null,
+      customerId: meta.customerId,
+    });
+  } catch (err) {
+    logger.warn(`[portal-late-rering] push for notification ${row.id} failed: ${safeError(err)}`);
+  }
 }
 
 async function runPortalLateRering({ now = new Date(), pageSize = PAGE_SIZE } = {}) {

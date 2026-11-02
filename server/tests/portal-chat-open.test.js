@@ -934,3 +934,136 @@ describe('one item holds a bounded amount of text', () => {
     expect(portalOpen.keepNewest('short', 100)).toBe('short');
   });
 });
+
+// GATE_PORTAL_ASK_PUSH (owner 2026-11-02): a hand-off bell that really rang also pages the admin phones, once the
+// transaction that wrote the ask has committed. Never for a silent dedupe, a quiet refresh, a withheld bell, a failed
+// bell write or a rolled-back transaction.
+describe('GATE_PORTAL_ASK_PUSH: the hand-off bell also rings the phones', () => {
+  const PUSH = 'GATE_PORTAL_ASK_PUSH';
+  const handOff = (input) => calls(tool('escalate', { reason: 'Customer is unhappy with a visit', topic: 'complaint', ...input }));
+  const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'portal_ask');
+  const fakeTurn = () => ({
+    requestRowId: 'req-row-1',
+    assertActive: jest.fn(),
+    transaction: jest.fn((_stage, work) => db.transaction(work)),
+    query: jest.fn((query) => query),
+    waitFor: jest.fn((work) => work()),
+    persistCommittedResult: jest.fn(async (_trx, result) => result),
+    rememberCommittedResult: jest.fn((result) => result),
+    fallbackExtras: jest.fn(() => ({})),
+    registerFallbackExtras: jest.fn(),
+    providerOptions: jest.fn(() => undefined),
+  });
+  // Whether the outer transaction had committed when the push was sent.
+  let committedAtPush;
+  beforeEach(() => {
+    process.env[PUSH] = 'true';
+    committedAtPush = [];
+    triggerNotification.mockImplementation(async (key) => {
+      if (key === 'portal_ask') committedAtPush.push(db.__queries.some((q) => /^commit/i.test(q.sql)));
+      return { bellWritten: false, push: { sent: 1 } };
+    });
+  });
+  afterEach(() => {
+    delete process.env[PUSH];
+    triggerNotification.mockReset();
+    triggerNotification.mockImplementation(async () => ({ bellWritten: true }));
+  });
+
+  test('gate off: the bell rings and no push is sent', async () => {
+    delete process.env[PUSH];
+    mockCreate.mockResolvedValueOnce(handOff({}));
+    await say('The tech was rude');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(pushes()).toHaveLength(0);
+  });
+
+  test('a new hand-off sends one pushOnly page: first name and last initial, the ask in a few words, no contact details', async () => {
+    mockCreate.mockResolvedValueOnce(handOff({}));
+    await say('The tech was rude. Call me on 941-555-0100 or pat@example.com');
+    expect(pushes()).toHaveLength(1);
+    const [key, payload, opts] = pushes()[0];
+    expect(key).toBe('portal_ask');
+    expect(opts).toEqual({ pushOnly: true });
+    expect(payload).toEqual(expect.objectContaining({
+      itemKey: 'portal-chat-escalation:esc-1',
+      title: 'Reply to a portal chat',
+      body: 'Pat S. asked about a complaint',
+      link: '/admin/customers?customerId=cust-1',
+      customerId: 'cust-1',
+    }));
+    expect(JSON.stringify(payload)).not.toMatch(/941|555|@example|rude/);
+  });
+
+  test.each([
+    ['a silent dedupe', { id: 'n-1', deduped: true }, 0],
+    ['a quiet refresh', { id: 'n-1', deduped: true, refreshed: true, rung: false }, 0],
+    ['a withheld bell', { id: null, suppressed: true }, 0],
+    ['a failed bell write', null, 0],
+    ['a refresh that rings again', { id: 'n-1', deduped: true, refreshed: true, rung: true }, 1],
+    ['a fresh bell', { id: 'n-1', deduped: false }, 1],
+  ])('%s -> %i push(es)', async (_label, bell, expected) => {
+    NotificationService.notifyAdmin.mockResolvedValue(bell);
+    mockCreate.mockResolvedValueOnce(handOff({}));
+    await say('The tech was rude');
+    expect(pushes()).toHaveLength(expected);
+  });
+
+  test('a push that throws never costs the hand-off its reply', async () => {
+    triggerNotification.mockRejectedValue(new Error('push down'));
+    mockCreate.mockResolvedValueOnce(handOff({}));
+    const result = await say('The tech was rude');
+    expect(result.escalated).toBe(true);
+    expect(result.teamNotified).toBe(true);
+  });
+
+  describe('inside the portal turn\'s transaction', () => {
+    test('an opened chat hand-off pushes once, after the transaction committed', async () => {
+      const turn = fakeTurn();
+      mockCreate.mockResolvedValueOnce(calls(tool('escalate', { reason: 'Customer is unhappy', topic: 'complaint', say: 'The team will look.' })));
+      await assistant.processMessage({ message: 'The tech was rude', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', turn });
+      expect(pushes()).toHaveLength(1);
+      expect(committedAtPush).toEqual([true]);
+    });
+
+    test('the keyword/legacy turn path (chat not opened up) pushes once, after the commit', async () => {
+      delete process.env[OPEN];
+      const turn = fakeTurn();
+      mockCreate.mockResolvedValueOnce(calls(tool('escalate', { reason: 'Customer is unhappy', topic: 'complaint' })));
+      const result = await assistant.processMessage({ message: 'The tech was rude', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', turn });
+      expect(result.escalated).toBe(true);
+      expect(pushes()).toHaveLength(1);
+      expect(pushes()[0][1].body).toBe('Pat S. asked about a complaint');
+      expect(committedAtPush).toEqual([true]);
+    });
+
+    test('a transaction that rolls back sends no push', async () => {
+      const turn = fakeTurn();
+      turn.persistCommittedResult.mockRejectedValue(new Error('checkpoint failed'));
+      mockCreate.mockResolvedValue(calls(tool('escalate', { reason: 'Customer is unhappy', topic: 'complaint' })));
+      await assistant.processMessage({ message: 'The tech was rude', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', turn }).catch(() => {});
+      expect(db.__queries.some((q) => /^rollback/i.test(q.sql))).toBe(true);
+      expect(pushes()).toHaveLength(0);
+    });
+
+    test('a move item pushes once, after the commit, and says the customer is moving', async () => {
+      const turn = fakeTurn();
+      mockCreate
+        .mockResolvedValueOnce(calls(tool('request_move', { new_address: '12 Palm Way', move_date: '' })))
+        .mockResolvedValueOnce(text('Which day?'));
+      await assistant.processMessage({ message: 'Moving to 12 Palm Way', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', turn });
+      expect(pushes()).toHaveLength(1);
+      expect(pushes()[0][1].body).toBe('Pat S. is moving and asked to transfer service');
+      expect(JSON.stringify(pushes()[0][1])).not.toContain('Palm Way');
+      expect(committedAtPush).toEqual([true]);
+    });
+
+    test('a replayed hand-off whose bell already stands sends no second push', async () => {
+      const turn = fakeTurn();
+      NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1', deduped: true });
+      mockCreate.mockResolvedValueOnce(calls(tool('escalate', { reason: 'Customer is unhappy', topic: 'complaint' })));
+      await assistant.processMessage({ message: 'The tech was rude', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', turn });
+      expect(pushes()).toHaveLength(0);
+    });
+  });
+});

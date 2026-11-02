@@ -58,6 +58,13 @@ describe('notification trigger push tags', () => {
     expect(__private.pushTagFor('relay_hot_lead', {})).not.toBe(__private.pushTagFor('relay_hot_lead', {}));
   });
 
+  // GATE_PORTAL_ASK_PUSH: one banner per ask, so a repeat collapses and a second customer's ask does not replace the first.
+  test('portal_ask gets a per-ask push tag', () => {
+    expect(__private.pushTagFor('portal_ask', { itemKey: 'request:r-1' })).toBe('waves-portal_ask-request:r-1');
+    expect(__private.pushTagFor('portal_ask', { itemKey: 'late:n-9' })).not.toBe(__private.pushTagFor('portal_ask', { itemKey: 'request:r-1' }));
+    expect(__private.pushTagFor('portal_ask', {})).not.toBe(__private.pushTagFor('portal_ask', {}));
+  });
+
   it('customer_landline_from_call gets a per-customer push tag so concurrent alerts do not collapse', () => {
     const a = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-a' });
     const b = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-b' });
@@ -413,6 +420,32 @@ describe('triggerNotification bell outcome', () => {
     // Without the option the same call writes its bell as before.
     await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('portal_ask is a pushOnly page: it writes no bell row and pushes one banner tagged by the ask', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const trigger = TRIGGER_REGISTRY.portal_ask;
+    expect(trigger).toEqual(expect.objectContaining({ label: 'Customer asked in the app', priority: 'high', group: 'Communication', adminRoleOnly: true }));
+    expect(trigger.rule).toEqual({ area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true });
+    const payload = { itemKey: 'request:r-1', title: 'Answer a portal request', body: 'Pat S. sent a pest control request', link: '/admin/customers?customerId=c-1' };
+    await triggerNotification('portal_ask', payload, { pushOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    const sent = PushService.sendToAdminUsers.mock.calls[0][1]('admin-1');
+    expect(sent.tag).toBe('waves-portal_ask-request:r-1');
+    expect(sent.title).toBe('Answer a portal request');
+    expect(sent.body).toBe('Pat S. sent a pest control request');
+    // A fallback link when the payload carries none.
+    expect(trigger.build({ title: 't' }).link).toBe('/admin/communications');
+  });
+
+  test('portal_ask redacts a phone number or email that slipped into the text', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('portal_ask', { itemKey: 'request:r-2', title: 'Answer a portal request', body: 'Pat S. wrote pat@example.com or 941-555-0100' }, { pushOnly: true });
+    const sent = PushService.sendToAdminUsers.mock.calls[0][1]('admin-1');
+    expect(sent.body).not.toMatch(/pat@example\.com|941-555-0100/);
   });
 
   test('a keyed SMS replay reuses its committed bell and does not push again', async () => {
