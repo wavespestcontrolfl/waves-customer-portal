@@ -147,8 +147,10 @@ async function main(opts) {
   if (failed > 0) process.exitCode = 1;
 }
 
-async function applyAll({ db, svc, plans, planFor, todayET }) {
-  const deps = {
+// The app helpers --apply calls. Each one must resolve before the first write: on 11-01 the series lock was not a
+// module export, so 28 series moved their visits and then stopped at the conversion.
+function buildApplyDeps(todayET) {
+  return {
     rebooker: require('../server/services/rebooker'),
     reminders: require('../server/services/appointment-reminders'),
     lockSeries: require('../server/routes/admin-schedule').acquireRecurringSeriesMaintenanceLock,
@@ -156,6 +158,24 @@ async function applyAll({ db, svc, plans, planFor, todayET }) {
     prepay: require('../server/services/annual-prepay-renewals')._private,
     todayET,
   };
+}
+
+const APPLY_DEP_FUNCTIONS = [
+  ['rebooker', 'reschedule'], ['rebooker', 'previewMoveConflicts'], ['reminders', 'handleReschedule'],
+  ['lockSeries'], ['lockComms'], ['prepay', 'normalizeCoverageCadence'], ['prepay', 'inferCoverageCadence'],
+];
+
+// The helper names that do not resolve to a function ([] when all do).
+function missingApplyDeps(deps) {
+  return APPLY_DEP_FUNCTIONS
+    .filter(([key, fn]) => typeof (fn ? deps[key]?.[fn] : deps[key]) !== 'function')
+    .map((path) => path.join('.'));
+}
+
+async function applyAll({ db, svc, plans, planFor, todayET }) {
+  const deps = buildApplyDeps(todayET);
+  const missing = missingApplyDeps(deps);
+  if (missing.length) throw new Error(`refusing --apply: ${missing.join(', ')} did not resolve; nothing was written`);
   const perTech = new Map();
   const dates = new Set();
   const counts = {};
@@ -198,4 +218,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseCliArgs, summarizePlans };
+module.exports = { parseCliArgs, summarizePlans, buildApplyDeps, missingApplyDeps };
