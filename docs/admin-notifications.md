@@ -233,6 +233,13 @@ belong in the owner's bell, because the owner would only relay them to Claude:
   the 8:05 AM list of AI-test cases with no grade yet (`typed-decisions-review:`,
   `server/services/typed-decisions/daily-review-item.js`), an `fyi` the Claude labeler grades
   each night (owner 2026-11-02: plain words, not the owner's to-do).
+- work a job on the owner's Mac already does (owner 2026-11-02, "A"): the daily list of website
+  posts that wait for a terminal draft (`Content — write N website posts in the terminal`,
+  `metadata.terminalDue` `claude`, class `content-terminal-due`). The 9:15 AM blog-run job on the
+  Mac writes those drafts, so the row is `fyi`. Its emitter stamps it only while
+  `AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET` is not `false`; the owner's bell gets its own row,
+  `Content — blog-run left N website posts for 2 days` (`content-terminal-stalled:<ET date>`, never
+  routed), when rows wait 44 hours on the same brief with no draft.
 The routing is server-side, in `NotificationService.create` and `notifyAdmin`: no emitter and no
 Mac code decides it. A routed row is written Activity-only (`metadata.feed = 'activity'`) and
 stamped `who = 'claude'`, so `needs-me --who claude` lists it. It is written even when the

@@ -7,8 +7,10 @@
 //      in the bell (a gate flip for the owner's gates, a money ask). Every other opsJob row is Claude's.
 //   2. An engineering fault of ours: a table of named classes below, matched by category plus the
 //      emitter's dedupeKey prefix (or a metadata field when the emitter writes no dedupeKey).
-//   3. A list Claude works through by itself, in the same table with its own severity: the daily
-//      AI-test list the Claude labeler grades (owner 2026-11-02, "yes": not the owner's to-do).
+//   3. A list Claude works through by itself, or that a job on the owner's Mac already handles, in the
+//      same table with its own severity: the daily AI-test list the Claude labeler grades (owner
+//      2026-11-02, "yes": not the owner's to-do), and the list of website posts that wait for a terminal
+//      draft (owner 2026-11-02, "A": the 9:15 AM blog-run job on the Mac writes them).
 //
 // A routed row is written Activity-only (metadata.feed = 'activity', the marker
 // NotificationService.excludeActivityOnlyFromBell reads), so it never rings or counts in the bell, and
@@ -61,6 +63,16 @@ const CLAUDE_QUEUE_CLASSES = Object.freeze([
     // dedupeKey 'typed-decisions-review:<day>'. Not a fault: an FYI the Claude labeler works through.
     category: 'typed_decisions',
     dedupeKeyPrefix: 'typed-decisions-review:',
+    severity: 'fyi',
+  },
+  {
+    name: 'content-terminal-due',
+    // content/terminal-writer.js raiseTerminalDue: "Content — write N website posts in the terminal". Not a
+    // fault: the 9:15 AM blog-run job on the owner's Mac writes these drafts (owner 2026-11-02, "A"), so the
+    // row is fyi (no Claude tab is opened for it). The emitter stamps metadata.terminalDue only while its
+    // quiet switch is on; the owner's bell gets its own row when the terminal stops handling the list.
+    category: 'content',
+    meta: { terminalDue: 'claude' },
     severity: 'fyi',
   },
 ]);
