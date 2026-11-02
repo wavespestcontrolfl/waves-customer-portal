@@ -6,8 +6,9 @@
  *      conversation is a `portal_chat` agent_sessions row;
  *   2. customer service requests that are not resolved / closed / cancelled and
  *      were not made by staff (source 'admin').
- * The Communications Portal tab shows the last 14 days. Older open items are
- * only counted; `closeOlder` closes them and sends NOTHING to a customer.
+ * The Communications Portal tab lists the last 14 days (`items`). Open items at
+ * or before the cutoff are listed one by one too (`olderItems`) and counted
+ * (`older`); `closeOlder` still closes them and sends NOTHING to a customer.
  *
  * This module never sends an email, text or call. The route files pass in the
  * actor and call these helpers; the gate is read at call time.
@@ -136,17 +137,20 @@ function requestItem(row) {
   };
 }
 
-async function listRecent(cutoff) {
+// Open items on one side of the cutoff, newest first, at most LIST_CAP of each
+// kind: `recent` is strictly after it, otherwise at or before it.
+async function listOpen(cutoff, recent) {
+  const op = recent ? '>' : '<=';
   const chatRows = await openChats()
     .leftJoin('customers as c', 'c.id', 'e.customer_id')
-    .where('e.created_at', '>', cutoff)
+    .where('e.created_at', op, cutoff)
     .orderBy('e.created_at', 'desc')
     .limit(LIST_CAP)
     .select('e.id', 'e.created_at', 'e.customer_id', 'e.customer_message', 'e.summary', 'e.reason',
       'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL), db.raw(`${REPLY_SQL} AS assistant_reply`));
   const requestRows = await openRequests()
     .leftJoin('customers as c', 'c.id', 'r.customer_id')
-    .where('r.created_at', '>', cutoff)
+    .where('r.created_at', op, cutoff)
     .orderBy('r.created_at', 'desc')
     .limit(LIST_CAP)
     .select('r.id', 'r.created_at', 'r.customer_id', 'r.category', 'r.subject', 'r.description',
@@ -157,15 +161,18 @@ async function listRecent(cutoff) {
 
 // `total` is every open item in the window; `items` holds at most LIST_CAP of
 // each kind, so the tab shows "N of total" and reloads when it runs out.
+// `olderItems` lists the open items at or before the cutoff the same way, and
+// `older` holds their true totals.
 async function list(now = new Date()) {
   const cutoff = windowCutoff(now);
-  const [items, recent, chats, requests] = await Promise.all([
-    listRecent(cutoff),
+  const [items, olderItems, recent, chats, requests] = await Promise.all([
+    listOpen(cutoff, true),
+    listOpen(cutoff, false),
     summary(cutoff),
     countOf(openChats().where('e.created_at', '<=', cutoff)),
     countOf(openRequests().where('r.created_at', '<=', cutoff)),
   ]);
-  return { cutoff: cutoff.toISOString(), items, total: recent.count, older: { chats, requests } };
+  return { cutoff: cutoff.toISOString(), items, olderItems, total: recent.count, older: { chats, requests } };
 }
 
 // Close the open admin bell alerts raised for these ids. `key` is the metadata

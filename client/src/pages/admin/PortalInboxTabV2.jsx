@@ -7,8 +7,10 @@ import { formatETDateTime } from "../../lib/timezone";
 
 // Communications -> Portal tab (GATE_PORTAL_INBOX). Lists what customers asked
 // for inside the customer portal and nobody answered: portal chat hand-offs and
-// customer service requests, last 14 days. Older open items are only counted;
-// "Close all older" closes them and sends nothing to a customer.
+// customer service requests. The last 14 days come first; open items older than
+// that are listed one by one under the "Older than 14 days" line. Mark handled
+// works on both. "Close all older" closes every older item and sends nothing to
+// a customer.
 
 const KIND_LABEL = { chat: "Chat", request: "Request" };
 const HANDLED_NOTE = "Handled in Communications → Portal";
@@ -135,7 +137,7 @@ function InboxRow({ item, busy, error, onHandled, onReply, onOpenCustomer }) {
   );
 }
 
-function OlderLine({ older, cutoff, onClosed }) {
+function OlderLine({ older, cutoff, onClosed, children }) {
   const total = older.chats + older.requests;
   const [confirming, setConfirming] = useState(false);
   const [closing, setClosing] = useState(false);
@@ -197,6 +199,7 @@ function OlderLine({ older, cutoff, onClosed }) {
               <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {error}
             </div>
           )}
+          {children}
         </>
       )}
     </div>
@@ -224,7 +227,13 @@ export default function PortalInboxTabV2({ onCount }) {
     return adminFetch("/admin/portal-inbox")
       .then((d) => {
         const items = d.items || [];
-        setData({ cutoff: d.cutoff, items, total: Number.isFinite(d.total) ? d.total : items.length, older: d.older || { chats: 0, requests: 0 } });
+        setData({
+          cutoff: d.cutoff,
+          items,
+          olderItems: d.olderItems || [],
+          total: Number.isFinite(d.total) ? d.total : items.length,
+          older: d.older || { chats: 0, requests: 0 },
+        });
       })
       .catch((err) => {
         setLoadError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Failed to load.");
@@ -260,10 +269,22 @@ export default function PortalInboxTabV2({ onCount }) {
         return;
       }
       handledSinceLoad.current += 1;
-      // Lower the total only for a row still listed, so it drops once per row.
-      setData((prev) => (prev.items.some((row) => rowKey(row) === key)
-        ? { ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) }
-        : prev));
+      // Lower a count only for a row still listed, so it drops once per row.
+      // A recent row lowers the total; an older row lowers its older count.
+      setData((prev) => {
+        if (prev.items.some((row) => rowKey(row) === key)) {
+          return { ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) };
+        }
+        if (prev.olderItems.some((row) => rowKey(row) === key)) {
+          const field = item.kind === "chat" ? "chats" : "requests";
+          return {
+            ...prev,
+            olderItems: prev.olderItems.filter((row) => rowKey(row) !== key),
+            older: { ...prev.older, [field]: Math.max(0, prev.older[field] - 1) },
+          };
+        }
+        return prev;
+      });
     } catch (err) {
       const message = isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Could not mark this handled. Try again.";
       setRowErrors((prev) => ({ ...prev, [key]: message }));
@@ -282,7 +303,7 @@ export default function PortalInboxTabV2({ onCount }) {
   return (
     <div className="p-4 md:p-6 space-y-4">
       <p className="text-14 text-ink-secondary">
-        What customers asked for in the customer portal and nobody answered yet. Last 14 days.
+        What customers asked for in the customer portal and nobody answered yet. The last 14 days first, then anything older.
       </p>
       {data && data.total > data.items.length && (
         <p className="text-14 text-ink-secondary" role="status">
@@ -318,7 +339,32 @@ export default function PortalInboxTabV2({ onCount }) {
               ))}
             </div>
           ) : null}
-          {data && <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => setData((prev) => ({ ...prev, older: { chats: 0, requests: 0 } }))} />}
+          {data && (
+            <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => setData((prev) => ({ ...prev, olderItems: [], older: { chats: 0, requests: 0 } }))}>
+              {data.olderItems.length > 0 && (
+                <div className="mt-4">
+                  {data.older.chats + data.older.requests > data.olderItems.length && (
+                    <p className="text-14 text-ink-secondary mb-3" role="status">
+                      Showing {data.olderItems.length} of {data.older.chats + data.older.requests} older items, newest first.
+                    </p>
+                  )}
+                  <div className="divide-y divide-zinc-200" data-testid="portal-older-list">
+                    {data.olderItems.map((item) => (
+                      <InboxRow
+                        key={rowKey(item)}
+                        item={item}
+                        busy={busyKeys.has(rowKey(item))}
+                        error={rowErrors[rowKey(item)]}
+                        onHandled={handle}
+                        onReply={reply}
+                        onOpenCustomer={openCustomer}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </OlderLine>
+          )}
         </CardBody>
       </Card>
     </div>
