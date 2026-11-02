@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Inbox, AlertTriangle } from "lucide-react";
 import { Badge, Button, Card, CardBody } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
@@ -7,12 +7,12 @@ import { formatETDateTime } from "../../lib/timezone";
 
 // Communications -> Portal tab (GATE_PORTAL_INBOX). Lists what customers asked
 // for inside the customer portal and nobody answered: portal chat hand-offs and
-// customer service requests. The last 14 days come first; open items older than
+// customer service requests, plus (GATE_PORTAL_BOOKING_ITEMS) visitors who started to book and left. The last 14 days come first; open items older than
 // that are listed one by one under the "Older than 14 days" line. Mark handled
 // works on both. "Close all older" closes every older item and sends nothing to
 // a customer.
 
-const KIND_LABEL = { chat: "Chat", request: "Request" };
+const KIND_LABEL = { chat: "Chat", request: "Request", booking: "Booking not finished" };
 const HANDLED_NOTE = "Handled in Communications → Portal";
 
 function customerName(customer) {
@@ -35,18 +35,26 @@ function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-const DONE_STATUSES = { chat: ["resolved", "dismissed"], request: ["resolved", "closed", "cancelled"] };
+const DONE_STATUSES = { chat: ["resolved", "dismissed"], request: ["resolved", "closed", "cancelled"], booking: ["done"] };
 
 // Did the update route really finish the item? A request PATCH that lost a race
-// answers 200 with the still-open row (statusChanged: false); keep it then.
+// answers 200 with the still-open row (statusChanged: false); keep it then. A booking item is a bell: its Done
+// route answers { updated: true } only when this call closed it (false = someone else did, or it changed).
 function handledStatus(item, res) {
+  if (item.kind === "booking") return res?.updated === true ? "done" : "";
   return item.kind === "chat" ? res?.escalation?.status : res?.request?.status;
 }
 
 // Mark handled uses the existing update routes: chat -> the escalation PUT,
-// request -> the request PATCH. `quiet` asks that PATCH not to email the customer "Resolved"
+// request -> the request PATCH, booking -> the bell's own Done. `quiet` asks that PATCH not to email the customer "Resolved"
 // (the server honors it only while GATE_PORTAL_ITEM_CLOSE is on; Customer 360 keeps its email).
 function markHandled(item) {
+  if (item.kind === "booking") {
+    return adminFetch(`/admin/notifications/${item.id}/done`, {
+      method: "PUT",
+      body: JSON.stringify({ version: item.version, resolution: HANDLED_NOTE }),
+    });
+  }
   if (item.kind === "chat") {
     return adminFetch(`/ai/admin/escalations/${item.id}`, {
       method: "PUT",
@@ -86,6 +94,53 @@ function RequestDetails({ item }) {
   );
 }
 
+// The slot the visitor picked, as a person says it: "Tue Nov 3, 1-2 PM" (the bell's own wording).
+function clockParts(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
+  if (!m) return null;
+  const hour = Number(m[1]);
+  return { hour12: hour % 12 || 12, minute: m[2], meridiem: hour >= 12 ? "PM" : "AM" };
+}
+
+const clockText = (p, withMeridiem) => `${p.hour12}${p.minute === "00" ? "" : `:${p.minute}`}${withMeridiem ? ` ${p.meridiem}` : ""}`;
+
+function rangeText(start, end) {
+  const from = clockParts(start);
+  if (!from) return "";
+  const to = clockParts(end);
+  if (!to) return clockText(from, true);
+  return from.meridiem === to.meridiem ? `${clockText(from, false)}-${clockText(to, true)}` : `${clockText(from, true)}-${clockText(to, true)}`;
+}
+
+function slotText(slot) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(slot?.date || "");
+  if (!m) return "";
+  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+  const when = day.toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" }).replace(",", "");
+  const range = rangeText(slot.start, slot.end);
+  return range ? `${when}, ${range}` : when;
+}
+
+function BookingDetails({ item }) {
+  const picked = slotText(item.slot);
+  const where = item.source === "estimate_card" ? "the card step of an estimate" : "the booking page";
+  return (
+    <>
+      {item.service && <div className="text-14 font-medium text-zinc-900 mt-1" data-testid="booking-service">{item.service}</div>}
+      {picked && <div className="text-14 text-zinc-800 mt-1" data-testid="booking-slot">They picked {picked}.</div>}
+      <div className="text-14 text-ink-secondary mt-1" data-testid="booking-where">
+        They left at {where} without finishing.
+        {item.estimateId && (
+          <>
+            {" "}
+            <Link className="underline" to={`/admin/estimates?estimateId=${encodeURIComponent(item.estimateId)}`}>Open the estimate</Link>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
 function ChatDetails({ item }) {
   return (
     <>
@@ -116,7 +171,9 @@ function InboxRow({ item, busy, error, onHandled, onReply, onOpenCustomer }) {
         <span className="text-14 font-medium text-zinc-900">{customerName(item.customer)}</span>
         <span className="text-14 text-ink-tertiary">{formatWhen(item.createdAt)}</span>
       </div>
-      {item.kind === "chat" ? <ChatDetails item={item} /> : <RequestDetails item={item} />}
+      {item.kind === "chat" && <ChatDetails item={item} />}
+      {item.kind === "request" && <RequestDetails item={item} />}
+      {item.kind === "booking" && <BookingDetails item={item} />}
       <div className="flex flex-wrap gap-2 mt-3">
         <Button type="button" density="comfortable" variant="secondary" disabled={!canReply} title={canReply ? undefined : "No phone on file"} onClick={() => onReply(item)}>
           Reply by text
@@ -137,8 +194,10 @@ function InboxRow({ item, busy, error, onHandled, onReply, onOpenCustomer }) {
   );
 }
 
+const olderTotal = (older) => older.chats + older.requests + (older.bookings || 0);
+
 function OlderLine({ older, cutoff, onClosed, children }) {
-  const total = older.chats + older.requests;
+  const total = olderTotal(older);
   const [confirming, setConfirming] = useState(false);
   const [closing, setClosing] = useState(false);
   const [error, setError] = useState("");
@@ -154,7 +213,7 @@ function OlderLine({ older, cutoff, onClosed, children }) {
         method: "POST",
         body: JSON.stringify({ cutoff }),
       });
-      const closed = (res?.closed?.chats || 0) + (res?.closed?.requests || 0);
+      const closed = (res?.closed?.chats || 0) + (res?.closed?.requests || 0) + (res?.closed?.bookings || 0);
       setConfirming(false);
       setDone(`Closed ${plural(closed, "item", "items")}.`);
       onClosed();
@@ -174,6 +233,7 @@ function OlderLine({ older, cutoff, onClosed, children }) {
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-14 text-zinc-900">
               Older than 14 days: {plural(older.chats, "chat hand-off", "chat hand-offs")} and {plural(older.requests, "request", "requests")}
+              {older.bookings > 0 && <>{" "}and {plural(older.bookings, "booking not finished", "bookings not finished")}</>}
             </span>
             {!confirming && (
               <Button type="button" density="comfortable" variant="secondary" onClick={() => setConfirming(true)}>
@@ -248,7 +308,7 @@ export default function PortalInboxTabV2({ onCount }) {
     if (!data || handledSinceLoad.current === 0) return;
     const recentOut = data.items.length === 0 && data.total > 0;
     // The older list is capped too: once its listed rows are all handled, load the next ones.
-    const olderOut = data.olderItems.length === 0 && data.older.chats + data.older.requests > 0;
+    const olderOut = data.olderItems.length === 0 && olderTotal(data.older) > 0;
     if (recentOut || olderOut) load();
   }, [data, load]);
 
@@ -280,17 +340,21 @@ export default function PortalInboxTabV2({ onCount }) {
           return { ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) };
         }
         if (prev.olderItems.some((row) => rowKey(row) === key)) {
-          const field = item.kind === "chat" ? "chats" : "requests";
+          const field = { chat: "chats", request: "requests", booking: "bookings" }[item.kind];
           return {
             ...prev,
             olderItems: prev.olderItems.filter((row) => rowKey(row) !== key),
-            older: { ...prev.older, [field]: Math.max(0, prev.older[field] - 1) },
+            older: { ...prev.older, [field]: Math.max(0, (prev.older[field] || 0) - 1) },
           };
         }
         return prev;
       });
     } catch (err) {
-      const message = isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Could not mark this handled. Try again.";
+      // A booking bell's Done answers 409 when the bell changed after this list loaded.
+      const changed = item.kind === "booking" && err?.status === 409;
+      const message = isRateLimitError(err)
+        ? "You're going too fast — try again in a few seconds."
+        : changed ? "This changed before you could mark it handled. It is still open." : "Could not mark this handled. Try again.";
       setRowErrors((prev) => ({ ...prev, [key]: message }));
     } finally {
       pendingKeys.current.delete(key);
@@ -344,12 +408,12 @@ export default function PortalInboxTabV2({ onCount }) {
             </div>
           ) : null}
           {data && (
-            <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => setData((prev) => ({ ...prev, olderItems: [], older: { chats: 0, requests: 0 } }))}>
+            <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => setData((prev) => ({ ...prev, olderItems: [], older: { chats: 0, requests: 0, ...(prev.older.bookings !== undefined ? { bookings: 0 } : {}) } }))}>
               {data.olderItems.length > 0 && (
                 <div className="mt-4">
-                  {data.older.chats + data.older.requests > data.olderItems.length && (
+                  {olderTotal(data.older) > data.olderItems.length && (
                     <p className="text-14 text-ink-secondary mb-3" role="status">
-                      Showing {data.olderItems.length} of {data.older.chats + data.older.requests} older items, newest first.
+                      Showing {data.olderItems.length} of {olderTotal(data.older)} older items, newest first.
                     </p>
                   )}
                   <div className="divide-y divide-zinc-200" data-testid="portal-older-list">

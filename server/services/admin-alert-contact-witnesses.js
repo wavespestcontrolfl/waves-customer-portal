@@ -148,7 +148,8 @@ const SUBJECT_OF = {
   },
   lead: ({ refs }) => ({ anchor: null, customerId: null, phones: [refs.phone] }),
   // A portal chat hand-off: the customer alone (identify adds the customer's own phone), at the bell's anchor.
-  customer: () => ({ anchor: null, customerId: null, phones: [] }),
+  // An unfinished-booking bell for a visitor with no customer on file passes the visitor's phone instead.
+  customer: ({ refs }) => ({ anchor: null, customerId: null, phones: [refs.phone] }),
 };
 
 // An item that cannot be identified is dropped: unknown, never judged.
@@ -382,7 +383,8 @@ async function attachCustomerEmailSends(conn, idents, bundles) {
 /**
  * @param {Array<{id, kind: 'sms'|'voice'|'email'|'lead'|'customer', bellAt: Date|null, refs: object}>} items
  *   refs by kind: sms {sid, customerId}; voice {callLogId, customerId, phone};
- *   email {emailId, customerId}; lead {customerId, phone}; customer {customerId} (anchor = bellAt).
+ *   email {emailId, customerId}; lead {customerId, phone}; customer {customerId, phone?} (anchor = bellAt;
+ *   phone only for a visitor with no customer id).
  * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>, visitRan?: boolean, staffActions?: boolean}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
  *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt,

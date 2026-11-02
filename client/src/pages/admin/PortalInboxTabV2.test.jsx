@@ -24,6 +24,19 @@ const request = {
   requestedService: "", source: "portal", urgency: "routine", status: "new",
 };
 
+// A visitor who picked a time on the booking page and left (GATE_PORTAL_BOOKING_ITEMS): a bell, not a request.
+const booking = {
+  kind: "booking", id: "bell-1", version: "0123456789abcdef0123456789abcdef", createdAt: "2026-10-31T15:00:00.000Z",
+  customer: { id: "cust-7", firstName: "Jo", lastName: "Visitor", phone: "+19415550107", hasTexts: false },
+  source: "booking_page", service: "Mosquito Control", slot: { date: "2026-11-03", start: "13:00", end: "14:00" },
+};
+// An estimate card step with no customer on file: only the contact the bell carries.
+const cardStep = {
+  kind: "booking", id: "bell-2", version: "fedcba9876543210fedcba9876543210", createdAt: "2026-10-30T15:00:00.000Z",
+  customer: { id: null, firstName: "Sam Walkin", lastName: "", phone: "+19415550108", hasTexts: false },
+  source: "estimate_card", service: "Pest Control", slot: null, estimateId: "est-1",
+};
+
 const olderChat = {
   ...chat, id: "esc-old", createdAt: "2026-09-20T15:00:00.000Z",
   customer: { id: "cust-5", firstName: "Dana", lastName: "Backlog", phone: "+19415550105", hasTexts: true },
@@ -62,6 +75,7 @@ function updated(url) {
   const id = url.split("/").pop();
   if (url.startsWith("/ai/admin/escalations/")) return { escalation: { id, status: "resolved" } };
   if (url.startsWith("/admin/requests/")) return { request: { id, status: "resolved" }, statusChanged: true };
+  if (url.startsWith("/admin/notifications/")) return { success: true, updated: true };
   return { ok: true };
 }
 
@@ -346,5 +360,87 @@ describe("Portal inbox tab", () => {
     mount();
     expect(await screen.findByText(/Nothing open/)).toBeInTheDocument();
     expect(screen.queryByText(/Older than 14 days/)).not.toBeInTheDocument();
+  });
+
+  it("shows a booking item with what they picked, where they left, and a link to the estimate", async () => {
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [booking, cardStep], total: 2 }) : updated(url)));
+    mount();
+    const pageRow = (await screen.findByText("Jo Visitor")).closest("[data-testid]");
+    expect(within(pageRow).getByText("Booking not finished")).toBeInTheDocument();
+    expect(within(pageRow).getByTestId("booking-service")).toHaveTextContent("Mosquito Control");
+    expect(within(pageRow).getByTestId("booking-slot")).toHaveTextContent("They picked Tue Nov 3, 1-2 PM.");
+    expect(within(pageRow).getByTestId("booking-where")).toHaveTextContent("They left at the booking page without finishing.");
+    expect(within(pageRow).queryByRole("link", { name: "Open the estimate" })).not.toBeInTheDocument();
+    const cardRow = screen.getByText("Sam Walkin").closest("[data-testid]");
+    expect(within(cardRow).getByTestId("booking-where")).toHaveTextContent("They left at the card step of an estimate without finishing.");
+    expect(within(cardRow).queryByTestId("booking-slot")).not.toBeInTheDocument();
+    expect(within(cardRow).getByRole("link", { name: "Open the estimate" })).toHaveAttribute("href", "/admin/estimates?estimateId=est-1");
+    // Reply and Open customer work like the other kinds: by phone when there is no customer.
+    fireEvent.click(within(cardRow).getByRole("button", { name: "Reply by text" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/admin/communications?phone=%2B19415550108&action=sms#tab=sms");
+    expect(within(cardRow).getByRole("button", { name: "Open customer" })).toBeDisabled();
+  });
+
+  it("marks a booking handled with the bell's own Done and its version, then drops the row and lowers the count", async () => {
+    const onCount = vi.fn();
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [booking, request], total: 2 }) : updated(url)));
+    mount(onCount);
+    const row = (await screen.findByText("Jo Visitor")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Jo Visitor")).not.toBeInTheDocument());
+    expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/bell-1/done", {
+      method: "PUT",
+      body: JSON.stringify({ version: "0123456789abcdef0123456789abcdef", resolution: "Handled in Communications → Portal" }),
+    });
+    expect(screen.getByText("Kim Sample")).toBeInTheDocument();
+    await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(1));
+  });
+
+  it("keeps a booking whose Done lost a race (nothing updated, or the bell changed) and says so", async () => {
+    const onCount = vi.fn();
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [booking], total: 1 }) : { success: true, updated: false }));
+    mount(onCount);
+    const row = (await screen.findByText("Jo Visitor")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    expect(await within(row).findByRole("alert")).toHaveTextContent("This changed before you could mark it handled. It is still open.");
+    expect(screen.getByText("Jo Visitor")).toBeInTheDocument();
+    expect(onCount).toHaveBeenLastCalledWith(1);
+    // The Done route answers 409 when the bell's text changed after the list loaded.
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return listing({ items: [booking], total: 1 });
+      throw Object.assign(new Error("changed"), { status: 409 });
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(within(row).getByRole("alert")).toHaveTextContent("This changed before you could mark it handled. It is still open."));
+    expect(screen.getByText("Jo Visitor")).toBeInTheDocument();
+  });
+
+  it("counts older bookings in the Older line, lists them, and Close all older sums them", async () => {
+    const olderBooking = { ...booking, id: "bell-old", createdAt: "2026-09-10T15:00:00.000Z", customer: { ...booking.customer, id: "cust-8", firstName: "Old", lastName: "Dropoff" } };
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox"
+      ? listing({ olderItems: [olderBooking], older: { chats: 0, requests: 0, bookings: 2 } })
+      : { closed: { chats: 0, requests: 0, bookings: 2 } }));
+    mount();
+    expect(await screen.findByText("Older than 14 days: 0 chat hand-offs and 0 requests and 2 bookings not finished")).toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 2 older items, newest first.")).toBeInTheDocument();
+    expect(within(screen.getByTestId("portal-older-list")).getByText("Old Dropoff")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close all older" }));
+    expect(screen.getByText("Close 2 items? Customers get no message.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close them" }));
+    expect(await screen.findByText("Closed 2 items.")).toBeInTheDocument();
+    expect(screen.queryByTestId("portal-older-list")).not.toBeInTheDocument();
+  });
+
+  it("marks an older booking handled: the row goes and the older bookings count drops", async () => {
+    const olderBooking = { ...booking, id: "bell-old", createdAt: "2026-09-10T15:00:00.000Z", customer: { ...booking.customer, id: "cust-8", firstName: "Old", lastName: "Dropoff" } };
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox"
+      ? listing({ olderItems: [olderBooking, { ...olderBooking, id: "bell-old-2", customer: { ...olderBooking.customer, id: "cust-9", firstName: "Other", lastName: "Dropoff" } }], older: { chats: 0, requests: 0, bookings: 3 } })
+      : updated(url)));
+    mount();
+    const row = (await screen.findByText("Old Dropoff")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Old Dropoff")).not.toBeInTheDocument());
+    expect(screen.getByText("Other Dropoff")).toBeInTheDocument();
+    expect(screen.getByText("Older than 14 days: 0 chat hand-offs and 0 requests and 2 bookings not finished")).toBeInTheDocument();
   });
 });

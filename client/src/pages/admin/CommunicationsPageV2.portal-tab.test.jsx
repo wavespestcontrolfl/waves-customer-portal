@@ -3,7 +3,7 @@
 // owner's one-time summary read says enabled, with the open count in its label.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,8 +12,10 @@ vi.mock("../../hooks/useRenderedTabBeacon", () => ({ default: () => {} }));
 import CommunicationsPageV2 from "./CommunicationsPageV2";
 
 let summary;
+let portalItems;
 beforeEach(() => {
   summary = { enabled: true, count: 5 };
+  portalItems = [];
   localStorage.setItem("waves_admin_token", "synthetic-token");
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     const path = new URL(String(url), "http://localhost").pathname;
@@ -21,7 +23,8 @@ beforeEach(() => {
     if (path.endsWith("/log")) data = { messages: [{ id: "m1", conversationId: "conv1", from: "+15557654321", to: "+19415550199", channel: "sms", direction: "inbound", body: "Synthetic customer text", createdAt: "2024-01-01T12:00:00Z", isRead: false }] };
     else if (path.endsWith("/blocked-numbers")) data = { numbers: [] };
     else if (path.endsWith("/admin/portal-inbox/summary")) data = summary;
-    else if (path.endsWith("/admin/portal-inbox")) data = { enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: [], olderItems: [], older: { chats: 0, requests: 0 } };
+    else if (path.endsWith("/admin/portal-inbox")) data = { enabled: true, cutoff: "2026-10-17T12:00:00.000Z", items: portalItems, olderItems: [], total: portalItems.length, older: { chats: 0, requests: 0 } };
+    else if (path.endsWith("/admin/notifications/bell-1/done")) data = { success: true, updated: true };
     return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
   }));
 });
@@ -68,6 +71,24 @@ describe("Communications Portal tab", () => {
     expect(await screen.findByText(/Nothing open/)).toBeInTheDocument();
     // The list holds no open items, so the label count follows it down to zero.
     expect(await screen.findByRole("button", { name: "Portal" })).toBeInTheDocument();
+    window.location.hash = "";
+  });
+
+  it("lists a booking-not-finished item and marks it handled through the bell's own Done route", async () => {
+    portalItems = [{
+      kind: "booking", id: "bell-1", version: "0123456789abcdef0123456789abcdef", createdAt: "2026-10-31T15:00:00.000Z",
+      customer: { id: "cust-7", firstName: "Jo", lastName: "Visitor", phone: "+19415550107", hasTexts: false },
+      source: "booking_page", service: "Mosquito Control", slot: { date: "2026-11-03", start: "13:00", end: "14:00" },
+    }];
+    window.location.hash = "#tab=portal";
+    mount("admin", "/admin/communications#tab=portal");
+    expect(await screen.findByText("Booking not finished")).toBeInTheDocument();
+    expect(screen.getByText("Jo Visitor")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Jo Visitor")).not.toBeInTheDocument());
+    const done = fetch.mock.calls.find(([url]) => String(url).includes("/admin/notifications/bell-1/done"));
+    expect(done[1].method).toBe("PUT");
+    expect(JSON.parse(done[1].body)).toEqual({ version: "0123456789abcdef0123456789abcdef", resolution: "Handled in Communications → Portal" });
     window.location.hash = "";
   });
 
