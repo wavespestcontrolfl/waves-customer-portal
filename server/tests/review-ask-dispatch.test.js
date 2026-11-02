@@ -7,6 +7,7 @@ jest.mock('../services/review-ask-history', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/review-click-guard', () => ({
   askIdSuppressedByClick: jest.fn(async () => false),
+  tapPauseForRequestId: jest.fn(async () => false),
   REVIEW_LINK_CLICKED_REASON: 'already tapped',
 }));
 jest.mock('../utils/cron-lock', () => ({
@@ -27,6 +28,7 @@ describe('review ask dispatch boundary', () => {
     history.lastUnresolvedAskAt.mockReset().mockResolvedValue(null);
     lock.runExclusive.mockReset().mockImplementation(async (_key, callback) => callback());
     guard.askIdSuppressedByClick.mockReset().mockResolvedValue(false);
+    guard.tapPauseForRequestId.mockReset().mockResolvedValue(false);
   });
   afterEach(() => jest.useRealTimers());
 
@@ -223,6 +225,21 @@ describe('review ask dispatch boundary', () => {
     expect(seen).toEqual([{ drop: 'clicked', held: true }, { drop: 'unknown', held: true }, { drop: null, held: true }]);
     expect(guard.askIdSuppressedByClick).toHaveBeenCalledWith('rr-1');
     expect(lock.runExclusive).toHaveBeenCalledWith('review-send:customer', expect.any(Function), { recordHealth: false, waitForSlot: false });
+  });
+
+  test('GATE_REVIEW_TAP_PAUSE: a paused bundled ask drops its line and the completion still goes; an unreadable pause holds the line', async () => {
+    const send = jest.fn(async () => ({ sent: true }));
+    guard.tapPauseForRequestId.mockResolvedValueOnce(true);
+    expect(await withBundledAskGate('customer', 'rr-1', send)).toEqual({ sent: true });
+    guard.tapPauseForRequestId.mockRejectedValueOnce(new Error('db down'));
+    expect(await withBundledAskGate('customer', 'rr-1', send)).toEqual({ sent: true });
+    expect(send.mock.calls).toEqual([['clicked'], ['unknown']]);
+    expect(guard.tapPauseForRequestId).toHaveBeenCalledWith('rr-1');
+    // The deferred completion replay reads the same gate.
+    guard.tapPauseForRequestId.mockResolvedValueOnce(true);
+    const provider = jest.fn(async () => ({ sent: true }));
+    expect(await dispatchReviewAsk('customer', provider, { clickAskId: 'rr-2' })).toMatchObject({ sent: false, blocked: true, code: 'REVIEW_LINK_CLICKED' });
+    expect(provider).not.toHaveBeenCalled();
   });
 
   test('a busy or failed lock still sends the completion, with the line dropped', async () => {

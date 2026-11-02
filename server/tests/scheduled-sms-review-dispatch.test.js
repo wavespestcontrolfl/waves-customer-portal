@@ -19,6 +19,7 @@ jest.mock('../services/messaging/deferred-replay-registry', () => ({
 }));
 jest.mock('../services/review-click-guard', () => ({
   askIdSuppressedByClick: jest.fn(async () => false),
+  tapPauseForRequestId: jest.fn(async () => false),
   REVIEW_LINK_CLICKED_REASON: 'already tapped',
 }));
 const db = require('../models/db');
@@ -328,6 +329,26 @@ test('a tracked click since the visit drops ONLY the bundled review suffix: the 
   expect(history.lastDeliveredAskAt).not.toHaveBeenCalled(); // no review-ask spacing dispatch: it is not an ask anymore
   // judged by the bundled request id while the review-send lock was held
   expect(require('../services/review-click-guard').askIdSuppressedByClick).toHaveBeenCalledWith('review-1');
+});
+
+test('GATE_REVIEW_TAP_PAUSE: a paused bundled ask in a deferred completion drops ONLY the review suffix; the completion still sends and the ask is suppressed', async () => {
+  const guard = require('../services/review-click-guard');
+  const completion = 'Your service is complete: https://portal.test/report/abc\nReceipt: https://portal.test/receipt/xyz';
+  row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  // The visit-anchored guard lets a tap from before this visit through; the pause does not.
+  guard.askIdSuppressedByClick.mockResolvedValueOnce(false);
+  guard.tapPauseForRequestId.mockResolvedValueOnce(true);
+  const send = jest.fn(async () => {
+    expect(row.message_body).toBe(completion);
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' };
+  });
+  expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete')).toMatchObject({ sent: true });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(reviewRequest).toMatchObject({ id: 'review-1', status: 'suppressed', scheduled_for: null });
+  expect(guard.tapPauseForRequestId).toHaveBeenCalledWith('review-1');
 });
 
 test('the completion suffix is built from the same sentence the strip matches', () => {

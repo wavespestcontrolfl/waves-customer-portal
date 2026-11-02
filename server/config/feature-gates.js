@@ -7165,6 +7165,15 @@ function reviewAskAtVisitLive() {
   return String(process.env.GATE_REVIEW_ASK_AT_VISIT || '').trim().toLowerCase() === 'true';
 }
 
+// GATE_REVIEW_TAP_PAUSE read at CALL time (owner 2026-11-02, reviews audit D3 "180 days"): 'true' = a customer who
+// tapped a tracked Google review link in the last 180 days gets no AUTOMATIC review ask: a visit enrolls no cadence
+// (enrollPostService, reason tap_pause) and an automatic cadence already running stands down at its next step. Staff
+// can still send the review link by hand (Quick Links, the composer, a cadence a person starts). Off = a tap stops
+// asks only for the visit it answered (services/review-click-guard.js). Unset is the kill, no redeploy.
+function reviewTapPauseLive() {
+  return String(process.env.GATE_REVIEW_TAP_PAUSE || '').trim().toLowerCase() === 'true';
+}
+
 // GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
 // builds", Route Check Everywhere build 3c). The portal assistant's
 // check_availability and the text drafter's city-based OPEN TIMES fallback
@@ -8958,6 +8967,8 @@ function rainoutKeepRainOkLive() {
 module.exports.rainoutKeepRainOkLive = rainoutKeepRainOkLive;
 // GATE_REVIEW_ASK_AT_VISIT reader, on its own line so gate PRs never conflict.
 module.exports.reviewAskAtVisitLive = reviewAskAtVisitLive;
+// GATE_REVIEW_TAP_PAUSE reader, on its own line so gate PRs never conflict.
+module.exports.reviewTapPauseLive = reviewTapPauseLive;
 module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
