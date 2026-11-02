@@ -28590,6 +28590,20 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
       });
     });
   }
+  // A pest-only plan nets its manual credit into the per-application price,
+  // as the other single-service ladders do: the card leads with this price
+  // and lists the credit under it (PriceCard), and the accept bills it,
+  // grossing the invoice line back up by the same slice
+  // (acceptManualDiscountItemization). Left gross, the card showed the
+  // undiscounted price over a "−$X" row and the first application billed it.
+  // A plan with other recurring services keeps pre-credit rows: its credit
+  // is plan-level.
+  const pestOnlyRow = nonPestServices.length === 0 ? perServiceTreatments[0] : null;
+  const manualRecurringAnnual = Number(manualDiscount?.recurringAmount) || 0;
+  if (pestOnlyRow?.displayPrice > 0 && pestOnlyRow.visitsPerYear > 0 && manualRecurringAnnual > 0) {
+    const slice = Math.round((manualRecurringAnnual / pestOnlyRow.visitsPerYear) * 100) / 100;
+    pestOnlyRow.displayPrice = Math.max(0, Math.round((pestOnlyRow.displayPrice - slice) * 100) / 100);
+  }
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
     (sum, row) => sum + (Number.isFinite(row.perTreatment) ? row.perTreatment : 0),
     0,
