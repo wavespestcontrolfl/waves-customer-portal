@@ -1044,6 +1044,31 @@ For a row with `customer_pick_by` set:
   already sent keeps working, and Auto-Dispatch still books an unpicked visit
   after its deadline.
 
+Quick Move "let the customer pick a day" on the reschedule GET (owner 2026-11-01;
+read from `scheduled_services.customer_pick_by`, not behind
+`GATE_QUICKMOVE_CUSTOMER_PICK`, so a link already sent keeps working after a kill;
+`customerPickFields` in `routes/reschedule-public.js`). A visit with the marker
+set and no `window_start` (handed to the customer, waiting) carries
+`customerPick: { pickBy, pickByLabel, deadlinePassed, originalDate,
+originalWindowStart, reasonCode }`: `pickBy` is the marker as an ISO instant,
+`pickByLabel` its ET wording ("Wed, Nov 4 at 8 PM"), `deadlinePassed` is
+`now >= pickBy`, and the other three come from the visit's newest
+`reschedule_log` row with `reason_code = 'customer_pick'` (`original_date`,
+`original_window`'s start as `HH:MM`, and the Quick Move reason code the
+hand-off writes in `notes`; a `notes` value that is not a Quick Move reason
+code reads as `null`). No such row, or a failed read: those three are `null`. For a waiting visit
+`buildAvailabilityForService` asks for up to 6 curated `availability.slots`
+(one per date, `curateSlots`' opt-in count) on the GET, `find-slots` and the
+`SLOT_TAKEN` refresh; every other visit and every other caller keeps 4, and
+`days` is unchanged. A visit with the marker, a `window_start` and a
+`last_auto_dispatch_at` later than the marker (Auto-Dispatch booked it after
+the deadline; its placement keeps the marker) carries `autoPlacedFromPick: {
+from: { date, windowStart } | null, to: { date, windowStart } }` (`from` = that
+log row's original slot, `null` without a row; `to` = the visit now). Both keys
+are OMITTED for every other visit (no extra query) and when building them
+throws; the POST is unchanged (a pick is a single-visit move and clears the
+marker).
+
 Lawn rounds on the public reschedule link (owner 2026-10-28, `lawn_rounds_9`;
 no gate, inert until a visit carries that pattern; every other pattern is
 byte-identical). A `lawn_rounds_9` visit has one visit in each of nine fixed

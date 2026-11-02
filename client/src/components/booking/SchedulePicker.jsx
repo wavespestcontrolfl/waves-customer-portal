@@ -126,10 +126,11 @@ function SectionTitle({ children, aside }) {
   );
 }
 
-// Route-ranked top picks. The ranked list is already sorted by the slot
-// engine's score (detour minutes + days-out) — surfacing it is the whole
-// point. Copy stays privacy-safe: never another customer's name or address.
-export function PickerBestTimes({ slots, days, onPick, frame }) {
+// The ranked recommendations matched to their day panel rows, best first:
+// [{ s: panelSlot, day, i, tier, nearby, rank }]. PickerBestTimes shows the
+// first three; the reschedule page's customer-pick card (ScheduleFlowPage)
+// lists more and books the first for "you pick for me".
+export function rankBestTimes(slots, days) {
   const byDate = new Map((days || []).map((d) => [d.date, d]));
   // Only recommend slots the day panel actually renders — the ranked list
   // and days[].slots are built separately server-side, and a pick with no
@@ -153,7 +154,7 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
   // first). Estimate's SlotPicker never sets `s.rank` at all, so it always
   // falls through to `panelSlot.rank` unchanged either way.
   const rankOf = (panelSlot, s) => [s.rank, panelSlot.rank].find(Number.isFinite) ?? null;
-  const picks = (slots || [])
+  return (slots || [])
     .map((s, i) => {
       const day = s.date ? byDate.get(s.date) : null;
       // slotId first (two technicians can share a date + start), else time.
@@ -168,8 +169,14 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
     .sort((a, b) => (a.tier - b.tier)
       || (Number(b.nearby) - Number(a.nearby))
       || ((a.rank != null && b.rank != null) ? a.rank - b.rank : 0)
-      || (a.i - b.i))
-    .slice(0, 3);
+      || (a.i - b.i));
+}
+
+// Route-ranked top picks. The ranked list is already sorted by the slot
+// engine's score (detour minutes + days-out) — surfacing it is the whole
+// point. Copy stays privacy-safe: never another customer's name or address.
+export function PickerBestTimes({ slots, days, onPick, frame }) {
+  const picks = rankBestTimes(slots, days).slice(0, 3);
   if (!picks.length) return null;
   return (
     <Section frame={frame}>

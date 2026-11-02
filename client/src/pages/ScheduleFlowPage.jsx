@@ -38,7 +38,8 @@ import { estimateCard } from '../components/estimate/cardStyles';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
-import SchedulePicker, { sameSlot } from '../components/booking/SchedulePicker';
+import SchedulePicker, { sameSlot, rankBestTimes, SchedulePickerStyles } from '../components/booking/SchedulePicker';
+import { etParts } from '../lib/timezone';
 import VisitPrepPhotoForm from '../components/visit-prep/VisitPrepPhotoForm';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -767,11 +768,231 @@ function MoveLimitNote({ moveLimit }) {
   );
 }
 
-function RescheduleHero({ data, selectedSlot }) {
-  const current = data?.current || {};
-  const move = data.weatherMove;
+// ── Quick Move "let the customer pick a day" (owner 2026-11-01) ─────────
+// payload.customerPick: the office or a technician handed this visit to the
+// customer. It has no time until they pick one here, by the pick-by time, or
+// Auto-Dispatch books it overnight. The hero asks for the pick, a card lists
+// up to 6 route-fit times, and the full picker waits behind "See all open
+// times". payload.autoPlacedFromPick: nobody picked and Auto-Dispatch booked
+// it; the hero says so above the usual page. New copy uses the service name
+// exactly as stored (owner ruling: never lower-cased).
+
+const PICK_H2 = { margin: 0, fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.15, color: S.text };
+// NextVisitNote's orange, for the pick-by time that already passed.
+const LATE_NOTE = {
+  background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
+  padding: '10px 12px', fontSize: 14, color: '#9A3412', lineHeight: 1.5,
+};
+const NOTE_ROW = { marginTop: 14, display: 'flex', gap: 8, alignItems: 'flex-start' };
+const PICK_CHIP_LIMIT = 6;
+const MOVE_AGAIN_COPY = 'Use this same link to move it again, up to a day before your visit.';
+const MOVE_AGAIN_STYLE = { fontSize: 16, color: S.body, lineHeight: 1.6, marginTop: 12 };
+const WE_PICK_BUTTON = {
+  display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', minHeight: 48,
+  marginTop: 16, padding: '0 16px', borderRadius: 10, border: `1px solid ${S.softBorder}`,
+  background: S.soft, color: S.text, font: 'inherit', fontSize: 16, fontWeight: 600,
+  textAlign: 'center', cursor: 'pointer',
+};
+const SEE_ALL_BUTTON = {
+  display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', minHeight: 44,
+  marginTop: 8, padding: 0, border: 0, background: 'transparent', color: COLORS.glassNavy,
+  font: 'inherit', fontSize: 14, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer',
+};
+const BUSY = { opacity: 0.6, cursor: 'default' };
+
+// "8 PM": the pick-by instant's ET hour (the hand-off sets 8 PM).
+function pickByHourLabel(pickBy) {
+  const at = new Date(pickBy);
+  if (Number.isNaN(at.getTime())) return '8 PM';
+  const { hour, minute } = etParts(at);
+  return `${hour % 12 || 12}${minute ? `:${String(minute).padStart(2, '0')}` : ''} ${hour >= 12 ? 'PM' : 'AM'}`;
+}
+
+function customerPickHeading(pick, name, service) {
+  if (pick.deadlinePassed) return `Hi ${name} — you can still pick a time.`;
+  const weatherLead = WEATHER_MOVE_LEADS[pick.reasonCode];
+  if (weatherLead) return `Hi ${name} — ${weatherLead} ${service}. Pick a new time.`;
+  const scheduleLead = SCHEDULE_MOVE_LEADS[pick.reasonCode];
+  if (scheduleLead) return `Hi ${name} — ${scheduleLead}, so we need to move your ${service}. Pick a new time.`;
+  // No reason on the hand-off row: no weather or schedule claim.
+  return `Hi ${name} — we need to move your ${service}. Pick a new time.`;
+}
+
+function PickByNote({ pick }) {
+  if (pick.deadlinePassed) {
+    return (
+      <div data-glass="soft" data-testid="pick-by-note" style={{ ...LATE_NOTE, ...NOTE_ROW }}>
+        <Icon name="clock" size={16} style={{ marginTop: 2 }} />
+        <span>The pick-by time passed at {pickByHourLabel(pick.pickBy)}. Overnight we’ll book the best open time for you and text you 3 days before.</span>
+      </div>
+    );
+  }
+  return (
+    <div data-glass="soft" data-testid="pick-by-note" style={{ ...SOFT_NOTE, ...NOTE_ROW }}>
+      <Icon name="clock" size={16} style={{ marginTop: 2, color: S.text }} />
+      <span>
+        <strong style={{ color: S.text }}>Pick by {pick.pickByLabel}.</strong> If we don’t hear from you, we’ll book the best open time on our route and text you 3 days before.
+      </span>
+    </div>
+  );
+}
+
+// Replaces the reschedule hero while the visit waits for the customer's pick,
+// before and after the pick-by time.
+function CustomerPickHero({ data }) {
+  const pick = data.customerPick;
+  const service = data.service?.type || 'service';
+  return (
+    <div style={{ margin: '8px 2px 20px' }}>
+      <div data-gt="eyebrow" style={DOC_EYEBROW}>
+        {WEATHER_MOVE_LEADS[pick.reasonCode] ? 'Moved for weather' : 'Schedule update'}
+      </div>
+      <h2 style={PICK_H2}>{customerPickHeading(pick, data.customerFirstName || 'there', service)}</h2>
+      <div data-testid="pick-intro" style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
+        {pick.originalDate ? (
+          <>
+            Your <strong style={{ color: S.text }}>{service}</strong> visit was set
+            for <strong style={{ color: S.text }}>{formatDateLabel(pick.originalDate)}</strong>.{' '}
+          </>
+        ) : null}
+        {pick.deadlinePassed
+          ? 'Nothing is booked yet, so any time below is still yours to take.'
+          : 'Tap a time below to book it — it’s confirmed right away.'}
+      </div>
+      <PickByNote pick={pick} />
+      <MoveLimitNote moveLimit={data.moveLimit} />
+    </div>
+  );
+}
+
+// Nobody picked and Auto-Dispatch booked the visit: the hero says so, then the
+// move as Was / Now rows (chips only when the payload carries chances).
+// Nothing when the payload has no autoPlacedFromPick.
+function AutoPlacedHero({ data }) {
+  const placed = data.autoPlacedFromPick;
+  if (!placed) return null;
+  const heading = `Hi ${data.customerFirstName || 'there'} — we didn’t hear back, so we scheduled your ${data.service?.type || 'service'} for you.`;
   return (
     <>
+      <div style={{ margin: '8px 2px 20px' }}>
+        <div data-gt="eyebrow" style={DOC_EYEBROW}>Scheduled for you</div>
+        <h2 style={PICK_H2}>{heading}</h2>
+      </div>
+      <Card data-testid="auto-placed-move">
+        {placed.from?.date ? (
+          <WeatherMoveRow label="Was" date={placed.from.date} windowStart={placed.from.windowStart} chance={placed.fromChance} isNow={false} />
+        ) : null}
+        <WeatherMoveRow label="Now" date={placed.to?.date} windowStart={placed.to?.windowStart} chance={placed.toChance} isNow />
+      </Card>
+    </>
+  );
+}
+
+// "Times that fit our route": up to 6 ranked times shown in date order, each one
+// tap to book; "you pick for me" books the best-ranked one; "See all open
+// times" reveals the Ask card and the full picker below. The page's confirm()
+// does every commit, so its errors and SLOT_TAKEN refresh apply unchanged.
+function CustomerPickTimesCard({ ranked, submitting, error, showError, onBook, onWePick, seeAllOpen, onSeeAll }) {
+  const [tapped, setTapped] = useState(null);
+  const chips = ranked.slice(0, PICK_CHIP_LIMIT)
+    .sort((a, b) => a.day.date.localeCompare(b.day.date) || String(a.s.start_time).localeCompare(String(b.s.start_time)));
+  const book = (key, pick, commit) => {
+    setTapped(key);
+    commit({ ...pick.s, date: pick.day.date, fullDate: pick.day.fullDate });
+  };
+  const busyLabel = (key, label) => (submitting && tapped === key ? 'Booking…' : label);
+  return (
+    <Card data-testid="customer-pick-times">
+      <SchedulePickerStyles />
+      <CardTitle>Times that fit our route</CardTitle>
+      <div className="wpk-intro">These fit our route near you best — easiest for everyone. Tap one to book it.</div>
+      {showError && error ? <div className="wpk-error" role="alert">{error}</div> : null}
+      <div className="wpk-best-row">
+        {chips.map((pick) => {
+          const key = `${pick.day.date}|${pick.s.start_time}`;
+          const arrival = arrivalWindowLabel(pick.s.start_time);
+          return (
+            <button
+              type="button"
+              data-glass="chip"
+              className="wpk-best-chip"
+              key={key}
+              aria-label={`Book ${formatDateLabel(pick.day.date)}, arrival ${arrival}`}
+              disabled={submitting}
+              onClick={() => book(key, pick, onBook)}
+              style={submitting ? BUSY : undefined}
+            >
+              <span>
+                <span className="wpk-best-when">{formatDateLabel(pick.day.date)}</span>
+                <span className="wpk-best-why">Arrival {arrival}</span>
+              </span>
+              <span className="wpk-best-go">{busyLabel(key, `Book ${'→'}`)}</span>
+            </button>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        data-glass="chip"
+        disabled={submitting}
+        onClick={() => book('we-pick', ranked[0], onWePick)}
+        style={submitting ? { ...WE_PICK_BUTTON, ...BUSY } : WE_PICK_BUTTON}
+      >
+        {busyLabel('we-pick', 'Any of these work — you pick for me')}
+      </button>
+      {seeAllOpen ? null : (
+        <button type="button" onClick={onSeeAll} style={SEE_ALL_BUTTON}>See all open times</button>
+      )}
+    </Card>
+  );
+}
+
+// The waiting page's view: the ranked times its card lists, and whether the full
+// picker shows (after "See all open times", or at once when there is no time to
+// list, so EmptyTimesCard shows as on any page). Null for every other page.
+function customerPickView(flow, data, seeAll) {
+  if (flow !== 'reschedule' || !data?.customerPick) return null;
+  const ranked = rankBestTimes(data.availability?.slots, data.availability?.days);
+  return { ranked, showPicker: seeAll || ranked.length === 0 };
+}
+
+// The reschedule hero's story. An Auto-Dispatch booking after a hand-off is the
+// newer one, so it leads over a weather move; either way the hero below
+// reframes, because the visit already has its time.
+function rescheduleHeroStory(data) {
+  const placed = data.autoPlacedFromPick || null;
+  const move = placed ? null : data.weatherMove;
+  return { move, reframed: !!(move || placed) };
+}
+
+// "Our best times for you": hidden while an AI search narrows the calendar
+// (except under the re-service rank profile; see the comment at the prop) and
+// on a page waiting for the customer's pick, whose times card already lists
+// the ranked times.
+function pickerRankedSlots(availability, aiFiltered, pickView) {
+  if (pickView || (aiFiltered && availability?.rank_profile !== 'reservice')) return null;
+  return availability?.slots;
+}
+
+// Renders the page's picker block (children) unchanged when there is no view.
+function CustomerPickGate({ view, cardProps, children }) {
+  if (!view) return children;
+  return (
+    <>
+      {view.ranked.length ? <CustomerPickTimesCard ranked={view.ranked} {...cardProps} /> : null}
+      {view.showPicker ? children : null}
+    </>
+  );
+}
+
+function RescheduleHero({ data, selectedSlot }) {
+  // Quick Move customer pick: a visit waiting for the pick gets its own hero.
+  if (data.customerPick) return <CustomerPickHero data={data} />;
+  const current = data?.current || {};
+  const { move, reframed } = rescheduleHeroStory(data);
+  return (
+    <>
+      <AutoPlacedHero data={data} />
       {move ? (
         <div style={{ margin: '8px 2px 20px' }}>
           {/* The move's classification stays, as the eyebrow (no chip —
@@ -788,7 +1009,7 @@ function RescheduleHero({ data, selectedSlot }) {
       ) : null}
       <WeatherMoveBanner move={move} serviceType={data.service?.type} />
       <div style={{ margin: '8px 2px 20px' }}>
-        {move ? (
+        {reframed ? (
           <h2 style={{ margin: 0, fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.15, color: S.text }}>
             Want a different time instead?
           </h2>
@@ -801,7 +1022,7 @@ function RescheduleHero({ data, selectedSlot }) {
           </>
         )}
         <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
-          {move ? (
+          {reframed ? (
             <>
               Your new time is confirmed — nothing else to do. Or pick any
               open time below and we&apos;ll move it again.
@@ -831,7 +1052,10 @@ function RescheduleHero({ data, selectedSlot }) {
   );
 }
 
-function RescheduleSuccessCard({ result, service }) {
+// A pick for a visit that was waiting for one (payload.customerPick) adds how to
+// move it again; "you pick for me" (result.wePicked) says we chose the time.
+function RescheduleSuccessCard({ result, service, waitingPick = false }) {
+  if (result.wePicked) return <WePickedSuccessCard result={result} />;
   return (
     <Card>
       <CardTitle>You&apos;re all set</CardTitle>
@@ -844,6 +1068,21 @@ function RescheduleSuccessCard({ result, service }) {
           : ' We also shifted your upcoming visits to follow the new date — your regular schedule now runs from this one.') : ''}
         {' '}We&apos;ll text you a confirmation shortly.
       </div>
+      {waitingPick ? <div style={MOVE_AGAIN_STYLE}>{MOVE_AGAIN_COPY}</div> : null}
+    </Card>
+  );
+}
+
+function WePickedSuccessCard({ result }) {
+  return (
+    <Card>
+      <CardTitle>You’re all set</CardTitle>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
+        We picked <strong style={{ color: S.text }}>{formatDateLabel(result.newDate)}</strong>, arrival
+        window <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
+        {' '}It’s the best fit on our route near you. We’ll text you a confirmation shortly.
+      </div>
+      <div style={MOVE_AGAIN_STYLE}>{MOVE_AGAIN_COPY}</div>
     </Card>
   );
 }
@@ -1457,7 +1696,7 @@ const FLOWS = {
     // A card when the loaded state cannot proceed to the picker, else null.
     blocked: (data) => (data?.state !== 'reschedulable' ? <IneligibleCard data={data} /> : null),
     Hero: RescheduleHero,
-    Success: ({ result, data }) => <RescheduleSuccessCard result={result} service={data?.service} />,
+    Success: ({ result, data }) => <RescheduleSuccessCard result={result} service={data?.service} waitingPick={!!data?.customerPick} />,
     canConfirm: () => true,
     actionLabel: ({ submitting }) => (submitting ? 'Moving…' : `Confirm ${'→'}`),
     payload: ({ slot, data }) => ({
@@ -1655,8 +1894,12 @@ export default function ScheduleFlowPage({ flow }) {
   // The ?slot= preselect's own pick (EmailPickCard). Cleared the moment the
   // customer taps any other time; a search that keeps the pick keeps it.
   const [emailPick, setEmailPick] = useState(null);
-  // Set when the commit ran from EmailPickCard, so its error shows there.
+  // Set when the commit ran from EmailPickCard, so its error shows there. The
+  // customer-pick times card uses it the same way.
   const [bookedFromTop, setBookedFromTop] = useState(false);
+  // Reschedule, a visit waiting for the customer's pick: "See all open times"
+  // was tapped, so the Ask card and the full picker show under the times card.
+  const [seeAllTimes, setSeeAllTimes] = useState(false);
   const pickerRef = useRef(null);
   // The "we moved you" note describes the emailed pick only — it goes
   // whenever that pick does (another time picked, search dropped it,
@@ -1915,7 +2158,9 @@ export default function ScheduleFlowPage({ flow }) {
   // The slot is explicit: the inline Book passes the selection, EmailPickCard
   // its own emailed time — still bookable after the customer browsed another
   // day (which clears the selection). fromTop routes errors to that card.
-  const confirm = async (slotToBook, fromTop) => {
+  // resultMarks rides into the success result ({ wePicked: true } from the
+  // customer-pick card's "you pick for me").
+  const confirm = async (slotToBook, fromTop, resultMarks) => {
     if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
     setBookedFromTop(fromTop);
     setSubmitting(true);
@@ -1929,7 +2174,7 @@ export default function ScheduleFlowPage({ flow }) {
       });
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
-        setResult(body);
+        setResult({ ...body, ...resultMarks });
         return;
       }
       // Inspection only: the geocoded address falls outside the service
@@ -2044,6 +2289,8 @@ export default function ScheduleFlowPage({ flow }) {
   const blockedLanes = lanes.filter((l) => l.alreadyBooked);
   const days = data?.availability?.days || [];
   const selectedDay = days.find((d) => d.date === selectedDate) || days[0] || null;
+  // Reschedule, a visit waiting for the customer's pick (payload.customerPick).
+  const pickView = customerPickView(flow, data, seeAllTimes);
 
   return (
     // Single column at every width (owner ask 2026-07-14) — the page keeps
@@ -2106,6 +2353,20 @@ export default function ScheduleFlowPage({ flow }) {
       {blockedLanes.map((lane) => (
         <AlreadyBookedCard key={lane.key} lane={lane} />
       ))}
+      {/* A visit waiting for the customer's pick: the times card first, and the
+          block below (kept at its old indent) only after "See all open times". */}
+      <CustomerPickGate
+        view={pickView}
+        cardProps={{
+          submitting,
+          error: submitError,
+          showError: bookedFromTop,
+          onBook: (slot) => confirm(slot, true),
+          onWePick: (slot) => confirm(slot, true, { wePicked: true }),
+          seeAllOpen: seeAllTimes,
+          onSeeAll: () => setSeeAllTimes(true),
+        }}
+      >
       {flow === 'reservice' && !selectedLane ? (
         <Card><p style={{ margin: 0, fontSize: 14, color: S.body }}>Choose a service above to see available times.</p></Card>
       ) : (<>
@@ -2128,7 +2389,10 @@ export default function ScheduleFlowPage({ flow }) {
           // so the kill switch genuinely restores the old post-search UI
           // instead of leaving this exception permanently on for the route
           // (pre-push audit r3 P1 on #4926).
-          rankedSlots={(aiFiltered && data?.availability?.rank_profile !== 'reservice') ? null : data?.availability?.slots}
+          // A visit waiting for the customer's pick lists its ranked times in
+          // the card above, so the strip would only repeat them
+          // (pickerRankedSlots).
+          rankedSlots={pickerRankedSlots(data?.availability, aiFiltered, pickView)}
           selectedDate={selectedDay?.date || null}
           onSelectDay={(date) => {
             setSelectedDate(date);
@@ -2173,6 +2437,7 @@ export default function ScheduleFlowPage({ flow }) {
           )}
         />
       </>)}
+      </CustomerPickGate>
       {flow === 'reservice' && data?.location_review_required
         ? null
         : <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>}

@@ -623,3 +623,36 @@ describe('buildBookingAvailability — rankProfile: reservice (end to end)', () 
     expect(emptyFirst.slots.map((s) => s.technician_id)).toEqual(['tech-packed']);
   });
 });
+
+// Quick Move "let the customer pick a day" (owner 2026-11-01): the curated list's
+// size is an opt-in count. Only the reschedule page asks for more (6, for a visit
+// waiting for the customer's pick, reschedule-public.js pickSlotCount); every other
+// caller keeps 4, one per date. The re-service strip keeps its own at-most-3.
+describe('curated best-times count (opt-in bestSlotCount)', () => {
+  const dates = [10, 11, 12, 13, 14, 15, 16].map((n) => dayOffset(n));
+
+  test('curateSlots: 4 by default, the count when asked, one per date, in date order', () => {
+    const candidates = dates.map((date, i) => ({ date, start_time: i % 2 ? '14:00' : '09:00', score: i + 1, rank: i + 1 }));
+    expect(curateSlots(candidates, NOW).map((s) => s.date)).toEqual(dates.slice(0, 4));
+    expect(curateSlots(candidates, NOW, 6).map((s) => s.date)).toEqual(dates.slice(0, 6));
+    // Fewer dates than the count: every date once, no padding.
+    expect(curateSlots(candidates.slice(0, 3), NOW, 6)).toHaveLength(3);
+  });
+
+  test('buildBookingAvailability: unset keeps 4; bestSlotCount 6 returns 6; days[] is the same either way', async () => {
+    const slots = dates.map((date, i) => capacitySlot(date, { score: i + 1, startTime: i % 2 ? '14:00' : '10:00' }));
+    const byDefault = await build(slots, {});
+    const six = await build(slots, { bestSlotCount: 6 });
+    expect(byDefault.slots.map((s) => s.date)).toEqual(dates.slice(0, 4));
+    expect(six.slots.map((s) => s.date)).toEqual(dates.slice(0, 6));
+    expect(stripSig(six.days)).toEqual(stripSig(byDefault.days));
+  });
+
+  test('the re-service profile ignores the count (its strip stays at most 3)', async () => {
+    await withGate('true', () => {
+      const candidates = dates.map((date, i) => ({ date, start_time: '10:00', score: i + 1, rank: i + 1, stops_that_day: 2, idle_minutes: 0, slot_sig: `sig-${i}` }));
+      const result = applyReserviceProfile({ rankProfile: 'reservice', candidates, today: NOW, totalFeasible: 7, bestSlotCount: 6 });
+      expect(result.slots).toHaveLength(3);
+    });
+  });
+});

@@ -110,7 +110,7 @@ describe('GET /schedule/properties-next', () => {
       const body = await (await fetch(`${base}/schedule/properties-next`)).json();
       for (const p of body.properties) {
         expect(Object.keys(p).sort()).toEqual(['customerId', 'key', 'next', 'propertyId']);
-        if (p.next) expect(Object.keys(p.next).sort()).toEqual(['customerConfirmed', 'date', 'id', 'serviceType', 'status', 'windowEnd', 'windowStart']);
+        if (p.next) expect(Object.keys(p.next).sort()).toEqual(['customerConfirmed', 'customerPickBy', 'date', 'id', 'serviceType', 'status', 'windowEnd', 'windowStart']);
       }
     });
   });
