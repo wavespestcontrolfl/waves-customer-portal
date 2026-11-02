@@ -3298,6 +3298,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
       // refused below once GATE_FAST_COMPLETE_WRAP_UP is off. Absent on the full form.
       wrapUpReviewAsk,
+      // The tech's answer to each thing the customer told us on a pest / lawn re-service (GATE_RESERVICE_ASKS,
+      // services/reservice-answers.js). Read only below, once the gate, the visit and the outcome are known.
+      reserviceAnswers,
       reviewTiming,
       reviewScheduledFor,
       oneTimeRecapOnly = false,
@@ -3971,6 +3974,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       fixedRequested: reserviceFixedRecapRequested,
       fixedHonored: reserviceFixedRecap,
     });
+    // Re-service asks (GATE_RESERVICE_ASKS): a pest / lawn re-service completed as performed (visitOutcome exactly
+    // 'completed', what every Fast Complete sheet posts) on a live (not backdated) closeout carries the tech's answers
+    // and freezes what the customer told us. An inspection, a decline or any other outcome ignores the field, so no
+    // record can say "We treated it" for a visit that treated nothing. One predicate (reservice-asks
+    // isReserviceVisit) decides "a re-service", never the rodent trapping follow-up. Gate off: the field is never read.
+    // The answers are checked after the attempt claim, beside the tips check (see below).
+    const reserviceAsksWanted = require('../config/feature-gates').reserviceAsksLive()
+      && visitOutcome === 'completed' && !isIncompleteVisit && !isBackfillCompletion
+      && require('./reservice-asks').isReserviceVisit({
+        is_callback: svc.is_callback === true, service_key: completionProfile?.serviceKey,
+      });
+    let reserviceAnswersChecked = [];
     // Station cap must reject BEFORE the completion commits: the typed
     // counts were auto-filled from every pin the tech can see, so a pin
     // silently dropped later by the fail-soft sync's cap guard would freeze
@@ -5092,6 +5107,39 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       if (recheckOutcome && recheckOutcome.legacyVisitId) {
         legacyVisitToDissolve = recheckOutcome.legacyVisitId;
+      }
+    }
+
+    // What the customer told us, read ONCE before the completion transaction (read-only). Only a fresh run gathers: a
+    // replay returns its stored result and a crash-resume finds the record already frozen, so neither can change what a
+    // committed completion stored. A failed read is logged and means no freeze, never a refusal. The tech's answers are
+    // checked first, deferred like the tips check below: a wrong answer (a product not on this visit, banned customer
+    // copy in a typed answer) is an actionable 400 for a FRESH attempt, before any write; a same-key replay or a resume
+    // keeps returning its stored result even if the copy rules changed since.
+    let reserviceAsksGathered = null;
+    let reserviceAsksGatheredAt = null;
+    // The block the completion froze (set inside the transaction below; a rolled-back attempt never reaches the bell).
+    let reserviceAsksFrozen = null;
+    if (reserviceAsksWanted && claim.action === 'proceed') {
+      const checked = require('./reservice-answers').validateReserviceAnswers(reserviceAnswers, {
+        productIds: [...(Array.isArray(products) ? products.map((p) => p?.productId) : []), ...(productIdsAsSubmitted || [])],
+      });
+      if (!checked.ok) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error('reservice_answer_invalid'),
+          db,
+        );
+        return ({ status: 400, body: { error: checked.error, code: 'reservice_answer_invalid' } });
+      }
+      reserviceAnswersChecked = checked.answers;
+      try {
+        reserviceAsksGatheredAt = new Date();
+        const gathered = await require('./reservice-asks').gatherReserviceAsks(svc.id, { now: reserviceAsksGatheredAt });
+        if (gathered?.ok) reserviceAsksGathered = gathered;
+        else logger.warn(`[completion] re-service asks not gathered for ${svc.id}: ${gathered?.reason || 'unknown'}`);
+      } catch (asksErr) {
+        logger.error(`[completion] re-service asks gather failed for ${svc.id}: ${asksErr.message}`);
       }
     }
 
@@ -7626,6 +7674,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             : require('../services/service-report/reservice-report-card')
               .freezeReserviceRequest(lockedSvcRow || svc);
           if (frozenReserviceRequest) serviceData.reserviceRequest = frozenReserviceRequest;
+          // Re-service asks (GATE_RESERVICE_ASKS): what the customer told us, as gathered before this transaction, and the
+          // tech's checked answers freeze together, even with no answers (the record keeps what the customer said). Same
+          // backfill rule as above; gate off, or a failed gather: no key.
+          if (reserviceAsksGathered && !isBackfillCompletion) {
+            const asksFreeze = require('./reservice-answers').buildReserviceAsksFreeze({
+              gathered: reserviceAsksGathered, answers: reserviceAnswersChecked, gatheredAt: reserviceAsksGatheredAt,
+            });
+            if (asksFreeze.dropped) logger.warn(`[completion] visit ${svc.id}: ${asksFreeze.dropped} re-service answer(s) named an ask that was not gathered and were dropped`);
+            serviceData.reserviceAsks = asksFreeze.freeze;
+            reserviceAsksFrozen = asksFreeze.freeze;
+          }
           // Freeze the appointment's add-on line identities with the
           // completion (codex P2 on #3189): schedule add-on rows are
           // MUTABLE after completion (the update-details route replaces
@@ -9295,6 +9354,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // execution we can now run best-effort follow-up alerts and tracking;
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
+
+    // The re-service office bell (GATE_RESERVICE_ASKS, step S3b): one bell for what the tech marked "Not today" and the
+    // customer messages that belong to the office. It reads the freeze the completion COMMITTED: this run's own on a
+    // fresh run, or the saved record's on a resume. A resume is how a packet's effects phase runs, and how a fresh run
+    // that returned early before this point (a street-level hold that failed to release) is retried, so every
+    // completion that reaches here rings; the bell's dedupe key holds a retry or a resume to one row. It sits first
+    // after the commit, ahead of the resumable early returns below. Fire and forget: the bell never throws, and nothing
+    // here waits on it, so it cannot fail, delay or change the completion.
+    const committedReserviceAsks = reserviceAsksFrozen
+      || (resumingCommittedCompletion && require('../config/feature-gates').reserviceAsksLive()
+        ? parseJsonObject(record?.service_data)?.reserviceAsks || null
+        : null);
+    if (committedReserviceAsks) {
+      Promise.resolve(require('./reservice-office-bell').raiseReserviceOfficeBell({
+        freeze: committedReserviceAsks,
+        customer: { id: svc.customer_id, first_name: svc.first_name, last_name: svc.last_name },
+        scheduledServiceId: svc.id,
+        serviceRecordId: record?.id ?? null,
+        scheduledDate: svc.scheduled_date,
+      })).catch((bellErr) => logger.warn(`[completion] re-service office bell failed (${bellErr?.code || 'error'})`));
+    }
 
     // Backfill survives resume via its own structured_notes freeze — and the
     // freeze decides in BOTH directions (Codex P2 ×2, PR #2897 fix round 5):

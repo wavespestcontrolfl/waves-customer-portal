@@ -67,7 +67,7 @@ const { compilePropertyAlerts } = require('./nextstop-alerts');
 // The shared deterministic access-code redactor (context-aggregator's own
 // layer) — re-applied here to EVERY free-text slice at the LLM boundary.
 const { redactAccessCodes, customerSafeVisitNotes } = require('./context-aggregator');
-const { normalizeServiceType, stripServiceSuffixes, detectServiceCategory } = require('../utils/service-normalizer');
+const { normalizeServiceType, stripServiceSuffixes, detectServiceCategory, hasCompletedVisit } = require('../utils/service-normalizer');
 const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 
 // Exact stored type strings. WDO_BRIEF_TYPE mirrors
@@ -129,9 +129,8 @@ async function deterministicVisitFacts(svc, dbh = db) {
     logger.warn(`[previsit-brief] visit-facts property_preferences unreadable for customer ${svc.customer_id}: ${err.message}`);
   }
   const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
-  // First-visit is a POSITIVE claim (same rule as assembleGrounding):
-  // unreadable history (available:false) asserts nothing.
-  const genuinelyNew = history.available ? !history.last : false;
+  // First-visit is a POSITIVE claim (same rule as assembleGrounding).
+  const genuinelyNew = await firstVisitClaim(dbh, svc.customer_id, history);
   // A prefs OUTAGE yields access: null, never an empty access block — the
   // clients prefer live facts over a cached brief's access, and a truthy
   // codes-cleared block would suppress the valid cached codes. Only a
@@ -305,6 +304,20 @@ const COMPANION_TYPE_LINES = {
 // query FAILURE is not an empty history: available:false marks the history
 // UNREADABLE so no caller can turn an outage into the false fact "this is
 // a first visit" (the new-customer claim is omitted entirely then).
+// First-visit is a POSITIVE claim: it may only be made when the service
+// history was readable and empty AND the schedule holds no completed visit
+// (a visit can close with no service record, owner 2026-11-02). An outage of
+// either lookup asserts nothing: no new-customer alert, no first-visit fact.
+async function firstVisitClaim(dbh, customerId, history) {
+  if (!history.available || history.last) return false;
+  try {
+    return !(await hasCompletedVisit(dbh, customerId));
+  } catch (err) {
+    logger.warn(`[previsit-brief] completed-visit lookup failed for customer ${customerId}: ${err.message}`);
+    return false;
+  }
+}
+
 async function loadRecentServiceRecords(dbh, customerId, serviceType) {
   try {
     const { loadRecentLineServices } = require('../utils/last-line-service');
@@ -903,10 +916,9 @@ async function assembleGrounding(svc, dbh = db) {
     pendingEstimate: context?.pendingEstimate || null,
   };
 
-  // First-visit is a POSITIVE claim: it may only be made when history was
-  // actually readable and empty. An outage (available:false) asserts
-  // nothing — no new-customer alert, no first-visit prompt fact.
-  const genuinelyNew = history.available ? !history.last : false;
+  // First-visit is a POSITIVE claim (firstVisitClaim): no new-customer
+  // alert and no first-visit prompt fact unless both lookups say so.
+  const genuinelyNew = await firstVisitClaim(dbh, svc.customer_id, history);
 
   // Current service opt-outs from the CUSTOMER row —
   // customers.service_preferences is where estimate acceptance persists

@@ -3010,7 +3010,140 @@ export function reserviceCardView(card) {
   };
 }
 
+// "Your re-service" (GATE_RESERVICE_ASKS, owner-approved 2026-11-02): the four
+// numbered cards built on the SERVER from the frozen reserviceAsks block
+// (reservice-asks-report.js), which REPLACES the card above whenever the
+// payload carries it. Every phrase, label, date and quote mark is decided
+// there; this only lays out what the payload says. Shared with the PDF
+// document. null = no (or an unreadable) payload key: nothing renders.
+const textOf = (value) => (typeof value === 'string' ? value.trim() : '');
+
+export function reserviceAsksView(report) {
+  if (!report || typeof report !== 'object' || Number(report.version) !== 1) return null;
+  const told = (Array.isArray(report.told) ? report.told : [])
+    .map((row) => ({ label: textOf(row?.label), words: textOf(row?.words), quoted: row?.quoted === true }))
+    .filter((row) => row.label);
+  const did = (Array.isArray(report.did) ? report.did : [])
+    .map((row) => ({ chip: textOf(row?.chip), subject: textOf(row?.subject), line: textOf(row?.line) }))
+    .filter((row) => row.chip && row.line);
+  const products = (Array.isArray(report.products) ? report.products : [])
+    .map((row) => ({ name: textOf(row?.name), where: textOf(row?.where), how: textOf(row?.how) }))
+    .filter((row) => row.name);
+  if (!told.length) return null;
+  return {
+    title: textOf(report.title) || 'Your re-service',
+    summary: textOf(report.summary),
+    told,
+    did,
+    products,
+    expectation: textOf(report.expectation),
+    topic: textOf(report.stillSeeing),
+  };
+}
+
+function ReserviceAsksCard({ id, step, title, children }) {
+  return (
+    <section data-glass="card" className="sr-section reservice-card" id={id} data-section={id} aria-labelledby={`${id}-title`}>
+      <h3 data-gt="h3x" id={`${id}-title`} className="reservice-card-title">
+        <span className="reservice-step" aria-hidden="true">{step}</span>
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+function ReserviceAsksReport({ data }) {
+  const view = reserviceAsksView(data?.reserviceAsksReport);
+  if (!view) return null;
+  const { title, summary, told, did, products, expectation, topic } = view;
+  const canRebook = data.reserviceEligible === true && Boolean(topic);
+  const cards = [
+    {
+      id: 'reservice-asks-told',
+      title: 'What you told us',
+      body: (
+        <div className="reservice-rows reservice-rows-stacked">
+          {told.map((row, index) => (
+            <div key={`${row.label}-${index}`} data-glass="soft" className="reservice-row">
+              <div data-gt="eyebrow" className="reservice-row-label">{row.label}</div>
+              {row.words && (
+                <div className="reservice-row-value" data-quoted={row.quoted ? 'true' : 'false'}>{row.words}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      ),
+    },
+    did.length > 0 && {
+      id: 'reservice-asks-did',
+      title: 'What we did for each',
+      body: (
+        <div className="reservice-rows reservice-rows-stacked">
+          {did.map((row, index) => (
+            <div key={`${row.subject}-${index}`} data-glass="soft" className="reservice-row">
+              <div className="reservice-did-head">
+                <span data-glass="chip" className="reservice-chip">{row.chip}</span>
+                {row.subject && <span className="reservice-did-subject">{row.subject}</span>}
+              </div>
+              <div className="reservice-row-value">{row.line}</div>
+            </div>
+          ))}
+        </div>
+      ),
+    },
+    products.length > 0 && {
+      id: 'reservice-asks-products',
+      title: 'Products and how they help',
+      body: (
+        <div className="reservice-rows reservice-rows-stacked">
+          {products.map((row, index) => (
+            <div key={`${row.name}-${index}`} data-glass="soft" className="reservice-row">
+              <div className="reservice-did-subject">{row.name}</div>
+              {row.where && <div className="reservice-row-value">{`Where: ${row.where}`}</div>}
+              {row.how && (
+                <>
+                  <div data-gt="eyebrow" className="reservice-row-label reservice-how-label">How it helps</div>
+                  <div className="reservice-row-value">{row.how}</div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      ),
+    },
+    (expectation || canRebook) && {
+      id: 'reservice-asks-expect',
+      title: 'What to expect',
+      body: (
+        <>
+          {expectation && <p className="reservice-card-body">{expectation}</p>}
+          {canRebook && (
+            <div className="reservice-card-cta">
+              <a data-glass-accent="" href="/?tab=schedule" style={actionButtonStyle('primary')}>
+                {`Still seeing ${topic}? Tell us`}
+              </a>
+            </div>
+          )}
+        </>
+      ),
+    },
+  ].filter(Boolean);
+  return (
+    <div id="reservice-asks" data-section="reservice-asks">
+      <section data-glass="card" className="sr-section reservice-card" aria-labelledby="reservice-asks-heading">
+        <h2 data-gt="h3x" id="reservice-asks-heading">{title}</h2>
+        {summary && <p className="reservice-card-body">{summary}</p>}
+      </section>
+      {cards.map((card, index) => (
+        <ReserviceAsksCard key={card.id} id={card.id} step={index + 1} title={card.title}>{card.body}</ReserviceAsksCard>
+      ))}
+    </div>
+  );
+}
+
 export function ReserviceReportCard({ data, mode }) {
+  if (mode === 'live' && data?.reserviceAsksReport) return <ReserviceAsksReport data={data} />;
   const view = mode === 'live' ? reserviceCardView(data?.reserviceReportCard) : null;
   if (!view) return null;
   const {
@@ -7629,6 +7762,49 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .reservice-card-cta {
           margin-top: 4px;
+        }
+        /* "Your re-service" (GATE_RESERVICE_ASKS): numbered cards, one soft
+           row per item, stacked full width so a long line wraps on a phone. */
+        .reservice-card-title {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .reservice-step {
+          display: inline-flex;
+          flex: none;
+          align-items: center;
+          justify-content: center;
+          width: 32px;
+          height: 32px;
+          border-radius: 999px;
+          border: 1px solid var(--line);
+          color: var(--text);
+          font-size: 16px;
+          font-weight: 600;
+        }
+        .reservice-rows-stacked {
+          grid-template-columns: 1fr;
+        }
+        .reservice-did-head {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 8px;
+          margin: 0 0 6px;
+        }
+        .reservice-did-subject {
+          color: var(--text);
+          font-size: 16px;
+          font-weight: 600;
+          line-height: 1.3;
+          overflow-wrap: anywhere;
+        }
+        .reservice-how-label {
+          margin-top: 8px;
+        }
+        .reservice-row-value {
+          overflow-wrap: anywhere;
         }
         .reservice-card-cta a {
           display: inline-flex;

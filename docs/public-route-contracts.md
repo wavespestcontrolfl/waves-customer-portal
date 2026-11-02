@@ -241,6 +241,74 @@ is the pure builder.
 The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
 when the card is present.
 
+Re-service asks report (owner-approved design 2026-11-02, consolidated re-service
+report step S3a; `GATE_RESERVICE_ASKS` — dark, off unless exactly `'true'`, read
+at call time): on the same service-report payload (`/api/reports/:token/data` and
+the PDF, which share `buildReportV1Data`), gate on adds an optional
+`data.reserviceAsksReport` when the record carries a version-2
+`service_records.service_data.reserviceAsks` block (version 2 is the first
+to mark account-wide items; a version-1 freeze never renders) (frozen at completion: pest /
+lawn re-services completed as performed on a live closeout), the report's
+`reserviceReport` copy block, when composed, reads a performed (`treated`)
+outcome, and at least one item shows. When the key is present
+`data.reserviceReportCard` is omitted: the block replaces the card on the web
+page and the PDF. Gate off, no freeze, a not-performed outcome, or nothing to
+show: the key is omitted (never `null`), and the payload, the card and every PDF
+key are byte-identical to before.
+`server/services/service-report/reservice-asks-report.js` is the pure builder.
+Shape: `{ version: 1, title: 'Your re-service', lane, summary, told: [{ label,
+words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
+}], expectation, stillSeeing }`.
+- Which items: an item shows only with a technician answer that is not
+  `hidden`, and only when `officeOnlyReason`
+  (`server/services/reservice-office-only.js`: a health complaint after a
+  treatment or a person or pet that ate, licked, touched or got into our
+  product, damage we caused, money, a
+  complaint about the service, a missed or late visit) passes it: the verdict
+  on the customer's ORIGINAL words is frozen as the item's `officeOnly` (the
+  scrub keeps only pest talk, so it would hide "I want a refund"), and the
+  shown words are screened again. Unless the account provably has one
+  premises (`reservice-property-scope.js`, the shared fail-closed proof in
+  `visit-property-scope.js`), texts, calls and emails name no property and may
+  be about another one: they are frozen `accountWide` and never print; only
+  the visit's own booking words do (an unproven account or a failed read
+  counts as several).
+  The office's not-today reasons (`officeNotes`) are never read; no item ids
+  are exposed.
+- `told`: `label` is `<Source> · <Mon D>` (Eastern date; a question reads
+  `Your question · <Mon D>`); `words` are quoted words in curly quotes, or a
+  call / office lead plus the words. At render they pass the card's own
+  egress screens (a sentence saying where a key, lockbox, remote or fob is, or
+  making any pesticide-safety claim, is dropped; a third-person paraphrase
+  never sits under a lead), then a private-topic rule (a sentence that names a
+  pet or another person, a bait, poison, granule, dust, gel, station or trap,
+  or a health or safety word is dropped, whatever the office-only screen
+  found), and then `customerCopyViolations`; `null` (label only) when the
+  frozen item is not `printable` or nothing passes. The technician's own
+  answer keeps only the card's screens.
+- `did`: one row per shown item, in card 1's order. `subject` names the
+  message: card 1's label plus its first six printed words ("Text · Oct 30 ·
+  “Ants are back in the kitchen”"; a label-only message keeps its label).
+  The line is fixed wording from the technician's tap: `Treated` (`We treated it
+  with <products>.` from the record's product rows the answer names, plus
+  `Where: …` on lawn reports only, since pest reports name no treated areas,
+  owner 2026-10-05), `Checked`, `Noted`, `Follow-up` (`We will follow up on
+  this one.`) or `Answered` (the technician's sentence, re-screened at render
+  with the same egress screens; it prints whole or its row is dropped).
+- `products`: the visit's product rows once each (termite and rodent
+  monitoring stations and bait left out), `where` on lawn reports only, and `how` = the approved
+  `how_it_works` line (`report-product-copy.js`) only while
+  `GATE_REPORT_PRODUCT_COPY` is on. The report's standard products section is
+  unchanged.
+- `expectation`: the copy block's expectation line, or `null`. `stillSeeing`:
+  the card's topic rule and the same `/?tab=schedule` button rule (live view
+  only, `reserviceEligible === true`; no token or new route).
+The PDF prints the four cards (no button). Its cache key part `-ras1` (`-ras1p`
+with `GATE_REPORT_PRODUCT_COPY` on) takes the card's `-rcd1` place, and stands
+alone when the copy block is `null`; the render fence
+(`reserviceCardRenderFence`) appends `|asks:0` / `|asks:1` only while the gate
+is on.
+
 **Owner 2026-10-05: the `rain` key and the `pestWeekWeatherUncacheable` /
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
@@ -3270,8 +3338,7 @@ test, or watering, rain or mowing guidance, and never ordinal or sequence
 wording (first, final, again, re-check) since a customer may join mid-year.
 A visit on a 9-visit rounds series gets the sentence for its lawn round instead
 of its month: when the visit's linked scheduled row has `recurring_pattern`
-`lawn_rounds_9` (only `GATE_LAWN_9X_ROUNDS` creates such rows; nothing here reads
-that gate), the round (1 to 9) is `lawn-rounds.js` `roundOf` of that row's
+`lawn_rounds_9` (a residential lawn 9x series is written that way), the round (1 to 9) is `lawn-rounds.js` `roundOf` of that row's
 `scheduled_date`, and the line is that round's sentence from `lawn-program-line.js`
 `ROUND_PROGRAM_LINES_V13` (nine sentences held to every rule above, so none says
 "round"). Every other visit, including one with no linked scheduled row, keeps the
@@ -3939,7 +4006,22 @@ them, and an enforced verdict never creates a suppression row. The
 unanswered digest omits a thread only when its latest eligible inbound has
 an enforced verdict, so a later genuine message resurfaces.
 Verdict attachment merges metadata without replacing unrelated fields. Failed
-verdict attachment bypasses enforcement. Provider request/auth contracts are unchanged. The SMS operational extension
+verdict attachment bypasses enforcement.
+`GATE_SMS_SPAM_TAG=true` (dark; strict `true`, read at call time) adds a manual
+spam tag the admin inbox sets (`sms_spam_senders`, `services/sms-spam-tag.js`):
+a new text from a tagged sender takes the same enforced path as a confident
+screen verdict, with a manual verdict (`method: 'manual'`, `enforced: true`)
+and no model call, whatever `GATE_SMS_SPAM_CLASSIFIER` is set to. Both message
+stores keep the text, it is marked read, and the webhook returns empty TwiML
+before lead creation, quoting, alerts or auto-replies. A tag never applies to
+a staff sender, the AI assistant line, a reaction, a message with media, an
+empty body, an applicant reply, a carrier keyword (STOP, START, HELP, YES and
+the like) or any text the webhook treats as an opt-out or opt-in command, a
+sender with a customer record or a failed customer lookup, or a sender with an
+open lead: those keep ordinary handling, and consent handling is unchanged. A
+failed tag lookup or a failed verdict write also means ordinary handling. Off =
+no tag lookup and byte-identical behavior.
+Provider request/auth contracts are unchanged. The SMS operational extension
 runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
@@ -6969,6 +7051,39 @@ id, gate off, a non-multipart body (answered by
 `reservicePhotosPreParserGuard` ahead of the shared body parsers), another
 customer's or a non-re-service visit, an ineligible visit — is the generic
 404. Sends nothing to a customer.
+`/api/public/moving/:token` (GET, plus `POST /:token/check` and
+`POST /:token/submit`; the moving page the office sends a customer who is
+moving, by email from the Customer 360 Moving card or by text from the
+Communications composer, always on a staff click). Dark behind
+`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
+the generic 404 before any DB read. 48-hex token format gate on
+`customer_moves.token`; a malformed, unknown or closed move is the same
+generic 404. Privacy headers (`Cache-Control: private, no-store`,
+`X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
+answer, and the `/moving/<token>` SPA shell gets the sensitive-page headers.
+Router limit 60 req/min per IP; `/check` 6 req/min per IP and `/submit` 10
+req/min per IP on top. GET payload (`services/customer-moves.js`
+`publicMoveView`): `firstName`, the plan's recurring service names, `status`
+(`open` | `submitted`), `moveOutDate` / `moveInDate` (`YYYY-MM-DD` or null),
+`newCity` (only the CITY of a submitted new address), `verdict`
+(`in_area` | `out_of_area` | `unverified` | null) and `addressOnFile`. Never
+the current street address, a phone, an email or money. `/check` takes
+`{ address }` (5-200 chars) and makes one paid Google address check: the
+same text is answered from `customer_moves.last_check` for 24 hours, and a
+link gets at most 10 paid checks per Eastern day (claimed atomically in SQL;
+the 11th is a 429). It answers `{ typed, normalized, verdict, checkId }` for
+the NEW address only; `checkId` is an opaque 16-hex id of that check.
+`/submit` takes `{ checkId, moveOutDate, moveInDate }`: the browser never
+sends an address or a verdict. A `checkId` uses the address of that check,
+and only while it is still the check the server holds (read under the move's
+row lock); a check replaced since (another tab or device) is a 409, never
+swapped in. No `checkId` keeps the address already saved. It needs a checked
+address or a move-out date; dates must be real and inside 60 days back to 400 days
+ahead. A submit writes one `service_requests` row (`category` `moving`,
+reused and reopened on a resubmit), an `activity_log` row and one admin
+alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
+receipt sentences. It changes no visit, price, property or primary address
+and sends nothing to a customer.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

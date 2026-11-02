@@ -273,13 +273,18 @@ function activityLabelFor(service, block, scoreRow) {
 
 // PDF render fence: what the card prints that can change OUTSIDE the record
 // between the server payload and the browser's own /data fetch — the gate,
-// and the score row the "Activity seen" word reads. Snapshot before the
+// and the score row the "Activity seen" word reads (plus the asks report's
+// gates). Snapshot before the
 // payload, compare after the render; null (unreadable) never matches.
 async function reserviceCardRenderFence(service, knex) {
-  if (!reserviceReportCardGateOn()) return 'off';
+  // The asks report's own gates (GATE_RESERVICE_ASKS and the approved product
+  // wording gate) ride the same snapshot; '' while GATE_RESERVICE_ASKS is dark,
+  // so a dark gate leaves the fence value as it was.
+  const asks = require('./reservice-asks-report').reserviceAsksFenceStamp();
+  if (!reserviceReportCardGateOn()) return `off${asks}`;
   try {
     const row = await require('../pest-pressure/store').loadScoreForServiceRecord(knex, service?.id);
-    return `on:${row?.displayed_score ?? ''}|${row?.label_name ?? ''}`;
+    return `on:${row?.displayed_score ?? ''}|${row?.label_name ?? ''}${asks}`;
   } catch {
     return null;
   }
@@ -421,4 +426,11 @@ module.exports = {
   buildReserviceReportCard,
   activityLabelFor,
   reserviceCardRenderFence,
+  // Shared with the asks report (reservice-asks-report.js).
+  productRows,
+  lawnWhereOf,
+  stillSeeingTopic,
+  KEY_LOCATION_RE,
+  SAFETY_CLAIM_RE,
+  readsAsAddressedToCustomer,
 };

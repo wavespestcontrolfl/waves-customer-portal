@@ -441,6 +441,7 @@ const AppointmentPage = lazyWithRetry(() => import('./pages/AppointmentPage'));
 const SecureAppointmentPage = lazyWithRetry(() => import('./pages/SecureAppointmentPage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const PriceChangeNoticePage = lazyWithRetry(() => import('./pages/PriceChangeNoticePage'));
+const MovingPage = lazyWithRetry(() => import('./pages/MovingPage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
 const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
@@ -705,6 +706,8 @@ export default function App() {
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="reschedule" flow="reschedule" /></Suspense>} />
           <Route path="/reservice/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="reservice" flow="reservice" /></Suspense>} />
+          {/* Moving link (GATE_MOVING_FLOW): the token is customer_moves.token; the API 404s while the gate is dark. */}
+          <Route path="/moving/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><MovingPage /></Suspense>} />
           <Route path="/inspection/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="inspection" flow="inspection" /></Suspense>} />
           {/* "Book a free Waves Assessment first" from an estimate (GATE_ESTIMATE_ASSESSMENT_FIRST): the token is the estimate's. */}
           <Route path="/estimate/:token/assessment" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="assessment" flow="assessment" /></Suspense>} />

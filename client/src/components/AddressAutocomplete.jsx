@@ -41,6 +41,8 @@ export function sameAutocompleteAddress(previous, parts) {
  *   enabled     — false keeps a manual input without loading Google
  *   appearance  — 'admin' selects the monochrome dropdown while focused
  *   geocodeOnBlur — false requires an explicit suggestion selection
+ *   anyState    — true accepts an address in any state (the moving page: a
+ *                 customer may move out of Florida); default Florida only
  *   Other native input props (maxLength, aria-label, disabled) are forwarded.
  */
 export default function AddressAutocomplete({
@@ -57,6 +59,7 @@ export default function AddressAutocomplete({
   enabled = true,
   appearance = 'customer',
   geocodeOnBlur = true,
+  anyState = false,
   ...inputProps
 }) {
   const inputRef = useRef(null);
@@ -67,10 +70,14 @@ export default function AddressAutocomplete({
   // without the subpremise and wipe the unit).
   const lastSelectedRef = useRef([]);
   const onSelectRef = useRef(onSelect);
+  const anyStateRef = useRef(anyState);
 
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
+  useEffect(() => {
+    anyStateRef.current = anyState;
+  }, [anyState]);
 
   useEffect(() => {
     const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
@@ -142,7 +149,7 @@ export default function AddressAutocomplete({
           lng: p.geometry?.location?.lng?.() ?? null,
           source: 'suggestion',
         };
-        if (parts.state && parts.state !== 'FL') return;
+        if (parts.state && parts.state !== 'FL' && !anyStateRef.current) return;
         lastSelectedRef.current = [parts.formatted, parts.line1].filter(Boolean);
         onSelectRef.current?.(parts);
       });
@@ -212,7 +219,7 @@ export default function AddressAutocomplete({
         geocoder.geocode({
           address: typed,
           bounds: SWFL_BOUNDS,
-          componentRestrictions: { country, administrativeArea: 'FL' },
+          componentRestrictions: anyStateRef.current ? { country } : { country, administrativeArea: 'FL' },
         }, (results, status) => {
           if (status !== 'OK' || !results?.[0]) return;
           const p = results[0];
@@ -237,7 +244,7 @@ export default function AddressAutocomplete({
             lng: p.geometry?.location?.lng?.() ?? null,
             source: 'typed',
           };
-          if (parts.state && parts.state !== 'FL') return;
+          if (parts.state && parts.state !== 'FL' && !anyStateRef.current) return;
           lastSelectedRef.current = [parts.formatted, parts.line1, typed].filter(Boolean);
           onSelectRef.current?.(parts);
         });

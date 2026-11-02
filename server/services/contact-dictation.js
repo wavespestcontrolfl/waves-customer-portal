@@ -280,6 +280,7 @@ EMAIL RULES:
 6. Never produce a URL-shaped local part ("www.", "http", "slash") from call audio — that is a mis-transcription of spelled letters. Decode the letters instead, or omit the candidate.
 7. When a letter/digit is ambiguous (one W vs two), return MULTIPLE candidates with honest confidences and needs_confirmation true.
 8. Do not invent missing letters. Fewer, honest candidates beat one forced guess.
+9. A transcript writes a letter said on its own as an initial, with a period and a space before the next word. That period is punctuation, not a spoken "dot": in the local part the letter joins the next word with no dot, unless the caller said "dot", "period" or "point" between them. When you cannot tell, return both forms, the form without the dot first, with needs_confirmation true.
 
 ADDRESS RULES:
 1. Preserve the raw spoken evidence verbatim in raw_spoken.

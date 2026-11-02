@@ -203,7 +203,8 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     const enhancedNumeric = { name: 'Lawn Care', service: 'lawn_care', frequency: 9, visitsPerYear: 9 };
     expect(converterFollowUpSeedingPattern(enhancedNumeric, { service_type: 'Lawn Care' }, 'monthly')).toBe('every_6_weeks');
     expect(supportsConverterFollowUpSeeding(enhancedNumeric, {}, 'every_6_weeks')).toBe(true);
-    expect(EstimateConverter.annualPrepayCoverageCadence(enhancedNumeric, null)).toBe('every_6_weeks');
+    // The term records the pattern the series is written with: lawn 9x rounds.
+    expect(EstimateConverter.annualPrepayCoverageCadence(enhancedNumeric, null)).toBe('lawn_rounds_9');
     // A TEXTUAL bimonthly field with nine visits still declines (real
     // contradiction, not the numeric bucket artifact).
     expect(supportsConverterFollowUpSeeding({ name: 'Lawn Care', service: 'lawn_care', frequency: 'bimonthly', visitsPerYear: 9 }, {}, 'every_6_weeks')).toBe(false);
@@ -245,8 +246,8 @@ describe('supportsConverterFollowUpSeeding — lawn series (owner GO 2026-08-10)
     expect(converterFollowUpSeedingPattern({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 12 }, { service_type: 'Lawn Care' }, 'quarterly')).toBe('monthly');
     // Retired 4-visit count maps to nothing and still declines.
     expect(converterFollowUpSeedingPattern({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 4 }, { service_type: 'Lawn Care' }, 'quarterly')).toBe(null);
-    // Prepay mirror records the same cadence the series seeds.
-    expect(EstimateConverter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, 'quarterly')).toBe('every_6_weeks');
+    // Prepay mirror records the same cadence the series seeds: a residential lawn 9x series is written as rounds.
+    expect(EstimateConverter.annualPrepayCoverageCadence({ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, 'quarterly')).toBe('lawn_rounds_9');
   });
 
   test('lawn prepay coverage rejects contradictory shapes; legacy cadence-only rows keep their inferred cadence (codex r11 P1)', () => {

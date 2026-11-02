@@ -860,6 +860,17 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
+    // A moving page (GATE_MOVING_FLOW) shows the customer's first name, plan
+    // services and move details, and its holder can change the move. Only /sms
+    // binds it to the recipient (checkMovingLinks); a queued text keeps the old
+    // phone and replays later, so it never carries one (GH Codex security
+    // review on #7486). Short forms arrive expanded (expandedRuns).
+    label: 'Moving',
+    fragment: /\/moving\//i,
+    token: (run, host) => canonicalPortalToken(run, host, MOVING_PATH_RE, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
     label: 'Statement pay',
     fragment: /\/pay\/statement\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/pay\/statement\/([0-9a-f]{64})$/i, ANY_SCHEME),
@@ -1237,6 +1248,10 @@ async function immediateOnlyLinkSendCheck(body) {
   // ...and a consultation credential anywhere in a FOREIGN URL (Codex #4709
   // r12–r15 P1): parked here so the send-time check refuses it.
   if (await strayConsultationCredentialPresent(runs, hosts)) return { present: true, label: 'Consultation link' };
+  // ...and a live moving token outside a canonical moving link (#7486). A
+  // body too long to scan cannot be sent as an SMS (1,600 characters), and
+  // the send-time seam refuses it with its own words.
+  if ((await strayMovingTokenScan(runs, hosts)) === 'stray') return { present: true, label: 'Moving' };
   return { present: false };
 }
 
@@ -1576,6 +1591,81 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
 // The account-scoped kinds together: the appointment gate is re-read at the
 // send (every /appointment route 404s the moment it is off — r2 P1), then
 // each kind binds to the recipient's account.
+// A moving page link (GATE_MOVING_FLOW) shows the customer's first name, plan
+// services and move details, and its holder can change the move: bound to
+// the recipient's account at the send like a report link (GH Codex security
+// review on #7486). A short link arrives expanded to its /moving/ target
+// (expandedView). The page must still open at the send: gate on, a move that
+// is not closed (else its link is a 404). A look-alike host is not a Waves
+// link and is not judged. A gates module without the reader (a test mock)
+// reads as off: fail closed.
+function movingGateOn() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.movingFlowLive === 'function' && gates.movingFlowLive();
+}
+// A live moving token ANYWHERE in the message other than the path token of a
+// canonical owned /moving/<token> link (GH Codex security reviews on #7486):
+// a foreign host that redirects to the real page, a query parameter (also on
+// a canonical link: /moving/<B>?shared=<A>), a percent-encoded or nested copy
+// would all skip the owner binding. Every run is fully decoded and every
+// 48-hex window is looked up against moves that still open, except each
+// canonical link's own path token, which the owner binding judges. Gate off:
+// every moving page is a 404, so nothing is looked up.
+// The scan is bounded (GH Codex security review on #7486): an SMS body is at
+// most 1,600 characters (sms-guard validateOutbound), so a longer text can
+// never be sent. Short links expand, so the runs may total 4x that; past it,
+// or past MOVING_SCAN_MAX_WINDOWS candidates, the scan stops before any lookup.
+// Answers 'stray', 'too_long' or null.
+const MOVING_SCAN_MAX_CHARS = 6400;
+const MOVING_SCAN_MAX_WINDOWS = 2000;
+async function strayMovingTokenScan(runs, hosts, conn = db) {
+  if (!movingGateOn()) return null;
+  if (runs.reduce((total, run) => total + run.length, 0) > MOVING_SCAN_MAX_CHARS) return 'too_long';
+  const windows = new Set();
+  const bound = new Set();
+  for (const raw of runs) {
+    const run = raw.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '');
+    const own = canonicalPortalToken(run, hosts, MOVING_PATH_RE, ANY_SCHEME);
+    if (own) bound.add(own.toLowerCase());
+    const decoded = fullyDecoded(ownedHostStripped(run, hosts)).toLowerCase();
+    for (const m of decoded.matchAll(/[a-f0-9]{48,}/g)) {
+      for (let i = 0; i + 48 <= m[0].length; i += 1) {
+        windows.add(m[0].slice(i, i + 48));
+        if (windows.size > MOVING_SCAN_MAX_WINDOWS) return 'too_long';
+      }
+    }
+  }
+  const all = [...windows].filter((w) => !bound.has(w));
+  for (let i = 0; i < all.length; i += 500) {
+    if (await conn('customer_moves').whereIn('token', all.slice(i, i + 500)).whereNot({ status: 'closed' }).first('id')) return 'stray';
+  }
+  return null;
+}
+
+async function checkMovingLinks(ctx, moveIds) {
+  const stray = await strayMovingTokenScan(ctx.runs, ctx.hosts);
+  if (stray === 'too_long') return refuseSend('This text is too long to check for customer links — shorten it and send again.');
+  if (stray === 'stray') {
+    return refuseSend('This text carries a moving link outside the Waves portal address — remove it and insert the moving link as itself.');
+  }
+  const onRecipientAccount = recipientAccountBinder(ctx);
+  for (const run of linkRuns(ctx.runs, /\/moving\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, MOVING_PATH_RE, ANY_SCHEME);
+    if (!token) continue;
+    if (!movingGateOn()) {
+      return refuseSend('Moving links are switched off (GATE_MOVING_FLOW) — remove the moving link before sending.');
+    }
+    const move = await db('customer_moves').where({ token: token.toLowerCase() }).first('id', 'customer_id', 'status');
+    if (!move || move.status === 'closed') return refuseSend('This moving link no longer opens — remove it and insert a fresh one.');
+    const bad = await onRecipientAccount(move.customer_id, 'moving link');
+    if (bad) return bad;
+    ctx.bearers += 1;
+    // A real send of this text is the link's delivery (POST /sms stamps it).
+    if (!moveIds.includes(String(move.id))) moveIds.push(String(move.id));
+  }
+  return null;
+}
+
 async function checkAccountBoundLinks(ctx, projectReports) {
   // ANY_SCHEME here too: an http://<owned>/l/<code> run must not vanish from
   // the seam (nothing later sees the /l/ occurrence) — it is judged, and its
@@ -2044,7 +2134,8 @@ async function visitCardRequestLinked(runs, hosts, conn) {
  * READ-ONLY owner of every generated bearer the composer's seam does not
  * itself verify: reschedule and track (scheduled_services tokens), re-service
  * (customers.reservice_token), pay (invoices.token), estimate
- * (estimates.token) and referral (the public /r/ resolver's three paths), owned-host
+ * (estimates.token), referral (the public /r/ resolver's three paths) and the
+ * moving page (customer_moves.token, GATE_MOVING_FLOW), owned-host
  * links only. Short codes are judged by their stored target as well as by the
  * in-place expansion (which leaves an unpaid invoice's /pay target wrapped —
  * Codex r5 on #6266 P1), and a code with no row is unresolved. The
@@ -2054,6 +2145,9 @@ async function visitCardRequestLinked(runs, hosts, conn) {
  * an owned-host link of these shapes that matches no row is `unresolved`
  * (the caller fails closed).
  */
+// The moving page (routes/moving-public.js, 48 lowercase hex). A pasted
+// upper-case token is looked up lower-cased, so it is judged, never skipped.
+const MOVING_PATH_RE = /^\/moving\/([a-f0-9]{48})$/i;
 const ownedBearerShapes = () => [
   ['reschedule', /\/reschedule\//i, RESCHEDULE_PATH_RE,
     async (conn, t) => (await conn('scheduled_services').where({ reschedule_token: t }).first('customer_id'))?.customer_id],
@@ -2066,6 +2160,9 @@ const ownedBearerShapes = () => [
   ['estimate', /\/estimate\//i, /^\/estimate\/([A-Za-z0-9_-]{8,})$/i,
     async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
   ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
+  ['moving', /\/moving\//i, MOVING_PATH_RE,
+    // A closed move's link is a 404: unresolved, so the caller fails closed.
+    async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).whereNot({ status: 'closed' }).first('customer_id'))?.customer_id],
 ];
 // The public /r/:code resolver's own three paths (routes/referral-links.js):
 // an active promoter, a merged-away promoter whose code survives as an alias
@@ -2129,11 +2226,13 @@ async function bearerLinkSendCheck(body, toLast10, {
   const statements = [];
   const preps = [];
   const projectReports = [];
+  const moves = [];
   const checks = [
     () => checkContractLinks(ctx, contracts),
     () => checkPrepLinks(ctx, preps),
     () => checkStatementLinks(ctx, statements),
     () => checkAccountBoundLinks(ctx, projectReports),
+    () => checkMovingLinks(ctx, moves),
     () => checkCardLinks(ctx, cards),
     // Pre-push Codex P1: consultation is lead-bound, not account-bound —
     // checked by destination phone alone (ctx.toLast10), independent of
@@ -2158,6 +2257,7 @@ async function bearerLinkSendCheck(body, toLast10, {
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
     ...(projectReports.length ? { projectReports } : {}),
+    ...(moves.length ? { moves } : {}),
     // The one lead a validated consultation link belongs to (Codex #4709
     // r13 P2) — so a pasted link still gets its lead outreach bookkeeping.
     ...(ctx.consultationLeadIds?.length === 1 ? { consultationLeadId: ctx.consultationLeadIds[0] } : {}),

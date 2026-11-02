@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
-import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView } from './ReportViewPage';
+import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView, reserviceAsksView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
@@ -640,6 +640,9 @@ export default function ServiceReportDocument({ data, token }) {
   // document too, so the permanent PDF agrees with the live page. Null while
   // the gate is dark — no payload key, nothing printed, cache key unchanged.
   const reserviceCard = reservice ? reserviceCardView(data.reserviceReportCard) : null;
+  // "Your re-service" (GATE_RESERVICE_ASKS): the server's four-card block, which
+  // replaces the card above (the payload carries one or the other).
+  const reserviceAsks = reserviceAsksView(data.reserviceAsksReport);
   // A non-performed callback (inspection_only / customer_declined /
   // incomplete) applied nothing — legacy/typed summary copy written for a
   // performed visit can claim treatment, so it is suppressed below and the
@@ -1139,6 +1142,57 @@ export default function ServiceReportDocument({ data, token }) {
             scrubbed server-side; quote marks only for verbatim words) and the
             performed-visit summary. The web page's "Still seeing…" button has
             no print equivalent. */}
+        {/* Your re-service: the same four cards as the web page, in the
+            document's own style. The "Still seeing…" button has no print
+            equivalent, so the last card prints the expectation line only. */}
+        {reserviceAsks && (
+          <>
+            <div className="doc-keep">
+              <SectionHeader>{reserviceAsks.title}</SectionHeader>
+              {reserviceAsks.summary && (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceAsks.summary}</p>
+              )}
+            </div>
+            <div className="doc-keep">
+              <SectionHeader>1. What you told us</SectionHeader>
+              {reserviceAsks.told.map((row, index) => (row.words ? (
+                <InfoRow key={`told-${index}`} label={row.label}>{row.words}</InfoRow>
+              ) : (
+                // A message shown by its label only: the same label style as every other row, never body text.
+                <div key={`told-${index}`} className="field-info-row" style={{ display: 'flex', gap: 8, minWidth: 0 }}><Label>{row.label}</Label></div>
+              )))}
+            </div>
+            {reserviceAsks.did.length > 0 && (
+              <div className="doc-keep">
+                <SectionHeader>2. What we did for each</SectionHeader>
+                {reserviceAsks.did.map((row, index) => (
+                  <InfoRow key={`did-${index}`} label={row.chip}>
+                    {[row.subject, row.line].filter(Boolean).join(': ')}
+                  </InfoRow>
+                ))}
+              </div>
+            )}
+            {reserviceAsks.products.length > 0 && (
+              <div className="doc-keep">
+                <SectionHeader>{`${reserviceAsks.did.length > 0 ? 3 : 2}. Products and how they help`}</SectionHeader>
+                {reserviceAsks.products.map((row, index) => (
+                  <div key={`product-${index}`} style={{ margin: '3px 0' }}>
+                    <InfoRow label={row.name}>{[row.where && `Where: ${row.where}`, row.how && `How it helps: ${row.how}`].filter(Boolean).join(' ') || null}</InfoRow>
+                    {!row.where && !row.how && (
+                      <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{row.name}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {reserviceAsks.expectation && (
+              <div className="doc-keep">
+                <SectionHeader>{`${[true, reserviceAsks.did.length > 0, reserviceAsks.products.length > 0].filter(Boolean).length + 1}. What to expect`}</SectionHeader>
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceAsks.expectation}</p>
+              </div>
+            )}
+          </>
+        )}
         {reserviceCard?.showTold && (
           <div className="doc-keep">
             <SectionHeader>You told us</SectionHeader>

@@ -29,8 +29,8 @@
  * stored anchor), and the anchor is STAMPED on the parent then
  * (recurring_round_anchor_date). An existing series never adopts an area later,
  * so a config edit moves no existing series. Only rows whose pattern is
- * lawn_rounds_9 reach this module, and those exist only behind
- * GATE_LAWN_9X_ROUNDS (or the one-time re-date).
+ * lawn_rounds_9 reach this module: residential lawn 9x series written since
+ * the rounds went live, and the series the one-time re-date converted.
  */
 
 const logger = require('./logger');

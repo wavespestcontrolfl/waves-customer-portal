@@ -95,7 +95,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const numbers = require('../config/twilio-numbers');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
-const { canonicalizeAddress, stripTrailingUnit, normalizeZip, unitKey, streetEmbeddedUnitKey, STREET_SUFFIX_CANON } = require('./customer-property-address-keys');
+const { stripTrailingUnit, normalizeZip, unitKey, streetEmbeddedUnitKey, STREET_SUFFIX_CANON } = require('./customer-property-address-keys');
 
 // data_hygiene_source_extractions.extractor_version is varchar(32).
 const VERSION = 'access-net-v1';
@@ -190,7 +190,13 @@ function codeIsWholeTokenIn(code, quote) {
   return new RegExp(`(?<![A-Za-z0-9#*-])${escapeRegExp(code)}(?![A-Za-z0-9#*-])`).test(quote);
 }
 
-const SUFFIX_WORDS = new Set(Object.values(STREET_SUFFIX_CANON));
+// Words that END a street in a message. The 2026-11-02 key forms that often
+// lead a street name ("Lake Haven Dr", "Green Briar Ln", "Grove Park Dr") are
+// left out, so they never cut a street short (codex #7485 r2); "loop" counts.
+const NAME_LIKE_SUFFIX_WORDS = new Set(['crescent', 'crest', 'common', 'garden', 'gardens', 'green', 'harbor',
+  'hill', 'hills', 'isle', 'knoll', 'lake', 'lakes', 'manor', 'orchard', 'pines', 'ranch', 'shore', 'shores',
+  'spring', 'springs', 'village', 'valley', 'estates', 'forest', 'beach', 'bluff', 'brook', 'grove']);
+const SUFFIX_WORDS = new Set(Object.values(STREET_SUFFIX_CANON).filter((w) => !NAME_LIKE_SUFFIX_WORDS.has(w)));
 const STREET_WORDS_MAX = 4;
 const DIRECTIONALS = { n: 'n', north: 'n', s: 's', south: 's', e: 'e', east: 'e', w: 'w', west: 'w',
   ne: 'ne', northeast: 'ne', nw: 'nw', northwest: 'nw', se: 'se', southeast: 'se', sw: 'sw', southwest: 'sw' };
@@ -199,8 +205,15 @@ const UNIT_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite']);
 // Address words in one canonical spelling: lower case, suffixes in long form,
 // directionals short ("North" = "n"), "#5" as "unit 5".
 function addressWords(value) {
-  return canonicalizeAddress(String(value || '').replace(/#\s*(?=[A-Za-z0-9])/g, ' unit '))
-    .split(/\s+/).filter(Boolean).map((w) => DIRECTIONALS[w] || w);
+  const words = String(value || '').replace(/#\s*(?=[A-Za-z0-9])/g, ' unit ').toLowerCase().replace(/[.,#]/g, ' ')
+    .split(/\s+/).filter(Boolean);
+  // The id after a unit word is data and stays exact: "Unit LP" != "Unit Loop",
+  // "Apt E" != "Apt East", as unitKey reads the home's unit (pre-push audit, #7485).
+  return words.map((w, i) => {
+    if (UNIT_WORDS.has(words[i - 1])) return w;
+    const canon = STREET_SUFFIX_CANON[w] || w;
+    return DIRECTIONALS[canon] || canon;
+  });
 }
 
 // The street addresses a text names, for a text with no customer (so no

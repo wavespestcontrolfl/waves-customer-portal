@@ -18,7 +18,8 @@ const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
 const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
 const { specialtyReportVoiceLive, techWorkDaysLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive, reserviceAsksLive } = require('../config/feature-gates');
+const { isReserviceVisit } = require('../services/reservice-asks');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -603,9 +604,6 @@ function sanitizeServiceType(serviceType) {
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern, seriesCadencePosition, seriesRoundAnchor } = require('../services/recurring-appointment-seeder');
-const { lawn9xRoundsLive } = require('../config/feature-gates');
-// GATE_LAWN_9X_ROUNDS, read live; off when a feature-gates test mock lacks the reader.
-const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
 const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows, roundsRowMoveIsOneOff } = require('../services/lawn-rounds');
@@ -706,14 +704,12 @@ function areaAnchorColumns(cols, rOpts) {
     : {};
 }
 
-// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the pattern + interval a NEW series is
-// written with. The shared lawnRoundsSeriesPattern decides (residential lawn
-// 9x only); this adds the catalog row's key to the identity when the booking
-// names a service id, so a lawn plan whose label does not say "lawn" still
-// reads as lawn. Gate off, or any other series: the input comes back
-// unchanged and no query runs.
+// Lawn 9x rounds: the pattern + interval a NEW series is written with. The
+// shared lawnRoundsSeriesPattern decides (residential lawn 9x only); this adds
+// the catalog row's key to the identity when the booking names a service id,
+// so a lawn plan whose label does not say "lawn" still reads as lawn. Any
+// other series: the input comes back unchanged.
 async function lawnRoundsSeriesForBooking(conn, { pattern, intervalDays, serviceType, serviceId = null, serviceKey = null }) {
-  if (!lawnRoundsGateOn()) return { pattern, intervalDays };
   let service = null;
   if (serviceId) {
     try {
@@ -5735,6 +5731,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
       lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_RESERVICE_ASKS (step S2a): the Fast Complete sheet asks the tech to answer each thing the customer told us.
+      // A pest or lawn re-service only (never the rodent trapping follow-up); the catalog key is the completion profile's.
+      reserviceAsksEnabled: reserviceAsksLive()
+        && isReserviceVisit({ is_callback: service.is_callback === true, service_key: completionProfile?.serviceKey }),
       // GATE_ASSESSMENT_FAST_COMPLETE: Dispatch opens the Waves Assessment's one-screen sheet; only an assessment profile.
       assessmentFastCompleteEnabled: require('../config/feature-gates').assessmentFastCompleteLive()
         && completionProfile?.serviceKey === require('../services/assessment-booking').ASSESSMENT_SERVICE_KEY,
@@ -7103,6 +7103,7 @@ router.get('/', async (req, res, next) => {
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+        reserviceAsksEnabled: projectCompletionContext.reserviceAsksEnabled === true,
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
         // The add-on lookup failed for this batch: the completion form refuses a completed visit until the schedule reloads.
@@ -7775,6 +7776,7 @@ router.get('/week', async (req, res, next) => {
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+          reserviceAsksEnabled: projectCompletionContext.reserviceAsksEnabled === true,
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
           areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,
@@ -8571,7 +8573,7 @@ async function scheduleCreateHandler(req, res, next) {
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
     } = req.body;
-    // Reassigned below when GATE_LAWN_9X_ROUNDS writes the series as rounds.
+    // Reassigned below when a residential lawn 9x series is written as rounds.
     let { recurringPattern, recurringIntervalDays } = req.body;
 
     const separateProgram = req.body.duplicateSeriesOverride;
@@ -8632,7 +8634,7 @@ async function scheduleCreateHandler(req, res, next) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): decided ONCE, before the prepay
+    // Lawn 9x rounds: decided ONCE, before the prepay
     // preflight, the date plan and every insert, so the parent and all of its
     // children are written with the same pattern and no interval. Off, or any
     // other service: both values stay exactly as posted.
@@ -8899,7 +8901,7 @@ async function scheduleCreateHandler(req, res, next) {
       const prepayBookedPattern = (recurringPattern === 'custom' && Number(recurringIntervalDays) === 42)
         ? 'every_6_weeks'
         : recurringPattern;
-      // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) is the nine-round
+      // A series written as lawn_rounds_9 is the nine-round
       // lawn plan: 9 covered visits, coverage cadence lawn_rounds_9
       // (prepayCoverageCadenceForPattern), placed on the round calendar.
       const prepayRoundsSeries = prepayBookedPattern === LAWN_ROUNDS_9;
@@ -14361,7 +14363,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       expectedTotal,
     } = req.body;
     let { discountType, discountAmount } = req.body;
-    // Reassigned below when GATE_LAWN_9X_ROUNDS writes the new series as rounds.
+    // Reassigned below when a residential lawn 9x series is written as rounds.
     let { recurringPattern, recurringIntervalDays } = req.body;
     if (expectedTotal !== undefined && expectedTotal !== null && !Number.isFinite(Number(expectedTotal))) {
       throw httpError(422, 'expectedTotal must be a number');
@@ -14662,12 +14664,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         return res.status(403).json({ error: 'Admin access required' });
       }
     }
-    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS), make-this-recurring only: a visit
+    // Lawn 9x rounds, make-this-recurring only: a visit
     // that is not yet in a series becomes a NEW series, so the parent update
     // and every spawned child below carry the rounds pattern and no interval.
     // A visit already in a series keeps the pattern its rows already carry,
     // so a series never mixes the two.
-    if (isRecurring && spawnRecurringChildren !== false && recurringPattern && lawnRoundsGateOn()) {
+    if (isRecurring && spawnRecurringChildren !== false && recurringPattern) {
       const seriesCurrent = await db('scheduled_services')
         .where({ id: req.params.id })
         .first('is_recurring', 'recurring_parent_id', 'service_type', 'service_id');
@@ -24933,7 +24935,7 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       ? 'every_6_weeks'
       : input.rawCadence;
     if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
-    // A NEW series (the draft probe) that GATE_LAWN_9X_ROUNDS will write as
+    // A NEW series (the draft probe) that will be written as
     // lawn_rounds_9 is covered on the rounds cadence: the term records the
     // pattern the series is written with. A committed series is read as it is
     // stored.

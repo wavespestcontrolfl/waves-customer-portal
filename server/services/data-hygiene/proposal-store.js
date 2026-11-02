@@ -264,4 +264,5 @@ module.exports = {
   findPendingExtractionProposal,
   findSmsExtractionProposals,
   isSensitiveProposal,
+  EXTRACTION_MESSAGE_SID,
 };

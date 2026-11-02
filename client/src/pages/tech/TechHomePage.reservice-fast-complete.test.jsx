@@ -23,7 +23,7 @@ vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }))
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, onFullForm, onViewDetails, voiceFillEnabled, suspended }) => (
-    <div data-recap-enabled={String(service.recapEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)} data-suspended={String(!!suspended)}>
+    <div data-recap-enabled={String(service.recapEnabled)} data-reservice-asks={String(service.reserviceAsksEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)} data-suspended={String(!!suspended)}>
       Fast Complete sheet for {service.id} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
       {onViewDetails && <button type="button" onClick={onViewDetails}>Sheet details</button>}
@@ -198,6 +198,21 @@ it.each([
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   const sheet = (await screen.findByText('Fast Complete sheet for svc-voice')).closest('[data-voice-fill-enabled]');
   expect(sheet.getAttribute('data-voice-fill-enabled')).toBe(expected);
+});
+
+// GATE_RESERVICE_ASKS rides the same schedule row: the sheet's service carries it, and only an exact true turns
+// "They told us" on (GitHub Codex P1 on #7500: the builder must forward it, or the block never shows).
+it.each([
+  [true, 'true'],
+  [false, 'false'],
+  [undefined, 'false'],
+  ['true', 'false'],
+])('passes reserviceAsksEnabled %s to the pest sheet as %s', async (flag, expected) => {
+  rows = [row('svc-asks', { reserviceFastCompleteEnabled: true, ...(flag === undefined ? {} : { reserviceAsksEnabled: flag }) })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  const sheet = (await screen.findByText('Fast Complete sheet for svc-asks')).closest('[data-reservice-asks]');
+  expect(sheet.getAttribute('data-reservice-asks')).toBe(expected);
 });
 
 it('the voice-fill flag alone never opens the sheet: the routing gate still decides', async () => {
