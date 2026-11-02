@@ -58,10 +58,18 @@ const UNIT_DESIGNATOR_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite
 const canonicalizeScopeAddress = (s) => {
   const words = String(s || '').toLowerCase().replace(/[.,]/g, ' ').replace(/#/g, ' # ').split(/\s+/).filter(Boolean);
   return words.map((w, i) => {
+    // The unit id after a designator stays exact: "Unit LP" != "Unit Loop",
+    // "Apt E" != "Apt East" (codex #7485 r1).
+    if (UNIT_DESIGNATOR_WORDS.has(words[i - 1])) return w;
     const canon = STREET_SUFFIX_CANON[w] || w;
-    return UNIT_DESIGNATOR_WORDS.has(words[i - 1]) ? canon : (DIRECTIONAL_CANON[canon] || canon);
+    return DIRECTIONAL_CANON[canon] || canon;
   }).join(' ');
 };
+
+// A unit line (address line 2) for the scope compare: case and punctuation
+// only, never the suffix or directional maps, because the whole line is a unit
+// id ("Unit LP" != "Unit Loop").
+const canonicalizeUnitLine = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ');
 
 /** First 5 ZIP digits, so "34205" and "34205-1234" (ZIP+4) key identically. */
 const normalizeZip = (z) => (String(z || '').match(/\d{5}/) || [''])[0];
@@ -154,6 +162,7 @@ module.exports = {
   STREET_SUFFIX_CANON,
   canonicalizeAddress,
   canonicalizeScopeAddress,
+  canonicalizeUnitLine,
   normalizeZip,
   stripTrailingUnit,
   streetKey,

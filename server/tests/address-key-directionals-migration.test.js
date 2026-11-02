@@ -98,6 +98,20 @@ describe('address key: street directionals and suffix short forms', () => {
     expect(canonicalizeAddress('Apt E')).toBe('apt e');
     expect(canonicalizeAddress('100 Main Lp')).toBe('100 main loop');
   });
+
+  // codex #7485 r1: a unit id that looks like a suffix form stays a distinct
+  // unit in the estimate scope key, in line 2 and inline after a designator.
+  test('the estimate scope key keeps a unit id exact ("Unit LP" != "Unit Loop")', () => {
+    const { normalizedStampedStreet } = require('../services/estimate-property-linkage');
+    const scope = (l1, l2) => normalizedStampedStreet(l1, l2, 'Parrish', Z);
+    expect(scope('100 Main St', 'Unit LP')).not.toBe(scope('100 Main St', 'Unit Loop'));
+    expect(scope('100 Main St', 'Apt E')).not.toBe(scope('100 Main St', 'Apt East'));
+    expect(scope('100 Main St Unit LP')).not.toBe(scope('100 Main St Unit Loop'));
+    expect(canonicalizeScopeAddress('100 Main St Unit PT')).toBe('100 main street unit pt');
+    // Same unit written two ways still matches, and the street still expands.
+    expect(scope('100 Main St E', 'Apt 4')).toBe(scope('100 Main Street East', 'Unit 4'));
+    expect(scope('100 Main St E Apt 4')).toBe(scope('100 Main Street East', 'Apt 4'));
+  });
 });
 
 describe('20261102130000 frozen key copies', () => {
