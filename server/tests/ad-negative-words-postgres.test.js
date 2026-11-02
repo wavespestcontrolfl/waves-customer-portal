@@ -28,8 +28,8 @@ const google = require('../services/ads/google-ads');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const gates = require('../config/feature-gates');
 const frozen = require('../models/migrations/20261102110000_ad_negative_keywords');
-const migration = require('../models/migrations/20261102120000_ad_negative_words');
-const starter = require('../models/migrations/20261102120100_ad_negative_words_starter');
+const migration = require('../models/migrations/20261102151700_ad_negative_words');
+const starter = require('../models/migrations/20261102151800_ad_negative_words_starter');
 const actions = require('../services/ads/negative-keyword-actions');
 
 jest.setTimeout(60000);
@@ -84,7 +84,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }).returning('*').then(([r]) => r);
 
   describe('the migration', () => {
-    const STARTER_ACTION = 'migration:20261102120100_ad_negative_words_starter:insert';
+    const STARTER_ACTION = 'migration:20261102151800_ad_negative_words_starter:insert';
 
     test('the starter list is the approved 16 words, added by starter-list, and not free / diy / how to', async () => {
       await database('ad_negative_words').del();
@@ -108,7 +108,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       expect(audits.map((a) => a.resource_id).sort()).toEqual(words.map((w) => String(w.id)).sort());
       expect(audits.every((a) => a.actor_type === 'system' && a.resource_type === 'ad_negative_words')).toBe(true);
       expect(audits.find((a) => a.resource_id === String(words[0].id)).metadata).toMatchObject({
-        migration: '20261102120100_ad_negative_words_starter', text: words[0].text, before: null,
+        migration: '20261102151800_ad_negative_words_starter', text: words[0].text, before: null,
       });
       // The owner's own state for a word wins: still removed, still his.
       const jobs = await database('ad_negative_words').where({ text: 'jobs' }).first();

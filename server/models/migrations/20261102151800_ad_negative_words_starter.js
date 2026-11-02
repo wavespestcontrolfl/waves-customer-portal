@@ -6,7 +6,7 @@
 const { recordAuditEvent } = require('../../services/audit-log');
 
 // audit_log.action is varchar(96): `migration:<name>:insert` must fit, so the name stays short.
-const MIGRATION = '20261102120100_ad_negative_words_starter';
+const MIGRATION = '20261102151800_ad_negative_words_starter';
 
 const STARTER_WORDS = [
   'squirrel', 'squirrels', 'raccoon', 'raccoons', 'opossum', 'armadillo', 'snake', 'snakes',

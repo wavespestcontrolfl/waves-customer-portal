@@ -9,7 +9,7 @@
 //
 // The same migration gives ad_negative_keywords the two columns the bell needs: notified_at (the day the advisor
 // word's bell rang, for the 3-a-day cap) and last_error (why Google refused it, shown on the Ads page).
-// Schema only: the approved starter words are seeded by 20261102120100_ad_negative_words_starter.
+// Schema only: the approved starter words are seeded by 20261102151800_ad_negative_words_starter.
 // A pushed migration is frozen: edit nothing here after the first push, add a new migration instead.
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('ad_negative_words'))) {
