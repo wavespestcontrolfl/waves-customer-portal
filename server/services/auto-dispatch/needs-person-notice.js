@@ -92,9 +92,11 @@ function collect(bucket, service, kind, conflict) {
 }
 
 // A visit in conflict that this run leaves where it is, for `reasonCode`.
-// No conflict: nothing to tell a person.
+// No conflict, or one with no notice wording (a mowing day,
+// GATE_AUTO_DISPATCH_MOWING_DAYS: the visit stays silently), nothing to tell
+// a person.
 function collectUnmoved(bucket, service, reasonCode, conflict) {
-  if (conflict) collect(bucket, service, REASON_KIND[reasonCode] || 'not_moved', conflict);
+  if (conflict && PROBLEM[conflict.kind]) collect(bucket, service, REASON_KIND[reasonCode] || 'not_moved', conflict);
 }
 
 

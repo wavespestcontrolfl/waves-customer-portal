@@ -35,6 +35,7 @@ const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveRules = require('./move-rules');
 const dryTime = require('./dry-time');
+const mowingDays = require('./mowing-days');
 const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
 const needsPerson = require('./needs-person-notice');
@@ -301,14 +302,16 @@ function noteUnmoved(run, service, reasonCode) {
 // The visit as it stands now: a move this run (its own, a group's, a partner's)
 // or a person may have changed its slot or freed the stop it overlapped.
 // Returns null when it is no longer an open visit with an arrival time,
-// { clear: true } when it no longer conflicts.
+// { clear: true } when it no longer conflicts. A visit whose only conflict is
+// the customer's mowing day (GATE_AUTO_DISPATCH_MOWING_DAYS) needs no person:
+// it reads clear here, so it raises no notice and closes an older one.
 async function standingConflict(seen, id) {
   const row = await db('scheduled_services').where({ id }).first('*');
   if (!row || !VALID_STATUSES.has(row.status) || !row.window_start) return null;
   const service = { ...seen.service, ...row };
   // Required lazily, like apply.js's conflict re-read.
   const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, seen.ctx);
-  return conflict ? { service, conflict } : { clear: true };
+  return conflict && conflict.kind !== 'mowing_day' ? { service, conflict } : { clear: true };
 }
 
 // Every visit whose conflict the run must read at its end: the ledger (each
@@ -372,7 +375,7 @@ async function settleConflicts(run) {
 
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
-    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [],
+    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing,
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
@@ -395,7 +398,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates, shadow: emptyShadow }) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates, shadow: emptyShadow }), ...mowingDays.auditNote(mowing, { service, current }) } },
     };
   }
 
@@ -424,8 +427,11 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     current, currentScore, candidate: best, candidateScore: ranked.bestScore, service, prefs, lockBoundary, ctx, threshold,
   });
   const shadowPool = dryShadowCandidates.length ? candidates.concat(dryShadowCandidates) : candidates;
+  const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
-    service, current, candidates: shadowPool, live: ranked.qualifies ? best : null, shadow: dryTimeShadowBest({ service, prefs, current, candidates: shadowPool, scoreCtx, threshold, config }),
+    service, current, candidates: shadowPool, live, shadow: dryTimeShadowBest({ service, prefs, current, candidates: shadowPool, scoreCtx, threshold, config }),
+  }), mowingDays.auditNote(mowing, {
+    service, current, live, scored, currentScore, threshold, config, conflictMoves: ctx.conflictMoves,
   }));
 
   // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
@@ -459,10 +465,13 @@ function dryTimeConstraint(prefs, {
 }
 
 // A placement audit rebuilt around the candidate apply.js tried keeps the
-// evaluation's dry_time block, with live_best following that candidate.
+// evaluation's dry_time block, with live_best following that candidate, and
+// its mowing_days block as it was (GATE_AUTO_DISPATCH_MOWING_DAYS).
 function carryDryTime(built, evaluation, candidate) {
-  const note = dryTime.noteForCandidate(evaluation.audit && evaluation.audit.constraints && evaluation.audit.constraints.dry_time, candidate);
-  return note ? { ...built, constraints: { ...built.constraints, dry_time: note } } : built;
+  const from = (evaluation.audit && evaluation.audit.constraints) || {};
+  const note = dryTime.noteForCandidate(from.dry_time, candidate);
+  const kept = { ...(note ? { dry_time: note } : {}), ...(from.mowing_days ? { mowing_days: from.mowing_days } : {}) };
+  return Object.keys(kept).length ? { ...built, constraints: { ...built.constraints, ...kept } } : built;
 }
 
 // 'shadow' mode: the slot the dry window would have chosen, ranked by the
@@ -1284,7 +1293,7 @@ function inConflict(pm) {
 }
 
 // "Moved (+12.5)", naming the conflict the move cleared when there was one.
-const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day' };
+const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day', mowing_day: ' off the customer\'s mowing day' };
 function movedDescription(appliedAudit) {
   const conflict = appliedAudit.constraints && appliedAudit.constraints.conflict;
   return `Moved${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(appliedAudit.improvement)})`;
@@ -1727,4 +1736,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict } };

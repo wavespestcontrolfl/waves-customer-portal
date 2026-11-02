@@ -53,6 +53,7 @@ const { applyAssignable, absentTechDays } = require('../technician-eligibility')
 const { currentConflict } = require('./current-conflict');
 const { capacityEnabled } = require('../scheduling/policy');
 const dryTime = require('./dry-time');
+const mowingDays = require('./mowing-days');
 const territory = require('../territory');
 const logger = require('../logger');
 
@@ -821,40 +822,56 @@ async function movingUnitIds(service, ctx) {
   return [...new Set([String(service.id), ...[...(excludeIds || [])].map(String)])];
 }
 
+// The auto-dispatch HARD filters, in order: the first that matches drops the
+// slot and counts it under its own key in `drops`.
+//   after_hours  find-time (findAvailableSlots) shares ONE admission bound
+//     across every caller once GATE_SCHEDULING_CAPACITY is on —
+//     scheduling/policy.js SHIFT.endMinutes is the CUSTOMER day close (18:00
+//     since picker-windows PR 2, 2026-09-23), not an auto-dispatch one.
+//     Auto-dispatch re-optimizes an EXISTING technician's route, not a
+//     customer-facing offer, and this module's own DAY_CLOSE (used for the
+//     current-placement HQ anchor, above) has always been 17:00 — without
+//     this filter, capacity mode would let auto-dispatch move a visit into
+//     the new 17:00-18:00 hour the owner's ruling only extended for customer
+//     booking (Codex r1 P1 on #4663). Post-filtered here rather than threaded
+//     through find-time's shared admission check, which every
+//     customer-facing caller (booking, reschedule, re-service, the estimate
+//     picker, slot-reservation) also relies on for offer/commit parity at
+//     the real 18:00 close.
+//   blackout, sibling (a same-series occurrence that day), weekend (a
+//     skip_weekends series).
+//   preferred_day, preferred_time: explicit portal preferences override
+//     route efficiency. Route may only optimize among slots on the
+//     customer's preferred day + time window.
+//   mowing_day (GATE_AUTO_DISPATCH_MOWING_DAYS='true', mowing-days.js): a
+//     Lawn Care Service unit never lands on or next to a mowing day.
+//   other_tech (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has
+//     a technician stays with that technician. An unassigned visit is not
+//     filtered.
+//   other_territory (GATE_TERRITORY_NIGHT_RUN, territoryTechnicianForVisit):
+//     an unassigned pest / termite visit goes only to the technician who
+//     owns its ZIP.
+const slotTechId = (slot) => slot.technician && slot.technician.id;
+const HARD_FILTERS = [
+  ['after_hours', (slot) => hhmmToMin(slot.end_time) > DAY_CLOSE],
+  ['blackout', (slot, h) => inBlackout(slot.date, h.prefs.blackout)],
+  ['sibling', (slot, h) => h.siblingDates.has(slot.date)],
+  ['weekend', (slot, h) => h.service.skip_weekends === true && isWeekendDay(slot.date)],
+  ['preferred_day', (slot, h) => violatesPreferredDay(slot.date, h.prefs)],
+  ['preferred_time', (slot, h) => violatesPreferredTime(slot.start_time, h.prefs)],
+  ['mowing_day', (slot, h) => mowingDays.blocksLive(slot.date, h.mowing)],
+  ['other_tech', (slot, h) => h.ctx.keepTech === true && !!h.service.technician_id && String(slotTechId(slot)) !== String(h.service.technician_id)],
+  ['other_territory', (slot, h) => !!h.territoryTechId && String(slotTechId(slot)) !== String(h.territoryTechId)],
+];
+
 // One find-time slot through the auto-dispatch HARD filters, as a candidate;
 // null (and a tally in `drops`) when a filter drops it. Also the filter every
 // added same-day hour (conflictSameDaySlots) passes.
-function candidateFromSlot(slot, {
-  service, prefs, ctx, category, siblingDates, drops, territoryTechId = null,
-}) {
-  // HARD: find-time (findAvailableSlots) shares ONE admission bound across
-  // every caller once GATE_SCHEDULING_CAPACITY is on — scheduling/policy.js
-  // SHIFT.endMinutes is the CUSTOMER day close (18:00 since picker-windows
-  // PR 2, 2026-09-23), not an auto-dispatch one. Auto-dispatch re-optimizes
-  // an EXISTING technician's route, not a customer-facing offer, and this
-  // module's own DAY_CLOSE (used for the current-placement HQ anchor,
-  // above) has always been 17:00 — without this filter, capacity mode
-  // would let auto-dispatch move a visit into the new 17:00-18:00 hour the
-  // owner's ruling only extended for customer booking (Codex r1 P1 on
-  // #4663). Post-filtered here rather than threaded through find-time's
-  // shared admission check, which every customer-facing caller (booking,
-  // reschedule, re-service, the estimate picker, slot-reservation) also
-  // relies on for offer/commit parity at the real 18:00 close.
-  if (hhmmToMin(slot.end_time) > DAY_CLOSE) { drops.after_hours++; return null; }
-  if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; return null; }       // HARD: blackout
-  if (siblingDates.has(slot.date)) { drops.sibling++; return null; }                  // HARD: same-series occurrence that day
-  if (service.skip_weekends === true && isWeekendDay(slot.date)) { drops.weekend++; return null; } // HARD: skip_weekends series
-  // HARD: explicit portal preferences override route efficiency. Route may
-  // only optimize among slots on the customer's preferred day + time window.
-  if (violatesPreferredDay(slot.date, prefs)) { drops.preferred_day++; return null; }
-  if (violatesPreferredTime(slot.start_time, prefs)) { drops.preferred_time++; return null; }
-  const techId = slot.technician && slot.technician.id;
-  // HARD (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has a
-  // technician stays with that technician. An unassigned visit is not filtered.
-  if (ctx.keepTech === true && service.technician_id && String(techId) !== String(service.technician_id)) { drops.other_tech++; return null; }
-  // HARD (GATE_TERRITORY_NIGHT_RUN, territoryTechnicianForVisit): an unassigned pest / termite
-  // visit goes only to the technician who owns its ZIP.
-  if (territoryTechId && String(techId) !== String(territoryTechId)) { drops.other_territory++; return null; }
+function candidateFromSlot(slot, hard) {
+  const { ctx, category, drops } = hard;
+  const dropped = HARD_FILTERS.find(([, test]) => test(slot, hard));
+  if (dropped) { drops[dropped[0]]++; return null; }
+  const techId = slotTechId(slot);
   const cap = ctx.capabilityFor(techId, category);
   if (cap === 'deactivated') { drops.deactivated++; return null; }                    // HARD: tech turned off for this category
   return {
@@ -1143,12 +1160,15 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     evalConflict: await readCurrentConflict(service, grouped),
     territoryTechId: await unitTerritoryTechnician(service, geo, grouped),
   };
+  // GATE_AUTO_DISPATCH_MOWING_DAYS: the unit's mowing rule (shadow or true),
+  // or null — gate off, nothing is read.
+  const mowing = await unitMowingRule(service, prefs, ctx);
 
   const { dateFrom, dateTo } = searchWindow(service, ctx);
   if (dateFrom > dateTo) {
     // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
     const current = await computeCurrentPlacement(service, prefs, ctx);
-    return { current, candidates: [], drops: null, feasible: 0, search: { date_from: dateFrom, date_to: dateTo, open_starts_by_date: {} } };
+    return { current, candidates: [], drops: null, feasible: 0, search: { date_from: dateFrom, date_to: dateTo, open_starts_by_date: {} }, ...mowingField(mowing) };
   }
   const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
   const category = prefs.service_category;
@@ -1217,6 +1237,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0,
     ...(ctx.keepTech === true ? { other_tech: 0 } : {}),
     ...(territoryTechId ? { other_territory: 0 } : {}),
+    ...(mowing && mowing.mode === 'true' ? { mowing_day: 0 } : {}),
   };
   // The current placement is read first: a visit in overlap also gets every
   // free same-day hour (conflictSameDaySlots), through the same filters.
@@ -1226,7 +1247,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // re-checks both authoritatively, grouped members' derived starts included).
   const admitted = flexRules.admit(slots.concat(await conflictSameDaySlots(service, current, slots, findTimeArgs)), drops);
   const hard = {
-    service, prefs, ctx, category, siblingDates, drops, territoryTechId,
+    service, prefs, ctx, category, siblingDates, drops, territoryTechId, mowing,
   };
   const candidates = admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean);
 
@@ -1235,8 +1256,21 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // every survivor re-scored on the shared model.
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
   const withDry = await withDryWindowCandidates(scored, { prefs, findTimeArgs, slots, flexRules, hard, geo });
-  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates) };
+  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing) };
 }
+
+// The unit's mowing rule (mowing-days.js unitRule): the visit and, when it is
+// not a Lawn Care Service visit itself, its open group members, which move
+// with it. Gate off (no `mowing` on the prefs): null, nothing read.
+async function unitMowingRule(service, prefs, ctx) {
+  if (!prefs.mowing) return null;
+  const siblings = service.visit_id && !mowingDays.isLawnCareService(service.service_type)
+    ? (await groupContextFor(service, ctx)).siblings : [];
+  return mowingDays.unitRule(prefs, [service, ...siblings]);
+}
+
+// The evaluation result's `mowing` (index.js audits it); none when null.
+const mowingField = (mowing) => (mowing ? { mowing } : {});
 
 module.exports = {
   SCORE_CAP,

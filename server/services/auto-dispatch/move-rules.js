@@ -20,7 +20,9 @@
  *     any placement over none, on its raw score as before;
  *   - a visit in conflict (current-conflict.js, behind
  *     GATE_AUTO_DISPATCH_CONFLICT_MOVES): it overlaps another customer's
- *     stop, or sits on an owner blackout day. A free hour on the same day is
+ *     stop, or sits on an owner blackout day, or (GATE_AUTO_DISPATCH_MOWING_DAYS
+ *     ='true') a Lawn Care Service visit sits on or next to the customer's
+ *     mowing day. A free hour on the same day is
  *     taken first when the day itself stays open; then the slot that adds
  *     the least drive. A slot that adds more than
  *     config.conflictMaxAddedDriveMinutes is never taken: the visit stays

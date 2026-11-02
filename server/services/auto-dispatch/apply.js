@@ -282,11 +282,17 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
 // endpoints' exclusive lock; it covers one-off dates and weekly days off).
 // An overlap takes FOR SHARE on the other stops' rows, and on the
 // job_applications row behind a booked interview (`interview:<id>`), which
-// blocks their update or delete (r4).
+// blocks their update or delete (r4). A mowing day (mowing-days.js) takes FOR
+// SHARE on the customer's property_preferences row, so the saved mowing and
+// preferred days cannot change before the move commits.
 const INTERVIEW_ID = /^interview:(.+)$/;
-async function fenceSourceConflict(trx, sourceConflict) {
+async function fenceSourceConflict(trx, sourceConflict, service) {
   if (sourceConflict.kind === 'closed_day') {
     await require('../scheduling/blackout-dates').lockClosureState(trx);
+    return;
+  }
+  if (sourceConflict.kind === 'mowing_day') {
+    await trx('property_preferences').where('customer_id', service.customer_id).forShare().select('id');
     return;
   }
   const ids = (sourceConflict.with || []).map(String);
@@ -312,19 +318,20 @@ async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, c
   // or still not the fenced one after the second read, refuses the move.
   let fenced = sourceConflict;
   for (let round = 0; round < 2; round += 1) {
-    await fenceSourceConflict(trx, fenced);
+    await fenceSourceConflict(trx, fenced, service);
     const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
     if (!still) break;
     if (coveredBy(still, fenced)) { check.heldBy = trx; return; }
     fenced = still;
   }
-  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
+  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day or a mowing day');
 }
 
 // Every row the re-read conflict rests on is already held by the fence.
 function coveredBy(still, fenced) {
   if (still.kind !== fenced.kind) return false;
-  if (still.kind === 'closed_day') return true;
+  // A closed day or a mowing day is held whole by its fence.
+  if (still.kind !== 'overlap') return true;
   const held = new Set((fenced.with || []).map(String));
   return (still.with || []).every((id) => held.has(String(id)));
 }
