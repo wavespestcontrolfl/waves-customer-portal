@@ -1256,7 +1256,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // every survivor re-scored on the shared model.
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
   const withDry = await withDryWindowCandidates(scored, { prefs, findTimeArgs, slots, flexRules, hard, geo });
-  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing) };
+  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing, await mowingShadowCandidates(service, geo, candidates, ctx, mowing)) };
 }
 
 // The unit's mowing rule (mowing-days.js unitRule): the visit and, when it is
@@ -1269,8 +1269,23 @@ async function unitMowingRule(service, prefs, ctx) {
   return mowingDays.unitRule(prefs, [service, ...siblings]);
 }
 
-// The evaluation result's `mowing` (index.js audits it); none when null.
-const mowingField = (mowing) => (mowing ? { mowing } : {});
+// GATE_AUTO_DISPATCH_MOWING_DAYS='shadow' on the legacy model: the pool mode
+// 'true' would rank, i.e. these candidates without the blocked weekdays, put
+// through the same ranking and its SCORE_CAP. Filtering the live list after
+// that cap reads "no move" when every capped slot is blocked (Codex #7472 r2
+// P2). The shared model caps only after scoring, so its scored list is
+// filtered as it is (mowing-days.js shadowBest). Live decisions never read
+// this pool, and its drops are not counted.
+async function mowingShadowCandidates(service, geo, candidates, ctx, mowing) {
+  if (!mowing || mowing.mode !== 'shadow' || autoDispatchSharedModelLive()) return null;
+  return rankSurvivorsForSharedModel(service, geo, mowingDays.withoutBlockedDays(candidates, mowing), ctx, null);
+}
+
+// The evaluation result's `mowing` (index.js audits it), with the legacy
+// model's shadow pool when there is one; none when the rule is null.
+const mowingField = (mowing, shadowCandidates = null) => (mowing
+  ? { mowing, ...(shadowCandidates ? { mowing_shadow_candidates: shadowCandidates } : {}) }
+  : {});
 
 module.exports = {
   SCORE_CAP,

@@ -356,6 +356,19 @@ describe('evaluation and audit (index.js evaluatePlacement)', () => {
     expect(result.audit.constraints.mowing_days).not.toHaveProperty('shadow_best');
   });
 
+  test('shadow on the legacy model: the pool is filtered before the score cap, so an open slot past the cap still shows', async () => {
+    process.env[GATE] = 'shadow';
+    findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });
+    // A cap of 1 keeps only the blocked Tuesday slot in the live list; true would rank the open Wednesday.
+    const result = await evaluatePlacement(SERVICE, prefsFor('shadow'), { ...evalCtx(), scoreCap: 1 }, CONFIG, '2026-07-03');
+    expect(result.kind).toBe('no_change');
+    expect(result.audit.constraints.mowing_days).toMatchObject({
+      current_blocked: true,
+      shadow_best: { date: WED, start: '08:00' },
+      would_move: true,
+    });
+  });
+
   test('true: no open day -> the visit stays, and the row says why', async () => {
     process.env[GATE] = 'true';
     findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00')] });
@@ -363,5 +376,48 @@ describe('evaluation and audit (index.js evaluatePlacement)', () => {
     expect(result.kind).toBe('no_change');
     expect(result.conflict).toMatchObject({ kind: 'mowing_day' });
     expect(result.audit.constraints).toMatchObject({ drops: { mowing_day: 1 }, conflict: { kind: 'mowing_day' }, mowing_days: { current_blocked: true } });
+  });
+});
+
+describe('apply-time destination check (mowing-days.js assertDestinationClear, apply.js move guard)', () => {
+  const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
+  const trxWith = (row) => tableDb({ property_preferences: { first: row } });
+
+  test('true: a destination the rule as saved NOW blocks is refused, whatever the run scored on', async () => {
+    process.env[GATE] = 'true';
+    // Scored with Monday mowing (Wednesday open); the customer now mows Tuesday, which blocks Wednesday.
+    await expect(mowingDays.assertDestinationClear(trxWith({ preferred_day: null, mowing_days: ['Tue'] }), SERVICE, WED, refuse, [LAWN]))
+      .rejects.toMatchObject({ code: 'REFUSED' });
+    await expect(mowingDays.assertDestinationClear(trxWith({ preferred_day: null, mowing_days: ['Mon'] }), SERVICE, WED, refuse, [LAWN]))
+      .resolves.toBeUndefined();
+  });
+
+  test('true: the customer\'s preferred day is never refused', async () => {
+    process.env[GATE] = 'true';
+    await expect(mowingDays.assertDestinationClear(trxWith({ preferred_day: 'wednesday', mowing_days: ['Tue'] }), SERVICE, WED, refuse, [LAWN]))
+      .resolves.toBeUndefined();
+  });
+
+  test('true: a unit with a Lawn Care Service member is held to the rule; shadow, off and a pest-only unit read nothing', async () => {
+    const PEST = 'Quarterly Pest Control Service';
+    const pestService = { ...SERVICE, service_type: PEST };
+    process.env[GATE] = 'true';
+    await expect(mowingDays.assertDestinationClear(trxWith({ preferred_day: null, mowing_days: ['Tue'] }), pestService, WED, refuse, [PEST, LAWN]))
+      .rejects.toMatchObject({ code: 'REFUSED' });
+    const trx = trxWith({ preferred_day: null, mowing_days: ['Tue'] });
+    await mowingDays.assertDestinationClear(trx, pestService, WED, refuse, [PEST]);
+    process.env[GATE] = 'shadow';
+    await mowingDays.assertDestinationClear(trx, SERVICE, WED, refuse, [LAWN]);
+    delete process.env[GATE];
+    await mowingDays.assertDestinationClear(trx, SERVICE, WED, refuse, [LAWN]);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('the move guard refuses a destination that turned blocked inside the move transaction', async () => {
+    process.env[GATE] = 'true';
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const guard = makeMoveGuard({ service: SERVICE, best: { date: WED, start_time: '08:00', technician_id: 't1' } });
+    await expect(guard({ trx: trxWith({ preferred_day: null, mowing_days: ['Tue'] }), technicianId: 't1' }))
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', statusCode: 409, message: expect.stringContaining('mowing day') });
   });
 });

@@ -29,7 +29,9 @@
  *           overlap), so it moves to the best legal slot without the score
  *           bar, inside every other guard. A visit whose only conflict is
  *           the mowing day raises no needs-a-person notice: with no slot
- *           that fits it stays, and its audit row says why.
+ *           that fits it stays, and its audit row says why. At apply the
+ *           move transaction re-reads the rule FOR SHARE and refuses a
+ *           blocked destination (assertDestinationClear).
  */
 const { parseDays } = require('../../utils/mowing-schedule');
 const { weekdayOf } = require('./scoring');
@@ -97,23 +99,50 @@ function blocksLive(dateStr, rule) {
   return !!rule && rule.mode === 'true' && blocksDay(dateStr, rule);
 }
 
+// Candidates (slot-shaped, `date`) the rule leaves open.
+const withoutBlockedDays = (candidates, rule) => candidates.filter((c) => !blocksDay(c.date, rule));
+
+/**
+ * At apply (apply.js makeMoveGuard and makeMemberGuard), inside the move
+ * transaction: the destination against the customer's rule as saved NOW, the
+ * property_preferences row held FOR SHARE, so a mowing-day or preferred-day
+ * edit made after the run scored the move cannot land the unit on a blocked
+ * day, whether or not a proofreader looked at it (Codex #7472 r2 P2). Mode
+ * 'true' only; `serviceTypes` are the unit's rows (the moving visit, or its
+ * committed group members), and a unit with no Lawn Care Service row reads
+ * nothing.
+ */
+async function assertDestinationClear(trx, service, dateStr, refuse, serviceTypes) {
+  if (mowingDaysMode() !== 'true' || !serviceTypes.some(isLawnCareService)) return;
+  const row = await trx('property_preferences').where('customer_id', service.customer_id).forShare().first('preferred_day', 'mowing_days');
+  const { normalizePreferences } = require('./preferences');
+  const rule = ruleFor(row, normalizePreferences(row, service.service_type).preferred_day_indexes, 'true');
+  if (blocksDay(dateStr, rule)) throw refuse(service.id, `would land on ${dateStr}, on or next to the customer's mowing day`);
+}
+
 const startOf = (p) => (p ? { date: p.date, start: p.start_time || null } : null);
 const sameSlot = (a, b) => !!a && !!b && a.date === b.date && a.start === b.start;
 
 // The slot mode 'true' would choose: the same candidates without the blocked
 // days, and a placed visit on a blocked day read in conflict (as
 // current-conflict.js reads it: conflict moves on, no other conflict first).
-// The pure move rule only: no road check, no write.
+// `shadowCandidates` is that pool when the legacy model capped the live list
+// (candidate-slots.js mowingShadowCandidates, filtered BEFORE the cap), scored
+// with `scoreOf`; without it the scored live list is filtered (the shared
+// model caps only after scoring). The pure move rule only: no road check, no write.
 function shadowBest(rule, {
-  service, current, scored, currentScore, threshold, config, conflictMoves,
+  service, current, scored, shadowCandidates, scoreOf, currentScore, threshold, config, conflictMoves,
 }) {
   if (!current || !currentScore) return null;
   const inConflict = conflictMoves === true && !current.conflict && !!service.window_start && blocksDay(current.date, rule);
+  const pool = shadowCandidates
+    ? shadowCandidates.map((cand) => ({ cand, sc: scoreOf(cand) }))
+    : (scored || []).filter(({ cand }) => !blocksDay(cand.date, rule));
   const ranked = rankCandidates({
     service,
     current: inConflict ? { ...current, conflict: { kind: 'mowing_day', date: current.date } } : current,
     currentScore,
-    scored: (scored || []).filter(({ cand }) => !blocksDay(cand.date, rule)),
+    scored: pool,
     threshold,
     config,
   });
@@ -142,5 +171,5 @@ function auditNote(rule, args) {
 }
 
 module.exports = {
-  mowingDaysMode, isLawnCareService, blockedWeekdays, ruleFor, withMowingRule, unitRule, blocksLive, auditNote, DAY_INDEX,
+  mowingDaysMode, isLawnCareService, blockedWeekdays, ruleFor, withMowingRule, unitRule, blocksLive, withoutBlockedDays, assertDestinationClear, auditNote, DAY_INDEX,
 };

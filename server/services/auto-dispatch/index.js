@@ -375,7 +375,7 @@ async function settleConflicts(run) {
 
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
-    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing,
+    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing, mowing_shadow_candidates: mowingShadowCandidates = null,
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
@@ -432,6 +432,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     service, current, candidates: shadowPool, live, shadow: dryTimeShadowBest({ service, prefs, current, candidates: shadowPool, scoreCtx, threshold, config }),
   }), mowingDays.auditNote(mowing, {
     service, current, live, scored, currentScore, threshold, config, conflictMoves: ctx.conflictMoves,
+    shadowCandidates: mowingShadowCandidates, scoreOf: (cand) => scoreAppointmentPlacement(cand, prefs, scoreCtx),
   }));
 
   // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
