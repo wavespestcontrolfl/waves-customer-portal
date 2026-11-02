@@ -128,10 +128,12 @@ function claudeFaultsEnabled() {
   } catch { return false; }
 }
 
-// A rescue also refuses the id a technician-scope payload carries (scopeCustomerId), not only carriesCustomer's ids.
+// A rescue also refuses the technician-scope customer id (scopeCustomerId), top level or in either payload, not only
+// carriesCustomer's ids.
 const tiedToCustomer = (meta, payload) => carriesCustomer(meta)
   || carriesCustomer({ payload })
-  || [payload.scopeCustomerId, metaOf(meta.payload).scopeCustomerId].some((v) => v !== undefined && v !== null && String(v).trim() !== '');
+  || [meta.scopeCustomerId, payload.scopeCustomerId, metaOf(meta.payload).scopeCustomerId]
+    .some((v) => v !== undefined && v !== null && String(v).trim() !== '');
 
 // The verdict for an alert the bell policy is about to drop: null = dropped as today, else { className, severity }.
 // `payload` is a registry event's raw payload (before sanitizing). Pure except for the gate read.

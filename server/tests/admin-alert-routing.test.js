@@ -260,6 +260,7 @@ describe('dropped Claude faults (classifyClaudeFault, rescueClaudeFault)', () =>
     expect(classifyClaudeFault({ category: 'system', triggerKey: key, payload: { threadId: 't1' } })).toBeNull();
     expect(classifyClaudeFault({ category: 'system', triggerKey: key, metadata: { payload: { scopeCustomerId: 'c1' } } })).toBeNull();
     expect(classifyClaudeFault({ category: 'token_alert', metadata: { customerId: 'c1' } })).toBeNull();
+    expect(classifyClaudeFault({ category: 'token_alert', metadata: { scopeCustomerId: 'c1' } })).toBeNull();
     for (const category of ['inbound_sms', 'inbound_email', 'missed_call', 'voicemail_callback', 'new_lead', 'ops_digest']) {
       expect(classifyClaudeFault({ category, triggerKey: key })).toBeNull();
     }
