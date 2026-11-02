@@ -119,6 +119,8 @@ describe('reserviceAsksReport builder', () => {
     expect(buildReserviceAsksReport(service(flagged), { block: BLOCK, products: PRODUCTS })).toBeNull();
     const unflagged = frozen([item({ text: 'I got sick after your spray. Ants are still in the kitchen.' })], { 'text:1': { answer: 'treated', productIds: ['prod-1'] } });
     expect(buildReserviceAsksReport(service(unflagged), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    const breathe = frozen([item({ text: 'Ants are still in the kitchen. I could not breathe after your spray.' })], { 'text:1': { answer: 'treated', productIds: ['prod-1'] } });
+    expect(buildReserviceAsksReport(service(breathe), { block: BLOCK, products: PRODUCTS })).toBeNull();
   });
 
   test('an item frozen as office-only never shows, even when its scrubbed words read clean', () => {

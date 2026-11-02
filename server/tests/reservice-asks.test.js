@@ -237,9 +237,11 @@ describe('texts', () => {
   });
 
   test('a first-person health complaint is office-only even when its pest words survive the scrub', async () => {
-    const { items } = await gather({ sms: [sms('s8', 'I got sick after your spray. Ants are still in the kitchen.')] });
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ id: 'text:s8', officeOnly: 'health' });
+    const { items } = await gather({ sms: [
+      sms('s8', 'I got sick after your spray. Ants are still in the kitchen.'),
+      sms('s9', 'Ants are still in the kitchen. I could not breathe after your spray.', new Date(NOW - DAY)),
+    ] });
+    expect(items.map((item) => [item.id, item.officeOnly])).toEqual([['text:s8', 'health'], ['text:s9', 'health']]);
   });
 
   test('tapbacks, STOP and empty texts are dropped', async () => {

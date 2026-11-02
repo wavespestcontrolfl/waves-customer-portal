@@ -49,7 +49,9 @@ describe('officeOnlyReason', () => {
     'I used bleach on the ants',
     'My grass is burnt from the sun',
     'Our cat gets sick if we let her out on the lanai',
-    "I didn't get sick after the spray",
+    "I'm sick of these ants",
+    'The roaches are dead after the spray',
+    'The ants ate the poison',
     'My kids got bit by fire ants',
     // "late" and "what happened" about the pests, not the visit.
     'I see them late at night in the kitchen',
@@ -83,6 +85,12 @@ describe('officeOnlyReason', () => {
     ['The treatment made me sick', 'health'],
     ['Your spray gave our cat a rash', 'health'],
     ['We have had headaches since the last treatment', 'health'],
+    // Any health word beside a word for our treatment, whatever the shape or a "not" inside it.
+    ['Ants are still in the kitchen. I could not breathe after your spray.', 'health'],
+    ['My son has asthma, is the spray ok?', 'health'],
+    ['Is the treatment toxic to my dog?', 'health'],
+    ['My eyes were burning after the spray', 'health'],
+    ['We took the dog to the vet after your guy sprayed', 'health'],
     ['The weed killer killed the grass and the weeds', 'damage'],
     ['You killed my roses', 'damage'],
     ['I want a refund', 'billing'],

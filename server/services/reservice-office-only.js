@@ -49,6 +49,10 @@ const PET = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|fish|birds?|chickens?|h
 const PERSON_OR_PET = `(?:I|we|my\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|son|daughter|baby|wife|husband|family)|our\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|baby|family))`;
 const PERSON_OR_PET_OBJECT = `(?:me|us|my\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|son|daughter|baby|wife|husband|family)|our\\s+(?:\\w+\\s+)?(?:${PET}|kids?|child|children|baby|family))`;
 const SYMPTOM = '(?:sick|ill|nause\\w*|dizzy|rash\\w*|a\\s+rash|headaches?|a\\s+headache|itch\\w*|cough\\w*|vomit\\w*|throwing\\s+up|trouble\\s+breathing|died|dead)';
+// Any health word in the same sentence as a word for our treatment or us is a health concern, whatever the sentence's
+// shape or a "not" inside it ("I could not breathe after your spray", "is the spray ok for my son's asthma?"). A
+// health question goes to the office too. Never "sick of these ants", "dead roaches" or "the ants ate the poison".
+const HEALTH = "(?:sick(?!\\s+(?:of|and\\s+tired))|ill(?:ness)?|nause\\w*|dizz\\w*|rash\\w*|hives|headaches?|migraines?|cough\\w*|vomit\\w*|throw(?:ing)?\\s+up|threw\\s+up|breath\\w*|breathe|asthma\\w*|allerg\\w*|wheez\\w*|chok\\w*|swell\\w*|swollen|seizures?|faint\\w*|passed\\s+out|hospital\\w*|emergency\\s+room|urgent\\s+care|doctors?|vets?|veterinar\\w*|poison\\s+control|toxic|(?:eyes|throat|skin|nose|lungs?)\\s+(?:(?:were|was|are|is|kept|started|been|felt|feel)\\s+)?(?:burn\\w*|itch\\w*|sting\\w*|hurt\\w*|water\\w*)|burn\\w*\\s+(?:eyes|throat|skin|nose))";
 
 // Order matters: the first match names the reason. Each entry is [reason, regex].
 const SCREENS = [
@@ -57,6 +61,9 @@ const SCREENS = [
     `\\b${PERSON_OR_PET}\\b${NEAR}\\b${SYMPTOM}\\b${NEAR}\\b(?:from|after|since|by|because\\s+of)\\s+${OURS}\\b`,
     // "the treatment made me sick", "your spray gave our cat a rash"
     `\\b${OURS}\\b${NEAR}\\b(?:made|makes|making|gave|gives|giving|got)\\s+${PERSON_OR_PET_OBJECT}\\s+(?:\\w+\\s+)?${SYMPTOM}\\b`,
+    // Any health word beside a word for our treatment or us, in either order, within one sentence.
+    `\\b${OURS}\\b[^.?!]{0,80}?\\b${HEALTH}\\b`,
+    `\\b${HEALTH}\\b[^.?!]{0,80}?\\b${OURS}\\b`,
   ].join('|'), 'i')],
   ['damage', new RegExp([
     // A spill is our doing on a re-service; so is a fertilizer or chemical burn.
