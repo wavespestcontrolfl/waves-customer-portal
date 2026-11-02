@@ -8,8 +8,9 @@
  * customers automatically — it builds the AppointmentAutoDispatchChanged payload
  * and only logs it, leaving a single place to wire real comms later.
  *
- * Note: reschedule() forces status → 'confirmed' and resets the track token; the
- * pre/post status is returned so the caller can record it in the audit log.
+ * Note: the move keeps the visit's status inside its transaction (keepStatus;
+ * a rewound live lifecycle still lands 'confirmed') and resets the track token;
+ * the pre/post status is returned so the caller can record it in the audit log.
  */
 const db = require('../../models/db');
 const SmartRebooker = require('../rebooker');
@@ -634,7 +635,10 @@ async function flagReminderSyncFailed(service, best) {
 
 // handleReschedule catches its own errors and returns null, as it does for a
 // visit with no reminder row. Tell the two apart by the row itself.
+// { skippedStale: true }: a newer move holds another slot now, and that
+// writer syncs its own reminder — nothing to ring or close for this one.
 async function flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best) {
+  if (reminderRecord && reminderRecord.skippedStale === true) return;
   if (reminderRecord) { await closeReminderSyncNotices(service.id); return; }
   await checkMovedReminder(AppointmentReminders, service, best);
 }
@@ -752,35 +756,80 @@ async function syncMovedReminders(service, best, moveResult, siblingMembers) {
     const reminderRecord = await AppointmentReminders.handleReschedule(
       service.id,
       `${best.date}T${best.start_time || '08:00'}`,
-      // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
-      // round): a full success no longer releases inside the mover — this
-      // sync is the fenced finalizer and its repair-release clears the
-      // cohort; a partial/failed-retarget move keeps the hold for staff.
-      { sendNotification: false, preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true },
+      {
+        sendNotification: false,
+        // Auto-dispatch sends no reschedule notice, so a still-pending
+        // creation confirmation stays pending in the same write, for the
+        // deferred sendConfirmation to deliver. A re-arm after this call
+        // raced a send in between and could send it twice (audit 11-01).
+        keepPendingConfirmation: true,
+        // The sync is skipped (skippedStale) when a newer move holds another
+        // slot: that writer owns the reminder.
+        expectSchedule: { date: best.date, ...(best.start_time ? { windowStart: best.start_time } : {}) },
+        // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
+        // round): a full success no longer releases inside the mover — this
+        // sync is the fenced finalizer and its repair-release clears the
+        // cohort; a partial/failed-retarget move keeps the hold for staff.
+        preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true,
+      },
     );
-    await rearmPendingConfirmation(reminderRecord);
     await flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best);
   } catch (remErr) {
     logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
-    // The throw may come from the re-arm update, after the time was written:
-    // tell staff only when the persisted reminder is really off the new slot
+    // Tell staff only when the persisted reminder is really off the new slot
     // (an unreadable row counts as off: the sync itself threw).
     await checkMovedReminder(AppointmentReminders, service, best);
   }
   await flagSiblingReminders(AppointmentReminders, service, best, siblingMembers);
 }
 
-// handleReschedule flips confirmation_sent→true assuming a reschedule notice
-// will follow; auto-dispatch sends none. If a creation confirmation was still
-// pending, re-arm it (mirrors the admin silent-reschedule path) so the
-// deferred sendConfirmation isn't suppressed — otherwise the customer gets
-// neither the confirmation nor a reschedule notice.
-async function rearmPendingConfirmation(reminderRecord) {
-  if (reminderRecord && reminderRecord.confirmation_sent === false) {
-    await db('appointment_reminders')
-      .where({ id: reminderRecord.id })
-      .update({ confirmation_sent: false, confirmation_sent_at: null });
+// Post-move bookkeeping for one moved row, fenced on the exact slot and the
+// status this move landed (local codex audit): a staff confirm or a newer
+// move landing after the commit is newer state — never rewound to pending,
+// never stamped as this run's (a stale stamp would attribute the operator's
+// placement to auto-dispatch and skew drift/cooldown). A fence miss skips ALL
+// bookkeeping for the row. Resolves with the status the row holds: the
+// landed status, or 'pending' only after a restore that wrote the row. A row
+// whose landed slot or status is unknown cannot be fenced: no bookkeeping, null.
+async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, label }) {
+  if (!slot || !landedStatus) {
+    logger.warn(`[auto-dispatch] post-move bookkeeping skipped for ${label}: the move reported no landed slot or status to fence on`);
+    return null;
   }
+  // keepStatus lands the pre-move status inside the move transaction; only a
+  // rewound live lifecycle lands a pending visit on 'confirmed'. Restore
+  // pending there: the recurring-lifecycle code counts only PENDING rows for
+  // plan-extend / plan_ending. customer_confirmed=false (codex r17): a
+  // confirm landing after the commit keeps status + slot but flips the marker.
+  const restore = previousStatus === 'pending' && landedStatus === 'confirmed';
+  let persisted = landedStatus;
+  try {
+    const stamp = {
+      last_auto_dispatch_at: db.fn.now(),
+      last_auto_dispatch_run_id: runId,
+      auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
+      updated_at: db.fn.now(),
+    };
+    const stamped = await db('scheduled_services')
+      .where({ id, status: landedStatus, ...slot, ...(restore ? { customer_confirmed: false } : {}) })
+      .update(restore ? { ...stamp, status: 'pending' } : stamp);
+    if (Number(stamped) !== 1) {
+      logger.warn(`[auto-dispatch] post-move bookkeeping skipped for ${label}: the row changed after the move (newer state kept)`);
+    } else if (restore) {
+      persisted = 'pending';
+      // The rebooker just logged pending→confirmed; record the compensating
+      // confirmed→pending so the job_status_history timeline stays consistent.
+      await db('job_status_history').insert({
+        job_id: id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
+      });
+    }
+  } catch (stampErr) {
+    // The move already committed; a stamp failure must NOT flip the result
+    // to "failed" (that loses the move in run totals and skips the stability
+    // stamp). Best-effort.
+    logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${label} (move already applied): ${stampErr.message}`);
+  }
+  return persisted;
 }
 
 /**
@@ -792,19 +841,21 @@ async function rearmPendingConfirmation(reminderRecord) {
  * transaction as well). Throws SLOT_TAKEN (or any other rebooker refusal)
  * exactly as before this lane's retry wrapper was added.
  */
-async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config = {}) {
+async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
   // Remaining per-run change budget (orchestrator): a grouped visit whose
   // LOCKED member count exceeds it is refused inside the unit move before
   // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
   if (Number.isFinite(config.remainingChanges)) options.maxUnitSize = Math.max(0, config.remainingChanges);
-  const techChanged = !!best.technician_id
-    && String(best.technician_id) !== String(service.technician_id || '');
-  // GATE_AUTO_DISPATCH_KEEP_TECH (config.keepTech): a visit that has a
-  // technician never changes it here; refused before any write (keep-tech.js).
-  if (techChanged && config.keepTech === true && service.technician_id) throw techChangeBlocked();
-  if (techChanged) options.technicianId = best.technician_id;
+  const techChanged = Boolean(best.technician_id)
+    && String(best.technician_id) !== String(service.technician_id ?? '');
+  if (techChanged) {
+    // GATE_AUTO_DISPATCH_KEEP_TECH (config.keepTech): a visit that has a
+    // technician never changes it here; refused before any write (keep-tech.js).
+    if (config.keepTech === true && service.technician_id) throw techChangeBlocked();
+    options.technicianId = best.technician_id;
+  }
   // Every grouped member re-passes the apply-time hard guards under the
   // unit mover's stop lock, or the grouped move is refused (codex r13 P1).
   options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
@@ -833,11 +884,12 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
-    recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
-    // Pinned for every visit (owner 2026-10-09): a confirmation that lands
-    // between the read above and the move fails the atomic match.
-    customer_confirmed: fresh.customer_confirmed ?? null,
-    ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
+    // recurring_dispatch_due_date and customer_confirmed are pinned with the
+    // location fields, null when absent. customer_confirmed for every visit
+    // (owner 2026-10-09): a confirmation that lands between the read above
+    // and the move fails the atomic match.
+    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS]
+      .map((field) => [field, fresh[field] ?? null])),
   };
 
   // Canonical move — transactional, overlap-checked, silent. ALWAYS a
@@ -846,50 +898,26 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   // later visit -7d and compound on the next run) — hard-coded here, not a
   // caller convention (owner ruling 2026-08-28).
   options.seriesPolicy = 'single';
-  const moveResult = await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
+  // The visit keeps its own status inside the move transaction (pending
+  // stays pending), so no write after the commit has to put it back.
+  options.keepStatus = true;
+  const moveResult = (await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options)) || {};
+  // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit) reports its
+  // members here; a single-row move has none.
+  const visitMove = moveResult.visitMove || {};
 
-  // reschedule() forces status→'confirmed'. The recurring-lifecycle code counts
-  // only PENDING recurring rows for plan-extend / plan_ending, so silently
-  // confirming an optimized future visit can make a plan look depleted. Restore
-  // pending — but base it on the FRESH status (which options.expect made atomic),
-  // NOT the stale scored status, so we don't undo a concurrent operator confirm.
-  const postStatus = fresh.status === 'pending' ? 'pending' : 'confirmed';
-
-  // Stamp auto-dispatch bookkeeping (+ restore pending). The move already
-  // committed; a stamp failure must NOT flip the result to "failed" (that loses
-  // the move in run totals and skips the stability stamp). Best-effort.
-  try {
-    const stamp = {
-      last_auto_dispatch_at: db.fn.now(),
-      last_auto_dispatch_run_id: runId,
-      auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
-      updated_at: db.fn.now(),
-    };
-    // Every stamp is fenced on the exact slot + status this move wrote
-    // (local codex audit): a staff confirm or a newer move landing between
-    // the commit and this bookkeeping is newer state — never rewound to
-    // pending, never stamped as this run's (a stale stamp would attribute
-    // the operator's placement to auto-dispatch and skew drift/cooldown).
-    // A fence miss skips ALL bookkeeping for the row.
-    // The pending restore also requires customer_confirmed=false (codex r17):
-    // an admin/customer confirm landing after the commit keeps status +
-    // slot but flips the marker — never rewound to pending. The complete
-    // landed slot (end too) is part of the fence.
-    const stamped = await db('scheduled_services')
-      .where({ id: service.id, status: 'confirmed', scheduled_date: best.date, window_start: best.start_time, window_end: best.end_time, ...(postStatus === 'pending' ? { customer_confirmed: false } : {}) })
-      .update(postStatus === 'pending' ? { ...stamp, status: 'pending' } : stamp);
-    if (Number(stamped) !== 1) {
-      logger.warn(`[auto-dispatch] post-move bookkeeping skipped for ${service.id}: the row changed after the move (newer state kept)`);
-    } else if (postStatus === 'pending') {
-      // The rebooker just logged pending→confirmed; record the compensating
-      // confirmed→pending so the job_status_history timeline stays consistent.
-      await db('job_status_history').insert({
-        job_id: service.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
-      });
-    }
-  } catch (stampErr) {
-    logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
-  }
+  // Stamp auto-dispatch bookkeeping (+ restore pending after a lifecycle
+  // rewind). The pre-move status is the FRESH one (options.expect made it
+  // atomic), not the stale scored status. post_status is what is persisted.
+  const postStatus = await stampMovedRow({
+    id: service.id,
+    // The complete landed slot (end too) is part of the fence.
+    slot: { scheduled_date: best.date, window_start: best.start_time, window_end: best.end_time },
+    previousStatus: fresh.status,
+    landedStatus: moveResult.landedStatus,
+    runId,
+    label: service.id,
+  });
 
   // A grouped stop that only PARTLY moved (primary committed, a sibling
   // lost its CAS / hit a conflict) is an explicit failure for auto-dispatch
@@ -897,45 +925,19 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   // must not report the optimization as applied. Bookkeeping for the rows
   // that DID move still runs below; the throw carries movedCount so the
   // orchestrator's change count and cap stay honest.
-  const partialFailed = Array.isArray(moveResult?.visitMove?.failed) ? moveResult.visitMove.failed : [];
+  const partialFailed = visitMove.failed || [];
 
-  // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit): every
-  // sibling went through the same reschedule() and was forced 'confirmed'
-  // too. Apply the identical restoration + bookkeeping per moved sibling
-  // from its pre-move state, so a pending recurring sibling keeps counting
-  // toward plan extension (codex #3609 r4). Best-effort, like the tapped row.
-  const siblingMembers = (moveResult?.visitMove?.members || []).filter((m) => m && !m.isPrimary && String(m.id) !== String(service.id));
+  // Every grouped sibling went through the same reschedule() with
+  // keepStatus. Apply the identical bookkeeping per moved sibling from its
+  // pre-move and landed status, so a pending recurring sibling keeps
+  // counting toward plan extension (codex #3609 r4). A mover that reports no
+  // landed slot cannot be fenced ⇒ skipped (fail closed, in stampMovedRow).
+  // Best-effort, like the tapped row.
+  const siblingMembers = (visitMove.members || []).filter((m) => m && !m.isPrimary && String(m.id) !== String(service.id));
   for (const sib of siblingMembers) {
-    try {
-      const stamp = {
-        last_auto_dispatch_at: db.fn.now(),
-        last_auto_dispatch_run_id: runId,
-        auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
-        updated_at: db.fn.now(),
-      };
-      // Fenced on the post-move 'confirmed' the rebooker wrote (codex r5)
-      // AND the exact slot the unit move landed (local audit): a staff
-      // confirm/reschedule after the unit move is newer state — never
-      // rewound to pending, never stamped as this run's. A miss skips ALL
-      // bookkeeping for the row; a mover that reports no landed slot cannot
-      // be fenced ⇒ skipped too (fail closed). The history row only follows
-      // a real restoration.
-      if (!sib.landed) {
-        logger.warn(`[auto-dispatch] post-move bookkeeping skipped for grouped sibling ${sib.id}: no landed slot to fence on`);
-        continue;
-      }
-      const restore = sib.previousStatus === 'pending';
-      const stamped = await db('scheduled_services').where({ id: sib.id, status: 'confirmed', ...sib.landed, ...(restore ? { customer_confirmed: false } : {}) }).update(restore ? { ...stamp, status: 'pending' } : stamp);
-      if (Number(stamped) !== 1) {
-        logger.warn(`[auto-dispatch] post-move bookkeeping skipped for grouped sibling ${sib.id}: the row changed after the move (newer state kept)`);
-      } else if (restore) {
-        await db('job_status_history').insert({
-          job_id: sib.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
-        });
-      }
-    } catch (stampErr) {
-      logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for grouped sibling ${sib.id} (move already applied): ${stampErr.message}`);
-    }
+    await stampMovedRow({
+      id: sib.id, slot: sib.landed, previousStatus: sib.previousStatus, landedStatus: sib.landedStatus, runId, label: `grouped sibling ${sib.id}`,
+    });
   }
 
   await syncMovedReminders(service, best, moveResult, siblingMembers);
@@ -950,7 +952,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   // Every member moved but the visit record could not follow (codex r8):
   // the cleanup seam may detach/dissolve the group against a parent that
   // still names the old stop — an escalation, not a success.
-  if (moveResult?.visitMove?.parentRetargetFailed) {
+  if (visitMove.parentRetargetFailed) {
     throw Object.assign(
       new Error(`grouped visit moved but its visit record could not be retargeted — ${(moveResult.warnings || []).join('; ')}`),
       { code: 'VISIT_PARENT_RETARGET_FAILED', movedCount },

@@ -2775,15 +2775,16 @@ class SmartRebooker {
     if (overlapWarned || offDayWarnings.size) {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       // previousStatus: the status the CAS matched — the row's real
-      // pre-move state, for callers that restore it (auto-dispatch).
+      // pre-move state; landedStatus: the one the move wrote (auto-dispatch
+      // reports and fences on it).
       return {
-        success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId,
+        success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId,
         warnings: [...(overlapWarned ? [arrivalWarning || slotOverlapWarning(newDateStr)] : []), ...offDayWarnings],
       };
     }
     // technicianId: the holder on the COMMITTED row — a caller that suppressed
     // the per-move tech notice (options.suppressTechNotice) tells them itself.
-    return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId };
+    return { success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId };
   }
 
   // Reschedule the dropped occurrence AND every future sibling in the
