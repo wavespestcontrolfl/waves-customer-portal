@@ -874,9 +874,12 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
 
   test('both derived scans deduplicate only queue rows belonging to the current owner', () => {
     const route = src.slice(src.indexOf("router.get('/recurring-alerts'"), src.indexOf("router.post('/recurring-alerts/:id/action'"));
-    const queueChecks = route.match(/where\(\{ recurring_parent_id: plan.id, customer_id: plan.customer_id \}\)\.whereNull\('resolved_at'\)\.first\(\)/g) || [];
-    expect(queueChecks).toHaveLength(2);
+    // Open queue rows are read once and keyed by plan AND customer.
+    expect(route).toContain(".map((row) => `${row.recurring_parent_id}:${row.customer_id}`)");
+    expect(route).toContain('const hasOpenQueueRow = (plan) => openQueueKeys.has(`${plan.id}:${plan.customer_id}`);');
+    expect(route.match(/if \(hasOpenQueueRow\(plan\)\) continue;/g) || []).toHaveLength(2);
     expect(route).not.toContain("where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first()");
+    expect(route).not.toMatch(/openQueueKeys\.has\(`\$\{plan\.id\}`\)/);
   });
 
   test('schedule status route still runs the maintenance after completion', () => {

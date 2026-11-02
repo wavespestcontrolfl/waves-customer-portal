@@ -2493,6 +2493,29 @@ async function countUpcomingSeriesVisits(conn, parentId) {
   return parseInt(row?.c || 0, 10);
 }
 
+// countUpcomingSeriesVisits for many BASE series in one read: parent id ->
+// { count, latest } with the same filters, plus the latest upcoming date. A
+// series is its parent row and the rows naming it as recurring_parent_id, so
+// each row groups under COALESCE(recurring_parent_id, id). Parents with no
+// upcoming visit are absent from the map.
+const SERIES_BATCH_SIZE = 1000;
+async function upcomingSeriesVisitStats(conn, parentIds, today = etDateString()) {
+  const stats = new Map();
+  for (let offset = 0; offset < parentIds.length; offset += SERIES_BATCH_SIZE) {
+    const batch = parentIds.slice(offset, offset + SERIES_BATCH_SIZE);
+    const rows = await conn('scheduled_services')
+      .where(function () { this.whereIn('recurring_parent_id', batch).orWhereIn('id', batch); })
+      .whereIn('status', UPCOMING_VISIT_STATUSES)
+      .where('is_recurring', true)
+      .where('scheduled_date', '>=', today)
+      .groupByRaw('COALESCE(recurring_parent_id, id)')
+      .select(conn.raw('COALESCE(recurring_parent_id, id) AS parent_id'),
+        conn.raw('count(*) AS c'), conn.raw('max(scheduled_date) AS latest'));
+    for (const row of rows) stats.set(String(row.parent_id), { count: parseInt(row.c, 10), latest: row.latest });
+  }
+  return stats;
+}
+
 function shouldPreserveParentTemplateForThisOnlyAssignment(job, technicianId) {
   if (technicianId === undefined || (technicianId !== null && typeof technicianId !== 'string')) return false;
   if (!job?.is_recurring || job.recurring_parent_id || job.recurring_technician_override) return false;
@@ -28292,16 +28315,24 @@ router.get('/recommend-slots', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The customer a recurring-plan alert may name: active, not archived, and not
+// in a former-customer stage. recurringAlertTemplate checks every alert with
+// it; the derived scans apply it up front (prefix 'c.') so former customers'
+// plans never reach that per-alert revalidation.
+function whereAlertableCustomer(query, prefix = '') {
+  return query.where(`${prefix}active`, true).whereNull(`${prefix}deleted_at`)
+    .where(function () {
+      this.whereNull(`${prefix}pipeline_stage`).orWhereNotIn(`${prefix}pipeline_stage`, FORMER_CUSTOMER_STAGES);
+    });
+}
+
 // Shared read/action fence: only an explicit plan decision stops a series;
 // individually cancelled appointments do not establish that decision.
 async function recurringAlertTemplate(conn, parent, cols) {
   if (!parent?.is_recurring || !parent.recurring_pattern
     || parent.recurring_pattern === 'one_time') return null;
   const customer = await conn('customers')
-    .where({ id: parent.customer_id, active: true }).whereNull('deleted_at')
-    .where(function () {
-      this.whereNull('pipeline_stage').orWhereNotIn('pipeline_stage', FORMER_CUSTOMER_STAGES);
-    }).first('id');
+    .where({ id: parent.customer_id }).modify(whereAlertableCustomer).first('id');
   if (!customer) return null;
   const template = overlayRecurringTemplateOverrides(parent, cols);
   const profile = await resolveCompletionProfileForScheduledService(template, conn, { strict: true });
@@ -28410,41 +28441,43 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
     } catch (e) { logger.warn(`[recurring-alerts] queue read failed: ${e.message}`); }
 
     // 2. Derived: fixed plans with ≤1 pending visit in next 14 days (pre-emptive)
+    // Each scan reads its plans' series in grouped queries, not several
+    // queries per plan, and skips customers that the revalidation below would
+    // drop anyway (whereAlertableCustomer).
+    let scheduledCols = null;
     try {
       const cols = await db('scheduled_services').columnInfo();
+      scheduledCols = cols;
       if (cols.recurring_ongoing) {
         const today = etDateString();
         const soonStr = etDateString(addETDays(new Date(), 14));
+        // An old owner's queue row cannot suppress this owner's derived alert:
+        // an open queue row counts only for the same plan AND customer.
+        const openQueueKeys = new Set((await db('recurring_plan_alerts').whereNull('resolved_at')
+          .select('recurring_parent_id', 'customer_id'))
+          .map((row) => `${row.recurring_parent_id}:${row.customer_id}`));
+        const hasOpenQueueRow = (plan) => openQueueKeys.has(`${plan.id}:${plan.customer_id}`);
         const ending = await db('scheduled_services as s')
           .leftJoin('customers as c', 's.customer_id', 'c.id')
           .where('s.is_recurring', true)
           .where(function () { this.where('s.recurring_ongoing', false).orWhereNull('s.recurring_ongoing'); })
           .whereNull('s.recurring_parent_id')
+          .modify((query) => whereAlertableCustomer(query, 'c.'))
           .select(
             's.id', 's.customer_id', 's.service_type', 's.recurring_pattern', 's.scheduled_date',
             'c.first_name', 'c.last_name', 'c.phone', 'c.email',
           );
+        // Confirmed visits are upcoming too — counting only pending made a
+        // customer-confirmed plan read as ending and raised false alerts.
+        const endingStats = await upcomingSeriesVisitStats(db, ending.map((plan) => plan.id), today);
 
         for (const plan of ending) {
-          // Confirmed visits are upcoming too — counting only pending made a
-          // customer-confirmed plan read as ending and raised false alerts.
-          const pending = await db('scheduled_services')
-            .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
-            .where('is_recurring', true)
-            .whereIn('status', ['pending', 'confirmed'])
-            .where('scheduled_date', '>=', today)
-            .orderBy('scheduled_date', 'desc').limit(1);
-          const latestPending = pending[0];
-          if (!latestPending) continue;
-          if (latestPending.scheduled_date && dateOnly(latestPending.scheduled_date) > soonStr) continue;
-
-          const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
+          const upcoming = endingStats.get(String(plan.id));
+          if (!upcoming) continue;
+          if (dateOnly(upcoming.latest) > soonStr) continue;
+          const pendingCount = upcoming.count;
           if (pendingCount > 1) continue;
-
-          // An old owner's queue row cannot suppress this owner's derived alert.
-          const q = await db('recurring_plan_alerts')
-            .where({ recurring_parent_id: plan.id, customer_id: plan.customer_id }).whereNull('resolved_at').first();
-          if (q) continue;
+          if (hasOpenQueueRow(plan)) continue;
 
           alerts.push({
             id: `derived-${plan.id}`,
@@ -28455,7 +28488,7 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
             phone: plan.phone, email: plan.email,
             serviceType: plan.service_type,
             alertType: 'plan_ending_soon',
-            lastVisitDate: dateOnly(latestPending.scheduled_date),
+            lastVisitDate: dateOnly(upcoming.latest),
             pattern: plan.recurring_pattern,
             remainingVisits: pendingCount,
             createdAt: null,
@@ -28475,6 +28508,7 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
           .where('s.is_recurring', true)
           .where('s.recurring_ongoing', true)
           .whereNull('s.recurring_parent_id')
+          .modify((query) => whereAlertableCustomer(query, 'c.'))
           .whereNotExists(function () {
             this.select(db.raw('1'))
               .from('scheduled_services as u')
@@ -28487,21 +28521,22 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
             's.id', 's.customer_id', 's.service_type', 's.recurring_pattern', 's.scheduled_date',
             'c.first_name', 'c.last_name', 'c.phone', 'c.email',
           );
+        const exhaustedIds = exhausted.map((plan) => plan.id);
+        // Re-confirm with the shared counter's filters (single source of truth
+        // for what counts as "upcoming") before alerting.
+        const exhaustedStats = await upcomingSeriesVisitStats(db, exhaustedIds, today);
+        // Last date that actually occupied a slot = the plan's last activity
+        // (any row of the series that is not cancelled or rescheduled).
+        const lastLiveDates = new Map((await db('scheduled_services')
+          .where(function () { this.whereIn('recurring_parent_id', exhaustedIds).orWhereIn('id', exhaustedIds); })
+          .whereNotIn('status', ['cancelled', 'rescheduled'])
+          .groupByRaw('COALESCE(recurring_parent_id, id)')
+          .select(db.raw('COALESCE(recurring_parent_id, id) AS parent_id'), db.raw('max(scheduled_date) AS last_date')))
+          .map((row) => [String(row.parent_id), row.last_date]));
         for (const plan of exhausted) {
-          // Re-confirm with the shared counter (single source of truth for
-          // what counts as "upcoming") before alerting.
-          const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
-          if (pendingCount > 0) continue;
-          // An old owner's queue row cannot suppress this owner's derived alert.
-          const q = await db('recurring_plan_alerts')
-            .where({ recurring_parent_id: plan.id, customer_id: plan.customer_id }).whereNull('resolved_at').first();
-          if (q) continue;
-          // Last date that actually occupied a slot = the plan's last activity.
-          const lastRow = await db('scheduled_services')
-            .where(function () { this.where('recurring_parent_id', plan.id).orWhere('id', plan.id); })
-            .whereNotIn('status', ['cancelled', 'rescheduled'])
-            .orderBy('scheduled_date', 'desc')
-            .first('scheduled_date');
+          // Any upcoming visit (a stats entry) means the series has not run dry.
+          if (exhaustedStats.has(String(plan.id))) continue;
+          if (hasOpenQueueRow(plan)) continue;
           alerts.push({
             id: `derived-${plan.id}`,
             source: 'derived',
@@ -28511,7 +28546,7 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
             phone: plan.phone, email: plan.email,
             serviceType: plan.service_type,
             alertType: 'ongoing_plan_exhausted',
-            lastVisitDate: dateOnly(lastRow?.scheduled_date || plan.scheduled_date),
+            lastVisitDate: dateOnly(lastLiveDates.get(String(plan.id)) || plan.scheduled_date),
             pattern: plan.recurring_pattern,
             remainingVisits: 0,
             createdAt: null,
@@ -28521,7 +28556,7 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
     } catch (e) { logger.warn(`[recurring-alerts] derived scan failed: ${e.message}`); }
 
     const currentAlerts = [];
-    const alertCols = alerts.length ? await db('scheduled_services').columnInfo().catch(() => {
+    const alertCols = alerts.length ? scheduledCols || await db('scheduled_services').columnInfo().catch(() => {
       logger.warn('[recurring-alerts] schema lookup failed; skipping recurring alerts');
       return null;
     }) : {};
