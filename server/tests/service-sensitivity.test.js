@@ -49,7 +49,7 @@ describe('shared service-sensitivity classifier', () => {
 
   test('the job card uses the same classifier', () => {
     const src = require('fs').readFileSync(require.resolve('../services/job-card'), 'utf8');
-    expect(src).toContain("require('./service-sensitivity').classifyServiceSensitivity(serviceType)");
+    expect(src).toContain("require('./service-sensitivity').classifyServiceSensitivity(service?.name ?? service, service?.serviceKey)");
     expect(src).not.toContain('forecast-analyzer');
   });
 
