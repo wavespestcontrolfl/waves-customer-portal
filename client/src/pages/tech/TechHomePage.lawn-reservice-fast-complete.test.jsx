@@ -27,7 +27,7 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
 }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
   default: ({ service, onFullForm }) => (
-    <div>
+    <div data-reservice-asks={String(service.reserviceAsksEnabled)}>
       Lawn re-service sheet for {service.id} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
     </div>
@@ -80,6 +80,19 @@ it('opens the lawn re-service Fast Complete sheet when the gate rides the schedu
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Lawn re-service sheet for svc-lawn-on')).toBeInTheDocument();
   expect(assign).not.toHaveBeenCalled();
+});
+
+// GATE_RESERVICE_ASKS rides the same schedule row (GitHub Codex P1 on #7500): only an exact true reaches the sheet.
+it.each([
+  [true, 'true'],
+  [undefined, 'false'],
+  ['true', 'false'],
+])('passes reserviceAsksEnabled %s to the lawn re-service sheet as %s', async (flag, expected) => {
+  rows = [row('svc-lawn-asks', { lawnReserviceFastCompleteEnabled: true, ...(flag === undefined ? {} : { reserviceAsksEnabled: flag }) })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  const sheet = (await screen.findByText('Lawn re-service sheet for svc-lawn-asks')).closest('[data-reservice-asks]');
+  expect(sheet.getAttribute('data-reservice-asks')).toBe(expected);
 });
 
 it('keeps today\'s Dispatch deep link when the gate is false or absent', async () => {
