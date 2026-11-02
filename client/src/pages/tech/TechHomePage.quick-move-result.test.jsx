@@ -161,6 +161,69 @@ describe('Tech Home Quick Move: reason reaches the route count', () => {
   });
 });
 
+// A reason that crosses rain / not rain loads a different rest-of-route list.
+// Until it arrives (or when it fails) the old count belongs to the other bucket,
+// so a rest-of-route Move stays locked; this stop alone never waits on it.
+describe('Tech Home Quick Move: rest of route waits for the list of the new reason', () => {
+  const NOT_RAIN_URL = '/api/tech/services/one/rain-out-options';
+  const moveButton = () => screen.getByRole('button', { name: /^(Move this stop|Move \d+ stops)/ });
+  const newList = () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      ok: true, days: [], extraReasonsEnabled: true, remainingRouteCount: 2, service: { window: { start: '09:00', end: '10:00' } }, today: {},
+      sameDay: [{ kind: 'same_day', date: '2099-01-01', window: { start: '14:00', end: '15:00' }, label: 'Later today', display: 'Today, 2:00 PM-3:00 PM' }],
+    }),
+  });
+  const reroute = (handler) => {
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (path, init) => (String(path) === NOT_RAIN_URL ? handler() : base(path, init)));
+  };
+  async function openWithRoute() {
+    optionsExtra = { extraReasonsEnabled: true };
+    mount();
+    await screen.findByText('Property brief for one');
+    fireEvent.click(screen.getByRole('button', { name: 'Quick Move' }));
+    await screen.findByText(/Today, 2:00 PM-3:00 PM/);
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route \(2 stops\)/ }));
+    expect(moveButton()).toBeEnabled();
+  }
+
+  it('locks a rest-of-route Move at once and unlocks it when the new list arrives', async () => {
+    await openWithRoute();
+    let release;
+    reroute(() => new Promise((resolve) => { release = () => resolve(newList()); }));
+    fireEvent.click(screen.getByRole('button', { name: 'Emergency' }));
+    expect(moveButton()).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^Rest of route \(…\)/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'This stop only' }));
+    expect(moveButton()).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
+    expect(moveButton()).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Rest of route \(3 stops\)/ })).toBeInTheDocument());
+    expect(moveButton()).toBeEnabled();
+  });
+
+  it('shows Retry when the refetch fails, keeps the route Move locked, and unlocks on a good retry', async () => {
+    await openWithRoute();
+    let fail = true;
+    reroute(() => (fail ? { ok: false, status: 500, json: async () => ({ error: 'boom' }) } : newList()));
+    fireEvent.click(screen.getByRole('button', { name: 'Emergency' }));
+    expect(await screen.findByText(/Could not refresh the rest of the route/)).toBeInTheDocument();
+    expect(moveButton()).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'This stop only' }));
+    expect(moveButton()).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
+    expect(moveButton()).toBeDisabled();
+
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText(/Could not refresh the rest of the route/)).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /^Rest of route \(3 stops\)/ })).toBeInTheDocument();
+    expect(moveButton()).toBeEnabled();
+  });
+});
+
 // "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): the one MOVE TO
 // row, the swap back to day rows, the text preview, the hand-off POST and the
 // Today card it leaves behind.

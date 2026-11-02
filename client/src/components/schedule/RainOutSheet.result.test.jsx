@@ -243,3 +243,65 @@ describe('RainOutSheet: reason reaches the route preview', () => {
     await waitFor(() => expect(checkBodies().at(-1)).toMatchObject({ reasonCode: 'tech_emergency' }), { timeout: 3000 });
   });
 });
+
+// A reason that crosses rain / not rain loads a different rest-of-route list.
+// Until it arrives (or when it fails) the old count belongs to the other bucket,
+// so a rest-of-route Move stays locked; this stop alone never waits on it.
+describe('RainOutSheet: rest of route waits for the list of the new reason', () => {
+  const NOT_RAIN_URL = '/api/admin/dispatch/visit-1/rain-out-options';
+  async function openWithRoute() {
+    optionsExtra = { extraReasonsEnabled: true, remainingRouteCount: 2 };
+    render(<RainOutSheet service={{ id: 'visit-1', customerName: 'Fixture Customer' }} onClose={vi.fn()} onDone={vi.fn()} />);
+    const move = await screen.findByRole('button', { name: 'Move appointment' });
+    await waitFor(() => expect(move).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /This \+ rest of route \(2\)/ }));
+  }
+  const reroute = (handler) => {
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (url, init) => (String(url) === NOT_RAIN_URL ? handler() : base(url, init)));
+  };
+
+  it('locks a rest-of-route Move at once and unlocks it when the new list arrives', async () => {
+    await openWithRoute();
+    let release;
+    reroute(() => new Promise((resolve) => { release = () => resolve(json({
+      sameDay: [], days: [{ kind: 'day', date: '2099-01-02', window: { start: '09:00', end: '10:00' }, display: 'Fri, Jan 2, 9:00 AM-10:00 AM' }],
+      service: { window: { start: '10:00', end: '11:00' } }, remainingRouteCount: 3, extraReasonsEnabled: true,
+    })); }));
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'tech_emergency' } });
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /This \+ rest of route \(…\)/ })).toBeInTheDocument();
+    // This stop alone does not wait on the route list.
+    fireEvent.click(screen.getByRole('button', { name: 'This stop' }));
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /This \+ rest of route/ }));
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByRole('button', { name: /This \+ rest of route \(3\)/ })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
+  });
+
+  it('shows Retry when the refetch fails, keeps the route Move locked, and unlocks on a good retry', async () => {
+    await openWithRoute();
+    let fail = true;
+    reroute(() => (fail
+      ? { ok: false, status: 500, json: async () => ({ error: 'boom' }) }
+      : json({
+        sameDay: [], days: [{ kind: 'day', date: '2099-01-02', window: { start: '09:00', end: '10:00' }, display: 'Fri, Jan 2, 9:00 AM-10:00 AM' }],
+        service: { window: { start: '10:00', end: '11:00' } }, remainingRouteCount: 3, extraReasonsEnabled: true,
+      })));
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'tech_emergency' } });
+    expect(await screen.findByText(/Could not refresh the rest of the route/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'This stop' }));
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /This \+ rest of route/ }));
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeDisabled();
+
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText(/Could not refresh the rest of the route/)).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /This \+ rest of route \(3\)/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Move appointment' })).toBeEnabled();
+  });
+});

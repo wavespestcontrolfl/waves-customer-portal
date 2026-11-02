@@ -1683,11 +1683,18 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   // GATE_RAINOUT_KEEP_RAIN_OK: the server drops all-rain-OK stops from the
   // "rest of route" count and badges for a RAIN move only, so the fetch says
   // when the picked reason is rain. Only that bucket change refetches (not
-  // every reason pick); the refetch keeps the highlighted slot and fails quietly.
+  // every reason pick); the refetch keeps the highlighted slot. Until the list
+  // for the new bucket arrives the loaded route count and conflicts belong to the
+  // OTHER bucket, so "rest of route" is locked (`routeStale`); a failed refetch
+  // shows a Retry and keeps it locked. This stop alone never depends on it.
   const rainReason = reason === 'weather_rain';
   const optionsLoaded = useRef(false);
+  const [optionsRain, setOptionsRain] = useState(null);
+  const [routeLoadError, setRouteLoadError] = useState('');
+  const [routeRetry, setRouteRetry] = useState(0);
   useEffect(() => {
     let cancelled = false;
+    setRouteLoadError('');
     (async () => {
       try {
         const token = getAdminAuthToken();
@@ -1700,13 +1707,19 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
           setOptions(loaded.options);
           if (!optionsLoaded.current) setSelectedKey(loaded.selectedKey);
           optionsLoaded.current = true;
+          setOptionsRain(rainReason);
         }
       } catch (err) {
-        if (!cancelled && !optionsLoaded.current) setError(err.message || 'Failed to load options');
+        if (cancelled) return;
+        if (optionsLoaded.current) setRouteLoadError(err.message || 'Failed to refresh the route');
+        else setError(err.message || 'Failed to load options');
       }
     })();
     return () => { cancelled = true; };
-  }, [service.id, rainReason]);
+  }, [service.id, rainReason, routeRetry]);
+  const routeStale = !!options && optionsRain !== null && optionsRain !== rainReason;
+  // A rest-of-route Move needs the route list for THIS reason.
+  const routeBlocked = scope === 'route' && routeStale;
 
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
@@ -1736,7 +1749,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   const selected = visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null;
   // One lock for the Move button: no slot picked, a move in flight, or a move
   // that already committed and is showing its result. A hand-off needs no slot.
-  const moveLocked = pickSelected ? busy || committed : !selected || busy || committed;
+  const moveLocked = pickSelected ? busy || committed : !selected || busy || committed || routeBlocked;
 
   // Overlap disclaimer (owner ask 2026-08-12): the same-day presets are
   // pure clock offsets, so they can land on another booked stop — the
@@ -1761,7 +1774,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
   // halfway with the earlier stops already booked and already texted.
   const conflictsFor = (src) => [
     ...(src?.conflicts || []).filter((c) => !(scope === 'route' && c.isRouteSibling)),
-    ...(scope === 'route' ? (src?.routeConflicts || []) : []),
+    ...(scope === 'route' && !routeStale ? (src?.routeConflicts || []) : []),
   ];
   const selectedConflicts = conflictsFor(selected);
   const conflictLabel = (c) => {
@@ -1842,7 +1855,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
 
   const handleCommit = async () => {
     if (pickSelected) { handlePick(); return; }
-    if (!selected || busy || committed) return;
+    if (!selected || busy || committed || routeBlocked) return;
     setBusy(true);
     setError('');
     try {
@@ -1922,6 +1935,19 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
             background: '#fcebeb', border: '1px solid #a32d2d', color: '#a32d2d',
           }}>
             {error}
+          </div>
+        )}
+
+        {routeLoadError && (
+          <div style={{
+            marginBottom: 12, fontSize: 14, padding: '8px 10px', borderRadius: 4,
+            background: '#fcebeb', border: '1px solid #a32d2d', color: '#a32d2d',
+          }}>
+            {`Could not refresh the rest of the route for this reason (${routeLoadError}). This stop alone still works.`}
+            {' '}
+            <button type="button" onClick={() => setRouteRetry((n) => n + 1)} style={{ font: 'inherit', fontWeight: 600, color: 'inherit', textDecoration: 'underline', background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
+              Retry
+            </button>
           </div>
         )}
 
@@ -2052,7 +2078,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
                     This stop only
                   </button>
                   <button type="button" onClick={() => setScope('route')} style={chip(scope === 'route')}>
-                    Rest of route ({options.remainingRouteCount + 1} stops)
+                    Rest of route ({routeStale ? '…' : `${options.remainingRouteCount + 1} stops`})
                   </button>
                 </div>
               </>
