@@ -6,7 +6,10 @@
  * with nobody working them: no lead_activities row inside the window, no
  * scheduled future follow-up, and no booked service on a linked customer
  * (a lead whose customer already has scheduled service is pending
- * won-conversion — burying it as unresponsive would hide it from that fix).
+ * won-conversion — burying it as unresponsive would hide it from that fix),
+ * and no ask of the lead's own customer still waiting on us (an open Portal
+ * chat hand-off or service request, or a text they sent that no person has
+ * answered: a lead that wrote to us and got silence is not "unresponsive").
  *
  * Threshold lives in env so it can be tuned without a deploy:
  *   LEAD_STALENESS_DAYS=21
@@ -25,11 +28,18 @@ const logger = require('./logger');
 const { bridgeLeadsFunnelStage } = require('./lead-funnel-bridge');
 const { DISPOSITIONS } = require('./estimate-disposition');
 const { leadNoResponseReasonLive } = require('../config/feature-gates');
+const { openChatScope, openRequestScope } = require('./portal-inbox');
+const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
+const { personSentFilter } = require('./email/email-customer-link');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const NO_RESPONSE_REASON = 'no_response';
 // The estimate dispositions that count against the win rate. Read from the
 // disposition module's own group mapping so a new lost code joins here.
 const LOST_DISPOSITION_CODES = DISPOSITIONS.filter((d) => d.group === 'lost').map((d) => d.code);
+// A text the customer sent this recently, with no person's reply after it, keeps
+// their lead out of the sweep.
+const UNANSWERED_TEXT_DAYS = 90;
 const ESTIMATE_LEAD_STATUSES = ['estimate_sent', 'estimate_viewed'];
 // leads.estimate_id is canonical; the public-quote mirror
 // estimate_data.lead_id is the fallback (services/estimate-lead-linkage.js).
@@ -157,6 +167,105 @@ function staleLeadScope(builder, { now, cutoff, excludeSoftDeleted = false }) {
       this.select(1).from('ad_service_attribution')
         .whereRaw('ad_service_attribution.lead_id = leads.id')
         .whereIn('ad_service_attribution.funnel_stage', ['booked', 'completed']);
+    })
+    // Their own ask is still waiting on us. The sweep reads lead_activities
+    // only, so a customer who asked in the app or by text and got no answer
+    // looked "unresponsive" (a real lead: three app asks, nobody replied, then
+    // "Auto-marked unresponsive after 21 days with no contact"). Never park a
+    // lead while its linked customer has an open ask. Not behind any gate:
+    // it sends and writes nothing, it only parks fewer leads. An unlinked lead
+    // (customer_id NULL) matches none of these and is judged as before.
+    .modify((builder) => whereCustomerAskUnanswered(builder, { now }));
+}
+
+// Three NOT EXISTS clauses, all correlated on leads.customer_id:
+//  1. an open Portal chat hand-off, 2. an open customer service request: the
+//     Portal tab's own definitions (portal-inbox.js openChatScope /
+//     openRequestScope), so "open" means the same thing there and here;
+//  3. an inbound text from the last UNANSWERED_TEXT_DAYS days that is not an
+//     opt-out and has no person contact after it.
+function whereCustomerAskUnanswered(builder, { now }) {
+  const since = new Date(now.getTime() - UNANSWERED_TEXT_DAYS * 24 * 60 * 60 * 1000);
+  return builder
+    .whereNotExists(function () {
+      openChatScope(this.select(1).from('ai_escalations as e'))
+        .whereRaw('e.customer_id = leads.customer_id');
+    })
+    .whereNotExists(function () {
+      openRequestScope(this.select(1).from('service_requests as r'))
+        .whereRaw('r.customer_id = leads.customer_id');
+    })
+    .whereNotExists(function () {
+      this.select(1).from('sms_log as inb')
+        .whereRaw('inb.customer_id = leads.customer_id')
+        .where('inb.direction', 'inbound')
+        .where('inb.created_at', '>=', since)
+        // A STOP is the customer leaving, not asking. Same two markers the
+        // pending-text reader uses: the message type, or an opt-out receipt.
+        .whereRaw("inb.message_type IS DISTINCT FROM 'opt_out'")
+        .whereNotExists(function () {
+          this.select(1).from('inbound_sms_optout_receipts as oo').whereRaw('oo.message_sid = inb.twilio_sid');
+        })
+        .whereNot(function () {
+          wherePersonContactedAfter(this, 'inb.created_at', since);
+        });
+    });
+}
+
+// A person reached the customer after `after` (a column of the outer query).
+// The shared "a person contacted the customer" witnesses as SQL over
+// leads.customer_id, the same predicates admin-alert-contact-witnesses.js
+// uses (staff-contact.js): a person's delivered text, a call a person placed
+// that reached the customer, a call in a human answered, a person's Gmail
+// send. Matched by customer id only, as that module does when both sides
+// carry one. `group` is the builder of a whereNot group: the four EXISTS
+// clauses OR together, and the caller negates them.
+function wherePersonContactedAfter(group, after, since) {
+  // Lazy: both pull in large modules (call-commitments, the pending-text reader).
+  const { withoutProactiveDraft } = require('./call-commitments');
+  const { callEndedAtSql } = require('./sms-pending-conversations');
+  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+  const callEnded = callEndedAtSql('cl');
+  const recipients = "LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address))";
+  const customerEmail = "(SELECT LOWER(NULLIF(BTRIM(cu.email), '')) FROM customers cu WHERE cu.id = leads.customer_id)";
+  group
+    // A person's text: delivered, and not an unresolved reservation or a proactive draft.
+    .whereExists(function () {
+      excludeUnresolvedSendReservations(this.select(1).from('sms_log as os'), 'os')
+        .where('os.direction', 'outbound')
+        .whereRaw('os.customer_id = leads.customer_id')
+        .whereRaw(operatorReplySql('os'))
+        .whereRaw(smsDeliveredSql('os'))
+        .modify(withoutProactiveDraft)
+        .whereRaw(`os.created_at > ${after}`);
+    })
+    // A call a person placed and spoke on / a call in a human answered, judged
+    // by when it ENDED. The created_at bound is only a prefilter for the index.
+    .orWhereExists(function () {
+      whereNotSandboxCall(this.select(1).from('call_log as cl'), 'cl.source')
+        .where('cl.direction', 'outbound').where('cl.status', 'completed')
+        .whereRaw('cl.customer_id = leads.customer_id')
+        .whereRaw(personCallBackSql('cl'))
+        .whereRaw(`cl.created_at > ${after} - interval '1 day'`)
+        .whereRaw(`${callEnded} > ${after}`);
+    })
+    .orWhereExists(function () {
+      whereNotSandboxCall(this.select(1).from('call_log as cl'), 'cl.source')
+        .where('cl.direction', 'inbound').where('cl.status', 'completed').where('cl.answered_by', 'human')
+        .whereRaw('cl.customer_id = leads.customer_id')
+        .whereRaw(`cl.created_at > ${after} - interval '1 day'`)
+        .whereRaw(`${callEnded} > ${after}`);
+    })
+    // A person's Gmail send whose recipients name the customer's own address.
+    // The same address-text prefilter attachCustomerEmailSends uses. It does not
+    // run resolveEmailCustomerLink (JS, a query per row), so a send that names
+    // two customers also counts here; that lead is then parked as before.
+    .orWhereExists(function () {
+      this.select(1).from('emails as er')
+        .whereRaw(personSentFilter('er'))
+        .where('er.received_at', '>=', since)
+        .whereRaw(`er.received_at > ${after}`)
+        .whereRaw(`strpos(${recipients}, ${customerEmail}) > 0`);
     });
 }
 
