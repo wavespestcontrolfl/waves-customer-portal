@@ -211,7 +211,7 @@ customer's message by this rule.
    rollback = unset): a visit a person booked in the admin, or a payment a person recorded,
    for the text's customer (by customer id) within 24 hours after the text. In `true` the Messages
    reader counts the text as answered too, so the Unanswered filter and the evening digest agree.
-   A text-note bell (the SMS reader's "Comms - check <name>'s text note", `doneWhen: 'text_note_checked'`)
+   A text-note bell (the SMS reader's "Comms — check <name>'s text note", `doneWhen: 'text_note_checked'`)
    closes by itself under `GATE_ALERT_CONTACT_CLOSE` alone (owner 2026-11-02), once both hold after the
    bell: a person answered that customer (a text that reached them, a call a person made or took, or a
    person's email) and a visit of that customer was completed, on any day. Either alone leaves it open.
