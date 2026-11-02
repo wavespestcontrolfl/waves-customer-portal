@@ -52,6 +52,7 @@ async function main() {
       let body;
       let status = 200;
       if (api === '/admin/auth/me') body = { id: 'fixture-owner', name: 'Fixture operator', email: 'operator@example.invalid', role };
+      else if (api === '/admin/auth/google/status') body = { enabled: false };
       else if (api === '/health') body = { status: 'ok', gates: {} };
       else if (api === '/admin/feature-flags') body = { flags: {} };
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
