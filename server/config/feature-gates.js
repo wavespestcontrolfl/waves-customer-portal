@@ -215,6 +215,7 @@
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_PUBLIC_WATERING_PLAN=true (owner 2026-10-31, backlink tools plan step 2, 'ok go, approved'): public lawn watering calculator API + embed; dark until flipped; no paid AI; weather from the existing Open-Meteo plan, MRMS and NWS. GET /api/public/watering-plan answers one JSON plan for a curated Florida location or ZIP: last 7 days of observed rain (NOAA MRMS merged with Open-Meteo), the plan-week forecast, the turf's weekly need (ET0 x crop coefficient, seasonal fallback) and the week's run/hold decision from the same engine as the Monday irrigation email. The legal ceiling is the county's restriction policy (config/irrigation-restrictions.js) and it fails closed: outside established coverage the answer is need_only (inches, no event count, no legal maximum). No customer row, no database write, nothing sent to anyone. 120 requests per 15 minutes per IP. Read at call time via publicWateringPlanLive(), strict 'true', dark by default; off = every request to /api/public/watering-plan, any method, answers the generic 404 in server/index.js before the wildcard CORS handler, the global /api/ limiter and this route's own limiter. Kill switch: unset.)
+ *   GATE_PUBLIC_PEST_PRESSURE_INDEX=true (owner 2026-11-02, backlink plan step 5, 'Pest Pressure Index'): public county averages of technician pest-activity ratings; dark until flipped; no paid AI. GET /api/public/pest-pressure-index answers one JSON document (or CSV with ?format=csv) of county x service line averages and medians of the technician's on-site 0-5 tap ratings from completed service visits in a rolling 90-day window (never before the 2026-09-24 tap cutover), a group published only at 20 or more visits. No customer name, address or ZIP leaves the server; internal test customers are excluded; visits whose ZIP does not map to one county are dropped. Read-only database query, cached in memory for 1 hour; 120 requests per 15 minutes per IP. Read at call time via publicPestPressureIndexLive(), strict 'true', dark by default; off = every request to /api/public/pest-pressure-index, any method, answers the generic 404 in server/index.js before the wildcard CORS handler, the global /api/ limiter and this route's own limiter. Kill switch: unset.)
  *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
  *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
  *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
@@ -3357,6 +3358,11 @@ const gates = {
   // publicWateringPlanLive(). Kill switch: unset GATE_PUBLIC_WATERING_PLAN.
   publicWateringPlan: process.env.GATE_PUBLIC_WATERING_PLAN === 'true',
 
+  // Public Pest Pressure Index API (owner 2026-11-02, backlink plan step 5): GET /api/public/pest-pressure-index. OFF in
+  // every environment; boot-log entry only, the call-time reader is publicPestPressureIndexLive(). Kill switch: unset
+  // GATE_PUBLIC_PEST_PRESSURE_INDEX.
+  publicPestPressureIndex: process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX === 'true',
+
   // Payroll layer 3a (owner 2026-10-25): the line-by-line figures for Form 941,
   // RT-6, Form 940 and W-2/W-3 in the Payroll tab. OFF in every environment;
   // read at call time via payrollFormFiguresLive(). Kill switch: unset
@@ -5651,6 +5657,11 @@ function gateEnvValue(envName) {
 // /api/public/watering-plan request answers the generic 404. Kill switch = unset.
 function publicWateringPlanLive() {
   return process.env.GATE_PUBLIC_WATERING_PLAN === 'true';
+}
+// GATE_PUBLIC_PEST_PRESSURE_INDEX read at CALL time, strict `=== 'true'`, dark in every environment. Off = every
+// /api/public/pest-pressure-index request answers the generic 404. Kill switch = unset.
+function publicPestPressureIndexLive() {
+  return process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX === 'true';
 }
 function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
@@ -8973,6 +8984,8 @@ module.exports.smsMacDraftsLive = smsMacDraftsLive;
 module.exports.smsLedgerStallFeedLive = smsLedgerStallFeedLive;
 // GATE_PUBLIC_WATERING_PLAN reader, on its own line so gate PRs never conflict.
 module.exports.publicWateringPlanLive = publicWateringPlanLive;
+// GATE_PUBLIC_PEST_PRESSURE_INDEX reader, on its own line so gate PRs never conflict.
+module.exports.publicPestPressureIndexLive = publicPestPressureIndexLive;
 // GATE_REPORT_EMAIL_FOLLOW_LINK read at CALL time, strict `=== 'true'`, dark in every environment.
 function reportEmailFollowLinkLive() {
   return process.env.GATE_REPORT_EMAIL_FOLLOW_LINK === 'true';

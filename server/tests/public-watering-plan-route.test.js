@@ -250,7 +250,7 @@ describe('server/index.js wiring', () => {
   test('the dark gate precedes the wildcard CORS handler, the credentialed cors(), the /api/ limiter and the router', () => {
     const gate = at("app.use('/api/public/watering-plan', (req, res, next) => {");
     expect(src.slice(gate, gate + 300)).toContain('publicWateringPlanLive()');
-    const corsStar = at("app.use(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan'], (req, res, next) => {");
+    const corsStar = at("app.use(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan', '/api/public/pest-pressure-index'], (req, res, next) => {");
     expect(gate).toBeLessThan(corsStar);
     expect(corsStar).toBeLessThan(at('app.use(cors({'));
     expect(gate).toBeLessThan(at("app.use('/api/', limiter);"));
@@ -275,8 +275,8 @@ describe('server/index.js wiring', () => {
   });
 
   test('wildcard CORS: Access-Control-Allow-Origin * for the route, GET and OPTIONS only, no credentials, preflight answered 204', () => {
-    const { paths, handler } = mountedHandler(at("app.use(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan']"));
-    expect(paths).toEqual(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan']);
+    const { paths, handler } = mountedHandler(at("app.use(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan'"));
+    expect(paths).toEqual(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan', '/api/public/pest-pressure-index']);
 
     const getRes = fakeRes();
     const next = jest.fn();
