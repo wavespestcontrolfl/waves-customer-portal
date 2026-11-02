@@ -6,7 +6,7 @@ const { renderTemplate } = require('../services/email-template-library');
 const { followUsLine } = require('../services/email-template');
 const { reportEmailFollowLinkLive } = require('../config/feature-gates');
 
-const LEAD = 'Follow Waves for local pest and lawn tips:';
+const LEAD = 'Follow Waves on social:';
 const FB = 'https://facebook.com/wavespestcontrol';
 const IG = 'https://instagram.com/wavespestcontrol';
 const TT = 'https://tiktok.com/@wavespestcontrol';

@@ -191,7 +191,7 @@ describe('service report email recipient delivery', () => {
       await sendServiceReportV1Email('record-1', { token: 'token-1' });
       expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
       for (const [args] of EmailTemplateLibrary.sendTemplate.mock.calls) {
-        expect(args.bodyAppend.html).toContain('Follow Waves for local pest and lawn tips:');
+        expect(args.bodyAppend.html).toContain('Follow Waves on social:');
         expect(args.bodyAppend.text).toContain('https://tiktok.com/@wavespestcontrol');
       }
     });
