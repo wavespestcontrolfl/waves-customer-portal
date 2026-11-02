@@ -177,9 +177,11 @@ async function postJson(url, body) {
   return data;
 }
 
-// The address input, its "Not sure yet" box and the Check button.
+// The address input, its "Not sure yet" box and the Check button. Both stay
+// locked while a check runs, so its answer always matches what is typed.
 function AddressField({ f, busy, canCheck, onCheck }) {
   const reset = () => { f.setCheck(null); f.setConfirmed(false); };
+  const checking = busy === 'check';
   return (
     <div style={FIELD}>
       <label htmlFor="moving-address" style={LABEL}>New address</label>
@@ -192,7 +194,7 @@ function AddressField({ f, busy, canCheck, onCheck }) {
         <AddressAutocomplete
           id="moving-address"
           value={f.address}
-          disabled={f.noAddress}
+          disabled={f.noAddress || checking}
           onChange={(v) => { f.setAddress(v); reset(); }}
           onSelect={(parts) => { f.setAddress(parts.formatted || parts.line1); reset(); }}
           placeholder="123 Main St, City"
@@ -202,13 +204,13 @@ function AddressField({ f, busy, canCheck, onCheck }) {
         />
       )}
       <label style={CHECK_ROW}>
-        <input type="checkbox" checked={f.noAddress} onChange={(e) => { f.setNoAddress(e.target.checked); reset(); }} />
+        <input type="checkbox" checked={f.noAddress} disabled={checking} onChange={(e) => { f.setNoAddress(e.target.checked); reset(); }} />
         Not sure yet
       </label>
       {!f.check && !f.noAddress && (
         <div style={{ marginTop: SP.sm }}>
           <BrandButton variant="secondary" disabled={!canCheck} onClick={onCheck}>
-            {busy === 'check' ? 'Checking' : 'Check address'}
+            {checking ? 'Checking' : 'Check address'}
           </BrandButton>
         </div>
       )}

@@ -43,6 +43,7 @@ jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: je
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)),
   leadInspectionLinkLive: jest.fn(() => true),
+  movingFlowLive: jest.fn(() => true),
 }));
 jest.mock('../services/appointment-card-request', () => ({
   claimCardLinkSend: jest.fn(),
@@ -190,6 +191,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereIn = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
   b.whereNotNull = jest.fn(() => b);
+  b.whereNot = jest.fn(() => b);
   b.whereRaw = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
@@ -3488,6 +3490,7 @@ describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at
     expect(await linkOwnersInBody(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))
       .toEqual({ owners: [{ kind: 'moving', token: MOVE_TOKEN, customerId: 'c2' }], unresolved: [] });
     expect(mockBuilders.customer_moves.where).toHaveBeenCalledWith({ token: MOVE_TOKEN });
+    expect(mockBuilders.customer_moves.whereNot).toHaveBeenCalledWith({ status: 'closed' });
     wireMoving({ move: null });
     expect(await linkOwnersInBody(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`))
       .toEqual({ owners: [], unresolved: [{ kind: 'moving', token: MOVE_TOKEN }] });
@@ -3512,7 +3515,19 @@ describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at
       .toMatch(/moving link belongs to a different customer/);
     wireMoving({ move: null });
     expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
-      .toMatch(/moving link no longer resolves/);
+      .toMatch(/moving link no longer opens/);
+  });
+
+  test('a closed move or a dark gate refuses at the send: the page would answer 404', async () => {
+    wireMoving({ move: { id: 'move-1', customer_id: 'c2', status: 'closed' } });
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link no longer opens/);
+    const { movingFlowLive } = require('../config/feature-gates');
+    movingFlowLive.mockReturnValueOnce(false);
+    wireMoving();
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/Moving links are switched off/);
+    expect(mockBuilders.customer_moves.first).not.toHaveBeenCalled();
   });
 
   test('a look-alike host is not a Waves link and is not judged', async () => {

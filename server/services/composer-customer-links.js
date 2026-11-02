@@ -1580,15 +1580,21 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
 // services and move details, and its holder can change the move: bound to
 // the recipient's account at the send like a report link (GH Codex security
 // review on #7486). A short link arrives expanded to its /moving/ target
-// (expandedView). A token with no move fails closed; a look-alike host is not
-// a Waves link and is not judged.
+// (expandedView). The page must still open at the send: gate on, a move that
+// is not closed (else its link is a 404). A look-alike host is not a Waves
+// link and is not judged. A gates module without the reader (a test mock)
+// reads as off: fail closed.
 async function checkMovingLinks(ctx, moveIds) {
   const onRecipientAccount = recipientAccountBinder(ctx);
   for (const run of linkRuns(ctx.runs, /\/moving\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, MOVING_PATH_RE, ANY_SCHEME);
     if (!token) continue;
-    const move = await db('customer_moves').where({ token: token.toLowerCase() }).first('id', 'customer_id');
-    if (!move) return refuseSend('This moving link no longer resolves — remove it and insert a fresh one.');
+    const gates = require('../config/feature-gates');
+    if (!(typeof gates.movingFlowLive === 'function' && gates.movingFlowLive())) {
+      return refuseSend('Moving links are switched off (GATE_MOVING_FLOW) — remove the moving link before sending.');
+    }
+    const move = await db('customer_moves').where({ token: token.toLowerCase() }).first('id', 'customer_id', 'status');
+    if (!move || move.status === 'closed') return refuseSend('This moving link no longer opens — remove it and insert a fresh one.');
     const bad = await onRecipientAccount(move.customer_id, 'moving link');
     if (bad) return bad;
     ctx.bearers += 1;
@@ -2093,7 +2099,8 @@ const ownedBearerShapes = () => [
     async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
   ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
   ['moving', /\/moving\//i, MOVING_PATH_RE,
-    async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).first('customer_id'))?.customer_id],
+    // A closed move's link is a 404: unresolved, so the caller fails closed.
+    async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).whereNot({ status: 'closed' }).first('customer_id'))?.customer_id],
 ];
 // The public /r/:code resolver's own three paths (routes/referral-links.js):
 // an active promoter, a merged-away promoter whose code survives as an alias

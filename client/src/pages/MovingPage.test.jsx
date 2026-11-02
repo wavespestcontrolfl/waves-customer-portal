@@ -162,6 +162,21 @@ describe('MovingPage', () => {
     expect(screen.getByRole('button', { name: 'Check address' })).toBeInTheDocument();
   });
 
+  it('the address and its "Not sure yet" box are locked while a check runs', async () => {
+    let answer;
+    renderPage([
+      [`/public/moving/${TOKEN}`, () => jsonResponse(OPEN_VIEW)],
+      [`/public/moving/${TOKEN}/check`, () => new Promise((resolve) => { answer = resolve; })],
+    ]);
+    await screen.findByRole('heading', { level: 1, name: 'Moving, Pat?' });
+    fireEvent.change(screen.getByLabelText('New address'), { target: { value: '12 Example Way, Parrish FL' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check address' }));
+    await waitFor(() => expect(screen.getByLabelText('New address')).toBeDisabled());
+    expect(screen.getAllByLabelText('Not sure yet')[0]).toBeDisabled();
+    answer(jsonResponse({ typed: '12 Example Way, Parrish FL', normalized: { city: 'Parrish' }, verdict: 'in_area', checkId: 'abcdef0123456789' }));
+    expect(await screen.findByRole('heading', { name: 'Is this the right address?' })).toBeInTheDocument();
+  });
+
   it('a dead link shows the not-found card', async () => {
     renderPage([[`/public/moving/${TOKEN}`, () => jsonResponse({ error: 'Not found' }, 404)]]);
     expect(await screen.findByText('Page not found')).toBeInTheDocument();
