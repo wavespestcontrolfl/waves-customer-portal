@@ -45,7 +45,7 @@ function item(overrides = {}) {
 
 function frozen(items, answers, extra = {}) {
   return {
-    version: 1, gatheredAt: '2026-11-01T15:00:00.000Z', lane: 'pest', items, answers, officeNotes: {}, ...extra,
+    version: 2, gatheredAt: '2026-11-01T15:00:00.000Z', lane: 'pest', items, answers, officeNotes: {}, ...extra,
   };
 }
 
@@ -75,7 +75,10 @@ describe('reserviceAsksReport builder', () => {
     expect(buildReserviceAsksReport(service(treatedAsk), { block: BLOCK, products: PRODUCTS })).toBeNull();
     on();
     expect(buildReserviceAsksReport(service(null), { block: BLOCK, products: PRODUCTS })).toBeNull();
-    expect(buildReserviceAsksReport(service({ ...treatedAsk, version: 2 }), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    // A version-1 freeze predates the property marker, so it never renders (it may hold another property's texts).
+    expect(buildReserviceAsksReport(service({ ...treatedAsk, version: 1 }), { block: BLOCK, products: PRODUCTS })).toBeNull();
+    expect(reserviceAsksReportApplies(service({ ...treatedAsk, version: 1 }), BLOCK)).toBe(false);
+    expect(buildReserviceAsksReport(service({ ...treatedAsk, version: 3 }), { block: BLOCK, products: PRODUCTS })).toBeNull();
     // An unanswered item is left out; so is a hidden one; so is an office-only one.
     const none = frozen(
       [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c', text: 'You charged me twice and I want a refund.' })],

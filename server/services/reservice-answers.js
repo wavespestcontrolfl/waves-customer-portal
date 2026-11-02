@@ -25,7 +25,9 @@ const MAX_REASON_CHARS = 160;
 const MAX_TEXT_CHARS = 200;
 const MAX_PRODUCT_IDS = 20;
 const ANSWER_KINDS = Object.freeze(['treated', 'checked_none', 'noted', 'not_today', 'hidden', 'answered']);
-const FREEZE_VERSION = 1;
+// 2: items from an account with several properties carry `accountWide` (reservice-asks.js). A version-1 freeze has no
+// such marker, so the customer's report never reads it (reservice-asks-report.js).
+const FREEZE_VERSION = 2;
 
 const URL_RE = /\b(?:https?:\/\/|www\.)\S*/i;
 // Seven or more digits with only spaces, dots, dashes or brackets between them.

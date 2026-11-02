@@ -245,8 +245,9 @@ Re-service asks report (owner-approved design 2026-11-02, consolidated re-servic
 report step S3a; `GATE_RESERVICE_ASKS` — dark, off unless exactly `'true'`, read
 at call time): on the same service-report payload (`/api/reports/:token/data` and
 the PDF, which share `buildReportV1Data`), gate on adds an optional
-`data.reserviceAsksReport` when the record carries a version-1
-`service_records.service_data.reserviceAsks` block (frozen at completion: pest /
+`data.reserviceAsksReport` when the record carries a version-2
+`service_records.service_data.reserviceAsks` block (version 2 is the first
+to mark account-wide items; a version-1 freeze never renders) (frozen at completion: pest /
 lawn re-services completed as performed on a live closeout), the report's
 `reserviceReport` copy block, when composed, reads a performed (`treated`)
 outcome, and at least one item shows. When the key is present

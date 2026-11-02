@@ -37,6 +37,10 @@ const {
   productRows, lawnWhereOf, stillSeeingTopic, KEY_LOCATION_RE, SAFETY_CLAIM_RE, readsAsAddressedToCustomer,
 } = require('./reservice-report-card');
 
+// The freeze this report reads: version 2, the first to mark account-wide items (reservice-answers.js). A version-1
+// freeze has no property scope, so it never renders here: that report keeps today's card (Codex security review, #7502).
+const FREEZE_VERSION = 2;
+// The payload's own shape, which the web page and the PDF read (unchanged).
 const VERSION = 1;
 const TITLE = 'Your re-service';
 const ET = 'America/New_York';
@@ -68,7 +72,7 @@ function asksGateOn() {
 function readFrozenReserviceAsks(service) {
   const data = parseMaybeJson(service?.service_data);
   const frozen = data && typeof data === 'object' ? data.reserviceAsks : null;
-  if (!frozen || typeof frozen !== 'object' || Number(frozen.version) !== VERSION) return null;
+  if (!frozen || typeof frozen !== 'object' || Number(frozen.version) !== FREEZE_VERSION) return null;
   return Array.isArray(frozen.items) ? frozen : null;
 }
 

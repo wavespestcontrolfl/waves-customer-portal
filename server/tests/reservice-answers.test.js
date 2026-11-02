@@ -231,7 +231,7 @@ describe('buildReserviceAsksFreeze', () => {
     });
     expect(dropped).toBe(0);
     expect(freeze).toEqual({
-      version: 1,
+      version: 2,
       gatheredAt: '2026-11-02T12:00:00.000Z',
       lane: 'pest',
       items: gathered.items.map((item) => ({ ...item, printable: true })),
@@ -274,7 +274,7 @@ describe('buildReserviceAsksFreeze', () => {
   test('no answers at all still freezes what the customer said', () => {
     const { freeze, dropped } = buildReserviceAsksFreeze({ gathered, gatheredAt, answers: [] });
     expect(dropped).toBe(0);
-    expect(freeze).toMatchObject({ version: 1, lane: 'pest', answers: {}, officeNotes: {} });
+    expect(freeze).toMatchObject({ version: 2, lane: 'pest', answers: {}, officeNotes: {} });
     expect(freeze.items).toHaveLength(3);
     expect(buildReserviceAsksFreeze({ gathered, gatheredAt }).freeze.answers).toEqual({});
   });
