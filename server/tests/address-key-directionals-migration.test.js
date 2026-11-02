@@ -108,6 +108,9 @@ describe('address key: street directionals and suffix short forms', () => {
     expect(scope('100 Main St', 'Apt E')).not.toBe(scope('100 Main St', 'Apt East'));
     expect(scope('100 Main St Unit LP')).not.toBe(scope('100 Main St Unit Loop'));
     expect(canonicalizeScopeAddress('100 Main St Unit PT')).toBe('100 main street unit pt');
+    expect(scope('100 Main St Apt 4 Building LP')).not.toBe(scope('100 Main St Apt 4 Building Loop'));
+    expect(scope('100 Main St Apt 4 Bldg E')).not.toBe(scope('100 Main St Apt 4 Bldg East'));
+    expect(key('100 Main St Apt 4 Building LP')).not.toBe(key('100 Main St Apt 4 Building Loop'));
     // Same unit written two ways still matches, and the street still expands.
     expect(scope('100 Main St E', 'Apt 4')).toBe(scope('100 Main Street East', 'Unit 4'));
     expect(scope('100 Main St E Apt 4')).toBe(scope('100 Main Street East', 'Apt 4'));

@@ -45,22 +45,40 @@ const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/
 
 // Street DIRECTIONALS, expanded the same way ("Dr E" == "Drive East"). They are
 // NOT part of canonicalizeAddress, because callers also run a unit (line 2)
-// through that one and a unit id is data ("Apt E" is not "Apt East"). The
-// STREET key (streetKey, and so addressKey, which is stored in
-// customer_properties.address_key under a unique index) and the in-memory
-// property SCOPE keys (estimate-property-linkage normalizedStampedStreet) all
-// use this wrapper, so they agree. Widening it changed stored keys:
-// migration 20261102130000 recomputes them.
+// through that one and a unit id is data ("Apt E" is not "Apt East").
 const DIRECTIONAL_CANON = {
   n: 'north', s: 'south', e: 'east', w: 'west', ne: 'northeast', nw: 'northwest', se: 'southeast', sw: 'southwest',
 };
 const UNIT_DESIGNATOR_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', '#']);
-const canonicalizeScopeAddress = (s) => {
-  const words = String(s || '').toLowerCase().replace(/[.,]/g, ' ').replace(/#/g, ' # ').split(/\s+/).filter(Boolean);
+const scopeWords = (s) => String(s || '').toLowerCase().replace(/[.,]/g, ' ').replace(/#/g, ' # ').split(/\s+/).filter(Boolean);
+
+// STREET words for the stored key (streetKey, and so addressKey, which is
+// stored in customer_properties.address_key under a unique index): suffixes
+// and directionals expand; the token right after a designator is not
+// direction-mapped. addressKey cuts the unit off before this runs. Frozen as
+// canonicalScope in migration 20261102130000 (a test pins addressKey to it):
+// any change here needs its own recompute migration.
+const canonicalizeStreetWords = (s) => {
+  const words = scopeWords(s);
   return words.map((w, i) => {
-    // The unit id after a designator stays exact: "Unit LP" != "Unit Loop",
-    // "Apt E" != "Apt East" (codex #7485 r1).
-    if (UNIT_DESIGNATOR_WORDS.has(words[i - 1])) return w;
+    const canon = STREET_SUFFIX_CANON[w] || w;
+    return UNIT_DESIGNATOR_WORDS.has(words[i - 1]) ? canon : (DIRECTIONAL_CANON[canon] || canon);
+  }).join(' ');
+};
+
+// The in-memory property SCOPE line (estimate-property-linkage
+// normalizedStampedStreet, customer-properties scopeStreet): street words
+// expand like the stored key, but a unit stays exact (codex #7485 r1 + pre-push
+// audit). A designator after the first word starts the unit, and everything
+// from there on is kept as typed ("Apt 4 Building LP" != "Apt 4 Building
+// Loop"). A designator that opens the line ("Unit 4, 100 Beach Rd") keeps only
+// its id exact, because the street follows it.
+const canonicalizeScopeAddress = (s) => {
+  const words = scopeWords(s);
+  const unitAt = words.findIndex((w, i) => i > 0 && UNIT_DESIGNATOR_WORDS.has(w));
+  return words.map((w, i) => {
+    if (unitAt !== -1 && i >= unitAt) return w;
+    if (UNIT_DESIGNATOR_WORDS.has(w) || UNIT_DESIGNATOR_WORDS.has(words[i - 1])) return w;
     const canon = STREET_SUFFIX_CANON[w] || w;
     return DIRECTIONAL_CANON[canon] || canon;
   }).join(' ');
@@ -84,7 +102,7 @@ const stripTrailingUnit = (s) => String(s || '').replace(/\s+(?:apt|apartment|un
  * "123 Main Street", "61st Ave E" == "61st Avenue East", but "Main St" != "Main Ave"
  * (nothing is ever stripped). Only STREET words expand; the unit keeps its exact id.
  */
-const streetKey = (s) => canonicalizeScopeAddress(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
+const streetKey = (s) => canonicalizeStreetWords(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
 
 // Interchangeable unit designators are written loosely for the SAME unit, so
 // strip the designator WORD wherever it appears (in line2 OR embedded in line1) —
@@ -162,6 +180,7 @@ module.exports = {
   STREET_SUFFIX_CANON,
   canonicalizeAddress,
   canonicalizeScopeAddress,
+  canonicalizeStreetWords,
   canonicalizeUnitLine,
   normalizeZip,
   stripTrailingUnit,
