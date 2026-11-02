@@ -109,6 +109,12 @@ describe('replay safety', () => {
       expect(() => lib.localDatabaseUrl(url)).toThrow(/ib_replay/);
     }
     expect(lib.localDatabaseUrl('postgresql://owner@localhost:5432/ib_replay_dev')).toBe('postgresql://owner@localhost:5432/ib_replay_dev');
+    expect(() => lib.localDatabaseUrl('postgresql://localhost/ib_replay"; DROP DATABASE x; --')).toThrow(/ib_replay/);
+    // A run's throwaway copy is a valid replay name that never equals the template (the run drops its copy).
+    const copy = lib.scratchDatabaseName('ib_replay_dev', 98765, 1762070400000);
+    expect(copy).toBe('ib_replay_dev_run_98765_1762070400000');
+    expect(() => lib.localDatabaseUrl(`postgresql://localhost/${copy}`)).not.toThrow();
+    expect(() => lib.scratchDatabaseName(`ib_replay_${'x'.repeat(40)}`, 98765, 1762070400000)).toThrow(/too long/);
   });
 
   test('a written file is owner-only even when it replaces a readable one', () => {

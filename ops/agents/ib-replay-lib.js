@@ -131,10 +131,19 @@ function localDatabaseUrl(url) {
   try { parsed = new URL(String(url || '')); } catch { parsed = null; }
   const name = parsed ? parsed.pathname.replace(/^\//, '') : '';
   if (!parsed || !['postgres:', 'postgresql:'].includes(parsed.protocol) || parsed.search
-      || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) || !name.startsWith('ib_replay')) {
-    throw new Error('IB_REPLAY_DATABASE_URL must be postgresql://localhost/ib_replay* with no query string');
+      || !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) || !/^ib_replay[a-z0-9_]{0,54}$/.test(name)) {
+    throw new Error('IB_REPLAY_DATABASE_URL must be postgresql://localhost/ib_replay* (lower-case letters, digits, _) with no query string');
   }
   return parsed.toString();
+}
+
+// The throwaway copy one run works on (CREATE DATABASE ... TEMPLATE), named
+// from the validated template name, so it is a safe identifier. Never cut to
+// fit: a cut name could equal the template, and the run drops its copy.
+function scratchDatabaseName(template, pid, now) {
+  const name = `${template}_run_${pid}_${now}`;
+  if (name.length > 63) throw new Error(`the database name ${template} is too long for a run copy; use 30 characters or fewer`);
+  return name;
 }
 
 function replayEnv(callerEnv, profile, { databaseUrl, apiKey = null }) {
@@ -202,5 +211,5 @@ function compareRuns(before, after) {
 
 module.exports = {
   PRICES, costUsd, buildTape, caseFromTask, pickCases, scoreFirstTool, stableJson,
-  profileFrom, localDatabaseUrl, replayEnv, assertOutsideRepo, writePrivateFile, compareRuns, FORCED_OFF,
+  profileFrom, localDatabaseUrl, scratchDatabaseName, replayEnv, assertOutsideRepo, writePrivateFile, compareRuns, FORCED_OFF,
 };

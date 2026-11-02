@@ -26,10 +26,12 @@
  *    before any server module loads; then the export's gate profile and --set
  *    apply. Owner-direct writes, the OpenAI backup and the credit-key pool are
  *    forced off, and the checkout's .env is never read (WAVES_LOCAL_DEV=1).
- *  - Database: a dedicated localhost database named ib_replay*, migrated to
- *    this checkout (DATABASE_URL=<it> npm run db:migrate). The run sets its
- *    field roster to the exported one (the bar's rules name it) and writes its
- *    own task, thread and ledger rows there.
+ *  - Database: a localhost database named ib_replay*, migrated to this
+ *    checkout (DATABASE_URL=<it> npm run db:migrate), used only as a template.
+ *    Each run creates a fresh copy (CREATE DATABASE ... TEMPLATE), sets the
+ *    copy's field roster to the exported one (the bar's rules name it), lets
+ *    the bar write its task, thread and ledger rows there, and drops the copy
+ *    at the end. No database keeps a change, dry run or not.
  *  - Login: the owner's admin login with full access (a local technicians row).
  *  - The named customer: the target the request resolved to when it ran, so
  *    no customer record is needed here.
@@ -197,14 +199,48 @@ async function replayCase(base, state, c, execute) {
   };
 }
 
+// Every run works on a fresh copy of the ib_replay* database and drops it at
+// the end, so no database keeps a change, dry run or not. The ib_replay*
+// database itself is only the template.
+async function withScratchDatabase(templateUrl, fn) {
+  const { Client } = require(require.resolve('pg', { paths: [SERVER] }));
+  const template = new URL(templateUrl).pathname.slice(1);
+  const copyName = lib.scratchDatabaseName(template, process.pid, Date.now());
+  const maintenance = new URL(templateUrl);
+  maintenance.pathname = '/postgres';
+  const admin = new Client({ connectionString: maintenance.toString() });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE "${copyName}" TEMPLATE "${template}"`);
+    const copy = new URL(templateUrl);
+    copy.pathname = `/${copyName}`;
+    return await fn(copy.toString());
+  } finally {
+    await admin.query(`DROP DATABASE IF EXISTS "${copyName}" WITH (FORCE)`);
+    await admin.end();
+  }
+}
+
 async function runCases(args) {
   const file = JSON.parse(fs.readFileSync(lib.assertOutsideRepo(args.cases, REPO_ROOT), 'utf8'));
   const out = lib.assertOutsideRepo(args.out, REPO_ROOT);
   const set = overrides(args.set);
   if (args.execute && !process.env.ANTHROPIC_API_KEY) throw new Error('--execute needs ANTHROPIC_API_KEY');
-  const env = lib.replayEnv(process.env, { ...file.profile, ...set }, {
-    databaseUrl: process.env.IB_REPLAY_DATABASE_URL, apiKey: args.execute ? process.env.ANTHROPIC_API_KEY : null,
-  });
+  const apiKey = args.execute ? process.env.ANTHROPIC_API_KEY : null;
+  const results = await withScratchDatabase(lib.localDatabaseUrl(process.env.IB_REPLAY_DATABASE_URL),
+    (databaseUrl) => replayAll(args, file, { ...file.profile, ...set }, { databaseUrl, apiKey }));
+  const spentUsd = Number(results.reduce((sum, r) => sum + (r.costUsd || 0), 0).toFixed(4));
+  const report = { version: 1, mode: 'first-tool', ranAt: new Date().toISOString(), execute: args.execute, set, cases: path.resolve(args.cases), spentUsd, results };
+  lib.writePrivateFile(out, `${JSON.stringify(report, null, 1)}\n`);
+  for (const r of results) console.log(`${String(r.id).slice(0, 8)}  ${r.kind.padEnd(4)}  ${r.expected} -> ${r.actual || '-'}  ${r.verdict}${r.error ? `  (${r.status} ${r.error})` : ''}`);
+  const count = (verdict) => results.filter((r) => r.verdict === verdict).length;
+  console.log(args.execute
+    ? `pass ${count('pass')} of ${results.length}; spent about $${spentUsd.toFixed(2)}. Wrote ${out}`
+    : `dry run: ${count('dry_ok')} of ${results.length} built a model request; no model was called. Wrote ${out}`);
+}
+
+async function replayAll(args, file, profile, { databaseUrl, apiKey }) {
+  const env = lib.replayEnv(process.env, profile, { databaseUrl, apiKey });
   for (const key of Object.keys(process.env)) delete process.env[key];
   Object.assign(process.env, env);
 
@@ -237,14 +273,7 @@ async function runCases(args) {
     if (server) await new Promise((resolve) => server.close(resolve));
     await db.destroy();
   }
-  const spentUsd = Number(results.reduce((sum, r) => sum + (r.costUsd || 0), 0).toFixed(4));
-  const report = { version: 1, mode: 'first-tool', ranAt: new Date().toISOString(), execute: args.execute, set, cases: path.resolve(args.cases), spentUsd, results };
-  lib.writePrivateFile(out, `${JSON.stringify(report, null, 1)}\n`);
-  for (const r of results) console.log(`${String(r.id).slice(0, 8)}  ${r.kind.padEnd(4)}  ${r.expected} -> ${r.actual || '-'}  ${r.verdict}${r.error ? `  (${r.status} ${r.error})` : ''}`);
-  const count = (verdict) => results.filter((r) => r.verdict === verdict).length;
-  console.log(args.execute
-    ? `pass ${count('pass')} of ${results.length}; spent about $${spentUsd.toFixed(2)}. Wrote ${out}`
-    : `dry run: ${count('dry_ok')} of ${results.length} built a model request; no model was called. Wrote ${out}`);
+  return results;
 }
 
 function compareFiles(args) {
