@@ -68,6 +68,20 @@ describe('nameAnchoredEmailCandidates — the deterministic Pitts resolver', () 
   test('no name → no candidates (never guesses without an anchor)', () => {
     expect(nameAnchoredEmailCandidates({ bouncedEmail: 'apitz6958@yahoo.com' })).toHaveLength(0);
   });
+
+  test('a transcribed initial "A." that bounced → the same letters without the dot come first', () => {
+    const out = nameAnchoredEmailCandidates({ bouncedEmail: 'a.rowe@example.net', firstName: 'Ann Marie', lastName: 'Rowe' });
+    expect(out.map((c) => c.value)).toEqual(['arowe@example.net', 'rowe@example.net']);
+    expect(out[0]).toMatchObject({ confidence: 'high', edit_distance: 0 });
+    // The other direction: a bounced dot-less form proposes the dotted one.
+    const reverse = nameAnchoredEmailCandidates({ bouncedEmail: 'arowe@example.net', firstName: 'Ann Marie', lastName: 'Rowe' });
+    expect(reverse[0]).toMatchObject({ value: 'a.rowe@example.net', edit_distance: 0 });
+  });
+
+  test('Gmail ignores dots, so a dot-only variant there is never proposed', () => {
+    const out = nameAnchoredEmailCandidates({ bouncedEmail: 'a.rowe@gmail.com', firstName: 'Ann Marie', lastName: 'Rowe' });
+    expect(out.map((c) => c.value)).toEqual(['rowe@gmail.com']);
+  });
 });
 
 describe('buildReadbackQuestion', () => {
@@ -96,6 +110,15 @@ describe('mergeCandidates', () => {
     expect(merged[0].confidence).toBeCloseTo(0.98, 2);
     expect(typeof merged[1].confidence).toBe('number');
     expect(merged.map((c) => c.value)).not.toContain('apitz6958@yahoo.com');
+  });
+
+  test('a dot-only fix outranks a dropped letter, and the read-back spells it', () => {
+    const merged = mergeCandidates({
+      bouncedEmail: 'a.rowe@example.net',
+      nameCandidates: nameAnchoredEmailCandidates({ bouncedEmail: 'a.rowe@example.net', firstName: 'Ann Marie', lastName: 'Rowe' }),
+    });
+    expect(merged.map((c) => [c.value, c.confidence])).toEqual([['arowe@example.net', 0.9], ['rowe@example.net', 0.85]]);
+    expect(buildReadbackQuestion(merged[0].value)).toBe('A-R-O-W-E at example — is that right?');
   });
 });
 
