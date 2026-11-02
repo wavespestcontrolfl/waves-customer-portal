@@ -34,6 +34,7 @@ const PREVIEW = {
   occurrences: [occ('svc-a', '2099-03-02', '2099-03-04'), occ('svc-b', '2099-06-01', '2099-06-03'), occ('svc-c', '2099-08-31', '2099-09-02')],
   skippedCount: 0,
   conflicts: [],
+  conflictSnapshot: [],
 };
 const rowsFor = (ids, extra = {}) => ids.map((id) => ({ id, visit_id: null, ...extra[id] }));
 
@@ -143,6 +144,8 @@ describe('runSeriesMove: Confirm runs the board move bound to the card', () => {
       actor: { techRole: 'admin', technicianId: 'tech-1' }, sourceSurface: 'intelligence_bar',
     }));
     expect(rescheduleOptions.expectOccurrences).toBe(plan.occurrences);
+    expect(rescheduleOptions.expectConflictSnapshot).toBe(plan.conflict_snapshot);
+    expect(typeof rescheduleOptions.moveGuard).toBe('function');
     expect(rescheduleOptions.carryVisit).toBe(false);
     expect(mockRunPlannedVisitMove).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: false, reasonCode: 'admin', serviceId: ANCHOR }));
     expect(out).toMatchObject({ success: true, plan_move: true, visits_moved: 3, customer_name: 'Pat Example', warning: '2099-06-03 overlaps another appointment.' });
@@ -162,6 +165,38 @@ describe('runSeriesMove: Confirm runs the board move bound to the card', () => {
     const drift = await SeriesMove.runSeriesMove({ input: { _series_move: plan }, actionContext: admin, appt, dateStr: '2099-03-04', window: null });
     expect(drift.preview_changed).toBe(true);
     expect(mockPlanVisitMoveForStaff).not.toHaveBeenCalled();
+  });
+
+  test('the overlaps the card counted ride the plan and bind the commit', async () => {
+    const snapshot = [{ target_id: 'svc-b', target_date: '2099-06-03', conflict_id: 'other-1', conflict_date: '2099-06-03' }];
+    mockPreviewSeriesMove.mockResolvedValueOnce({ ...PREVIEW, conflictSnapshot: snapshot, conflicts: [{ occurrenceId: 'svc-b', date: '2099-06-03' }] });
+    const plan = await approvedPlan();
+    expect(plan.conflict_snapshot).toBe(snapshot);
+    // A plan pin from before this field existed is not a card this commit can bind: refused.
+    const { conflict_snapshot: _gone, ...oldPin } = plan;
+    const out = await SeriesMove.runSeriesMove({ input: { _series_move: oldPin }, actionContext: admin, appt, dateStr: '2099-03-04', window: null });
+    expect(out.preview_changed).toBe(true);
+  });
+
+  test('the move guard locks the plan rows, then refuses a linked visit added since the card', async () => {
+    const plan = await approvedPlan();
+    const rescheduleOptions = {};
+    mockPlanVisitMoveForStaff.mockResolvedValue({ plan: { rescheduleOptions } });
+    mockRunPlannedVisitMove.mockResolvedValue({ status: 200, body: { success: true, occurrencesRescheduled: 3 } });
+    await SeriesMove.runSeriesMove({ input: { _series_move: plan }, actionContext: admin, appt, dateStr: '2099-03-04', window: null });
+    const calls = [];
+    const trx = jest.fn((table) => {
+      const q = { whereIn: (...a) => { calls.push(['whereIn', table, ...a]); return q; }, orderBy: () => q, forUpdate: () => { calls.push(['forUpdate']); return q; }, select: async () => [] };
+      return q;
+    });
+    await expect(rescheduleOptions.moveGuard({ trx })).resolves.toBeUndefined();
+    expect(calls).toEqual([['whereIn', 'scheduled_services', 'id', ['svc-a', 'svc-b', 'svc-c']], ['forUpdate']]);
+    expect(mockHasLivePackageChild).toHaveBeenLastCalledWith(trx, ['svc-a', 'svc-b', 'svc-c']);
+    mockPlanCallFollowUpShift.mockResolvedValueOnce([{ id: 'child-1' }]);
+    const err = await rescheduleOptions.moveGuard({ trx }).catch((e) => e);
+    expect(err).toMatchObject({ statusCode: 409, code: 'linked_follow_up_move_unsupported' });
+    expect(err.message).toMatch(/Nothing was moved\.$/);
+    expect(SeriesMove._test.refusalFromThrown(err)).toEqual({ error: err.message, code: 'linked_follow_up_move_unsupported' });
   });
 
   test('a new overlap since the card is drift too', async () => {

@@ -51,23 +51,41 @@ async function readPreview(appointmentId, newDate, window) {
   }
 }
 
-const CANNOT_MOVE = 'The bar can\'t move that plan from here yet. Nothing was proposed.';
+const cannotMove = (tail) => `The bar can't move that plan from here yet. ${tail}`;
+
+// A linked visit the card does not list (a package visit 2, a call-booked follow-up that would shift): checked
+// at the card and again inside the move's transaction (linkedVisitGuard).
+async function linkedVisitRefusal(conn, ids, occurrences, tail) {
+  if (await require('../package-followup-booking').hasLivePackageChild(conn, ids)) {
+    return { error: `A visit in this recurring plan has a linked second treatment (a two-treatment package visit 2) that would move with it. ${cannotMove(tail)}`, code: 'package_visit_two_linked' };
+  }
+  const { planCallFollowUpShift } = require('../call-booking-catalog');
+  for (const occ of occurrences) {
+    if ((await planCallFollowUpShift({ conn, parentServiceId: occ.id, fromDate: occ.from_date, toDate: occ.to_date })).length) {
+      return { error: `A visit in this recurring plan has a call-booked follow-up visit that would shift with it. ${cannotMove(tail)}`, code: 'linked_follow_up_move_unsupported' };
+    }
+  }
+  return null;
+}
 
 // A plan visit with an effect the card does not list: refused up front, never carried.
 async function unlistedEffectRefusal(rows, ids, occurrences) {
   if (rows.some((r) => r.visit_id)) {
-    return { error: `A visit in this recurring plan shares its stop with another service. ${CANNOT_MOVE}`, code: 'grouped_visit_move_unsupported' };
+    return { error: `A visit in this recurring plan shares its stop with another service. ${cannotMove('Nothing was proposed.')}`, code: 'grouped_visit_move_unsupported' };
   }
-  if (await require('../package-followup-booking').hasLivePackageChild(db, ids)) {
-    return { error: `A visit in this recurring plan has a linked second treatment (a two-treatment package visit 2) that would move with it. ${CANNOT_MOVE}`, code: 'package_visit_two_linked' };
-  }
-  const { planCallFollowUpShift } = require('../call-booking-catalog');
-  for (const occ of occurrences) {
-    if ((await planCallFollowUpShift({ conn: db, parentServiceId: occ.id, fromDate: occ.from_date, toDate: occ.to_date })).length) {
-      return { error: `A visit in this recurring plan has a call-booked follow-up visit that would shift with it. ${CANNOT_MOVE}`, code: 'linked_follow_up_move_unsupported' };
-    }
-  }
-  return null;
+  return linkedVisitRefusal(db, ids, occurrences, 'Nothing was proposed.');
+}
+
+// The rebooker's moveGuard: runs on the locked series before its first write. The plan's rows are locked
+// FOR UPDATE first, so a linked visit inserted since the card (its parent key check takes FOR KEY SHARE on
+// the parent) either is visible here or waits until this move commits; the follow-up shift would otherwise
+// move it without the card showing it.
+function linkedVisitGuard(approved) {
+  return async ({ trx }) => {
+    await trx('scheduled_services').whereIn('id', approved.occurrence_ids).orderBy('id').forUpdate().select('id');
+    const refusal = await linkedVisitRefusal(trx, approved.occurrence_ids, approved.occurrences, 'Nothing was moved.');
+    if (refusal) throw Object.assign(new Error(refusal.error), { statusCode: 409, isOperational: true, code: refusal.code, guardRefusal: true });
+  };
 }
 
 // The plan the card shows, or the refusal that stops the card. `window` is the anchor's landing window
@@ -95,6 +113,9 @@ async function planSeriesMove({ appointmentId, newDate, window }) {
       occurrences: preview.occurrences,
       skipped_count: Number(preview.skippedCount) || 0,
       conflict_dates: [...new Set((preview.conflicts || []).map((c) => dateOnly(c.date)).filter(Boolean))].sort(),
+      // Every appointment a landing window overlaps, as the rebooker probed it: the commit re-probes under
+      // its occupancy locks and refuses on any difference (expectConflictSnapshot).
+      conflict_snapshot: Array.isArray(preview.conflictSnapshot) ? preview.conflictSnapshot : [],
       rewound_ids: rows.filter((r) => String(r.id) !== String(appointmentId) && needsLifecycleRewind(r)).map((r) => String(r.id)).sort(),
     },
   };
@@ -105,7 +126,8 @@ function seriesPlanFingerprint(plan) {
   const pick = {
     anchor_id: plan?.anchor_id, new_date: plan?.new_date, window: plan?.window || null,
     occurrence_ids: plan?.occurrence_ids, occurrences: plan?.occurrences,
-    skipped_count: plan?.skipped_count, conflict_dates: plan?.conflict_dates, rewound_ids: plan?.rewound_ids,
+    skipped_count: plan?.skipped_count, conflict_dates: plan?.conflict_dates, conflict_snapshot: plan?.conflict_snapshot,
+    rewound_ids: plan?.rewound_ids,
   };
   return crypto.createHash('sha256').update(JSON.stringify(pick)).digest('hex');
 }
@@ -158,6 +180,7 @@ function refusalFromThrown(err) {
   if (!(status >= 400 && status < 500)) return null;
   if (CHANGED_CODES.has(err.code)) return { ...CHANGED, error: `${err.message} Nothing was moved. Ask again for a fresh card.` };
   if (err.code === 'VISIT_SERIES_MOVE_UNSUPPORTED') return { error: `${err.message} Nothing was moved.`, code: 'grouped_visit_move_unsupported' };
+  if (err.guardRefusal) return { error: err.message, code: err.code };
   return { error: `${err.message} Nothing was moved.`, ...(err.code ? { code: err.code } : {}) };
 }
 
@@ -185,9 +208,14 @@ async function runBoardMove({ input, actionContext, appt, dateStr, window, appro
       body: { seriesAck: true, seriesAckIds: approved.occurrence_ids }, actor, sourceSurface: 'intelligence_bar',
     });
     if (!planned.plan) return { refusal: refusalFromReply(planned) };
-    // Every visit's disclosed date and window is checked again under the series locks. A later visit
-    // grouped since the card is refused, never carried.
-    Object.assign(planned.plan.rescheduleOptions, { expectOccurrences: approved.occurrences, carryVisit: false });
+    // Bound to the card under the series locks: every visit's disclosed date and window, every overlap the
+    // card counted, and no linked visit it did not list. A later visit grouped since is refused, never carried.
+    Object.assign(planned.plan.rescheduleOptions, {
+      expectOccurrences: approved.occurrences,
+      expectConflictSnapshot: approved.conflict_snapshot,
+      moveGuard: linkedVisitGuard(approved),
+      carryVisit: false,
+    });
     return {
       reply: await runPlannedVisitMove({
         plan: planned.plan, serviceId: appt.id, newDate: dateStr, reasonCode: 'admin', reasonText: input.reason || null,
@@ -203,7 +231,7 @@ async function runBoardMove({ input, actionContext, appt, dateStr, window, appro
 
 // A confirmed plan move needs the card's own plan; a call without it never saw the later visits.
 const validPin = (approved) => Boolean(approved) && typeof approved === 'object'
-  && Array.isArray(approved.occurrences) && Array.isArray(approved.occurrence_ids);
+  && Array.isArray(approved.occurrences) && Array.isArray(approved.occurrence_ids) && Array.isArray(approved.conflict_snapshot);
 
 // Confirm: re-plan, compare with the card, then run the board's staff move bound to the card.
 async function runSeriesMove({ input, actionContext = {}, appt, dateStr, window, customerName }) {
