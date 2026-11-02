@@ -5808,7 +5808,6 @@ function CustomerOverlayHeader({
   onClose,
   customerId,
   setAnnualPrepayInvoiceOpen,
-  setActiveTab,
 }) {
   const customerName = [c.firstName, c.lastName]
     .filter(Boolean)
@@ -5958,12 +5957,6 @@ function CustomerOverlayHeader({
                 Prepay Invoice
               </button>
             )}
-            <button data-ui-text-action
-              onClick={() => setActiveTab("comms")}
-              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-            >
-              Add Note
-            </button>
             {isAdmin && (
               <button data-ui-text-action
                 onClick={openEditModal}
@@ -8588,7 +8581,6 @@ function CustomerProfileMobileActions({
   menuOpen,
   setAnnualPrepayInvoiceOpen,
   setAnnualPrepayOpen,
-  setActiveTab,
   customerId,
 }) {
   return (
@@ -8659,24 +8651,26 @@ function CustomerProfileMobileActions({
               Edit
             </button>
           )}
-          <div ref={menuRef} className="relative">
-            {" "}
-            <button data-ui-text-action
-              ref={menuButtonRef}
-              onClick={() => setMenuOpen((v) => !v)}
-              aria-label="More"
-              aria-expanded={menuOpen}
-              className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-            >
+          {/* Every ⋯ item is admin-only, so a non-admin gets no ⋯ button
+              rather than an empty menu. */}
+          {isAdmin && (
+            <div ref={menuRef} className="relative">
               {" "}
-              <MoreHorizontal size={18} strokeWidth={1.75} />{" "}
-            </button>
-            {menuOpen && (
-              <div
-                role="menu"
-                className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
+              <button data-ui-text-action
+                ref={menuButtonRef}
+                onClick={() => setMenuOpen((v) => !v)}
+                aria-label="More"
+                aria-expanded={menuOpen}
+                className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
               >
-                {isAdmin && (
+                {" "}
+                <MoreHorizontal size={18} strokeWidth={1.75} />{" "}
+              </button>
+              {menuOpen && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
+                >
                   <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
@@ -8688,8 +8682,6 @@ function CustomerProfileMobileActions({
                   >
                     Edit customer
                   </button>
-                )}
-                {isAdmin && (
                   <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
@@ -8701,8 +8693,6 @@ function CustomerProfileMobileActions({
                   >
                     Send prepay invoice
                   </button>
-                )}
-                {isAdmin && (
                   <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
@@ -8714,20 +8704,10 @@ function CustomerProfileMobileActions({
                   >
                     Record collected prepay
                   </button>
-                )}
-                <button data-ui-text-action
-                  role="menuitem"
-                  onClick={() => {
-                    setActiveTab("comms");
-                    setMenuOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                >
-                  Add note
-                </button>{" "}
-              </div>
-            )}
-          </div>{" "}
+                </div>
+              )}
+            </div>
+          )}{" "}
         </div>{" "}
       </div>{" "}
       <CustomerActionBar
@@ -11118,9 +11098,9 @@ function useCustomerProfileNavigation({
     menuOpen,
     setMenuOpen,
     menuRef,
-    // Every external consumer of this (the overlay tab bar, the mobile
-    // action menu's tab jumps) gets the same draft guard as changeWorkspaceTab
-    // for free — this is no longer the raw useState setter.
+    // Every external consumer of this (the overlay tab bar) gets the same
+    // draft guard as changeWorkspaceTab for free — this is no longer the raw
+    // useState setter.
     setActiveTab: requestTabChange,
     tabsAnchorRef,
     profileContentId,
@@ -11893,7 +11873,6 @@ export default function Customer360ProfileV2({
           menuOpen={menuOpen}
           setAnnualPrepayInvoiceOpen={setAnnualPrepayInvoiceOpen}
           setAnnualPrepayOpen={setAnnualPrepayOpen}
-          setActiveTab={setActiveTab}
           customerId={customerId}
         />
       }
