@@ -159,11 +159,7 @@ async function pickProposal({ dbi, versions, now }) {
     .whereIn('p.prompt_version', versions)
     .where('p.created_at', '>', new Date(now.getTime() - PROPOSAL_MAX_AGE_DAYS * DAY_MS))
     .whereNotExists(function noPatchYet() {
-      // A patch binds its proposal, except one rejected only because its exam could not run (exam_unavailable:
-      // the shared plan's limit or an outage): that proposal stays pickable, within PROPOSAL_MAX_AGE_DAYS
-      // (owner 2026-11-02, weekly-loop review item 5).
-      this.select(dbi.raw('1')).from({ pp: PATCHES }).whereRaw('pp.source_proposal_id = p.id')
-        .whereRaw("NOT (pp.status = 'rejected' AND COALESCE(pp.decision_reason, '') = 'exam_unavailable')");
+      this.select(dbi.raw('1')).from({ pp: PATCHES }).whereRaw('pp.source_proposal_id = p.id');
     })
     .orderBy('p.created_at', 'desc')
     .first('p.id', 'p.surface', 'p.failure_mode', 'p.proposal');
