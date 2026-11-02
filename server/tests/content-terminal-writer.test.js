@@ -129,6 +129,44 @@ describe('fetchTerminalDraft', () => {
   });
 });
 
+describe('a hold in place of a draft (owner 2026-11-02): the row cannot be written as briefed', () => {
+  const hold = (over = {}, extra = {}) => ({ opportunity_id: ID, brief_id: BRIEF, hold: { reason: 'duplicate', detail: 'The live termite swarmers post covers this topic.', ...over }, ...extra });
+
+  test('a usable hold is read as HELD, never as a draft, with its text tidied', async () => {
+    const r = await tw.fetchTerminalDraft(ID, { gh: ghWith(hold({ detail: '  The live post\n covers it.\t ' })), expectedBriefId: BRIEF });
+    expect(r).toMatchObject({ ok: false, code: tw.HELD, hold: { reason: 'duplicate', detail: 'The live post covers it.' }, brief_id: BRIEF, revision: 'commit-1', agent_id: 'terminal-writer' });
+    expect(r.draft).toBeUndefined();
+    expect(r.hold.question).toBeUndefined();
+    const owner = await tw.fetchTerminalDraft(ID, { gh: ghWith(hold({ reason: 'needs_owner', question: 'Remove the competitor names from the page text?' })), expectedBriefId: BRIEF });
+    expect(owner.hold).toEqual({ reason: 'needs_owner', detail: 'The live termite swarmers post covers this topic.', question: 'Remove the competitor names from the page text?' });
+  });
+
+  test.each([
+    ['another row', hold({}, { opportunity_id: 'someone-else' }), /opportunity_id does not match/],
+    ['another brief', hold({}, { brief_id: 'brief-before' }), /brief_id is not the brief this row waits on/],
+    ['a draft and a hold at once', hold({}, { body, frontmatter: {} }), /a draft or a hold, not both/],
+    ['a hold that is not an object', { opportunity_id: ID, brief_id: BRIEF, hold: 'duplicate' }, /hold must be an object/],
+    ['an unknown reason', hold({ reason: 'too_hard' }), /hold.reason must be one of duplicate, blocked_by_rule, brief_unusable, needs_owner/],
+    ['no detail', hold({ detail: '   ' }), /hold.detail must be 1 to 500 characters/],
+    ['a detail too long', hold({ detail: 'x'.repeat(501) }), /hold.detail must be 1 to 500 characters/],
+    ['a needs_owner hold with no question', hold({ reason: 'needs_owner' }), /needs a question of 1 to 300 characters/],
+  ])('%s is rejected like a bad draft: the row keeps waiting', async (_name, content, why) => {
+    const r = await tw.fetchTerminalDraft(ID, { gh: ghWith(content), expectedBriefId: BRIEF });
+    expect(r).toMatchObject({ ok: false, code: tw.INVALID });
+    expect(r.reason).toMatch(why);
+  });
+
+  test('the draft source answers a hold with `held`, not `wait`', async () => {
+    process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
+    try {
+      const source = tw.draftSourceFor(ID, { id: BRIEF, action_type: 'new_supporting_blog', page_type: 'supporting-blog' }, { handed: true, gh: ghWith(hold()) });
+      const r = await source.runWithBrief();
+      expect(r).toMatchObject({ held: true, code: tw.HELD, hold: { reason: 'duplicate' }, revision: 'commit-1' });
+      expect(r.wait).toBeUndefined();
+    } finally { delete process.env.GATE_CONTENT_WRITER_TERMINAL; }
+  });
+});
+
 describe('draftSourceFor: the terminal as a draft source with the dispatcher\'s contract', () => {
   const saved = { ...process.env };
   beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; });
@@ -229,6 +267,13 @@ describe('waiting rows and the admin item', () => {
 
     branches[C] = draftFor(C);
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
+
+    // A hold on the branch: the row is held, neither due nor written.
+    branches[ID] = { opportunity_id: ID, brief_id: 'brief-aa', hold: { reason: 'brief_unusable', detail: 'The brief has no search data, so the quality check fails any draft.' } };
+    const withHold = await tw.awaitingTerminalDrafts({ deps: d });
+    expect(withHold.held.map((r) => [r.opportunity_id, r.hold.reason])).toEqual([[ID, 'brief_unusable']]);
+    expect(withHold.due.map((r) => r.opportunity_id)).toEqual([]);
+    expect(withHold.written.map((r) => r.opportunity_id)).toEqual([B, C]);
   });
 
   test('a waiting row whose brief is too old, or gone, is not offered for writing, nor listed written with its draft pushed: the next run briefs it again', async () => {
@@ -314,6 +359,73 @@ describe('the gate as a kill switch, and the 1pm catch-up', () => {
       expect(await tw.blogDraftRequested({ now, deps: { episodes: failing, db: withBlog([{}]) } })).toBe(false);
       process.env.GATE_CONTENT_WRITER_TERMINAL = 'false';
       expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: withBlog([{}]) } })).toBe(false);
+    });
+  });
+});
+
+describe('a needs_owner hold asks the owner once, and the item closes when the row no longer waits on the owner', () => {
+  const OPP = '00000000-0000-4000-8000-0000000000f1';
+  const OTHER = '00000000-0000-4000-8000-0000000000f2';
+  const episodes = (open = []) => ({
+    openAdminAlertKeys: jest.fn(async (_conn, prefix) => open.filter((key) => key.startsWith(prefix))),
+    closeAdminAlertKeys: jest.fn(async (_conn, keys) => keys.length),
+    raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'n1', rang: true })),
+  });
+  const hold = (question) => ({ reason: 'needs_owner', detail: 'The live page names a competitor in its text.', question });
+  const row = { action_type: 'refresh_existing_page', query: 'in wall pest control system' };
+
+  test('the question is the why when it fits; the item is the owner\'s, rings by default, one per row', async () => {
+    const e = episodes();
+    await tw.raiseHoldQuestion({ opportunityId: OPP, row, hold: hold('Remove the competitor names from the page text?'), deps: { episodes: e } });
+    const [category, title, why, opts] = e.raiseAdminAlertWithReopen.mock.calls[0];
+    expect([category, title, why]).toEqual(['content', 'Content — a website post needs your decision', 'Remove the competitor names from the page text?']);
+    expect(opts).toMatchObject({ dedupeKey: `content-terminal-hold:${OPP}`, bellDefault: true, link: '/admin/blog?tab=autopilot' });
+    expect(opts.metadata).toMatchObject({ severity: 'needs-you', who: 'person', doneWhen: 'owner_decided', opportunityId: OPP });
+    expect(opts.detail).toContain('Post: refresh existing page: in wall pest control system');
+    expect(opts.detail).toContain('Question: Remove the competitor names from the page text?');
+    expect(opts.detail).toContain('Why the terminal held it: The live page names a competitor in its text.');
+  });
+
+  test('a question that breaks the why rules (two sentences, or too long) moves to the detail under a fixed why', async () => {
+    for (const question of ['Strip the names from the text. Or exempt the page?', `Should the page ${'really '.repeat(20)}keep the names?`]) {
+      const e = episodes();
+      await tw.raiseHoldQuestion({ opportunityId: OPP, row, hold: hold(question), deps: { episodes: e } });
+      const [, , why, opts] = e.raiseAdminAlertWithReopen.mock.calls[0];
+      expect(why).toBe('The terminal held this website post until you decide; the question is in the details.');
+      expect(opts.detail).toContain(`Question: ${question}`);
+    }
+  });
+
+  describe('closeAnsweredHoldItems', () => {
+    const saved = { ...process.env };
+    beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; });
+    afterEach(() => { process.env = { ...saved }; });
+    const latest = (rows) => ({ raw: jest.fn(async () => ({ rows })) });
+
+    test('an item stays while its row is still parked on the owner\'s question; anything else closes it', async () => {
+      const e = episodes([`content-terminal-hold:${OPP}`, `content-terminal-hold:${OTHER}`, 'content-terminal-hold:not-a-row']);
+      const conn = latest([
+        { opportunity_id: OPP, outcome: tw.HOLD_OUTCOME, skip_reason: 'terminal_hold:needs_owner', status: 'pending' },
+        // requeued and briefed again: its latest run waits for a draft now
+        { opportunity_id: OTHER, outcome: tw.AWAITING_OUTCOME, skip_reason: tw.MISSING, status: 'pending' },
+      ]);
+      await tw.closeAnsweredHoldItems({ deps: { episodes: e, db: conn } });
+      expect(conn.raw.mock.calls[0][1]).toEqual([[OPP, OTHER], 'deferred_publish_cap']);
+      expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OTHER}`, 'content-terminal-hold:not-a-row']);
+      expect(e.closeAdminAlertKeys.mock.calls[0][2]).toBe('owner_decided');
+    });
+
+    test('a row that left the queue closes its item; with the gate off every item closes, with no read', async () => {
+      const e = episodes([`content-terminal-hold:${OPP}`]);
+      await tw.closeAnsweredHoldItems({ deps: { episodes: e, db: latest([{ opportunity_id: OPP, outcome: tw.HOLD_OUTCOME, skip_reason: 'terminal_hold:needs_owner', status: 'skipped' }]) } });
+      expect(e.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OPP}`]);
+
+      process.env.GATE_CONTENT_WRITER_TERMINAL = 'false';
+      const off = episodes([`content-terminal-hold:${OPP}`]);
+      const conn = latest([]);
+      await tw.closeAnsweredHoldItems({ deps: { episodes: off, db: conn } });
+      expect(conn.raw).not.toHaveBeenCalled();
+      expect(off.closeAdminAlertKeys.mock.calls[0][1]).toEqual([`content-terminal-hold:${OPP}`]);
     });
   });
 });

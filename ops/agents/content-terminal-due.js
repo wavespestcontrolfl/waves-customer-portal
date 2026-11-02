@@ -8,8 +8,9 @@
 //
 // The list has `due` (no usable draft yet; each row names the branch and the
 // file its draft must use), `written` (a draft is on its branch; the next run
-// takes it), `waitingForRetryBrief` (a draft failed a check; the next run
-// writes the retry brief) and `gate`. With the gate OFF the agent is the writer and nothing
+// takes it), `held` (a hold is on its branch: the next run keeps the row out
+// of the queue for 30 days), `waitingForRetryBrief` (a draft failed a check;
+// the next run writes the retry brief) and `gate`. With the gate OFF the agent is the writer and nothing
 // reads a terminal draft: `due` is empty.
 //
 // The writing pack is the brief the runner composed for that row, the system
@@ -33,7 +34,7 @@ const server = (...p) => path.join(__dirname, '..', '..', 'server', ...p);
 const db = require(server('models', 'db'));
 const tw = require(server('services', 'content', 'terminal-writer'));
 
-const LIST_FIELDS = ['opportunity_id', 'brief_id', 'action_type', 'query', 'page_url', 'service', 'city', 'score', 'problem', 'branch', 'draft_path'];
+const LIST_FIELDS = ['opportunity_id', 'brief_id', 'action_type', 'query', 'page_url', 'service', 'city', 'score', 'problem', 'hold', 'branch', 'draft_path'];
 const slim = (rows) => rows.map((r) => Object.fromEntries(LIST_FIELDS.filter((f) => r[f] != null).map((f) => [f, r[f]])));
 
 // The agent config the dispatcher would have used for this brief: its system
@@ -53,8 +54,8 @@ async function writingPack(opportunityId) {
   // The kill switch covers the pack too: with the gate off the agent drafts,
   // and a draft written from a leftover waiting row would never be read.
   if (!tw.terminalWriterLive()) throw new Error('the terminal writer gate is off: no row waits for a terminal draft');
-  const { due, written } = await tw.awaitingTerminalDrafts();
-  const row = [...due, ...written].find((r) => r.opportunity_id === opportunityId);
+  const { due, written, held } = await tw.awaitingTerminalDrafts();
+  const row = [...due, ...written, ...held].find((r) => r.opportunity_id === opportunityId);
   if (!row) throw new Error('that row does not wait for a terminal draft');
   const stored = await db('content_briefs').where('id', row.brief_id).first();
   if (!stored) throw new Error('the brief for that row was not found');
@@ -95,6 +96,20 @@ async function writingPack(opportunityId) {
       brief_id: row.brief_id,
       emit_draft_input: config?.tools?.find((t) => t.name === 'emit_draft')?.input_schema || null,
     },
+    // Owner 2026-11-02 ("A"): a row that cannot be written as briefed gets a
+    // hold in place of a draft, at the same branch and path.
+    hold_shape: {
+      note: `In place of a draft, when this row cannot be written as briefed. The next run keeps the row out of the queue for 30 days; a needs_owner hold also asks the owner its question. reason is one of: ${tw.HOLD_REASONS.join(', ')}. No frontmatter or body in a hold.`,
+      example: {
+        opportunity_id: opportunityId,
+        brief_id: row.brief_id,
+        hold: {
+          reason: 'duplicate',
+          detail: 'One or two plain sentences on why (at most 500 characters), e.g. the live post that already covers the topic.',
+          question: 'needs_owner only: the decision the owner must make (at most 300 characters).',
+        },
+      },
+    },
     writer_system_prompt: config?.system || null,
     brief,
   };
@@ -108,8 +123,8 @@ async function writingPack(opportunityId) {
       return;
     }
     const live = tw.terminalWriterLive();
-    const { due, written, rebrief } = live ? await tw.awaitingTerminalDrafts() : { due: [], written: [], rebrief: [] };
-    console.log(JSON.stringify({ gate: live ? 'on' : 'off', due: slim(due), written: slim(written), waitingForRetryBrief: slim(rebrief) }, null, 2));
+    const { due, written, held = [], rebrief } = live ? await tw.awaitingTerminalDrafts() : { due: [], written: [], held: [], rebrief: [] };
+    console.log(JSON.stringify({ gate: live ? 'on' : 'off', due: slim(due), written: slim(written), held: slim(held), waitingForRetryBrief: slim(rebrief) }, null, 2));
   } catch (err) {
     console.error(`content-terminal-due failed: ${err.message}`);
     process.exitCode = 1;

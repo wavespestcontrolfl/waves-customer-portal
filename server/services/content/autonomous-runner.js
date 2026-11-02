@@ -755,6 +755,8 @@ class AutonomousRunner {
       await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
       return finalized;
     }
+    // The terminal held the row: it cannot be written as briefed (owner 2026-11-02, "A").
+    if (dispatchResult.held) return this._parkHeldTerminalRow({ queue, opp, run, t0, claimToken, dispatchResult });
     // A terminal draft's branch commit, for the cleanup after this run is
     // stored (settleTerminalWork); undefined for an agent draft. In-memory
     // only, like citability_backfill_brief (finalize persists named columns).
@@ -1951,7 +1953,9 @@ class AutonomousRunner {
 
   // The rows whose terminal draft is pushed and usable, best score first
   // (terminal-writer awaitingTerminalDrafts `written`; a row whose brief is
-  // past its age limit is not listed, it is briefed again). With an
+  // past its age limit is not listed, it is briefed again), then the rows
+  // whose terminal hold is pushed (`held`), so a hold parks its row at the
+  // next pass instead of leaving it on the waiting list. With an
   // actionType (a scoped pass), only that lane's rows: the run that waited
   // for the draft carries the lane its claim was fenced to. Gate off, kill
   // switch off or any read failure: none (the batch claims by score as before).
@@ -1959,8 +1963,8 @@ class AutonomousRunner {
     const terminalWriter = require('./terminal-writer');
     if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return [];
     try {
-      const { written } = await terminalWriter.awaitingTerminalDrafts();
-      return written.filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
+      const { written, held = [] } = await terminalWriter.awaitingTerminalDrafts();
+      return [...written, ...held].filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
     } catch (err) {
       logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
       return [];
@@ -2350,6 +2354,33 @@ class AutonomousRunner {
   async _completeClaimOrThrow(queue, opportunityId, payload) {
     const ok = await queue.complete(opportunityId, payload);
     if (!ok) throw new Error('queue_complete_failed_or_stale_claim');
+  }
+
+  /**
+   * A terminal hold (owner 2026-11-02, "A": a live post already covers the
+   * topic, a site rule bars it, the brief cannot pass the portal's own checks,
+   * or it needs the owner). Not a failure: record why and keep the row out of
+   * the queue for HOLD_MS (the defer refunds the attempt; the next claim after
+   * that composes a new brief, since this run is not one that waits). A
+   * needs_owner hold also asks the owner. The branch is deleted after the
+   * batch, like a taken draft's (settleTerminalWork).
+   */
+  async _parkHeldTerminalRow({ queue, opp, run, t0, claimToken, dispatchResult }) {
+    const terminalWriter = require('./terminal-writer');
+    const { hold } = dispatchResult;
+    run.terminal_draft_revision = dispatchResult.revision;
+    const finalized = await finalize(run, t0, {
+      outcome: terminalWriter.HOLD_OUTCOME,
+      skip_reason: terminalWriter.holdSkipReason(hold.reason),
+      reviewer_notes: hold.question ? `${hold.detail} | Question for the owner: ${hold.question}` : hold.detail,
+    });
+    await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.HOLD_MS), { claimToken });
+    if (hold.reason === 'needs_owner') {
+      await terminalWriter.raiseHoldQuestion({ opportunityId: opp.id, row: opp, hold }).catch((err) => {
+        logger.warn(`[autonomous-runner] run ${run.id}: the owner question for held row ${opp.id} was not raised: ${err.message}`);
+      });
+    }
+    return finalized;
   }
 
   async _skipClaimOrThrow(queue, opportunityId, reason, payload) {
@@ -4521,15 +4552,17 @@ class AutonomousRunner {
   /**
    * Terminal writer, after one or more runs are stored — the daily batch, the
    * admin Run now button and the --live script all end here: delete the
-   * branch of each draft a run took, then bring the admin item up to date
-   * (gate on: the rows that wait; gate off: close what is open). Its own
-   * failure never fails the caller.
+   * branch of each draft or hold a run took, then bring the admin item up to
+   * date (gate on: the rows that wait; gate off: close what is open), then
+   * close each owner question whose held row no longer waits on the owner.
+   * Its own failure never fails the caller.
    */
   async settleTerminalWork(runs) {
     const terminalWriter = require('./terminal-writer');
     try {
       await terminalWriter.cleanupConsumedDrafts(runs);
       await (terminalWriter.terminalWriterLive() ? terminalWriter.raiseTerminalDue() : terminalWriter.closeTerminalItems());
+      await terminalWriter.closeAnsweredHoldItems();
     } catch (err) {
       logger.warn(`[autonomous-runner] terminal writer follow-up failed: ${err.message}`);
     }

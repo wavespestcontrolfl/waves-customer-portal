@@ -1715,10 +1715,12 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       const listing = spy(jest.spyOn(tw(), 'awaitingTerminalDrafts')).mockResolvedValue({
         due: [{ opportunity_id: 'due_1' }],
         written: [{ opportunity_id: 'w_hi', action_type: 'refresh_existing_page' }, { opportunity_id: 'w_lo', action_type: 'new_supporting_blog' }],
+        // A pushed hold is taken at the next pass too, after the drafts, so it parks its row.
+        held: [{ opportunity_id: 'h_1', action_type: 'new_supporting_blog' }],
         rebrief: [{ opportunity_id: 'old_1' }],
       });
-      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo']);
-      await expect(runnerFor()._writtenTerminalDraftIds('new_supporting_blog')).resolves.toEqual(['w_lo']);
+      await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual(['w_hi', 'w_lo', 'h_1']);
+      await expect(runnerFor()._writtenTerminalDraftIds('new_supporting_blog')).resolves.toEqual(['w_lo', 'h_1']);
 
       listing.mockRejectedValueOnce(new Error('GitHub 502'));
       await expect(runnerFor()._writtenTerminalDraftIds()).resolves.toEqual([]);
@@ -5550,22 +5552,66 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(onward.mock.calls[0][2].terminal_draft_revision).toBeUndefined();
   });
 
-  test('settleTerminalWork: clean up what the runs took, then bring the item up to date (gate on: raise; gate off: close); a failure never throws', async () => {
+  describe('a terminal hold (owner 2026-11-02): the row is parked 30 days, not failed', () => {
+    const held = (hold) => ({ ok: false, held: true, code: 'terminal_draft_held', hold, brief_id: 'brief_handed', revision: 'sha_hold', duration_ms: 3, agent_id: 'terminal-writer', session_id: null });
+
+    test('a duplicate: the run records the hold, the claim is deferred 30 days, the branch rides the run for cleanup, no gates, no agent, no owner question', async () => {
+      const { queue, dispatcher, briefBuilder, runner, terminalWriter } = setup({
+        source: held({ reason: 'duplicate', detail: 'The live termite swarmers post covers this topic.' }),
+        handed: city('brief_handed'),
+      });
+      terminalWriter.raiseHoldQuestion = jest.fn().mockResolvedValue({ id: 'n1' });
+      const onward = reachGates(runner);
+      const before = Date.now();
+      const result = await runner.runNext();
+      expect(result).toMatchObject({
+        outcome: 'deferred_terminal_hold', skip_reason: 'terminal_hold:duplicate', brief_id: 'brief_handed',
+        reviewer_notes: 'The live termite swarmers post covers this topic.', agent_id: 'terminal-writer', terminal_draft_revision: 'sha_hold',
+      });
+      const [id, availableAt, payload] = queue.defer.mock.calls[0];
+      expect(id).toBe('opp_tw');
+      expect(payload).toEqual({ claimToken: claimedAt });
+      expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(30 * 864e5 - 1000);
+      expect(availableAt.getTime() - before).toBeLessThan(30 * 864e5 + 60e3);
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(onward).not.toHaveBeenCalled();
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(briefBuilder.compose).not.toHaveBeenCalled();
+      expect(terminalWriter.raiseHoldQuestion).not.toHaveBeenCalled();
+    });
+
+    test('a needs_owner hold also asks the owner; a failed ask never fails the run', async () => {
+      const hold = { reason: 'needs_owner', detail: 'The live page names a competitor in its text.', question: 'Remove the competitor names from the page text?' };
+      const { runner, terminalWriter } = setup({ source: held(hold), handed: city('brief_handed') });
+      terminalWriter.raiseHoldQuestion = jest.fn().mockRejectedValue(new Error('db down'));
+      const result = await runner.runNext();
+      expect(result).toMatchObject({
+        outcome: 'deferred_terminal_hold', skip_reason: 'terminal_hold:needs_owner',
+        reviewer_notes: 'The live page names a competitor in its text. | Question for the owner: Remove the competitor names from the page text?',
+      });
+      expect(terminalWriter.raiseHoldQuestion).toHaveBeenCalledWith({ opportunityId: 'opp_tw', row: expect.objectContaining({ id: 'opp_tw' }), hold });
+    });
+  });
+
+  test('settleTerminalWork: clean up what the runs took, then bring the item up to date (gate on: raise; gate off: close), then close answered owner questions; a failure never throws', async () => {
     const { runner, terminalWriter } = setup({});
     Object.assign(terminalWriter, {
       cleanupConsumedDrafts: jest.fn().mockResolvedValue(undefined),
       raiseTerminalDue: jest.fn().mockResolvedValue({ due: 1 }),
       closeTerminalItems: jest.fn().mockResolvedValue(0),
+      closeAnsweredHoldItems: jest.fn().mockResolvedValue(0),
     });
     const runs = [{ id: 'run_1' }];
     await runner.settleTerminalWork(runs);
     expect(terminalWriter.cleanupConsumedDrafts).toHaveBeenCalledWith(runs);
     expect(terminalWriter.raiseTerminalDue).toHaveBeenCalledTimes(1);
     expect(terminalWriter.closeTerminalItems).not.toHaveBeenCalled();
+    expect(terminalWriter.closeAnsweredHoldItems).toHaveBeenCalledTimes(1);
 
     terminalWriter.terminalWriterLive = () => false;
     await runner.settleTerminalWork(runs);
     expect(terminalWriter.closeTerminalItems).toHaveBeenCalledTimes(1);
+    expect(terminalWriter.closeAnsweredHoldItems).toHaveBeenCalledTimes(2);
 
     terminalWriter.closeTerminalItems.mockRejectedValue(new Error('db down'));
     await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();

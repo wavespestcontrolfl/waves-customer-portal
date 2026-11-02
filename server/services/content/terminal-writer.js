@@ -33,6 +33,15 @@
  * retry therefore asks for a fresh draft, written against the retry brief
  * the next run composes. Deleting the branch afterwards is cleanup.
  *
+ * Owner 2026-11-02 ("A"): instead of a draft the file can be a HOLD, when the
+ * row cannot be written as briefed (a live post already covers the topic, a
+ * site rule bars it, the brief cannot pass the portal's own checks, or it needs
+ * the owner's decision):
+ *     { opportunity_id, brief_id, hold: { reason, detail, question? } }
+ * The run that reads it records `deferred_terminal_hold` and keeps the row out
+ * of the queue for HOLD_MS (the next claim after that composes a new brief);
+ * a `needs_owner` hold also asks the owner its question in one admin item.
+ *
  * The branch lives in the Astro repo itself (ghFetch reads owner/repo from
  * the environment), so only an account with push access can supply a draft.
  * The file is still untrusted input: it is size-bounded, shape-checked and
@@ -62,6 +71,16 @@ const MISSING = 'terminal_draft_missing';
 const INVALID = 'terminal_draft_invalid';
 // The branch could not be read at all (GitHub failed); the row keeps waiting.
 const UNREADABLE = 'terminal_draft_unreadable';
+// The file is a hold (the row cannot be written as briefed), not a draft.
+const HELD = 'terminal_draft_held';
+const HOLD_OUTCOME = 'deferred_terminal_hold';
+// How long a held row stays out of the queue (owner 2026-11-02: 30 days).
+const HOLD_MS = 30 * 24 * 60 * 60 * 1000;
+const HOLD_REASONS = Object.freeze(['duplicate', 'blocked_by_rule', 'brief_unusable', 'needs_owner']);
+const MAX_HOLD_DETAIL_CHARS = 500;
+const MAX_HOLD_QUESTION_CHARS = 300;
+// One owner item per held row that needs the owner (raiseHoldQuestion).
+const HOLD_KEY_PREFIX = 'content-terminal-hold:';
 const ALERT_KEY_PREFIX = 'content-terminal-due:';
 // How long a claim waits before the runner looks for the draft again.
 const RECHECK_MS = 3 * 60 * 60 * 1000;
@@ -116,6 +135,23 @@ function draftProblem(parsed, opportunityId, expectedBriefId) {
   return null;
 }
 
+const holdText = (v) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim() : '');
+
+/** Why a parsed hold file is not a usable hold for this row, or null. */
+function holdProblem(parsed, opportunityId, expectedBriefId) {
+  if (parsed.opportunity_id !== opportunityId) return 'opportunity_id does not match the branch';
+  if (String(parsed.brief_id ?? '') !== String(expectedBriefId)) return 'brief_id is not the brief this row waits on';
+  if (parsed.body != null || parsed.frontmatter != null) return 'a file is a draft or a hold, not both';
+  const { hold } = parsed;
+  if (!isObject(hold)) return 'hold must be an object';
+  if (!HOLD_REASONS.includes(hold.reason)) return `hold.reason must be one of ${HOLD_REASONS.join(', ')}`;
+  const detail = holdText(hold.detail);
+  if (!detail || detail.length > MAX_HOLD_DETAIL_CHARS) return `hold.detail must be 1 to ${MAX_HOLD_DETAIL_CHARS} characters`;
+  const question = holdText(hold.question);
+  if (hold.reason === 'needs_owner' && (!question || question.length > MAX_HOLD_QUESTION_CHARS)) return `a needs_owner hold needs a question of 1 to ${MAX_HOLD_QUESTION_CHARS} characters`;
+  return null;
+}
+
 /**
  * The brief the terminal was asked to write from: the brief on the row's
  * LATEST run (pre-draft deferrals aside), when that run ended waiting for a draft. Null when the latest
@@ -133,6 +169,7 @@ async function waitingBriefId(opportunityId, { conn = db } = {}) {
  * The draft for one row, in the shape agent-dispatcher.runWithBrief returns,
  * so the runner's code after the dispatch does not change.
  *   { ok: true, draft, brief_id, revision }      a usable draft
+ *   { ok: false, code: HELD, hold, revision }    a usable hold (no draft)
  *   { ok: false, code: MISSING | INVALID, ... }  wait for the terminal
  * `revision` is the branch commit the file was read at (for the cleanup).
  * A GitHub failure other than "not found" throws; draftSourceFor turns it
@@ -157,6 +194,12 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
   if (Buffer.byteLength(file.content || '', 'utf8') > MAX_DRAFT_BYTES) return invalid('the file is too large');
   let parsed;
   try { parsed = JSON.parse(file.content); } catch { return invalid('the file is not valid JSON'); }
+  if (isObject(parsed) && parsed.hold !== undefined) {
+    const holdIssue = holdProblem(parsed, opportunityId, expectedBriefId);
+    if (holdIssue) return invalid(holdIssue);
+    const hold = { reason: parsed.hold.reason, detail: holdText(parsed.hold.detail), ...(parsed.hold.reason === 'needs_owner' ? { question: holdText(parsed.hold.question) } : {}) };
+    return result({ ok: false, code: HELD, hold, brief_id: expectedBriefId, revision });
+  }
   const problem = draftProblem(parsed, opportunityId, expectedBriefId);
   if (problem) return invalid(problem);
   // `type: 'draft'` is what the agent's emit_draft handler stamps on a captured
@@ -175,7 +218,8 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
  * `handed` says the brief is the stored one the row already waits on; only
  * then can a draft exist for it. A result with `wait: true` means "no usable
  * draft yet" (missing, rejected, or GitHub could not be read): the runner
- * records the run as waiting and looks again later. A read failure waits too
+ * records the run as waiting and looks again later. `held: true` means the
+ * terminal held the row: the runner records the hold and parks the row. A read failure waits too
  * and never fails the run: a failed run would stop the row waiting on its
  * brief and orphan a draft that is already pushed.
  */
@@ -185,7 +229,8 @@ function draftSourceFor(opportunityId, brief, { handed = false, dryRun = false, 
     async runWithBrief() {
       const fetched = await fetchTerminalDraft(opportunityId, { ...(gh ? { gh } : {}), expectedBriefId: handed ? brief.id : null })
         .catch((err) => ({ ok: false, code: UNREADABLE, reason: `terminal draft could not be read: ${err.message}`, agent_id: TERMINAL_AGENT_ID, session_id: null }));
-      return fetched.ok ? fetched : { ...fetched, wait: true };
+      if (fetched.ok) return fetched;
+      return fetched.code === HELD ? { ...fetched, held: true } : { ...fetched, wait: true };
     },
   };
 }
@@ -226,6 +271,7 @@ async function cleanupConsumedDrafts(runs, { gh } = {}) {
  *   due      it ended waiting and no usable draft for its brief is pushed
  *            (a file the run would reject counts as not pushed)
  *   written  a usable draft is on the branch; the next run takes it
+ *   held     a usable hold is on the branch; the next run parks the row
  *   rebrief  the row needs a new brief before the terminal can write: its
  *            draft failed a gate (the next run writes the retry brief), or
  *            the brief it waits on is too old
@@ -250,6 +296,7 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     ORDER BY score DESC`, [AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
   const due = [];
   const written = [];
+  const held = [];
   const rebrief = [];
   for (const row of rows) {
     const item = { ...row, branch: branchFor(row.opportunity_id), draft_path: draftPathFor(row.opportunity_id) };
@@ -259,9 +306,10 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     if (row.outcome !== AWAITING_OUTCOME || briefAge > MAX_BRIEF_AGE_MS) { rebrief.push(item); continue; }
     const fetched = await fetchTerminalDraft(row.opportunity_id, { gh, expectedBriefId: row.brief_id });
     if (fetched.ok) written.push(item);
+    else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold });
     else due.push({ ...item, problem: fetched.code === INVALID ? fetched.reason : null });
   }
-  return { due, written, rebrief };
+  return { due, written, held, rebrief };
 }
 
 /**
@@ -362,8 +410,83 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
   return { ...counts, delivered: raised?.suppressed !== true };
 }
 
+const holdSkipReason = (reason) => `terminal_hold:${reason}`;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A needs_owner hold asks the owner its question (owner 2026-11-02: the bell
+ * rings when a post needs the owner's decision). One admin item per held row,
+ * `content-terminal-hold:<opportunity id>`, raised by the run that reads the
+ * hold. It rings once: a raise onto the standing item is a silent dedupe, and
+ * a hold that comes back after the item closed rings again.
+ * closeAnsweredHoldItems clears it.
+ */
+async function raiseHoldQuestion({ opportunityId, row = {}, hold, deps = {} }) {
+  const episodes = deps.episodes || require('../admin-alert-episodes');
+  const { composeAdminAlert, breaksAlertRules, MAX_WHY_CHARS } = require('../admin-alert-compose');
+  const question = hold.question;
+  // The question itself when it fits a why; else a fixed one, with the question in the detail.
+  const why = question.length <= MAX_WHY_CHARS && !breaksAlertRules(question)
+    ? question
+    : 'The terminal held this website post until you decide; the question is in the details.';
+  const composed = composeAdminAlert({
+    area: 'Content',
+    action: 'a website post needs your decision',
+    why,
+    severity: 'needs-you',
+    link: '/admin/blog?tab=autopilot',
+    subject: { type: 'check', id: `content-terminal-hold-${opportunityId}` },
+    doneWhen: 'owner_decided',
+    who: 'person',
+  });
+  return episodes.raiseAdminAlertWithReopen('content', composed.headline, composed.why, {
+    link: composed.link,
+    metadata: { ...composed.metadata, opportunityId },
+    // `content` is off the bell policy's default list; this item is the owner's.
+    bellDefault: true,
+    dedupeKey: `${HOLD_KEY_PREFIX}${opportunityId}`,
+    detail: [
+      `Post: ${describe(row)}`,
+      `Question: ${question}`,
+      `Why the terminal held it: ${hold.detail}`,
+      'Tell Claude your answer. Until then the post stays out of the queue for 30 days.',
+    ].join('\n'),
+  });
+}
+
+/**
+ * Closes each raiseHoldQuestion item whose row no longer waits on the owner:
+ * its latest run is not a needs_owner hold any more (the row was requeued,
+ * briefed again or taken), or the row left the queue. With the gate off every
+ * hold item closes: the terminal is out of the loop. Called after each batch
+ * (settleTerminalWork). Returns the number of items closed.
+ */
+async function closeAnsweredHoldItems({ now = new Date(), deps = {} } = {}) {
+  const episodes = deps.episodes || require('../admin-alert-episodes');
+  const conn = deps.db || db;
+  const open = await episodes.openAdminAlertKeys(conn, HOLD_KEY_PREFIX);
+  const ids = open.map((key) => key.slice(HOLD_KEY_PREFIX.length)).filter((id) => UUID_RE.test(id));
+  const waiting = new Set();
+  if (ids.length && terminalWriterLive()) {
+    const { rows } = await conn.raw(`
+      SELECT DISTINCT ON (r.opportunity_id) r.opportunity_id::text AS opportunity_id, r.outcome, r.skip_reason, q.status
+        FROM autonomous_runs r
+        JOIN opportunity_queue q ON q.id = r.opportunity_id
+       WHERE r.opportunity_id = ANY(?::uuid[])
+         AND NOT (r.outcome = ? AND r.agent_id IS NULL)
+       ORDER BY r.opportunity_id, r.created_at DESC`, [ids, PRE_DRAFT_CAP_OUTCOME]);
+    for (const r of rows) {
+      if (r.status === 'pending' && r.outcome === HOLD_OUTCOME && r.skip_reason === holdSkipReason('needs_owner')) waiting.add(String(r.opportunity_id).toLowerCase());
+    }
+  }
+  const answered = open.filter((key) => !waiting.has(key.slice(HOLD_KEY_PREFIX.length).toLowerCase()));
+  return episodes.closeAdminAlertKeys(conn, answered, 'owner_decided', { now, resolution: 'Cleared: this website post no longer waits on your decision' });
+}
+
 module.exports = {
   terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
-  branchFor, draftPathFor, draftProblem,
+  raiseHoldQuestion, closeAnsweredHoldItems, holdSkipReason,
+  branchFor, draftPathFor, draftProblem, holdProblem,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
+  HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };
