@@ -92,15 +92,29 @@ async function collectCustomerMembers({ partition = false, suppression = null } 
   return partition ? partitionMarketingSuppressed(members, opts) : filterMarketingSuppressed(members, opts);
 }
 
+// The audience's status rule: open leads only (LEAD_CLOSED out). With GATE_LEAD_NO_RESPONSE_REASON on, a lead the
+// staleness sweep parked as 'unresponsive' with lost_reason 'no_response' stays in as well: it went quiet but never
+// booked (owner 2026-11-02, "B": park quiet leads, keep them in the ads). Gate off: the same single clause as before.
+function unbookedLeadStatusFilter(q, { keepNoResponse = false } = {}) {
+  const placeholders = LEAD_CLOSED.map(() => '?').join(',');
+  const open = `LOWER(COALESCE(status, '')) NOT IN (${placeholders})`;
+  if (!keepNoResponse) return q.whereRaw(open, LEAD_CLOSED);
+  return q.where(function openOrQuietNoResponse() {
+    this.whereRaw(open, LEAD_CLOSED)
+      .orWhere(function quietNoResponse() {
+        this.whereRaw("LOWER(COALESCE(status, '')) = 'unresponsive'").where('lost_reason', 'no_response');
+      });
+  });
+}
+
 async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAYS, partition = false, suppression = null } = {}) {
   const cutoff = new Date(Date.now() - windowDays * 86400000).toISOString();
-  const placeholders = LEAD_CLOSED.map(() => '?').join(',');
+  const keepNoResponse = require('../../config/feature-gates').leadNoResponseReasonLive();
   // Recent, not-closed leads who are NOT already real customers. We can't filter on
   // `whereNull('customer_id')` — quote-wizard leads get a 'new_lead' prospect customer
   // linked back, which would drop the biggest retargeting source. Instead exclude only
   // leads whose linked customer is a LIVE customer.
-  const rows = await db('leads')
-    .whereRaw(`LOWER(COALESCE(status, '')) NOT IN (${placeholders})`, LEAD_CLOSED)
+  const rows = await unbookedLeadStatusFilter(db('leads'), { keepNoResponse })
     .whereNull('deleted_at')
     .where('created_at', '>=', cutoff)
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
@@ -411,6 +425,7 @@ module.exports = {
     boolEnv,
     collectCustomerMembers,
     collectUnbookedLeadMembers,
+    unbookedLeadStatusFilter,
     hashMember,
     uploadsAllowed,
   },
