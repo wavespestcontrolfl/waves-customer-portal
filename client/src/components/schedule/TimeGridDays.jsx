@@ -126,6 +126,35 @@ function effectiveDuration(svc) {
   return 30;
 }
 
+// The week with `svc` moved from `fromDate` to `toDate` at `toMin`: what a
+// drop shows before the save, and what a saved move shows until the refresh.
+function weekWithMove(week, svc, fromDate, toDate, toMin) {
+  const dur = effectiveDuration(svc);
+  const updatedSvc = {
+    ...svc,
+    windowStart: minutesToHHMM(toMin),
+    windowEnd: minutesToHHMM(toMin + dur),
+  };
+  const days = (week?.days || []).map((d) => {
+    if (d.date === fromDate && d.date === toDate) {
+      return {
+        ...d,
+        services: d.services.map((s) => (s.id === svc.id ? updatedSvc : s)),
+      };
+    }
+    if (d.date === fromDate) {
+      const filtered = d.services.filter((s) => s.id !== svc.id);
+      return { ...d, services: filtered, count: filtered.length };
+    }
+    if (d.date === toDate) {
+      const added = [...d.services, updatedSvc];
+      return { ...d, services: added, count: added.length };
+    }
+    return d;
+  });
+  return { ...week, days };
+}
+
 // Flat-color appointment blocks. Mirrors TimeGridDay's palette so the
 // week/5-day grid reads identically to the single-day swimlane view.
 function statusBlockClasses(status) {
@@ -916,29 +945,7 @@ export default function TimeGridDays({
     if (toMin == null || toMin + dur > DAY_END_HOUR * 60) return;
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
 
-    const updatedSvc = {
-      ...svc,
-      windowStart: minutesToHHMM(toMin),
-      windowEnd: minutesToHHMM(toMin + dur),
-    };
-    const nextDays = (data?.days || []).map((d) => {
-      if (d.date === fromDate && d.date === toDate) {
-        return {
-          ...d,
-          services: d.services.map((s) => (s.id === svc.id ? updatedSvc : s)),
-        };
-      }
-      if (d.date === fromDate) {
-        const filtered = d.services.filter((s) => s.id !== svc.id);
-        return { ...d, services: filtered, count: filtered.length };
-      }
-      if (d.date === toDate) {
-        const added = [...d.services, updatedSvc];
-        return { ...d, services: added, count: added.length };
-      }
-      return d;
-    });
-    setOptimistic({ ...data, days: nextDays });
+    setOptimistic(weekWithMove(data, svc, fromDate, toDate, toMin));
     setPending({
       mode: 'reschedule',
       svc,
@@ -970,9 +977,11 @@ export default function TimeGridDays({
     onChange?.();
   }, [monday, onChange]);
 
-  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds, target }) => {
     if (!pending) return;
-    const { mode, svc, toDate, newWindow } = pending;
+    const { mode, svc } = pending;
+    // A time tapped in the confirm's open-times list replaces the drop.
+    const [toDate, newWindow] = target ? [target.date, target.window] : [pending.toDate, pending.newWindow];
     const gen = genRef.current;
     setStatus({ text: 'Saving…' });
     try {
@@ -1026,7 +1035,9 @@ export default function TimeGridDays({
     // The week changed while the write was in flight: the move is saved, but
     // this week's optimistic copy must not become the new week's baseline.
     if (gen !== genRef.current) return;
-    setData(optimistic || data);
+    // A time tapped in the confirm moved the visit off the dropped slot: the
+    // saved move is placed from the last read, not from the drop's copy.
+    setData(target ? weekWithMove(data, svc, pending.fromDate, toDate, parseHHMM(newWindow)) : (optimistic || data));
     setOptimistic(null);
     // Not awaited: the confirmation resolves once the write commits, so a slow
     // refresh never holds its busy state over the next drag (reloadWeek catches
@@ -1135,6 +1146,7 @@ export default function TimeGridDays({
         technicianId={pending?.mode === 'assign'
           ? undefined
           : (pending?.svc?.technicianId || pending?.svc?.technician_id || undefined)}
+        pickTimes
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />
