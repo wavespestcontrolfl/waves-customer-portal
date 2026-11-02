@@ -27,8 +27,8 @@ const tick = async (ms = 350) => act(async () => { await vi.advanceTimersByTimeA
 const likeCalls = () => fetch.mock.calls.filter(([url]) => String(url).includes("/like"));
 const likeButton = () => screen.queryByRole("button", { name: /Text a thumbs-up/ });
 
-async function openThread(preview) {
-  render(<SmsTab active />, { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> });
+async function openThread(preview, route = "/") {
+  render(<SmsTab active />, { wrapper: ({ children }) => <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter> });
   await tick();
   fireEvent.click(screen.getByText(preview));
   await tick();
@@ -107,6 +107,27 @@ it("a customer like becomes a badge on our quoted text; one that matches nothing
   expect(document.getElementById("sms-message-r-2")).toHaveTextContent('Liked "Something we never sent"');
   // The newest text is a reaction: no like button.
   expect(likeButton()).not.toBeInTheDocument();
+});
+
+it("keeps the like button through an Unanswered refresh that combines loaded pages", async () => {
+  const pageOne = [sms("in-1", "inbound", "Thanks, see you Tuesday!", 15, fields({ likeable: true, responseNeedsResponse: true }))];
+  const pageTwo = [sms("out-0", "outbound", "An older text", 1, fields())];
+  fetch.mockImplementation(async (url) => {
+    const parsed = new URL(String(url), "http://localhost");
+    if (parsed.pathname.endsWith("/log")) {
+      const page = Number(parsed.searchParams.get("page") || 1);
+      return response({ smsLike: true, messages: page === 1 ? pageOne : pageTwo, hasMore: page === 1, page });
+    }
+    return response({ numbers: [] });
+  });
+  await openThread("Thanks, see you Tuesday!", "/?needsResponse=true");
+  fireEvent.click(screen.getByRole("button", { name: "Load older SMS history" }));
+  await tick();
+  expect(likeButton()).toBeInTheDocument();
+
+  // The 30-second refresh re-reads both loaded pages and combines them.
+  await tick(30000);
+  expect(likeButton()).toBeInTheDocument();
 });
 
 it("gate off: no Like button, and a customer like stays its own bubble", async () => {

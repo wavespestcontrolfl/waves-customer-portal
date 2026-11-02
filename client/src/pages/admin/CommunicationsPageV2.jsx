@@ -1481,6 +1481,8 @@ export function SmsTab({
           messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
           hasMore: !!pages.at(-1)?.hasMore,
           page: pages.at(-1)?.page || loadedPageCount,
+          // GATE_SMS_LIKE: every page answers it; the combined result keeps it.
+          smsLike: pages.every((pageData) => pageData.smsLike === true),
         };
       })
       : adminFetch(logUrl, { signal: controller.signal });

@@ -30,8 +30,9 @@ export function likeableMessageId(messages) {
 }
 
 // Customer likes become badges on our text they quote. Messages run oldest to
-// newest. A like attaches to the newest earlier text of ours whose body is
-// exactly the quoted text; a removal takes back that text's matching badge.
+// newest. A like attaches to the newest earlier text of ours, between the same
+// customer number and the same line of ours, whose body is exactly the quoted
+// text; a removal takes back that text's matching badge.
 // A matched reaction leaves the list. Anything unmatched stays a bubble, as
 // before the gate. Returns { visible, badges } with badges keyed by our text's
 // id: [{ id, emoji, createdAt }].
@@ -40,7 +41,7 @@ export function collapseCustomerReactions(messages) {
   const badges = new Map();
   for (const m of Array.isArray(messages) ? messages : []) {
     const reaction = m?.direction === "inbound" ? m.customerReaction : null;
-    const quoted = reaction ? findQuotedText(visible, reaction.target) : null;
+    const quoted = reaction ? findQuotedText(visible, reaction.target, textEnds(m)) : null;
     const list = quoted ? badges.get(quoted.id) || [] : null;
     const removeAt = reaction?.removed && list ? list.findIndex((b) => b.emoji === reaction.emoji) : -1;
     if (!quoted || (reaction.removed && removeAt < 0)) {
@@ -54,12 +55,32 @@ export function collapseCustomerReactions(messages) {
   return { visible, badges };
 }
 
-function findQuotedText(earlier, target) {
+function findQuotedText(earlier, target, ends) {
   const wanted = typeof target === "string" ? target.trim() : "";
-  if (!wanted) return null;
+  if (!wanted || !ends) return null;
   for (let i = earlier.length - 1; i >= 0; i -= 1) {
     const m = earlier[i];
-    if (m?.direction === "outbound" && (m.channel || "sms") === "sms" && typeof m.body === "string" && m.body.trim() === wanted) return m;
+    if (m?.direction === "outbound" && (m.channel || "sms") === "sms" && textEnds(m) === ends
+      && typeof m.body === "string" && m.body.trim() === wanted) return m;
   }
   return null;
+}
+
+// A text's two ends, the customer's number and our line, or null when either
+// is unknown. Customer 360 rows carry contactPhone / ourEndpointId; Messages
+// rows carry from / to.
+function textEnds(m) {
+  const inbound = m?.direction === "inbound";
+  const theirs = phoneIdentity(m?.contactPhone ?? (inbound ? m?.from : m?.to));
+  const ours = phoneIdentity(m?.ourEndpointId ?? (inbound ? m?.to : m?.from));
+  return theirs && ours ? `${theirs}|${ours}` : null;
+}
+
+// The server's phoneIdentityKey: a US number as its last 10 digits, any other
+// as "+digits", no digits as "".
+function phoneIdentity(value) {
+  const text = String(value || "").trim();
+  const digits = text.replace(/\D/g, "");
+  if (!digits) return "";
+  return /^1\d{10}$/.test(digits) || (!text.startsWith("+") && digits.length === 10) ? digits.slice(-10) : `+${digits}`;
 }

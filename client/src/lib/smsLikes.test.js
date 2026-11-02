@@ -3,8 +3,16 @@ import { collapseCustomerReactions, likeableMessageId } from "./smsLikes";
 
 // GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button").
 const THUMB = "\u{1F44D}";
+const CUSTOMER = "+19415550100";
+const LINE = "+19413187612";
 const at = (minute) => `2026-11-02T16:${String(minute).padStart(2, "0")}:00Z`;
-const text = (id, direction, body, minute, extra = {}) => ({ id, direction, body, createdAt: at(minute), ...extra });
+// Messages rows: from / to, as GET /communications/log returns them.
+const text = (id, direction, body, minute, extra = {}) => ({
+  id, direction, body, createdAt: at(minute),
+  from: direction === "inbound" ? CUSTOMER : LINE,
+  to: direction === "inbound" ? LINE : CUSTOMER,
+  ...extra,
+});
 const like = (id, target, minute, removed = false) => text(id, "inbound", `${removed ? "Removed a like from" : "Liked"} "${target}"`, minute, {
   likeable: false, customerReaction: { emoji: THUMB, removed, target },
 });
@@ -57,6 +65,31 @@ describe("collapseCustomerReactions", () => {
     ]);
     expect(badges.has("old")).toBe(false);
     expect(badges.get("new")).toHaveLength(1);
+  });
+
+  it("matches only our text between the same customer number and the same line", () => {
+    const { visible, badges } = collapseCustomerReactions([
+      text("line-a", "outbound", "On the way", 1),
+      text("line-b", "outbound", "On the way", 2, { from: "+19415550000" }),
+      like("r", "On the way", 3),
+    ]);
+    expect(badges.has("line-b")).toBe(false);
+    expect(badges.get("line-a")).toHaveLength(1);
+    expect(visible.map((m) => m.id)).toEqual(["line-a", "line-b"]);
+  });
+
+  it("reads Customer 360 rows by contactPhone and ourEndpointId; a like with an unknown number stays a bubble", () => {
+    const row = (id, direction, body, minute, extra = {}) => ({
+      id, direction, body, channel: "sms", createdAt: at(minute), contactPhone: "9415550100", ourEndpointId: LINE, ...extra,
+    });
+    const { badges } = collapseCustomerReactions([
+      row("out", "outbound", "See you Tuesday", 2),
+      row("r", "inbound", 'Liked "See you Tuesday"', 3, { customerReaction: { emoji: THUMB, removed: false, target: "See you Tuesday" } }),
+    ]);
+    expect(badges.get("out")).toHaveLength(1);
+
+    const unknown = collapseCustomerReactions([text("out", "outbound", "See you Tuesday", 2), { ...like("r", "See you Tuesday", 3), from: null }]);
+    expect(unknown.visible.map((m) => m.id)).toEqual(["out", "r"]);
   });
 
   it("a removal takes back the badge; a removal with nothing to take back stays a bubble", () => {
