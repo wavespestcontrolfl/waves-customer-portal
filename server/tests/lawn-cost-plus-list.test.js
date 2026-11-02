@@ -1,6 +1,7 @@
 // GATE_LAWN_COST_PLUS_LIST (owner 2026-10-09): residential recurring lawn care
 // is listed at cost / (1 - 0.45), never below the market table, at least $55 a
-// visit; discounts stop at the 35% collected-margin floor. Ships OFF: off must
+// visit. Discounts apply in full; the 35% collected-margin floor is a review
+// line (owner 2026-11-02, "remove this"). Ships OFF: off must
 // price exactly as before, and a saved estimate replays as it was priced.
 const {
   generateEstimate,
@@ -230,12 +231,12 @@ describe('mode resolution', () => {
     }
   });
 
-  test('generateEstimate: gate on prices cost-plus, stamps the mode and arms the cost floor', () => {
+  test('generateEstimate: gate on prices cost-plus, stamps the mode and leaves the cost floor off', () => {
     process.env[GATE] = 'true';
     const estimate = generateEstimate(estimateInput({ lawn: lawnService() }));
     expect(lawnLine(estimate).annual).toBe(693);
     expect(estimate.pricingMetadata.lawnCostPlusList).toBe(true);
-    expect(estimate.pricingMetadata.lawnCostFloorArmed).toBe(true);
+    expect(estimate.pricingMetadata.lawnCostFloorArmed).toBe(false);
   });
 
   test('generateEstimate: explicit false with the gate on prices market', () => {
@@ -263,16 +264,23 @@ describe('mode resolution', () => {
   });
 });
 
-describe('discounts stop at the 35% margin floor', () => {
-  test('Platinum 20% on 4,500 sq ft stops at the floor; Silver 10% applies in full', () => {
+describe('discounts apply in full; the 35% margin floor is a review line (owner 2026-11-02)', () => {
+  test('Platinum 20% on 4,500 sq ft applies in full and reports the floor; Silver 10% applies in full', () => {
     const platinum = generateEstimate(estimateInput(fourServices({ costPlusList: true })));
     expect(platinum.waveGuard.tier).toBe('platinum');
+    expect(platinum.pricingMetadata.lawnCostFloorArmed).toBe(false);
     const p = lawnLine(platinum);
     expect(p.annual).toBe(693);
+    // The floor still rides the line for reporting: $584.71 a year is a 35% margin.
     expect(p.minimumCollectedAnnualPrice).toBe(584.71);
-    // 693 x 0.80 = 554.40 is below the floor, so the guard holds the line at it.
-    expect(p.annualAfterDiscount).toBeGreaterThanOrEqual(584.71);
-    expect(p.annualAfterDiscount).toBeLessThan(693);
+    // 693 x 0.80 = 554.40 is below the floor, and the customer gets it.
+    expect(p.annualAfterDiscount).toBeCloseTo(554.4, 2);
+    expect(p.marginFloorGuardApplied).not.toBe(true);
+    expect(p.belowMarginFloor).toBe(true);
+    expect(p.finalMargin).toBeLessThan(0.35);
+    expect(platinum.marginWarnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'lawn_care', type: 'waveguard_discount_below_margin_floor' }),
+    ]));
 
     const silver = generateEstimate(estimateInput({
       pest: { frequency: 'quarterly' },
@@ -282,13 +290,32 @@ describe('discounts stop at the 35% margin floor', () => {
     expect(lawnLine(silver).annualAfterDiscount).toBeCloseTo(693 * 0.9, 2);
   });
 
-  test('a manual discount on the lawn line stops at the same floor', () => {
+  test('a manual discount on the lawn line applies in full and warns below the floor', () => {
     const estimate = generateEstimate(estimateInput(
       { lawn: lawnService({ costPlusList: true }) },
       { manualDiscount: { type: 'PERCENT', value: 50 } },
     ));
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBeGreaterThanOrEqual(584.71 - 0.01);
-    expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({ capped: true }));
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeCloseTo(346.5, 2);
+    expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({ capped: false }));
+    expect(estimate.marginWarnings.map((w) => w.type)).toContain('manual_discount_below_margin_floor');
+  });
+
+  test('lawn_pricing_v2.useLawnCostFloor=true re-arms the floor (the no-deploy rollback)', () => {
+    const prior = LAWN_PRICING_V2.useLawnCostFloor;
+    LAWN_PRICING_V2.useLawnCostFloor = true;
+    try {
+      const platinum = generateEstimate(estimateInput(fourServices({ costPlusList: true })));
+      expect(platinum.pricingMetadata.lawnCostFloorArmed).toBe(true);
+      expect(lawnLine(platinum).annualAfterDiscount).toBeCloseTo(584.71, 2);
+      const manual = generateEstimate(estimateInput(
+        { lawn: lawnService({ costPlusList: true }) },
+        { manualDiscount: { type: 'PERCENT', value: 50 } },
+      ));
+      expect(manual.summary.recurringAnnualAfterDiscount).toBeGreaterThanOrEqual(584.71 - 0.01);
+      expect(manual.summary.manualDiscount).toEqual(expect.objectContaining({ capped: true }));
+    } finally {
+      LAWN_PRICING_V2.useLawnCostFloor = prior;
+    }
   });
 });
 
@@ -303,7 +330,22 @@ describe('saved estimates replay as they were priced', () => {
     const again = replay(input, saved);
     expect(lawnLine(again).annual).toBe(693);
     expect(again.pricingMetadata.lawnCostPlusList).toBe(true);
+    expect(again.pricingMetadata.lawnCostFloorArmed).toBe(false);
+  });
+
+  test('a Platinum quote saved while cost-plus armed the floor still replays at the floor', () => {
+    // Before owner 2026-11-02 the mode armed the floor, so a sent quote carries
+    // lawnCostFloorArmed: true. Its replay must not drop to the full 20%.
+    process.env[GATE] = 'true';
+    const input = estimateInput(fourServices());
+    const sentUnderFloor = generateEstimate({ ...input, useLawnCostFloor: true });
+    expect(sentUnderFloor.pricingMetadata.lawnCostFloorArmed).toBe(true);
+    expect(lawnLine(sentUnderFloor).annualAfterDiscount).toBeCloseTo(584.71, 2);
+    const again = replay(input, sentUnderFloor);
     expect(again.pricingMetadata.lawnCostFloorArmed).toBe(true);
+    expect(lawnLine(again).annualAfterDiscount).toBeCloseTo(584.71, 2);
+    // A fresh quote on the same inputs gets the full discount.
+    expect(lawnLine(generateEstimate(input)).annualAfterDiscount).toBeCloseTo(554.4, 2);
   });
 
   test('priced OFF, gate now ON: replays OFF', () => {

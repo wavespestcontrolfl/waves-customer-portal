@@ -603,6 +603,10 @@ class ContentBriefBuilder {
             city: opportunity.city || null,
             device: 'mobile',
             persist: false,
+            // A brief built with no search data fails the quality gate's
+            // serp check on any draft, so DataForSEO's transient 40101 gets
+            // one more try here (owner 2026-11-02, "retry").
+            transientRetries: 1,
           });
         } catch (err) {
           // Digest, never the raw keyword: GSC queries are arbitrary

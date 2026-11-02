@@ -292,6 +292,32 @@ describe('commercial bid authoring', () => {
     if (changed) expect(dataOf().proposalDelivery).toBeUndefined();
     else expect(dataOf().proposalDelivery).toEqual({ pdfEmailed: true });
   });
+  test('saving a SENT proposal with quote flags in its send snapshot succeeds and leaves the snapshot alone', async () => {
+    // pg returns a fresh object per read; the fake's first() clones likewise, so
+    // the pre-read and the locked re-read are separate objects. A cleanup that
+    // mutated the pre-read's nested nodes would split their edit versions.
+    const sendSnapshot = () => ({
+      renderedAt: '2026-01-02T12:00:00.000Z',
+      pricingBundle: { quoteRequired: true, services: [{ name: 'Synthetic service', quoteRequired: true }] },
+    });
+    const saved = proposal();
+    delete saved.buildingUse;
+    Object.assign(row, {
+      status: 'viewed', sent_at: new Date('2026-01-02T12:00:00.000Z'), viewed_at: new Date('2026-01-03T12:00:00.000Z'),
+      estimate_data: {
+        quoteRequired: true,
+        proposal: saved,
+        sendSnapshot: sendSnapshot(),
+        automation: { draftEstimateAutomation: { status: 'manual_review_required' } },
+      },
+    });
+    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal() });
+    expect(res.statusCode).toBe(200);
+    expect(dataOf().proposal.buildingUse).toBe('nonresidential');
+    expect(dataOf().sendSnapshot).toEqual(sendSnapshot());
+    expect(dataOf().quoteRequired).toBe(false);
+    expect(dataOf().automation.draftEstimateAutomation.status).toBe('manual_review_complete');
+  });
   test('PUT stores fractional quote totals, fixed expiry and private costing atomically', async () => {
     row.status = 'draft';
     const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal(), projectCosting: costing });

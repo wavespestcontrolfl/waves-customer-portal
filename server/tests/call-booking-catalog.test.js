@@ -1001,6 +1001,21 @@ describe('resolveCallFollowUpPlan', () => {
     });
   });
 
+  test('a rodent service never plans a trap-check visit, even when the call discussed one (owner ruling 2026-11-02)', () => {
+    // Staff said the trapping price includes one trap check, and even named a
+    // day. Every rodent_* row is covered: the trapping family, the general
+    // rodent service a plain "rats" call books, and rodent_inspection.
+    const discussed = { follow_up_visit_mentioned: true, follow_up_date_time: '2026-11-06T13:00' };
+    const rodentRows = CATALOG.filter((s) => /^rodent_/.test(s.service_key));
+    expect(rodentRows.map((s) => s.service_key)).toEqual(expect.arrayContaining(['rodent_trapping', 'rodent_general_one_time', 'rodent_inspection']));
+    for (const catalogRow of rodentRows) {
+      expect(resolveCallFollowUpPlan({ extracted: discussed, catalogRow, parentDate: '2026-11-03', parentWindowStart: '13:00' })).toBeNull();
+    }
+    // The same discussion on a non-rodent row still plans visit 2.
+    expect(resolveCallFollowUpPlan({ extracted: discussed, catalogRow: roach, parentDate: '2026-11-03', parentWindowStart: '13:00' }))
+      .toEqual({ scheduledDate: '2026-11-06', windowStart: '13:00', hourStated: true });
+  });
+
   test('mention with no date -> parent date + catalog interval, parent window', () => {
     const plan = resolveCallFollowUpPlan({
       extracted: { follow_up_visit_mentioned: true },

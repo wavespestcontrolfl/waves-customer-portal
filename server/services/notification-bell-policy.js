@@ -44,6 +44,7 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // denylisted internal_admin_alert redirect, which silenced them.
   'relay_hot_lead',                 // a caller told Sandy about an emergency; the page she promises the caller
   'relay_reservice_filed',          // a customer asked Sandy for a re-service; the ticket's phone page
+  'portal_ask',                     // a customer asked inside the app (chat hand-off, service request, estimate request); the phone page, pushOnly (GATE_PORTAL_ASK_PUSH)
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
   'reservice_self_booked',          // a customer booked a free re-service and described the problem (owner 2026-10-05)
   // Owner ruling 2026-09-11: a declined card / returned ACH is the one money

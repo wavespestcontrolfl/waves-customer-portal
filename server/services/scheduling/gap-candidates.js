@@ -1,6 +1,7 @@
 /** Candidate-specific read analysis for the existing schedule gap tool.
  * Reuses staff arrival-placement checks and the optimizer's hard preference
- * filters. No holds, geocoding, reassignment, or customer promises are made. */
+ * filters (the mowing-day rule included, GATE_AUTO_DISPATCH_MOWING_DAYS).
+ * No holds, geocoding, reassignment, or customer promises are made. */
 const { guardedCoordSelects } = require('./day-stops');
 const { enumerateArrivalPlacements } = require('./arrival-route');
 const { ADMIN_DAY_END_MINUTES, parseHHMM } = require('./window-rules');
@@ -8,6 +9,7 @@ const { workDuration } = require('../route-reorder-window-fit');
 const { getCustomerSchedulingPreferences } = require('../auto-dispatch/preferences');
 const { inBlackout, violatesPreferredDay, violatesPreferredTime, _internals: { weekdayOf } } = require('../auto-dispatch/candidate-slots');
 const { toDateStr, shiftDateStr } = require('../auto-dispatch/dates');
+const mowingDays = require('../auto-dispatch/mowing-days');
 
 async function loadGapCandidate(serviceId, conn) {
   const service = await conn('scheduled_services').leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -63,8 +65,16 @@ function analyzeGapCandidate(candidate, rows, {
   if (holds.some(hold => toDateStr(hold.starts_on) <= date && toDateStr(hold.resume_on) > date)) {
     return { ...response, reason: 'plan_paused_on_date' };
   }
-  if (inBlackout(date, preferences.blackout) || violatesPreferredDay(date, preferences)
-    || (service.skip_weekends && [0, 6].includes(weekdayOf(date)))) return { ...response, reason: 'customer_date_preference' };
+  // The customer's date rules, all cheap and pure, so a list rather than a
+  // chain. GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service visit is
+  // not offered on or next to the customer's mowing day (mowing-days.js).
+  const dateRefused = [
+    inBlackout(date, preferences.blackout),
+    violatesPreferredDay(date, preferences),
+    mowingDays.blocksLive(date, mowingDays.unitRule(preferences, [service])),
+    service.skip_weekends && [0, 6].includes(weekdayOf(date)),
+  ].some(Boolean);
+  if (dateRefused) return { ...response, reason: 'customer_date_preference' };
   if (service.is_recurring && !service.recurring_parent_id && toDateStr(service.scheduled_date) !== date) {
     return { ...response, reason: 'first_occurrence_cadence_anchor' };
   }

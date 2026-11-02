@@ -20,6 +20,7 @@ const { resolveGeo } = require('./geo');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveLimit = require('./move-limit');
+const mowingDays = require('./mowing-days');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
@@ -282,11 +283,17 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
 // endpoints' exclusive lock; it covers one-off dates and weekly days off).
 // An overlap takes FOR SHARE on the other stops' rows, and on the
 // job_applications row behind a booked interview (`interview:<id>`), which
-// blocks their update or delete (r4).
+// blocks their update or delete (r4). A mowing day (mowing-days.js) takes FOR
+// SHARE on the customer's property_preferences row, so the saved mowing and
+// preferred days cannot change before the move commits.
 const INTERVIEW_ID = /^interview:(.+)$/;
-async function fenceSourceConflict(trx, sourceConflict) {
+async function fenceSourceConflict(trx, sourceConflict, service) {
   if (sourceConflict.kind === 'closed_day') {
     await require('../scheduling/blackout-dates').lockClosureState(trx);
+    return;
+  }
+  if (sourceConflict.kind === 'mowing_day') {
+    await trx('property_preferences').where('customer_id', service.customer_id).forShare().select('id');
     return;
   }
   const ids = (sourceConflict.with || []).map(String);
@@ -312,19 +319,20 @@ async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, c
   // or still not the fenced one after the second read, refuses the move.
   let fenced = sourceConflict;
   for (let round = 0; round < 2; round += 1) {
-    await fenceSourceConflict(trx, fenced);
+    await fenceSourceConflict(trx, fenced, service);
     const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
     if (!still) break;
     if (coveredBy(still, fenced)) { check.heldBy = trx; return; }
     fenced = still;
   }
-  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
+  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day or a mowing day');
 }
 
 // Every row the re-read conflict rests on is already held by the fence.
 function coveredBy(still, fenced) {
   if (still.kind !== fenced.kind) return false;
-  if (still.kind === 'closed_day') return true;
+  // A closed day or a mowing day is held whole by its fence.
+  if (still.kind !== 'overlap') return true;
   const held = new Set((fenced.with || []).map(String));
   return (still.with || []).every((id) => held.has(String(id)));
 }
@@ -349,6 +357,8 @@ function makeMoveGuard({ service, best, config = {} }) {
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
+    // GATE_AUTO_DISPATCH_MOWING_DAYS='true': the destination against the mowing rule as saved now.
+    await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
     // GATE_TERRITORY_NIGHT_RUN: the moving visit lands only in its own territory, read at apply (a ZIP can
@@ -530,6 +540,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets);
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
+    // GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service member holds the unit to the mowing rule as saved now.
+    await mowingDays.assertDestinationClear(trx, service, best.date, refuse, rows.map((r) => r.service_type));
     // Every sibling against the receiving tech, committed rows, tech changed
     // or not (see assertCapabilitiesActive).
     await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);

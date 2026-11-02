@@ -1387,6 +1387,11 @@ describe('a visit handed to the customer to pick a day (Quick Move)', () => {
     expect(JSON.stringify(card)).not.toMatch(/Nov 11/);
   });
 
+  test('a deadline off the hour keeps its minutes (24 hours after the text, on a quarter hour)', () => {
+    const card = composeCard({ kind: 'rescheduled', visit: visit({ customer_pick_by: new Date('2026-11-04T16:15:00Z') }), actorText: 'the office', previous: null });
+    expect(card.payload.when).toBe('the customer picks a day by Wed 11:15 AM');
+  });
+
   test('once the visit has a time it reads like any visit', () => {
     const card = composeCard({ kind: 'rescheduled', visit: visit({ window_start: '09:00:00', window_end: '11:00:00' }), actorText: 'the office', previous: null });
     expect(card.payload.when).toBe('Wed Nov 11, 9–11 AM');

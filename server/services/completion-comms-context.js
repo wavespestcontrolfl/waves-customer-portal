@@ -39,12 +39,22 @@ const ContextAggregator = require('./context-aggregator');
 const { etDateString } = require('../utils/datetime-et');
 const { isSmsReaction } = require('./sms-intent');
 const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
+const featureGates = require('../config/feature-gates');
+
+// GATE_RESERVICE_ASKS, read at call time. A partial feature-gates mock (many suites mock the module) lacks the
+// reader, so it reads as off rather than throwing inside every report draft.
+function reserviceAsksLive() {
+  return typeof featureGates.reserviceAsksLive === 'function' && featureGates.reserviceAsksLive() === true;
+}
 
 const { redactAccessCodes } = ContextAggregator;
 
 const RECURRING_CAP_DAYS = 120;
 const ONE_TIME_CAP_DAYS = 180;
 const MAX_CONTEXT_LINES = 8;
+// GATE_RESERVICE_ASKS: a re-service's writer window opens this many days before the booking.
+const RESERVICE_LOOKBACK_DAYS = 10;
+const RESERVICE_SERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
 
 function compactText(value, max = 280) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -72,6 +82,42 @@ function asDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+// A pest or lawn re-service visit: a callback, or the catalog's re-service
+// key. Only asked while GATE_RESERVICE_ASKS is live; a failed catalog lookup
+// reads as "not a re-service" (the window stays as it was).
+// The rodent trapping follow-up is a callback too (is_callback, re-service.js), but it is a trap check, never a
+// re-service the customer described: its catalog key is checked first, so its flag never widens the window.
+async function isReserviceVisit(svc, knex) {
+  if (!reserviceAsksLive()) return false;
+  let serviceKey = null;
+  if (svc.service_id) {
+    try {
+      serviceKey = (await knex('services').where({ id: svc.service_id }).first('service_key'))?.service_key || null;
+    } catch (err) {
+      logger.warn(`[comms-context] re-service key lookup failed: ${err.message}`);
+      return false;
+    }
+  }
+  if (serviceKey === 'rodent_trapping_followup') return false;
+  return svc.is_callback === true || RESERVICE_SERVICE_KEYS.has(serviceKey);
+}
+
+// The visit columns the window reads. GATE_RESERVICE_ASKS adds is_callback;
+// off, the select is as it always was.
+function visitColumns() {
+  const columns = ['id', 'customer_id', 'service_type', 'service_id', 'recurring_parent_id', 'is_recurring', 'source_estimate_id', 'created_at', 'scheduled_date'];
+  return reserviceAsksLive() ? [...columns, 'is_callback'] : columns;
+}
+
+// GATE_RESERVICE_ASKS: a customer describes the problem before the re-service
+// is booked, so its booking origin moves 10 days earlier. Any other case
+// returns the origin and label unchanged.
+async function widenReserviceOrigin(svc, origin, label, knex) {
+  if (!origin || !(await isReserviceVisit(svc, knex))) return { origin, label };
+  const widened = new Date(origin.getTime() - RESERVICE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  return { origin: widened, label: `since ${RESERVICE_LOOKBACK_DAYS} days before the booking (${contextDate(widened)})` };
+}
+
 /**
  * Resolve the context window floor for a completion.
  *
@@ -88,7 +134,7 @@ async function resolveContextWindow({
   if (scheduledServiceId) {
     svc = await knex('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'service_type', 'service_id', 'recurring_parent_id', 'is_recurring', 'source_estimate_id', 'created_at', 'scheduled_date')
+      .first(...visitColumns())
       .catch(() => null);
   }
   const serviceLine = svc ? detectServiceLine(svc.service_type) : null;
@@ -177,6 +223,7 @@ async function resolveContextWindow({
   if (!origin && svc) {
     origin = asDate(svc.created_at);
     if (origin) originLabel = `since the booking (${contextDate(origin)})`;
+    ({ origin, label: originLabel } = await widenReserviceOrigin(svc, origin, originLabel, knex));
   }
   if (!origin && originDate) {
     origin = asDate(originDate);
@@ -361,10 +408,17 @@ const pestTalk = (sentence) => PEST_TALK_RE.test(sentence) || CANONICAL_PEST_RE.
 // report card on a lawn callback). Same access-detail and credential
 // protections; only the relevance test widens. Default callers are unchanged.
 const LAWN_TALK_RE = /\b(?:lawn|grass|turf|sod|yard|weeds?|weedy|crabgrass|dollarweed|clover|sedge|nutsedge|brown(?:ing)?|yellow(?:ing)?|dead|dying|patch(?:es|y)?|spots?|thin(?:ning)?|bare|fungus|fungal|mushrooms?|disease|chinch|grubs?|armyworms?|webworms?|mole\s*crickets?|fertiliz\w*|sprinklers?|irrigation|watering)\b/i;
+// For { lane: 'reservice' } (GATE_RESERVICE_ASKS): what a customer says about
+// the problem behind a re-service. Pest or lawn talk, the product they
+// treated with, or who in the home it affects (a pet, a child, an allergy).
+const PRODUCT_TALK_RE = /\b(?:spray(?:s|ed|ing)?|treat(?:s|ed|ing|ment|ments)?|chemicals?|pesticides?|insecticides?|herbicides?|products?|granul\w*|poison\w*|powders?|bifenthrin|fipronil|permethrin|deltamethrin|cypermethrin|dinotefuran|imidacloprid|indoxacarb|abamectin|hydramethylnon|boric|borate|pyrethrin\w*|termidor|talstar|taurus|talak|advion|alpine|demand|gentrol|delta\s+dust)\b/i;
+const CARE_TALK_RE = /\b(?:pets?|dogs?|pupp(?:y|ies)|cats?|kittens?|kids?|children|child|bab(?:y|ies)|toddlers?|infants?|pregnan\w*|allerg\w*|asthma|sick)\b/i;
+const reserviceTalk = (sentence) => pestTalk(sentence) || LAWN_TALK_RE.test(sentence)
+  || PRODUCT_TALK_RE.test(sentence) || CARE_TALK_RE.test(sentence);
 function scrub(text, { lane } = {}) {
-  const relevant = lane === 'lawn'
-    ? (sentence) => pestTalk(sentence) || LAWN_TALK_RE.test(sentence)
-    : pestTalk;
+  let relevant = pestTalk;
+  if (lane === 'lawn') relevant = (sentence) => pestTalk(sentence) || LAWN_TALK_RE.test(sentence);
+  else if (lane === 'reservice') relevant = reserviceTalk;
   return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
     .filter((sentence) => !accessSentence(sentence) && relevant(sentence))
     .map((sentence) => {

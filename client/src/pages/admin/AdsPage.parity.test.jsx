@@ -143,7 +143,13 @@ it("retains all six PPC workflows and their data reads without starting an actio
       fetch.mock.calls.some(([url]) => url.endsWith("/admin/ads/gap-rule")),
     ).toBe(true),
   );
-  expect(fetch.mock.calls).toHaveLength(7);
+  // Advisor also asks for the blocked-words card's state (hidden on 404).
+  await waitFor(() =>
+    expect(
+      fetch.mock.calls.some(([url]) => url.endsWith("/admin/ads/negatives")),
+    ).toBe(true),
+  );
+  expect(fetch.mock.calls).toHaveLength(8);
   expect(
     fetch.mock.calls.every(
       ([url, options]) =>
