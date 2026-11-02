@@ -2576,22 +2576,24 @@ router.post('/messages/:id/like', async (req, res, next) => {
     const verdict = officeLikeSendVerdict(reply);
     await officeLike.finishOfficeLike(db, target.id, claim.token, verdict);
     if (reply.status >= 300) return res.status(reply.status).json(reply.json);
+    // A suppressed send answers 200 with nothing delivered.
+    if (verdict === 'not_sent') return res.status(422).json({ error: 'The thumbs-up was not sent, so the text has no like.' });
     return res.json({ success: true, officeLike: officeLike.officeLikeForClient({ office_like: { ...claim, status: verdict } }) });
   } catch (err) { next(err); }
 });
 
 // What the like's send did, from the handler's answer or its error: 'sent',
-// 'uncertain' (it may have left) or 'not_sent'. An error with no provider
-// outcome may come after the provider took the text, so it reads 'uncertain'.
-// The applicant rail answers 200 with its own outcome.
+// 'uncertain' (it may have left, or it waits in a queue) or 'not_sent'. A 200
+// alone proves nothing: a suppressed send answers 200 with a sentinel id, so
+// the provider outcome decides. An error with no provider outcome may come
+// after the provider took the text. The applicant rail answers 200 with its
+// own outcome: sent, uncertain or deferred (queued, not yet sent).
 function officeLikeSendVerdict(reply, err = null) {
-  if (err) {
-    const outcome = err.providerOutcome;
-    if (autoSendExecutor.isRealProviderSend(outcome)) return 'sent';
-    return outcome && !autoSendExecutor.isAmbiguousProviderOutcome(outcome) ? 'not_sent' : 'uncertain';
-  }
-  if (reply.status < 300) return reply.json?.outcome === 'uncertain' ? 'uncertain' : 'sent';
-  return autoSendExecutor.isAmbiguousProviderOutcome(reply.json) ? 'uncertain' : 'not_sent';
+  if (!err && reply.json?.recruiting) return reply.json.outcome === 'sent' ? 'sent' : 'uncertain';
+  const outcome = err ? err.providerOutcome : reply.json;
+  if (autoSendExecutor.isRealProviderSend(outcome)) return 'sent';
+  if (autoSendExecutor.isAmbiguousProviderOutcome(outcome) || (err && !outcome)) return 'uncertain';
+  return 'not_sent';
 }
 
 // GET /api/admin/communications/stats — channel analytics
@@ -4659,3 +4661,5 @@ function sendOfficeLikeText(req, target) {
 }
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;
+// Test seam for the like's send verdict.
+router._officeLikeSendVerdict = officeLikeSendVerdict;

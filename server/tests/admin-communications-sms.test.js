@@ -4417,6 +4417,31 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
     expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'uncertain');
   });
 
+  test('a suppressed send answers 200 with nothing delivered: the like is handed back and the click hears why', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'gate-blocked' });
+    await withServer(async (baseUrl) => {
+      const res = await like(baseUrl);
+      expect(res.status).toBe(422);
+      expect((await res.json()).error).toBe('The thumbs-up was not sent, so the text has no like.');
+    });
+    expect(officeLike.finishOfficeLike).toHaveBeenCalledWith(db, MESSAGE_ID, 'tok-1', 'not_sent');
+  });
+
+  test.each([
+    ['a real provider send', { status: 200, json: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-1' } }, null, 'sent'],
+    ['a suppressed send', { status: 200, json: { sent: true, providerMessageId: 'owner-silence' } }, null, 'not_sent'],
+    ['a blocked send', { status: 422, json: { sent: false, blocked: true, code: 'SMS_OPTED_OUT' } }, null, 'not_sent'],
+    ['an uncertain outcome', { status: 422, json: { sent: false, retryable: true, deliveryOutcome: 'uncertain' } }, null, 'uncertain'],
+    ['an applicant text sent', { status: 200, json: { success: true, recruiting: true, outcome: 'sent' } }, null, 'sent'],
+    ['an applicant text queued', { status: 200, json: { success: true, recruiting: true, outcome: 'deferred' } }, null, 'uncertain'],
+    ['a failed applicant text', { status: 422, json: { error: 'Applicant text failed' } }, null, 'not_sent'],
+    ['an error with no provider outcome', null, new Error('socket hang up'), 'uncertain'],
+    ['an error after a definite non-send', null, Object.assign(new Error('rejected'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }), 'not_sent'],
+    ['an error after the provider took it', null, Object.assign(new Error('late'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-2' } }), 'sent'],
+  ])('the send verdict for %s', (_label, reply, err, verdict) => {
+    expect(communicationsRouter._officeLikeSendVerdict(reply, err)).toBe(verdict);
+  });
+
   test('a technician gets the composer\'s own scope answer before any write', async () => {
     // A text with no customer behind it: 403, as the composer answers.
     await withServer(async (baseUrl) => {
