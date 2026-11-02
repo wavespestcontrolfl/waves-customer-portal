@@ -263,15 +263,19 @@ async function readEmails(knex, customerId, window) {
   }));
 }
 
+// A staff row (source 'admin', written by admin-cancellation.js) holds an operator's note, never the customer's
+// words, so it is left out: in the query, NULL-safe as routes/requests.js does (portal rows carry no source), and
+// again on the rows read.
 async function readPortalRequests(knex, customerId, window) {
   const rows = await knex('service_requests')
     .where({ customer_id: customerId })
+    .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })
     .where('created_at', '>=', window.from)
     .where('created_at', '<=', window.to)
-    .select('id', 'subject', 'description', 'created_at')
+    .select('id', 'subject', 'description', 'source', 'created_at')
     .orderBy('created_at', 'desc')
     .limit(CHANNEL_ROW_LIMIT);
-  return (rows || []).map((row) => ({
+  return (rows || []).filter((row) => row.source !== 'admin').map((row) => ({
     id: `portal_request:${row.id}`, source: 'portal_request', at: row.created_at, text: row.description || row.subject, quoted: true,
   }));
 }

@@ -308,6 +308,19 @@ describe('emails and portal requests', () => {
       ['portal_request:r2', 'Wasps at the front door', 'portal_request', true],
     ]);
   });
+
+  test("a staff row (source 'admin') is an operator's note, never a quote", async () => {
+    const knex = fakeKnex({
+      requests: [
+        { id: 'r1', created_at: new Date(NOW - 3 * DAY), source: 'admin', subject: 'Cancel', description: 'Office note: ants came back, offered a free re-service before cancel.' },
+        { id: 'r2', created_at: new Date(NOW - DAY), source: null, subject: 'Pests', description: 'Ants are back in the kitchen.' },
+      ],
+    });
+    const { items } = await gatherReserviceAsks('visit-1', { knex, now: NOW });
+    expect(items.map((item) => item.id)).toEqual(['portal_request:r2']);
+    // The query also leaves staff rows out (NULL-safe, as routes/requests.js does).
+    expect(knex.wheres.some(([table, args]) => table === 'service_requests' && typeof args[0] === 'function')).toBe(true);
+  });
 });
 
 describe('scrub in the reservice lane', () => {
