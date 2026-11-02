@@ -2757,20 +2757,6 @@ class SmartRebooker {
       }
     }
 
-    // A technician change reaches every open dispatch board, as
-    // assignDispatchJob's broadcast does. Best-effort post-commit. Its
-    // throwaway Set: this move's route-quality refresh runs just below.
-    // (A grouped member never carries technicianId here: the unit mover
-    // re-points it through assignDispatchJob, which broadcasts itself.)
-    if (Object.prototype.hasOwnProperty.call(options, 'technicianId')
-      && (options.technicianId || null) !== (service.technician_id || null)) {
-      try {
-        await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: serviceId, actorId: options.actorId || null, qualityDates: new Set() });
-      } catch (emitErr) {
-        logger.warn(`[rebooker] dispatch board update failed for ${serviceId} (move already committed): ${emitErr.message}`);
-      }
-    }
-
     // A caller that mutates several visits in one pass (rain-out's per-job
     // loop, a future batch) passes a shared Set here and flushes it once
     // itself instead of every row awaiting its own repair/measurement pass

@@ -126,31 +126,34 @@ const move = (options) => SmartRebooker.reschedule(
 
 beforeEach(() => { jest.clearAllMocks(); });
 
-test('an unassigned visit that gains a technician closes its open unassigned alert in the move, then updates the board once', async () => {
+// The rebooker adds no dispatch-board broadcast of its own: dispatch:admins
+// is joined by every technician (sockets/index.js) and the payload carries the
+// customer's address and notes (Codex security review on #7400). Staff
+// surfaces broadcast after their own moves, as before.
+test('an unassigned visit that gains a technician closes its open unassigned alert inside the move', async () => {
   const { steps, alertReads, alertResolves } = wireMove({ from: null, to: 'tech-2' });
 
   await expect(move({ technicianId: 'tech-2', actorId: 'staff-1' })).resolves.toMatchObject({ success: true, technicianId: 'tech-2' });
 
   expect(alertReads).toEqual([[{ type: 'unassigned_overdue', job_id: 'svc-1' }]]);
   expect(alertResolves).toEqual([{ where: [{ id: 'alert-1' }] }]);
-  expect(emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
-  expect(emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'svc-1', actorId: 'staff-1' }));
-  expect(steps).toEqual(['resolve', 'commit', 'emit']);
+  expect(steps).toEqual(['resolve', 'commit']);
+  expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
 });
 
-test('a visit that moves from one technician to another updates the board once and reads no unassigned alert', async () => {
+test('a visit that moves from one technician to another reads no unassigned alert', async () => {
   const { alertReads } = wireMove({ from: 'tech-1', to: 'tech-2' });
 
   await expect(move({ technicianId: 'tech-2' })).resolves.toMatchObject({ success: true });
 
   expect(alertReads).toEqual([]);
-  expect(emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
+  expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
 });
 
 test.each([
   ['the same technician', { technicianId: 'tech-1' }],
   ['no technician option', {}],
-])('a move with %s neither resolves an alert nor updates the board', async (_label, options) => {
+])('a move with %s resolves no alert', async (_label, options) => {
   const { alertReads } = wireMove({ from: 'tech-1' });
 
   await expect(move(options)).resolves.toMatchObject({ success: true });
@@ -159,11 +162,11 @@ test.each([
   expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
 });
 
-test('a move that removes the technician updates the board and resolves nothing', async () => {
+test('a move that removes the technician resolves nothing', async () => {
   const { alertReads } = wireMove({ from: 'tech-1', to: null });
 
   await expect(move({ technicianId: null })).resolves.toMatchObject({ success: true });
 
   expect(alertReads).toEqual([]);
-  expect(emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
+  expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
 });
