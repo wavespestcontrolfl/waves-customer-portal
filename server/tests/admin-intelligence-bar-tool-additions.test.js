@@ -219,11 +219,20 @@ describe('a resumed task with saved additions', () => {
     expect(resumed.options).toEqual(BETA);
   });
 
-  test('gate off: the saved additions still offer their tools; `tools` gains none of them', async () => {
+  test('gate off (a rollback mid-task): a saved history with additions keeps the path; `tools` gains none of them', async () => {
     const history = [...savedRound(), ...calledFound];
     const [resumed] = await resumeWith(history);
     expect(resumed.request.tools).toEqual(pageTools);
     expect(withoutMarkers(resumed.request.messages[3])).toEqual(history[3]);
+    expect(resumed.options).toEqual(BETA);
+  });
+
+  test('gate off and a history that ends on an addition: the found tools still come back by message, not in `tools`', async () => {
+    const [resumed] = await resumeWith(savedRound());
+    expect(resumed.request.tools).toEqual(pageTools);
+    const messages = resumed.request.messages;
+    expect(messages.map(m => m.role)).toEqual(['user', 'assistant', 'user', 'user', 'system']);
+    expect(withoutMarkers(messages[4])).toEqual(ToolAdditions.additionMessage(addedByOriginal()));
     expect(resumed.options).toEqual(BETA);
   });
 

@@ -28,6 +28,14 @@ describe('toolAdditionsWanted', () => {
     process.env.GATE_IB_TOOL_ADDITIONS = 'TRUE';
     expect(ToolAdditions.toolAdditionsWanted(base)).toBe(false);
   });
+
+  test('a resume whose saved history holds an addition keeps the path with the gate off, on a model that takes it', () => {
+    const saved = [question, call, results, ToolAdditions.additionMessage([tool('cancel_plan')])];
+    const base = { platformEnabled: true, toolSearch: false, model: 'claude-opus-5-5' };
+    expect(ToolAdditions.toolAdditionsWanted({ ...base, saved })).toBe(true);
+    expect(ToolAdditions.toolAdditionsWanted({ ...base, saved: [question, call, results] })).toBe(false);
+    expect(ToolAdditions.toolAdditionsWanted({ ...base, saved, model: 'claude-sonnet-5' })).toBe(false);
+  });
 });
 
 describe('createRequestState', () => {
@@ -87,10 +95,9 @@ describe('createRequestState', () => {
     expect(state.pending().map(d => d.name)).toEqual(['get_review_stats']);
   });
 
-  test('restore, off: the tools join `tools`, all but the ones a saved addition already offers', () => {
-    const saved = [question, call, results, ToolAdditions.additionMessage([tool('cancel_plan')])];
-    const state = ToolAdditions.createRequestState({ enabled: false, messages: saved });
-    const restored = state.restore([tool('cancel_plan'), tool('get_review_stats')], [tool('discover_capabilities')]);
+  test('restore, off: the tools join `tools` once each, as before', () => {
+    const state = ToolAdditions.createRequestState({ enabled: false, messages: [question, call, results] });
+    const restored = state.restore([tool('discover_capabilities'), tool('get_review_stats')], [tool('discover_capabilities')]);
     expect(restored.map(t => t.name)).toEqual(['discover_capabilities', 'get_review_stats']);
     expect(state.pending()).toEqual([]);
   });

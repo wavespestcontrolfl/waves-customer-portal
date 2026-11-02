@@ -3898,7 +3898,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // cannot read them, gets them back in `tools`.
     ({ tools, messages: currentMessages } = ToolAdditions.forModel({ tools, messages: currentMessages, model }));
     const toolAdditions = ToolAdditions.createRequestState({
-      enabled: ToolAdditions.toolAdditionsWanted({ platformEnabled, toolSearch, model }),
+      enabled: ToolAdditions.toolAdditionsWanted({ platformEnabled, toolSearch, model, saved: req.ibResumedTask?.checkpoint }),
       messages: currentMessages,
     });
     if (req.ibResumedTask && platformEnabled) {

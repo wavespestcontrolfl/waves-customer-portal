@@ -40,9 +40,15 @@ function modelTakesToolAdditions(model) {
   return typeof MODELS.anthropicSupportsMidConversationTools === 'function' && MODELS.anthropicSupportsMidConversationTools(model);
 }
 
-function toolAdditionsWanted({ platformEnabled, toolSearch, model }) {
+// On the platform path, off tool search, on a model that takes additions: a
+// request uses them when the gate is on, or when it resumes a saved history
+// (`saved`, the raw checkpoint) that already holds one. That task keeps the
+// path it started on whatever the gate reads now (a rollback mid-task), since
+// its saved thinking blocks were checked against the `tools` it sent.
+function toolAdditionsWanted({ platformEnabled, toolSearch, model, saved }) {
   const live = typeof gates.ibToolAdditionsLive === 'function' && gates.ibToolAdditionsLive();
-  return platformEnabled === true && toolSearch !== true && live && modelTakesToolAdditions(model);
+  const started = Array.isArray(saved) && saved.some(isAdditionMessage);
+  return platformEnabled === true && toolSearch !== true && (live || started) && modelTakesToolAdditions(model);
 }
 
 const isAdditionMessage = message => message?.role === 'system' && Array.isArray(message.content)
@@ -109,8 +115,7 @@ function forModel({ tools, messages, model }) {
  *   restore(defs, tools)  a resume's tools to restore: on, queued like a find,
  *                         so `tools` stays as the original request sent it (the
  *                         saved thinking blocks were checked against it); off,
- *                         merged into `tools`, all but the ones a saved addition
- *                         message already offers. Returns the tools to send.
+ *                         merged into `tools`, as before. Returns the tools to send.
  *   beforeCall(h, final)  the messages for the next model call: the waiting
  *                         definitions appended as one addition message when
  *                         the history lets one follow
@@ -137,8 +142,7 @@ function createRequestState({ enabled, messages }) {
     queue,
     restore(definitions, tools) {
       if (queue(definitions, tools)) return tools;
-      const missing = definitions.filter(definition => !added.has(definition.name));
-      return [...new Map([...tools, ...missing].map(tool => [tool.name, tool])).values()];
+      return [...new Map([...tools, ...definitions].map(tool => [tool.name, tool])).values()];
     },
     beforeCall(history, finalRound) {
       if (!on || finalRound || !waiting.length || history[history.length - 1]?.role !== 'user') return history;
