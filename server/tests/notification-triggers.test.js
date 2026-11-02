@@ -440,6 +440,18 @@ describe('triggerNotification bell outcome', () => {
     expect(trigger.build({ title: 't' }).link).toBe('/admin/communications');
   });
 
+  test('portal_ask re-alerts on a repeat ask in the same chat: same banner tag, renotify on', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const payload = { itemKey: 'portal-chat-escalation:esc-7', title: 'Reply to a portal chat', body: 'Pat S. asked about scheduling' };
+    await triggerNotification('portal_ask', payload, { pushOnly: true });
+    await triggerNotification('portal_ask', { ...payload, body: 'Pat S. asked about pricing' }, { pushOnly: true });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    for (const [, build] of PushService.sendToAdminUsers.mock.calls) {
+      expect(build('admin-1')).toMatchObject({ tag: 'waves-portal_ask-portal-chat-escalation:esc-7', renotify: true });
+    }
+  });
+
   test('portal_ask redacts a phone number or email that slipped into the text', async () => {
     const PushService = require('../services/push-notifications');
     PushService.sendToAdminUsers.mockClear();

@@ -1593,7 +1593,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
-              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
+              // portal_ask: every push is an ask that is new or rang again (portal-ask-push.js callers), so a repeat on
+              // the same tag (the customer asked again in the same chat) must alert again, not silently replace the
+              // banner. The admin's sound preference still holds (silent/vibrate above).
+              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask',
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           },
