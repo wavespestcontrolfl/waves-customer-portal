@@ -340,6 +340,36 @@ function isSmsReaction(body) {
     || ANDROID_EMOJI_SMS_REACTION_RE.test(text);
 }
 
+// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button" page, the extra): a
+// customer's like on one of OUR texts, so the inbox can show it as a small
+// badge on that text instead of a bubble of its own. Only the like family:
+// Liked / Loved, a removed like or heart, and an acknowledgement-emoji
+// tapback (the ACK_EMOJI_RE set) or its removal. Questioned, Disliked,
+// Laughed at, Emphasized and any other emoji say something, so they stay
+// bubbles (null). An unquoted target ("an image") is null too: there is no
+// text to match. The shape was already checked by isSmsReaction, so the head
+// before the first quote is a few words or one emoji sequence, read with
+// plain string steps. Returns { emoji, removed, target } (target trimmed:
+// Google Messages pads the quote with spaces).
+const LIKE_VERB_EMOJI = Object.freeze({ liked: '\u{1F44D}', loved: '\u2764\ufe0f' });
+const REMOVED_LIKE_KIND_EMOJI = Object.freeze({ like: '\u{1F44D}', heart: '\u2764\ufe0f' });
+function ackEmojiOnly(sequence) {
+  return sequence.replace(ACK_EMOJI_RE, '').replace(/[\ufe0f\u200d]/gu, '').length === 0 ? sequence : null;
+}
+function customerLikeReaction(body) {
+  if (!isSmsReaction(body)) return null;
+  const text = body.trim();
+  const target = reactionQuotedTarget(text);
+  if (target === null || !target.trim()) return null;
+  const head = /^[^\u201c"]*/.exec(text)[0].replace(/[\s\u200b\u200c\ufeff]+/gu, ' ').trim().toLowerCase();
+  if (LIKE_VERB_EMOJI[head]) return { emoji: LIKE_VERB_EMOJI[head], removed: false, target: target.trim() };
+  const removedKind = /^removed an? (like|heart) from$/.exec(head);
+  if (removedKind) return { emoji: REMOVED_LIKE_KIND_EMOJI[removedKind[1]], removed: true, target: target.trim() };
+  const emojiForm = /^reacted (\S+) to$/u.exec(head) || /^removed (\S+) from$/u.exec(head) || /^(\S+) to$/u.exec(head);
+  const emoji = emojiForm ? ackEmojiOnly(emojiForm[1]) : null;
+  return emoji ? { emoji, removed: head.startsWith('removed '), target: target.trim() } : null;
+}
+
 // Reschedule/away intent — a strict SUBSET of scheduling intent. Scheduling
 // intent only decides whether the AI auto-reply stands down; this detector
 // decides whether to raise a "customer is asking to move or miss an upcoming
@@ -502,6 +532,7 @@ function escapeRe(s) {
 module.exports = {
   hasSchedulingIntent,
   isSmsReaction,
+  customerLikeReaction,
   isQuietSmsReaction,
   isAffirmativeSmsReaction,
   reactionTargetAsksQuestion,
