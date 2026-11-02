@@ -2022,12 +2022,15 @@ describe('customer-contact classes', () => {
         expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
         mockTables.estimates = [{ id: uid(543), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Termite Bait Monitoring', mo: 35 }] } } } }];
         expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
-        // A one-time line for the asked service answers it even beside another service's recurring plan.
+        // The shared classifier reads a plan with one-time rows beside it as unknown (call-estimate-service-match.js):
+        // unknown never answers a request (fail closed). A recurring plan for another service is a clear no.
         mockTables.service_requests = [{ id: REQ, customer_id: CUST, requested_service: 'mosquito' }];
         mockTables.estimates = [{ id: uid(544), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Lawn Care', mo: 55 }] }, oneTime: { items: [{ service: 'Mosquito', name: 'One-time mosquito treatment', price: 120 }] } } } }];
-        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
         mockTables.estimates = [{ id: uid(545), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Lawn Care', mo: 55 }] } } } }];
         expect(await judged(bundleBell(), null)).toMatchObject({ reason: null });
+        mockTables.estimates = [{ id: uid(546), customer_id: CUST, estimate_data: { result: { recurring: { services: [{ service: 'Mosquito', mo: 45 }, { service: 'Lawn Care', mo: 55 }] } } } }];
+        expect(await judged(bundleBell(), null)).toMatchObject({ reason: 'Estimate was sent' });
         // No request row for the bell's customer: nothing to match, no close.
         mockTables.service_requests = [];
         mockTables.estimates = [{ id: uid(540), customer_id: CUST, estimate_data: { inputs: { svcMosquito: true } } }];
