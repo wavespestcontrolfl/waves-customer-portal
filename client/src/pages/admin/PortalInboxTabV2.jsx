@@ -137,6 +137,11 @@ function BookingDetails({ item }) {
           </>
         )}
       </div>
+      {item.verified === false && (
+        <div className="text-14 text-ink-secondary mt-1" data-testid="booking-unverified">
+          The phone was typed in online and is not verified.
+        </div>
+      )}
     </>
   );
 }

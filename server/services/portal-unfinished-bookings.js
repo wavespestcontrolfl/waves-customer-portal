@@ -52,14 +52,15 @@ const MAX_PAGES = 10;
 //   room, a safety cap only. 99 of 105 card-step drop-offs, Jun-Nov 2026.
 // - unverified: every booking-page start and every website estimate, whatever customer they link to: the page and
 //   the website forms match a customer by the phone or email typed, which proves nothing (Codex #7489 r4). A small
-//   room; past it a drop-off is held and listed on the day's one summary bell, and a later day's room can still
-//   raise it.
-// Real days had at most three drop-offs of any kind (Jul-Nov 2026), so neither cap binds in normal use.
+//   room.
+// The room caps the ringing only, never the record (Codex #7489 r5): a drop-off past its tier's room still gets its
+// row, written quietly (the activity feed, not the bell), so the Portal tab lists every drop-off and fake starts can
+// never hide a real one; the day's one summary bell says the unverified room ran over. Real days had at most three
+// drop-offs of any kind (Jul-Nov 2026), so neither cap binds in normal use.
 const ESTABLISHED = 'established';
 const UNVERIFIED = 'unverified';
 const MAX_BELLS_PER_DAY = { [ESTABLISHED]: 10, [UNVERIFIED]: 3 };
 const BURST_KEY_PREFIX = 'portal-booking-burst:';
-const MAX_HELD_LINES = 10;
 // An estimate our office sent: made by staff (its maker is on the row), or drafted by the call and text estimator
 // (estimate-learning.js AI_DRAFT_SOURCES), never a website or self-served source. Not source 'manual': it is the
 // column's default, so a path that sets no source would pass as the office's.
@@ -344,7 +345,9 @@ function subjectFor(item) {
 
 // Raise the one bell. Returns { id, isNew } or null when nothing was written. The default dedupe finds a row
 // with this key, open or done, so a drop-off never rings twice.
-async function raiseBell(item) {
+// `quiet`: past the tier's room. The same row and key, written to the activity feed (notifyAdmin's ringGate), so it
+// is listed and handled in the Portal tab like any other but rings nothing.
+async function raiseBell(item, { quiet = false } = {}) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { action, why } = composeWords(item);
   const result = await raiseAdminAlert('alert', {
@@ -360,6 +363,7 @@ async function raiseBell(item) {
     bell: true,
     dedupeKey: item.key,
     metadata: bellMetadata(item),
+    ...(quiet ? { ringGate: async () => false } : {}),
   });
   if (!result?.id || result.suppressed) return null;
   return { id: result.id, isNew: result.deduped === false, why, action };
@@ -367,19 +371,17 @@ async function raiseBell(item) {
 
 // Phone push for an app ask (portal-ask-push.js) is added by another change; this module rings the bell alone.
 
-// Raises each drop-off's bell while its tier's room for the day lasts (`room.left`). A drop-off past it is held,
-// not raised (`room.held`, listed on the summary bell); a later run reads it again.
+// Raises each drop-off's row: ringing while its tier's room for the day lasts (`room.left`), quietly past it
+// (`room.held` counts those).
 async function raiseAll(items, room) {
   let raised = 0;
   for (const item of items) {
     const tier = tierOf(item);
-    if (room.left[tier] <= 0) {
-      room.held.push(item);
-      continue;
-    }
+    const quiet = room.left[tier] <= 0;
     try {
-      const done = await raiseBell(item);
-      if (done?.isNew) {
+      const done = await raiseBell(item, { quiet });
+      if (done?.isNew && quiet) room.held += 1;
+      else if (done?.isNew) {
         raised += 1;
         room.left[tier] -= 1;
       }
@@ -407,12 +409,13 @@ async function sweepSource(source, now, conn, pageSize, room) {
   return { found, raised };
 }
 
-// This ET day's bells from this module per tier, open or done (a bell with no tier counts as unverified). The cap
-// reads the table, so a restart cannot reset it.
+// This ET day's ringing bells from this module per tier, open or done (a bell with no tier counts as unverified;
+// a quiet row past the room is not counted). The cap reads the table, so a restart cannot reset it.
 async function bellsRaisedToday(conn, now) {
   const since = parseETDateTime(`${etDateString(now)}T00:00`);
   const rows = await conn('notifications').where({ recipient_type: 'admin' }).where('created_at', '>=', since)
     .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [KEY_PREFIX.length, KEY_PREFIX])
+    .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
     // One expression, the constant inlined: two bound copies of the default are two parameters to Postgres, so
     // the SELECT would not match the GROUP BY (42803).
     .groupByRaw(TIER_SQL)
@@ -423,13 +426,13 @@ async function bellsRaisedToday(conn, now) {
   return counts;
 }
 
-// The day's one summary bell once a tier's cap held a drop-off back. The words never carry a count; the list of
-// what was held is the bell's detail, newest first.
+// The day's one summary bell once a tier's room ran over: the extra drop-offs are on the Portal tab without a ring.
+// The words never carry a count (the first bell of the day stands).
 function burstAlertSpec(day) {
   return {
     area: 'Customers',
     action: 'Check unverified booking starts',
-    why: 'More unverified booking starts than usual were left today, so the extra ones are listed here',
+    why: 'More unverified booking starts than usual today; the extra ones are on the Portal tab without a ring',
     severity: 'needs-you',
     link: '/admin/communications#tab=portal',
     subject: { type: 'check', id: `${BURST_KEY_PREFIX}${day}` },
@@ -438,30 +441,12 @@ function burstAlertSpec(day) {
   };
 }
 
-// One line per held drop-off, newest first, at most MAX_HELD_LINES: who, for what, the time picked, the phone typed.
-function heldLines(held) {
-  const newest = [...held].sort((a, b) => b.dropOffAt.getTime() - a.dropOffAt.getTime());
-  const lines = newest.slice(0, MAX_HELD_LINES).map((item) => {
-    const slot = slotWords(item.slot);
-    return [item.name || 'A visitor', item.service || 'a booking', slot, item.phone].filter(Boolean).join(', ');
-  });
-  if (newest.length > MAX_HELD_LINES) lines.push(`and ${newest.length - MAX_HELD_LINES} more`);
-  return lines.join('\n');
-}
-
-// Rings once a day (the first raise); later runs that hold more rewrite the list quietly, never ring again.
+// Rings once a day: the first raise; a later run's raise is a plain dedupe.
 async function raiseBurstBell(now, held) {
   const day = etDateString(now);
   try {
     const { raiseAdminAlert } = require('./admin-alert-compose');
-    await raiseAdminAlert('alert', burstAlertSpec(day), {
-      bell: true,
-      dedupeKey: `${BURST_KEY_PREFIX}${day}`,
-      refreshOnDedupe: true,
-      ringOnRefresh: () => false,
-      detail: heldLines(held),
-      metadata: { day, heldCount: held.length },
-    });
+    await raiseAdminAlert('alert', burstAlertSpec(day), { bell: true, dedupeKey: `${BURST_KEY_PREFIX}${day}`, metadata: { day, heldCount: held } });
   } catch (err) {
     logger.warn(`[portal-unfinished-bookings] summary bell not raised: ${safeError(err)}`);
   }
@@ -476,7 +461,7 @@ async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSi
     const today = await bellsRaisedToday(conn, now);
     room = {
       left: { [ESTABLISHED]: Math.max(0, MAX_BELLS_PER_DAY[ESTABLISHED] - today[ESTABLISHED]), [UNVERIFIED]: Math.max(0, MAX_BELLS_PER_DAY[UNVERIFIED] - today[UNVERIFIED]) },
-      held: [],
+      held: 0,
     };
     for (const source of SOURCES) {
       const result = await sweepSource(source, now, conn, pageSize, room);
@@ -486,13 +471,13 @@ async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSi
   } catch (err) {
     logger.warn(`[portal-unfinished-bookings] stopped, nothing more raised this run: ${safeError(err)}`);
   }
-  const held = room?.held || [];
-  if (held.length) {
-    logger.warn(`[portal-unfinished-bookings] a day's cap was reached: ${held.length} drop-off(s) held and listed on the summary bell`);
+  const held = room?.held || 0;
+  if (held) {
+    logger.warn(`[portal-unfinished-bookings] a day's room was full: ${held} drop-off(s) written without a ring`);
     await raiseBurstBell(now, held);
   }
   if (raised) logger.info(`[portal-unfinished-bookings] raised ${raised} bell(s) for bookings not finished`);
-  return { skipped: false, found, raised, held: held.length };
+  return { skipped: false, found, raised, held };
 }
 
 module.exports = {
@@ -509,7 +494,6 @@ module.exports = {
   MAX_BELLS_PER_DAY,
   BURST_KEY_PREFIX,
   burstAlertSpec,
-  heldLines,
   findDropOffPage,
   withoutPersonContact,
   slotWords,

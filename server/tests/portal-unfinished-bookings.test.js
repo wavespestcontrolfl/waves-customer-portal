@@ -54,19 +54,6 @@ describe('the day\'s summary bell (past MAX_BELLS_PER_DAY)', () => {
   test('the estimate card step is read before the booking page', () => {
     expect(mod.SOURCES.map((source) => source.name)).toEqual([mod.SOURCE_ESTIMATE_CARD, mod.SOURCE_BOOKING_PAGE]);
   });
-
-  test('the held list: newest first, one line each, at most ten and a count of the rest', () => {
-    const at = (minutes) => new Date(Date.parse('2026-11-02T15:00:00Z') - minutes * 60 * 1000);
-    const held = Array.from({ length: 12 }, (_, k) => ({
-      name: k === 0 ? '' : `Sam V${k}`, service: k === 1 ? '' : 'Mosquito Control', phone: '9415550142', dropOffAt: at(k),
-      slot: k === 0 ? { date: '2026-11-24', start: '13:00', end: '14:00' } : null,
-    }));
-    const lines = mod.heldLines([...held].reverse()).split('\n');
-    expect(lines).toHaveLength(11);
-    expect(lines[0]).toBe('A visitor, Mosquito Control, Tue Nov 24, 1-2 PM, 9415550142');
-    expect(lines[1]).toBe('Sam V1, a booking, 9415550142');
-    expect(lines[10]).toBe('and 2 more');
-  });
 });
 
 describe('the off switch', () => {

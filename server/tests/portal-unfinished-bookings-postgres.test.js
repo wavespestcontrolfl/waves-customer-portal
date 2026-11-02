@@ -7,9 +7,10 @@
  *   - portal-inbox.js: the Communications Portal tab lists the bell as a booking item whose version the bell's
  *     Done accepts.
  *   - admin-alert-relevance.js: the bell closes on a person's text after it, and when the booking was finished.
- *   - the day's cap per tier: an unverified drop-off past its room is held and listed on one summary bell a day; an
- *     established one (the card step of an estimate our office sent) still rings with that room full. A typed phone
- *     that matches a customer we have served is still unverified.
+ *   - the day's cap per tier caps the ringing, never the record: an unverified drop-off past its room still gets its
+ *     row, quietly (the activity feed), listed on the Portal tab, and one summary bell a day rings; an established one
+ *     (the card step of an estimate our office sent) still rings with that room full. A typed phone that matches a
+ *     customer we have served is still unverified.
  * Each test removes everything it made and every bell its sweeps raised, so the next test starts with no drop-off
  * and the day's count at zero (Codex #7489 r2). Every row is synthetic. It refuses any database but a private QA
  * one or CI's.
@@ -172,7 +173,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     for (const i of contacted) expect(await bellsFor(intentKey(i))).toHaveLength(0);
   });
 
-  test('past the unverified room the rest are held, listed on one summary bell a day', async () => {
+  test('past the unverified room every drop-off still gets its row, quietly, on the Portal tab; one summary bell a day', async () => {
     const now = new Date();
     const room = mod.MAX_BELLS_PER_DAY[mod.UNVERIFIED];
     const intents = [];
@@ -183,23 +184,26 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     const first = await run(now);
     expect(first.raised).toBe(room);
     expect(first.held).toBeGreaterThanOrEqual(4);
+    const quietRows = [];
+    for (const i of intents) {
+      const rows = await bellsFor(intentKey(i));
+      expect(rows).toHaveLength(1);
+      if (meta(rows[0]).feed === 'activity') quietRows.push(rows[0]);
+    }
+    expect(quietRows.length).toBeGreaterThanOrEqual(4);
     const { etDateString, parseETDateTime } = require('../utils/datetime-et');
-    const today = await dropOffBells(db('notifications')).where('created_at', '>=', parseETDateTime(`${etDateString(now)}T00:00`))
-      .whereRaw("metadata->>'trust' = ?", [mod.UNVERIFIED]).count({ n: '*' }).first();
-    expect(Number(today.n)).toBe(room);
-    let rung = 0;
-    for (const i of intents) rung += (await bellsFor(intentKey(i))).length;
-    expect(rung).toBeLessThan(intents.length);
+    const ringing = await dropOffBells(db('notifications')).where('created_at', '>=', parseETDateTime(`${etDateString(now)}T00:00`))
+      .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'").whereRaw("metadata->>'trust' = ?", [mod.UNVERIFIED]).count({ n: '*' }).first();
+    expect(Number(ringing.n)).toBe(room);
     const [summary] = await bellsFor(burstKey(now));
     expect(summary).toEqual(expect.objectContaining({ category: 'alert', link: '/admin/communications#tab=portal' }));
-    // The held drop-offs are listed, one line each: who, for what, the time picked, the phone typed.
-    const lines = summary.detail.split('\n');
-    expect(lines).toHaveLength(first.held);
-    expect(lines[0]).toMatch(/^Pat Synthetic\S*, Mosquito Control, Tue Nov 24, 1-2 PM, \d{10}$/);
-    // The summary is not a booking item, and a later run that holds again rings no second one.
+    // Every drop-off, rung or quiet, is a Portal item; the summary is not one.
     process.env.GATE_PORTAL_INBOX = 'true';
-    expect((await portalInbox.list()).items.some((row) => row.id === summary.id)).toBe(false);
-    expect(await run(now)).toEqual(expect.objectContaining({ raised: 0, held: first.held }));
+    const listed = new Set((await portalInbox.list()).items.map((row) => row.id));
+    for (const row of quietRows) expect(listed.has(row.id)).toBe(true);
+    expect(listed.has(summary.id)).toBe(false);
+    // A later run finds nothing new and rings no second summary.
+    expect(await run(now)).toEqual(expect.objectContaining({ raised: 0, held: 0 }));
     expect(await bellsFor(burstKey(now))).toHaveLength(1);
   });
 
@@ -213,6 +217,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     const rows = await bellsFor(estimateKey(e));
     expect(rows).toHaveLength(1);
     expect(meta(rows[0]).trust).toBe(mod.ESTABLISHED);
+    expect(meta(rows[0]).feed).not.toBe('activity');
   });
 
   test('only an estimate our office sent is established; a typed phone that matches a served customer is not', async () => {
@@ -297,6 +302,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
       source: 'booking_page', service: 'Mosquito Control', slot: { date: '2026-11-24', start: '13:00', end: '14:00' },
     }));
     expect(item.customer.id).toBe(c.id);
+    expect(item.verified).toBe(false);
     expect(item.version).toMatch(/^[0-9a-f]{32}$/);
     expect(listed.older).toHaveProperty('bookings');
     // Gate off: the kind is not listed at all.

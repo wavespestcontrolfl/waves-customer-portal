@@ -28,13 +28,13 @@ const request = {
 const booking = {
   kind: "booking", id: "bell-1", version: "0123456789abcdef0123456789abcdef", createdAt: "2026-10-31T15:00:00.000Z",
   customer: { id: "cust-7", firstName: "Jo", lastName: "Visitor", phone: "+19415550107", hasTexts: false },
-  source: "booking_page", service: "Mosquito Control", slot: { date: "2026-11-03", start: "13:00", end: "14:00" },
+  source: "booking_page", service: "Mosquito Control", slot: { date: "2026-11-03", start: "13:00", end: "14:00" }, verified: false,
 };
 // An estimate card step with no customer on file: only the contact the bell carries.
 const cardStep = {
   kind: "booking", id: "bell-2", version: "fedcba9876543210fedcba9876543210", createdAt: "2026-10-30T15:00:00.000Z",
   customer: { id: null, firstName: "Sam Walkin", lastName: "", phone: "+19415550108", hasTexts: false },
-  source: "estimate_card", service: "Pest Control", slot: null, estimateId: "est-1",
+  source: "estimate_card", service: "Pest Control", slot: null, estimateId: "est-1", verified: true,
 };
 
 const olderChat = {
@@ -371,7 +371,10 @@ describe("Portal inbox tab", () => {
     expect(within(pageRow).getByTestId("booking-slot")).toHaveTextContent("They picked Tue Nov 3, 1-2 PM.");
     expect(within(pageRow).getByTestId("booking-where")).toHaveTextContent("They left at the booking page without finishing.");
     expect(within(pageRow).queryByRole("link", { name: "Open the estimate" })).not.toBeInTheDocument();
+    // A phone typed in on the booking page is not verified; the card step of an estimate the office sent is.
+    expect(within(pageRow).getByTestId("booking-unverified")).toHaveTextContent("The phone was typed in online and is not verified.");
     const cardRow = screen.getByText("Sam Walkin").closest("[data-testid]");
+    expect(within(cardRow).queryByTestId("booking-unverified")).not.toBeInTheDocument();
     expect(within(cardRow).getByTestId("booking-where")).toHaveTextContent("They left at the card step of an estimate without finishing.");
     expect(within(cardRow).queryByTestId("booking-slot")).not.toBeInTheDocument();
     expect(within(cardRow).getByRole("link", { name: "Open the estimate" })).toHaveAttribute("href", "/admin/estimates?estimateId=est-1");
