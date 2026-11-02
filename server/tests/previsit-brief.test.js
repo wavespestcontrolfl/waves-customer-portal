@@ -390,14 +390,44 @@ describe('history outage — generation aborts, cached brief survives', () => {
     expect(state.updates.scheduled_services || []).toEqual([]);
   });
 
+  // The fake answers every scheduled_services read with the visit itself; the
+  // completed-visit lookup (where status = 'completed') gets `completed`.
+  const scheduleWith = (completed) => (rec) => (
+    rec.ops.some(([m, args]) => m === 'where' && args[0] && args[0].status === 'completed') ? completed : [{ ...SVC }]
+  );
+
   test('genuinely-empty history (readable) still claims new customer', async () => {
-    const state = useDb(baseResponses({ service_records: [] }));
+    const state = useDb(baseResponses({ service_records: [], scheduled_services: scheduleWith([]) }));
     await PrevisitBrief.generateVisitBrief('svc-1');
     const facts = await groundedFacts();
     expect(facts.history).toEqual({ available: true });
     expect(facts.visit.newCustomer).toBe(true);
     const { brief } = storedBrief(state);
     expect(brief.access.alerts.map((a) => a.type)).toContain('new_customer');
+  });
+
+  // Owner 2026-11-02: an annual prepay customer's done quarterly visit had no
+  // service record, and her next visit read "New customer — first visit".
+  test('a completed visit with no service record is not a new customer', async () => {
+    const state = useDb(baseResponses({ service_records: [], scheduled_services: scheduleWith([{ id: 'svc-done' }]) }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const facts = await groundedFacts();
+    expect(facts.visit.newCustomer).toBe(false);
+    const { brief } = storedBrief(state);
+    expect(brief.access.alerts.map((a) => a.type)).not.toContain('new_customer');
+  });
+
+  test('a failed completed-visit lookup asserts no first visit', async () => {
+    const state = useDb(baseResponses({
+      service_records: [],
+      scheduled_services: (rec) => {
+        if (rec.ops.some(([m, args]) => m === 'where' && args[0] && args[0].status === 'completed')) throw new Error('db down');
+        return [{ ...SVC }];
+      },
+    }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const { brief } = storedBrief(state);
+    expect(brief.access.alerts.map((a) => a.type)).not.toContain('new_customer');
   });
 
   test('visit.oneTime is present only when the whole recurring-lineage trio is clear', async () => {
