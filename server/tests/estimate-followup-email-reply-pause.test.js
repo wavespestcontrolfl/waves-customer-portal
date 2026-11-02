@@ -82,6 +82,9 @@ const emailCalls = () => db._calls.filter((c) => c.table === 'emails');
 const ALIGNED = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=s1 header.b=abc; spf=pass (google.com: domain designates 192.0.2.1 as permitted sender) smtp.mailfrom=reply@${domain}`;
 const SPOOFED = 'mx.google.com; dkim=pass header.i=@attacker.example header.s=s1; spf=fail (google.com: domain does not designate) smtp.mailfrom=bounce@attacker.example';
 const CUSTOMER_REPLY = { from_address: 'pat@example.com', authentication_results: ALIGNED('example.com') };
+// The quoted-local-part forgery from email-auth-strict.test.js: the permissive
+// parser reads a fake dkim=pass for example.com out of the attacker's MAIL FROM.
+const FORGED = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=example.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=example.com y"@evil.example';
 const LEAD_REPLY = { from_address: 'lead@example.com', authentication_results: ALIGNED('example.com') };
 
 function setGate(on) {
@@ -144,6 +147,12 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
     setRows({ emails: [{ from_address: 'lead@example.com', authentication_results: SPOOFED }] });
     expect(await hasRepliedRecently(LEAD_EST)).toBe(false);
     expect(emailCalls()).toHaveLength(1);
+  });
+
+  test('a dkim=pass forged inside a quoted MAIL FROM never counts (strict reader)', async () => {
+    setGate(true);
+    setRows({ emails: [{ from_address: 'lead@example.com', authentication_results: FORGED }] });
+    expect(await hasRepliedRecently(LEAD_EST)).toBe(false);
   });
 
   test('a row with no Authentication-Results never counts', async () => {

@@ -142,7 +142,10 @@ async function hasInboundSmsSince(est, cutoff) {
 // SPF aligned with the sender's domain (hasAlignedAuth, the check
 // email-reply-context.js runs on the same "is this a real customer reply"
 // question). Without it, anyone who knows a lead's address could pause that
-// lead's follow-ups (Codex security review, #7407). The newest rows are read
+// lead's follow-ups (Codex security review, #7407). Always the strict reader
+// ({ strict: true }, as access-code-capture.js and bid-desk do): the default
+// parser accepts a dkim=pass forged inside a quoted MAIL FROM unless
+// GATE_EMAIL_AUTH_STRICT is on (email-auth-strict.test.js). The newest rows are read
 // first; a spoofed flood can only push a real reply past the cap, which sends
 // the follow-up exactly as before this gate.
 const EMAIL_REPLY_SCAN_LIMIT = 25;
@@ -163,7 +166,7 @@ async function hasInboundEmailSince(est, cutoff) {
   // Lazy: inbox-hygiene loads the Gmail client, and only the gate-on path needs it.
   const { hasAlignedAuth } = require("./email/inbox-hygiene");
   const { domainFromAddress } = require("./email/spam-blocker");
-  return (rows || []).some((row) => hasAlignedAuth(row.authentication_results, domainFromAddress(row.from_address)));
+  return (rows || []).some((row) => hasAlignedAuth(row.authentication_results, domainFromAddress(row.from_address), { strict: true }));
 }
 
 // Reply-pause: if the customer has SMS'd Waves in the last N days (via
