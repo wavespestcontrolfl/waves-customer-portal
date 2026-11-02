@@ -68,6 +68,15 @@ maybeDescribe('monday review bell (live Postgres)', () => {
       const after = await Review._private.loadUnreadAlerts({ now: NOW });
       expect(after.count - before.count).toBe(1);
     });
+
+    test('pages past older rows that do not qualify (a 2-row page proves the keyset walk)', async () => {
+      const before = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2 });
+      for (let i = 0; i < 3; i += 1) await addNotification({ created_at: ago(60 + i), metadata: { severity: undefined } }); // unsorted, older
+      await addNotification({ title: `Paged ${RUN.slice(0, 8)}`, created_at: ago(30) });
+      const after = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2 });
+      expect(after.count - before.count).toBe(1);
+      expect(after.capped).toBe(false);
+    });
   });
 
   describe('list 3: completed visits whose only invoice is a draft', () => {

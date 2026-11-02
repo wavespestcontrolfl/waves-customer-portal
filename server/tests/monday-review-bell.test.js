@@ -321,6 +321,11 @@ describe('list 4: open past visits', () => {
 });
 
 describe('assembly', () => {
+  test('a capped unread-alert scan reads as a floor', () => {
+    const [list] = buildLists({ alerts: { count: 3, capped: true, headlines: [] } });
+    expect(list.phrase).toBe('3+ unread alerts');
+  });
+
   test('drafts link opens the oldest draft; without an id it opens the Invoices page', () => {
     const [withId] = buildLists({ drafts: { count: 2, total: 100.5, oldestId: 'a b', oldestNumber: 'X-1' } });
     expect(withId.link).toBe('/admin/invoices?invoice=a%20b');

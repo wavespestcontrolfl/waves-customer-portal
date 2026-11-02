@@ -44,7 +44,10 @@ const AREA = 'System';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const UNREAD_DAYS = 14;
 const DRAFT_FLOOR_DAYS = 3;
-const ALERT_SCAN_LIMIT = 2000;
+// Candidates are paged (keyset on created_at, id) because the needs-you test runs in JS after the SQL filter: a
+// fixed LIMIT could leave every qualifying row behind older ineligible ones. The cap only bounds a runaway table.
+const ALERT_PAGE = 1000;
+const ALERT_MAX_PAGES = 50;
 const ALERT_HEADLINES = 5;
 const HEADLINE_CHARS = 90;
 const PROMISE_PAGE = 200;
@@ -81,33 +84,42 @@ function parseMeta(metadata) {
 // List 1. A needs-you row (needs-me's reading) that is not done, was never
 // read, and has shown no sign of life for UNREAD_DAYS (created_at or a later
 // ring stamp, the way the retention sweep computes it).
-async function loadUnreadAlerts({ now = new Date(), database = db } = {}) {
+async function loadUnreadAlerts({ now = new Date(), database = db, pageSize = ALERT_PAGE } = {}) {
   const { mapAlertRow } = require('./needs-me');
   const { lastActivityMs } = require('./admin-alert-retention');
   const nowMs = now.getTime();
   const cutoff = new Date(nowMs - UNREAD_DAYS * DAY_MS);
-  const rows = await database('notifications')
-    .where({ recipient_type: 'admin' }).whereNull('done_at').whereNull('read_at')
-    .where('created_at', '<', cutoff)
-    .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
-    .whereRaw("COALESCE(metadata->>'claudeQueue', '') = ''")
-    .whereRaw("COALESCE(metadata->>'who', '') <> 'claude'")
-    .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
-    .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-    .whereRaw("COALESCE(metadata->>'dedupeKey', '') NOT LIKE 'monday-review:%'")
-    .orderByRaw('created_at ASC, id ASC')
-    .limit(ALERT_SCAN_LIMIT)
-    .select('id', 'category', 'title', 'link', 'metadata', 'created_at', 'read_at');
   const kept = [];
-  for (const row of rows) {
-    const item = mapAlertRow(row);
-    if (item.severity !== 'needs-you' || item.unsorted || item.activityOnly || item.who === 'claude') continue;
-    const idleSince = lastActivityMs(row, parseMeta(row.metadata), nowMs);
-    if (idleSince < cutoff.getTime()) kept.push({ headline: String(row.title || '').trim(), idleSince });
+  let after = null;
+  let capped = false;
+  for (let page = 0; ; page += 1) {
+    if (page >= ALERT_MAX_PAGES) { capped = true; break; }
+    const query = database('notifications')
+      .where({ recipient_type: 'admin' }).whereNull('done_at').whereNull('read_at')
+      .where('created_at', '<', cutoff)
+      .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
+      .whereRaw("COALESCE(metadata->>'claudeQueue', '') = ''")
+      .whereRaw("COALESCE(metadata->>'who', '') <> 'claude'")
+      .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
+      .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+      .whereRaw("COALESCE(metadata->>'dedupeKey', '') NOT LIKE 'monday-review:%'");
+    if (after) query.whereRaw('(created_at, id) > (?, ?)', [after.created_at, after.id]);
+    const rows = await query.orderByRaw('created_at ASC, id ASC').limit(pageSize)
+      .select('id', 'category', 'title', 'link', 'metadata', 'created_at', 'read_at');
+    for (const row of rows) {
+      const item = mapAlertRow(row);
+      if (item.severity !== 'needs-you' || item.unsorted || item.activityOnly || item.who === 'claude') continue;
+      const idleSince = lastActivityMs(row, parseMeta(row.metadata), nowMs);
+      if (idleSince < cutoff.getTime()) kept.push({ headline: String(row.title || '').trim(), idleSince });
+    }
+    if (rows.length < pageSize) break;
+    after = rows[rows.length - 1];
   }
+  if (capped) logger.warn(`[monday-review] unread alert scan stopped after ${ALERT_MAX_PAGES} pages; the count is a floor`);
   kept.sort((a, b) => a.idleSince - b.idleSince);
   return {
     count: kept.length,
+    capped,
     oldestAt: kept[0] ? new Date(kept[0].idleSince) : null,
     headlines: kept.slice(0, ALERT_HEADLINES).map((k) => ({ headline: k.headline, at: new Date(k.idleSince) })),
   };
@@ -196,7 +208,7 @@ function buildLists({ alerts, promises, drafts, visits }) {
     lists.push({
       key: 'alerts',
       count: alerts.count,
-      phrase: `${alerts.count} unread ${plural(alerts.count, 'alert', 'alerts')}`,
+      phrase: `${alerts.count}${alerts.capped ? '+' : ''} unread ${plural(alerts.count, 'alert', 'alerts')}`,
       detail: [
         `Needs-you alerts nobody read for ${UNREAD_DAYS}+ days: ${alerts.count}. A row expires after 30 idle days. Page: the bell.`,
         ...(lines.length ? [`   Oldest ${lines.length}:`, ...lines] : []),
