@@ -9965,6 +9965,14 @@ function recapGlassesClipsLive() {
 function techSetTextsLive() {
   return process.env.GATE_TECH_SET_TEXTS === 'true';
 }
+// GATE_EMAIL_DRAFT_FACTS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02). On, the Gmail auto-draft reply
+// (services/email/email-actions.js draftReplyForEmail) gets a FACTS block from our own records for an address-matched
+// customer: upcoming and just-passed visits (exact service name, ET date, arrival window, status, technician first name),
+// the Waves line to call or text, the live-tracking text note, and the texts Waves sent in the last 72 hours
+// (services/email/email-draft-facts.js). Off = the prompt is byte-identical. Drafts never send. Kill = unset.
+function emailDraftFactsLive() {
+  return process.env.GATE_EMAIL_DRAFT_FACTS === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -10158,3 +10166,5 @@ module.exports.techInstantAnswersLive = techInstantAnswersLive;
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 // GATE_TECH_SET_TEXTS reader, on its own line so gate PRs never conflict.
 module.exports.techSetTextsLive = techSetTextsLive;
+// GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
+module.exports.emailDraftFactsLive = emailDraftFactsLive;
