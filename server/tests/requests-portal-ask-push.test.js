@@ -77,7 +77,7 @@ async function post(body) {
 
 const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'portal_ask');
 const body = { category: 'pest_issue', subject: 'Ants in the kitchen', description: 'Trail along the counter. Call 941-555-0100', urgency: 'routine' };
-beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; });
+beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; require('../services/portal-ask-push').__private.resetPageLimits(); });
 afterEach(() => { delete process.env.GATE_PORTAL_ASK_PUSH; });
 
 test('a new request rings the bell and sends one pushOnly page: first name and last initial, no description, no phone', async () => {

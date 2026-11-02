@@ -153,7 +153,8 @@ async function runPage(rows, now) {
       const landed = await ringAgain(item, now);
       rung += landed;
       // Only a row this run really rewrote (the fenced update landed) pages the phones, once: the row is stamped
-      // lateReRungAt in the same statement, so no later sweep reads it again.
+      // lateReRungAt in the same statement, so no later sweep reads it again. This waits for the customer's name
+      // read only; the page goes out from portal-ask-push.js's queue, never awaited, so it cannot hold the sweep.
       if (landed) await pushStillWaiting(item);
     } catch (err) {
       logger.warn(`[portal-late-rering] notification ${item.row.id} not rung: ${safeError(err)}`);
@@ -168,10 +169,11 @@ async function pushStillWaiting({ row, meta }) {
   try {
     const { pushPortalAsk, customerShortName } = require('./portal-ask-push');
     if (!require('../config/feature-gates').portalAskPushLive?.()) return;
-    await pushPortalAsk({
+    const name = await customerShortName(meta.customerId);
+    void pushPortalAsk({
       itemKey: `late:${row.id}`,
       title: 'Still waiting on a reply to a customer',
-      body: `${await customerShortName(meta.customerId)} has waited over 1 business hour for an answer`,
+      body: `${name} has waited over 1 business hour for an answer`,
       link: row.link || null,
       customerId: meta.customerId,
     });

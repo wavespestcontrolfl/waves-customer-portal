@@ -267,7 +267,7 @@ describe('GATE_PORTAL_ASK_PUSH on the estimate page asks', () => {
   const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'portal_ask');
   // The push is not awaited by the request (it must not hold the customer): let it settle before reading it.
   const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
-  beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; });
+  beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; require('../services/portal-ask-push').__private.resetPageLimits(); });
   afterEach(() => { delete process.env.GATE_PORTAL_ASK_PUSH; });
 
   test('a change request pushes once: first name and last initial, no note, no contact details', async () => {

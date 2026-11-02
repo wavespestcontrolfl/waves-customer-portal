@@ -57,6 +57,7 @@ const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'p
 
 beforeEach(() => {
   jest.clearAllMocks();
+  require('../services/portal-ask-push').__private.resetPageLimits();
   process.env.GATE_PORTAL_LATE_RERING = 'true';
   process.env.GATE_PORTAL_ASK_PUSH = 'true';
   mockState.rows = [row('n-1', 'c-1'), row('n-2', 'c-2')];
@@ -66,6 +67,13 @@ beforeEach(() => {
 afterEach(() => { delete process.env.GATE_PORTAL_LATE_RERING; delete process.env.GATE_PORTAL_ASK_PUSH; });
 
 describe('the late re-ring pages the phones', () => {
+  test('a page that never answers does not hold the sweep (the page is not awaited)', async () => {
+    triggerNotification.mockImplementationOnce(() => new Promise(() => {})).mockImplementationOnce(() => new Promise(() => {}));
+    const out = await runPortalLateRering({ now: NOW });
+    expect(out).toEqual({ skipped: false, due: 2, rung: 2 });
+    expect(pushes()).toHaveLength(2);
+  });
+
   test('each re-rung row pushes once, pushOnly, with first name and last initial and no contact details', async () => {
     const out = await runPortalLateRering({ now: NOW });
     expect(out).toEqual({ skipped: false, due: 2, rung: 2 });

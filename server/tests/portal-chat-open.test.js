@@ -958,6 +958,7 @@ describe('GATE_PORTAL_ASK_PUSH: the hand-off bell also rings the phones', () => 
   let committedAtPush;
   beforeEach(() => {
     process.env[PUSH] = 'true';
+    require('../services/portal-ask-push').__private.resetPageLimits();
     committedAtPush = [];
     triggerNotification.mockImplementation(async (key) => {
       if (key === 'portal_ask') committedAtPush.push(db.__queries.some((q) => /^commit/i.test(q.sql)));

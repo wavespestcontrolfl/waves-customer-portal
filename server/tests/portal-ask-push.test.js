@@ -5,11 +5,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
 
 const { triggerNotification } = require('../services/notification-triggers');
-const { pushPortalAsk, shortName } = require('../services/portal-ask-push');
+const {
+  pushPortalAsk, shortName, PAGES_PER_CUSTOMER_PER_HOUR, PAGES_PER_HOUR, PAGES_IN_FLIGHT, __private,
+} = require('../services/portal-ask-push');
 
 const ask = { itemKey: 'request:r-1', title: 'Answer a portal request', body: 'Pat S. sent a pest control request', link: '/admin/customers?customerId=c-1', customerId: 'c-1' };
 
-beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_ASK_PUSH; });
+beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_ASK_PUSH; __private.resetPageLimits(); });
 afterAll(() => { delete process.env.GATE_PORTAL_ASK_PUSH; });
 
 describe('pushPortalAsk', () => {
@@ -51,6 +53,61 @@ describe('pushPortalAsk', () => {
     await expect(pushPortalAsk({ title: 'x' })).resolves.toEqual({ skipped: 'incomplete' });
     await expect(pushPortalAsk({ itemKey: 'k' })).resolves.toEqual({ skipped: 'incomplete' });
     expect(triggerNotification).not.toHaveBeenCalled();
+  });
+});
+
+// Codex #7482 security review: a signed-in customer can open many asks, and a sweep can find many rows at once.
+describe('page limits: a burst of asks cannot flood the phones or hold a caller', () => {
+  const askFor = (customerId, n = 1) => ({ ...ask, itemKey: `request:${customerId}-${n}`, customerId });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; });
+
+  test('a customer gets at most PAGES_PER_CUSTOMER_PER_HOUR pages an hour; another customer still pages; after the hour it pages again', async () => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-02T15:00:00Z'));
+    try {
+      for (let n = 1; n <= PAGES_PER_CUSTOMER_PER_HOUR; n += 1) expect((await pushPortalAsk(askFor('c-1', n))).sent).toBe(true);
+      await expect(pushPortalAsk(askFor('c-1', 9))).resolves.toEqual({ skipped: 'rate_limited' });
+      expect((await pushPortalAsk(askFor('c-2'))).sent).toBe(true);
+      clock.mockReturnValue(Date.parse('2026-11-02T16:00:01Z'));
+      expect((await pushPortalAsk(askFor('c-1', 10))).sent).toBe(true);
+      expect(triggerNotification).toHaveBeenCalledTimes(PAGES_PER_CUSTOMER_PER_HOUR + 2);
+    } finally { clock.mockRestore(); }
+  });
+
+  test('at most PAGES_PER_HOUR pages an hour in all', async () => {
+    for (let n = 1; n <= PAGES_PER_HOUR; n += 1) expect((await pushPortalAsk(askFor(`c-${n}`))).sent).toBe(true);
+    await expect(pushPortalAsk(askFor('c-new'))).resolves.toEqual({ skipped: 'rate_limited' });
+    expect(triggerNotification).toHaveBeenCalledTimes(PAGES_PER_HOUR);
+  });
+
+  test('an ask with no customer is limited by its own key', async () => {
+    const anonymous = { ...ask, customerId: null };
+    for (let n = 1; n <= PAGES_PER_CUSTOMER_PER_HOUR; n += 1) expect((await pushPortalAsk(anonymous)).sent).toBe(true);
+    await expect(pushPortalAsk(anonymous)).resolves.toEqual({ skipped: 'rate_limited' });
+    expect((await pushPortalAsk({ ...anonymous, itemKey: 'request:another' })).sent).toBe(true);
+  });
+
+  test('PAGES_IN_FLIGHT go out at once; a newer ask from a customer whose page waits replaces its words: one page', async () => {
+    const releases = [];
+    for (let k = 0; k < 3; k += 1) {
+      triggerNotification.mockImplementationOnce(() => new Promise((resolve) => releases.push(() => resolve({ push: { sent: 1 } }))));
+    }
+    const first = pushPortalAsk(askFor('c-1'));
+    const second = pushPortalAsk(askFor('c-2'));
+    const older = pushPortalAsk({ ...askFor('c-3', 1), body: 'Pat S. sent a request' });
+    const newer = pushPortalAsk({ ...askFor('c-3', 2), body: 'Pat S. sent another request' });
+    expect(triggerNotification).toHaveBeenCalledTimes(PAGES_IN_FLIGHT);
+    releases[0]();
+    await expect(first).resolves.toEqual(expect.objectContaining({ sent: true }));
+    await flush();
+    expect(triggerNotification).toHaveBeenCalledTimes(PAGES_IN_FLIGHT + 1);
+    expect(triggerNotification.mock.calls[2][1]).toEqual(expect.objectContaining({ itemKey: 'request:c-3-2', body: 'Pat S. sent another request' }));
+    releases[1]();
+    releases[2]();
+    await expect(second).resolves.toEqual(expect.objectContaining({ sent: true }));
+    await expect(older).resolves.toEqual(expect.objectContaining({ sent: true }));
+    await expect(newer).resolves.toEqual(expect.objectContaining({ sent: true, coalesced: true }));
+    expect(triggerNotification).toHaveBeenCalledTimes(3);
   });
 });
 
