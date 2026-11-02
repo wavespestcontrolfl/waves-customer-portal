@@ -1396,10 +1396,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             if (r.keepContent) {
               const kept = { ...base, ...r.payload };
               const rebuilt = sanitizeBuiltNotification(trigger.build(kept), trigger);
-              // The row keeps its buttons with its text: an older emission's own buttons (a late CALL text's Call)
-              // must not land on the newer text the row still shows.
-              const keptButtons = existingMeta && Object.hasOwn(existingMeta, 'buttons') ? { buttons: existingMeta.buttons } : {};
-              return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept, ...keptButtons }, quiet: true };
+              // The row keeps the buttons of the text it still shows, rebuilt from its own payload like its title: an
+              // older emission's own buttons (a late CALL text's Call) must not land on it. Always set, because
+              // notifyAdmin merges this over the older emission's metadata.
+              return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept, buttons: rebuilt.alert?.buttons ?? null }, quiet: true };
             }
             const merged = { ...payload, ...r.payload };
             const rebuilt = sanitizeBuiltNotification(trigger.build(merged), trigger);

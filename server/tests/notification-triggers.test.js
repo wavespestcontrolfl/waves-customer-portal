@@ -508,21 +508,33 @@ describe('triggerNotification bell outcome', () => {
     });
 
     // The buttons follow the text the row shows (alert-call-button.js): a CALL text's emission carries Call into the
-    // row's metadata, and an older late text keeps the row's own buttons with its text.
-    test('Call rides with the CALL text the row shows; an older late text keeps the row\'s own buttons', async () => {
+    // row's metadata, and an older late text leaves the row the buttons of the text it still shows. Checked on the
+    // metadata notifyAdmin writes: the refresh's metadata merged over the emission's (notification-service.js).
+    test('Call rides with the CALL text the row shows; an older late text never moves the buttons', async () => {
       const LEAD = '00000000-0000-4000-8000-0000000000e1';
-      const HANDLED_ONLY = { kind: 'close_note', items: [{ id: 'handled', label: 'Handled' }] };
-      await ring({ threadId: LEAD, twilioSid: 'SM-new', message: 'Call', leadPreference: 'call' }, false);
-      expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.buttons).toEqual({
-        kind: 'call_back',
-        items: [expect.objectContaining({ id: 'call', label: 'Call', args: { customerId: LEAD } }), { id: 'handled', label: 'Handled' }],
-      });
-      await ring({ threadId: LEAD, twilioSid: 'SM-next', message: 'ants again' }, false);
-      expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.buttons).toEqual(HANDLED_ONLY);
-      const olderCall = await ring({ threadId: LEAD, twilioSid: 'SM-old', message: 'Call', leadPreference: 'call' }, true);
-      const held = { fromName: 'Dana Example', threadId: LEAD, twilioSid: 'SM-held', textCount: 1 };
-      expect((await olderCall(row, { payload: held, buttons: HANDLED_ONLY })).metadata.buttons).toEqual(HANDLED_ONLY);
-      expect((await olderCall(row, { payload: held })).metadata).not.toHaveProperty('buttons');
+      const HANDLED = { id: 'handled', label: 'Handled' };
+      const HANDLED_ONLY = { kind: 'close_note', items: [HANDLED] };
+      const CALL_AND_HANDLED = { kind: 'call_back', items: [expect.objectContaining({ id: 'call', label: 'Call', args: { customerId: LEAD } }), HANDLED] };
+      const { mergeRefreshMetadata } = jest.requireActual('../services/notification-service')._private;
+      // What notifyAdmin stores for this emission on the standing row: useMeta = { ...metadata, ...adjusted.metadata }.
+      const written = async (emission, keepOlder, existingMeta) => {
+        const refresh = await ring(emission, keepOlder);
+        const { metadata } = NotificationService.notifyAdmin.mock.calls.at(-1)[3];
+        const adjusted = await refresh(row, existingMeta);
+        return mergeRefreshMetadata(existingMeta, { ...metadata, ...adjusted.metadata }, false);
+      };
+      const plain = { fromName: 'Dana Example', threadId: LEAD, twilioSid: 'SM-held', textCount: 1 };
+      const callText = { ...plain, leadPreference: 'call' };
+
+      // A newer CALL text: Call, then Handled. A newer plain text: Handled only.
+      expect((await written({ threadId: LEAD, twilioSid: 'SM-new', message: 'Call', leadPreference: 'call' }, false, { payload: plain, buttons: HANDLED_ONLY })).buttons).toEqual(CALL_AND_HANDLED);
+      expect((await written({ threadId: LEAD, twilioSid: 'SM-new', message: 'ants again' }, false, { payload: callText, buttons: CALL_AND_HANDLED })).buttons).toEqual(HANDLED_ONLY);
+      // An older late CALL text on a row showing a plain text, with or without stored buttons: no Call.
+      const olderCall = { threadId: LEAD, twilioSid: 'SM-old', message: 'Call', leadPreference: 'call' };
+      expect((await written(olderCall, true, { payload: plain, buttons: HANDLED_ONLY })).buttons).toEqual(HANDLED_ONLY);
+      expect((await written(olderCall, true, { payload: plain })).buttons).toEqual(HANDLED_ONLY);
+      // An older late plain text on a row showing the CALL text: Call stays.
+      expect((await written({ threadId: LEAD, twilioSid: 'SM-old', message: 'hello' }, true, { payload: callText, buttons: CALL_AND_HANDLED })).buttons).toEqual(CALL_AND_HANDLED);
     });
 
     test('an OLDER late text cannot change the title: not add a label, not remove one', async () => {
