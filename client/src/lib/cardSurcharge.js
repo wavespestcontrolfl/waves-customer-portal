@@ -6,6 +6,12 @@
 
 export const DEFAULT_CARD_SURCHARGE_RATE = 0.029;
 
+// Visa-required notice shown next to every displayed credit card surcharge
+// and in the pay-page FAQ (owner-approved text, 2026-11-01). One constant so
+// every screen says the same words.
+export const CARD_SURCHARGE_NOTICE =
+  'Waves adds this fee to credit card payments only. It is not more than what Waves pays to accept credit cards.';
+
 export function shouldSurcharge(funding) {
   return funding === 'credit';
 }

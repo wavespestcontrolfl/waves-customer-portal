@@ -3188,7 +3188,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // (v12) authorization, the variant the accept records.
 // afterVisitSetup (GATE_PAF_SETUP_FEE): the setup fee is billed with the first
 // visit — the copy names it and the checkbox renders the after_visit_card text.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, prepayAfterVisit = false, afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false }) {
+export function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, prepayAfterVisit = false, afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3217,9 +3217,13 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
   // recorded ACH authorization is the one that was on screen.
   // A succeeded replay initializes to the tender already on the intent
   // (Codex #3723 r1 P1) — the customer never re-enters it.
-  const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
-  const bank = methodType === 'us_bank_account';
+  // Bank first (owner 2026-11-01): the Payment Element lists US bank account
+  // first when the intent offers it, so a fresh capture starts on bank — the
+  // heading, body copy and consent follow the first tab at mount, with no
+  // reliance on a Stripe 'change' event.
   const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
+  const [methodType, setMethodType] = useState(intent?.capturedMethodType || (bankOffered ? 'us_bank_account' : 'card'));
+  const bank = methodType === 'us_bank_account';
   // Synchronous mirrors for the save gesture (pre-push Codex P1): a tender
   // switch clears consent inside the change handler itself, and the
   // handler reads the live tick through the ref.
@@ -3245,7 +3249,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
           : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
       });
-      const paymentElement = elements.create('payment');
+      const paymentElement = elements.create('payment', { paymentMethodOrder: ['us_bank_account', 'card'] });
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
       paymentElement.on('change', (event) => {

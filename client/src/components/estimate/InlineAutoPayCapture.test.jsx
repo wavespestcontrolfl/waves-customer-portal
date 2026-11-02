@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import InlineAutoPayCapture from './InlineAutoPayCapture';
-import { AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 afterEach(() => cleanup());
 
@@ -102,7 +102,7 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     return { StripeCtor, handlers };
   }
 
-  it('switches to the ACH authorization when the Payment Element reports us_bank_account', async () => {
+  it('switches to the card authorization when the Payment Element reports card, and back to ACH on a bank pick', async () => {
     const { StripeCtor, handlers } = makeTenderStub();
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
     const onStateChange = vi.fn();
@@ -114,17 +114,22 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
       />,
     );
     await flush();
-    expect(getByText(/charge this card after each completed service/)).toBeInTheDocument();
+    // Bank first: the bank authorization is on screen before any change event.
+    expect(getByText(/debit this bank account after each completed service/)).toBeInTheDocument();
 
     const checkbox = getByRole('checkbox');
     await act(async () => { checkbox.click(); });
     expect(checkbox).toBeChecked();
 
-    await act(async () => { handlers.change({ value: { type: 'us_bank_account' } }); });
-    expect(getByText(/debit this bank account after each completed service/)).toBeInTheDocument();
-    expect(queryByText(/charge this card after each completed service/)).toBeNull();
+    await act(async () => { handlers.change({ value: { type: 'card' } }); });
+    expect(getByText(/charge this card after each completed service/)).toBeInTheDocument();
+    expect(queryByText(/debit this bank account after each completed service/)).toBeNull();
     expect(checkbox).not.toBeChecked();
     // The parent's summary + confirm label follow the tender via the emit.
+    expect(onStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ methodType: 'card', agreed: false }));
+
+    await act(async () => { handlers.change({ value: { type: 'us_bank_account' } }); });
+    expect(getByText(/debit this bank account after each completed service/)).toBeInTheDocument();
     expect(onStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ methodType: 'us_bank_account', agreed: false }));
 
     await act(async () => { getByText('View full terms').click(); });
@@ -464,5 +469,82 @@ describe('InlineAutoPayCapture prepayAfterVisit (annual prepay charged after the
     await act(async () => { getByText('View full terms').click(); });
     expect(getByText(PREPAY_CARD_CONSENT_TEXT)).toBeInTheDocument();
     expect(queryByText(AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT)).toBeNull();
+  });
+});
+
+// Bank first (owner 2026-11-01, option A): the Payment Element is created with
+// US bank account first, and a fresh capture of a bank-capable intent STARTS on
+// bank — copy, consent and the tender reported to the parent — with no change
+// event. A card-only intent and a replay keep their own tender.
+describe('InlineAutoPayCapture bank first', () => {
+  function makeOrderStub() {
+    const created = [];
+    const StripeCtor = vi.fn(() => ({
+      elements: vi.fn(() => ({
+        create: vi.fn((type, opts) => {
+          created.push({ type, opts });
+          return { mount: vi.fn(), on: vi.fn() };
+        }),
+      })),
+      retrieveSetupIntent: vi.fn(),
+      confirmSetup: vi.fn(),
+    }));
+    return { StripeCtor, created };
+  }
+
+  it('bank offered: element order starts with us_bank_account; bank copy, ACH consent and tender at mount', async () => {
+    const { StripeCtor, created } = makeOrderStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const onStateChange = vi.fn();
+    const { getByText, queryByText, container } = render(
+      <InlineAutoPayCapture
+        intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'] }}
+        loadStripeSdk={loadStripeSdk}
+        onStateChange={onStateChange}
+      />,
+    );
+    await flush();
+    expect(created[0].type).toBe('payment');
+    expect(created[0].opts.paymentMethodOrder).toEqual(['us_bank_account', 'card']);
+    expect(getByText(/debit this bank account after each completed service/)).toBeInTheDocument();
+    expect(queryByText(/charge this card after each completed service/)).toBeNull();
+    expect(getByText(/Auto Pay — nothing charged today/)).toBeInTheDocument();
+    expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'us_bank_account' }));
+    await act(async () => { getByText('View full terms').click(); });
+    expect(container.textContent).toContain(ACH_CONSENT_TEXT);
+    expect(container.textContent).not.toContain(CARD_CONSENT_TEXT);
+  });
+
+  it('bank NOT offered: card copy, card consent and card tender at mount', async () => {
+    const { StripeCtor } = makeOrderStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const onStateChange = vi.fn();
+    const { getByText, queryByText, container } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} onStateChange={onStateChange} />,
+    );
+    await flush();
+    expect(getByText(/I authorize Waves to charge this card after each completed service/)).toBeInTheDocument();
+    expect(queryByText(/debit this bank account/)).toBeNull();
+    expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'card' }));
+    await act(async () => { getByText('View full terms').click(); });
+    expect(container.textContent).toContain(CARD_CONSENT_TEXT);
+  });
+
+  it('a replay keeps its captured tender even though bank is first', async () => {
+    const { StripeCtor } = makeOrderStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const onStateChange = vi.fn();
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture
+        intent={{ ...INTENT, setupIntentId: 'seti_1', paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'card' }}
+        loadStripeSdk={loadStripeSdk}
+        onStateChange={onStateChange}
+        onReplace={vi.fn()}
+      />,
+    );
+    await flush();
+    expect(getByText('Your card is already saved for this plan.')).toBeInTheDocument();
+    expect(queryByText(/bank account is already saved/)).toBeNull();
+    expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ methodType: 'card' }));
   });
 });

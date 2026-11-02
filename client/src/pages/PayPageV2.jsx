@@ -98,7 +98,7 @@ import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
-import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
+import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE, CARD_SURCHARGE_NOTICE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
 import { getStripe } from '../lib/stripeLoader';
@@ -748,7 +748,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
           Credit cards entered directly carry a surcharge of up to {pct}% — the exact surcharge and
           total are shown before you confirm. Apple Pay, Google Pay, and Link are currently charged at
           the quoted amount with no surcharge, and debit cards, prepaid cards, and bank transfers have
-          no added card surcharge{zelle ? ', and Zelle has no fees' : ''}.
+          no added card surcharge{zelle ? ', and Zelle has no fees' : ''}. {CARD_SURCHARGE_NOTICE}
         </PayFaqItem>
         <PayFaqItem question="How long does a bank (ACH) payment take?">
           Bank transfers take a few business days to clear — there’s nothing more you need to do
@@ -1469,8 +1469,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const disabled = !ready || processing || syncingAmount || amountSyncError;
   const methodControlsDisabled = !ready || processing || syncingAmount;
   const methodOptions = [
-    { value: 'card', title: 'Card or wallet', detail: `Up to ${pct}% credit card surcharge`, icon: 'card' },
+    // Bank first (owner 2026-11-01). The initial selection stays card: the
+    // invoice PaymentIntent is minted card-locked.
     { value: 'us_bank_account', title: 'Bank account', detail: 'No added fee', icon: 'building' },
+    { value: 'card', title: 'Card or wallet', detail: `Up to ${pct}% credit card surcharge`, icon: 'card' },
   ];
 
   if (loadFailed) {
@@ -1656,6 +1658,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
               Credit card surcharge ({pct}%)
             </span>
             <span style={{ color: DOC.ink }}>+ {fmtCurrency(displayedSurcharge)}</span>
+          </div>
+        )}
+        {isCardFamily && displayedSurcharge > 0 && (
+          <div data-testid="card-surcharge-notice" style={{ color: DOC.muted, fontFamily: DOC_FONT, fontSize: FS.body, lineHeight: LH.snug, marginBottom: 6 }}>
+            {CARD_SURCHARGE_NOTICE}
           </div>
         )}
         {isCardFamily && quoteData && quoteData.funding !== 'credit' && (
