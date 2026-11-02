@@ -175,6 +175,21 @@ describe('commands', () => {
     expect(sendSetText).toHaveBeenCalledTimes(1);
   });
 
+  test('only a plain yes sends: a negated or qualified reply sends nothing, an unclear one asks again', async () => {
+    prepareSetText.mockResolvedValue({ ok: true, target: { customer: CUSTOMER }, body: 'Hi Sam, your back gate is locked.' });
+    sendSetText.mockResolvedValue({ status: 200, json: { success: true } });
+    const { say } = await session();
+    for (const reply of ["Okay, don't send it.", 'Yes, but wait.', 'yes do not send', 'send it later, not now', 'no, send it']) {
+      await say('gate locked');
+      expect(await say(reply)).toBe(SAY.not_sent);
+    }
+    await say('gate locked');
+    expect(await say('yes I guess')).toBe(SAY.confirm_again);
+    expect(sendSetText).not.toHaveBeenCalled();
+    expect(await say('Yes.')).toBe(SAY.sent);
+    expect(sendSetText).toHaveBeenCalledTimes(1);
+  });
+
   test('"gate code" and "garage code" ask for codes, never a set text', async () => {
     listForVisit.mockResolvedValue({ ok: true, codes: [] });
     const { say } = await session();

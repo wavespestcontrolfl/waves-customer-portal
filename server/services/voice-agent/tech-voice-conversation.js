@@ -81,8 +81,18 @@ const COMMANDS = [
   { re: /\b(help|commands|options|what can (i|you) (say|do))\b/i, run: 'help' },
   { re: /\b(good ?bye|bye|hang up|that'?s all|i'?m done|end (the )?call)\b/i, run: 'bye' },
 ];
-const YES_RE = /^\s*(yes|yeah|yep|yup|send( it)?|correct|do it|go ahead|ok(ay)?)\b/i;
-const NO_RE = /^\s*(no|nope|cancel|don'?t|stop|wait)\b/i;
+// A text goes only on a plain yes: the whole reply, case and punctuation
+// aside, is one of these phrases. A no, a "don't", a "wait" or a "but"
+// anywhere means not sent ("okay, don't send it" and "yes, but wait" send
+// nothing). Anything else asks again.
+const YES_PHRASES = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'yes please', 'send', 'send it', 'yes send', 'yes send it', 'yes send the text',
+  'send the text', 'correct', 'go ahead', 'do it', 'ok', 'okay', 'ok send it', 'okay send it',
+]);
+const NO_RE = /\b(no|nope|not|cancel|don'?t|do not|stop|wait|hold|but|never ?mind)\b/;
+function plainWords(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
 
 const CODE_LABELS = {
   neighborhood_gate: 'Community gate',
@@ -306,20 +316,21 @@ class TechVoiceConversation {
   }
 
   async _confirm(text) {
-    if (YES_RE.test(text)) {
+    const said = plainWords(text);
+    if (NO_RE.test(said)) {
+      this._pending = null;
+      this.state = 'READY';
+      return this.say(SAY.not_sent);
+    }
+    if (YES_PHRASES.has(said)) {
       const pending = this._pending;
       this._pending = null;
       this.state = 'READY';
       const out = await sendSetText({ actor: this.actor, scheduledServiceId: pending.visitId, kind: pending.kind });
       return this.say(out.status === 200 ? SAY.sent : refusalSpeech(out));
     }
-    if (NO_RE.test(text)) {
-      this._pending = null;
-      this.state = 'READY';
-      return this.say(SAY.not_sent);
-    }
     return this.say(SAY.confirm_again);
   }
 }
 
-module.exports = { TechVoiceConversation, _test: { COMMANDS, YES_RE, NO_RE, spellCode, refusalSpeech, SAY, PIN_TIMEOUT_MS } };
+module.exports = { TechVoiceConversation, _test: { COMMANDS, YES_PHRASES, NO_RE, spellCode, refusalSpeech, SAY, PIN_TIMEOUT_MS } };
