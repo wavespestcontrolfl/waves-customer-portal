@@ -4269,17 +4269,17 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         )}
       </div>
       <div id={settingsId} hidden={!showSettings} style={{ marginTop: 12, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Allow app notifications</div>
-          <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
-        </div>
-        {(prefs.pushEnabled === false || (!connected && registered)) && (
-          <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
-            {prefs.pushEnabled === false ? 'Your notification history is still available.'
-              : 'Open the app to refresh its connection.'}
+        {prefs.pushEnabled !== false && !connected && registered && (
+          <p style={{ margin: '0 0 12px', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
+            Open the app to refresh its connection.
           </p>
         )}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {prefs.pushEnabled === false && (
+            <button type="button" data-glass-accent="" disabled={saving} onClick={() => onSave({ pushEnabled: true })} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+              Turn on app notifications
+            </button>
+          )}
           {isNativeApp() && app.deviceState !== 'granted' && (
             <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
               {app.busy ? 'Connecting…' : 'Connect this device'}
