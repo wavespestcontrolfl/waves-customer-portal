@@ -235,7 +235,10 @@ export function useGlassTheme(active) {
       ents.forEach((en) => {
         if (!en.isIntersecting) return;
         statIO.unobserve(en.target);
-        if (reduced) return;
+        // Read Reduce Motion when the stat scrolls in, not once at mount: a
+        // setting turned on while the estimate is open must stop the count-up
+        // too (motion audit 2026-11-02, M07).
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
         const node = Array.from(en.target.childNodes).find((n) => n.nodeType === 3 && n.textContent.trim());
         const m = node && node.textContent.trim().match(/^([\d,]+) sq ft$/);
         if (!m) return;

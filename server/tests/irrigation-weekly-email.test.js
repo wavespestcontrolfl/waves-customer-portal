@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
 });
 // The week-plan gate stays OFF here: these suites pin the legacy sweep
 // (plan mode has its own suites).
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false), isEnabled: jest.fn((gate) => gate !== 'irrigationWeekPlan') }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false), isEnabled: jest.fn((gate) => gate !== 'irrigationWeekPlan'), autoDispatchMowingDaysMode: jest.fn(() => 'off') }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-07-06T11:00:00Z' } })),
   activeSuppressionsFor: jest.fn(async () => []),
@@ -29,7 +29,7 @@ jest.mock('../services/service-report/application-conditions', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, autoDispatchMowingDaysMode } = require('../config/feature-gates');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { fetchServiceWeekWeather } = require('../services/service-report/application-conditions');
 const {
@@ -40,6 +40,7 @@ const {
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
   TEMPLATE_ON_TRACK,
+  MOWING_ASK,
   _private,
 } = require('../services/irrigation-weekly-email');
 
@@ -381,6 +382,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     for (const m of [
       'join', 'leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
       'orWhereRaw', 'orWhereNotNull', 'orWhereExists', 'whereExists', 'select', 'orderBy', 'from', 'first',
+      'whereNot', 'count', 'max',
     ]) b[m] = jest.fn(() => b);
     b.insert = jest.fn((row) => { inserts.push(row); return Promise.resolve([1]); });
     // `.first()` on a table with no configured rows resolves null, as knex
@@ -434,6 +436,29 @@ describe('runWeeklyIrrigationEmailSweep', () => {
 
     // Audit trail row recorded for the send.
     expect(inserts.some((row) => row.interaction_type === 'email_outbound')).toBe(true);
+  });
+
+  test('mowing-days ask: the sweep sends it only with the switch at true and nothing saved under Mowing', async () => {
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan');
+    const sentAsk = () => EmailTemplateLibrary.sendTemplate.mock.calls.at(-1)[0].payload;
+    try {
+      // 'true', nothing saved, no ask sent before (history reads 0), a recurring lawn customer: the line rides.
+      autoDispatchMowingDaysMode.mockReturnValue('true');
+      await runWeeklyIrrigationEmailSweep({ now: NOW });
+      expect(sentAsk().mowing_ask).toBe(MOWING_ASK);
+      expect(sentAsk().mowing_ask_url).toMatch(/\/\?tab=property$/);
+      // Days saved under Mowing: no line.
+      db.mockImplementation((table) => makeBuilder(String(table).startsWith('customers') ? { rows: [{ ...CANDIDATE, mowing_days: ['Sat'] }] } : {}));
+      await runWeeklyIrrigationEmailSweep({ now: NOW });
+      expect(sentAsk()).toMatchObject({ mowing_ask: '', mowing_ask_url: '' });
+      // 'shadow' (or off) never shows it.
+      db.mockImplementation((table) => makeBuilder(String(table).startsWith('customers') ? { rows: [CANDIDATE] } : {}));
+      autoDispatchMowingDaysMode.mockReturnValue('shadow');
+      await runWeeklyIrrigationEmailSweep({ now: NOW });
+      expect(sentAsk()).toMatchObject({ mowing_ask: '', mowing_ask_url: '' });
+    } finally {
+      autoDispatchMowingDaysMode.mockReturnValue('off');
+    }
   });
 
   test('a momentary EMAIL_SEND_IN_PROGRESS collision is retried (bounded) before counting as failed (codex gh-r21)', async () => {

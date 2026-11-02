@@ -7,7 +7,6 @@
 // real test-env behavior (all gates dark); the extension suite flips ONLY
 // waveguardExtendExisting.
 let mockExtendExistingGate = false;
-let mockLawnRoundsGate = false;
 let mockAutoTierGate = false;
 jest.mock('../config/feature-gates', () => ({
   // The real adapter and engine (tick-list margins) read the named gate
@@ -15,7 +14,6 @@ jest.mock('../config/feature-gates', () => ({
   ...jest.requireActual('../config/feature-gates'),
   isEnabled: (gate) => {
     if (gate === 'waveguardExtendExisting') return mockExtendExistingGate;
-    if (gate === 'lawn9xRounds') return mockLawnRoundsGate;
     if (gate === 'autoWaveguardTierEnroll') return mockAutoTierGate;
     return false;
   },
@@ -2939,7 +2937,6 @@ describe('existing-service tier extension snapshot', () => {
 describe('staff-picked tier extension (option B)', () => {
   afterEach(() => {
     mockExtendExistingGate = false;
-    mockLawnRoundsGate = false;
     mockTranslate.mockReset();
     mockGenerate.mockReset();
   });
@@ -3148,12 +3145,12 @@ describe('staff-picked tier extension (option B)', () => {
     }
   });
 
-  test('the lawn 42-day spread follows the stored series, never the 9-rounds gate', async () => {
+  test('the lawn 42-day spread follows the stored series pattern', async () => {
     mockExtendExistingGate = true;
     // A 42-day series makes ~8.7 visits a year, so the line's $114 of yearly
     // costs spread over fewer visits than the 9 it prices: $70.00 + $114 x
     // (42/365 - 1/9) = $70.45 against $75.56 = 6.8%. Nine rounds make 9
-    // visits: $70.00 = 7.4%. The gate decides only how NEW series are written.
+    // visits: $70.00 = 7.4%. lawnRoundsSeriesPattern decides only how NEW series are written.
     const root = { id: 'l0', service_type: 'lawn_care', scheduled_date: '2020-01-06', estimated_price: 80, recurring_pattern: 'every_6_weeks' };
     const cases = [
       ['every_6_weeks', { recurring_pattern: 'every_6_weeks' }, [], 6.8],
@@ -3161,13 +3158,9 @@ describe('staff-picked tier extension (option B)', () => {
       ['a child that carries no pattern, under an every_6_weeks root', { recurring_parent_id: 'l0' }, [root], 6.8],
       ['lawn_rounds_9', { recurring_pattern: 'lawn_rounds_9' }, [], 7.4],
     ];
-    for (const rounds of [false, true]) {
-      mockLawnRoundsGate = rounds;
-      for (const [series, lawnSeries, extraRows, marginPct] of cases) {
-        const offer = await todayEngineOffer(lawnSeries, extraRows);
-        expect([series, rounds, offer.services.find((svc) => svc.key === 'lawn_care').marginPct])
-          .toEqual([series, rounds, marginPct]);
-      }
+    for (const [series, lawnSeries, extraRows, marginPct] of cases) {
+      const offer = await todayEngineOffer(lawnSeries, extraRows);
+      expect([series, offer.services.find((svc) => svc.key === 'lawn_care').marginPct]).toEqual([series, marginPct]);
     }
   });
 

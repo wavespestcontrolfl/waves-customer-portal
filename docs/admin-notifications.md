@@ -158,9 +158,28 @@ Kinds today:
   follows `GATE_ALERT_CLOSE_BUTTONS`, so each button is served while its own gate is on
   (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
   emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
+- `text_note` (`server/services/sms-text-note-buttons.js`, `GATE_ALERT_CLOSE_BUTTONS`; owner 2026-11-02
+  "C"): **Save to profile** and **One visit only** on the SMS reader's review bell ("Comms — check
+  <name>'s text note", `sms-property-instructions:<sms>`). Both are stored at raise; `visibleItems`
+  serves Save only while it would write something. Save re-reads the held-back facts of the bell's
+  source text (`bellExceptions`, the set the bell rang for) and writes each through the SMS lane's
+  shared compare-and-set writer (`data-hygiene/property-preferences.js`) under the
+  `property-preferences` lock: a long-text note (special instructions, access, pet, parking and the two
+  irrigation notes) gets the text as a new `[text <date>]` line, and any other field (the four codes,
+  the controller location, the contact preference) is filled only while it is empty, so a value on
+  file is never overwritten. The profile row is the customer's, so Save writes only for a customer
+  with exactly one active property, read at the tap, and only facts that name no property or that one;
+  a fact the reader could not pin to one value or topic, or a "no" / "not sure" pet or irrigation report
+  it held for a person to read, is left for the profile too. Save follows the reader's own rules: it is off
+  while `GATE_SMS_OPERATIONAL_ACTIONS` is off or for a text from before `GATE_SMS_OPERATIONAL_ACTIONS_SINCE`,
+  it refuses while a later text's suggestion for the same field waits in Data hygiene, and it retires only
+  suggestions from this text or older ones. Each write is audited as
+  `sms.property_preference.updated` (field names only), and the bell closes on the version the tap
+  claimed; a bell that changed rolls the write back. One visit only is the bell's own Done, fenced the
+  same way. Neither sends anything to a customer.
 - `negative_keyword` (`server/services/ads/negative-keyword-buttons.js`, `GATE_ADS_NEGATIVES`; owner plan A,
   2026-11-02): **Add** and **Decline** on one ads-advisor word's row (`ads-negative:<id>`, area Leads, category
-  `system`, link `/admin/ads?tab=advisor&negative=<id>`). Both are stored at raise; `visibleItems` serves them only
+  `system`, link `/admin/ppc?tab=advisor&negative=<id>`). Both are stored at raise; `visibleItems` serves them only
   while the word is still pending on the Ads page. A tap is the Ads page's own decide step
   (`decideSuggestion` in `server/services/ads/negative-keyword-actions.js`, the route
   `POST /api/admin/ads/negatives/:id/decide`) with its checks again under the row lock: the campaign is still a linked

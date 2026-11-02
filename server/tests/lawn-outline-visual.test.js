@@ -3,7 +3,7 @@
 // inputs: no database.
 //
 // Pins: the layout's own content stamp, and none of it on the plain v13 outline; the approved section order; a rounds
-// estimate (its lawn line seeds as lawn_rounds_9, which needs GATE_LAWN_9X_ROUNDS) draws nine
+// estimate (its lawn line seeds as lawn_rounds_9) draws nine
 // year-bar blocks whose main steps are DERIVED from the protocol, the round the visit falls in, the Manatee summer band,
 // and no LESCO 44-0-0 in the products; a monthly estimate draws twelve blocks and today's month list; an estimate whose
 // plan is not known draws the month view and names no plan; every new section keeps text bullets; every word passes the
@@ -13,9 +13,8 @@ const outline = require('../services/lawn-service-outline');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
-const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_9X_ROUNDS', 'GATE_LAWN_BERMUDA_REMOVAL'];
+const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_BERMUDA_REMOVAL'];
 const DETAIL = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true', GATE_LAWN_OUTLINE_DETAIL: 'true' };
-const ROUNDS_ON = { ...DETAIL, GATE_LAWN_9X_ROUNDS: 'true' };
 const OCT_26 = new Date('2026-10-26T12:00:00Z');
 
 async function withGates(values, fn) {
@@ -117,11 +116,11 @@ const DERIVED_MAIN = [['barrier', 'micros'], ['feeding', 'barrier'], ['feeding']
 
 describe('the stamp', () => {
   test('the detailed outline stamps the layout\'s version; the plain v13 outline draws no year bar or plan line', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-2');
       expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-2');
     });
-    await withGates({ GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true', GATE_LAWN_9X_ROUNDS: 'true' }, async () => {
+    await withGates({ GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true' }, async () => {
       const plain = await build({ line: ROUNDS_LINE });
       expect(section(plain, 'year_bar')).toBeUndefined();
       expect(plain.content.property.planLabel).toBeUndefined();
@@ -132,7 +131,7 @@ describe('the stamp', () => {
 
 describe('a 9-visit rounds estimate', () => {
   test('the approved sections, in order, each with text bullets', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const result = await build({ line: ROUNDS_LINE });
       expect(keys(result)).toEqual(NEW_KEYS);
       for (const key of NEW_SECTIONS) expect(section(result, key).bullets.length).toBeGreaterThan(0);
@@ -145,7 +144,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('nine blocks, main steps derived from the protocol, the round dates the page reads', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const bar = section(await build({ line: ROUNDS_LINE }), 'year_bar').visual;
       expect(bar.type).toBe('yearBar');
       expect(bar.anchorPrefix).toBe('round');
@@ -170,7 +169,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('a leap year makes round 2 one day longer, and the program year follows `now`', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const jan = section(await build({ line: ROUNDS_LINE, now: new Date('2027-01-05T15:00:00Z') }), 'year_bar').visual;
       expect(jan.blocks[0].window).toBe('Dec 25 – Feb 2');
       const leap = section(await build({ line: ROUNDS_LINE, now: new Date('2028-03-01T15:00:00Z') }), 'year_bar').visual;
@@ -181,7 +180,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('the Manatee summer band and caption', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const bar = section(await build({ line: ROUNDS_LINE }), 'year_bar').visual;
       expect(bar.limit).toEqual({ offset: 158, days: 122, label: 'No nitrogen or phosphorus (local summer rule)' });
       expect(bar.caption).toBe('Your rule area: Manatee County, FL. No nitrogen or phosphorus from June 1 to September 30; micronutrients keep the color instead.');
@@ -189,7 +188,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('round cards: the words, derived steps, no frozen open card, the summer-rules post by rule area', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const result = await build({ line: ROUNDS_LINE });
       const { rounds, labels } = section(result, 'rounds').visual;
       expect(section(result, 'rounds').visual.type).toBe('rounds');
@@ -208,7 +207,7 @@ describe('a 9-visit rounds estimate', () => {
       for (const card of rounds) expect(card.links.every((l) => l.label && l.url && l.source)).toBe(true);
       expect(rounds[4].links.map((l) => l.url)).toEqual(['https://www.wavespestcontrol.com/lawn-care/fertilizer-blackout-manatee-county/']);
     });
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const sarasota = section(await build({ line: ROUNDS_LINE, jurisdictionId: 'sarasota_county_fl' }), 'rounds').visual.rounds[4].links;
       expect(sarasota.map((l) => l.url)).toEqual(['https://www.wavespestcontrol.com/lawn-care/fertilizer-blackout-sarasota-county/']);
       const charlotte = section(await build({ line: ROUNDS_LINE, jurisdictionId: 'charlotte_county_fl' }), 'rounds').visual.rounds[4].links;
@@ -217,7 +216,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('the plan line and the intro', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const { content } = await build({ line: ROUNDS_LINE });
       expect(content.property.planLabel).toBe('9 visits a year, one per round');
       expect(content.intro).toContain('Your plan is nine visits a year, one in each round.');
@@ -228,7 +227,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('products: no LESCO 44-0-0 on a rounds plan, and the label sentence', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const products = section(await build({ line: ROUNDS_LINE }), 'products');
       expect(JSON.stringify(products)).not.toContain('44-0-0');
       expect(products.visual.items.length).toBeGreaterThan(0);
@@ -237,7 +236,7 @@ describe('a 9-visit rounds estimate', () => {
   });
 
   test('timeline, fact cards, problems and the questions', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const result = await build({ line: ROUNDS_LINE });
       expect(section(result, 'after_visit_timeline').visual.items).toHaveLength(4);
       const afterVisit = section(result, 'after_visit').visual.items;
@@ -270,20 +269,11 @@ describe('a 9-visit rounds estimate', () => {
     });
   });
 
-  test('without GATE_LAWN_9X_ROUNDS the same estimate seeds as 42-day visits: the month view, no plan line', async () => {
-    await withGates(DETAIL, async () => {
-      const result = await build({ line: ROUNDS_LINE });
-      expect(section(result, 'year_bar').visual.blocks).toHaveLength(12);
-      expect(section(result, 'rounds')).toBeUndefined();
-      expect(result.content.property.planLabel).toBeUndefined();
-      expectNoCadenceWords(result);
-    });
-  });
 });
 
 describe('a 12-visit estimate', () => {
   test('twelve blocks, today\'s month list, a plan line, the month wording', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       const result = await build({ line: MONTHLY_LINE });
       expect(keys(result)).toEqual(['year_bar', 'program_year', ...NEW_KEYS.slice(2)]);
       expect(section(result, 'year_bar').title).toBe('Your Year In Twelve Visits');
@@ -315,7 +305,7 @@ describe('a 12-visit estimate', () => {
   });
 });
 
-// A plan that is not known (a 6-visit plan, a 9-visit plan while GATE_LAWN_9X_ROUNDS is off) must not read as one visit a month:
+// A plan that is not known (a 6-visit plan, several lawn lines) must not read as one visit a month:
 // the bar names no visit count, and the two cadence answers drop "Once a month." and "In May".
 function expectNoCadenceWords(result) {
   const bar = section(result, 'year_bar');
@@ -329,7 +319,7 @@ function expectNoCadenceWords(result) {
 
 describe('an estimate whose plan is not known', () => {
   test('the month view, no plan line and no visit count', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       for (const line of [undefined, lawnLine(6, 'bimonthly'), { service: 'lawn_care', name: 'Lawn Care' }]) {
         const result = await build({ line });
         expect(section(result, 'year_bar').visual.blocks).toHaveLength(12);
@@ -349,7 +339,7 @@ describe('a failed plan read', () => {
     const read = jest.spyOn(converter, 'recurringServicesFromEstimateData').mockImplementation(() => { throw new Error('unreadable'); });
     const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
     try {
-      await withGates(ROUNDS_ON, async () => {
+      await withGates(DETAIL, async () => {
         const result = await build({ line: ROUNDS_LINE });
         expect(section(result, 'year_bar').visual.blocks).toHaveLength(12);
         expect(result.content.property.planLabel).toBeUndefined();
@@ -372,7 +362,7 @@ describe('every word passes the customer-copy checks', () => {
   };
 
   test('rounds, monthly and unknown-plan outlines, every rule area', async () => {
-    await withGates(ROUNDS_ON, async () => {
+    await withGates(DETAIL, async () => {
       for (const jurisdictionId of Object.keys(RULES)) {
         for (const line of [ROUNDS_LINE, MONTHLY_LINE, lawnLine(6, 'bimonthly')]) {
           const result = await build({ line, jurisdictionId });
