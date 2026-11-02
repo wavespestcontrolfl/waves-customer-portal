@@ -34,7 +34,8 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
   const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
   const SmartRebooker = require('../services/rebooker');
   const { etDateString, addETDays } = require('../utils/datetime-et');
-  const { BODY } = require('../models/migrations/20261101164500_rain_out_customer_pick')._test;
+  // The live body since 2026-11-02 (owner: 24 hours to pick, a shorter text).
+  const { _AFTER: BODY } = require('../models/migrations/20261102170000_rain_out_customer_pick_concise');
   const RainOut = require('../services/rain-out');
   let database;
   let trx;
@@ -122,9 +123,10 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     await insertVisit();
     const before = await visitRow();
     const due = etDateString(addETDays(new Date(), 8));
-    const { pickBy } = RainOut._test.pickDates(new Date());
+    const startedAt = Date.now();
 
     const result = await handOff();
+    const endedAt = Date.now();
 
     expect(result).toEqual(expect.objectContaining({ ok: true, dueDate: due, textSent: true, needsAttention: [] }));
     const after = await visitRow();
@@ -138,7 +140,11 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
       technician_id: null, customer_id: customerId, service_type: 'Quarterly Pest Control Service', estimated_duration_minutes: 45,
       track_state: 'scheduled',
     }));
-    expect(new Date(after.customer_pick_by).toISOString()).toBe(pickBy.toISOString());
+    // 24 hours after the hand-off, rounded up to the quarter hour.
+    const pickByMs = new Date(after.customer_pick_by).getTime();
+    expect(pickByMs % (15 * 60 * 1000)).toBe(0);
+    expect(pickByMs).toBeGreaterThanOrEqual(startedAt + 24 * 3600 * 1000);
+    expect(pickByMs).toBeLessThan(endedAt + 24 * 3600 * 1000 + 15 * 60 * 1000);
     expect(dateOnly(after.date_exception_cadence_date)).toBe(today);
     expect(after.track_token_expires_at).not.toBeNull();
     expect(new Date(after.updated_at).getTime()).toBeGreaterThan(new Date(before.updated_at).getTime());
@@ -160,7 +166,7 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     expect(await trx('job_status_history').where({ job_id: serviceId })).toEqual([]);
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Maria - rain is moving through your area this (morning|afternoon|evening), so we need to move your Quarterly Pest Control Service\. Pick a new time here: portal\.wavespestcontrol\.com\/l\/k3j9m2x7qp\n\nPlease pick by /);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Maria - rain is moving through your area this (morning|afternoon|evening), so we need to move your Quarterly Pest Control Service\.\n\nPick a new time by \w{3} \d{1,2}(:\d{2})? [AP]M: portal\.wavespestcontrol\.com\/l\/k3j9m2x7qp\n\nIf you don't, we'll book one and text you\.$/);
   });
 
   test('a "customer not home" hand-off counts once toward the 2-in-90 missed-visit outreach, like a no-show Quick Move', async () => {
