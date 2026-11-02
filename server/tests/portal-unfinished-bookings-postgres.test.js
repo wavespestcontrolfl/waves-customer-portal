@@ -207,6 +207,25 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(await bellsFor(burstKey(now))).toHaveLength(1);
   });
 
+  test('a quiet row past the room closes by the same rules as a rung one', async () => {
+    process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
+    // The newest drop-offs take the day's room (the page reads newest first); the two older ones are written quietly.
+    for (let k = 0; k < mod.MAX_BELLS_PER_DAY[mod.UNVERIFIED]; k += 1) await intent(await customer(), { last_activity_at: ago(80 + k) });
+    const texted = await customer();
+    const textedIntent = await intent(texted, { last_activity_at: ago(150) });
+    const finishedIntent = await intent(await customer(), { last_activity_at: ago(160) });
+    await run();
+    expect(meta((await bellsFor(intentKey(textedIntent)))[0]).feed).toBe('activity');
+    expect(meta((await bellsFor(intentKey(finishedIntent)))[0]).feed).toBe('activity');
+    await staffText(texted, ago(20));
+    await db('booking_intents').where({ id: finishedIntent.id }).update({ converted_at: ago(10) });
+    await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
+    expect((await bellsFor(intentKey(textedIntent)))[0].done_at).not.toBeNull();
+    const [finishedAfter] = await bellsFor(intentKey(finishedIntent));
+    expect(finishedAfter.done_at).not.toBeNull();
+    expect(finishedAfter.resolution).toBe('Booking was finished');
+  });
+
   test('an office estimate still rings after the day\'s unverified room is full; its bell says so', async () => {
     for (let k = 0; k <= mod.MAX_BELLS_PER_DAY[mod.UNVERIFIED]; k += 1) await intent(await customer(), { last_activity_at: ago(90 + k) });
     expect((await run()).held).toBeGreaterThanOrEqual(1);

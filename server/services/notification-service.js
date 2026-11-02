@@ -86,8 +86,9 @@ function scopeAdminFeedToRole(query, role, technicianId = null) {
 // NOT folded into scopeAdminFeedToRole above: that helper also scopes
 // markReadAdmin (mark-one-read by id), which the Activity feed's own Review
 // link relies on to clear a row the feed itself can see.
+const NOT_ACTIVITY_ONLY_SQL = "COALESCE(metadata->>'feed', '') <> 'activity'";
 function excludeActivityOnlyFromBell(query) {
-  return query.whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'");
+  return query.whereRaw(NOT_ACTIVITY_ONLY_SQL);
 }
 
 // Content version of an admin row: an md5 over everything the bell shows
@@ -1267,6 +1268,7 @@ module.exports._private = {
   applyAdminBrevityGuard,
   normalizeAdminNotificationText,
   excludeActivityOnlyFromBell,
+  NOT_ACTIVITY_ONLY_SQL,
   NOTIFICATION_VERSION_SQL,
   doneColumns,
   openToCloser,

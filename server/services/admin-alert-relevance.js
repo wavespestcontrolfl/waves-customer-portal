@@ -1194,8 +1194,12 @@ function classify(row, { anyMode = false } = {}) {
 // cut-off would hide a re-rung one for good). Keyset-paged on id: retiring a
 // row removes it from the set, so an offset would skip rows.
 function candidateQuery(cursor) {
-  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
-  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
+  const { NOT_ACTIVITY_ONLY_SQL } = require('./notification-service')._private;
+  // Activity-only rows are not bell items, so the sweep skips them, with one exception: an unfinished-booking row
+  // written quietly past the day's room (portal-unfinished-bookings.js) is still a Portal item and closes by the same
+  // rules as a rung one. It stays out of the bell: the bell list keeps excluding activity rows.
+  return db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw(`(${NOT_ACTIVITY_ONLY_SQL} OR left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?)`, [UNFINISHED_BOOKING_PREFIX.length, UNFINISHED_BOOKING_PREFIX])
     // Open rows, and rows a PERSON marked done (openToCloser's rule): when the
     // subject moves on, the sweep takes the close over so their Reopen can't
     // bring back an obsolete alert. A row any system component closed is left.

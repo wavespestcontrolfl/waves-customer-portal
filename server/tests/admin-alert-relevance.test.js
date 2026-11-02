@@ -742,6 +742,8 @@ describe('runAdminAlertRelevanceSweep', () => {
     // Read is not done: a row someone opened is still open work.
     expect(q.calls).not.toContainEqual(['whereNull', 'read_at']);
     expect(flat).toContain("metadata->>'feed'");
+    // The one activity-only exception: an unfinished-booking row written quietly past the day's room.
+    expect(flat).toContain('portal-unfinished-');
     // created_at is read (a new lead is judged by what came after it), never filtered on.
     expect(JSON.stringify(q.calls.filter(([m]) => m !== 'select'))).not.toContain('created_at');
   });
