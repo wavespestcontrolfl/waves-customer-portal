@@ -99,9 +99,6 @@ function blocksLive(dateStr, rule) {
   return !!rule && rule.mode === 'true' && blocksDay(dateStr, rule);
 }
 
-// Candidates (slot-shaped, `date`) the rule leaves open.
-const withoutBlockedDays = (candidates, rule) => candidates.filter((c) => !blocksDay(c.date, rule));
-
 /**
  * At apply (apply.js makeMoveGuard and makeMemberGuard), inside the move
  * transaction: the destination against the customer's rule as saved NOW, the
@@ -123,9 +120,9 @@ async function assertDestinationClear(trx, service, dateStr, refuse, serviceType
 // Shadow only: the mowing_day conflict mode 'true' would read for a visit on
 // `dateStr` (current-conflict.js): conflict moves on, no other conflict
 // (`existing`), an arrival window, and the date blocked. Null otherwise. Both
-// shadow paths run under it, as live does: the legacy model's pool
-// (candidate-slots.js mowingShadowCandidates, whose grouped-window checks and
-// own-date retention read it, Codex #7472 r3 P2) and the ranking (shadowBest).
+// shadow paths run under it, as live does: the pool (candidate-slots.js
+// mowingShadowCandidates, whose grouped-window checks and own-date retention
+// read it, Codex #7472 r3 P2) and the ranking (shadowBest).
 function simulatedConflict(rule, { service, dateStr, conflictMoves, existing }) {
   if (existing || conflictMoves !== true || !service.window_start || !blocksDay(dateStr, rule)) return null;
   return { kind: 'mowing_day', date: dateStr, mowing_days: rule.days };
@@ -134,23 +131,19 @@ function simulatedConflict(rule, { service, dateStr, conflictMoves, existing }) 
 const startOf = (p) => (p ? { date: p.date, start: p.start_time || null } : null);
 const sameSlot = (a, b) => !!a && !!b && a.date === b.date && a.start === b.start;
 
-// The slot mode 'true' would choose: the same candidates without the blocked
-// days, and a placed visit on a blocked day read in conflict (as
+// The slot mode 'true' would choose: its own candidates (candidate-slots.js
+// mowingShadowCandidates, the live pipeline run with the rule live), scored
+// with `scoreOf`, and a placed visit on a blocked day read in conflict (as
 // current-conflict.js reads it: conflict moves on, no other conflict first).
-// `shadowCandidates` is that pool when the legacy model capped the live list
-// (candidate-slots.js mowingShadowCandidates, filtered BEFORE the cap), scored
-// with `scoreOf`; without it the scored live list is filtered (the shared
-// model caps only after scoring). The pure move rule only: no road check, no write.
+// The pure move rule only: no road check, no write.
 function shadowBest(rule, {
-  service, current, scored, shadowCandidates, scoreOf, currentScore, threshold, config, conflictMoves,
+  service, current, shadowCandidates, scoreOf, currentScore, threshold, config, conflictMoves,
 }) {
   if (!current || !currentScore) return null;
   const simulated = simulatedConflict(rule, {
     service, dateStr: current.date, conflictMoves, existing: current.conflict,
   });
-  const pool = shadowCandidates
-    ? shadowCandidates.map((cand) => ({ cand, sc: scoreOf(cand) }))
-    : (scored || []).filter(({ cand }) => !blocksDay(cand.date, rule));
+  const pool = (shadowCandidates || []).map((cand) => ({ cand, sc: scoreOf(cand) }));
   const ranked = rankCandidates({
     service,
     current: simulated ? { ...current, conflict: simulated } : current,
@@ -184,5 +177,5 @@ function auditNote(rule, args) {
 }
 
 module.exports = {
-  mowingDaysMode, isLawnCareService, blockedWeekdays, ruleFor, withMowingRule, unitRule, blocksLive, withoutBlockedDays, assertDestinationClear, simulatedConflict, auditNote, DAY_INDEX,
+  mowingDaysMode, isLawnCareService, blockedWeekdays, ruleFor, withMowingRule, unitRule, blocksLive, assertDestinationClear, simulatedConflict, auditNote, DAY_INDEX,
 };

@@ -383,6 +383,16 @@ describe('evaluation and audit (index.js evaluatePlacement)', () => {
     expect(result.audit.constraints.mowing_days).toMatchObject({ current_blocked: true, shadow_best: { date: THU, start: '08:00' }, would_move: true });
   });
 
+  test('shadow with dry-time ordering on: the pool takes the dry-window slots true would add', async () => {
+    process.env[GATE] = 'shadow';
+    // A rain-proof visit (1-5 PM dry window) whose regular search finds only the blocked Tuesday;
+    // the dry-window search adds Wednesday 13:00, which true would rank.
+    findAvailableSlots.mockImplementation(async (args) => ({ slots: args.earliestStartMin ? [slot(WED, '13:00')] : [slot(TUE, '10:00')] }));
+    const prefs = { ...prefsFor('shadow'), dry_time: { mode: 'true', hours: 0, class: 'proof', source: 'test', window_key: 'dry_proof', customer_time: false } };
+    const result = await evaluatePlacement(SERVICE, prefs, evalCtx(), CONFIG, '2026-07-03');
+    expect(result.audit.constraints.mowing_days).toMatchObject({ current_blocked: true, shadow_best: { date: WED, start: '13:00' }, would_move: true });
+  });
+
   test('simulatedConflict: only with conflict moves on, an arrival window, a blocked date and no other conflict', () => {
     const rule = mowingDays.ruleFor({ mowing_days: ['Mon'] }, [], 'shadow');
     const args = { service: SERVICE, dateStr: TUE, conflictMoves: true, existing: null };

@@ -431,7 +431,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   Object.assign(constraints, dryTimeConstraint(prefs, {
     service, current, candidates: shadowPool, live, shadow: dryTimeShadowBest({ service, prefs, current, candidates: shadowPool, scoreCtx, threshold, config }),
   }), mowingDays.auditNote(mowing, {
-    service, current, live, scored, currentScore, threshold, config, conflictMoves: ctx.conflictMoves,
+    service, current, live, currentScore, threshold, config, conflictMoves: ctx.conflictMoves,
     shadowCandidates: mowingShadowCandidates, scoreOf: (cand) => scoreAppointmentPlacement(cand, prefs, scoreCtx),
   }));
 
