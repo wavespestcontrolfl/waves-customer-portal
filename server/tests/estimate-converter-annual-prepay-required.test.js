@@ -194,6 +194,19 @@ describe('estimate converter annual prepay orchestration', () => {
     });
   });
 
+  test('the prepay invoice is labelled Annual prepay for service_type reporting', async () => {
+    const { EstimateConverter, invoiceService } = setup([
+      { service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' },
+    ]);
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+      .rejects.toThrow('Annual prepay term was not created');
+
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+      serviceTypeLabel: 'Annual prepay',
+    }));
+  });
+
   test('acceptance deposit credits the prepay invoice: create carries depositCredit, the ledger consumes exactly the applied amount, and the term records the GROSS prepay', async () => {
     const deposits = {
       acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),
