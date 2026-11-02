@@ -34,7 +34,7 @@ function visits(count, overrides = {}) {
       zip: MANATEE_ZIP,
       service_line: 'pest',
       service_date: '2026-10-15',
-      pressure_index: 2,
+      tap_rating: 2,
       is_tap: true,
       ...overrides,
     };
@@ -73,8 +73,8 @@ describe('window', () => {
     const rows = [
       ...visits(MIN_VISITS, { service_date: '2026-09-23' }), // blended era
       ...visits(MIN_VISITS, { service_date: '2026-11-02' }), // today, not yet complete
-      ...visits(MIN_VISITS, { service_date: '2026-11-01', pressure_index: 3 }), // end, inclusive
-      ...visits(MIN_VISITS, { service_date: '2026-09-24', pressure_index: 1, service_line: 'lawn' }), // start, inclusive
+      ...visits(MIN_VISITS, { service_date: '2026-11-01', tap_rating: 3 }), // end, inclusive
+      ...visits(MIN_VISITS, { service_date: '2026-09-24', tap_rating: 1, service_line: 'lawn' }), // start, inclusive
     ];
     const body = computePublicPestPressureIndex(rows, { now: NOW });
     expect(body.groups.map((g) => [g.service_line, g.visits, g.average])).toEqual([['lawn', 20, 1], ['pest', 20, 3]]);
@@ -90,11 +90,11 @@ describe('what counts', () => {
   test('technician taps only: a row flagged not-a-tap is dropped, as is a missing or out-of-range value', () => {
     const rows = [
       ...visits(MIN_VISITS),
-      ...visits(5, { is_tap: false, pressure_index: 5 }),
-      ...visits(5, { pressure_index: null }),
-      ...visits(5, { pressure_index: 7 }),
-      ...visits(5, { pressure_index: -1 }),
-      ...visits(5, { pressure_index: 'abc' }),
+      ...visits(5, { is_tap: false, tap_rating: 5 }),
+      ...visits(5, { tap_rating: null }),
+      ...visits(5, { tap_rating: 7 }),
+      ...visits(5, { tap_rating: -1 }),
+      ...visits(5, { tap_rating: 'abc' }),
     ];
     const body = computePublicPestPressureIndex(rows, { now: NOW });
     expect(body.groups).toEqual([{ county: 'Manatee', service_line: 'pest', visits: 20, average: 2, median: 2 }]);
@@ -102,8 +102,17 @@ describe('what counts', () => {
   });
 
   test('numeric strings from pg count (numeric columns arrive as strings)', () => {
-    const rows = visits(MIN_VISITS, { pressure_index: '3.0' });
+    const rows = visits(MIN_VISITS, { tap_rating: '3.0' });
     expect(find(computePublicPestPressureIndex(rows, { now: NOW }), 'Manatee', 'pest').average).toBe(3);
+  });
+
+  test('an admin override does not change the count: only the tap value is read', () => {
+    // applyOverride rewrites service_records.pressure_index and displayed_score but keeps the
+    // technicianActivityRating component, so a row's overridden score must never be averaged.
+    const rows = visits(MIN_VISITS, { tap_rating: 1, pressure_index: 5, displayed_score: 5 });
+    const group = find(computePublicPestPressureIndex(rows, { now: NOW }), 'Manatee', 'pest');
+    expect(group.average).toBe(1);
+    expect(group.median).toBe(1);
   });
 
   test('a ZIP that does not map to one county drops the visit (unknown, malformed, empty, out of state)', () => {
@@ -134,9 +143,9 @@ describe('what counts', () => {
     const last = rest.join(' ');
     const rows = [
       ...visits(MIN_VISITS),
-      ...visits(15, { first_name: first.toUpperCase(), last_name: last.toUpperCase(), pressure_index: 5 }),
-      ...visits(15, { first_name: first, last_name: last, pressure_index: 5 }),
-      ...visits(15, { customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], pressure_index: 5 }),
+      ...visits(15, { first_name: first.toUpperCase(), last_name: last.toUpperCase(), tap_rating: 5 }),
+      ...visits(15, { first_name: first, last_name: last, tap_rating: 5 }),
+      ...visits(15, { customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], tap_rating: 5 }),
     ];
     const body = computePublicPestPressureIndex(rows, { now: NOW });
     expect(body.groups).toEqual([{ county: 'Manatee', service_line: 'pest', visits: 20, average: 2, median: 2 }]);
@@ -188,22 +197,22 @@ describe('suppression', () => {
 describe('numbers', () => {
   test('average and median round to 1 decimal', () => {
     // 20 visits: 7 x 3 and 13 x 2 -> mean 2.35 -> 2.4 (never 2.3); median 2.
-    const rows = [...visits(7, { pressure_index: 3 }), ...visits(13, { pressure_index: 2 })];
+    const rows = [...visits(7, { tap_rating: 3 }), ...visits(13, { tap_rating: 2 })];
     const g = find(computePublicPestPressureIndex(rows, { now: NOW }), 'Manatee', 'pest');
     expect(g).toEqual({ county: 'Manatee', service_line: 'pest', visits: 20, average: 2.4, median: 2 });
   });
 
   test('1/3 repeating rounds down, 2/3 rounds up', () => {
-    const third = [...visits(7, { pressure_index: 1 }), ...visits(14, { pressure_index: 0 })]; // 21 visits, mean 0.333
-    const twoThirds = [...visits(14, { pressure_index: 1, service_line: 'lawn' }), ...visits(7, { pressure_index: 0, service_line: 'lawn' })];
+    const third = [...visits(7, { tap_rating: 1 }), ...visits(14, { tap_rating: 0 })]; // 21 visits, mean 0.333
+    const twoThirds = [...visits(14, { tap_rating: 1, service_line: 'lawn' }), ...visits(7, { tap_rating: 0, service_line: 'lawn' })];
     const body = computePublicPestPressureIndex([...third, ...twoThirds], { now: NOW });
     expect(find(body, 'Manatee', 'pest').average).toBe(0.3);
     expect(find(body, 'Manatee', 'lawn').average).toBe(0.7);
   });
 
   test('median of an even count is the mean of the middle two; odd takes the middle', () => {
-    const even = [...visits(10, { pressure_index: 1 }), ...visits(10, { pressure_index: 2 })]; // middle two: 1 and 2
-    const odd = [...visits(10, { pressure_index: 1, service_line: 'lawn' }), ...visits(1, { pressure_index: 4, service_line: 'lawn' }), ...visits(10, { pressure_index: 5, service_line: 'lawn' })];
+    const even = [...visits(10, { tap_rating: 1 }), ...visits(10, { tap_rating: 2 })]; // middle two: 1 and 2
+    const odd = [...visits(10, { tap_rating: 1, service_line: 'lawn' }), ...visits(1, { tap_rating: 4, service_line: 'lawn' }), ...visits(10, { tap_rating: 5, service_line: 'lawn' })];
     const body = computePublicPestPressureIndex([...even, ...odd], { now: NOW });
     expect(find(body, 'Manatee', 'pest').median).toBe(1.5);
     expect(find(body, 'Manatee', 'lawn').median).toBe(4);
@@ -261,7 +270,7 @@ describe('shape and order', () => {
 
 describe('CSV', () => {
   test('header, published groups only, one decimal, window columns', () => {
-    const rows = [...visits(20, { pressure_index: 3 }), ...visits(20, { zip: SARASOTA_ZIP, service_line: 'lawn', pressure_index: 1 }), ...visits(5, { service_line: 'mosquito' })];
+    const rows = [...visits(20, { tap_rating: 3 }), ...visits(20, { zip: SARASOTA_ZIP, service_line: 'lawn', tap_rating: 1 }), ...visits(5, { service_line: 'mosquito' })];
     const csv = toCsv(computePublicPestPressureIndex(rows, { now: NOW }));
     expect(csv).toBe([
       'county,service_line,visits,average,median,window_start,window_end',
@@ -291,7 +300,9 @@ describe('query', () => {
     const { sql, bindings } = buildQuery({ start: '2026-09-24', end: '2026-11-01' });
     expect(sql).toContain("jsonb_exists(pps.component_scores, 'technicianActivityRating')");
     expect(sql).toContain("service_records.status = 'completed'");
-    expect(sql).toContain('service_records.pressure_index IS NOT NULL');
+    expect(sql).toContain("(pps.component_scores->'technicianActivityRating'->>'value') IS NOT NULL");
+    expect(sql).toContain("pps.component_scores->'technicianActivityRating'->>'value' AS tap_rating");
+    expect(sql).not.toContain('service_records.pressure_index');
     expect(sql).toContain('JOIN pest_pressure_scores pps ON pps.service_record_id = service_records.id');
     expect(sql).not.toMatch(/component_scores\s*\?/);
     // Every ? is a binding: two dates, then the names, then the ids.

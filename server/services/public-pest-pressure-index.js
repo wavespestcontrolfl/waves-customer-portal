@@ -10,11 +10,13 @@
  * customer name, address, ZIP or visit.
  *
  * What is counted
- *   - service_records.status = 'completed' with a pressure_index, joined to its
- *     pest_pressure_scores row, and ONLY technician tap readings (the score
- *     row carries the technicianActivityRating component). Since the
- *     2026-09-24 cutover (TECH_RATING_CUTOVER_DATE, #4741) a tap IS the score
- *     (tap 3 -> 3.0), so the stored value is the technician's own 0-5 rating.
+ *   - service_records.status = 'completed', joined to its pest_pressure_scores
+ *     row, and ONLY technician tap readings (the score row carries the
+ *     technicianActivityRating component, #4741, since the 2026-09-24 cutover).
+ *     The value counted is that component's own value: the technician's 0-5
+ *     tap. Never service_records.pressure_index or displayed_score: an admin
+ *     override (pest-pressure/store.js applyOverride) rewrites both and keeps
+ *     the component, so they can hold a score the technician never gave.
  *     Blended readings (customer-submitted, or recorded before the cutover)
  *     sit on another scale and are never mixed in.
  *   - Window: the 90 calendar days ending yesterday (America/New_York,
@@ -132,7 +134,7 @@ const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 // One visit row -> { county, line, value }, or null when it does not count.
 function eligibleVisit(row, window) {
   if (!row || row.is_tap === false) return null; // technician taps only
-  const raw = row.pressure_index;
+  const raw = row.tap_rating;
   const value = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
   if (!Number.isFinite(value) || value < 0 || value > 5) return null;
   const day = dateOnly(row.service_date);
@@ -145,7 +147,7 @@ function eligibleVisit(row, window) {
 
 /**
  * rows: { customer_id, first_name, last_name, zip, service_line, service_date,
- *         pressure_index, is_tap } — one per completed visit. The query already
+ *         tap_rating, is_tap } — one per completed visit. The query already
  * filters; every rule is applied here again so the function is correct on its own.
  */
 function computePublicPestPressureIndex(rows, { now = new Date() } = {}) {
@@ -226,7 +228,7 @@ function buildQuery(window) {
   const bindings = [window.start, window.end];
   const where = [
     "service_records.status = 'completed'",
-    'service_records.pressure_index IS NOT NULL',
+    "(pps.component_scores->'technicianActivityRating'->>'value') IS NOT NULL",
     "jsonb_exists(pps.component_scores, 'technicianActivityRating')",
     'service_records.service_date >= ?',
     'service_records.service_date <= ?',
@@ -247,7 +249,7 @@ function buildQuery(window) {
       customers.zip AS zip,
       COALESCE(service_records.service_line, service_records.service_type, 'unknown') AS service_line,
       to_char(service_records.service_date, 'YYYY-MM-DD') AS service_date,
-      service_records.pressure_index AS pressure_index,
+      pps.component_scores->'technicianActivityRating'->>'value' AS tap_rating,
       TRUE AS is_tap
     FROM service_records
     JOIN pest_pressure_scores pps ON pps.service_record_id = service_records.id

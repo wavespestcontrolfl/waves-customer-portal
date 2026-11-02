@@ -38,7 +38,7 @@ function rows(count, overrides = {}) {
       zip: '34205',
       service_line: 'pest',
       service_date: '2026-10-15',
-      pressure_index: 2,
+      tap_rating: 2,
       is_tap: true,
       ...overrides,
     };
@@ -63,7 +63,7 @@ beforeEach(() => {
   seq = 0;
   process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX = 'true';
   process.env.NODE_ENV = 'test';
-  db.raw.mockResolvedValue({ rows: [...rows(25), ...rows(21, { zip: '34236', service_line: 'lawn', pressure_index: 3 }), ...rows(4, { service_line: 'mosquito' })] });
+  db.raw.mockResolvedValue({ rows: [...rows(25), ...rows(21, { zip: '34236', service_line: 'lawn', tap_rating: 3 }), ...rows(4, { service_line: 'mosquito' })] });
   jest.useFakeTimers({ ...ONLY_DATE, now: NOW });
 });
 afterEach(() => jest.useRealTimers());
