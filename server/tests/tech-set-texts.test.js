@@ -125,6 +125,10 @@ describe('setTextReply', () => {
     expect(ops).toContainEqual(['where', { direction: 'inbound', from_phone: PHONE, to_phone: LINE }]);
     expect(ops).toContainEqual(['where', 'created_at', '>', new Date('2026-11-02T15:00:00Z')]);
     expect(ops).toContainEqual(['orderBy', 'created_at', 'desc']);
+    // Wrapped in the shared reservation guard before the sort.
+    const guard = ops.findIndex((o) => o[0] === 'whereRaw' && /status = 'sending'/.test(o[1]));
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(ops.findIndex((o) => o[0] === 'orderBy'));
   });
 
   test('a send the gate suppressed (sentinel id) or a blocked attempt is not a set text', async () => {

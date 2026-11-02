@@ -126,9 +126,12 @@ async function setTextReply(conn, { customerId, customerPhone, lineNumber, visit
   if (sends.some((row) => !stopIds.has(metaOf(row).scheduled_service_id))) {
     return { setText, reply: null, ambiguous: true };
   }
-  const reply = await conn('sms_log')
+  // The shared reader guard: no unresolved send reservation (a synthetic
+  // 'sending' placeholder) is ever presented as a message.
+  const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+  const reply = await excludeUnresolvedSendReservations(conn('sms_log')
     .where({ direction: 'inbound', from_phone: customerPhone, to_phone: lineNumber })
-    .where('created_at', '>', mine.sent_at)
+    .where('created_at', '>', mine.sent_at))
     .orderBy('created_at', 'desc')
     .first('message_body', 'created_at', 'metadata');
   if (!reply) return { setText, reply: null, ambiguous: false };
