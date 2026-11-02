@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_SOCIAL_STUDIO_SKIP_META=true (owner 2026-11-01, social audit "studio trim": from Sep 1 to Nov 1 the autonomous Social Studio's Instagram stills reached about 1.5 to 3 people each and gained no followers, so the autonomous studio stops posting to Facebook and Instagram and keeps LinkedIn and Google Business. On, an autonomous run (the 6:30 AM ET cron, the admin Run Draft and Run Publish buttons, and the approval of a queued autonomous draft) drops facebook and instagram from its channel list: no copy or image is made for them, no Veo clip is made, and an old queued draft publishes to its other channels only. A run whose channels were only facebook and instagram is skipped and logged. The manual Social Studio, Campaign Builder, Publish All, blog and RSS shares, testimonial graphics and scheduled posts are NOT touched. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialStudioSkipMetaLive().)
  *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
  *   GATE_MOVE_NOTICE_EMAIL=true (owner 2026-10-24 "reschedule email": the email version of a reschedule or cancellation text that reached nobody. A customer whose line cannot take texts (a landline, a carrier bounce) otherwise hears nothing when a visit moves or is cancelled. On, when the reschedule text (handleReschedule, sendRescheduleNoticeForVisit) or the cancellation text (handleCancellation) reached no recipient and was not held (send window, visit move, unreadable settings), or a carrier later bounced it (handleUndeliveredSms), the customer gets the same notice by email (appointment.rescheduled / appointment.cancelled, transactional). No usable email raises the no-channel admin alert. One email per notice. Off = today's behavior: no reschedule or cancellation email. Kill: unset)
  *   GATE_PUBLIC_LLM_SHARED_CAP=true (security audit run 2, 2026-10-22 #13: the public paid-LLM routes (Ask Waves chat, lawn-assessment and pest-identifier photo analysis) also share one daily ceiling across all IPs and processes, counted in Postgres (public_llm_daily_usage, Eastern calendar day), on top of the per-IP in-memory limiters. Each route counts once, right before the paid call, after its own limiter, honeypot, Turnstile and validation; 1500/day Ask Waves (PUBLIC_LLM_DAILY_CAP_ASK_WAVES), 300/day photo (PUBLIC_LLM_DAILY_CAP_PHOTO); over the cap = the same 429 message. A database error fails open. Read at call time via publicLlmSharedCapLive(), strict 'true', dark by default; off = unchanged, no database call. Sends nothing to a customer.)
@@ -8938,6 +8939,15 @@ module.exports.payerInvoiceSmsLive = payerInvoiceSmsLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+
+// GATE_SOCIAL_STUDIO_SKIP_META read at CALL time (so a flip needs no redeploy); strict 'true'.
+// Owner 2026-11-01 "studio trim": the autonomous Social Studio stops drafting and posting to
+// Facebook and Instagram; LinkedIn and Google Business stay. Manual paths are not touched.
+function socialStudioSkipMetaLive() {
+  return process.env.GATE_SOCIAL_STUDIO_SKIP_META === 'true';
+}
+// GATE_SOCIAL_STUDIO_SKIP_META reader, on its own line so gate PRs never conflict.
+module.exports.socialStudioSkipMetaLive = socialStudioSkipMetaLive;
 module.exports.leadNoResponseReasonLive = leadNoResponseReasonLive;
 // GATE_SMS_MAC_DRAFTS reader, on its own line so gate PRs never conflict.
 module.exports.smsMacDraftsLive = smsMacDraftsLive;

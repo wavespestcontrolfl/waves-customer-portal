@@ -14,6 +14,7 @@ const { runExclusive } = require('../utils/cron-lock');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
 const { etParts } = require('../utils/datetime-et');
+const { socialStudioSkipMetaLive } = require('../config/feature-gates');
 const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
 
 const FASTEST_RISER_PROFILES = [
@@ -203,6 +204,16 @@ const DEFAULT_COMPETITOR_PATTERNS = [
 
 const CHANNELS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 const AUTONOMOUS_SOURCE = 'autonomous_studio';
+
+// GATE_SOCIAL_STUDIO_SKIP_META ("studio trim", owner 2026-11-01): the AUTONOMOUS
+// studio stops drafting and posting to these two. Manual Studio / Campaign
+// Builder / Publish All paths call normalizeChannels directly and never pass
+// through this filter.
+const META_CHANNELS = ['facebook', 'instagram'];
+function withoutMetaWhenTrimmed(channels) {
+  if (!socialStudioSkipMetaLive()) return channels;
+  return channels.filter((c) => !META_CHANNELS.includes(c));
+}
 
 // Origin for the versus lane's fire counter (see selectAutonomousVersusPlan).
 // Any fixed January works — it only sets the rotation's phase, so changing it
@@ -792,7 +803,7 @@ const AUTONOMOUS_FLAGS = {
       ? 'gbp,facebook,instagram'
       : String(process.env.SOCIAL_AUTONOMOUS_CHANNELS);
     const selected = raw.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
-    return normalizeChannels(selected);
+    return withoutMetaWhenTrimmed(normalizeChannels(selected));
   },
 };
 
@@ -2625,6 +2636,15 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     return { skipped: true, reason: 'social automation is paused by admin' };
   }
 
+  // Studio trim: when the gate removed every requested channel (e.g.
+  // SOCIAL_AUTONOMOUS_CHANNELS=facebook,instagram), there is nothing to post —
+  // skip before any plan, copy or image work is spent.
+  if (socialStudioSkipMetaLive() && !AUTONOMOUS_FLAGS.channels.length) {
+    const reason = 'GATE_SOCIAL_STUDIO_SKIP_META removed every autonomous channel';
+    await logAutonomousSkip(reason);
+    return { skipped: true, reason };
+  }
+
   // Fail closed if the audit/cadence table is missing. latestAutonomousRun()
   // and insertAutonomousRun() both no-op when social_content_studio_runs is
   // absent, so without this the cadence guard would see "no prior run" on every
@@ -3413,10 +3433,15 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       return { ok: false, status: 400, error: 'selected variant has no hosted image' };
     }
 
-    const channels = normalizeChannels(
+    // Studio trim: a draft queued before the gate flipped must not reach
+    // Facebook or Instagram when it is approved afterwards.
+    const channels = withoutMetaWhenTrimmed(normalizeChannels(
       toJson(run.channels, null) ?? input.channels ?? preview.inputs?.channels
-    );
+    ));
     if (!channels.length) return { ok: false, status: 400, error: 'run has no publishable channels' };
+    if (isVideoVariant && socialStudioSkipMetaLive()) {
+      return { ok: false, status: 409, error: 'a video variant posts to Facebook and Instagram only, which the studio trim turned off — pick an image variant' };
+    }
 
     const city = run.city || preview.inputs?.city || input.city;
     const gbpLocationId = preview.inputs?.locationId || locationForCity(city).id;
