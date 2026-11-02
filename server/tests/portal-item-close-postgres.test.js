@@ -475,7 +475,9 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
     const NOT_DUE = mins(ASK, 44 * 60);
     const DUE = mins(ASK, 52 * 60);
     const estimateOn = () => { process.env.GATE_PORTAL_ESTIMATE_RERING = 'true'; };
-    const addRequest = (customer, service = 'mosquito') => requestRow(customer, { category: 'add_service', requested_service: service, source: 'portal_home' });
+    // Filed at the ask, not at FILED (now minus 3 days, to the minute): the quiet close resolves a request only when
+    // its updated_at is at or before the bell's askedAt, and FILED passes ASK (15:00 UTC) every day after 15:00 UTC.
+    const addRequest = (customer, service = 'mosquito') => requestRow(customer, { category: 'add_service', requested_service: service, source: 'portal_home', created_at: ASK, updated_at: ASK });
     const bundleFor = async (customer, at = ASK, service = 'mosquito') => bundleBell(customer, await addRequest(customer, service), at);
     const rungText = 'Estimate still owed: no estimate for this service after 2 business days.';
     // Every test sweeps all open bells in this database: close the fixtures of the last test so none rings in the next.
