@@ -9356,14 +9356,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // continue the customer-visible billing/SMS/review side effects below.
 
     // The re-service office bell (GATE_RESERVICE_ASKS, step S3b): one bell for what the tech marked "Not today" and the
-    // customer messages that belong to the office. It sits FIRST after the commit, ahead of every early return below
-    // (a resumable invoice, report or text error, a street-level hold that fails to release), so a saved completion
-    // never loses it. `reserviceAsksFrozen` is set only by a fresh run that wrote the freeze, so a replay or a resume
-    // (their claim never gathers) raises nothing; the bell's dedupe key also holds a retry to one row. Fire and
-    // forget: the bell never throws, and nothing here waits on it, so it cannot fail, delay or change the completion.
-    if (reserviceAsksFrozen && !resumingCommittedCompletion) {
+    // customer messages that belong to the office. It reads the freeze the completion COMMITTED: this run's own on a
+    // fresh run, or the saved record's on a resume. A resume is how a packet's effects phase runs, and how a fresh run
+    // that returned early before this point (a street-level hold that failed to release) is retried, so every
+    // completion that reaches here rings; the bell's dedupe key holds a retry or a resume to one row. It sits first
+    // after the commit, ahead of the resumable early returns below. Fire and forget: the bell never throws, and nothing
+    // here waits on it, so it cannot fail, delay or change the completion.
+    const committedReserviceAsks = reserviceAsksFrozen
+      || (resumingCommittedCompletion && require('../config/feature-gates').reserviceAsksLive()
+        ? parseJsonObject(record?.service_data)?.reserviceAsks || null
+        : null);
+    if (committedReserviceAsks) {
       Promise.resolve(require('./reservice-office-bell').raiseReserviceOfficeBell({
-        freeze: reserviceAsksFrozen,
+        freeze: committedReserviceAsks,
         customer: { id: svc.customer_id, first_name: svc.first_name, last_name: svc.last_name },
         scheduledServiceId: svc.id,
         serviceRecordId: record?.id ?? null,

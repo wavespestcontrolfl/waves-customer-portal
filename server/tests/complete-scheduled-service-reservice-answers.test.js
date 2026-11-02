@@ -255,7 +255,7 @@ describe('the re-service office bell wiring (GATE_RESERVICE_ASKS, step S3b)', ()
   const setAt = source.indexOf('reserviceAsksFrozen = asksFreeze.freeze;');
   const commitAt = source.indexOf('// The durable completion artifacts are committed.');
   const callAt = source.indexOf("require('./reservice-office-bell').raiseReserviceOfficeBell({");
-  const blockAt = source.lastIndexOf('if (reserviceAsksFrozen', callAt);
+  const blockAt = source.lastIndexOf('const committedReserviceAsks', callAt);
   const block = source.slice(blockAt, source.indexOf('\n    }\n', callAt));
 
   test('the frozen block is kept where the freeze is written, inside the completion transaction', () => {
@@ -265,11 +265,14 @@ describe('the re-service office bell wiring (GATE_RESERVICE_ASKS, step S3b)', ()
     expect(source.match(/reserviceAsksFrozen = /g)).toHaveLength(2); // the declaration and the one assignment
   });
 
-  test('the bell follows the commit, runs on a fresh run only, and is fire and forget with a catch', () => {
+  test('the bell follows the commit, reads this run\'s freeze or a resume\'s saved one, and is fire and forget with a catch', () => {
     expect(callAt).toBeGreaterThan(commitAt);
     expect(commitAt).toBeGreaterThan(setAt);
-    expect(block).toContain('reserviceAsksFrozen && !resumingCommittedCompletion');
-    expect(block).toContain('freeze: reserviceAsksFrozen');
+    // A fresh run's own freeze, or (a resume: a packet's effects phase, a retry after an early return) the saved
+    // record's, read only while the gate is live.
+    expect(block).toMatch(/reserviceAsksFrozen\s*\|\|\s*\(resumingCommittedCompletion && require\('\.\.\/config\/feature-gates'\)\.reserviceAsksLive\(\)/);
+    expect(block).toContain('parseJsonObject(record?.service_data)?.reserviceAsks');
+    expect(block).toContain('freeze: committedReserviceAsks');
     expect(block).toContain('.catch(');
     expect(block).not.toMatch(/await /);
     expect(source.match(/raiseReserviceOfficeBell\(/g)).toHaveLength(1);

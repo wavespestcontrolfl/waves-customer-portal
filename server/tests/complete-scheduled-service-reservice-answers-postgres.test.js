@@ -236,6 +236,34 @@ postgres('re-service answers frozen on /complete', () => {
     } finally { await cleanup(f); }
   });
 
+  test('a resume of a committed completion (a packet\'s effects phase, a retry after an early return) rings from the saved record', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    const f = await seedVisit();
+    try {
+      const key = randomUUID();
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const gathered = await require('../services/reservice-asks').gatherReserviceAsks(f.serviceId);
+      const body = { visitOutcome: 'completed', products: [], areasServiced: ['Outside'], technicianNotes: 'Treated the entry points.',
+        sendCompletionSms: false, includePayLink: false, requestReview: false,
+        reserviceAnswers: { items: [{ itemId: gathered.items[0].id, answer: 'not_today', reason: 'Dog in the yard' }] } };
+      const call = () => completeScheduledService({ serviceId: f.serviceId, idempotencyKey: key, actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body });
+      expect((await call()).status).toBe(200);
+      expect(mockRaiseOfficeBell).toHaveBeenCalledTimes(1);
+      // What an early return after the commit leaves (releaseCompletionAttemptForResume): the next call resumes.
+      await mockPg('service_completion_attempts').where('service_id', f.serviceId).update({ status: 'side_effects_pending', updated_at: new Date() });
+      mockRaiseOfficeBell.mockClear();
+      expect((await call()).status).toBe(200);
+      expect(mockRaiseOfficeBell).toHaveBeenCalledTimes(1);
+      expect(mockRaiseOfficeBell.mock.calls[0][0].freeze).toEqual((await savedServiceData(f)).reserviceAsks);
+      // The gate turned off before the resume: the saved freeze is not read, nothing rings.
+      await mockPg('service_completion_attempts').where('service_id', f.serviceId).update({ status: 'side_effects_pending', updated_at: new Date() });
+      mockRaiseOfficeBell.mockClear();
+      delete process.env.GATE_RESERVICE_ASKS;
+      expect((await call()).status).toBe(200);
+      expect(mockRaiseOfficeBell).not.toHaveBeenCalled();
+    } finally { await cleanup(f); }
+  });
+
   test('a replay of the same completion raises no second bell', async () => {
     process.env.GATE_RESERVICE_ASKS = 'true';
     const f = await seedVisit();
