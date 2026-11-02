@@ -246,7 +246,10 @@ async function readTexts(knex, customerId, window, bookingKeys) {
   const candidates = [];
   for (const row of rows || []) {
     const text = smsSuggestionText(row);
-    if (!text || bookingKeys.has(normalizedWords(text))) continue;
+    // A repeat of the booking words is the same ask, judged on the raw words (the scrub can mask a shouted word),
+    // unless the WHOLE message is one for the office: the 400-character suggestion can match the booking words while
+    // a refund or damage line sits past the cap.
+    if (!text || (bookingKeys.has(normalizedWords(text)) && !officeOnlyReason(row.message_body))) continue;
     candidates.push({ id: `text:${row.id}`, source: 'text', at: row.created_at, text, quoted: true, screenText: row.message_body });
   }
   return candidates;

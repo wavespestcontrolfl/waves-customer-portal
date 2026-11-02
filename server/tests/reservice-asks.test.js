@@ -257,6 +257,17 @@ describe('texts', () => {
     expect(items.map((item) => item.id)).toEqual(['booking:visit-1', 'text:s2']);
   });
 
+  test('a text whose first 400 characters repeat the booking words still counts when the whole message is for the office', async () => {
+    const words = 'The ants came back along the kitchen counter and the back slider and the pantry shelves again this week. '.repeat(4).trim();
+    const body = `${words} I want a refund.`;
+    expect(words.length).toBeGreaterThan(400);
+    const { items } = await gather({
+      visit: baseVisit({ customer_request: words.slice(0, 400), customer_request_source: 'text' }),
+      sms: [sms('s9', body)],
+    });
+    expect(items.map((item) => [item.id, item.officeOnly || null])).toEqual([['booking:visit-1', null], ['text:s9', 'billing']]);
+  });
+
   test('a copy is judged on the scrubbed words: the booking words plus an off-topic sentence is one ask', async () => {
     const { items } = await gather({
       visit: baseVisit({ customer_request: 'Ants are back.', customer_request_source: 'picker' }),

@@ -5,7 +5,8 @@
  *   - "Not today": an item the tech answered not_today. The reason is for the office, never the customer.
  *   - Office only: a customer message about damage we caused, money, a complaint or a missed visit
  *     (reservice-office-only.js). It never prints on the report; the office reads it in full. An office-only item
- *     is listed whatever its answer, even none or hidden.
+ *     is listed whatever its answer, even none or hidden, and one the tech also marked not_today keeps the tech's
+ *     reason on the same line.
  *
  * `reserviceOfficeItems(freeze)` is pure. `raiseReserviceOfficeBell` raises through raiseAdminAlert
  * (docs/admin-notifications.md) and never throws: the completion that called it must not feel a failure here. Its
@@ -45,7 +46,8 @@ const entryOf = (item, reason) => ({
 /**
  * @param {*} freeze service_data.reserviceAsks
  * @returns {{ officeOnly: object[], notToday: object[] }} entries { itemId, source, at, words, reason }; `reason` is
- *   the screen's verdict for an office-only item and the tech's note for a not-today item.
+ *   the screen's verdict for an office-only item and the tech's note for a not-today item. An item that is both is
+ *   in both lists.
  */
 function reserviceOfficeItems(freeze) {
   const none = { officeOnly: [], notToday: [] };
@@ -56,7 +58,7 @@ function reserviceOfficeItems(freeze) {
   for (const item of freeze.items) {
     if (!item || item.id == null) continue;
     if (item.officeOnly) out.officeOnly.push(entryOf(item, item.officeOnly));
-    else if (answers[item.id]?.answer === 'not_today') out.notToday.push(entryOf(item, clean(notes[item.id]) || null));
+    if (answers[item.id]?.answer === 'not_today') out.notToday.push(entryOf(item, clean(notes[item.id]) || null));
   }
   return out;
 }
@@ -79,34 +81,53 @@ function visitLink(scheduledServiceId, scheduledDate) {
   return `/admin/dispatch?tab=schedule${date ? `&date=${encodeURIComponent(date)}` : ''}&appointment=${encodeURIComponent(scheduledServiceId)}`;
 }
 
-// The why covers the first entry and counts the rest. One sentence, 110 characters.
+// One row per item, office-only ones first: { entry, office: the screen's verdict | null, notToday: { reason } | null }.
+function rowsOf({ officeOnly, notToday }) {
+  const byItem = new Map();
+  for (const entry of officeOnly) byItem.set(entry.itemId, { entry, office: entry.reason, notToday: null });
+  for (const entry of notToday) {
+    const row = byItem.get(entry.itemId);
+    if (row) row.notToday = { reason: entry.reason };
+    else byItem.set(entry.itemId, { entry, office: null, notToday: { reason: entry.reason } });
+  }
+  return [...byItem.values()];
+}
+
+const notTodayWords = (reason) => {
+  const { redactedWords } = require('./admin-alert-names');
+  return reason ? redactedWords(reason) : '';
+};
+
+// The why covers the first row and counts the rest. One sentence, 110 characters.
 function whyFor(first, more) {
   const { cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
   const { whyWithQuote, redactedWords } = require('./admin-alert-names');
   const tail = more > 0 ? ` (+${more} more)` : '';
-  if (first.kind === 'officeOnly') {
-    const topic = TOPIC[first.entry.reason] || 'something for the office';
+  if (first.office) {
+    const topic = TOPIC[first.office] || 'something for the office';
     const who = first.entry.source === 'office' ? 'An office note' : `Their ${channelOf(first.entry)}`;
     const day = dayOf(first.entry);
-    return cutAtWord(`${who}${day ? ` on ${day}` : ''} is about ${topic}; read it in full${tail}.`, MAX_WHY_CHARS);
+    const deferred = first.notToday ? ', not done today' : '';
+    return cutAtWord(`${who}${day ? ` on ${day}` : ''} is about ${topic}${deferred}; read it in full${tail}.`, MAX_WHY_CHARS);
   }
-  const reason = first.entry.reason ? redactedWords(first.entry.reason) : '';
+  const reason = notTodayWords(first.notToday.reason);
   const lead = 'Not done today: ';
   const because = reason ? ` — ${cutAtWord(reason, REASON_ROOM)}` : '';
   const quote = redactedWords(first.entry.words);
   return whyWithQuote({ lead, quote, tail: `${because}${tail}` });
 }
 
-function detailLine({ kind, entry }) {
+function detailLine({ entry, office, notToday }) {
   const { redactedWords } = require('./admin-alert-names');
   const words = entry.words ? redactedWords(entry.words) : '';
-  if (kind === 'officeOnly') {
-    const topic = TOPIC[entry.reason] || 'something for the office';
-    return `Office only: ${channelDay(entry)} about ${topic}. Read the whole message; it is not on the report.`
-      + `${words ? ` The pest part: “${words}”.` : ''}`;
+  const reason = notToday ? notTodayWords(notToday.reason) : '';
+  const deferred = notToday ? `${reason ? ` Tech's reason: ${reason}.` : ' The tech gave no reason.'}` : '';
+  if (office) {
+    const topic = TOPIC[office] || 'something for the office';
+    return `Office only${notToday ? ', not done today' : ''}: ${channelDay(entry)} about ${topic}. Read the whole message; it is not on the report.`
+      + `${words ? ` The pest part: “${words}”.` : ''}${deferred}`;
   }
-  const reason = entry.reason ? redactedWords(entry.reason) : '';
-  return `Not done today: ${channelDay(entry)}${words ? ` “${words}”` : ''}.${reason ? ` Tech's reason: ${reason}.` : ' The tech gave no reason.'}`;
+  return `Not done today: ${channelDay(entry)}${words ? ` “${words}”` : ''}.${deferred}`;
 }
 
 /**
@@ -123,11 +144,9 @@ async function raiseReserviceOfficeBell({ freeze, customer, scheduledServiceId, 
 
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const { fitAction, fullName, tidyName } = require('./admin-alert-names');
-    const entries = [
-      ...officeOnly.map((entry) => ({ kind: 'officeOnly', entry })),
-      ...notToday.map((entry) => ({ kind: 'notToday', entry })),
-    ];
-    // Not-today items are a visit to follow up; an office-only message alone is a customer to read.
+    const rows = rowsOf({ officeOnly, notToday });
+    // Any not-today item is a visit to follow up (an office-only one too); office-only messages alone are a customer
+    // to read.
     const area = notToday.length ? 'Schedule' : 'Customers';
     const name = tidyName(fullName(customer));
     const templates = area === 'Schedule'
@@ -140,7 +159,7 @@ async function raiseReserviceOfficeBell({ freeze, customer, scheduledServiceId, 
     return await raiseAdminAlert('customer', {
       area,
       action,
-      why: whyFor(entries[0], entries.length - 1),
+      why: whyFor(rows[0], rows.length - 1),
       severity: 'needs-you',
       link: visitLink(scheduledServiceId, scheduledDate),
       subject: { type: 'visit', id: String(scheduledServiceId) },
@@ -149,12 +168,12 @@ async function raiseReserviceOfficeBell({ freeze, customer, scheduledServiceId, 
     }, {
       bell: true,
       dedupeKey: `${DEDUPE_PREFIX}${scheduledServiceId}`,
-      detail: entries.map(detailLine).join('\n'),
+      detail: rows.map(detailLine).join('\n'),
       metadata: {
         customerId: customer?.id ?? null,
         scheduledServiceId,
         serviceRecordId,
-        itemIds: entries.map(({ entry }) => entry.itemId),
+        itemIds: rows.map(({ entry }) => entry.itemId),
       },
     });
   } catch (err) {

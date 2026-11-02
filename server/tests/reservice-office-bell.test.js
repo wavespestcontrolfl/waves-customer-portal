@@ -32,8 +32,8 @@ describe('reserviceOfficeItems', () => {
 
     expect(officeOnly.map((e) => e.itemId)).toEqual(['a', 'b', 'c']);
     expect(officeOnly.map((e) => e.reason)).toEqual(['damage', 'billing', 'complaint']);
-    // Office-only beats not-today: c is not listed twice.
-    expect(notToday).toEqual([]);
+    // c is office-only AND not done today: it is in both lists, so the tech's reason is kept.
+    expect(notToday).toEqual([{ itemId: 'c', source: 'text', at: AT, words: 'Ants in the kitchen', reason: 'Customer upset' }]);
   });
 
   test('a not-today item carries the tech\'s reason; other answers and unanswered items are left out', () => {
@@ -152,6 +152,20 @@ describe('raiseReserviceOfficeBell', () => {
     expect(lines[1]).toBe('Not done today: a request form on Nov 2 “Roaches in the garage”. Tech\'s reason: Out of product.');
     expect(lines[2]).toBe('Not done today: a call on Nov 2 “Wasps by the door”. Tech\'s reason: Needs a ladder.');
     expect(opts.metadata.itemIds).toEqual(['a', 'b', 'c']);
+  });
+
+  test('an office-only item the tech also marked not today: one line with both, the reason kept, area Schedule', async () => {
+    await raise(freezeOf(
+      [item('a', { officeOnly: 'damage', text: 'Ants by the pool' })],
+      { a: { answer: 'not_today' } },
+      { a: 'Customer wants the office to call first' },
+    ));
+
+    const { headline, why, opts } = sent();
+    expect(headline).toBe('Schedule — follow up on Dana Q\'s re-service');
+    expect(why).toBe('Their text on Nov 2 is about damage to their things, not done today; read it in full.');
+    expect(opts.detail).toBe('Office only, not done today: a text on Nov 2 about damage to their things. Read the whole message; it is not on the report. The pest part: “Ants by the pool”. Tech\'s reason: Customer wants the office to call first.');
+    expect(opts.metadata.itemIds).toEqual(['a']);
   });
 
   test('the words are redacted like every bell body: a phone number is masked', async () => {
