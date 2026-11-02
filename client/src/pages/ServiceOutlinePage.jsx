@@ -342,7 +342,7 @@ function TagsVisual({ items = [], note }) {
   );
 }
 
-// ---- 9-round outline visuals (GATE_LAWN_OUTLINE_VISUAL): the year bar, round cards, timeline, fact tiles and FAQ.
+// ---- The lawn outline layout (every detailed lawn outline since 2026-11-01): the year bar, round cards, timeline, fact tiles and FAQ.
 // Nothing draws them until the server emits these visual types; an unknown type keeps the bullet cards.
 
 // One color per whole-lawn step, used on the year bar, the round cards and their key.
