@@ -1017,6 +1017,14 @@ describe('GATE_PORTAL_ASK_PUSH: the hand-off bell also rings the phones', () => 
     expect(result.teamNotified).toBe(true);
   });
 
+  test('a push that never answers does not hold the customer\'s reply (it is not awaited)', async () => {
+    triggerNotification.mockImplementation(() => new Promise(() => {}));
+    mockCreate.mockResolvedValueOnce(handOff({}));
+    const result = await say('The tech was rude');
+    expect(result.escalated).toBe(true);
+    expect(pushes()).toHaveLength(1);
+  });
+
   describe('inside the portal turn\'s transaction', () => {
     test('an opened chat hand-off pushes once, after the transaction committed', async () => {
       const turn = fakeTurn();

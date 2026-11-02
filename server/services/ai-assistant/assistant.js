@@ -144,18 +144,18 @@ function handOffPush({ customer, escalation, conversation, topic, newEmail = nul
 
 // Hold a rung hand-off's push until its transaction commits (`pushQueue`, flushed by the caller), or send it now
 // when no transaction is open. Inside a transaction with no queue it is dropped: a push for a bell that may still
-// roll back would page the office for an ask that does not exist.
-async function sendHandOffPush(push, { trx = null, pushQueue = null } = {}) {
+// roll back would page the office for an ask that does not exist. Never awaited: a slow push provider must not hold
+// the customer's chat reply (pushPortalAsk never throws).
+function sendHandOffPush(push, { trx = null, pushQueue = null } = {}) {
   if (pushQueue) { pushQueue.push(push); return; }
   if (trx) return;
-  await require('../portal-ask-push').pushPortalAsk(push);
+  void require('../portal-ask-push').pushPortalAsk(push);
 }
 
-// After the turn's transaction committed: send the queued pushes. Best-effort, bounded by the turn's budget.
-async function flushHandOffPushes(pushQueue, turn) {
-  for (const push of pushQueue.splice(0)) {
-    try { await waitFor(() => require('../portal-ask-push').pushPortalAsk(push), turn, 'portal ask push'); } catch { /* the bell is the record */ }
-  }
+// After the turn's transaction committed: dispatch the queued pushes without waiting for delivery, so an admin page
+// never spends the customer's turn budget (a move hand-off still has to ask for its address or date afterwards).
+function flushHandOffPushes(pushQueue) {
+  for (const push of pushQueue.splice(0)) void require('../portal-ask-push').pushPortalAsk(push);
 }
 
 // The same assistant serves coordinated portal turns and uncoordinated SMS.
@@ -1263,7 +1263,7 @@ class WavesAssistant {
       return { customer, escalation, created, handoff };
     });
     turn.rememberCommittedResult(persisted.handoff);
-    await flushHandOffPushes(pushQueue, turn);
+    flushHandOffPushes(pushQueue);
 
     if (gap) {
       try {
@@ -1350,7 +1350,7 @@ class WavesAssistant {
         return { ...stored, handoff };
       });
       turn.rememberCommittedResult(saved.handoff);
-      await flushHandOffPushes(pushQueue, turn);
+      flushHandOffPushes(pushQueue);
     } else {
       const stored = await db.transaction(async (trx) => {
         const row = await this.upsertOpenItem(trx, item);
@@ -1434,7 +1434,7 @@ class WavesAssistant {
         await trx.transaction((bellTrx) => ring(stored, bellTrx)).catch(() => { pushQueue.length = 0; return false; });
         return portalOpen.savedMove(stored.escalation.summary);
       });
-      await flushHandOffPushes(pushQueue, turn);
+      flushHandOffPushes(pushQueue);
       return savedMove;
     }
     const stored = await db.transaction((trx) => this.upsertOpenItem(trx, item));
@@ -1493,7 +1493,7 @@ class WavesAssistant {
       // GATE_PORTAL_ASK_PUSH: the phone page, only when the ask is new or rang again, and (inside a transaction)
       // only after it commits. Its own failure never costs the hand-off its bell.
       if (bellRangAgain(result)) {
-        try { await sendHandOffPush(handOffPush({ customer, escalation, conversation, topic, newEmail }), { trx, pushQueue }); } catch { /* the bell is the record */ }
+        try { sendHandOffPush(handOffPush({ customer, escalation, conversation, topic, newEmail }), { trx, pushQueue }); } catch { /* the bell is the record */ }
       }
       return rowExists;
     } catch (err) {
@@ -1542,7 +1542,7 @@ class WavesAssistant {
       });
       const rowExists = Boolean(result?.id) && !result.suppressed;
       if (bellRangAgain(result)) {
-        try { await sendHandOffPush(handOffPush({ customer, escalation, conversation, topic, move }), { trx, pushQueue }); } catch { /* the bell is the record */ }
+        try { sendHandOffPush(handOffPush({ customer, escalation, conversation, topic, move }), { trx, pushQueue }); } catch { /* the bell is the record */ }
       }
       return rowExists;
     } catch (err) {
