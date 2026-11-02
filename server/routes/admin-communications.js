@@ -372,6 +372,8 @@ const { linkedVisitIdsFrom } = require('../services/street-level-hold');
 async function sendSmsHandler(req, res, next) {
   // req.ibAgentPins is set only by sendSmsFromBar (never an HTTP field); see the adapter below.
   const barPins = req.ibAgentPins || null;
+  // req.officeLikeTarget is set only by sendOfficeLikeText (never an HTTP field): the liked text.
+  const likeTarget = req.officeLikeTarget || null;
   let claimedDecisionId = null;
   let manualReservationId = null;
   let parkedThreadIds = [];
@@ -1237,7 +1239,14 @@ async function sendSmsHandler(req, res, next) {
           );
         })(),
       // a translation card's reply: the same boundary checks, from the trial's stored snapshot
-      } : translationProviderPreSendCheck ? { providerPreSendCheck: translationProviderPreSendCheck } : {}),
+      } : translationProviderPreSendCheck ? { providerPreSendCheck: translationProviderPreSendCheck }
+        // the office's like (POST /messages/:id/like): a customer text that came in after the click stops it
+        : likeTarget ? {
+          providerPreSendCheck: async ({ dbi } = {}) => (await require('../services/sms-office-like')
+            .newerThreadMessageExists(dbi || db, likeTarget, { inboundOnly: true })
+            ? { ok: false, code: 'like_target_changed', reason: 'The customer sent a new text, so the like was not sent.' }
+            : { ok: true }),
+        } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —
@@ -2325,6 +2334,9 @@ router.get('/log', async (req, res, next) => {
 
     const fallbackCustomers = await resolveSmsLogCustomerFallbacks(rows);
     const pendingIdSet = new Set(pendingIds.map(String));
+    // GATE_SMS_LIKE: the office's like on a customer text, and customer likes on ours.
+    const officeLike = require('../services/sms-office-like');
+    const likesOn = officeLike.likesLive();
 
     const messages = await Promise.all(rows.map(async (m) => {
       const initialContact = m.effective_contact_phone || m.contact_phone || m.customer_phone;
@@ -2378,12 +2390,14 @@ router.get('/log', async (req, res, next) => {
         readAt: m.read_at,
         courtesyOnly,
         spamEnforced,
+        ...officeLike.likeFieldsForClient({ on: likesOn, direction: m.direction, body: m.body, metadata: m.metadata }),
         media: await signMediaForClient(m.media),
       };
     }));
 
     res.json({
       messages,
+      ...(likesOn ? { smsLike: true } : {}),
       page: requestedPage,
       limit: effectiveLimit,
       hasMore,
@@ -2535,6 +2549,50 @@ router.get('/unread-count', requireAdmin, async (req, res, next) => {
     }));
   } catch (err) { next(err); }
 });
+
+// POST /api/admin/communications/messages/:id/like — the office's like on a
+// customer's newest text (GATE_SMS_LIKE; owner 2026-11-02, "SMS Like Button"
+// option B). It texts a thumbs-up back through sendSmsHandler, the composer's
+// own send, and marks the text with who liked it and when. The rules live in
+// services/sms-office-like.js.
+router.post('/messages/:id/like', async (req, res, next) => {
+  try {
+    const officeLike = require('../services/sms-office-like');
+    if (!officeLike.likesLive()) return res.status(404).json({ error: 'Not found' });
+    const target = UUID_RE.test(String(req.params.id || '')) ? await officeLike.loadLikeTarget(db, req.params.id) : null;
+    if (!target) return res.status(404).json({ error: 'Text not found' });
+    // A technician texts only their own route's customers: the composer's own
+    // guard, before any write.
+    if (!(await technicianCustomerGuard(req, res, target.recipientCustomerId))) return undefined;
+    const refusal = officeLike.likeRefusal(target)
+      || (await officeLike.newerThreadMessageExists(db, target) ? officeLike.NEWER_MESSAGE_REFUSAL : null);
+    if (refusal) return res.status(409).json({ error: refusal });
+    const claim = await officeLike.claimOfficeLike(db, target.id, { technicianId: req.technicianId, name: req.technician?.name });
+    if (!claim) return res.status(409).json({ error: 'This text already has a like.' });
+    const reply = await sendOfficeLikeText(req, target).catch(async (err) => {
+      await officeLike.finishOfficeLike(db, target.id, claim.token, officeLikeSendVerdict(null, err));
+      throw err;
+    });
+    const verdict = officeLikeSendVerdict(reply);
+    await officeLike.finishOfficeLike(db, target.id, claim.token, verdict);
+    if (reply.status >= 300) return res.status(reply.status).json(reply.json);
+    return res.json({ success: true, officeLike: officeLike.officeLikeForClient({ office_like: { ...claim, status: verdict } }) });
+  } catch (err) { next(err); }
+});
+
+// What the like's send did, from the handler's answer or its error: 'sent',
+// 'uncertain' (it may have left) or 'not_sent'. An error with no provider
+// outcome may come after the provider took the text, so it reads 'uncertain'.
+// The applicant rail answers 200 with its own outcome.
+function officeLikeSendVerdict(reply, err = null) {
+  if (err) {
+    const outcome = err.providerOutcome;
+    if (autoSendExecutor.isRealProviderSend(outcome)) return 'sent';
+    return outcome && !autoSendExecutor.isAmbiguousProviderOutcome(outcome) ? 'not_sent' : 'uncertain';
+  }
+  if (reply.status < 300) return reply.json?.outcome === 'uncertain' ? 'uncertain' : 'sent';
+  return autoSendExecutor.isAmbiguousProviderOutcome(reply.json) ? 'uncertain' : 'not_sent';
+}
 
 // GET /api/admin/communications/stats — channel analytics
 router.get('/stats', requireAdmin, async (req, res, next) => {
@@ -4570,5 +4628,34 @@ function sendSmsFromBar({ body, actor, pins }) {
   });
 }
 module.exports.sendSmsFromBar = sendSmsFromBar;
+// The like's text (POST /messages/:id/like): the same handler with the fields
+// "Text back" posts for the liked text, run in-process like sendSmsFromBar.
+// req.officeLikeTarget adds the like's provider-boundary check. A line we no
+// longer own is left out, and the handler picks the sender as for any text.
+function sendOfficeLikeText(req, target) {
+  const { OFFICE_LIKE_BODY } = require('../services/sms-office-like');
+  const line = target.ourEndpoint ? TWILIO_NUMBERS.findByNumber(target.ourEndpoint) : null;
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const likeReq = {
+      body: {
+        to: target.contactPhone,
+        body: OFFICE_LIKE_BODY,
+        replyToMessageId: target.id,
+        ...(target.recipientCustomerId ? { customerId: target.recipientCustomerId } : {}),
+        ...(line ? { fromNumber: target.ourEndpoint } : {}),
+      },
+      technicianId: req.technicianId || null,
+      technician: req.technician || null,
+      techRole: req.techRole,
+      officeLikeTarget: target,
+    };
+    Promise.resolve(sendSmsHandler(likeReq, res, reject)).catch(reject);
+  });
+}
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;

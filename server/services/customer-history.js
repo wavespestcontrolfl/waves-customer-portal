@@ -355,7 +355,8 @@ async function listCustomerTimeline(db, customerId, query = {}) {
   };
 }
 
-function mapCommsMessage(message, customer, twilioNumbers) {
+// likesOn: GATE_SMS_LIKE, read once per request by listCustomerComms.
+function mapCommsMessage(message, customer, twilioNumbers, likesOn = false) {
   const numberCfg = twilioNumbers?.findByNumber?.(message.our_endpoint_id) || null;
   let media = [];
   try { media = typeof message.media === 'string' ? JSON.parse(message.media) : (message.media || []); } catch { media = []; }
@@ -385,6 +386,9 @@ function mapCommsMessage(message, customer, twilioNumbers) {
     createdAt: message.effective_created_at || message.created_at, ourEndpointId: message.our_endpoint_id,
     ourEndpointLabel: numberCfg?.label || null,
     contactPhone: message.contact_phone || customer.phone || null,
+    ...require('./sms-office-like').likeFieldsForClient({
+      on: likesOn, channel: message.channel, direction: message.direction, body: message.body, metadata: message.metadata,
+    }),
   };
 }
 
@@ -475,7 +479,8 @@ async function listCustomerComms(db, customer, query = {}) {
   const conversationIds = await db('conversations').where({ customer_id: customerId }).pluck('id');
   let twilioNumbers;
   try { twilioNumbers = require('../config/twilio-numbers'); } catch { twilioNumbers = null; }
-  const comms = await signCommsMedia(pageRows.map(message => mapCommsMessage(message, customer, twilioNumbers)));
+  const likesOn = require('./sms-office-like').likesLive();
+  const comms = await signCommsMedia(pageRows.map(message => mapCommsMessage(message, customer, twilioNumbers, likesOn)));
   const primaryPhoneKey = phoneIdentityKey(customer.phone);
   let composerComms = [];
   if (primaryPhoneKey) {
@@ -513,10 +518,11 @@ async function listCustomerComms(db, customer, query = {}) {
         row.response_prior_outbound_body = composerPriorOutboundBodies.get(String(row.id));
       }
     }
-    composerComms = await signCommsMedia(composerRows.map(message => mapCommsMessage(message, customer, twilioNumbers)));
+    composerComms = await signCommsMedia(composerRows.map(message => mapCommsMessage(message, customer, twilioNumbers, likesOn)));
   }
   return {
     comms, composerComms, total: comms.length, limit: parsed.limit, channel: parsed.channel,
+    ...(likesOn ? { smsLike: true } : {}),
     hasMore, nextCursor, readScope: { conversationIds, readBefore },
   };
 }
