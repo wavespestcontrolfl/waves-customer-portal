@@ -394,6 +394,18 @@ function smsMessageMatchesLine(message, lineNumber) {
   return phoneKey(messageLine) === lineKey;
 }
 
+// One log response from several refreshed pages. It keeps the page-level
+// flags the inbox reads (GATE_SMS_SPAM_TAG's smsSpamTag): a rebuilt response
+// without it would turn Mark spam back into the block while the gate is on.
+export function mergeRefreshedLogPages(pages, loadedPageCount) {
+  return {
+    messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
+    hasMore: !!pages.at(-1)?.hasMore,
+    page: pages.at(-1)?.page || loadedPageCount,
+    ...(pages.some((pageData) => pageData?.smsSpamTag === true) ? { smsSpamTag: true } : {}),
+  };
+}
+
 function mergeSmsMessages(existing, incoming) {
   return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
@@ -1496,11 +1508,7 @@ export function SmsTab({
       })).then((pages) => {
         const hasInvalidPage = pages.some((pageData) => !Array.isArray(pageData?.messages) || pageData.error);
         if (hasInvalidPage) return { error: "One or more message pages could not be refreshed." };
-        return {
-          messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
-          hasMore: !!pages.at(-1)?.hasMore,
-          page: pages.at(-1)?.page || loadedPageCount,
-        };
+        return mergeRefreshedLogPages(pages, loadedPageCount);
       })
       : adminFetch(logUrl, { signal: controller.signal });
     const logRequest = Promise.resolve(loadedPagesRequest).then(async (logData) => {

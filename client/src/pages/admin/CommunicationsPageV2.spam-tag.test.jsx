@@ -13,7 +13,7 @@ vi.mock("react-router-dom", async () => {
   return { ...actual, useOutletContext: () => ({ user: { role: "admin" } }) };
 });
 
-import { SmsTab } from "./CommunicationsPageV2";
+import { SmsTab, mergeRefreshedLogPages } from "./CommunicationsPageV2";
 
 const line = "+19415550199";
 const spammer = "+15557654321";
@@ -86,4 +86,17 @@ it("an unlinked thread without a verdict shows no Spam tag", async () => {
   await screen.findByRole("button", { name: /Mark spam/ });
   expect(screen.queryByText(/Spam · no alert sent/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Not spam/ })).not.toBeInTheDocument();
+});
+
+// Codex pre-push P1: refreshing several loaded Unanswered pages rebuilds the
+// log response; without the flag, Mark spam fell back to the block while the
+// gate was on.
+it("a refresh of several loaded pages keeps the spam-tag flag", () => {
+  const page = (n, extra = {}) => ({
+    messages: [pitch({ id: `m${n}`, createdAt: `2024-01-0${n}T12:00:00Z` })], hasMore: n < 2, page: n, ...extra,
+  });
+  const on = mergeRefreshedLogPages([page(1, { smsSpamTag: true }), page(2, { smsSpamTag: true })], 2);
+  expect(on).toMatchObject({ smsSpamTag: true, hasMore: false, page: 2 });
+  expect(on.messages.map((m) => m.id)).toEqual(["m2", "m1"]);
+  expect(mergeRefreshedLogPages([page(1), page(2)], 2)).not.toHaveProperty("smsSpamTag");
 });
