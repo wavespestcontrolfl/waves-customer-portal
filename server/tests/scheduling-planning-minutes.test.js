@@ -213,6 +213,26 @@ describe('preserveCapacity (a version-2 hold accepted after a gate rollback)', (
     expect(workDuration({ ...pest, preserveCapacity: true })).toBe(35);
   });
 
+  // The night search stamps every stop of every simulation step, and the gate read is two
+  // process.env reads: under plan-only mode it was 4.5 of the 5.4 CPU-seconds the mode added to a
+  // 46-visit sample of the 04:10 run (Nov 2 2026, the night the move checks ran out of time).
+  test('a stamped row is planned from its own flag, without reading the gate; an unstamped row still reads it', () => {
+    jest.isolateModules(() => {
+      const capacityEnabled = jest.fn(() => false);
+      const schedulingPlanMinutesOnly = jest.fn(() => false);
+      jest.doMock('../services/scheduling/policy', () => ({ ...jest.requireActual('../services/scheduling/policy'), capacityEnabled }));
+      jest.doMock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), schedulingPlanMinutesOnly }));
+      const planning = require('../services/scheduling/planning-minutes');
+      const pest = { service_type: 'Quarterly Pest Control Service', estimated_duration_minutes: 60 };
+      expect(planning.plannedWorkMinutes({ ...pest, preserveCapacity: true })).toBe(35);
+      expect(capacityEnabled).not.toHaveBeenCalled();
+      expect(schedulingPlanMinutesOnly).not.toHaveBeenCalled();
+      expect(planning.plannedWorkMinutes(pest)).toBeNull();
+      expect(capacityEnabled).toHaveBeenCalledTimes(1);
+      expect(schedulingPlanMinutesOnly).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('evaluateArrivalPlacement threads context.preserveCapacity onto every row, not just capacityEnabled()', () => {
     delete process.env.GATE_SCHEDULING_CAPACITY;
     // Identical shape to "existing recurring stops open room a 60-minute

@@ -100,7 +100,12 @@ function deliberateEstimate(stop) {
  *  planned minutes; its window span must not inflate that back to an hour. */
 function plannedWorkMinutes(stop) {
   if (!stop || stop.planning_exempt) return null;
-  if (!planningTableLive() && !stop.preserveCapacity) return null;
+  // The row's own flag first: the night search stamps preserveCapacity on
+  // every stop of every simulation step (arrival-route.js), and the gate read
+  // behind planningTableLive is two process.env reads. In plan mode that read
+  // was 4.5 of the 5.4 CPU-seconds the mode added to a 46-visit sample of the
+  // 04:10 run (Nov 2 2026, the night the move checks ran out of time).
+  if (!stop.preserveCapacity && !planningTableLive()) return null;
   if (stop.memberIds) return Number(stop.estimated_duration_minutes) || null;
   const planned = tableMinutes(stop);
   return planned == null ? null : Math.max(planned, deliberateEstimate(stop));
