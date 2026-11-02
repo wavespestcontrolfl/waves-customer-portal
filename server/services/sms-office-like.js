@@ -75,7 +75,7 @@ async function loadLikeTarget(dbi, messageId) {
   const row = await smsWithAddress(dbi)
     .where('m.id', messageId)
     .first(
-      'm.id', 'm.direction', 'm.body', 'm.created_at', 'm.twilio_sid', 'm.metadata',
+      'm.id', 'm.direction', 'm.body', 'm.created_at', 'm.twilio_sid', 'm.metadata', 'legacy.id as legacy_id',
       'c.customer_id', 'cu.phone as customer_phone', 'cu.deleted_at as customer_deleted_at',
       dbi.raw(`${projection.contactPhoneSql} AS contact_phone`),
       dbi.raw(`${projection.endpointSql} AS our_endpoint`),
@@ -91,6 +91,7 @@ async function loadLikeTarget(dbi, messageId) {
     body: row.body,
     createdAt: row.created_at,
     twilioSid: row.twilio_sid || null,
+    legacyId: row.legacy_id || null,
     metadata: parseMetadata(row.metadata),
     contactPhone,
     ourEndpoint: String(row.our_endpoint || '').trim(),
@@ -127,7 +128,9 @@ async function newerThreadMessageExists(dbi, target, { inboundOnly = false } = {
   const legacy = dbi('sms_log as sl')
     .where('sl.created_at', '>=', target.createdAt)
     .whereRaw(`${legacyPeer} = ?`, [target.peer]);
-  // The liked text's own log twin shares its provider id.
+  // The liked text's own log twin: the row the address projection linked
+  // (a historical backfill has no provider id), and any row with its id.
+  if (target.legacyId) legacy.whereNot('sl.id', target.legacyId);
   if (target.twilioSid) legacy.where((q) => q.whereNull('sl.twilio_sid').orWhereNot('sl.twilio_sid', target.twilioSid));
   if (inboundOnly) legacy.where('sl.direction', 'inbound');
   return Boolean(await legacy.first('sl.id'));
