@@ -174,25 +174,37 @@ async function stampExistingTexts(key, verdict, adminUserId) {
     await db('sms_log').whereIn('id', legacyIds)
       .update({ is_read: true, metadata: db.raw(mergeVerdictSql(), [verdictJson]) });
   }
-  const messageIds = await actionableTypes(unifiedRows(key), 'm.message_type')
+  const stampIds = await actionableTypes(unifiedRows(key), 'm.message_type')
     .whereRaw(`NOT (${enforcedSql('m.metadata')})`)
     .whereRaw(noMediaSql('m.media'))
     .distinct('m.id')
     .pluck('m.id');
-  if (!messageIds.length) return { legacy: legacyIds.length, unified: 0, readFailed: false };
-  await db('messages').whereIn('id', messageIds)
-    .update({ metadata: db.raw(mergeVerdictSql(), [verdictJson]), updated_at: new Date() });
-  // The ONE read writer: messages.is_read, the sms_log mirror, and the
-  // unknown-sender bell clean-up.
-  let readFailed = false;
-  try {
-    const { markInboundSmsRead } = require('./inbound-sms-read');
-    await markInboundSmsRead({ messageIds, adminUserId: adminUserId || null, role: 'admin' });
-  } catch (err) {
-    readFailed = true;
-    logger.warn(`[sms-spam-tag] marking the tagged texts read failed: ${err.code || err.name || 'error'}`);
+  if (stampIds.length) {
+    await db('messages').whereIn('id', stampIds)
+      .update({ metadata: db.raw(mergeVerdictSql(), [verdictJson]), updated_at: new Date() });
   }
-  return { legacy: legacyIds.length, unified: messageIds.length, readFailed };
+  // Read every eligible text that carries an enforced verdict and is still
+  // unread, not only the ones stamped now: a text stamped by an earlier tag
+  // whose read failed is repaired by the next tag (pre-push audit P1).
+  const readIds = await actionableTypes(unifiedRows(key), 'm.message_type')
+    .whereRaw(enforcedSql('m.metadata'))
+    .whereRaw(noMediaSql('m.media'))
+    .where((b) => b.where('m.is_read', false).orWhereNull('m.is_read'))
+    .distinct('m.id')
+    .pluck('m.id');
+  let readFailed = false;
+  if (readIds.length) {
+    // The ONE read writer: messages.is_read, the sms_log mirror, and the
+    // unknown-sender bell clean-up.
+    try {
+      const { markInboundSmsRead } = require('./inbound-sms-read');
+      await markInboundSmsRead({ messageIds: readIds, adminUserId: adminUserId || null, role: 'admin' });
+    } catch (err) {
+      readFailed = true;
+      logger.warn(`[sms-spam-tag] marking the tagged texts read failed: ${err.code || err.name || 'error'}`);
+    }
+  }
+  return { legacy: legacyIds.length, unified: stampIds.length, readFailed };
 }
 
 /**

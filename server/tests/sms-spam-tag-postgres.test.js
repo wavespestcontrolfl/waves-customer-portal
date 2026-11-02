@@ -158,6 +158,29 @@ let mockDatabase;
     expect((await unified(sid)).metadata.spam_verdict).toMatchObject({ method: 'model' });
   });
 
+  // Pre-push audit P1: a tag whose read failed is repaired by the next tag;
+  // the verdict already on file stays as it is.
+  test('a failed read is repaired when the sender is tagged again', async () => {
+    const { sid } = await addText({ from: '+19415550100', body: 'Need leads?' });
+    const reads = require('../services/inbound-sms-read');
+    const spy = jest.spyOn(reads, 'markInboundSmsRead')
+      .mockRejectedValueOnce(Object.assign(new Error('read failed'), { code: 'EREADFAIL' }));
+    try {
+      const first = await tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
+      expect(first).toMatchObject({ unified: 1, readFailed: true });
+      expect((await unified(sid)).is_read).toBe(false);
+      const stampedAt = (await unified(sid)).metadata.spam_verdict.marked_at;
+
+      const second = await tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
+      expect(second).toMatchObject({ alreadyTagged: true, unified: 0, readFailed: false });
+      const row = await unified(sid);
+      expect(row.is_read).toBe(true);
+      expect(row.metadata.spam_verdict).toMatchObject({ method: 'manual', enforced: true, marked_at: stampedAt });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test.each([
     ['primary phone', { phone: '(941) 555-0100' }],
     ['service-contact slot', { service_contact2_phone: '9415550100' }],
