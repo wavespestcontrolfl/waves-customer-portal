@@ -71,14 +71,13 @@ describe('catalog identity beats the words in a name', () => {
     ['bee_wasp_removal', null, 'outdoor'],
     ['dethatching', null, 'outdoor'],
     ['palm_treatment', null, 'outdoor'],
-    ['termite_installation_setup', null, 'outdoor'],
     ['some_new_admin_key', null, 'outdoor'],
     ['rodent_exclusion', 'rodent_exclusion', 'outdoor'],
-    // Lanes are too coarse: the same findings type covers setup and check.
-    ['rodent_trapping', 'rodent_trapping', 'outdoor'],
-    ['wildlife_trapping', 'wildlife_trapping', 'outdoor'],
+    // Exclusion is roof and sealant work: outdoor even when trapping rides with it.
     ['rodent_trapping_exclusion', 'rodent_trapping', 'outdoor'],
-    ['rodent_bait_setup', 'rodent_bait_station', 'outdoor'],
+    ['rodent_exclusion_only', null, 'outdoor'],
+    ['termite_liquid', 'termite_liquid', 'outdoor'],
+    ['mosquito_misting_install', null, 'outdoor'],
     ['rodent_general_one_time', 'rodent_inspection', 'outdoor'],
     ['waveguard_initial_setup', null, 'outdoor'],
     // A findings type with no catalog key is not enough.
@@ -98,6 +97,21 @@ describe('catalog identity beats the words in a name', () => {
     ['rodent_trapping_followup', 'rodent_trapping', 'ok'],
     ['rodent_trap_check_additional', 'rodent_trapping', 'ok'],
     ['rodent_sanitation_standard', 'rodent_sanitation', 'ok'],
+    // Owner 2026-11-01 rain-out scan: trapping, bait stations, injection and indoor/under-eave work.
+    ['rodent_trapping', 'rodent_trapping', 'ok'],
+    ['wildlife_trapping', 'wildlife_trapping', 'ok'],
+    ['rodent_bait_setup', 'rodent_bait_station', 'ok'],
+    ['trap_only_retainer_monthly', null, 'ok'],
+    ['termite_bait', null, 'ok'],
+    ['termite_installation_setup', null, 'ok'],
+    ['termite_cartridge_replacement', null, 'ok'],
+    ['palm_injection', null, 'ok'],
+    ['bora_care', null, 'ok'],
+    ['mud_dauber_removal', null, 'ok'],
+    ['mosquito_misting_refill', null, 'ok'],
+    ['mosquito_misting_system', null, 'ok'],
+    ['foam_drill', null, 'ok'],
+    ['foam_recurring', null, 'ok'],
     ['general_appointment', null, 'skip'],
     ['waveguard_membership', null, 'skip'],
   ])('key %s / type %s → %s', (key, type, cls) => {
@@ -124,10 +138,13 @@ describe('catalog identity beats the words in a name', () => {
 
   // None of them may be a spray / outline lane in the trace registry: that
   // registry says product goes down outside.
+  // The one named exception: termite foam goes into wall voids (owner 2026-11-01, "these can be done in the
+  // rain out"), though the trace registry keeps it a product lane. Any other spray lane still fails here.
+  const SPRAY_LANE_EXCEPTIONS = ['foam_drill', 'foam_recurring'];
   test('no rain-OK key is a spray lane in the trace registry', () => {
     const sprayed = [...RAIN_OK_KEYS].filter((key) => traceRules.SERVICE_KEY_RULES[key]?.eligible === true
       || traceRules.FINDINGS_TYPE_RULES[key]?.eligible === true);
-    expect(sprayed).toEqual([]);
+    expect(sprayed.sort()).toEqual([...SPRAY_LANE_EXCEPTIONS].sort());
   });
 });
 

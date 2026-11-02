@@ -80,6 +80,24 @@ const RAIN_OK_KEYS = new Set([
   'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_medium', 'rodent_sanitation_heavy',
   // Dead Rodent Removal & Odor Treatment: attic, garage or crawl-space work (owner 2026-10-30: "THIS JOB IS NOT OUTDOORS").
   'rodent_dead_animal_removal',
+  // Owner 2026-11-01, after the Nov 1 rain-outs ("wdo, rodent trapping, assesments, all could be done during a
+  // rainout"), approving the catalog scan: work that rain does not spoil, so a wet hour can hold it.
+  // Rodent and wildlife trapping, trap retainers and bait-station setup (traps in the attic or garage; stations
+  // are closed boxes).
+  'rodent_trapping', 'rodent_trapping_sanitation', 'rodent_bait_setup',
+  'trap_only_retainer_monthly', 'trap_only_retainer_standard', 'trap_only_retainer_plus', 'wildlife_trapping',
+  // Termite bait stations: in-ground installs, checks and cartridge swaps.
+  'termite_bait', 'termite_installation_setup', 'termite_active_annual', 'termite_active_bait_quarterly',
+  'termite_monitoring', 'termite_cartridge_replacement',
+  // Trunk injection (reschedule-rules.js tree_injection needs no rain-free hours).
+  'palm_injection', 'palm_injection_semiannual',
+  // Bora-Care in an attic or crawl space, mud dauber nests scraped under the eaves, misting-system tank refills
+  // and nozzle / pump checks.
+  'bora_care', 'mud_dauber_removal', 'mosquito_misting_refill', 'mosquito_misting_system',
+  // Termite foam into wall voids (owner 2026-11-01: "these can be done in the rain out"). The trace registry
+  // still lists foam as a product lane, so it is the one named exception in the test that keeps spray lanes
+  // off this list.
+  'foam_drill', 'foam_recurring',
 ]);
 // Not a visit's work at all: a billing rider (the registry's lane), or the
 // generic appointment whose work is unknown. Left out of the booking's
