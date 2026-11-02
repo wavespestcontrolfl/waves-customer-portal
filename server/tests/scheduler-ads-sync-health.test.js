@@ -15,7 +15,9 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'cronJobs'), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
+  adsNegativesLive: jest.fn(() => false),
 }));
+jest.mock('../services/ads/negative-keyword-actions', () => ({ syncOwnerWords: jest.fn().mockResolvedValue({ pushed: 0, failed: 0, removed: 0 }) }));
 // Pass-through lock that (like the real runExclusive) records a failed body
 // by name and rethrows it.
 const mockJobOutcomes = {};
@@ -49,6 +51,8 @@ const cron = require('../utils/scheduled-cron');
 const logger = require('../services/logger');
 const { runExclusive } = require('../utils/cron-lock');
 const googleAds = require('../services/ads/google-ads');
+const gates = require('../config/feature-gates');
+const negativeActions = require('../services/ads/negative-keyword-actions');
 const metaAds = require('../services/ads/meta-ads');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -78,6 +82,26 @@ describe('Google Ads 6:00 cron', () => {
     expect(googleAds.syncCampaigns).toHaveBeenCalledWith({ throwOnError: true });
     expect(googleAds.syncDailyPerformance).toHaveBeenCalledWith(7, { throwOnError: true });
     expect(googleAds.syncSearchTerms).toHaveBeenCalledWith(30, { throwOnError: true });
+  });
+
+  test('the owner\'s negative word list syncs as the fourth step only while GATE_ADS_NEGATIVES is on', async () => {
+    const run = googleTick();
+    await run();
+    expect(negativeActions.syncOwnerWords).not.toHaveBeenCalled();
+    gates.adsNegativesLive.mockReturnValue(true);
+    await run();
+    expect(negativeActions.syncOwnerWords).toHaveBeenCalledTimes(1);
+    expect(mockJobOutcomes['google-ads-sync']).toBe('success');
+    gates.adsNegativesLive.mockReturnValue(false);
+  });
+
+  test('a failed word-list sync fails the job after the other steps ran', async () => {
+    gates.adsNegativesLive.mockReturnValue(true);
+    negativeActions.syncOwnerWords.mockRejectedValueOnce(new Error('db down'));
+    await googleTick()();
+    expect(googleAds.syncSearchTerms).toHaveBeenCalled();
+    expect(mockJobOutcomes['google-ads-sync']).toBe('failed: db down');
+    gates.adsNegativesLive.mockReturnValue(false);
   });
 
   test('a failed sync fails the job (job_health failed) but the remaining steps still run', async () => {

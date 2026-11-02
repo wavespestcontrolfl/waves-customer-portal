@@ -7599,7 +7599,7 @@ function initScheduledJobs() {
   // =========================================================================
   // runExclusive records job_health ('google-ads-sync'), and the sync functions
   // run with throwOnError so a failed API call fails the job instead of being
-  // swallowed into an empty result that read as success. All three run even if
+  // swallowed into an empty result that read as success. All four run even if
   // one fails; the first error is rethrown at the end. job_health failures
   // surface through ops-queue laneScheduledJobs.
   cron.schedule('0 6 * * *', async () => {
@@ -7614,6 +7614,9 @@ function initScheduledJobs() {
           () => googleAds.syncCampaigns(opts),
           () => googleAds.syncDailyPerformance(7, opts),
           () => googleAds.syncSearchTerms(30, opts),
+          // The owner's negative word list (owner plan A, 2026-11-02; GATE_ADS_NEGATIVES): push new words, retry failed
+          // ones, take removed words out of Google. Off = skipped.
+          () => (require('../config/feature-gates').adsNegativesLive() ? require('./ads/negative-keyword-actions').syncOwnerWords() : null),
         ]) {
           try { await step(); } catch (err) { firstErr = firstErr || err; }
         }

@@ -830,6 +830,80 @@ router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// NEGATIVE KEYWORDS (owner plan A, 2026-11-02; GATE_ADS_NEGATIVES)
+// =========================================================================
+// The owner's word list goes to Google Ads as phrase negatives on every linked campaign; each ads-advisor word waits for
+// an Add or Decline (here, or on its bell row); every block can be undone. All of it is one server step
+// (services/ads/negative-keyword-actions.js), the same one the bell buttons run. Sends nothing to a customer, moves no
+// money. Gate off: every route answers 404. Refusals: 409 { error, message }; Google did not answer or refused: 502;
+// bad input: 422 { error: 'invalid' | 'protected', message }.
+let _negatives;
+function getNegatives() { return _negatives || (_negatives = require('../services/ads/negative-keyword-actions')); }
+
+router.use('/negatives', (req, res, next) => {
+  if (require('../config/feature-gates').adsNegativesLive() !== true) return res.status(404).json({ error: 'not_found' });
+  return next();
+});
+
+const NEGATIVE_BAD_GATEWAY = new Set(['google_error', 'google_unavailable']);
+// A word typed on the list that is empty, too long or a brand / service / city word is bad input (422). The same code on
+// a decide is a refusal (409): that word was already declined.
+function negativeRefusal(res, result, { typed = false } = {}) {
+  if (result.code === 'off') return res.status(404).json({ error: 'not_found' });
+  const badInput = result.code === 'invalid' || (typed && result.code === 'protected');
+  const status = NEGATIVE_BAD_GATEWAY.has(result.code) ? 502 : badInput ? 422 : 409;
+  return res.status(status).json({ error: result.code, message: result.message });
+}
+
+// GET /api/admin/ads/negatives — the owner's words, the advisor words waiting on a yes, and the decided log
+router.get('/negatives', async (req, res, next) => {
+  try {
+    res.json(await getNegatives().listNegatives());
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/negatives/words { text } — put a word on the list and send it to Google
+router.post('/negatives/words', async (req, res, next) => {
+  try {
+    if (typeof req.body?.text !== 'string') return res.status(422).json({ error: 'invalid', message: getNegatives().MESSAGES.invalid });
+    const result = await getNegatives().addOwnerWord(req.body.text, { by: req.technicianId });
+    if (!result.ok) return negativeRefusal(res, result, { typed: true });
+    res.json({ word: result.word });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/negatives/words/:id/remove — take a word off the list and out of Google
+router.post('/negatives/words/:id/remove', async (req, res, next) => {
+  try {
+    const result = await getNegatives().removeOwnerWord(req.params.id, { by: req.technicianId });
+    if (!result.ok) return negativeRefusal(res, result);
+    res.json({ word: result.word, failed: result.failed });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/negatives/:id/decide { decision: 'add' | 'decline' } — an advisor word
+router.post('/negatives/:id/decide', async (req, res, next) => {
+  try {
+    const decision = req.body?.decision;
+    if (decision !== 'add' && decision !== 'decline') {
+      return res.status(422).json({ error: 'invalid', message: 'The decision must be add or decline.' });
+    }
+    const result = await getNegatives().decideSuggestion(req.params.id, decision, { by: req.technicianId });
+    if (!result.ok) return negativeRefusal(res, result);
+    res.json({ state: result.state, message: result.message });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/negatives/:id/undo — take a block back out of Google
+router.post('/negatives/:id/undo', async (req, res, next) => {
+  try {
+    const result = await getNegatives().undoNegative(req.params.id, { by: req.technicianId });
+    if (!result.ok) return negativeRefusal(res, result);
+    res.json({ state: result.state, message: result.message });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/ads/advisor/apply — apply a recommendation
 // Only budget/mode recommendations map to an automated change; everything else
 // (add_negative, bid/keyword/SEO/GBP actions) is advisory and returns

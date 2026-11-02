@@ -134,6 +134,18 @@ Kinds today:
   follows `GATE_ALERT_CLOSE_BUTTONS`, so each button is served while its own gate is on
   (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
   emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
+- `negative_keyword` (`server/services/ads/negative-keyword-buttons.js`, `GATE_ADS_NEGATIVES`; owner plan A,
+  2026-11-02): **Add** and **Decline** on one ads-advisor word's row (`ads-negative:<id>`, area Leads, category
+  `system`, link `/admin/ads?tab=advisor&negative=<id>`). Both are stored at raise; `visibleItems` serves them only
+  while the word is still pending on the Ads page. A tap is the Ads page's own decide step
+  (`decideSuggestion` in `server/services/ads/negative-keyword-actions.js`, the route
+  `POST /api/admin/ads/negatives/:id/decide`) with its checks again under the row lock: the campaign is still a linked
+  Google Ads campaign, the word is not a brand, service or city word, and no search with it brought a conversion in
+  90 days. Add writes a phrase-match negative to Google Ads; Decline only records the answer. Each outcome that leaves
+  the word not pending closes the row. A Google error leaves the row open to try again. At most 3 new rows a day
+  (Eastern); the rest wait on the Ads page and ring on later days, oldest first, and a backlog is never a bell row.
+  The owner's own word list sends no bell. It sends nothing to a customer and moves no money; it changes where the ad
+  can show, and **Undo** is on the Ads page.
 
 ## 3. Never in a headline or a why
 
