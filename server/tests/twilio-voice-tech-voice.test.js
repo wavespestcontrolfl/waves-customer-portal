@@ -92,6 +92,23 @@ describe('/voice', () => {
     expect(res.body).toMatch(/<Response><Reject\/><\/Response>/);
     expect(db).not.toHaveBeenCalledWith('customers');
   });
+
+  test('…even with the customer voice gate off: no gate notice, no dedupe claim, no spam screen', async () => {
+    const { isEnabled } = require('../config/feature-gates');
+    const { tryClaimInboundWebhook } = require('../services/messaging/inbound-dedupe');
+    const { checkInboundBlock } = require('../middleware/spam-block');
+    isEnabled.mockReturnValue(false);
+    try {
+      const res = mockRes();
+      await handlerFor('/voice')({ body: call(), query: {}, headers: {} }, res);
+      expect(res.body).toMatch(/<Response><Reject\/><\/Response>/);
+      expect(res.body).not.toContain('<Say');
+      expect(tryClaimInboundWebhook).not.toHaveBeenCalled();
+      expect(checkInboundBlock).not.toHaveBeenCalled();
+    } finally {
+      isEnabled.mockReturnValue(true);
+    }
+  });
 });
 
 describe('/call-status', () => {

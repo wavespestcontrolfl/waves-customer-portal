@@ -1232,6 +1232,17 @@ router.post('/voice', async (req, res) => {
   // lock below) has committed, after which we must not release the claim on error.
   let callLogged = false;
   try {
+    // The staff-only tech voice line answers on its own route (/tech-voice).
+    // Reaching /voice means the number's voice URL is wrong: refuse it first,
+    // before the voice gate's notice, the dedupe claim or the spam screen can
+    // answer it, and before anything rings, records or logs it as a customer
+    // call. A bare <Reject> is never billed.
+    if (TWILIO_NUMBERS.isTechVoiceLine(toE164(req.body.To))) {
+      logger.warn(`[voice] tech voice line reached /voice — check its Twilio voice URL (${maskSid(req.body.CallSid)})`);
+      const rejectTwiml = new VoiceResponse();
+      rejectTwiml.reject();
+      return res.type('text/xml').send(rejectTwiml.toString());
+    }
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
       logger.info(`[GATE BLOCKED] Voice call from ${maskPhone(req.body.From)} (gate: twilioVoice)`);
@@ -1266,15 +1277,6 @@ router.post('/voice', async (req, res) => {
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
-    // The staff-only tech voice line answers on its own route (/tech-voice).
-    // Reaching /voice means the number's voice URL is wrong: refuse it before
-    // anything rings, records or logs it as a customer call.
-    if (TWILIO_NUMBERS.isTechVoiceLine(To)) {
-      logger.warn(`[voice] tech voice line reached /voice — check its Twilio voice URL (${maskSid(CallSid)})`);
-      const rejectTwiml = new VoiceResponse();
-      rejectTwiml.reject();
-      return res.type('text/xml').send(rejectTwiml.toString());
-    }
 
     // Match caller to customer. The raw matches are fetched once: a single
     // match links the call; 2+ matches deliberately do NOT auto-link (shared
