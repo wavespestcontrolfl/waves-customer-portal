@@ -47,7 +47,9 @@
  */
 
 import useCustomerHistory from "../../hooks/useCustomerHistory";
-import { useState, useEffect, useRef, useId, useCallback, lazy, Suspense } from "react";
+import { OfficeLikeButton, SmsLikeBadges } from "./SmsLikeControls";
+import { smsLikeThread } from "../../lib/smsLikes";
+import { Fragment, useState, useEffect, useRef, useId, useCallback, lazy, Suspense } from "react";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { createPortal } from "react-dom";
 import "./customer360-workspace.css";
@@ -5729,7 +5731,7 @@ function CustomerMessageTime({ message, inverted = false }) {
     </div>
   );
 }
-function CustomerSmsMessage({ message: m, embedded }) {
+function CustomerSmsMessage({ message: m, embedded, reactionBadges }) {
   const inbound = m.direction === "inbound";
   return (
     <div
@@ -5750,6 +5752,7 @@ function CustomerSmsMessage({ message: m, embedded }) {
           />
         </Suspense>
       )}{" "}
+      <SmsLikeBadges message={m} badges={reactionBadges} />
       <CustomerMessageTime message={m} inverted={!inbound} />
     </div>
   );
@@ -9854,6 +9857,7 @@ function CustomerConversation({
   loadOlderComms,
   retryComms,
   comms,
+  commsSmsLike,
   commsLoading,
   commsErr,
   embedded,
@@ -9876,6 +9880,9 @@ function CustomerConversation({
   data,
 }) {
   const interactions = data.interactions || [];
+  // GATE_SMS_LIKE: customer likes become badges on our quoted text, and the
+  // customer's newest text gets the like button. Off: the thread is unchanged.
+  const likeView = smsLikeThread([...comms].reverse(), commsSmsLike);
   return (
     <div className="c360-conversation flex flex-col">
       {" "}
@@ -9906,17 +9913,22 @@ function CustomerConversation({
           loading={commsLoading}
           onRetry={retryComms}
         />
-        {[...comms].reverse().map((message, i) => {
+        {likeView.visible.map((message, i) => {
           const Message =
             message.channel === "sms"
               ? CustomerSmsMessage
               : CustomerCallMessage;
           return (
-            <Message
-              key={message.id || i}
-              message={message}
-              embedded={embedded}
-            />
+            <Fragment key={message.id || i}>
+              <Message
+                message={message}
+                embedded={embedded}
+                reactionBadges={likeView.badges}
+              />
+              {message.id === likeView.likeMessageId ? (
+                <OfficeLikeButton messageId={message.id} customerName={c?.first_name} onLiked={() => setCommsLoaded(false)} />
+              ) : null}
+            </Fragment>
           );
         })}
         {commsLoaded && comms.length === 0 && (
@@ -10903,6 +10915,8 @@ function useCustomerMessages({
     loadOlderComms: history.loadOlder,
     retryComms: history.retry,
     comms,
+    // GATE_SMS_LIKE: the server says whether the like button and badges are on.
+    commsSmsLike: history.meta?.smsLike === true,
     commsLoading,
     commsErr,
     commsLoaded,
@@ -11519,6 +11533,7 @@ export default function Customer360ProfileV2({
     loadOlderComms,
     retryComms,
     comms,
+    commsSmsLike,
     commsLoading,
     commsErr,
     commsLoaded,
@@ -11662,6 +11677,7 @@ export default function Customer360ProfileV2({
       loadOlderComms={loadOlderComms}
       retryComms={retryComms}
       comms={comms}
+      commsSmsLike={commsSmsLike}
       commsLoading={commsLoading}
       commsErr={commsErr}
       embedded={embedded}
