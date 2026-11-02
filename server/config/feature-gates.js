@@ -473,6 +473,7 @@
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
+ *   GATE_MONDAY_REVIEW_BELL=true (owner 2026-11-02, "build all", B2: one needs-you bell every Monday 9:20 AM ET for the work that sits, built from the 2026-09-30 rule item 6. Lines, each only when its count is above zero: needs-you alerts unread 14+ days (before the 30-day retention sweep expires them), overdue promises to callers, completed visits whose only invoice is an unsent draft, past-dated visits still open. One row per Monday (dedupeKey monday-review:<ET date>) with a detail line and page for each list; last week's row closes first, and an all-zero week raises nothing. Admin only: sends nothing to a customer, no paid API, writes only admin notifications. Read at call time via mondayReviewBellLive(), strict 'true', dark by default; off = the Monday cron returns before any read. Rollback = unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -9983,6 +9984,11 @@ function techSetTextsLive() {
 function emailDraftFactsLive() {
   return process.env.GATE_EMAIL_DRAFT_FACTS === 'true';
 }
+
+// GATE_MONDAY_REVIEW_BELL read at CALL time (so a flip needs no redeploy); strict 'true'.
+function mondayReviewBellLive() {
+  return process.env.GATE_MONDAY_REVIEW_BELL === 'true';
+}
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // GATE_EMAIL_AUTH_STRICT reader, on its own line so gate PRs never conflict.
@@ -10178,3 +10184,5 @@ module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 module.exports.techSetTextsLive = techSetTextsLive;
 // GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.emailDraftFactsLive = emailDraftFactsLive;
+// GATE_MONDAY_REVIEW_BELL reader, on its own line so gate PRs never conflict.
+module.exports.mondayReviewBellLive = mondayReviewBellLive;
