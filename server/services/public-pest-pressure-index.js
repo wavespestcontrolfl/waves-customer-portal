@@ -42,7 +42,7 @@ const logger = require('./logger');
 const { TECH_RATING_CUTOVER_DATE } = require('./pest-pressure/score-scale');
 const { INTERNAL_TEST_CUSTOMERS, isInternalTestCustomerId, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etCalendarDaysUntil, parseETDateTime } = require('../utils/datetime-et');
 
 const MIN_VISITS = 20;
 const WINDOW_DAYS = 90;
@@ -68,26 +68,18 @@ const SCALE_LABELS = Object.freeze({
 const SOURCE = 'Completed Waves Pest Control service visits rated by the technician on site. Not a survey and not a forecast.';
 const CSV_HEADER = 'county,service_line,visits,average,median,window_start,window_end';
 
-// ---- dates (calendar strings, YYYY-MM-DD) ----
+// ---- dates (calendar strings, YYYY-MM-DD, via utils/datetime-et) ----
 
-function shiftDate(ymd, days) {
-  const [y, m, d] = ymd.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
-}
-
-function daysBetween(startYmd, endYmd) {
-  const ms = (ymd) => { const [y, m, d] = ymd.split('-').map(Number); return Date.UTC(y, m - 1, d); };
-  return Math.round((ms(endYmd) - ms(startYmd)) / 86400000);
-}
-
-// End = yesterday's ET calendar date (inclusive). Start = the later of end - 89
-// days and the tap cutover date. `days` is the inclusive count (0 when the
-// window would be empty, i.e. before the cutover has a full day behind it).
+// End = yesterday's ET calendar date (inclusive). Start = the later of the ET
+// date WINDOW_DAYS back (end - 89 days) and the tap cutover date. `days` is the
+// inclusive count (0 when the window would be empty, i.e. before the cutover
+// has a full day behind it).
 function windowFor(now = new Date()) {
   const end = etDateString(addETDays(now, -1));
-  const earliest = shiftDate(end, -(WINDOW_DAYS - 1));
+  const earliest = etDateString(addETDays(now, -WINDOW_DAYS));
   const start = earliest > TECH_RATING_CUTOVER_DATE ? earliest : TECH_RATING_CUTOVER_DATE;
-  return { start, end, days: Math.max(0, daysBetween(start, end) + 1) };
+  const days = start > end ? 0 : etCalendarDaysUntil(end, parseETDateTime(`${start}T12:00`)) + 1;
+  return { start, end, days };
 }
 
 // ---- pure computation ----
