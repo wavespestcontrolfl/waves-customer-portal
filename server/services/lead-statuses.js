@@ -70,7 +70,7 @@ function isOpenLeadRow(row) {
 // cast. Applied through knex .modify() on a `leads` query — unaliased, or
 // with the alias passed (`scopeToProspects(qb, 'l')`, the dashboard
 // breakdowns, codex #3834 r18 P2) — or spliced raw (PROSPECT_SCOPE_SQL)
-// into a correlated subquery over an unaliased `leads`.
+// into SQL over an unaliased `leads`.
 const UUID_RE = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 // Last 10 digits — the phone identity the wizard lookup and the link
 // resolver's normalizePhone agree on (a leading country code drops away).
@@ -141,8 +141,8 @@ const wonDescendantSql = (t) => `(${t}.status NOT IN (${openStatusList}) OR NOT 
     END
 ))`;
 const WON_DESCENDANT_SQL = wonDescendantSql('leads');
-// The same scope as a raw fragment, for the correlated COUNT subqueries the
-// sources summary builds over an unaliased `leads` (GET /leads/sources).
+// The same scope as a raw fragment over an unaliased `leads`, for raw SQL
+// (dashboard-service-lines.js reads it as is_prospect).
 const PROSPECT_SCOPE_SQL = `leads.status NOT IN (${NON_ENGAGED_LEAD_STATUSES.map((s) => `'${s}'`).join(', ')}) AND ${SECOND_WIN_SQL} AND ${WON_DESCENDANT_SQL}`;
 function scopeToProspects(qb, alias = 'leads') {
   return qb.whereNotIn(`${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias)).whereRaw(wonDescendantSql(alias));

@@ -110,9 +110,7 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(SECOND_WIN_SQL).toMatch(/SELECT o\.status, o\.deleted_at, o\.customer_id, COALESCE\(o\.extracted_data->>'won_estimate_id', o\.estimate_id::text\) AS won_scope, o\.phone, o\.email/);
     expect(SECOND_WIN_SQL).toMatch(/SELECT p\.status, p\.deleted_at, p\.customer_id, COALESCE\(p\.extracted_data->>'won_estimate_id', p\.estimate_id::text\), p\.phone, p\.email/);
     expect(SECOND_WIN_SQL).not.toMatch(/chain\.estimate_id/);
-    // The sources summary counts (GET /leads/sources) splice the same scope
-    // into every COUNT subquery, so the client-derived source conversion
-    // rate agrees with the ROI (codex r16 P2).
+    // The raw fragment is the same scope (raw SQL over an unaliased `leads`).
     const { PROSPECT_SCOPE_SQL, WON_DESCENDANT_SQL } = require('../services/lead-statuses');
     // 'handled' (a /book preferred-time request its own booking closed) is neither
     // won nor lost, so it is out of the prospect denominator with the other
@@ -136,8 +134,14 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(WON_DESCENDANT_SQL).toMatch(/COALESCE\(d\.extracted_data->>'won_estimate_id', d\.estimate_id::text\) AS won_scope/);
     expect(WON_DESCENDANT_SQL).toMatch(/AND NOT \(down\.won_scope IS NOT NULL AND leads\.estimate_id IS NOT NULL AND down\.won_scope <> leads\.estimate_id::text\)/);
     expect(WON_DESCENDANT_SQL).toMatch(/WHEN down\.customer_id IS NOT NULL AND leads\.customer_id IS NOT NULL THEN down\.customer_id = leads\.customer_id/);
+    // The sources summary (GET /leads/sources) takes all four counts from one
+    // grouped pass over the same scope, so the client-derived source
+    // conversion rate agrees with the ROI (codex r16 P2).
     const adminLeadsSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-leads.js'), 'utf8');
-    expect((adminLeadsSrc.match(/leads\.deleted_at IS NULL AND \$\{PROSPECT_SCOPE_SQL\}/g) || []).length).toBe(4);
+    const sourcesRoute = adminLeadsSrc.slice(adminLeadsSrc.indexOf("router.get('/sources',"), adminLeadsSrc.indexOf("router.get('/sources/:id'"));
+    expect(sourcesRoute).toMatch(/db\('leads'\)\s*\.whereNotNull\('leads\.lead_source_id'\)\s*\.whereNull\('leads\.deleted_at'\)\s*\.modify\(scopeToProspects\)/);
+    expect(sourcesRoute.match(/COUNT\(\*\)/g) || []).toHaveLength(4);
+    expect(sourcesRoute).not.toMatch(/SELECT COUNT\(\*\) FROM leads/);
     // The dashboard breakdowns (leads-by-source over `leads as l`, channel-mix)
     // apply the same scope — alias-aware, so every outer reference follows
     // the alias and none is left on the bare table name (codex r18 P2).
