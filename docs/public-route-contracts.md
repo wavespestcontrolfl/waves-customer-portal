@@ -6316,7 +6316,11 @@ the public `POST /login/mfa` (a generic 404 while the gate is dark, answered in
 prefix, a 5-wrong-code per-account lockout and no-store/noindex headers; a malformed body and an
 unknown, expired, revoked or ineligible challenge all answer the same generic
 404, only a wrong code for a live challenge answers 401 `MFA_INVALID`) takes that challenge plus an authenticator or recovery
-code and is the only path that mints an access token carrying `mfa: true`;
+code, mints an access token carrying `mfa: true` and sets `waves_staff_device`
+(a 90-day HttpOnly, SameSite=Strict signed cookie on path
+`/api/admin/auth/google`, bound to the token version and the enrollment time);
+the only other path to `mfa: true` is `/google/finish` from a device with that
+cookie;
 `/reset-password` on an enrolled account returns `{ passwordReset,
 signInRequired }` with no session. The native WavesPay app (`ios/WavesPay`,
 `API.login` / `API.loginMfa`) decodes the challenge and asks for the code; an
@@ -6364,9 +6368,11 @@ pins `google_sub` with a compare-and-set under the partial unique indexes.
 valid 2 minutes after the callback), then compares SHA-256(verifier) with the
 page challenge and re-reads the staff row (still active, same pinned
 `google_sub`); it then answers `{ token, refreshToken, user }` plus the
-`waves_admin` marker cookie. It never asks for the `GATE_ADMIN_MFA` code: a
-Google sign-in stands in for it (owner 2026-11-02), and while that gate is on
-the access token carries the `mfa` mark. Every
+`waves_admin` marker cookie, or `{ mfaRequired, challengeToken }` for an
+account enrolled under `GATE_ADMIN_MFA` when the request carries no valid
+`waves_staff_device` cookie for that staff row. A remembered device (owner
+2026-11-02, option A: the code once per device) gets the session with the `mfa`
+mark; a Google session used anywhere else still meets the code step. Every
 finish refusal is the same 401 `GOOGLE_SIGNIN_EXPIRED`, a deliberate exception
 to the generic-404 token baseline: the sign-in page restarts on it. The Team tab
 link `PUT /api/admin/timetracking/technicians/:id/google-signin` is not public

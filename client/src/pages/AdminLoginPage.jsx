@@ -91,8 +91,12 @@ export default function AdminLoginPage() {
     try {
       const data = await finishGoogleSignIn(outcome.result);
       if (data.error) throw new Error(googleSignInMessage(data.error));
-      // A Google sign-in never asks for the authenticator code (owner
-      // 2026-11-02): /google/finish answers with the session itself.
+      if (data.mfaRequired && data.challengeToken) {
+        setChallengeToken(data.challengeToken);
+        setCode('');
+        setUseRecoveryCode(false);
+        return;
+      }
       await completeSignIn(data, { next: outcome.next });
     } catch (e) {
       setError(e.message);

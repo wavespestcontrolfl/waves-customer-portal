@@ -110,13 +110,20 @@ postgres('staff Google sign-in on migrated PostgreSQL', () => {
     return { res, location: res.headers.get('location') || '' };
   }
 
-  async function finish(result, verifier) {
+  async function finish(result, verifier, { cookie } = {}) {
     const res = await fetch(`${baseUrl}/api/admin/auth/google/finish`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       body: JSON.stringify({ result, verifier }),
     });
     return { status: res.status, body: await res.json() };
+  }
+
+  // The cookie /login/mfa sets after a passing code, for this staff row as stored now.
+  function rememberedDeviceCookie(techRow) {
+    let header = null;
+    authRouter._deviceTrust.rememberDevice({ cookie: (name, value) => { header = `${name}=${value}`; } }, techRow);
+    return header;
   }
 
   const claimsFor = (tech, flow, extra = {}) => ({
@@ -289,12 +296,25 @@ postgres('staff Google sign-in on migrated PostgreSQL', () => {
     expect((await callback(flow)).location).toBe('/admin/login#google_error=relink_needed');
   });
 
-  test('a staff member with an authenticator skips its code after Google, and the session passes the two-step check', async () => {
+  test('on a new device a staff member with an authenticator still enters its code after Google', async () => {
     const tech = await addStaff({ mfa_enabled_at: new Date() });
     process.env.GATE_ADMIN_MFA = 'true';
     try {
       const { flow, result } = await signedResult(tech);
       const done = await finish(result, flow.secret);
+      expect(done).toEqual({ status: 200, body: { mfaRequired: true, challengeToken: expect.any(String) } });
+    } finally {
+      delete process.env.GATE_ADMIN_MFA;
+    }
+  });
+
+  test('a device that passed the code skips it after Google, and the session passes the two-step check', async () => {
+    const tech = await addStaff({ mfa_enabled_at: new Date() });
+    process.env.GATE_ADMIN_MFA = 'true';
+    try {
+      const { flow, result } = await signedResult(tech);
+      const stored = await mockDatabase('technicians').where({ id: tech.id }).first();
+      const done = await finish(result, flow.secret, { cookie: rememberedDeviceCookie(stored) });
       expect(done.status).toBe(200);
       expect(done.body).not.toHaveProperty('mfaRequired');
       expect(done.body.user).toMatchObject({ id: tech.id, twoStep: { enabled: true } });
@@ -305,6 +325,30 @@ postgres('staff Google sign-in on migrated PostgreSQL', () => {
       await realAdminAuthenticate(req, res, next);
       expect(res.status).not.toHaveBeenCalled();
       expect(next).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.GATE_ADMIN_MFA;
+    }
+  });
+
+  test('another staff member\'s remembered device, or one from before a sign-out everywhere or a new authenticator, still needs the code', async () => {
+    const tech = await addStaff({ mfa_enabled_at: new Date() });
+    const other = await addStaff({ mfa_enabled_at: new Date() });
+    process.env.GATE_ADMIN_MFA = 'true';
+    const challenged = { status: 200, body: { mfaRequired: true, challengeToken: expect.any(String) } };
+    try {
+      const otherCookie = rememberedDeviceCookie(await mockDatabase('technicians').where({ id: other.id }).first());
+      let signed = await signedResult(tech);
+      expect(await finish(signed.result, signed.flow.secret, { cookie: otherCookie })).toEqual(challenged);
+
+      const before = rememberedDeviceCookie(await mockDatabase('technicians').where({ id: tech.id }).first());
+      await mockDatabase('technicians').where({ id: tech.id }).increment('auth_token_version', 1);
+      signed = await signedResult(tech);
+      expect(await finish(signed.result, signed.flow.secret, { cookie: before })).toEqual(challenged);
+
+      const beforeNewAuthenticator = rememberedDeviceCookie(await mockDatabase('technicians').where({ id: tech.id }).first());
+      await mockDatabase('technicians').where({ id: tech.id }).update({ mfa_enabled_at: new Date(Date.now() + 1000) });
+      signed = await signedResult(tech);
+      expect(await finish(signed.result, signed.flow.secret, { cookie: beforeNewAuthenticator })).toEqual(challenged);
     } finally {
       delete process.env.GATE_ADMIN_MFA;
     }

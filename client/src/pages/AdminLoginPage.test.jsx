@@ -210,6 +210,14 @@ describe('AdminLoginPage Sign in with Google', () => {
     expect(sessionStorage.getItem('waves_google_signin_secret')).toBeNull();
   });
 
+  it('asks for the authenticator code after Google for an enrolled account', async () => {
+    sessionStorage.setItem('waves_google_signin_secret', SECRET);
+    vi.stubGlobal('fetch', vi.fn(async () => reply(200, { mfaRequired: true, challengeToken: 'challenge-g' })));
+    renderAt(`/admin/login#google_result=${RESULT}`);
+    expect(await screen.findByLabelText('Authentication code')).toBeInTheDocument();
+    expect(store.has('waves_admin_token')).toBe(false);
+  });
+
   it('says why Google refused, and a page without the secret cannot finish', async () => {
     renderAt('/admin/login#google_error=not_allowed');
     expect(await screen.findByRole('alert')).toHaveTextContent('not linked to an active Waves staff account');
