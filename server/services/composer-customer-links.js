@@ -1601,25 +1601,28 @@ function movingGateOn() {
   const gates = require('../config/feature-gates');
   return typeof gates.movingFlowLive === 'function' && gates.movingFlowLive();
 }
-// A live moving token ANYWHERE in the message other than a canonical owned
-// /moving/<token> link (GH Codex security review on #7486): a foreign host
-// that redirects to the real page, a query parameter, a percent-encoded or
-// nested copy would all skip the owner binding. Every run that is not a
-// canonical moving link is fully decoded, and every 48-hex window is looked
-// up against moves that still open. Gate off: every moving page is a 404, so
-// nothing is looked up.
+// A live moving token ANYWHERE in the message other than the path token of a
+// canonical owned /moving/<token> link (GH Codex security reviews on #7486):
+// a foreign host that redirects to the real page, a query parameter (also on
+// a canonical link: /moving/<B>?shared=<A>), a percent-encoded or nested copy
+// would all skip the owner binding. Every run is fully decoded and every
+// 48-hex window is looked up against moves that still open, except each
+// canonical link's own path token, which the owner binding judges. Gate off:
+// every moving page is a 404, so nothing is looked up.
 async function strayMovingTokenPresent(runs, hosts, conn = db) {
   if (!movingGateOn()) return false;
   const windows = new Set();
+  const bound = new Set();
   for (const raw of runs) {
     const run = raw.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '');
-    if (canonicalPortalToken(run, hosts, MOVING_PATH_RE, ANY_SCHEME)) continue;
+    const own = canonicalPortalToken(run, hosts, MOVING_PATH_RE, ANY_SCHEME);
+    if (own) bound.add(own.toLowerCase());
     const decoded = fullyDecoded(ownedHostStripped(run, hosts)).toLowerCase();
     for (const m of decoded.matchAll(/[a-f0-9]{48,}/g)) {
       for (let i = 0; i + 48 <= m[0].length; i += 1) windows.add(m[0].slice(i, i + 48));
     }
   }
-  const all = [...windows];
+  const all = [...windows].filter((w) => !bound.has(w));
   for (let i = 0; i < all.length; i += 500) {
     if (await conn('customer_moves').whereIn('token', all.slice(i, i + 500)).whereNot({ status: 'closed' }).first('id')) return true;
   }

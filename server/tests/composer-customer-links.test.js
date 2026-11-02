@@ -3567,6 +3567,19 @@ describe('moving page links (GATE_MOVING_FLOW): owned by the move\'s customer at
       .toMatch(/moving link outside the Waves portal address/);
   });
 
+  test('a canonical moving link carrying another live token in its query is refused; its own path token is the binder\'s', async () => {
+    const OTHER = 'cd'.repeat(24);
+    wireMoving();
+    expect((await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}?shared=${OTHER}`, '9415550100', { trustedCustomerId: null })).error)
+      .toMatch(/moving link outside the Waves portal address/);
+    expect(mockBuilders.customer_moves.whereIn).toHaveBeenCalledWith('token', [OTHER]);
+    // The plain canonical link: its own token is never a stray lookup.
+    wireMoving();
+    expect(await bearerLinkSendCheck(`Moving? portal.wavespestcontrol.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null }))
+      .toEqual({ ok: true, customerId: 'c1', moves: ['move-1'] });
+    expect(mockBuilders.customer_moves.whereIn).not.toHaveBeenCalled();
+  });
+
   test('a look-alike host whose token opens no move is not a Waves link and passes', async () => {
     wireMoving({ move: null });
     expect(await bearerLinkSendCheck(`Tips: https://example.com/moving/${MOVE_TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
