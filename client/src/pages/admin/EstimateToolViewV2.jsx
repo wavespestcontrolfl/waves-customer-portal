@@ -5690,7 +5690,7 @@ export default function EstimateToolViewV2({
                     <Button
                       variant="ghost"
                       size="sm"
-                      disabled={!savedId && !editMode?.id}
+                      disabled={(!savedId && !editMode?.id) || moveMode || !!editMoveEstimate}
                       onClick={() => addAnotherProperty({ address: composedAddress })}
                     >
                       Quote next
@@ -8588,7 +8588,8 @@ export default function EstimateToolViewV2({
                   : "Draft saved. It has not been sent."}
               </ActionFeedback>
             )}
-            {(savedId || editMode?.id) && (
+            {/* A new-home estimate is never part of a multi-property group (moving PR B1). */}
+            {(savedId || editMode?.id) && !moveMode && !editMoveEstimate && (
               <Button
                 variant="secondary"
                 size="md"

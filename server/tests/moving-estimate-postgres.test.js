@@ -251,6 +251,17 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       expect((await trx('customer_moves').where({ id: move.id }).first()).estimate_id).toBeNull();
     });
 
+    test('a new-home estimate is never a multi-property group anchor', async () => {
+      const move = await insertMove();
+      const { estimate } = await create(move);
+      await expect(Persistence.createOrReuseAdminEstimate({
+        database: trx,
+        body: body(move, { moveId: undefined, groupWithEstimateId: estimate.id, address: '9 Beach Lane, Venice, FL 34285' }),
+        technicianId: ADMIN.id, technician: ADMIN, recompute: NO_INPUTS,
+      })).rejects.toMatchObject({ statusCode: 400 });
+      expect((await trx('estimates').where({ id: estimate.id }).first('estimate_group_id')).estimate_group_id).toBeNull();
+    });
+
     test('a browser cannot invent a move stamp', async () => {
       const move = await insertMove();
       const { estimate } = await create(move, {

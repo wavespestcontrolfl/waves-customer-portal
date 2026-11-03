@@ -67,10 +67,19 @@ describe('new-home estimate setup-fee waiver in the builder', () => {
     expect(options.existingCustomerId).toBe('cust-1');
   });
 
+  it('a reopened move estimate offers no multi-property group action', async () => {
+    currentEdit = { ...editSource, moveEstimate: { moveId: 'move-1', moveOutDate: '2026-11-01', moveInDate: '2026-11-14' } };
+    renderEditor({ editEstimateId: 'est-move' });
+    await screen.findByTestId('move-estimate-edit-banner');
+    expect(screen.queryByRole('button', { name: 'Add another property for this customer' })).not.toBeInTheDocument();
+  });
+
   it('an ordinary reopened estimate sends neither field and shows no banner', async () => {
     renderEditor({ editEstimateId: 'est-move' });
     await screen.findByDisplayValue('QA Contact');
     expect(screen.queryByTestId('move-estimate-edit-banner')).toBeNull();
+    // The control for the move case above: an ordinary estimate keeps the group action.
+    expect(screen.getByRole('button', { name: 'Add another property for this customer' })).toBeInTheDocument();
     const options = await generate();
     expect(options).not.toHaveProperty('moveEstimateId');
     expect(options).not.toHaveProperty('moveId');

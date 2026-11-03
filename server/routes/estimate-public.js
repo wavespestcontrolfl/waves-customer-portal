@@ -12373,6 +12373,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.code = 'OFF_CUSTOMER_SURFACE';
           throw err;
         }
+        // Moving PR B1: a new-home estimate accepts only while its move still
+        // stands behind it, judged on the move row share-locked HERE, in the
+        // accept's own transaction, for every branch (the one-time accept
+        // skips the converter's own check). Stale = the view's generic 404.
+        if (freshLinkData?.move) {
+          try {
+            await require('../services/customer-moves').lockMoveForConversion(trx, freshLinkData);
+          } catch (moveErr) {
+            if (moveErr.code !== 'MOVE_ESTIMATE_STALE') throw moveErr;
+            const err = new Error('Estimate not found');
+            err.status = 404;
+            err.code = 'OFF_CUSTOMER_SURFACE';
+            throw err;
+          }
+        }
         // The call row is locked FOR UPDATE and HELD through the
         // acceptance write (codex P1, PR #3304 GH r6): an ordinary
         // SELECT would not serialize against the processor's concurrent

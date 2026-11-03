@@ -2479,7 +2479,12 @@ async function createOrReuseAdminEstimate({
     // and fail the anchor. Re-acquiring a held advisory xact lock is a no-op.
     const joining = { id: null, estimate_group_id: null };
     if (body.groupWithEstimateId) {
-      const anchorRow = await trx('estimates').where({ id: body.groupWithEstimateId }).first('estimate_group_id');
+      const anchorRow = await trx('estimates').where({ id: body.groupWithEstimateId }).first('estimate_group_id', 'estimate_data');
+      // Moving PR B1: a new-home estimate is never a multi-property group
+      // member, as the anchor either (the Multi-Home Discount rides groups).
+      if (parseStoredEstimateData(anchorRow?.estimate_data)?.move) {
+        throw errorWithStatus('A new-home estimate cannot be part of a multi-property group. Start a normal estimate for the other property.', 400);
+      }
       const anchorGroupId = anchorRow?.estimate_group_id || null;
       if (anchorGroupId) {
         await lockScheduledGroupGuardGroups(trx, joining, { ...writeFields, estimate_group_id: anchorGroupId });
