@@ -84,7 +84,7 @@ function installFetch(pageBody, extra = {}) {
     if (u.endsWith('/select-plan')) return extra.selectPlan ? extra.selectPlan(JSON.parse(opts.body)) : json({ success: true });
     if (u.endsWith('/complete')) return extra.complete ? extra.complete() : json({ success: true });
     if (u.endsWith('/accept-terms')) { accepted.push(JSON.parse(opts.body)); return extra.acceptTerms ? extra.acceptTerms(JSON.parse(opts.body)) : json({ success: true, recorded: true }); }
-    if (u.includes('/public/secure-card/')) return json(pageBody);
+    if (u.includes('/public/secure-card/')) return json(typeof pageBody === 'function' ? pageBody() : pageBody);
     throw new Error(`unexpected fetch ${u}`);
   });
   global.fetch = fetchMock;
@@ -170,6 +170,31 @@ describe.each([
     if (!handoff) {
       routerState.search = '';
       delete window.webkit;
+    }
+  });
+
+  it('a prepay chosen before the office marked the request asks for the terms before the pay link', async () => {
+    // The server withholds the pay link (payUrl null) until the terms are recorded.
+    const PREPAY = { ...RECURRING, state: 'prepay_selected' };
+    let page = { ...PREPAY, terms: TERMS, payUrl: null };
+    installFetch(() => page, {
+      acceptTerms: () => { page = { ...PREPAY, payUrl: 'https://pay.example.test/p/1' }; return json({ success: true, recorded: true }); },
+    });
+    render(<SecureAppointmentPage />);
+    const accept = await screen.findByRole('button', { name: 'Accept and continue' });
+    expect(accept).toBeDisabled();
+    expect(screen.queryByText('Pay your annual invoice')).toBeNull();
+    expect(screen.queryByTestId('handoff-prepay-qr')).toBeNull();
+    fireEvent.click(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.'));
+    await waitFor(() => expect(accept).toBeEnabled());
+    fireEvent.click(accept);
+    await waitFor(() => expect(accepted).toHaveLength(1));
+    expect(accepted[0]).toMatchObject({ terms_version: 'v2026-10', terms_scope: 'plan' });
+    if (handoff) {
+      expect(await screen.findByTestId('handoff-prepay-qr')).toBeInTheDocument();
+      expect(screen.queryByText('Pay your annual invoice')).toBeNull();
+    } else {
+      expect(await screen.findByText('Pay your annual invoice')).toHaveAttribute('href', 'https://pay.example.test/p/1');
     }
   });
 

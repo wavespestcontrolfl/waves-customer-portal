@@ -7720,15 +7720,17 @@ claim mechanics as security-critical.
 2026-11-02):** when staff open the in-person card step for a visit whose estimate
 they accepted but that records no acceptance terms, the visit's pending request is
 marked `appointment_card_requests.in_person_terms_required` (additive boolean, default
-false; texted requests are never marked). For a marked request that is `ready`, while
-the gate is live, the GET payload gains, on ANY device (the customer's own phone or
+false; texted requests are never marked). For a marked request that is `ready` or
+`prepay_selected`, while the gate is live, the GET payload gains, on ANY device (the customer's own phone or
 the owner's in hand-off mode; no query param, no sign-in), `terms: { estimateRef,
 version, scope, lines }` (`scope` = `'plan' | 'base'`; `lines` = the current terms for
 the estimate's scope, verbatim) until they are recorded, and `consumerNotice: { text }`
 when the accepted estimate needs the Florida consumer notice (`GATE_ESTIMATE_CONSUMER_NOTICE`
 live, a termite/WDO line, no signed notice on file; informational, the form is signed
 separately, no tick; independent of `terms`, which exclude termite/WDO estimates).
-No internal ids ride either key. Unmarked requests, a dark gate or nothing to show leave the
+While `terms` rides a `prepay_selected` payload, its `payUrl` is `null` (the customer may
+have chosen prepay before the request was marked; the pay link returns once the terms are
+recorded). No internal ids ride either key. Unmarked requests, a dark gate or nothing to show leave the
 payload byte-identical to before. `POST /api/public/secure-card/:token/accept-terms`
 `{ terms_version, terms_scope, consumer_notice_shown }` (same token contract, same
 privacy headers on every outcome: `Cache-Control: private, no-store`,
@@ -7742,7 +7744,9 @@ rate-review stamp for plan scope) with none of the accept's side effects; it is 
 attested version and scope are compared with the estimate's own under that lock:
 `409 { error: 'The terms changed. Reload this page to see them.', code: 'terms_changed' |
 'TERMS_VERSION_STALE' }`, nothing written; `409 consumer_notice_required` when the notice
-applies and was not shown; `409 request_closed` for a completed or closed request; an
+applies and was not shown; `409 request_closed` when the request (re-read under its row
+lock) is no longer pending or the visit no longer needs a card (the card save's own check:
+past, cancelled, unpriced, payer-covered); `503 try_again` when that check cannot run; an
 unknown token, an unmarked request, a standalone Auto Pay link or a dark gate are the same
 `404 { error: 'Not found' }`. ENFORCEMENT: while a marked request's terms are not recorded,
 `/select-plan` with `prepay_annual` and `/complete` (and the Stripe `setup_intent.succeeded`

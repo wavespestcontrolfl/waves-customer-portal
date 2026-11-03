@@ -4,8 +4,9 @@
  *   - markTermsRequired flags the visit's pending card request when its estimate still
  *     needs the acceptance terms (or the Florida notice).
  *   - buildTermsPayload adds `terms` / `consumerNotice` to GET /api/public/secure-card/:token
- *     for a flagged, ready request only, on any device. Everything else is the payload it
- *     always was.
+ *     for a flagged, ready or prepay_selected request only, on any device; a prepay_selected
+ *     page withholds its pay link until the terms are recorded. Everything else is the
+ *     payload it always was.
  *   - recordCardPageTerms stamps the SAME acceptance-terms fields the online accept stamps
  *     (method 'card_page_terms'), runs none of the accept's side effects, is idempotent.
  *   - assertTermsRecorded is the enforcement the card save and the prepay choice call.
@@ -24,6 +25,8 @@ jest.mock('../routes/estimate-public', () => mockRoute);
 const mockNotice = { consumerNoticeBlocksAccept: jest.fn(async () => false), HANDOFF_NOTICE_TEXT: 'Florida notice text.' };
 jest.mock('../services/estimate-consumer-notice', () => mockNotice);
 const mockAudit = jest.fn(async () => 'audit-1');
+const mockStillNeeded = jest.fn();
+jest.mock('../services/appointment-card-request', () => ({ secureVisitStillNeedsCard: (...a) => mockStillNeeded(...a) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudit(...a) }));
 
 const db = require('../models/db');
@@ -54,7 +57,7 @@ function makeBuilder(table) {
 beforeEach(() => {
   jest.clearAllMocks();
   rows = {
-    appointment_card_requests: { kind: 'visit', scheduled_service_id: 'visit-1', in_person_terms_required: true },
+    appointment_card_requests: { id: 'req-1', kind: 'visit', status: 'pending', customer_id: 'cust-1', scheduled_service_id: 'visit-1', in_person_terms_required: true },
     scheduled_services: { id: 'visit-1', source_estimate_id: 'est-1', recurring_parent_id: null },
     estimates: { ...ESTIMATE },
   };
@@ -66,6 +69,7 @@ beforeEach(() => {
   mockRoute.acceptanceTermsApplyTo.mockReturnValue(true);
   mockRoute.acceptanceTermsScopeFor.mockReturnValue('plan');
   mockNotice.consumerNoticeBlocksAccept.mockResolvedValue(false);
+  mockStillNeeded.mockResolvedValue({ ok: true });
   db.mockImplementation((table) => makeBuilder(table));
   const trxFn = (table) => { const q = makeBuilder(table); q.locked = true; return q; };
   trxFn.raw = (sql) => `RAW:${sql}`;
@@ -109,6 +113,23 @@ describe('buildTermsPayload (GET /api/public/secure-card/:token)', () => {
     mockGates.inPersonCardLive.mockReturnValue(false);
     await block();
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a prepay_selected page carries the terms and withholds its pay link until they are recorded', async () => {
+    // The customer chose prepay on their own phone before the office marked the request.
+    const result = await block({ state: 'prepay_selected', payUrl: 'https://portal.test/pay/inv-token' });
+    expect(result).toMatchObject({ terms: { estimateRef: 'EST-2026-0001', version: VERSION, scope: 'plan' }, payUrl: null });
+    // Once recorded nothing is added, so the page keeps the pay link it was built with.
+    rows.estimates = { ...ESTIMATE, terms_version: VERSION };
+    expect(await block({ state: 'prepay_selected', payUrl: 'https://portal.test/pay/inv-token' })).toBeNull();
+  });
+
+  test('a termite notice alone never withholds the pay link', async () => {
+    mockGates.estimateConsumerNoticeLive.mockReturnValue(true);
+    mockNotice.consumerNoticeBlocksAccept.mockResolvedValue(true);
+    mockRoute.acceptanceTermsApplyTo.mockReturnValue(false);
+    expect(await block({ state: 'prepay_selected', payUrl: 'https://portal.test/pay/inv-token' }))
+      .toEqual({ consumerNotice: { text: 'Florida notice text.' } });
   });
 
   test('a termite estimate\'s notice rides on its own; terms stay excluded', async () => {
@@ -274,6 +295,28 @@ describe('who may record: only a flagged, open request', () => {
 
   test('a completed or closed request is a 409 request_closed', async () => {
     expect(await run({ ...REQUEST, status: 'completed' })).toMatchObject({ ok: false, status: 409, code: 'request_closed' });
+    expect(writes).toEqual([]);
+  });
+
+  test('the request is re-read under the lock: completed meanwhile is a 409 and writes nothing', async () => {
+    rows.appointment_card_requests = { ...REQUEST, status: 'completed' };
+    expect(await run({ ...REQUEST })).toMatchObject({ ok: false, status: 409, code: 'request_closed' });
+    expect(writes).toEqual([]);
+    expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('a visit that closed after the page loaded (past, cancelled, unpriced, payer) records nothing', async () => {
+    mockStillNeeded.mockResolvedValue({ ok: false, code: 'no_longer_needed' });
+    expect(await run({ ...REQUEST })).toMatchObject({ ok: false, status: 409, code: 'request_closed' });
+    expect(writes).toEqual([]);
+    expect(mockAudit).not.toHaveBeenCalled();
+    // The same check the card save runs, on the locked request, inside the write transaction.
+    expect(mockStillNeeded).toHaveBeenCalledWith(expect.objectContaining({ id: 'req-1', status: 'pending' }), { database: expect.any(Function) });
+  });
+
+  test('a failed visit check is a retryable 503 and records nothing', async () => {
+    mockStillNeeded.mockResolvedValue({ ok: false, code: 'completion_failed' });
+    expect(await run({ ...REQUEST })).toMatchObject({ ok: false, status: 503, code: 'try_again' });
     expect(writes).toEqual([]);
   });
 });

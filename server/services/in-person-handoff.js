@@ -10,6 +10,8 @@
  *   buildTermsPayload      GET /api/public/secure-card/:token adds `terms` (the terms to
  *                          tick) and `consumerNotice` (the separate-signature Florida
  *                          note for a termite estimate, informational) for a marked row.
+ *                          A prepay_selected page also withholds its pay link until the
+ *                          terms are recorded.
  *   recordCardPageTerms    POST /api/public/secure-card/:token/accept-terms stamps the
  *                          SAME acceptance-terms fields an online accept stamps
  *                          (method 'card_page_terms') with none of the accept's side
@@ -34,6 +36,7 @@ const ACCEPTANCE_METHOD = 'card_page_terms';
 const refusal = (status, code, error) => ({ ok: false, status, code, error });
 const TERMS_CHANGED_MESSAGE = 'The terms changed. Reload this page to see them.';
 const TERMS_REQUIRED_MESSAGE = 'Please accept the estimate terms first.';
+const REQUEST_CLOSED_MESSAGE = 'This link is no longer open for changes. Refresh to see its current status.';
 
 // The estimate the visit was booked from (accept-on-book stamps source_estimate_id
 // on every row of the series); a later occurrence falls back to its series parent.
@@ -114,17 +117,25 @@ async function markTermsRequired(visitId) {
   return { marked: updated > 0 };
 }
 
+// Page states that can still save a card or pay: the terms ride on both.
+const TERMS_PAGE_STATES = new Set(['ready', 'prepay_selected']);
+
 // The `terms` and `consumerNotice` keys for GET /api/public/secure-card/:token, or
-// null. Only a ready page of a marked request, while the gate is live. `terms` leaves
-// once recorded.
+// null. Only a ready or prepay_selected page of a marked request, while the gate is
+// live. `terms` leaves once recorded. The customer may have chosen prepay on their own
+// phone before the office marked the request, so a prepay_selected page also withholds
+// its pay link (`payUrl: null`) while the terms are outstanding.
 async function buildTermsPayload({ token, data }) {
-  if (!data || data.state !== 'ready' || !featureGates.inPersonCardLive()) return null;
+  if (!data || !TERMS_PAGE_STATES.has(data.state) || !featureGates.inPersonCardLive()) return null;
   const request = await db('appointment_card_requests').where({ token }).first('kind', 'scheduled_service_id', 'in_person_terms_required');
   if (!request || request.kind === 'customer' || !request.scheduled_service_id || !request.in_person_terms_required) return null;
   const { estimate } = await linkedEstimateFor(request.scheduled_service_id);
   const context = await termsContextFor(estimate);
   const block = {};
-  if (context) block.terms = termsPayload(context);
+  if (context) {
+    block.terms = termsPayload(context);
+    if (data.state === 'prepay_selected') block.payUrl = null;
+  }
   if (await noticeAppliesFor(estimate)) block.consumerNotice = noticePayload();
   return Object.keys(block).length ? block : null;
 }
@@ -147,7 +158,7 @@ async function recordCardPageTerms({ request, termsVersion, termsScope, consumer
   if (!request || request.kind === 'customer' || !request.in_person_terms_required || !featureGates.inPersonCardLive()) {
     return refusal(404, 'not_found', 'Not found');
   }
-  if (request.status !== 'pending') return refusal(409, 'request_closed', 'This link is no longer open for changes. Refresh to see its current status.');
+  if (request.status !== 'pending') return refusal(409, 'request_closed', REQUEST_CLOSED_MESSAGE);
   const visitId = request.scheduled_service_id;
   if (termsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
     // Same words as a scope change: the app relays only the message, and the
@@ -169,6 +180,19 @@ async function recordCardPageTerms({ request, termsVersion, termsScope, consumer
     // landing first leaves exactly one record. The terms are judged on THIS row.
     const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!locked || locked.status !== 'accepted' || locked.terms_version) return false;
+    // The request and its visit, re-checked under lock: a page left open after the
+    // request completed, or after the visit closed (past, cancelled, unpriced, covered
+    // by a payer), records nothing. Same visit check the card save runs.
+    const lockedRequest = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first();
+    if (!lockedRequest || lockedRequest.status !== 'pending' || !lockedRequest.in_person_terms_required) {
+      return refusal(409, 'request_closed', REQUEST_CLOSED_MESSAGE);
+    }
+    const stillNeeded = await require('./appointment-card-request').secureVisitStillNeedsCard(lockedRequest, { database: trx });
+    if (!stillNeeded.ok) {
+      return stillNeeded.code === 'no_longer_needed'
+        ? refusal(409, 'request_closed', REQUEST_CLOSED_MESSAGE)
+        : refusal(503, 'try_again', 'We could not record your acceptance. Please try again.');
+    }
     const context = await termsContextFor(locked);
     if (!context) return refusal(409, 'terms_not_applicable', 'No terms are needed for this estimate.');
     if (context.scope !== shownScope) return refusal(409, 'terms_changed', TERMS_CHANGED_MESSAGE);

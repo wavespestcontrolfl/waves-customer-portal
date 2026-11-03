@@ -593,6 +593,20 @@ export default function SecureAppointmentPage() {
     }
   }, [planBusy, token, refresh, state, handoffMode, termsBlocking, terms, recordTerms, reopenTerms]);
 
+  // Book at the Table: the customer chose prepay before the office marked the request,
+  // so the server withholds the pay link until the estimate terms are recorded. Record
+  // them, then re-pull: the payload comes back with the pay link.
+  const acceptPrepayTerms = useCallback(async () => {
+    if (planBusy || termsBlocking) return;
+    setPlanBusy(true);
+    setError(null);
+    try {
+      if (await recordTerms()) await refresh();
+    } finally {
+      setPlanBusy(false);
+    }
+  }, [planBusy, termsBlocking, recordTerms, refresh]);
+
   const greeting = data?.firstName ? `${data.firstName}, you` : 'You';
   // Standalone Auto Pay setup link (GATE_AUTOPAY_SETUP_LINK): no visit,
   // no fee disclosure, no plan choice — the same capture with its own copy.
@@ -730,15 +744,45 @@ export default function SecureAppointmentPage() {
             </p>
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
-          {handoffMode ? (
+          {terms ? (
+            // Book at the Table: the estimate terms come before the pay link (the
+            // server sends no pay link until they are recorded).
+            <>
+              {termsNotice?.text ? (
+                <p role="note" data-testid="terms-notice" style={{ fontSize: 14, color: S.body, lineHeight: 1.5, margin: '14px 0 0' }}>
+                  {termsNotice.text}
+                </p>
+              ) : null}
+              <HandoffTermsBox terms={terms} checked={termsAccepted} onChange={setTermsAccepted} disabled={planBusy} />
+              <button
+                type="button"
+                onClick={acceptPrepayTerms}
+                disabled={planBusy || termsBlocking}
+                style={{ ...PRIMARY_CTA, marginTop: 16, opacity: planBusy || termsBlocking ? 0.55 : 1 }}
+              >
+                {planBusy ? 'Saving…' : 'Accept and continue'}
+              </button>
+              {termsChanged ? (
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  style={{ ...PRIMARY_CTA, marginTop: 12, background: '#FFFFFF', color: S.text, border: `1px solid ${S.border}` }}
+                >
+                  Reload
+                </button>
+              ) : null}
+            </>
+          ) : handoffMode ? (
             // Hand-off mode: no pay page on the owner's phone — the customer
             // scans the code and pays on their own phone.
             <HandoffPrepayQr url={secureLinkUrl} onBack={() => selectPlan('per_application')} busy={planBusy} />
           ) : (
             <>
-              <a href={data?.payUrl} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
-                Pay your annual invoice
-              </a>
+              {data?.payUrl ? (
+                <a href={data.payUrl} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+                  Pay your annual invoice
+                </a>
+              ) : null}
               {/* The card form is deliberately NOT rendered here: switching to
                   per-visit must first succeed server-side (it voids the pending
                   annual invoice and cancels its term). On success selectPlan

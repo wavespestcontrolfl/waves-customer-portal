@@ -4047,6 +4047,7 @@ module.exports = {
   isAppointmentCardRequestEnabled,
   isSecureCardLaneReady,
   loadSecureCardPageData,
+  secureVisitStillNeedsCard,
   completeSecureCardCapture,
   completeSecureCardCaptureFromWebhook,
   chargeAppointmentNoShowFee,
