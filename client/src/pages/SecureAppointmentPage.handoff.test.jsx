@@ -173,6 +173,15 @@ describe.each([
     }
   });
 
+  it('a prepay page shows the Florida note on its own (a termite estimate has no terms)', async () => {
+    installFetch({ ...RECURRING, state: 'prepay_selected', payUrl: 'https://pay.example.test/p/1', consumerNotice: { text: 'Florida notice text.' } });
+    render(<SecureAppointmentPage />);
+    expect(await screen.findByTestId('terms-notice')).toHaveTextContent('Florida notice text.');
+    expect(screen.queryByRole('button', { name: 'Accept and continue' })).toBeNull();
+    if (handoff) expect(await screen.findByTestId('handoff-prepay-qr')).toBeInTheDocument();
+    else expect(screen.getByText('Pay your annual invoice')).toHaveAttribute('href', 'https://pay.example.test/p/1');
+  });
+
   it('a prepay chosen before the office marked the request asks for the terms before the pay link', async () => {
     // The server withholds the pay link (payUrl null) until the terms are recorded.
     const PREPAY = { ...RECURRING, state: 'prepay_selected' };

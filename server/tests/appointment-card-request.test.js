@@ -1155,6 +1155,25 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockSavePaymentMethod).toHaveBeenCalled();
   });
 
+  test('a mark that lands after the pre-claim read fails the claim CAS: terms_required, nothing saved', async () => {
+    // The pre-claim reads see the row unmarked; the in-person route marks it before the
+    // claim. The claim's CAS carries the judged value, misses, and the re-read sees the mark.
+    mockTableHandlers.appointment_card_requests.first = (chain, ...cols) => ({
+      ...REQUEST, in_person_terms_required: cols.includes('in_person_terms_required'),
+    });
+    let claimWhere = null;
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => {
+      if (patch.status !== 'completing') return 1;
+      claimWhere = chain.calls.find((c) => c[0] === 'where')?.[1];
+      return 0;
+    };
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'terms_required' });
+    expect(claimWhere).toEqual({ id: 'req-1', status: 'pending', in_person_terms_required: false });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
+
   test('visit cancelled since page load → no_longer_needed, nothing saved', async () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });

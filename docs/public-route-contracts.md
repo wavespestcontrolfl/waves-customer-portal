@@ -7752,7 +7752,9 @@ unknown token, an unmarked request, a standalone Auto Pay link or a dark gate ar
 `/select-plan` with `prepay_annual` and `/complete` (and the Stripe `setup_intent.succeeded`
 backstop, which leaves the row pending) refuse with `409 { error: 'Please accept the
 estimate terms first.', code: 'terms_required' }` before any invoice is minted or card saved;
-`per_application` selection is not held. The acceptance copy-email sweep mails the copy
+`per_application` selection is not held. Both claims' compare-and-set also carry the marker
+the check judged, so a mark that lands mid-request fails the claim (`/complete`: 409
+`terms_required`; `/select-plan`: 409 `selection_conflict`, the page re-reads). The acceptance copy-email sweep mails the copy
 like an online accept. Hand-off mode itself (inside the Waves Admin app's isolated customer
 web view: URL `handoff=1` AND the `wavesCustomer` message handler) only changes the page: it
 hides every contact and outside link, never offers Apple Pay / Google Pay, and shows a QR

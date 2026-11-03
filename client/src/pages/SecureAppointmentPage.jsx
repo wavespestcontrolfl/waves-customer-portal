@@ -744,15 +744,16 @@ export default function SecureAppointmentPage() {
             </p>
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
+          {/* The Florida note stands on its own: a termite estimate has no terms. */}
+          {termsNotice?.text ? (
+            <p role="note" data-testid="terms-notice" style={{ fontSize: 14, color: S.body, lineHeight: 1.5, margin: '14px 0 0' }}>
+              {termsNotice.text}
+            </p>
+          ) : null}
           {terms ? (
             // Book at the Table: the estimate terms come before the pay link (the
             // server sends no pay link until they are recorded).
             <>
-              {termsNotice?.text ? (
-                <p role="note" data-testid="terms-notice" style={{ fontSize: 14, color: S.body, lineHeight: 1.5, margin: '14px 0 0' }}>
-                  {termsNotice.text}
-                </p>
-              ) : null}
               <HandoffTermsBox terms={terms} checked={termsAccepted} onChange={setTermsAccepted} disabled={planBusy} />
               <button
                 type="button"

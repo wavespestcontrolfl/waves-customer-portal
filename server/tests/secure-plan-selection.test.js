@@ -638,6 +638,15 @@ describe('selectSecurePlan — estimate terms ticked at the table (Book at the T
     expect(mockInvoiceCreate).toHaveBeenCalledTimes(1);
   });
 
+  test('the prepay CAS carries the terms marker the check judged: a mark landing mid-mint rolls it back', async () => {
+    // The check ran on an unmarked row; the in-person route marked it before the CAS.
+    setTables({ appointment_card_requests: { first: () => ({ ...pendingRequest }), update: (chain, patch) => (patch.selected_plan === 'prepay_annual' ? 0 : 1) } });
+    await expect(selectSecurePlan({ token: 'tok', plan: 'prepay_annual' })).rejects.toMatchObject({ code: 'selection_conflict' });
+    const cas = mockDbCalls.find((c) => c.table === 'appointment_card_requests'
+      && c.calls.some(([op, patch]) => op === 'update' && patch?.selected_plan === 'prepay_annual'));
+    expect(cas.calls.find(([op]) => op === 'where')[1]).toEqual({ id: 'r1', status: 'pending', in_person_terms_required: false });
+  });
+
   test('per_application is not held by the terms gate (the card save is, at /complete)', async () => {
     mockAssertTerms.mockResolvedValue({ ok: false, status: 409, code: 'terms_required' });
     await expect(selectSecurePlan({ token: 'tok', plan: 'per_application' })).resolves.toEqual({ ok: true, plan: 'per_application' });

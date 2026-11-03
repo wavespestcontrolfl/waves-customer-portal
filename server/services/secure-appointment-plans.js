@@ -1405,8 +1405,11 @@ async function selectSecurePlan({ token, plan }) {
       // The request row is the idempotency anchor: only the FIRST selection
       // lands; a concurrent winner makes this update match 0 rows and the
       // whole mint rolls back (the loser re-reads the winner's link below).
+      // Book at the Table: the terms marker the check above judged is part of the
+      // CAS, so a mark that landed since rolls the mint back (selection_conflict;
+      // the page re-reads and shows the terms).
       const stamped = await trx('appointment_card_requests')
-        .where({ id: request.id, status: 'pending' })
+        .where({ id: request.id, status: 'pending', in_person_terms_required: !!request.in_person_terms_required })
         .whereNull('prepay_invoice_id')
         .update({
           selected_plan: 'prepay_annual',
