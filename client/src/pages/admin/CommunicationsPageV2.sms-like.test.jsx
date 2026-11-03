@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
 
 // GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button"): the like button under
-// the customer's newest text, and like badges, in the Messages thread.
+// the customer's newest text, and like lines, in the Messages thread.
 vi.mock("react-router-dom", async (importOriginal) => ({ ...(await importOriginal()), useNavigate: () => vi.fn() }));
 
 const THUMB = "\u{1F44D}";
@@ -94,7 +94,7 @@ it("a failed like shows the server's reason and keeps the button", async () => {
   expect(likeButton()).toBeInTheDocument();
 });
 
-it("a customer like becomes a badge on our quoted text; one that matches nothing stays a bubble", async () => {
+it("a customer like becomes a labeled line on our quoted text; one that matches nothing stays a bubble", async () => {
   log.messages = [
     sms("r-2", "inbound", 'Liked "Something we never sent"', 4, fields({ customerReaction: { emoji: THUMB, removed: false, target: "Something we never sent" } })),
     sms("r-1", "inbound", 'Liked "Your technician arrives Tuesday."', 3, fields({ customerReaction: { emoji: THUMB, removed: false, target: "Your technician arrives Tuesday." } })),
@@ -103,10 +103,27 @@ it("a customer like becomes a badge on our quoted text; one that matches nothing
   await openThread('Liked "Something we never sent"');
 
   expect(document.getElementById("sms-message-r-1")).toBeNull();
-  expect(screen.getByTitle("The customer reacted to this text")).toHaveTextContent(THUMB);
+  expect(screen.getByTitle("The customer reacted to this text")).toHaveTextContent(`${THUMB} Liked \u00b7 11:03 AM`);
   expect(document.getElementById("sms-message-r-2")).toHaveTextContent('Liked "Something we never sent"');
   // The newest text is a reaction: no like button.
   expect(likeButton()).not.toBeInTheDocument();
+});
+
+it("a loud like (no customerReaction) stays a bubble; a like taken back removes its line", async () => {
+  const target = "Your technician arrives Tuesday.";
+  const reaction = (removed) => ({ emoji: THUMB, removed, target });
+  log.messages = [
+    sms("loud", "inbound", `Liked "${target}"`, 6, fields()),
+    sms("r-2", "inbound", `Removed a like from "${target}"`, 5, fields({ customerReaction: reaction(true) })),
+    sms("r-1", "inbound", `Liked "${target}"`, 3, fields({ customerReaction: reaction(false) })),
+    sms("out-1", "outbound", target, 2, fields()),
+  ];
+  await openThread(`Liked "${target}"`);
+
+  expect(document.getElementById("sms-message-loud")).toHaveTextContent(`Liked "${target}"`);
+  expect(document.getElementById("sms-message-r-1")).toBeNull();
+  expect(document.getElementById("sms-message-r-2")).toBeNull();
+  expect(screen.queryByTitle("The customer reacted to this text")).toBeNull();
 });
 
 it("keeps the like button through an Unanswered refresh that combines loaded pages", async () => {

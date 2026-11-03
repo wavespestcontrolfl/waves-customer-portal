@@ -2426,7 +2426,9 @@ router.get('/log', async (req, res, next) => {
         courtesyOnly,
         spamEnforced,
         ...(taggedKeys && contactKey && taggedKeys.has(contactKey) ? { senderSpamTagged: true } : {}),
-        ...officeLike.likeFieldsForClient({ on: likesOn, direction: m.direction, body: m.body, metadata: m.metadata }),
+        ...officeLike.likeFieldsForClient({
+          on: likesOn, direction: m.direction, body: m.body, metadata: m.metadata, messageType: m.message_type,
+        }),
         media: await signMediaForClient(m.media),
       };
     }));

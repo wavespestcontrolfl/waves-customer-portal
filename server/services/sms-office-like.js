@@ -31,6 +31,8 @@ const { normalizePhone } = require('../utils/phone');
 
 const OFFICE_LIKE_BODY = '\u{1F44D}';
 const OFFICE_LIKE_KEY = 'office_like';
+// The message_type the Twilio webhook stores a quiet reaction under.
+const QUIET_REACTION_MESSAGE_TYPE = 'sms_reaction';
 const NEWER_MESSAGE_REFUSAL = 'A newer text is in this thread. Only the newest customer text can get a like.';
 
 // GATE_SMS_LIKE at call time, read through the module object: suites that
@@ -192,12 +194,16 @@ function officeLikeForClient(metadata) {
 // On, a text carries the office's like on a customer text, a customer's like
 // (customerLikeReaction) on one of our texts, and whether it can get a like at
 // all (likeRefusal's per-text half; the inbox adds "newest in the thread").
-function likeFieldsForClient({ on, channel = 'sms', direction, body, metadata }) {
+// Only a quiet reaction (stored as 'sms_reaction': it raised no alert) is sent
+// as a customerReaction, so the thread folds it into a line on our text. A loud
+// one (an answer, a dislike; stored as an ordinary inbound text and alerted)
+// and a row with no message type stay a normal bubble.
+function likeFieldsForClient({ on, channel = 'sms', direction, body, metadata, messageType }) {
   if (!on || channel !== 'sms') return {};
   if (direction !== 'inbound') return { officeLike: null, customerReaction: null, likeable: false };
   return {
     officeLike: officeLikeForClient(metadata),
-    customerReaction: customerLikeReaction(body),
+    customerReaction: messageType === QUIET_REACTION_MESSAGE_TYPE ? customerLikeReaction(body) : null,
     likeable: !isSmsReaction(body),
   };
 }

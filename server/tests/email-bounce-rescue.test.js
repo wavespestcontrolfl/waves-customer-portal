@@ -559,3 +559,32 @@ describe('sendSuggestionEmail — always rings (admin-alerts-ring scope)', () =>
     }
   });
 });
+
+// Owner 2026-11-03: a hand-fixed email left this alert open with a stale guess. The alert now
+// names what admin-alert-relevance.js (class email_bounce_fix) needs to close it once fixed.
+describe('the alert names its bounced address, owner and field', () => {
+  beforeEach(() => { mockDeliverOpsDigest.mockClear(); });
+
+  test('a customer owner: its id and the field the address bounced from', async () => {
+    await rescue.sendSuggestionEmail({
+      rescueRowId: 'r1', bouncedEmail: 'm.sample@example.net', candidate: 'sample@example.net',
+      owner: { customer: { id: 'c1', first_name: 'M', last_name: 'Sample' }, lead: null, field: 'service_contact_email' },
+    });
+    expect(mockDeliverOpsDigest).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { doneWhen: 'bounced_email_replaced', bouncedEmail: 'm.sample@example.net', customerId: 'c1', ownerField: 'service_contact_email' },
+    }));
+  });
+
+  test('a lead owner by its id; an owner with no id names nothing, so the sweep never judges it', () => {
+    expect(rescue.bounceAlertMetadata({ bouncedEmail: 'x@example.net', owner: { customer: null, lead: { id: 'l1' }, field: 'email' } }))
+      .toEqual({ doneWhen: 'bounced_email_replaced', bouncedEmail: 'x@example.net', leadId: 'l1', ownerField: 'email' });
+    expect(rescue.bounceAlertMetadata({ bouncedEmail: 'x@example.net', owner: { lead: { first_name: 'A' } } })).toEqual({});
+  });
+
+  test('the sweep repeats this alert\'s doneWhen and email fields (the two files each hold them)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/admin-alert-relevance'), 'utf8');
+    expect(rescue.BOUNCE_ALERT_DONE_WHEN).toBe('bounced_email_replaced');
+    expect(src).toContain(`const BOUNCE_DONE_WHEN = '${rescue.BOUNCE_ALERT_DONE_WHEN}';`);
+    expect(src).toContain(`const BOUNCE_CUSTOMER_FIELDS = [${rescue.CUSTOMER_EMAIL_FIELDS.map((f) => `'${f}'`).join(', ')}];`);
+  });
+});

@@ -388,6 +388,7 @@ function mapCommsMessage(message, customer, twilioNumbers, likesOn = false) {
     contactPhone: message.contact_phone || customer.phone || null,
     ...require('./sms-office-like').likeFieldsForClient({
       on: likesOn, channel: message.channel, direction: message.direction, body: message.body, metadata: message.metadata,
+      messageType: message.message_type,
     }),
   };
 }

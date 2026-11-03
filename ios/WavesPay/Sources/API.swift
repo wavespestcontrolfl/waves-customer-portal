@@ -140,6 +140,55 @@ enum API {
         return r.secret
     }
 
+    // MARK: - Save a card (no charge)
+
+    // What POST /stripe/terminal/validate-save-card-handoff returns. The
+    // auth_token is the terminal token for the next two calls.
+    struct ValidatedSaveCard: Decodable {
+        let kind: String
+        let auth_token: String
+        let setup_intent_client_secret: String
+        let setup_intent_id: String
+    }
+
+    // POST /stripe/terminal/complete-setup.
+    struct SavedCard: Decodable {
+        let ok: Bool
+        let card: Card?
+
+        struct Card: Decodable {
+            let brand: String?
+            let last4: String?
+            let funding: String?
+
+            var detail: [String: Any] {
+                var d: [String: Any] = [:]
+                if let brand { d["brand"] = brand }
+                if let last4 { d["last4"] = last4 }
+                if let funding { d["funding"] = funding }
+                return d
+            }
+        }
+    }
+
+    static func validateSaveCardHandoff(token: String) async throws -> ValidatedSaveCard {
+        // Unauthenticated: the signed JWT IS the auth for this call.
+        return try await request("/stripe/terminal/validate-save-card-handoff", body: ["token": token], auth: false)
+    }
+
+    static func completeSetup(setupIntentId: String) async throws -> SavedCard {
+        return try await request("/stripe/terminal/complete-setup", body: ["setup_intent_id": setupIntentId], auth: true)
+    }
+
+    // The server's own `error` text from a { error, code } answer, for the
+    // save-card screens (the payment screens map some codes to payment words).
+    static func serverText(_ error: Error) -> String? {
+        guard case APIError.http(_, let body) = error else { return nil }
+        struct ServerError: Decodable { let error: String? }
+        let text = body.data(using: .utf8).flatMap { try? JSONDecoder().decode(ServerError.self, from: $0) }?.error
+        return text?.isEmpty == false ? text : nil
+    }
+
     // MARK: - Helpers
 
     private static func request<B: Encodable, R: Decodable>(

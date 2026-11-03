@@ -23,6 +23,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { soundForTrigger } = require('./alert-sounds');
 
 const TRIGGER_KEY = 'customer_missed_call';
 // call_log.metadata.missed_call_spam_wave values the bell stamps on a call whose push it quieted.
@@ -147,6 +148,7 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
           priority: trigger.priority,
           vibrate: wantsSound ? triggers.__private.PRIORITY_VIBRATE[trigger.priority] : [0],
           silent: !wantsSound,
+          ...(wantsSound && soundForTrigger(TRIGGER_KEY) ? { sound: soundForTrigger(TRIGGER_KEY) } : {}),
           renotify: true,
         };
       },
