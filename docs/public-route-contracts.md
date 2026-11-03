@@ -7084,6 +7084,19 @@ reused and reopened on a resubmit), an `activity_log` row and one admin
 alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
 receipt sentences. It changes no visit, price, property or primary address
 and sends nothing to a customer.
+Move pause (moving PR 2b, owner Q4, 2026-11-02): while `GATE_MOVING_PAUSE`
+is on (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the
+receipt of a submit with no checked address on file and a move-out date
+follows the customer's billing lane (`customer-moves.js` `pauseLane`): a
+customer billed per visit reads that the visits pause after the move-out
+date until the new address comes in, for up to 60 days; an annual-prepay or
+monthly member reads that we will contact them about the visits booked
+after that date; anyone else reads the plain no-address sentence. The GET
+payload, the `view` and every other answer are unchanged. The daily
+move-pause job (not a route) closes a paused move with still no address 60
+days after its move-out date (`closed_reason` `pause_expired`); from then on
+its token is the generic 404, like any closed move. Gate off: the plain
+no-address sentence, and no move closes this way.
 New-home estimates on the estimate routes (moving PR B1, owner 2026-11-02):
 `/estimate/:token` and its data, accept and decline routes,
 `/api/public/estimates/:token/find-slots`, `/available-slots`, `/reserve`,

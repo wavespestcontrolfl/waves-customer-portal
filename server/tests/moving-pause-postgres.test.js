@@ -1,7 +1,8 @@
 // Moving PR 2b against real PostgreSQL (one rolled-back transaction per test), dark behind
 // GATE_MOVING_PAUSE (owner Q4): the daily job's reminder text a week before move-out, the pause
-// of every plan at the house left the day after move-out (no customer text, no fee), the office
-// hand-offs, the move fence, the end after 60 days, and Apply move after a pause. Sends, charges
+// of every plan at the house left on the move-out day for the visits after it (no customer text,
+// no fee), the office hand-offs and their items written with the move change, the move fence,
+// the end after 60 days, the receipt's pause lane, and Apply move after a pause. Sends, charges
 // and texts nothing: the customer sender, the reminder sender and the admin bell writer are spies,
 // and the cancellation follow-through runs for real behind a call recorder. All names and
 // addresses are synthetic.
@@ -152,7 +153,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
   const moveRow = (id) => trx('customer_moves').where({ id }).first();
   const alertCalls = (kind) => Notifications.notifyAdmin.mock.calls.filter(([, , , opts]) => opts?.metadata?.kind === `moving_pause_${kind}`);
 
-  test('the day after move-out, every plan at the house left pauses quietly and the move is held 60 days', async () => {
+  test('after move-out, every plan at the house left pauses quietly and the move is held 60 days', async () => {
     const s = await seed();
     const result = await Moves.runMovePauseJob();
     expect(result).toMatchObject({ paused: 1, office: 0, busy: 0, failed: 0, ended: 0, reminded: 0 });
@@ -190,6 +191,8 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(title).toBe("Customers — check Pat Sample's old-house visits");
     expect(why).toBe('The plans paused after the move-out, but 2 visits are still booked at the old house.');
     expect(opts).toMatchObject({ bell: true, dedupeKey: `moving_pause_left_booked:${s.move.id}` });
+    // Written in the move change's own transaction (notifyAdmin's trx).
+    expect(opts.trx && opts.trx.isTransaction).toBe(true);
     expect(opts.detail).toContain('WDO Inspection');
     expect(opts.detail).toContain('Quarterly Pest Control Service');
 
@@ -200,8 +203,21 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(FollowThrough.runVisitCancellationFollowThrough).not.toHaveBeenCalled();
   });
 
-  test('nothing pauses before the day after move-out, for a move with an address, or with the gate off', async () => {
+  test('on the move-out day, the visits after it stop and that day\'s own visit stays', async () => {
     const s = await seed({ move: { move_out_date: day(0) } });
+    const today = await insertVisit({ scheduled_date: day(0), recurring_parent_id: s.pestRoot, recurring_pattern: 'quarterly', property_id: oldHouseId });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
+    expect(await statusOf(today)).toBe('pending');
+    expect(await statusOf(s.pestAfter1)).toBe('cancelled');
+    expect(await statusOf(s.lawnAfter)).toBe('cancelled');
+    // The open visit dated before the move-out is a visit before it, not one left booked after it.
+    expect(await statusOf(s.pestPastOpen)).toBe('pending');
+    const [[, , why]] = alertCalls('left_booked');
+    expect(why).toBe('The plans paused after the move-out, but 1 visit is still booked at the old house.');
+  });
+
+  test('nothing pauses before the move-out day, for a move with an address, or with the gate off', async () => {
+    const s = await seed({ move: { move_out_date: day(1) } });
     expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 0 });
     expect(await statusOf(s.pestAfter1)).toBe('pending');
 
@@ -243,7 +259,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(Sender.sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
-  test('no reminder on the submit day, more than 7 days ahead, or once an address is on file; a failed send is not retried', async () => {
+  test('no reminder on the submit day, more than 7 days ahead, with an address or for prepay; a failed send is not retried', async () => {
     const s = await seed({ move: { move_out_date: day(5), submitted_at: new Date() } });
     expect(await Moves.runMovePauseJob()).toMatchObject({ reminded: 0 });
     await trx('customer_moves').where({ id: s.move.id }).update({ submitted_at: DAYS_AGO_3(), move_out_date: day(8) });
@@ -255,6 +271,12 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(Sender.sendCustomerMessage).not.toHaveBeenCalled();
 
     await trx('customer_moves').where({ id: s.move.id }).update({ typed_address: null, normalized_address: null, address_verdict: null });
+    // The text says the visits pause: a customer the job hands to the office never gets it.
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'annual_prepay' });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ reminded: 0, reminderNotSent: 0 });
+    expect(Sender.sendCustomerMessage).not.toHaveBeenCalled();
+    expect((await moveRow(s.move.id)).pause_reminder_at).toBeNull();
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application' });
     Sender.sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'OPTED_OUT' });
     expect(await Moves.runMovePauseJob()).toMatchObject({ reminded: 0, reminderNotSent: 1 });
     expect((await moveRow(s.move.id)).pause_reminder_sent).toBe(false);
@@ -270,7 +292,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect((await moveRow(s.move.id)).pause_note).toContain('prepay for the year');
     const [[, title, why, opts]] = alertCalls('office');
     expect(title).toBe("Customers — pause Pat Sample's plan by hand");
-    expect(why).toMatch(/^Moved out .+ with no new address, and the automatic pause did not run\.$/);
+    expect(why).toMatch(/^Their move-out is .+ with no new address on file; the automatic pause did not run\.$/);
     expect(opts).toMatchObject({ bell: true, dedupeKey: `moving_pause_office:${s.move.id}` });
     expect(opts.detail).toContain('Pause their visits by hand.');
 
@@ -317,6 +339,42 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     const note = (await moveRow(s.move.id)).pause_note;
     expect(note).toMatch(/^Stopped: .+\. Not stopped: .+ changed while the pause was running\.$/);
     expect((await moveRow(s.move.id)).pause_state).toBe('office');
+  });
+
+  test('an office item that fails to write rolls back its move change, and the next run repeats the step', async () => {
+    const s = await seed();
+    // The pause's item for the visits left booked: the cancels stand, the mark rolls back.
+    Notifications.notifyAdmin.mockRejectedValueOnce(new Error('insert failed'));
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 0, failed: 1 });
+    expect(await statusOf(s.pestAfter1)).toBe('cancelled');
+    expect((await moveRow(s.move.id)).pause_state).toBeNull();
+    expect(await trx('activity_log').where({ customer_id: customerId, action: 'moving_paused' }).count({ n: '*' }).first()).toEqual({ n: '0' });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1, failed: 0 });
+    expect((await moveRow(s.move.id)).pause_state).toBe('paused');
+    expect(alertCalls('left_booked')).toHaveLength(2);
+
+    // The hand-off's item: nothing is recorded until the item is written.
+    await trx('customer_moves').where({ id: s.move.id }).update({ pause_state: null, paused_at: null, pause_ends_on: null });
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'annual_prepay' });
+    Notifications.notifyAdmin.mockRejectedValueOnce(new Error('insert failed'));
+    expect(await Moves.runMovePauseJob()).toMatchObject({ office: 0, failed: 1 });
+    expect((await moveRow(s.move.id)).pause_state).toBeNull();
+    expect(await Moves.runMovePauseJob()).toMatchObject({ office: 1 });
+    expect(alertCalls('office')).toHaveLength(2);
+    expect((await moveRow(s.move.id)).pause_state).toBe('office');
+  });
+
+  test('the submit names the pause lane for the receipt: per visit, office, no plan, gate off', async () => {
+    const s = await seed({ move: { move_out_date: null, submitted_at: null, status: 'open' } });
+    const submit = () => Moves.submitMove(s.move, { moveOutDate: day(5) });
+    expect((await submit()).pauseLane).toBe('auto');
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'annual_prepay' });
+    expect((await submit()).pauseLane).toBe('office');
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'one_time' });
+    expect((await submit()).pauseLane).toBeNull();
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application' });
+    process.env.GATE_MOVING_PAUSE = 'false';
+    expect((await submit()).pauseLane).toBeNull();
   });
 
   test('the pause waits for a running Apply or customer update on the same move (the move fence)', async () => {

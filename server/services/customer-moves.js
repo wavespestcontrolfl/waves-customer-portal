@@ -22,7 +22,7 @@
  *
  * PR 2b (GATE_MOVING_PAUSE) adds the move pause (owner Q4): a daily job sends
  * one reminder text a week before move-out to a customer with no new address,
- * pauses every plan at the house left the day after move-out, and closes the
+ * pauses every plan at the house left for the visits after move-out, and closes the
  * move when no address comes in within 60 days (see the Move pause section).
  *
  * Spend: Google Address Validation is a paid call. Each link allows at most
@@ -528,16 +528,26 @@ async function submitMove(move, { checkId = null, moveOutDate, moveInDate } = {}
   } catch (err) {
     logger.error(`[customer-moves] alert failed for move ${move.id} (${errCode(err)})`);
   }
-  return { move: saved.updated, request: saved.request, view: await publicMoveView(saved.updated) };
+  return {
+    move: saved.updated,
+    request: saved.request,
+    view: await publicMoveView(saved.updated),
+    pauseLane: await pauseLane(saved.updated),
+  };
 }
 
 // The fixed sentences the page shows after a submit. No model writes these.
-function receiptFor(view) {
+// `pauseLane` (pauseLane below): what the move pause will do for a move with
+// no new address, so the receipt never promises a pause the job will not run.
+function receiptFor(view, pauseLane = null) {
   const first = view.firstName;
   if (!view.addressOnFile) {
-    // The move pause (owner Q4) runs from the day after move-out.
-    if (movingPauseLive() && view.moveOutDate) {
-      return [`Thanks, ${first}. We have your move dates. We pause your visits after ${prettyDate(view.moveOutDate)} until we have your new address, for up to ${PAUSE_DAYS} days. When you know it, open this same link and add it.`];
+    const day = prettyDate(view.moveOutDate);
+    if (pauseLane === 'auto' && day) {
+      return [`Thanks, ${first}. We have your move dates. We pause your visits after ${day} until we have your new address, for up to ${PAUSE_DAYS} days. When you know it, open this same link and add it.`];
+    }
+    if (pauseLane === 'office' && day) {
+      return [`Thanks, ${first}. We have your move dates. We will contact you about the visits booked after ${day}. When you know your new address, open this same link and add it.`];
     }
     return [`Thanks, ${first}. We have your move dates. When you know your new address, open this same link and add it.`];
   }
@@ -1565,18 +1575,22 @@ async function applyAction(move, conn = db) {
 // runs three passes over submitted moves with no new address on file:
 //   1. reminder: move-out 0 to 7 days ahead, submitted before today: one text
 //      with the moving link, claimed before the send so it goes at most once;
-//   2. pause: from the day after move-out, every plan at the house left stops
-//      through Apply move's cancel (visits after move-out cancelled from today
-//      on, no customer text, no late-cancel fee), the termite pickup task
+//   2. pause: on the move-out day (or the first run after it), every plan at
+//      the house left stops through Apply move's cancel (visits after
+//      move-out cancelled from today on, no customer text, no late-cancel
+//      fee; the move-out day's own visit stays), the termite pickup task
 //      opens when Waves-owned stations are rented, and the move records the
 //      pause and its last day (move-out + 60). The move stays submitted: an
 //      address the customer adds later goes through the new-home estimate and
 //      Apply move, which then finds nothing left to stop;
 //   3. end: a pause past its last day with still no address closes the move
 //      (pause_expired), and the office gets one item.
-// Customers billed per visit only. Annual prepay and monthly members, and a
-// pause the job cannot run (a visit under way, a paid visit, a plan it cannot
-// tie to the house), go to the office once instead (pause_state 'office').
+// Customers billed per visit only (pauseLane 'auto'): only they get the
+// reminder and read the pause on the receipt. Annual prepay and monthly
+// members, and a pause the job cannot run (a visit under way, a paid visit, a
+// plan it cannot tie to the house), go to the office once instead
+// (pause_state 'office'). Every office item is written in the same
+// transaction as the move-row change it reports.
 // The job never cancels a one-time visit after move-out or an open visit
 // dated between move-out and today: the office gets those in one item.
 
@@ -1604,45 +1618,51 @@ function noAddressMoves() {
     .whereNotNull('move_out_date');
 }
 
+// The move pause runs on the move-out day itself, for the visits after it.
 function pauseDue(move, today) {
   return !!(move && move.status === 'submitted' && !move.normalized_address && !move.pause_state
-    && move.move_out_date && dateOnlyString(move.move_out_date) < today);
+    && move.move_out_date && dateOnlyString(move.move_out_date) <= today);
 }
 
-async function customerName(customerId) {
-  const row = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
-  return [row && row.first_name, row && row.last_name].filter(Boolean).join(' ').trim() || 'a customer';
+/**
+ * What the move pause will do for this move: 'auto' (the job pauses the
+ * plans: a customer billed per visit), 'office' (annual prepay, monthly or
+ * another billing plan: the office pauses by hand), or null (gate off, an
+ * address on file, no move-out date, no plan or no customer).
+ */
+async function pauseLane(move, conn = db) {
+  if (!movingPauseLive() || !move || move.normalized_address || !move.move_out_date) return null;
+  const block = await billingBlock(conn, move.customer_id);
+  if (!block) return 'auto';
+  return PAUSE_OFFICE_NOTES[block] ? 'office' : null;
 }
 
-// One office item per move and kind. It rings: the bell policy drops a plain
-// service row, and each kind asks the office to act on one customer. Raised
-// after the move row records what happened, so a failed write is logged and
-// never undoes or repeats the pause (the Moving card shows the state).
-async function raisePauseAlert(move, kind, { action, why, detail }) {
-  try {
-    const name = await customerName(move.customer_id);
-    const notif = await raiseAdminAlert('service', {
-      area: 'Customers',
-      action: cutAtWord(action(name), MAX_HEADLINE_CHARS - 'Customers — '.length),
-      why: cutAtWord(why, MAX_WHY_CHARS),
-      severity: 'needs-you',
-      link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
-      subject: { type: 'customer', id: move.customer_id },
-      doneWhen: 'move_handled',
-      who: 'person',
-    }, {
-      detail,
-      icon: '🚚',
-      bell: true,
-      dedupeKey: `moving_pause_${kind}:${move.id}`,
-      metadata: { customerId: move.customer_id, moveId: move.id, kind: `moving_pause_${kind}` },
-    });
-    if (!notif || notif.suppressed) {
-      logger.warn(`[customer-moves] ${kind} item for move ${move.id} did not persist (${(notif && notif.reason) || 'no row'})`);
-    }
-  } catch (err) {
-    logger.error(`[customer-moves] ${kind} item for move ${move.id} failed (${errCode(err)})`);
-  }
+// One office item per move and kind, written in the SAME transaction as the
+// move-row change it reports (notifyAdmin's `trx`): a failed write rolls the
+// change back and the next run does that step again, so an item is never
+// lost behind a recorded state. It rings: the bell policy drops a plain
+// service row, and each kind asks the office to act on one customer.
+async function raisePauseAlert(trx, move, kind, { action, why, detail }) {
+  const customer = await trx('customers').where({ id: move.customer_id }).first('first_name', 'last_name');
+  const name = [customer && customer.first_name, customer && customer.last_name].filter(Boolean).join(' ').trim() || 'a customer';
+  const notif = await raiseAdminAlert('service', {
+    area: 'Customers',
+    action: cutAtWord(action(name), MAX_HEADLINE_CHARS - 'Customers — '.length),
+    why: cutAtWord(why, MAX_WHY_CHARS),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
+    subject: { type: 'customer', id: move.customer_id },
+    doneWhen: 'move_handled',
+    who: 'person',
+  }, {
+    trx,
+    detail,
+    icon: '🚚',
+    bell: true,
+    dedupeKey: `moving_pause_${kind}:${move.id}`,
+    metadata: { customerId: move.customer_id, moveId: move.id, kind: `moving_pause_${kind}` },
+  });
+  if (!notif || notif.suppressed) throw new Error(`moving pause ${kind} item did not persist`);
 }
 
 // ── Pass 1: the reminder text ──
@@ -1678,8 +1698,11 @@ function reminderDue(query, today) {
 }
 
 // Claim, then send: a reminder that did not go out is never retried (one text
-// per move, owner Q4). The card shows whether it went.
+// per move, owner Q4). The card shows whether it went. Only a move the job
+// will pause gets it: the text says the visits pause.
 async function remindMove(moveId, { today, now }) {
+  const current = await db('customer_moves').where({ id: moveId }).first();
+  if ((await pauseLane(current)) !== 'auto') return 'skipped';
   const [move] = await reminderDue(noAddressMoves().where({ id: moveId }), today)
     .update({ pause_reminder_at: now, updated_at: now })
     .returning('*');
@@ -1732,28 +1755,31 @@ async function pausePlan(move, today) {
 // The office takes this pause, once: nothing more runs for it automatically.
 async function handPauseToOffice(move, note, { now, done = '', alert = true }) {
   const text = `${done}${note}`.trim();
-  const updated = await db('customer_moves')
-    .where({ id: move.id, status: 'submitted' })
-    .whereNull('pause_state')
-    .update({ pause_state: 'office', paused_at: now, pause_note: text.slice(0, 300), updated_at: now });
-  if (!updated) return 'not_due';
-  await db('activity_log').insert({
-    customer_id: move.customer_id,
-    action: 'moving_pause_office',
-    description: `Move pause left to the office: ${text}`,
-    metadata: JSON.stringify({ move_id: move.id }),
-  });
-  if (alert) {
-    await raisePauseAlert(move, 'office', {
-      action: (name) => `pause ${name}'s plan by hand`,
-      why: `Moved out ${prettyDate(dateOnlyString(move.move_out_date))} with no new address, and the automatic pause did not run.`,
-      detail: text,
+  return db.transaction(async (trx) => {
+    const updated = await trx('customer_moves')
+      .where({ id: move.id, status: 'submitted' })
+      .whereNull('pause_state')
+      .update({ pause_state: 'office', paused_at: now, pause_note: text.slice(0, 300), updated_at: now });
+    if (!updated) return 'not_due';
+    await trx('activity_log').insert({
+      customer_id: move.customer_id,
+      action: 'moving_pause_office',
+      description: `Move pause left to the office: ${text}`,
+      metadata: JSON.stringify({ move_id: move.id }),
     });
-  }
-  return 'office';
+    if (alert) {
+      await raisePauseAlert(trx, move, 'office', {
+        action: (name) => `pause ${name}'s plan by hand`,
+        why: `Their move-out is ${prettyDate(dateOnlyString(move.move_out_date))} with no new address on file; the automatic pause did not run.`,
+        detail: text,
+      });
+    }
+    return 'office';
+  });
 }
 
-// Records the pause and its last day, under the move's row lock.
+// Records the pause and its last day under the move's row lock, with the
+// office item for any visit the pause left booked at the old house.
 async function markPaused(move, plan, { now, summary }) {
   return db.transaction(async (trx) => {
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
@@ -1767,6 +1793,14 @@ async function markPaused(move, plan, { now, summary }) {
       description: summary,
       metadata: JSON.stringify({ move_id: move.id, from_property_id: plan.from.id, move_out_date: plan.moveOut }),
     });
+    const left = [...plan.oneOffs, ...plan.pastOpen];
+    if (left.length) {
+      await raisePauseAlert(trx, move, 'left_booked', {
+        action: (name) => `check ${name}'s old-house visits`,
+        why: `The plans paused after the move-out, but ${left.length} visit${left.length === 1 ? ' is' : 's are'} still booked at the old house.`,
+        detail: `Still booked at ${propertyLine(plan.from)}: ${left.map((v) => `${v.name} ${prettyDate(v.date)}`).join(', ')}. Cancel any that should not run.`,
+      });
+    }
     return true;
   });
 }
@@ -1813,17 +1847,6 @@ async function runPause(move, plan) {
   return progress;
 }
 
-// The visits the pause left booked at the old house, for the office.
-async function raiseLeftBookedAlert(move, plan) {
-  const left = [...plan.oneOffs, ...plan.pastOpen];
-  if (!left.length) return;
-  await raisePauseAlert(move, 'left_booked', {
-    action: (name) => `check ${name}'s old-house visits`,
-    why: `The plans paused after the move-out, but ${left.length} visit${left.length === 1 ? ' is' : 's are'} still booked at the old house.`,
-    detail: `Still booked at ${propertyLine(plan.from)}: ${left.map((v) => `${v.name} ${prettyDate(v.date)}`).join(', ')}. Cancel any that should not run.`,
-  });
-}
-
 /** Pause one move whose customer moved out with no new address. Returns its outcome. */
 async function pauseMove(moveId, { today, now }) {
   let release;
@@ -1857,7 +1880,6 @@ async function pauseMove(moveId, { today, now }) {
       progress.stationTask ? 'Termite station pickup task opened.' : '',
     ].join(' ').trim();
     if (!(await markPaused(move, plan, { now, summary }))) return 'not_due';
-    await raiseLeftBookedAlert(move, plan);
     logger.info(`[customer-moves] paused move ${moveId}: ${progress.plansStopped} plans, ${progress.visitsCancelled} visits`);
     return 'paused';
   } finally {
@@ -1868,7 +1890,7 @@ async function pauseMove(moveId, { today, now }) {
 async function pauseDueMoves({ today, now }) {
   const due = await noAddressMoves()
     .whereNull('pause_state')
-    .where('move_out_date', '<', today)
+    .where('move_out_date', '<=', today)
     .orderBy([{ column: 'move_out_date', order: 'asc' }, { column: 'id', order: 'asc' }])
     .limit(PAUSE_PASS_LIMIT)
     .select('id');
@@ -1909,17 +1931,18 @@ async function endPause(moveId, { today, now }) {
         description: `Move pause ended: no new address ${PAUSE_DAYS} days after the move-out on ${prettyDate(dateOnlyString(locked.move_out_date))}. The plans stay stopped.`,
         metadata: JSON.stringify({ move_id: locked.id }),
       });
+      await raisePauseAlert(trx, locked, 'ended', {
+        action: (name) => `close out ${name}'s move`,
+        why: `No new address ${PAUSE_DAYS} days after the move-out on ${prettyDate(dateOnlyString(locked.move_out_date))}, so their plans stay stopped.`,
+        detail: 'The moving link no longer opens. Call them, or end the account.',
+      });
       return locked;
     });
     if (!ended) return false;
+    // The moving office item: best effort, the Moving card shows the move closed.
     await require('./portal-inbox')
       .resolveRequestQuietly(ended.service_request_id, ended.customer_id, 'Move pause ended with no new address.', { notAfter: now, now })
       .catch((err) => logger.warn(`[customer-moves] office item close failed for move ${moveId} (${errCode(err)})`));
-    await raisePauseAlert(ended, 'ended', {
-      action: (name) => `close out ${name}'s move`,
-      why: `No new address ${PAUSE_DAYS} days after the move-out on ${prettyDate(dateOnlyString(ended.move_out_date))}, so their plans stay stopped.`,
-      detail: 'The moving link no longer opens. Call them, or end the account.',
-    });
     return true;
   } finally {
     await release();
