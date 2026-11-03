@@ -1605,12 +1605,6 @@ async function applyAction(move, conn = db) {
 const REMINDER_DAYS = 7;
 const PAUSE_PASS_LIMIT = 50;
 const REMINDER_TEMPLATE = 'moving_address_reminder';
-// Moves the job leaves alone with no office item, by billingBlock code: no
-// plan to pause, or no customer.
-const PAUSE_SKIP_NOTES = {
-  customer_gone: 'The customer record is not active.',
-  no_plan: 'They have no recurring plan to pause.',
-};
 // Why the office has a pause, by billingBlock code.
 const PAUSE_OFFICE_NOTES = {
   prepay: 'They prepay for the year, so the automatic pause skipped them. Pause their visits by hand.',
@@ -1787,9 +1781,9 @@ const pauseStarted = (move) => !!(move && move.paused_at && !move.pause_state);
 // The office item for a pause the office takes over.
 const officeItem = (note, why) => ({ action: (name) => `pause ${name}'s plan by hand`, why, detail: note });
 
-// The office takes a pause that never started (the customer's billing plan or
-// record rules it out), once: nothing more runs for it automatically.
-async function handPauseToOffice(move, note, { now, alert = true }) {
+// The office takes a pause that never started (annual prepay, monthly or
+// another billing plan), once: nothing more runs for it automatically.
+async function handPauseToOffice(move, note, { now }) {
   return db.transaction(async (trx) => {
     const updated = await trx('customer_moves')
       .where({ id: move.id, status: 'submitted' })
@@ -1803,10 +1797,8 @@ async function handPauseToOffice(move, note, { now, alert = true }) {
       description: `Move pause left to the office: ${note}`,
       metadata: JSON.stringify({ move_id: move.id }),
     });
-    if (alert) {
-      await raisePauseAlert(trx, move, 'office', officeItem(note,
-        `Their move-out is ${prettyDate(dateOnlyString(move.move_out_date))} with no new address on file; the automatic pause did not run.`));
-    }
+    await raisePauseAlert(trx, move, 'office', officeItem(note,
+      `Their move-out is ${prettyDate(dateOnlyString(move.move_out_date))} with no new address on file; the automatic pause did not run.`));
     return 'office';
   });
 }
@@ -1902,8 +1894,9 @@ async function runPause(move, plan) {
 // replays an earlier run's unfinished cancel follow-through. A move closed
 // since, or with a new move-out date, goes to the office (no more cancels);
 // a move with an address added since ends 'paused' (the new-home estimate
-// and Apply move take over). Otherwise every plan at the house left stops; a
-// refused cancel goes to the office with what already stopped.
+// and Apply move take over); a customer whose billing lane is no longer one
+// the pause handles goes to the office. Otherwise every plan at the house
+// left stops; a refused cancel goes to the office with what already stopped.
 async function finishPause(move, { today, now }) {
   const claimedMoveOut = plusDays(dateOnlyString(move.pause_ends_on), -PAUSE_DAYS);
   const facts = { status: move.status, moveOut: dateOnlyString(move.move_out_date) || null, hasAddress: !!move.normalized_address };
@@ -1921,6 +1914,14 @@ async function finishPause(move, { today, now }) {
       state: 'paused', now,
       summary: `The customer added the new address while the pause was running; the plans at the old house stay stopped after ${prettyDate(claimedMoveOut)}.`,
     });
+  }
+  // The billing lane again before any further cancel: a customer who became
+  // a monthly or prepay member (or lost their plan) since the claim goes to
+  // the office with what already stopped.
+  const block = await billingBlock(db, move.customer_id);
+  if (block) {
+    const note = PAUSE_OFFICE_NOTES[block] || 'Their account changed while the pause was running. Check the old-house visits by hand.';
+    return settlePause(move, facts, { state: 'office', note, why, now });
   }
   let plan;
   try {
@@ -1960,9 +1961,12 @@ async function pauseMove(moveId, { today, now }) {
     const move = await db('customer_moves').where({ id: moveId }).first();
     if (pauseStarted(move)) return await finishPause(move, { today, now });
     if (!pauseDue(move, today)) return 'not_due';
+    // The receipt's own rule (pauseLane): only 'auto' pauses; 'office' hands
+    // off once; anything else (no plan, no customer) is left alone, unmarked,
+    // exactly as the receipt promised nothing.
     const block = await billingBlock(db, move.customer_id);
-    if (PAUSE_SKIP_NOTES[block]) return await handPauseToOffice(move, PAUSE_SKIP_NOTES[block], { now, alert: false });
-    if (block) return await handPauseToOffice(move, PAUSE_OFFICE_NOTES[block] || PAUSE_OFFICE_NOTES.billing, { now });
+    if (PAUSE_OFFICE_NOTES[block]) return await handPauseToOffice(move, PAUSE_OFFICE_NOTES[block], { now });
+    if (block) return 'skipped';
     const claimed = await claimPause(move, today, now);
     return claimed ? await finishPause(claimed, { today, now }) : 'not_due';
   } finally {
@@ -1971,7 +1975,7 @@ async function pauseMove(moveId, { today, now }) {
 }
 
 async function pauseDueMoves({ today, now }) {
-  const out = { paused: 0, office: 0, busy: 0, failed: 0 };
+  const out = { paused: 0, office: 0, skipped: 0, busy: 0, failed: 0 };
   // Due moves, and every pause an earlier run started, whatever changed since.
   const due = db('customer_moves').whereNull('pause_state').where((q) => q
     .whereNotNull('paused_at')

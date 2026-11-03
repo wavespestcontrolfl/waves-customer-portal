@@ -519,12 +519,23 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(alertCalls('office')).toHaveLength(0);
   });
 
-  test('a customer with no recurring plan is left alone: no pause, no item, and the move never ends on its own', async () => {
-    const s = await seed({ customer: { billing_mode: 'one_time' } });
+  test('a started pause re-checks billing after the replay: a customer now on a monthly plan goes to the office', async () => {
+    const s = await seed();
+    await crashAfterPestCancel(s);
+    await trx('customers').where({ id: customerId }).update({ billing_mode: null, waveguard_tier: 'Gold', monthly_rate: 89 });
     expect(await Moves.runMovePauseJob()).toMatchObject({ office: 1, paused: 0 });
+    await expectPestReplayed(s);
+    expect(await statusOf(s.lawnAfter)).toBe('pending');
+    expect((await moveRow(s.move.id)).pause_note).toContain('monthly membership');
+  });
+
+  test('a customer with no recurring plan is left alone and unmarked, as the receipt promised nothing', async () => {
+    const s = await seed({ customer: { billing_mode: 'one_time' } });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ skipped: 1, office: 0, paused: 0 });
     expect(await statusOf(s.pestAfter1)).toBe('pending');
-    expect(await moveRow(s.move.id)).toMatchObject({ status: 'submitted', pause_state: 'office', pause_note: 'They have no recurring plan to pause.' });
+    expect(await moveRow(s.move.id)).toMatchObject({ status: 'submitted', pause_state: null, paused_at: null });
     expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
+    expect((await Moves.submitMove(await moveRow(s.move.id), { moveOutDate: MOVE_OUT })).pauseLane).toBeNull();
   });
 
   test('60 days after move-out with still no address, the move closes and the office gets one item', async () => {
