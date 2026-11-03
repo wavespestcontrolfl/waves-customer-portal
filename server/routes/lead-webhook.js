@@ -1007,6 +1007,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         zip: customer.zip,
         service: serviceInterest || null,
         leadId: leadRecord?.id || customer.id,
+        // The bell's Call (alert-call-button.js) dials the lead row's number, or this customer's when the lead row
+        // failed and leadId above is the customer id.
+        customerId: customer.id,
       });
       // suppressed counts as HANDLED (internal test customer) — the legacy
       // SMS fallback must not re-create the alert the suppression removed.
