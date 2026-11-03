@@ -21,8 +21,10 @@
  * occurrence cancel ('this_only') must NOT — the auto-extend refilling a
  * one-off cancelled slot is this lane's intended live-refill behaviour.
  *
- * Route internals are inline in the cancel branch, so the transaction/lock
- * shape is pinned with source guards (house style — see
+ * The cancel itself lives in services/recurring-series-cancel.js (moved out
+ * of the dispatch route so the moving flow's Apply move runs the same code);
+ * the route's branch picks the scope and calls it. The transaction/lock shape
+ * is pinned with source guards (house style — see
  * recurring-series-maintenance); the resulting no-op is proven behaviourally
  * against runRecurringSeriesMaintenance.
  */
@@ -40,8 +42,9 @@ const { runRecurringSeriesMaintenance } = require('../routes/admin-schedule')._t
 
 const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 const scheduleSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+const cancelSrc = fs.readFileSync(path.join(__dirname, '../services/recurring-series-cancel.js'), 'utf8');
 
-// Bounds of the scoped-cancel branch, so "inside the branch" is assertable.
+// Bounds of the route's scoped-cancel branch, so "inside the branch" is assertable.
 const BRANCH_START = dispatchSrc.indexOf(
   "if (toStatus === 'cancelled' && ['following', 'series'].includes(scope)) {",
 );
@@ -50,63 +53,75 @@ const BRANCH_START = dispatchSrc.indexOf(
 // anchor silently went -1, redding the suite for days while the guarded
 // behaviors were intact. `cancelledCount` is unique to this branch's return.
 const BRANCH_END = dispatchSrc.indexOf('cancelledCount: targets.length,');
+// Bounds of the shared cancel the branch calls.
+const CANCEL_START = cancelSrc.indexOf('async function cancelSeriesRemainder(');
+const CANCEL_END = cancelSrc.indexOf('module.exports');
 
 describe('scoped cancel stops the plan atomically (P0-2)', () => {
-  test('the branch bounds resolve (guards below are meaningful)', () => {
+  test('the branch and cancel bounds resolve (guards below are meaningful)', () => {
     expect(BRANCH_START).toBeGreaterThan(-1);
     expect(BRANCH_END).toBeGreaterThan(BRANCH_START);
+    expect(CANCEL_START).toBeGreaterThan(-1);
+    expect(CANCEL_END).toBeGreaterThan(CANCEL_START);
+    // The route's scoped branch is the one that runs the shared cancel.
+    const call = dispatchSrc.indexOf('await cancelSeriesRemainder({');
+    expect(call).toBeGreaterThan(BRANCH_START);
+    expect(call).toBeLessThan(BRANCH_END);
   });
 
   test('recurring_ongoing is cleared on the SAME trx as the row cancels, not a separate write', () => {
     // `trx(...)`, not `db(...)`: a separate statement could commit the
     // cancels and then fail, leaving the plan running.
-    const clear = dispatchSrc.indexOf("ongoingStopped = await trx('scheduled_services')");
-    expect(clear).toBeGreaterThan(BRANCH_START);
-    expect(clear).toBeLessThan(BRANCH_END);
-    expect(dispatchSrc).toContain('.update({ recurring_ongoing: false, updated_at: new Date() });');
+    const clear = cancelSrc.indexOf("ongoingStopped = await trx('scheduled_services')");
+    expect(clear).toBeGreaterThan(CANCEL_START);
+    expect(clear).toBeLessThan(CANCEL_END);
+    expect(cancelSrc).toContain('.update({ recurring_ongoing: false, updated_at: new Date() });');
     // Cleared series-wide — parent AND children carry the flag, and it is the
     // parent's value the maintenance reads.
-    expect(dispatchSrc.slice(clear, clear + 400))
+    expect(cancelSrc.slice(clear, clear + 400))
       .toContain("this.where('id', parentId).orWhere('recurring_parent_id', parentId);");
     // Only rows still flagged are touched, so the count reports a real stop.
-    expect(dispatchSrc.slice(clear, clear + 400)).toContain(".where('recurring_ongoing', true)");
+    expect(cancelSrc.slice(clear, clear + 400)).toContain(".where('recurring_ongoing', true)");
   });
 
   test('the clear runs AFTER the cancels and BEFORE the transaction commits', () => {
-    const cancels = dispatchSrc.indexOf('for (const target of targets) {', BRANCH_START);
-    const clear = dispatchSrc.indexOf("ongoingStopped = await trx('scheduled_services')");
-    const respond = dispatchSrc.indexOf('if (!targets.length) return res.status(409)', BRANCH_START);
+    const cancels = cancelSrc.indexOf('for (const target of targets) {', CANCEL_START);
+    const clear = cancelSrc.indexOf("ongoingStopped = await trx('scheduled_services')");
+    const respond = cancelSrc.indexOf("throw new SeriesCancelError(409, { error: 'No cancellable appointments found in this series' })", CANCEL_START);
     expect(cancels).toBeGreaterThan(-1);
     expect(clear).toBeGreaterThan(cancels);
     // The 409 (and every post-commit side effect) sits outside the trx block.
     expect(respond).toBeGreaterThan(clear);
   });
 
-  test('an empty cancel set writes nothing and still answers 409', () => {
+  test('an empty cancel set writes nothing and still answers 409 on the dispatch route', () => {
     // Selecting inside the trx moved the emptiness check inside it too; it
-    // must return before any write and surface the same 409 as before.
-    const empty = dispatchSrc.indexOf('if (!targets.length) return;', BRANCH_START);
+    // must return before any write and surface the same 409 as before. Only
+    // a caller that asks for allowEmpty (the moving flow: stop the plan with
+    // no visit left after move-out) gets past it; the route never does.
+    const empty = cancelSrc.indexOf('if (!targets.length && !allowEmpty) return;', CANCEL_START);
     expect(empty).toBeGreaterThan(-1);
-    expect(empty).toBeLessThan(dispatchSrc.indexOf("ongoingStopped = await trx('scheduled_services')"));
-    expect(dispatchSrc).toContain("return res.status(409).json({ error: 'No cancellable appointments found in this series' });");
+    expect(empty).toBeLessThan(cancelSrc.indexOf("ongoingStopped = await trx('scheduled_services')"));
+    expect(dispatchSrc.slice(BRANCH_START, BRANCH_END)).not.toContain('allowEmpty');
+    expect(dispatchSrc).toContain('if (err instanceof SeriesCancelError) return res.status(err.status).json(err.body);');
   });
 });
 
 describe('cancellation is serialized with series maintenance (P0-2b)', () => {
   test('the cancel trx takes the per-parent maintenance lock BEFORE selecting the cancel set', () => {
-    const lock = dispatchSrc.indexOf("['recurring-series-maintenance', String(parentId)],");
-    const select = dispatchSrc.indexOf('targets = await targetQuery');
-    expect(lock).toBeGreaterThan(BRANCH_START);
-    expect(lock).toBeLessThan(BRANCH_END);
+    const lock = cancelSrc.indexOf("['recurring-series-maintenance', String(parentId)],");
+    const select = cancelSrc.indexOf('targets = await targetQuery');
+    expect(lock).toBeGreaterThan(CANCEL_START);
+    expect(lock).toBeLessThan(CANCEL_END);
     // Locking after the select would let a completion's auto-extend commit a
     // fresh visit that this cancel never sees — a resurrected occurrence.
     expect(select).toBeGreaterThan(lock);
-    expect(dispatchSrc).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
+    expect(cancelSrc).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
   });
 
   test('cancel and maintenance derive the IDENTICAL lock key (else they never contend)', () => {
     const key = "['recurring-series-maintenance', String(parentId)],";
-    expect(dispatchSrc).toContain(key);
+    expect(cancelSrc).toContain(key);
     expect(scheduleSrc).toContain(key);
     // Same parent derivation on both sides.
     expect(dispatchSrc).toContain('const parentId = svc.recurring_parent_id || svc.id;');
@@ -131,10 +146,12 @@ describe('cancellation is serialized with series maintenance (P0-2b)', () => {
 });
 
 describe('single-occurrence cancels leave the plan running (classification)', () => {
-  test('the flag clear exists ONCE in admin-dispatch and only in the scoped branch', () => {
-    const occurrences = (dispatchSrc.match(/recurring_ongoing: false/g) || []).length;
-    expect(occurrences).toBe(1);
-    const only = dispatchSrc.indexOf('recurring_ongoing: false');
+  test('the flag clear exists ONCE, in the shared cancel, which admin-dispatch calls only from the scoped branch', () => {
+    expect((cancelSrc.match(/recurring_ongoing: false/g) || []).length).toBe(1);
+    expect((dispatchSrc.match(/recurring_ongoing: false/g) || []).length).toBe(0);
+    const calls = dispatchSrc.split('cancelSeriesRemainder(').length - 1;
+    expect(calls).toBe(1);
+    const only = dispatchSrc.indexOf('cancelSeriesRemainder(');
     expect(only).toBeGreaterThan(BRANCH_START);
     expect(only).toBeLessThan(BRANCH_END);
   });

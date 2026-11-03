@@ -304,3 +304,53 @@ describe('estimate converter: first service day', () => {
     });
   });
 });
+
+// Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate's first visit is
+// placed from the NEW address's city, never from the customer's old pin, and
+// never before the move-in date.
+describe('estimate converter: a new-home estimate\'s first service day', () => {
+  const { moveFirstServiceDate } = require('../services/estimate-converter');
+  const move = (patch = {}) => ({
+    id: 'move-1', move_in_date: '2026-10-09', normalized_address: { line1: '40 Sample Road', city: 'Venice', state: 'FL', zip: '34285' }, ...patch,
+  });
+
+  test('gate off: the old engine at the new city, first day on or after move-in', async () => {
+    mockOld.getAvailableSlots.mockResolvedValue({ zone: 'South', days: [{ date: '2026-10-07' }, { date: '2026-10-12' }] });
+    await expect(moveFirstServiceDate(move(), ESTIMATE_ID, { serviceKey: 'pest_control' })).resolves.toBe('2026-10-12');
+    expect(mockOld.getAvailableSlots).toHaveBeenCalledWith('Venice', ESTIMATE_ID);
+    expect(mockBook.bookableOfferCustomer).not.toHaveBeenCalled();
+  });
+
+  test('gate on + a funnel service: the website engine at the new city centre, never the customer\'s pin', async () => {
+    process.env[GATE] = 'true';
+    await expect(moveFirstServiceDate(move(), ESTIMATE_ID, { serviceKey: 'lawn_care' })).resolves.toBe('2026-10-09');
+    const [args] = mockBook.availabilityForPin.mock.calls[0];
+    expect(args).toMatchObject({ serviceKey: 'lawn_care', internal: true });
+    expect(Number.isFinite(args.lat) && Number.isFinite(args.lng)).toBe(true);
+    expect(mockBook.bookableOfferCustomer).not.toHaveBeenCalled();
+    expect(mockBook.customerBookingLocation).not.toHaveBeenCalled();
+  });
+
+  // A move-in date a month out, from today's clock: the fallback picks the later
+  // of today + 7 and move-in, so fixed dates would age out.
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const MOVE_IN = etDateString(addETDays(new Date(), 30));
+  const TWO_WEEKS_LATER = etDateString(addETDays(new Date(), 44));
+
+  test('no offered day on or after move-in: the move-in date itself, nudged off closed days', async () => {
+    mockOld.getAvailableSlots.mockResolvedValue({ zone: 'South', days: [{ date: '2026-10-07' }] });
+    const out = await moveFirstServiceDate(move({ move_in_date: MOVE_IN }), ESTIMATE_ID, {});
+    expect(out >= MOVE_IN && out <= TWO_WEEKS_LATER).toBe(true);
+  });
+
+  test('no move-in date: the first offered day', async () => {
+    mockOld.getAvailableSlots.mockResolvedValue({ zone: 'South', days: [{ date: '2026-10-07' }, { date: '2026-10-12' }] });
+    await expect(moveFirstServiceDate(move({ move_in_date: null }), ESTIMATE_ID, {})).resolves.toBe('2026-10-07');
+  });
+
+  test('the engine failing falls back without failing the acceptance', async () => {
+    mockOld.getAvailableSlots.mockRejectedValue(new Error('engine down'));
+    const out = await moveFirstServiceDate(move({ move_in_date: MOVE_IN }), ESTIMATE_ID, {});
+    expect(out >= MOVE_IN && out <= TWO_WEEKS_LATER).toBe(true);
+  });
+});

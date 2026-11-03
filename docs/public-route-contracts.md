@@ -7084,6 +7084,45 @@ reused and reopened on a resubmit), an `activity_log` row and one admin
 alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
 receipt sentences. It changes no visit, price, property or primary address
 and sends nothing to a customer.
+New-home estimates on the estimate routes (moving PR B1, owner 2026-11-02):
+`/estimate/:token` and its data, accept and decline routes,
+`/api/public/estimates/:token/find-slots`, `/available-slots`, `/reserve`,
+the first-visit routes and every other surface that reads the shared estimate
+guard (`utils/estimate-claim-sql.js` `callSideBlockForEstimateData`). An
+estimate whose `estimate_data.move` stamp exists (written only by a staff
+save that names a verified move while `GATE_MOVING_ESTIMATE` is on) leaves
+those surfaces exactly like a stale call link (the generic 404, accept and
+reserve refused) once its move is missing, closed for any reason but
+`applied`, links another estimate (a replacement supersedes it for good), or
+names another address than the stamped one (`services/customer-moves.js`
+`moveLinkBlock`, fail closed); this guard reads only stamped estimates, gate
+on or off. Every accept repeats the same rules at commit on the move row
+share-locked inside its own transaction (`lockMoveForConversion`): the public
+accept right after it locks the estimate row, for every branch including the
+one-time accept (stale = the generic 404), and the converter for every other
+accept path (409 `MOVE_ESTIMATE_STALE`, rolled back). A new-home estimate is
+never a multi-property group member or anchor. While `GATE_MOVING_ESTIMATE` is on
+(strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the submitted,
+in-area move linked to the estimate (`customer_moves.estimate_id`,
+`moveForEstimate`) limits the first visit: `available-slots` / `find-slots`
+offer no day before the move-in date (the rolling window opens on it, a
+seasonal selection at the first in-season day on or after it, and stops at
+the horizon `/reserve` accepts for that selection, the seasonal one included;
+an explicit window loses only the days before it; the offer cache keys on the
+date), `/reserve` refuses an earlier
+slot (`SLOT_UNAVAILABLE`), and the accept-time commit of a hold refuses one
+the move-in date has since passed (`SLOT_UNAVAILABLE`, the recoverable
+pick-another-time answer). Both booking checks lock and judge the stamped
+move inside the booking transaction whatever the gate (`slot-reservation.js`
+`moveBookingRefusal` through `lockMoveForConversion`: a stale move refuses
+like a stale call link), so a moving-page resubmit waits for that commit. The
+estimate page offers no existing visit before the move-in date for adoption
+(`findLinkedUpcomingAppointment`), and the accept compares an adopted
+(non-hold) visit's date with the move-in date read under its move lock (409
+`BEFORE_MOVE_IN`). An
+accept with no picked time places the first visit from the new city on or
+after the move-in date. Gate off: no move-in limit. No new route, token,
+header, rate limit or payload field.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

@@ -32,11 +32,57 @@ const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence, is
 const { findCustomersAtAddress } = require('./customer-address-match');
 const { computeMembershipContext, membershipScopeArgs } = require('./estimate-membership-context');
 const { autoFillSoldBy } = require('./estimate-sold-by');
+// Moving PR B1: the new-home estimate's move checks, waiver stamp and link.
+const Moves = require('./customer-moves');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
   err.statusCode = statusCode;
   return err;
+}
+
+// Moving PR B1: a new-home estimate stays bound to its move: never in a
+// multi-property group (the Multi-Home Discount rides groups), the move's own
+// customer, and the address the estimate was made for. A revise that changes
+// any of them is refused; staff start a normal estimate instead. Runs before
+// the dry-run preflight and again on the LOCKED row.
+async function assertMoveEstimateBinding(conn, row, writeFields) {
+  const stamp = parseStoredEstimateData(row && row.estimate_data)?.move;
+  if (!stamp?.moveId) return;
+  const nextGroupId = writeFields.estimate_group_id === undefined ? row.estimate_group_id : writeFields.estimate_group_id;
+  if (nextGroupId) {
+    const err = errorWithStatus('A new-home estimate cannot be part of a multi-property group. Start a normal estimate for the other property.', 400);
+    err.code = 'move_grouped';
+    throw err;
+  }
+  const move = await conn('customer_moves').where({ id: stamp.moveId }).first('id', 'customer_id', 'normalized_address');
+  if (!move) return;
+  const nextCustomerId = writeFields.customer_id === undefined ? row.customer_id : writeFields.customer_id;
+  const nextAddress = writeFields.address === undefined ? row.address : writeFields.address;
+  // The address the estimate was MADE for (its stamp), never the move's current
+  // one: after the customer resubmits another address, a revise must not carry
+  // this estimate there (the guard would still refuse it on the stamp).
+  const sameHouse = stamp.address ? Moves.sameAddressLine(nextAddress, stamp.address) : Moves.addressMatchesMove(nextAddress, move);
+  const refusal = String(nextCustomerId || '') !== String(move.customer_id)
+    ? ['move_customer_changed', 'This estimate is for this customer\'s move, so its customer cannot change. Start a normal estimate instead.']
+    : !sameHouse
+      && ['move_address_changed', 'This estimate is for the move to the new address, so its address cannot change. Start a normal estimate for another address.'];
+  if (!refusal) return;
+  const err = errorWithStatus(refusal[1], 409);
+  err.code = refusal[0];
+  throw err;
+}
+
+// A moving check's refusal (customer-moves MoveError) as this module's HTTP error.
+async function moveOrHttpError(check) {
+  try {
+    return await check();
+  } catch (err) {
+    if (!(err instanceof Moves.MoveError)) throw err;
+    const httpErr = errorWithStatus(err.message, err.status);
+    httpErr.code = err.code;
+    throw httpErr;
+  }
 }
 
 function normalizeLinkedLeadId(leadId) {
@@ -1975,6 +2021,7 @@ async function resolveEstimateWritePayload({
   storedEstimateData = null, // revise only: the ROW's parsed estimate_data (the offer-tier parked state lives there)
   requireLivePricing = false,
   priorPhone = null, // revise only: the ROW's customer_phone, so an unchanged echo is not re-judged
+  moveAllowed = false, // create only: the saver is an admin, so body.moveId may start a new-home estimate
 }) {
   // A US-shaped phone that can never be texted (area code or exchange starting
   // 0/1, Twilio 21211) is refused at save, not first at Send (codex #6028 P2).
@@ -2010,6 +2057,31 @@ async function resolveEstimateWritePayload({
     delete trustedEstimateData.groupLinkViewableThrough;
     delete trustedEstimateData.groupPublishedByEstimateId;
     delete trustedEstimateData.deliveryState;
+  }
+  // Moving PR B1 (GATE_MOVING_ESTIMATE): estimate_data.move and its setup-fee
+  // waiver are server-owned. A create naming a move (body.moveId) takes them
+  // from the verified move; a revise carries the stored row's; a browser copy
+  // is never read. Stamped BEFORE pricing, so the recompute drops the $99
+  // (owner Q2: waived for every move).
+  if (trustedEstimateData) delete trustedEstimateData.move;
+  const storedMove = storedEstimateData && storedEstimateData.move && typeof storedEstimateData.move === 'object'
+    ? storedEstimateData.move : null;
+  if (storedMove && trustedEstimateData) {
+    trustedEstimateData.move = storedMove;
+    trustedEstimateData.operatorPriceAdjustment = Moves.withMoveSetupWaiver(storedEstimateData.operatorPriceAdjustment);
+  } else if (body.moveId && !storedEstimateData) {
+    if (!moveAllowed) throw errorWithStatus('Only an admin can start a new-home estimate.', 403);
+    if (body.groupWithEstimateId || body.estimateGroupId) {
+      throw errorWithStatus('A new-home estimate cannot join a multi-property group.', 400);
+    }
+    if (!trustedEstimateData) throw errorWithStatus('A new-home estimate needs its estimate data.', 400);
+    const move = await moveOrHttpError(() => Moves.verifyMoveForEstimate({
+      moveId: body.moveId, customerId: body.customerId, address: body.address,
+    }, database));
+    // The estimate's own id rides in the stamp (the create inserts with it), so
+    // a later replacement estimate supersedes this one for good.
+    trustedEstimateData.move = { ...Moves.moveEstimateStamp(move), estimateId: body.clientDraftId || null };
+    trustedEstimateData.operatorPriceAdjustment = Moves.withMoveSetupWaiver(null);
   }
   // Before anything downstream derives from the payload (quoteRequired reads
   // proposal.enabled through buildPricingBundle): the browser's proposal is
@@ -2336,7 +2408,11 @@ async function createOrReuseAdminEstimate({
   dryRun = false,
   expectedEngineResultDigest = null,
   requireLivePricing = false,
+  moveAllowed = false,
 }) {
+  // Moving PR B1: a new-home estimate's id is fixed before pricing so its
+  // move stamp can name it (an admin's builder draft id, else a fresh one).
+  if (body.moveId && moveAllowed && !body.clientDraftId) body = { ...body, clientDraftId: crypto.randomUUID() };
   const clientDraftId = body.clientDraftId || null;
   if (clientDraftId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientDraftId)) {
     throw errorWithStatus('Invalid draft identifier.', 400);
@@ -2356,6 +2432,7 @@ async function createOrReuseAdminEstimate({
     recompute,
     pricingOut,
     requireLivePricing,
+    moveAllowed,
   });
   const expiresAt = estimateExpiresAt(now);
   const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
@@ -2389,6 +2466,13 @@ async function createOrReuseAdminEstimate({
         return { estimate: prior, reused: true, memberLinkageWarning };
       }
     }
+    // Moving PR B1: the move is re-checked under its row lock (a second live
+    // estimate for the same move is refused) and linked after the insert.
+    const lockedMove = body.moveId && moveAllowed
+      ? await moveOrHttpError(() => Moves.lockMoveForEstimate(trx, {
+        moveId: body.moveId, customerId: body.customerId, address: body.address,
+      }))
+      : null;
     let canReplaceLinkedEstimate = false;
 
     // "Add another property": the builder passes the FIRST estimate's id and
@@ -2407,7 +2491,12 @@ async function createOrReuseAdminEstimate({
     // and fail the anchor. Re-acquiring a held advisory xact lock is a no-op.
     const joining = { id: null, estimate_group_id: null };
     if (body.groupWithEstimateId) {
-      const anchorRow = await trx('estimates').where({ id: body.groupWithEstimateId }).first('estimate_group_id');
+      const anchorRow = await trx('estimates').where({ id: body.groupWithEstimateId }).first('estimate_group_id', 'estimate_data');
+      // Moving PR B1: a new-home estimate is never a multi-property group
+      // member, as the anchor either (the Multi-Home Discount rides groups).
+      if (parseStoredEstimateData(anchorRow?.estimate_data)?.move) {
+        throw errorWithStatus('A new-home estimate cannot be part of a multi-property group. Start a normal estimate for the other property.', 400);
+      }
       const anchorGroupId = anchorRow?.estimate_group_id || null;
       if (anchorGroupId) {
         await lockScheduledGroupGuardGroups(trx, joining, { ...writeFields, estimate_group_id: anchorGroupId });
@@ -2594,6 +2683,7 @@ async function createOrReuseAdminEstimate({
       token,
       expires_at: expiresAt,
     }).returning('*');
+    if (lockedMove) await Moves.attachMoveEstimate(trx, lockedMove.id, created.id);
 
     if (linkedLeadId) {
       await attachLeadToEstimate({
@@ -2933,7 +3023,9 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // the locked pass mirrors the locked row exactly, so a client payload can
 // neither drop it nor invent one.
 const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception'];
-const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception'];
+// move: a new-home estimate's link to its customer_moves row (moving PR B1),
+// stamped only by a create that names a verified move.
+const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception', 'move'];
 // The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
 // is carried across an ORDINARY revision (the public link and the send
 // guard both refuse while it stands), and cleared by the two staff actions
@@ -3224,6 +3316,8 @@ async function reviseAdminEstimate({
     pricingOut,
     requireLivePricing,
   });
+  // Moving PR B1: early answer for the dry-run preflight; the LOCKED pass below repeats it.
+  await assertMoveEstimateBinding(database, estimate, writeFields);
   // Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
   // pre-push codex P0): a delivered estimate's bearer link renders whatever
   // is stored, so a revision whose recompute fell back to the browser
@@ -3563,6 +3657,7 @@ async function reviseAdminEstimate({
     }
     await assertNoFallbackRevisionInScheduledGroup(trx, lockedPrior, writeFields);
     await assertLiveRowMayJoinGroup(trx, lockedPrior, writeFields);
+    await assertMoveEstimateBinding(trx, lockedPrior, writeFields);
     // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
     // r8c): writeFields.estimate_data was built from the pre-read
     // snapshot, so a delivery claim or an invalidation marker recorded
