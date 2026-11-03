@@ -1,11 +1,10 @@
 import SwiftUI
 
-// Tap to Pay in save-card mode: one SetupIntent, no charge. The page starts it
-// with { type: 'saveCard', requestId, deepLink } (deepLink =
-// wavespay://save-card?t=<jwt>) and the app answers once with a
-// 'wavesadmin:savecard' window event (see NativeBridge). This screen never
-// shows an amount or a surcharge, and the flow never calls /payment-intent or
-// /apply-surcharge.
+// Tap to Pay in save-card mode: one SetupIntent, no charge. The customer page
+// asks through CustomerHandoff, which gets the wavespay://save-card?t=<jwt> link
+// from the covered admin page and starts this flow (NativeBridge.runSaveCard).
+// This screen never shows an amount or a surcharge, and the flow never calls
+// /payment-intent or /apply-surcharge.
 @MainActor
 final class SaveCardSession: ObservableObject {
     enum Step: Equatable {

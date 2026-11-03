@@ -10,7 +10,10 @@ struct RootView: View {
     var body: some View {
         PortalView()
             .ignoresSafeArea()
-            .onAppear { TerminalManager.shared.configure() }
+            .onAppear {
+                TerminalManager.shared.configure()
+                HandoffRelaunchGate.presentIfLocked()
+            }
             // Back from another app: reconnect the reader if it dropped.
             .onChange(of: scenePhase) { phase in
                 if phase == .active { TerminalManager.shared.prepare() }

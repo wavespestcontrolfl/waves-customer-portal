@@ -15,6 +15,7 @@
 		71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1C0BACE518171B312F5B32 /* CollectView.swift */; };
 		800C9C346EA5B9DC2141B9F1 /* API.swift in Sources */ = {isa = PBXBuildFile; fileRef = 382A9E95DB30F9858AEDB35D /* API.swift */; };
 		86A9F2A9DFE673C345410D1D /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95C2F50AD33493B67A02D814 /* AppState.swift */; };
+		9137995403FD7C04808657CB /* CustomerHandoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EBAFFDC0A86E08B3B304779 /* CustomerHandoff.swift */; };
 		A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5879EC992F1DFD981D2C3E75 /* Brand.swift */; };
 		ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8F12848DEA3C5874AD613B3 /* PortalView.swift */; };
 		AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F257791252A99A45F5501281 /* TerminalManager.swift */; };
@@ -34,6 +35,7 @@
 		78F12D9BA969C35A97B98616 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		7B9C8A65672429056EA1F15D /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
 		7D1C0BACE518171B312F5B32 /* CollectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectView.swift; sourceTree = "<group>"; };
+		7EBAFFDC0A86E08B3B304779 /* CustomerHandoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomerHandoff.swift; sourceTree = "<group>"; };
 		95C2F50AD33493B67A02D814 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		B697676CF8667C3A3F9C626B /* StaffAlerts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaffAlerts.swift; sourceTree = "<group>"; };
 		C8F12848DEA3C5874AD613B3 /* PortalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalView.swift; sourceTree = "<group>"; };
@@ -71,6 +73,7 @@
 				95C2F50AD33493B67A02D814 /* AppState.swift */,
 				5879EC992F1DFD981D2C3E75 /* Brand.swift */,
 				7D1C0BACE518171B312F5B32 /* CollectView.swift */,
+				7EBAFFDC0A86E08B3B304779 /* CustomerHandoff.swift */,
 				426214503520A893CF644F6B /* HandoffLock.swift */,
 				F72AB2068EA75B9DD83360CE /* HowToTap.swift */,
 				78F12D9BA969C35A97B98616 /* Keychain.swift */,
@@ -182,6 +185,7 @@
 				86A9F2A9DFE673C345410D1D /* AppState.swift in Sources */,
 				A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */,
 				71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */,
+				9137995403FD7C04808657CB /* CustomerHandoff.swift in Sources */,
 				D309C1083AEC9EA81C1B28B4 /* HandoffLock.swift in Sources */,
 				693F6579FC4F8E662993A132 /* HowToTap.swift in Sources */,
 				E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */,

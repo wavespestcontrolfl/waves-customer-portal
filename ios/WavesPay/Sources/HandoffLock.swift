@@ -7,10 +7,11 @@ import UserNotifications
 // no banner and plays no sound, so the customer never reads a staff alert.
 // The alert still goes to the notification list and the badge.
 //
-// The page starts it with { type: 'handoffStart' } and ends it with
-// { type: 'handoffEnd' }, which asks for Face ID, Touch ID or the passcode.
-// Only a successful check ends it. The flag is saved in UserDefaults, so a
-// relaunch stays locked until an end succeeds. Sign-out clears it.
+// CustomerHandoff starts it when the customer view opens and ends it when the
+// owner hands back, which asks for Face ID, Touch ID or the passcode. Only a
+// successful check ends it. The flag is saved in UserDefaults, so a relaunch
+// finds it still on and HandoffRelaunchGate asks for the same check before the
+// admin screens show. Sign-out clears it.
 @MainActor
 final class HandoffLock {
     static let shared = HandoffLock()
