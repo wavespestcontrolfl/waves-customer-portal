@@ -1892,11 +1892,12 @@ async function runPause(move, plan) {
 
 // Runs a claimed pause to its end, whatever changed since the claim. It first
 // replays an earlier run's unfinished cancel follow-through. A move closed
-// since, or with a new move-out date, goes to the office (no more cancels);
-// a move with an address added since ends 'paused' (the new-home estimate
-// and Apply move take over); a customer whose billing lane is no longer one
-// the pause handles goes to the office. Otherwise every plan at the house
-// left stops; a refused cancel goes to the office with what already stopped.
+// since, or with a new move-out date, goes to the office (no more cancels),
+// and so does a customer whose billing lane is no longer one the pause
+// handles. Otherwise every plan at the house left stops, as the run that
+// claimed it would have done: an address the customer added since does not
+// stop it (the move-out passed; Apply move later finds nothing left to stop).
+// A refused cancel goes to the office with what already stopped.
 async function finishPause(move, { today, now }) {
   const claimedMoveOut = plusDays(dateOnlyString(move.pause_ends_on), -PAUSE_DAYS);
   const facts = { status: move.status, moveOut: dateOnlyString(move.move_out_date) || null, hasAddress: !!move.normalized_address };
@@ -1908,12 +1909,6 @@ async function finishPause(move, { today, now }) {
   if (facts.moveOut !== claimedMoveOut) {
     const note = `The customer changed the move-out date to ${prettyDate(facts.moveOut) || 'not known yet'} while the pause for ${prettyDate(claimedMoveOut)} was running. Check the old-house visits against the new date.`;
     return settlePause(move, facts, { state: 'office', note, why, now });
-  }
-  if (facts.hasAddress) {
-    return settlePause(move, facts, {
-      state: 'paused', now,
-      summary: `The customer added the new address while the pause was running; the plans at the old house stay stopped after ${prettyDate(claimedMoveOut)}.`,
-    });
   }
   // The billing lane again before any further cancel: a customer who became
   // a monthly or prepay member (or lost their plan) since the claim goes to

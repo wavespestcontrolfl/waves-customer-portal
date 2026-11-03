@@ -506,7 +506,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(why).toMatch(/^The automatic pause for the move-out on .+ did not finish; the item says what stopped\.$/);
   });
 
-  test('a started pause whose customer added the address meanwhile ends paused after the replay; Apply move takes the rest', async () => {
+  test('a started pause whose customer added the address meanwhile still stops every old-house plan', async () => {
     const s = await seed();
     await crashAfterPestCancel(s);
     await trx('customer_moves').where({ id: s.move.id }).update({
@@ -514,9 +514,11 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     });
     expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
     await expectPestReplayed(s);
-    expect(await statusOf(s.lawnAfter)).toBe('pending');
+    // The same end as a run that never stopped: the lawn plan stops too.
+    expect(await statusOf(s.lawnAfter)).toBe('cancelled');
     expect((await moveRow(s.move.id)).pause_state).toBe('paused');
     expect(alertCalls('office')).toHaveLength(0);
+    expect(alertCalls('left_booked')).toHaveLength(1);
   });
 
   test('a started pause re-checks billing after the replay: a customer now on a monthly plan goes to the office', async () => {
