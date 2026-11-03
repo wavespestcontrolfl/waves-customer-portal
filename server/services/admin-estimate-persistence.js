@@ -2066,7 +2066,9 @@ async function resolveEstimateWritePayload({
     const move = await moveOrHttpError(() => Moves.verifyMoveForEstimate({
       moveId: body.moveId, customerId: body.customerId, address: body.address,
     }, database));
-    trustedEstimateData.move = Moves.moveEstimateStamp(move);
+    // The estimate's own id rides in the stamp (the create inserts with it), so
+    // a later replacement estimate supersedes this one for good.
+    trustedEstimateData.move = { ...Moves.moveEstimateStamp(move), estimateId: body.clientDraftId || null };
     trustedEstimateData.operatorPriceAdjustment = Moves.withMoveSetupWaiver(null);
   }
   // Before anything downstream derives from the payload (quoteRequired reads
@@ -2396,6 +2398,9 @@ async function createOrReuseAdminEstimate({
   requireLivePricing = false,
   moveAllowed = false,
 }) {
+  // Moving PR B1: a new-home estimate's id is fixed before pricing so its
+  // move stamp can name it (an admin's builder draft id, else a fresh one).
+  if (body.moveId && moveAllowed && !body.clientDraftId) body = { ...body, clientDraftId: crypto.randomUUID() };
   const clientDraftId = body.clientDraftId || null;
   if (clientDraftId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientDraftId)) {
     throw errorWithStatus('Invalid draft identifier.', 400);

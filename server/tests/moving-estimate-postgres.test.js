@@ -217,9 +217,9 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       const spy = async (estimateData) => { seen.push(JSON.parse(JSON.stringify(estimateData))); return { recomputed: false, reason: 'NO_INPUTS' }; };
       const { estimate } = await create(move, {}, { recompute: spy });
       expect(seen[0].operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true, type: null, value: 0 });
-      expect(seen[0].move).toEqual({ moveId: move.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
+      expect(seen[0].move).toEqual({ moveId: move.id, estimateId: estimate.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
       const data = await storedData(estimate.id);
-      expect(data.move).toEqual({ moveId: move.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
+      expect(data.move).toEqual({ moveId: move.id, estimateId: estimate.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
       expect(data.operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true });
       expect(data.operatorPriceAdjustment.internalReason).toMatch(/moving/i);
       const after = await trx('customer_moves').where({ id: move.id }).first();
@@ -271,7 +271,7 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       });
       await revise({ notes: 'Revised' });
       const data = await storedData(estimate.id);
-      expect(data.move).toEqual({ moveId: move.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
+      expect(data.move).toEqual({ moveId: move.id, estimateId: estimate.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
       expect(data.operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true });
       await expect(revise({ address: '1 Old Street, Bradenton, FL 34205' })).rejects.toMatchObject({ statusCode: 409, code: 'move_address_changed' });
       const otherCustomer = crypto.randomUUID();
@@ -323,6 +323,25 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       });
       expect((await trx('customer_moves').where({ id: move.id }).first()).estimate_id).toBe(replacement.id);
       expect(await callSideBlockForEstimateData(trx, await storedData(replacement.id), { estimateStatus: 'draft' })).toBeNull();
+      // Back to the first address: the replaced estimate stays superseded for good.
+      await resubmit(move.id, '40 Sample Road, Venice FL 34285', '40 Sample Road');
+      expect(await callSideBlockForEstimateData(trx, await storedData(estimate.id))).toBe('move_superseded');
+      expect(await callSideBlockForEstimateData(trx, await storedData(replacement.id))).toBe('move_address_changed');
+    });
+
+    test('conversion share-locks the move and refuses a stale one inside the accept transaction', async () => {
+      const move = await insertMove();
+      const { estimate } = await create(move);
+      const data = await storedData(estimate.id);
+      await expect(Moves.lockMoveForConversion(trx, data)).resolves.toMatchObject({ id: move.id, move_in_date: '2026-11-25' });
+      expect(await Moves.lockMoveForConversion(trx, { inputs: {} })).toBeNull();
+      await trx('customer_moves').where({ id: move.id }).update({ status: 'closed', closed_reason: 'cancelled', closed_at: new Date() });
+      await expect(Moves.lockMoveForConversion(trx, data)).rejects.toMatchObject({ code: 'MOVE_ESTIMATE_STALE', reason: 'move_closed', statusCode: 409 });
+      // Gate off: no first-visit placement, but a stale move still refuses.
+      delete process.env.GATE_MOVING_ESTIMATE;
+      await expect(Moves.lockMoveForConversion(trx, data)).rejects.toMatchObject({ code: 'MOVE_ESTIMATE_STALE' });
+      await trx('customer_moves').where({ id: move.id }).update({ status: 'submitted', closed_reason: null, closed_at: null });
+      expect(await Moves.lockMoveForConversion(trx, data)).toBeNull();
     });
 
     test('a cancelled or missing move takes its estimate off the customer surface; an applied one does not', async () => {

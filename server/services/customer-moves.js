@@ -829,15 +829,54 @@ async function moveLinkBlock(conn, data) {
   try {
     const move = await conn('customer_moves')
       .where({ id: stamp.moveId })
-      .first('id', 'status', 'closed_reason', 'normalized_address');
-    if (!move) return 'move_missing';
-    if (move.status === 'closed' && move.closed_reason !== 'applied') return 'move_closed';
-    if (stamp.address && !addressMatchesMove(stamp.address, move)) return 'move_address_changed';
-    return null;
+      .first('id', 'status', 'closed_reason', 'estimate_id', 'normalized_address');
+    return moveRowBlock(move, stamp);
   } catch (err) {
     logger.warn(`[customer-moves] move link verdict failed (${errCode(err)})`);
     return 'move_verdict_unavailable';
   }
+}
+
+// The linkage rules both readers share: null while the move still stands
+// behind the stamped estimate. A replacement estimate (the move now links
+// another id) supersedes it for good, even if the address later returns.
+function moveRowBlock(move, stamp) {
+  if (!move) return 'move_missing';
+  if (move.status === 'closed' && move.closed_reason !== 'applied') return 'move_closed';
+  if (stamp.estimateId && String(move.estimate_id || '') !== String(stamp.estimateId)) return 'move_superseded';
+  if (stamp.address && !addressMatchesMove(stamp.address, move)) return 'move_address_changed';
+  return null;
+}
+
+/**
+ * The conversion-time check every accept path runs (estimate-converter
+ * convertEstimate, inside the accept's own transaction). Share-locks the
+ * stamped move, so a moving-page resubmit waits for this commit; a move that
+ * no longer stands behind the estimate refuses the conversion (409, rolled
+ * back with the accept). Returns the move that places the first visit (gate
+ * on, submitted, in area) or null.
+ */
+async function lockMoveForConversion(conn, data) {
+  const stamp = data && data.move;
+  if (!stamp || typeof stamp !== 'object' || !stamp.moveId) return null;
+  const move = await conn('customer_moves')
+    .where({ id: stamp.moveId })
+    .forShare()
+    .first('id', 'customer_id', 'status', 'closed_reason', 'estimate_id', 'address_verdict', 'normalized_address',
+      'move_out_date', 'move_in_date', 'from_property_id');
+  const block = moveRowBlock(move, stamp);
+  if (block) {
+    throw Object.assign(new Error('This estimate is no longer available.'), {
+      code: 'MOVE_ESTIMATE_STALE', reason: block, status: 409, statusCode: 409, isOperational: true,
+    });
+  }
+  if (!movingEstimateLive() || move.status !== 'submitted' || move.address_verdict !== 'in_area') return null;
+  return {
+    ...move,
+    normalized_address: parseJson(move.normalized_address),
+    move_out_date: dateOnlyString(move.move_out_date) || null,
+    move_in_date: dateOnlyString(move.move_in_date) || null,
+  };
 }
 
 // estimate_data.operatorPriceAdjustment with the setup fee waived. `base` is
@@ -901,6 +940,7 @@ module.exports = {
   attachMoveEstimate,
   moveEstimateStamp,
   moveLinkBlock,
+  lockMoveForConversion,
   withMoveSetupWaiver,
   moveForEstimate,
   _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert },

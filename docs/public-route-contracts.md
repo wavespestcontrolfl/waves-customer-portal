@@ -7093,9 +7093,13 @@ estimate whose `estimate_data.move` stamp exists (written only by a staff
 save that names a verified move while `GATE_MOVING_ESTIMATE` is on) leaves
 those surfaces exactly like a stale call link (the generic 404, accept and
 reserve refused) once its move is missing, closed for any reason but
-`applied`, or names another address than the stamped one
-(`services/customer-moves.js` `moveLinkBlock`, fail closed); this guard reads
-only stamped estimates, gate on or off. While `GATE_MOVING_ESTIMATE` is on
+`applied`, links another estimate (a replacement supersedes it for good), or
+names another address than the stamped one (`services/customer-moves.js`
+`moveLinkBlock`, fail closed); this guard reads only stamped estimates, gate
+on or off. Every accept path repeats the same rules at commit: the converter
+share-locks the stamped move inside the accept transaction
+(`lockMoveForConversion`) and a stale move refuses the accept (409
+`MOVE_ESTIMATE_STALE`, rolled back). While `GATE_MOVING_ESTIMATE` is on
 (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the submitted,
 in-area move linked to the estimate (`customer_moves.estimate_id`,
 `moveForEstimate`) limits the first visit: `available-slots` / `find-slots`

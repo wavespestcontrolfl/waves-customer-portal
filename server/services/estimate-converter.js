@@ -5734,6 +5734,10 @@ const EstimateConverter = {
     if (typeof estimateData === 'string') {
       try { estimateData = JSON.parse(estimateData); } catch { estimateData = {}; }
     }
+    // Moving PR B1: a new-home estimate converts only while its move still
+    // stands behind it. Every accept path converts inside its own
+    // transaction, so the move row is share-locked through that commit.
+    const newHomeMove = await require('./customer-moves').lockMoveForConversion(database, estimateData);
     estimateData = estimateData || {};
 
     // Termite annual-plan sign-before-pay (slice 3a restructure, owner
@@ -7844,7 +7848,6 @@ const EstimateConverter = {
     } else {
       const firstVisitServiceKey = multiTechTextTimesLive() ? funnelKeyForEstimate(recurringServicesForConversion, estimate) : '';
       // Moving PR B1: a new-home estimate places its first visit at the new house.
-      const newHomeMove = await require('./customer-moves').moveForEstimate(estimateId, database);
       const firstServiceDate = newHomeMove
         ? await moveFirstServiceDate(newHomeMove, estimateId, { serviceKey: firstVisitServiceKey })
         : await pickFirstServiceDate(customer, estimateId, { serviceKey: firstVisitServiceKey });
