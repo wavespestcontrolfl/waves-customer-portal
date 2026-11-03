@@ -7090,8 +7090,11 @@ receipt of a submit with no checked address on file and a move-out date
 follows the customer's billing lane (`customer-moves.js` `pauseLane`): a
 customer billed per visit reads that the visits pause after the move-out
 date until the new address comes in, for up to 60 days; an annual-prepay or
-monthly member reads that we will contact them about the visits booked
-after that date; anyone else reads the plain no-address sentence. The GET
+monthly member, or a move whose pause the office took over (a move-out
+date changed after the pause ran), reads that we will contact them about the
+visits booked after that date; anyone else reads the plain no-address
+sentence. A resubmit that changes the move-out date of a paused move hands
+it to the office (`pause_state` `office`) under the move's row lock. The GET
 payload, the `view` and every other answer are unchanged. The daily
 move-pause job (not a route) closes a paused move with still no address 60
 days after its move-out date (`closed_reason` `pause_expired`); from then on

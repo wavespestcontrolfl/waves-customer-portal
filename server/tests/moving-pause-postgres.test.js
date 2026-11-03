@@ -377,6 +377,43 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect((await submit()).pauseLane).toBeNull();
   });
 
+  test('a full page of moves the reminder skips never holds back an eligible one', async () => {
+    const s = await seed({ move: { move_out_date: day(5), id: 'ffffffff-ffff-4fff-bfff-ffffffffffff' } });
+    // 50 prepay movers (one page) whose ids sort before the eligible move's id.
+    for (let i = 0; i < 50; i += 1) {
+      const id = crypto.randomUUID();
+      await trx('customers').insert({ id, first_name: 'Sam', last_name: 'Sample', phone: '+19415550199', billing_mode: 'annual_prepay' });
+      await trx('customer_moves').insert({
+        id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, customer_id: id, token: crypto.randomBytes(24).toString('hex'),
+        status: 'submitted', move_out_date: day(5), submitted_at: DAYS_AGO_3(),
+      });
+    }
+    expect(await Moves.runMovePauseJob()).toMatchObject({ reminded: 1 });
+    expect(Sender.sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(Sender.sendCustomerMessage.mock.calls[0][0].metadata.move_id).toBe(s.move.id);
+  });
+
+  test('a new move-out date after the pause goes to the office, and the old deadline never closes the move', async () => {
+    const s = await seed();
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
+    // The same date again keeps the pause.
+    expect((await Moves.submitMove(await moveRow(s.move.id), { moveOutDate: MOVE_OUT })).pauseLane).toBe('auto');
+    expect((await moveRow(s.move.id)).pause_state).toBe('paused');
+
+    const saved = await Moves.submitMove(await moveRow(s.move.id), { moveOutDate: day(20) });
+    expect(saved.pauseLane).toBe('office');
+    const after = await moveRow(s.move.id);
+    expect(after).toMatchObject({ status: 'submitted', pause_state: 'office' });
+    expect(after.pause_note).toContain('changed the move-out date');
+    const item = await trx('service_requests').where({ id: requestId }).first('description');
+    expect(item.description).toContain('Check those visits against the new date.');
+
+    // Past the old deadline, the end pass leaves it alone: the office has it.
+    await trx('customer_moves').where({ id: s.move.id }).update({ pause_ends_on: day(-1) });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ ended: 0, paused: 0 });
+    expect((await moveRow(s.move.id)).status).toBe('submitted');
+  });
+
   test('the pause waits for a running Apply or customer update on the same move (the move fence)', async () => {
     const s = await seed();
     const other = await database.client.acquireConnection();

@@ -475,12 +475,19 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
     // customer's surfaces (moveLinkBlock) and frees the card for a new one.
     const estimateSuperseded = !!locked.estimate_id
       && !addressMatchesMove(addressLine(parseJson(locked.normalized_address)), { normalized_address: address.normalized });
+    // Moving PR 2b: the pause already stopped the old-house visits after the
+    // old move-out date. A new date leaves those visits to the office to
+    // check, and the job never ends this move on the old date's deadline.
+    const oldMoveOut = dateOnlyString(locked.move_out_date) || null;
+    const pauseNote = locked.pause_state === 'paused' && oldMoveOut !== moveOut
+      ? `The customer changed the move-out date to ${prettyDate(moveOut) || 'not known yet'} after the pause stopped the old-house visits after ${prettyDate(oldMoveOut)}. Check those visits against the new date.`
+      : null;
     const request = await writeOfficeItem(trx, {
       move: locked,
       subject,
-      description: estimateSuperseded
+      description: [estimateSuperseded
         ? `${description}\nThe new address is not the one the new-home estimate was made for, so the customer can no longer open or accept that estimate. Make a new estimate from the Moving card.`
-        : description,
+        : description, pauseNote].filter(Boolean).join('\n'),
       now,
     });
     const [updated] = await trx('customer_moves').where({ id: locked.id }).update({
@@ -493,6 +500,7 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
       status: 'submitted',
       submitted_at: now,
       updated_at: now,
+      ...(pauseNote ? { pause_state: 'office', pause_note: pauseNote.slice(0, 300) } : {}),
     }).returning('*');
     await trx('activity_log').insert({
       customer_id: locked.customer_id,
@@ -500,7 +508,7 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
       description: `Customer sent their move: ${subject.replace(/^Moving: /, '')}`,
       metadata: JSON.stringify({ move_id: locked.id, service_request_id: request.id, address_verdict: address.verdict || null }),
     });
-    return { updated, request, customer, description, address };
+    return { updated, request, customer, description: pauseNote ? `${description}\n${pauseNote}` : description, address };
   });
 }
 
@@ -1618,6 +1626,20 @@ function noAddressMoves() {
     .whereNotNull('move_out_date');
 }
 
+// Every move `query` matches, a page at a time in id order: a move a pass
+// leaves due (skipped, busy or failed) never holds back the ones after it.
+async function forEachMove(query, fn) {
+  let afterId = null;
+  for (;;) {
+    const page = query.clone();
+    if (afterId) page.where('id', '>', afterId);
+    const rows = await page.orderBy('id', 'asc').limit(PAUSE_PASS_LIMIT).select('id');
+    for (const { id } of rows) await fn(id);
+    if (rows.length < PAUSE_PASS_LIMIT) return;
+    afterId = rows[rows.length - 1].id;
+  }
+}
+
 // The move pause runs on the move-out day itself, for the visits after it.
 function pauseDue(move, today) {
   return !!(move && move.status === 'submitted' && !move.normalized_address && !move.pause_state
@@ -1632,6 +1654,8 @@ function pauseDue(move, today) {
  */
 async function pauseLane(move, conn = db) {
   if (!movingPauseLive() || !move || move.normalized_address || !move.move_out_date) return null;
+  // A pause that already ran (or went to the office) decides it.
+  if (move.pause_state) return move.pause_state === 'paused' ? 'auto' : 'office';
   const block = await billingBlock(conn, move.customer_id);
   if (!block) return 'auto';
   return PAUSE_OFFICE_NOTES[block] ? 'office' : null;
@@ -1716,12 +1740,8 @@ async function remindMove(moveId, { today, now }) {
 }
 
 async function sendDueMoveReminders({ today, now }) {
-  const due = await reminderDue(noAddressMoves(), today)
-    .orderBy([{ column: 'move_out_date', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .limit(PAUSE_PASS_LIMIT)
-    .select('id');
   const out = { reminded: 0, reminderNotSent: 0 };
-  for (const { id } of due) {
+  await forEachMove(reminderDue(noAddressMoves(), today), async (id) => {
     try {
       const outcome = await remindMove(id, { today, now });
       if (outcome === 'sent') out.reminded += 1;
@@ -1729,7 +1749,7 @@ async function sendDueMoveReminders({ today, now }) {
     } catch (err) {
       logger.error(`[customer-moves] reminder failed for move ${id} (${errCode(err)})`);
     }
-  }
+  });
   return out;
 }
 
@@ -1888,14 +1908,8 @@ async function pauseMove(moveId, { today, now }) {
 }
 
 async function pauseDueMoves({ today, now }) {
-  const due = await noAddressMoves()
-    .whereNull('pause_state')
-    .where('move_out_date', '<=', today)
-    .orderBy([{ column: 'move_out_date', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .limit(PAUSE_PASS_LIMIT)
-    .select('id');
   const out = { paused: 0, office: 0, busy: 0, failed: 0 };
-  for (const { id } of due) {
+  await forEachMove(noAddressMoves().whereNull('pause_state').where('move_out_date', '<=', today), async (id) => {
     try {
       const outcome = await pauseMove(id, { today, now });
       if (outcome in out) out[outcome] += 1;
@@ -1903,7 +1917,7 @@ async function pauseDueMoves({ today, now }) {
       out.failed += 1;
       logger.error(`[customer-moves] pause failed for move ${id} (${errCode(err)}); the next run resumes it`);
     }
-  }
+  });
   return out;
 }
 
@@ -1950,20 +1964,14 @@ async function endPause(moveId, { today, now }) {
 }
 
 async function endExpiredPauses({ today, now }) {
-  const due = await noAddressMoves()
-    .where({ pause_state: 'paused' })
-    .where('pause_ends_on', '<', today)
-    .orderBy([{ column: 'pause_ends_on', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .limit(PAUSE_PASS_LIMIT)
-    .select('id');
   const out = { ended: 0 };
-  for (const { id } of due) {
+  await forEachMove(noAddressMoves().where({ pause_state: 'paused' }).where('pause_ends_on', '<', today), async (id) => {
     try {
       if (await endPause(id, { today, now })) out.ended += 1;
     } catch (err) {
       logger.error(`[customer-moves] pause end failed for move ${id} (${errCode(err)}); retried on the next run`);
     }
-  }
+  });
   return out;
 }
 
