@@ -2330,6 +2330,13 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
   // sticky_window_disclosed=true from a disclosure shown only AFTER consent.
   const readyEcho = visitPriced && feeDisclosure
     ? { stickyDisclosureVersion: STICKY_DISCLOSURE_VERSION } : {};
+  // Book at the Table (GATE_TAP_SAVE_CARD): the hand-off page offers Tap to Pay only when
+  // this says the tap save is on, and echoes the fee NUMBER behind `cancelFeeNote` as the
+  // amount the customer was shown. Neither key rides while the gate is dark.
+  if (visitPriced && require('../config/feature-gates').isEnabled('tapSaveCard')) {
+    readyEcho.tapSaveCard = true;
+    if (feeDisclosure) readyEcho.cancelFeeAmount = feeDisclosure.feeAmount;
+  }
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
   // already succeeded and the page POST or webhook holds the completion

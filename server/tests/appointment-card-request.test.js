@@ -1928,6 +1928,33 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect('stickyDisclosureVersion' in closed).toBe(false);
   });
 
+  test('Tap to Pay: the ready payload carries tapSaveCard and the fee number only while GATE_TAP_SAVE_CARD is on', async () => {
+    // The hand-off page offers the tap only on this flag, and posts cancelFeeAmount as the
+    // fee the customer was shown; a dark gate leaves the payload byte-identical.
+    const featureGates = require('../config/feature-gates');
+    const dark = await loadSecureCardPageData(REQUEST.token);
+    expect('tapSaveCard' in dark).toBe(false);
+    expect('cancelFeeAmount' in dark).toBe(false);
+
+    const before = featureGates.gates.tapSaveCard;
+    featureGates.gates.tapSaveCard = true;
+    try {
+      const on = await loadSecureCardPageData(REQUEST.token);
+      expect(on.state).toBe('ready');
+      expect(on.tapSaveCard).toBe(true);
+      expect(typeof on.cancelFeeAmount).toBe('number');
+      expect(on.cancelFeeNote).toContain(`$${on.cancelFeeAmount}`);
+
+      mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completed', updated_at: new Date() });
+      const secured = await loadSecureCardPageData(REQUEST.token);
+      expect(secured.state).toBe('secured');
+      expect('tapSaveCard' in secured).toBe(false);
+      expect('cancelFeeAmount' in secured).toBe(false);
+    } finally {
+      featureGates.gates.tapSaveCard = before;
+    }
+  });
+
   test('cancelled or past visit → closed (no intent minted)', async () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
     const res = await loadSecureCardPageData(REQUEST.token);
