@@ -169,6 +169,7 @@ jest.setTimeout(30000);
       renotify: true,
       priority: 'high',
       silent: false,
+      sound: 'waves-missed-call.caf',
     });
     const after = await stored(row);
     expect(new Date(after.metadata.repushed_at).toISOString()).toBe(NOW.toISOString());
@@ -177,6 +178,15 @@ jest.setTimeout(30000);
     expect(after.read_at).toBeNull();
     expect(after.done_at).toBeNull();
     expect(Number((await database('notifications').count('* as n').first()).n)).toBe(1);
+  });
+
+  test('the re-push names no sound file when the admin turned Sound off', async () => {
+    await database('notification_preferences').insert({ id: randomUUID(), admin_user_id: adminId, trigger_key: 'customer_missed_call', push_enabled: true, sound_enabled: false });
+    await bell(31);
+    expect(await run()).toBe(1);
+    const push = PushService.sendToAdminUsers.mock.calls[0][1](adminId);
+    expect(push).toMatchObject({ silent: true });
+    expect(push).not.toHaveProperty('sound');
   });
 
   test('never twice: later ticks and an overlapping sweep leave it alone', async () => {
