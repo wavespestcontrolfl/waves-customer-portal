@@ -163,6 +163,16 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       expect(await Moves.newHomeAction(move)).toMatchObject({ action: 'blocked', reason: Moves.NEW_HOME_REFUSALS.monthly });
     });
 
+    test('the billing code\'s own lane decides: a legacy row with no mode, a real tier and a monthly rate is a monthly member', async () => {
+      const move = await insertMove();
+      await trx('customers').where({ id: customerId }).update({ billing_mode: null, waveguard_tier: 'Gold', monthly_rate: 60 });
+      expect(await Moves.newHomeAction(move)).toMatchObject({ action: 'blocked', reason: Moves.NEW_HOME_REFUSALS.monthly });
+      await trx('customers').where({ id: customerId }).update({ waveguard_tier: null });
+      expect(await Moves.newHomeAction(move)).toMatchObject({ action: 'start' });
+      await trx('customers').where({ id: customerId }).update({ billing_mode: 'one_time' });
+      expect(await Moves.newHomeAction(move)).toMatchObject({ action: 'blocked', reason: Moves.NEW_HOME_REFUSALS.no_plan });
+    });
+
     test('a live prepaid visit refuses it even when the billing mode says per visit', async () => {
       const move = await insertMove();
       const [{ id: termId }] = await trx('annual_prepay_terms').insert({
@@ -370,6 +380,20 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       expect(await callSideBlockForEstimateData(trx, { inputs: {} })).toBeNull();
     });
 
+    test('after a resubmit, a revise cannot carry the old estimate to the new address; the card offers a new one', async () => {
+      const move = await insertMove();
+      const { estimate } = await create(move);
+      const moved = await resubmit(move.id, '52 Other Lane, Venice FL 34285', '52 Other Lane');
+      await expect(Persistence.reviseAdminEstimate({
+        database: trx, estimateId: estimate.id, technicianId: ADMIN.id, technician: ADMIN, recompute: NO_INPUTS,
+        body: body(move, {
+          moveId: undefined, address: '52 Other Lane, Venice, FL 34285',
+          estimateData: { inputs: { address: '52 Other Lane, Venice, FL 34285', svcPest: true }, result: { total: 60 } },
+        }),
+      })).rejects.toMatchObject({ statusCode: 409, code: 'move_address_changed' });
+      expect(await Moves.newHomeAction(moved)).toEqual({ action: 'start', estimateId: null, reason: null });
+    });
+
     test('an out-of-area move steers no estimate', async () => {
       const move = await insertMove();
       const { estimate } = await create(move);
@@ -409,6 +433,24 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       await insertMove({ from_property_id: oldHouseId });
       delete process.env.GATE_MOVING_ESTIMATE;
       expect(await Linkage.refreshHasMultiHome(customerId, trx)).toBe(true);
+    });
+
+    test('a new-home estimate adopts no visit before the move-in date', async () => {
+      const { findLinkedUpcomingAppointment } = require('../routes/estimate-public');
+      const move = await insertMove({ move_in_date: '2099-03-10' });
+      const { estimate } = await create(move);
+      const row = await trx('estimates').where({ id: estimate.id }).first();
+      const [{ id: early }] = await trx('scheduled_services').insert({
+        customer_id: customerId, source_estimate_id: estimate.id, scheduled_date: '2099-03-01', service_type: 'Quarterly Pest Control Service', status: 'pending',
+      }).returning('id');
+      expect(await findLinkedUpcomingAppointment(row, null, { database: trx })).toBeNull();
+      const [{ id: onTime }] = await trx('scheduled_services').insert({
+        customer_id: customerId, source_estimate_id: estimate.id, scheduled_date: '2099-03-12', service_type: 'Quarterly Pest Control Service', status: 'pending',
+      }).returning('id');
+      expect((await findLinkedUpcomingAppointment(row, null, { database: trx }))?.id).toBe(onTime);
+      // Gate off: the move-in floor does not apply.
+      delete process.env.GATE_MOVING_ESTIMATE;
+      expect((await findLinkedUpcomingAppointment(row, null, { database: trx }))?.id).toBe(early);
     });
 
     test('moveForEstimate finds the submitted move by its estimate, with calendar dates', async () => {

@@ -593,7 +593,8 @@ async function recentMoves(customerId, limit = 5) {
 // refused here.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NEW_HOME_BILLING_MODES = new Set(['per_application', 'per_visit', '']);
+// The billing lanes a new-home estimate serves (billing-lane.js resolveBillingLane).
+const NEW_HOME_BILLING_MODES = new Set(['per_application', 'per_visit']);
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 const DEAD_ESTIMATE_STATUSES = ['declined', 'expired'];
 const MOVE_WAIVER_REASON = 'Customer is moving: the $99 setup fee is waived for every move (owner 2026-11-02, Q2).';
@@ -607,6 +608,7 @@ const NEW_HOME_REFUSALS = {
   prepay: 'This customer prepays for the year. New-home estimates for prepay plans come in a later update.',
   monthly: 'This customer pays a monthly membership. New-home estimates for monthly plans come in a later update.',
   billing: 'This customer\'s billing plan is not one the new-home estimate handles yet.',
+  no_plan: 'This customer has no recurring plan to move. Make a normal estimate instead.',
   estimate_exists: 'This move already has a new-home estimate. Open that one instead.',
 };
 // Plan services the new-home estimate does not copy, and why.
@@ -623,16 +625,19 @@ function addressComplete(n) {
   return !!(n && n.line1 && n.city && n.state && n.zip);
 }
 
-// The move's live estimate (not declined, expired or archived, and still for
-// the move's current address), or null.
+// The move's live estimate, or null: not declined, expired or archived, and
+// the move still stands behind its stamp (moveRowBlock, the same rule the
+// customer-surface guard reads), so the card and the guard never disagree.
 async function liveMoveEstimate(move, conn = db) {
   if (!move || !move.estimate_id) return null;
   const estimate = await conn('estimates')
     .where({ id: move.estimate_id })
     .whereNull('archived_at')
     .whereNotIn('status', DEAD_ESTIMATE_STATUSES)
-    .first('id', 'status', 'address');
-  return estimate && addressMatchesMove(estimate.address, move) ? estimate : null;
+    .first('id', 'status', 'estimate_data');
+  const stamp = estimate && (parseJson(estimate.estimate_data) || {}).move;
+  if (!stamp || typeof stamp !== 'object' || moveRowBlock(move, stamp)) return null;
+  return { id: estimate.id, status: estimate.status };
 }
 
 // Why this move cannot get a new-home estimate (a NEW_HOME_REFUSALS code), or null.
@@ -643,11 +648,14 @@ async function newHomeBlock(move, conn = db) {
   const customer = await conn('customers')
     .where({ id: move.customer_id })
     .whereNull('deleted_at')
-    .first('id', 'billing_mode');
+    .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate');
   if (!customer) return 'customer_gone';
-  const mode = String(customer.billing_mode || '');
+  // The billing code's own lane rule: a legacy row with no mode, a real tier
+  // and a monthly rate is a monthly member, not a per-visit customer.
+  const { mode } = require('./billing-lane').resolveBillingLane(customer);
   if (mode === 'annual_prepay') return 'prepay';
   if (mode === 'monthly_membership') return 'monthly';
+  if (mode === 'one_time') return 'no_plan';
   if (!NEW_HOME_BILLING_MODES.has(mode)) return 'billing';
   // A prepaid visit still on the books is a live prepay term, whatever the mode says.
   const prepaid = await conn('scheduled_services')
@@ -673,11 +681,17 @@ async function newHomeAction(move, conn = db) {
  * and at least one matching locality field (city or ZIP) on both sides.
  */
 function addressMatchesMove(address, move) {
+  return sameAddressLine(addressLine(parseJson(move && move.normalized_address)), address);
+}
+
+// Two one-line addresses name the same house: same street (unit-aware) and at
+// least one matching locality field (city or ZIP) on both sides.
+function sameAddressLine(a, b) {
   const { makeEstimateScopeKeys, sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
-  const want = makeEstimateScopeKeys(addressLine(parseJson(move && move.normalized_address)));
-  const got = makeEstimateScopeKeys(String(address || ''));
-  if (!want || !got || !want.estimateKey || !got.estimateKey) return false;
-  return sameScopeKey(want.estimateKey, got.estimateKey) && scopeKeysShareLocality(want.estimateKey, got.estimateKey);
+  const x = makeEstimateScopeKeys(String(a || ''));
+  const y = makeEstimateScopeKeys(String(b || ''));
+  if (!x || !y || !x.estimateKey || !y.estimateKey) return false;
+  return sameScopeKey(x.estimateKey, y.estimateKey) && scopeKeysShareLocality(x.estimateKey, y.estimateKey);
 }
 
 // The newest accepted builder estimate, preferring the house being left.
@@ -934,6 +948,7 @@ module.exports = {
   NEW_HOME_REFUSALS,
   newHomeAction,
   addressMatchesMove,
+  sameAddressLine,
   moveEstimateSource,
   verifyMoveForEstimate,
   lockMoveForEstimate,

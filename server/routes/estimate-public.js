@@ -1807,6 +1807,12 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const linkedId = data?.scheduled_service_id ? String(data.scheduled_service_id) : '';
   const today = etDateString();
   if (!linkedId && !estimate.id) return null;
+  // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate adopts no visit
+  // before its move-in date; the accept repeats this on the locked move.
+  const moveIn = data?.move?.moveId && estimate.id
+    ? (await require('../services/customer-moves').moveForEstimate(estimate.id, conn))?.move_in_date || null
+    : null;
+  const firstAdoptableDate = moveIn && moveIn > today ? moveIn : today;
   // Commit-time grace (accept path only): the estimate's OWN hold that
   // lapsed moments ago is still adoptable — commitReservation re-runs every
   // conflict check under the date lock, so nothing double-books. The view
@@ -1818,7 +1824,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // in ORDER BY would be ambiguous on that query.
   const baseQuery = () => conn('scheduled_services')
     .whereIn('scheduled_services.status', adoptableStatuses)
-    .where('scheduled_services.scheduled_date', '>=', today)
+    .where('scheduled_services.scheduled_date', '>=', firstAdoptableDate)
     .where((builder) => {
       if (estimate.customer_id) {
         builder.whereNull('scheduled_services.customer_id')
@@ -12378,14 +12384,28 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // accept's own transaction, for every branch (the one-time accept
         // skips the converter's own check). Stale = the view's generic 404.
         if (freshLinkData?.move) {
+          let lockedMove = null;
           try {
-            await require('../services/customer-moves').lockMoveForConversion(trx, freshLinkData);
+            lockedMove = await require('../services/customer-moves').lockMoveForConversion(trx, freshLinkData);
           } catch (moveErr) {
             if (moveErr.code !== 'MOVE_ESTIMATE_STALE') throw moveErr;
             const err = new Error('Estimate not found');
             err.status = 404;
             err.code = 'OFF_CUSTOMER_SURFACE';
             throw err;
+          }
+          // An adopted (non-hold) visit skips commitReservation's move check:
+          // compare its date with the move-in date read under this lock.
+          const adoptedVisit = existingAppointmentRow && !isReservationHeldAppointment(existingAppointmentRow)
+            ? existingAppointmentRow : null;
+          if (lockedMove?.move_in_date && adoptedVisit) {
+            const visitNow = await trx('scheduled_services').where({ id: adoptedVisit.id }).first('scheduled_date');
+            if (!visitNow || dateOnly(visitNow.scheduled_date) < lockedMove.move_in_date) {
+              const err = new Error('That visit is before your move-in date. Please pick a time on or after it.');
+              err.status = 409;
+              err.code = 'BEFORE_MOVE_IN';
+              throw err;
+            }
           }
         }
         // The call row is locked FOR UPDATE and HELD through the

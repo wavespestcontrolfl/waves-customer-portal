@@ -10,7 +10,8 @@ const base = {
   manualDiscountInternalReason: '', serviceSpecificDiscountKeys: [], linePriceOverrides: {},
   roachFeeOverride: '', standaloneRoachFeeOverride: '', showOneTimeOption: false, billByInvoice: false,
   offerTiers: false, _offerTiersDeclined: false, tierExtensionPick: null,
-  lawnFreq: '9', pestFreq: '4', tsTier: 'standard',
+  lawnFreq: '9', pestFreq: '4', tsTier: 'standard', mosquitoProgram: 'standard',
+  roachModifier: 'NONE', mosquitoStationCount: '', mosquitoDunkCount: '', palmCustomPricePerPalm: '', grassType: 'st_augustine',
   svcLawn: false, svcPest: false, svcTs: false, svcInjection: false, svcMosquito: false, svcRodentBait: false,
   svcTermiteBait: false, svcFoamRecurring: false, svcMisting: false, svcOnetimePest: false, svcWdo: false,
   mistingTier: '', mistingRefillsPerYear: '4',
@@ -33,7 +34,10 @@ const data = {
       serviceSpecificDiscountKeys: ['x'], linePriceOverrides: { lawn: { price: 50 } },
       roachFeeOverride: '40', standaloneRoachFeeOverride: '30',
       showOneTimeOption: true, billByInvoice: true, notes: 'gate code', leadId: 'lead-1', offerTiers: true,
-      tsTier: 'light4',
+      tsTier: 'light4', mosquitoProgram: 'monthly12',
+      // Old-house treatment facts and overrides (codex #7532 r1).
+      roachModifier: 'GERMAN', mosquitoStationCount: '8', mosquitoDunkCount: '4', palmCustomPricePerPalm: '45',
+      grassType: 'zoysia', someRetiredBuilderField: 'old',
     },
   },
 };
@@ -49,6 +53,18 @@ describe('moveEstimateForm', () => {
     expect(form.lawnFreq).toBe('12');
     expect(form.pestFreq).toBe('6');
     expect(form.tsTier).toBe('standard');
+    expect(form.mosquitoProgram).toBe('monthly12');
+  });
+
+  it('carries only each kept service\'s schedule: old-house treatment facts and overrides start from the defaults', () => {
+    const { form } = moveEstimateForm(data, { base, clearedProperty });
+    // A carried roach condition would make Generate add a paid one-time knockdown.
+    expect(form.roachModifier).toBe('NONE');
+    expect(form.mosquitoStationCount).toBe('');
+    expect(form.mosquitoDunkCount).toBe('');
+    expect(form.palmCustomPricePerPalm).toBe('');
+    expect(form.grassType).toBe('st_augustine');
+    expect(form).not.toHaveProperty('someRetiredBuilderField');
   });
 
   it('clears property fields, discounts, overrides and delivery choices', () => {

@@ -45,15 +45,19 @@ function errorWithStatus(message, statusCode) {
 // customer and the move's new address. A revise that changes either is
 // refused (409); staff start a normal estimate instead.
 async function assertMoveEstimateBinding(conn, row, writeFields) {
-  const moveId = parseStoredEstimateData(row && row.estimate_data)?.move?.moveId;
-  if (!moveId) return;
-  const move = await conn('customer_moves').where({ id: moveId }).first('id', 'customer_id', 'normalized_address');
+  const stamp = parseStoredEstimateData(row && row.estimate_data)?.move;
+  if (!stamp?.moveId) return;
+  const move = await conn('customer_moves').where({ id: stamp.moveId }).first('id', 'customer_id', 'normalized_address');
   if (!move) return;
   const nextCustomerId = writeFields.customer_id === undefined ? row.customer_id : writeFields.customer_id;
   const nextAddress = writeFields.address === undefined ? row.address : writeFields.address;
+  // The address the estimate was MADE for (its stamp), never the move's current
+  // one: after the customer resubmits another address, a revise must not carry
+  // this estimate there (the guard would still refuse it on the stamp).
+  const sameHouse = stamp.address ? Moves.sameAddressLine(nextAddress, stamp.address) : Moves.addressMatchesMove(nextAddress, move);
   const refusal = String(nextCustomerId || '') !== String(move.customer_id)
     ? ['move_customer_changed', 'This estimate is for this customer\'s move, so its customer cannot change. Start a normal estimate instead.']
-    : !Moves.addressMatchesMove(nextAddress, move)
+    : !sameHouse
       && ['move_address_changed', 'This estimate is for the move to the new address, so its address cannot change. Start a normal estimate for another address.'];
   if (!refusal) return;
   const err = errorWithStatus(refusal[1], 409);

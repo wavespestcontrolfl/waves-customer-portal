@@ -9,9 +9,20 @@
 // Pure: the component passes its default form and its property reset, and gets
 // back the seeded form plus the label of a discount the old estimate had.
 
-// Recurring services that move with the customer. Every other svc* flag goes off:
-// termite bait, recurring termite foam, misting and every one-time service.
-export const MOVE_KEPT_SERVICE_FLAGS = ["svcLawn", "svcPest", "svcTs", "svcInjection", "svcMosquito", "svcRodentBait"];
+// Recurring services that move with the customer, and the only settings each
+// one carries over: its schedule or program. Everything else starts from the
+// builder's defaults, because it describes the old house or the old sale
+// (sizes, grass type, palm and station counts, roach condition, price
+// overrides, one-time work, termite, recurring termite foam and misting).
+const MOVE_PROGRAM_KEYS = Object.freeze({
+  svcLawn: ["lawnFreq"],
+  svcPest: ["pestFreq"],
+  svcTs: ["tsTier"],
+  svcInjection: [],
+  svcMosquito: ["mosquitoProgram"],
+  svcRodentBait: [],
+});
+export const MOVE_KEPT_SERVICE_FLAGS = Object.keys(MOVE_PROGRAM_KEYS);
 
 function hadDiscount(inputs) {
   const type = inputs.manualDiscountType;
@@ -26,38 +37,18 @@ function discountLabel(inputs) {
     || "discount";
 }
 
-// Discounts, price overrides, delivery choices and lead links start clean.
-const CLEAN_FIELDS = Object.freeze({
-  manualDiscountPreset: "",
-  manualDiscountType: "NONE",
-  manualDiscountValue: "",
-  manualDiscountLabel: "",
-  manualDiscountInternalReason: "",
-  roachFeeOverride: "",
-  standaloneRoachFeeOverride: "",
-  showOneTimeOption: false,
-  billByInvoice: false,
-  offerTiers: false,
-  _offerTiersDeclined: false,
-  tierExtensionPick: null,
-  notes: "",
-  leadId: "",
-  leadServiceInterest: "",
-});
-
-// The old estimate's services on the default form: the recurring ones that
-// move stay on, every other svc* flag goes off, misting sizing returns to the
-// defaults, and the builder's bookkeeping flags (_homeSqFtEdited and the like)
-// are dropped because they describe the old house.
+// The default form with the kept services switched on and their schedules copied.
 function movedServices(base, inputs) {
-  const form = { ...base, ...inputs };
-  for (const key of Object.keys(form)) {
-    if (key.startsWith("_") && !(key in base)) delete form[key];
-    else if (key.startsWith("svc")) form[key] = MOVE_KEPT_SERVICE_FLAGS.includes(key) && inputs[key] === true;
-    else if (key.startsWith("misting")) form[key] = base[key];
+  const form = { ...base };
+  for (const [flag, keys] of Object.entries(MOVE_PROGRAM_KEYS)) {
+    if (inputs[flag] !== true) continue;
+    form[flag] = true;
+    for (const key of keys) {
+      if (inputs[key] !== undefined && inputs[key] !== null && inputs[key] !== "") form[key] = inputs[key];
+    }
   }
   // A saved retired Tree & Shrub program (4x light) opens as the standard program.
-  if (inputs.tsTier !== undefined) form.tsTier = inputs.tsTier === "enhanced" ? "enhanced" : "standard";
+  if (form.svcTs) form.tsTier = form.tsTier === "enhanced" ? "enhanced" : "standard";
   return form;
 }
 
@@ -82,16 +73,7 @@ function contactFields(data) {
  */
 export function moveEstimateForm(data, { base, clearedProperty = {} }) {
   const inputs = data?.source?.inputs && typeof data.source.inputs === "object" ? data.source.inputs : {};
-  // The new house is measured again (clearedProperty), so nothing sized for the old one carries over.
-  const form = {
-    ...movedServices(base, inputs),
-    ...CLEAN_FIELDS,
-    // Fresh containers each time: the form's lists are never shared between estimates.
-    serviceSpecificDiscountKeys: [],
-    linePriceOverrides: {},
-    ...clearedProperty,
-    ...contactFields(data),
-  };
+  const form = { ...movedServices(base, inputs), ...clearedProperty, ...contactFields(data) };
   return { form, droppedDiscountLabel: hadDiscount(inputs) ? discountLabel(inputs) : "" };
 }
 

@@ -7112,7 +7112,11 @@ slot (`SLOT_UNAVAILABLE`), and the accept-time commit of a hold refuses one
 the move-in date has since passed (`SLOT_UNAVAILABLE`, the recoverable
 pick-another-time answer). Both booking checks read the move under a share
 lock inside the booking transaction (`slot-reservation.js`
-`moveBookingRefusal`), so a moving-page resubmit waits for that commit. An
+`moveBookingRefusal`), so a moving-page resubmit waits for that commit. The
+estimate page offers no existing visit before the move-in date for adoption
+(`findLinkedUpcomingAppointment`), and the accept compares an adopted
+(non-hold) visit's date with the move-in date read under its move lock (409
+`BEFORE_MOVE_IN`). An
 accept with no picked time places the first visit from the new city on or
 after the move-in date. Gate off: no move-in limit. No new route, token,
 header, rate limit or payload field.

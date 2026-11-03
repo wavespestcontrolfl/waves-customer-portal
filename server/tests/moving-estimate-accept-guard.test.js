@@ -21,6 +21,11 @@ test('the public accept checks the move right after locking the estimate row, be
   expect(lockAt).toBeGreaterThan(-1);
   expect(moveAt).toBeGreaterThan(lockAt);
   expect(convertAt).toBeGreaterThan(moveAt);
+  // An adopted visit (no hold, so no commitReservation check) is compared with
+  // the move-in date read under that same lock (codex #7532 r1).
+  const adoptedAt = src.indexOf("err.code = 'BEFORE_MOVE_IN';", moveAt);
+  expect(adoptedAt).toBeGreaterThan(moveAt);
+  expect(convertAt).toBeGreaterThan(adoptedAt);
 });
 
 test('the converter checks the move before it schedules anything', () => {
