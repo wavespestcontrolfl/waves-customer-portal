@@ -41,12 +41,20 @@ function errorWithStatus(message, statusCode) {
   return err;
 }
 
-// Moving PR B1: a new-home estimate stays bound to its move: the move's own
-// customer and the move's new address. A revise that changes either is
-// refused (409); staff start a normal estimate instead.
+// Moving PR B1: a new-home estimate stays bound to its move: never in a
+// multi-property group (the Multi-Home Discount rides groups), the move's own
+// customer, and the address the estimate was made for. A revise that changes
+// any of them is refused; staff start a normal estimate instead. Runs before
+// the dry-run preflight and again on the LOCKED row.
 async function assertMoveEstimateBinding(conn, row, writeFields) {
   const stamp = parseStoredEstimateData(row && row.estimate_data)?.move;
   if (!stamp?.moveId) return;
+  const nextGroupId = writeFields.estimate_group_id === undefined ? row.estimate_group_id : writeFields.estimate_group_id;
+  if (nextGroupId) {
+    const err = errorWithStatus('A new-home estimate cannot be part of a multi-property group. Start a normal estimate for the other property.', 400);
+    err.code = 'move_grouped';
+    throw err;
+  }
   const move = await conn('customer_moves').where({ id: stamp.moveId }).first('id', 'customer_id', 'normalized_address');
   if (!move) return;
   const nextCustomerId = writeFields.customer_id === undefined ? row.customer_id : writeFields.customer_id;

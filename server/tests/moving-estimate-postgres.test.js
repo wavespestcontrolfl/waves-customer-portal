@@ -275,6 +275,13 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
         technicianId: ADMIN.id, technician: ADMIN, recompute: NO_INPUTS,
       })).rejects.toMatchObject({ statusCode: 400 });
       expect((await trx('estimates').where({ id: estimate.id }).first('estimate_group_id')).estimate_group_id).toBeNull();
+      // Nor by a revise naming a group.
+      const groupId = crypto.randomUUID();
+      await expect(Persistence.reviseAdminEstimate({
+        database: trx, estimateId: estimate.id, technicianId: ADMIN.id, technician: ADMIN, recompute: NO_INPUTS,
+        body: body(move, { moveId: undefined, estimateGroupId: groupId }),
+      })).rejects.toMatchObject({ statusCode: 400, code: 'move_grouped' });
+      expect((await trx('estimates').where({ id: estimate.id }).first('estimate_group_id')).estimate_group_id).toBeNull();
     });
 
     test('a browser cannot invent a move stamp', async () => {
