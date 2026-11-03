@@ -35,13 +35,20 @@ const TEMPLATE_EMAIL_KEY = 'welcome.new_recurring';
 // delivers hours later is the queue's timing again, held to the 8 AM-8 PM
 // send window like every other queued send.
 const CUSTOMER_ACTION_FRESH_MINUTES = 180;
+// A serviced visit inside this window is the new customer's own start, not
+// an existing relationship: most sign-ups accept the plan while the tech is
+// on site or days after that first visit (owner 2026-11-02, "send the
+// welcome text to all": 11 of 20 October online sign-ups had one such visit
+// and got no welcome text). Every first plan since May 2026 that followed a
+// visit followed it within 76 days. Older history is an existing customer.
+const NEW_CUSTOMER_HISTORY_DAYS = 90;
 
-// "New recurring customer" = no recurring series and no serviced visit
-// anywhere in their history. Visit history is checked in BOTH tables:
-// service_records is only written by the modern completion flow, so
-// imported/legacy customers carry their history solely as completed/on_site
-// scheduled_services rows (2026-07-16 misfire: two long-standing customers
-// with empty service_records were welcomed as new).
+// "New recurring customer" = no recurring series anywhere in their history
+// and no serviced visit older than NEW_CUSTOMER_HISTORY_DAYS. Visit history
+// is checked in BOTH tables: service_records is only written by the modern
+// completion flow, so imported/legacy customers carry their history solely
+// as completed/on_site scheduled_services rows (2026-07-16 misfire: two
+// long-standing customers with empty service_records were welcomed as new).
 //
 // excludeServiceId scopes the check for callers that run AFTER the booking
 // exists (the appointment tagger fires on the just-created appointment):
@@ -63,11 +70,15 @@ async function isNewRecurringSignupCandidate(customerId, { excludeServiceId = nu
       createdBefore = triggering.created_at;
     }
 
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    const historyCutoff = etDateString(addETDays(new Date(), -NEW_CUSTOMER_HISTORY_DAYS));
+
     const priorRecurringSeriesQuery = db('scheduled_services')
       .where({ customer_id: customerId, is_recurring: true });
     const priorServicedVisitQuery = db('scheduled_services')
       .where({ customer_id: customerId })
-      .whereIn('status', ['completed', 'on_site']);
+      .whereIn('status', ['completed', 'on_site'])
+      .where('scheduled_date', '<', historyCutoff);
     if (createdBefore) {
       priorRecurringSeriesQuery.where('created_at', '<', createdBefore);
       priorServicedVisitQuery.where('created_at', '<', createdBefore);
@@ -79,6 +90,7 @@ async function isNewRecurringSignupCandidate(customerId, { excludeServiceId = nu
       db('service_records')
         .where({ customer_id: customerId })
         .whereNot('status', 'cancelled')
+        .where('service_date', '<', historyCutoff)
         .first('id'),
     ]);
 
@@ -633,6 +645,7 @@ module.exports = {
   SEQUENCE_TYPE,
   EMAIL_SEQUENCE_TYPE,
   WELCOME_DELAY_MINUTES,
+  NEW_CUSTOMER_HISTORY_DAYS,
   isNewRecurringSignupCandidate,
   sendNewRecurringWelcome,
   processDueWelcomes,
