@@ -1,28 +1,37 @@
 /** County-roll pins for the hourly geocoder backstop (GATE_GEOCODE_COUNTY_FALLBACK, dark).
  *
- * Two passes after the existing sweeps, neither one calling Google:
+ * Three passes after the existing sweeps, none of them calling Google:
  *  1. customer-geocode-review retryCountyNeedsPin: rows already on the staff needs_pin list.
  *  2. sweepUnpinnedProperties: active customer_properties rows with no pin. The customer sweep only
  *     fills the customers row and mirrors the PRIMARY property, so a non-primary or
  *     address-mismatched property never gets a pin. A row takes the customer's pin when the
  *     address is the customer's, else the county lot for its own address.
+ *  3. sweepPropertyVisitPins: upcoming visits with no pin whose stamp is their property's address
+ *     take the property's pin, through the service-location recovery write.
  * Gate off: nothing here runs, no county call is made. Logs carry counts only (PII rule).
  */
 const db = require('../models/db');
 const logger = require('./logger');
 // Read at call time with an optional call: a test that mocks feature-gates wholesale must not crash the backstop.
 const countyFallbackLive = () => require('../config/feature-gates').geocodeCountyFallbackLive?.() === true;
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const { toDateStr } = require('./auto-dispatch/dates');
 
 const PROPERTY_BATCH = 25;
+const VISIT_BATCH = 25;
+// The service-location backstop's window; a later visit takes the pin once it is in range.
+const VISIT_WINDOW_DAYS = 30;
 const UNRESOLVED_CAP = 2000;
 const ADDRESS_COLUMNS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+const STAMP_COLUMNS = ['service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip'];
 
-// Properties the county could not place, keyed property id -> the address string that missed.
-// An address edit changes the string and re-admits the row; a restart clears the map.
+// Properties the county could not place, or whose customer pin a review withholds, keyed property
+// id -> the address string that missed. An address edit changes the string and re-admits the row;
+// a restart clears the map.
 const unresolvedProperties = new Map();
 
 const addressKey = row => [row.address_line1, row.city, row.zip].map(part => String(part || '').trim().toLowerCase()).join('|');
+const coordinate = value => (value == null ? null : Number(value));
 const hasCoordinates = row => ['latitude', 'longitude'].every(field => row[field] != null
   && Number.isFinite(Number(row[field])) && Number(row[field]) !== 0);
 
@@ -63,33 +72,33 @@ function whereUnchanged(query, row, columns) {
   return query;
 }
 
-// The pin for one property row: the customer's own pin at the same address, else the county lot.
-// Throws on a county outage; null is a clean miss.
-async function pinForProperty(row) {
-  const sameAsCustomer = addressKey(row) === addressKey({ address_line1: row.c_address_line1, city: row.c_city, zip: row.c_zip });
-  if (sameAsCustomer && hasCoordinates({ latitude: row.c_latitude, longitude: row.c_longitude })) {
-    return { lat: Number(row.c_latitude), lng: Number(row.c_longitude) };
-  }
-  if (sameAsCustomer) return null; // raced with the customer's pin being cleared; the SQL fence normally holds these back
-  return require('./property-lookup/county-lot-pin').countyLotPinForAddress(row);
-}
+// The customer's address and pin exactly as the candidate query read them (c_<column>).
+const customerAsRead = (customer, row) => ADDRESS_COLUMNS.every(column => (customer[column] ?? null) === (row[`c_${column}`] ?? null))
+  && ['latitude', 'longitude'].every(column => coordinate(customer[column]) === coordinate(row[`c_${column}`]));
 
-// Conditional write: the row's address and its missing pin must be as read. Also fills the
-// property's upcoming visits that still have no pin. Returns true when the pin landed.
-async function writePropertyPin(conn, row, pin) {
-  return conn.transaction(async trx => {
-    const count = await whereUnchanged(trx('customer_properties').where({ id: row.id, active: true }), row,
-      [...ADDRESS_COLUMNS, 'latitude', 'longitude'])
+/**
+ * The property pin, under the customer and primary-property locks that staff review actions take
+ * (withCustomerReviewWriteFence). The customer's address and pin, the row and its primary flag must
+ * be as read, and a review that holds this primary row's address blocks the write, so a staff
+ * decision made during the county call wins. `lot` null = copy the customer's pin, read here through
+ * the review: a pin the review withholds is never copied.
+ * Resolves 'pinned', 'withheld', or 'stale' (something changed; the next run reads the row again).
+ */
+async function writePropertyPin(conn, row, lot) {
+  const review = require('./customer-geocode-review');
+  const outcome = await review.withCustomerReviewWriteFence(row.customer_id, conn, async (trx) => {
+    const customer = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first();
+    if (!customer || !customerAsRead(customer, row)) return 'stale';
+    const located = lot ? null : await review.reviewedCustomerLocation(customer, trx);
+    const pin = lot || (located && hasCoordinates(located) ? { lat: Number(located.latitude), lng: Number(located.longitude) } : null);
+    if (!pin) return 'withheld';
+    const write = whereUnchanged(trx('customer_properties').where({ id: row.id, active: true }), row,
+      [...ADDRESS_COLUMNS, 'latitude', 'longitude', 'is_primary']);
+    const count = await review.excludePrimaryPropertyReviewForId(write, row.id)
       .update({ latitude: pin.lat, longitude: pin.lng, updated_at: new Date() });
-    if (!count) return false;
-    await trx('scheduled_services').where({ property_id: row.id })
-      .where('scheduled_date', '>=', etDateString(new Date()))
-      // A legacy NULL status is a live visit (customer-properties seriesAgreedPropertyId's rule).
-      .where(function () { this.whereNull('status').orWhereNotIn('status', ['cancelled', 'completed']); })
-      .where(function () { this.whereNull('lat').orWhereNull('lng'); })
-      .update({ lat: pin.lat, lng: pin.lng, updated_at: new Date() });
-    return true;
-  });
+    return count ? 'pinned' : 'stale';
+  }, { lockWhenDisabled: true });
+  return outcome || 'stale';
 }
 
 async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, conn = db } = {}) {
@@ -98,55 +107,136 @@ async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, conn = db } = {
   const review = require('./customer-geocode-review');
   await pruneUnresolvedProperties(conn);
   const rows = await candidatePropertiesQuery(conn, review).orderBy('p.id').limit(limit)
-    .select('p.id', 'p.customer_id', 'p.latitude', 'p.longitude', ...ADDRESS_COLUMNS.map(column => `p.${column}`),
-      'c.address_line1 as c_address_line1', 'c.city as c_city', 'c.zip as c_zip',
-      'c.latitude as c_latitude', 'c.longitude as c_longitude');
-  const pinnedCustomers = new Set();
+    .select('p.id', 'p.customer_id', 'p.is_primary', 'p.latitude', 'p.longitude', ...ADDRESS_COLUMNS.map(column => `p.${column}`),
+      ...ADDRESS_COLUMNS.map(column => `c.${column} as c_${column}`), 'c.latitude as c_latitude', 'c.longitude as c_longitude');
   for (const row of rows) {
     results.checked += 1;
-    let pin;
-    try {
-      pin = await pinForProperty(row);
-    } catch (err) {
-      // County outage: write nothing, remember nothing, and stop asking this hour.
-      logger.warn(`[geocoder] county property pin stopped: ${err.message}`);
-      break;
+    // The customer's own address takes the customer's pin; any other address asks the county.
+    let lot = null;
+    if (addressKey(row) !== addressKey({ address_line1: row.c_address_line1, city: row.c_city, zip: row.c_zip })) {
+      try {
+        lot = await require('./property-lookup/county-lot-pin').countyLotPinForAddress(row);
+      } catch (err) {
+        // County outage: write nothing, remember nothing, and stop asking this hour.
+        logger.warn(`[geocoder] county property pin stopped: ${err.message}`);
+        break;
+      }
+      if (!lot) {
+        results.unresolved += 1;
+        unresolvedProperties.set(row.id, addressKey(row));
+        continue;
+      }
     }
-    if (!pin) {
-      results.unresolved += 1;
-      unresolvedProperties.set(row.id, addressKey(row));
-    } else if (await writePropertyPin(conn, row, pin)) {
+    const outcome = await writePropertyPin(conn, row, lot);
+    if (outcome === 'pinned') {
       results.pinned += 1;
-      pinnedCustomers.add(row.customer_id);
-    } else results.unresolved += 1;
-  }
-  if (pinnedCustomers.size) {
-    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: [...pinnedCustomers] });
+      continue;
+    }
+    results.unresolved += 1;
+    if (outcome === 'withheld') unresolvedProperties.set(row.id, addressKey(row));
   }
   return results;
+}
+
+// The visit's stamp names this property: exactly, or the same premise with complete localities on
+// both sides (serviceReviewDecision's rule), so a stamp missing its city or ZIP never borrows the property's.
+function stampIsProperty(visit) {
+  const reference = Object.fromEntries(STAMP_COLUMNS.map((column, index) => [column, visit[`p_${ADDRESS_COLUMNS[index]}`]]));
+  if (STAMP_COLUMNS.every(column => (visit[column] || null) === (reference[column] || null))) return true;
+  const complete = row => STAMP_COLUMNS.filter(column => column !== 'service_address_line2').every(column => String(row[column] || '').trim());
+  if (!complete(visit) || !complete(reference)) return false;
+  const { premiseStampConflicts, inheritReferenceUnit } = require('./stamped-address');
+  return !premiseStampConflicts(inheritReferenceUnit(visit, reference), reference)
+    && String(visit.service_address_state).trim().toLowerCase() === String(reference.service_address_state).trim().toLowerCase();
+}
+
+// Upcoming visits with no pin on an active, pinned property of the same customer: the service-location
+// backstop's population (unlocked, not excluded, stamped) plus a legacy NULL status, which is a live visit.
+function unpinnedVisitsQuery(conn, now, snapshotColumns) {
+  return conn('scheduled_services as s')
+    .join('customers as c', 'c.id', 's.customer_id')
+    .join('customer_properties as p', function () { this.on('p.id', '=', 's.property_id').andOn('p.customer_id', '=', 's.customer_id'); })
+    .whereNull('c.deleted_at').where('p.active', true)
+    .whereRaw('p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND p.latitude <> 0 AND p.longitude <> 0')
+    .where(function () { this.whereNull('s.status').orWhereIn('s.status', ['pending', 'confirmed']); })
+    .whereBetween('s.scheduled_date', [etDateString(now), etDateString(addETDays(now, VISIT_WINDOW_DAYS))])
+    .whereRaw('NOT COALESCE(s.auto_dispatch_locked, false) AND NOT COALESCE(s.auto_dispatch_excluded, false)')
+    .whereRaw('(s.lat IS NULL OR s.lng IS NULL OR s.lat = 0 OR s.lng = 0)')
+    .whereRaw("NULLIF(btrim(s.service_address_line1), '') IS NOT NULL")
+    .select(...snapshotColumns.map(column => `s.${column}`), ...ADDRESS_COLUMNS.map(column => `p.${column} as p_${column}`),
+      'p.latitude as p_latitude', 'p.longitude as p_longitude');
+}
+
+/**
+ * Each visit goes through persistServicePin, the service-location backstop's write: the technician-day
+ * lock, the review recheck under it (a withheld pin writes nothing, a staff-verified point wins), and a
+ * write only on the visit exactly as read. Needs GATE_ROUTE_REORDER + GATE_ROUTE_REORDER_REPAIR like
+ * that backstop. Returns { checked, pinned, stale, failed }.
+ */
+async function sweepPropertyVisitPins({ limit = VISIT_BATCH, now = new Date(), conn = db } = {}) {
+  const results = { checked: 0, pinned: 0, stale: 0, failed: 0 };
+  if (!countyFallbackLive()) return results;
+  const { SNAPSHOT_COLUMNS, persistServicePin } = require('./geocoder-service-locations');
+  const query = unpinnedVisitsQuery(conn, now, SNAPSHOT_COLUMNS);
+  // Page past visits stamped for another address, so they cannot starve later ones.
+  const visits = [];
+  for (let offset = 0; visits.length < limit; offset += limit) {
+    const batch = await query.clone().orderBy('s.scheduled_date').orderBy('s.id').offset(offset).limit(limit);
+    visits.push(...batch.filter(stampIsProperty));
+    if (batch.length < limit) break;
+  }
+  const dates = new Set();
+  for (const row of visits.slice(0, limit)) {
+    results.checked += 1;
+    const snapshot = Object.fromEntries(SNAPSHOT_COLUMNS.map(column => [column, row[column]]));
+    try {
+      if (!await persistServicePin(conn, snapshot, { lat: Number(row.p_latitude), lng: Number(row.p_longitude) }, { source: 'property_pin' })) {
+        results.stale += 1;
+        continue;
+      }
+      results.pinned += 1;
+      dates.add(toDateStr(row.scheduled_date));
+      await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: row.id, qualityDates: dates })
+        .catch(error => logger.error(`[geocoder] county visit refresh failed for ${row.id} (${error.code || 'broadcast_error'})`));
+    } catch (error) {
+      results.failed += 1;
+      logger.error(`[geocoder] county visit pin failed for ${row.id}`, { code: error.code });
+    }
+  }
+  if (dates.size) await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [...dates], now }, conn);
+  return results;
+}
+
+// One pass failing never stops the next; the error code alone is logged.
+async function runPass(label, fallbackCode, pass) {
+  try {
+    return await pass();
+  } catch (err) {
+    logger.error(`[geocoder] county ${label} failed (${err.code || fallbackCode})`);
+    return undefined;
+  }
 }
 
 async function sweepCountyFallback() {
   if (!countyFallbackLive()) return null;
   const review = require('./customer-geocode-review');
   const results = {};
-  try {
-    results.needsPin = await review.retryCountyNeedsPin({ conn: db });
-    if (results.needsPin.customerIds.length) {
-      await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: results.needsPin.customerIds });
+  results.needsPin = await runPass('needs_pin retry', 'county_retry_error', async () => {
+    const needsPin = await review.retryCountyNeedsPin({ conn: db });
+    if (needsPin.customerIds.length) {
+      await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: needsPin.customerIds });
     }
-  } catch (err) {
-    logger.error(`[geocoder] county needs_pin retry failed (${err.code || 'county_retry_error'})`);
+    return needsPin;
+  });
+  results.properties = await runPass('property sweep', 'county_property_error', () => sweepUnpinnedProperties({ conn: db }));
+  results.visits = await runPass('visit pass', 'county_visit_error', () => sweepPropertyVisitPins({ conn: db }));
+  const count = (pass, field) => results[pass]?.[field] ?? 0;
+  if (count('needsPin', 'checked') + count('properties', 'checked') + count('visits', 'checked')) {
+    logger.info(`[geocoder] county fallback: needs_pin checked=${count('needsPin', 'checked')} pinned=${count('needsPin', 'pinned')}, `
+      + `properties checked=${count('properties', 'checked')} pinned=${count('properties', 'pinned')}, `
+      + `visits checked=${count('visits', 'checked')} pinned=${count('visits', 'pinned')}`);
   }
-  try {
-    results.properties = await sweepUnpinnedProperties({ conn: db });
-  } catch (err) {
-    logger.error(`[geocoder] county property sweep failed (${err.code || 'county_property_error'})`);
-  }
-  const touched = (results.needsPin?.checked ?? 0) + (results.properties?.checked ?? 0);
-  if (touched) logger.info(`[geocoder] county fallback: needs_pin checked=${results.needsPin?.checked ?? 0} pinned=${results.needsPin?.pinned ?? 0}, `
-    + `properties checked=${results.properties?.checked ?? 0} pinned=${results.properties?.pinned ?? 0}`);
   return results;
 }
 
-module.exports = { sweepCountyFallback, sweepUnpinnedProperties, _unresolvedProperties: unresolvedProperties };
+module.exports = { sweepCountyFallback, sweepUnpinnedProperties, sweepPropertyVisitPins, _unresolvedProperties: unresolvedProperties };
