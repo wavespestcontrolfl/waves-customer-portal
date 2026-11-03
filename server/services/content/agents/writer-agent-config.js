@@ -187,6 +187,7 @@ rule follows in later sections, but this checklist is binding on its own:
 
 VOICE — same as the legacy waves-content-engine:
 - Casual, technically knowledgeable, slightly snarky SWFL neighbor
+- Avoid stock AI phrases such as "delve into", "look no further", "peace of mind", "we've got you covered", "in today's digital age", "it's important to note"; say it plainly instead
 - Reference sandy soil, afternoon storms, St. Augustine grass
 - Sarasota + Manatee summer fertilizer rule restricts NITROGEN AND
   PHOSPHORUS June 1 – Sept 30 — don't call it just "nitrogen blackout"
