@@ -144,7 +144,7 @@ async function ringRestockBell({ notify, product, request }) {
     // A later sweep that learned the vendor/price rewrites the standing
     // bell (title/body/metadata) instead of leaving the linkless original.
     refreshOnDedupe: true,
-    ringOnRefresh: ringOnRefreshAfterConversion({ title: oldTitle, body: oldBody, link: bellLink }),
+    ringOnRefresh: ringOnRefreshAfterConversion({ category: 'system', title: oldTitle, body: oldBody, link: bellLink }),
     detail: `${oldTitle}\n${oldBody}`,
     metadata: { restockRequestId: request.id, productId: product.id, vendorId: meta.vendorId || null, vendorSku: meta.vendorSku || null, vendorProductUrl: meta.vendorProductUrl || null },
   });

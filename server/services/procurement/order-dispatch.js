@@ -532,7 +532,7 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
       bell: true,
       dedupeKey: v ? `auto-order:${ledgerId}:${v}` : `auto-order:${ledgerId}`,
       refreshOnDedupe: true,
-      ringOnRefresh: ringOnRefreshAfterConversion({ title, body, link: RESTOCK_TAB }),
+      ringOnRefresh: ringOnRefreshAfterConversion({ category: 'system', title, body, link: RESTOCK_TAB }),
       detail: `${title}\n${body}`,
       metadata: { vendorOrderId: ledgerId, restockRequestId: requestId, productName, vendorName },
     });

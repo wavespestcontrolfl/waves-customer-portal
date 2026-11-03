@@ -37,7 +37,7 @@ describe('raiserFor with an injected notifier', () => {
 
 describe('ringOnRefreshAfterConversion', () => {
   const old = { title: 'Restock: X is low (5 each)', body: 'Reorder 10 each.', link: '/admin/inventory?tab=restock' };
-  const ring = ringOnRefreshAfterConversion(old);
+  const ring = ringOnRefreshAfterConversion({ category: 'system', ...old });
 
   test('an old-format row with the same title, body and link refreshes without ringing', () => {
     expect(ring({ ...old }, {})).toBe(false);
@@ -48,6 +48,20 @@ describe('ringOnRefreshAfterConversion', () => {
     expect(ring({ ...old, title: 'Restock: X is low (9 each)' }, {})).toBe(true);
     expect(ring({ ...old, body: 'Reorder 12 each.' }, {})).toBe(true);
     expect(ring({ ...old, link: '/admin/inventory' }, {})).toBe(true);
+  });
+
+  test('a long old body stored cut (full text in detail) or whole counts as unchanged', () => {
+    const { normalizeAdminText: normalizeAdminNotificationText } = require('../services/notification-service');
+    const longBody = 'Reorder 10 each from Sample Vendor at $1.00 each. Vendor page: https://vendor.example.com/products/sample-sku-0001?ref=waves-restock-bell';
+    expect(longBody.length).toBeGreaterThan(110);
+    const longOld = { category: 'system', title: old.title, body: longBody, link: old.link };
+    const longRing = ringOnRefreshAfterConversion(longOld);
+    const stored = normalizeAdminNotificationText({ category: 'system', title: old.title, body: longBody, detail: null });
+    expect(stored.body).not.toBe(longBody); // the guard really cut it
+    expect(longRing({ title: stored.title, body: stored.body, detail: stored.detail, link: old.link }, {})).toBe(false);
+    expect(longRing({ title: old.title, body: longBody, link: old.link }, {})).toBe(false);
+    const changed = normalizeAdminNotificationText({ category: 'system', title: old.title, body: longBody.replace('10 each', '12 each'), detail: null });
+    expect(longRing({ title: changed.title, body: changed.body, detail: changed.detail, link: old.link }, {})).toBe(true);
   });
 
   test('a row already carrying the composed fields rings on any content change', () => {
