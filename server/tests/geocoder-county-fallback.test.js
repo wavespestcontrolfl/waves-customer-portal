@@ -93,6 +93,7 @@ beforeEach(() => {
       if (whereIn?.[1] === 'id') return state.prune; // pruneUnresolvedProperties
       if (whereIn?.[1] === 'customer_id') return state.primaries; // serviceReviewContexts
       if (rec.ops.some(op => op[0] === 'forUpdate')) return state.lockedProperty; // the write fence's row lock
+      if (rec.ops.some(op => op[0] === 'where' && op[1]?.is_primary === true)) return state.primary; // reviewedCustomerLocation
       return rec.ops.some(op => op[0] === 'forShare') ? state.sourceProperty : undefined;
     }),
     update: jest.fn(() => 1),
@@ -116,6 +117,17 @@ describe('sweepUnpinnedProperties', () => {
     const raw = query.ops.filter(op => op[0] === 'whereRaw').map(op => op[1]).join('\n');
     expect(raw).toContain(review.PRIMARY_ADDRESS_MATCH_SQL); // the customer path owns a primary at the customer's address
     expect(query.ops.some(op => op[0] === 'whereNotExists')).toBe(true); // excludePrimaryPropertyReviewBlocks
+    // A row at the customer's address waits only while neither the customer nor a matching primary has a pin.
+    expect(raw).toContain('NOT EXISTS (SELECT 1 FROM customer_properties pp WHERE pp.customer_id = c.id AND pp.active = true AND pp.is_primary = true');
+  });
+
+  test('a row at the customer\'s address copies a matching primary pin when the customer row has none', async () => {
+    state.candidates = [property({ address_line1: '100 Main St', city: 'Bradenton', zip: '34205', c_latitude: null, c_longitude: null })];
+    state.customer = customerRow({ latitude: null, longitude: null });
+    state.primary = { id: 'p0', customer_id: 'c1', is_primary: true, active: true, address_line1: '100 Main St', address_line2: null,
+      city: 'Bradenton', state: 'FL', zip: '34205', latitude: '27.48', longitude: '-82.56' };
+    expect(await sweepUnpinnedProperties()).toEqual({ checked: 1, pinned: 1, unresolved: 0 });
+    expect(propertyWrites()[0].ops.find(op => op[0] === 'update')[1]).toMatchObject({ latitude: 27.48, longitude: -82.56 });
   });
 
   test('a property at the customer\'s own address copies the customer pin without a county call', async () => {
@@ -383,6 +395,16 @@ describe('sweepPropertyVisitPins', () => {
 });
 
 describe('sweepCountyFallback', () => {
+  test('with the review gate off the county pass does nothing: its fences and rechecks need it', async () => {
+    delete process.env.GATE_GEOCODE_REVIEW;
+    state.candidates = [property()];
+    state.visitPages = [[visit()]];
+    expect(await sweepCountyFallback()).toBeNull();
+    expect(await sweepUnpinnedProperties()).toEqual({ checked: 0, pinned: 0, unresolved: 0 });
+    expect(await sweepPropertyVisitPins({ now: NOW })).toEqual({ checked: 0, pinned: 0, stale: 0, failed: 0 });
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('gate off: does nothing at all', async () => {
     delete process.env.GATE_GEOCODE_COUNTY_FALLBACK;
     expect(await sweepCountyFallback()).toBeNull();

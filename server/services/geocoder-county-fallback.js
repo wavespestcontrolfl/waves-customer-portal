@@ -13,7 +13,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 // Read at call time with an optional call: a test that mocks feature-gates wholesale must not crash the backstop.
-const countyFallbackLive = () => require('../config/feature-gates').geocodeCountyFallbackLive?.() === true;
+// The pass also needs GATE_GEOCODE_REVIEW: without it the write fence takes no locks and the review rechecks
+// are no-ops, so nothing here runs unless both gates are on.
+const countyFallbackLive = () => require('../config/feature-gates').geocodeCountyFallbackLive?.() === true
+  && require('./customer-geocode-review').reviewEnabled();
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { toDateStr } = require('./auto-dispatch/dates');
 
@@ -52,9 +55,15 @@ async function pruneUnresolvedProperties(conn, now) {
 }
 
 const norm = column => `lower(btrim(COALESCE(${column}, '')))`;
-// The customer's own address with no customer pin yet: the customer sweep will pin both.
+const pinnedSql = alias => `(${alias}.latitude IS NOT NULL AND ${alias}.longitude IS NOT NULL AND ${alias}.latitude <> 0 AND ${alias}.longitude <> 0)`;
+const sameRowsSql = (left, right) => `jsonb_build_array(${ADDRESS_COLUMNS.map(column => `COALESCE(${left}.${column}, '')`).join(', ')})`
+  + ` = jsonb_build_array(${ADDRESS_COLUMNS.map(column => `COALESCE(${right}.${column}, '')`).join(', ')})`;
+// The customer's own address with no effective customer pin yet, on the customer row or on a primary at
+// that address (effectiveCustomer's rule): the customer sweep will pin both.
 const WAITS_FOR_CUSTOMER_PIN_SQL = ['address_line1', 'city', 'zip'].map(column => `${norm(`p.${column}`)} = ${norm(`c.${column}`)}`).join(' AND ')
-  + ' AND (c.latitude IS NULL OR c.longitude IS NULL OR c.latitude = 0 OR c.longitude = 0)';
+  + ` AND NOT ${pinnedSql('c')}`
+  + ' AND NOT EXISTS (SELECT 1 FROM customer_properties pp WHERE pp.customer_id = c.id AND pp.active = true AND pp.is_primary = true'
+  + ` AND ${sameRowsSql('pp', 'c')} AND ${pinnedSql('pp')})`;
 
 function candidatePropertiesQuery(conn, review) {
   const query = conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
