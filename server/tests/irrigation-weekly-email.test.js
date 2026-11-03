@@ -27,8 +27,10 @@ jest.mock('../services/service-report/application-conditions', () => ({
   fetchServiceWeekWeather: jest.fn(async () => ({ rainInches: null, et0Inches: null, dailyRain: null })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/irrigation-rain-unknown-alert', () => ({ settleRainUnknownAlerts: jest.fn(async () => ({ closed: 0, raised: 0 })) }));
 
 const db = require('../models/db');
+const { settleRainUnknownAlerts } = require('../services/irrigation-rain-unknown-alert');
 const { isEnabled, autoDispatchMowingDaysMode } = require('../config/feature-gates');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { fetchServiceWeekWeather } = require('../services/service-report/application-conditions');
@@ -550,6 +552,41 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(summary.skipped.rain_unknown).toBe(1);
     // A no-send customer must not cost an Open-Meteo forecast request.
     expect(global.fetch).not.toHaveBeenCalled();
+    // Nothing re-runs the sweep, so the office hears about the skip (2026-11-02: one of 45, silently).
+    expect(settleRainUnknownAlerts).toHaveBeenCalledTimes(1);
+    const settled = settleRainUnknownAlerts.mock.calls[0][0];
+    expect(settled.rainUnknownCustomerIds).toEqual(['cust-1']);
+    expect([...settled.sentCustomerIds]).toEqual([]);
+    expect(settled.weekEnding).toBe(WEEK_ENDING);
+  });
+
+  test('a sent customer is handed to the rain-unknown bells (a later email closes theirs); a balanced week is not rain-unknown', async () => {
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
+    await runWeeklyIrrigationEmailSweep({ now: NOW });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    const settled = settleRainUnknownAlerts.mock.calls[0][0];
+    expect([...settled.sentCustomerIds]).toEqual(['cust-1']);
+    expect(settled.rainUnknownCustomerIds).toEqual([]);
+  });
+
+  test('customerIds narrows a hand run to those customers; the rest of the audience is not touched', async () => {
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
+    // cust-2 leads: the stand-in answers every customers read with these rows, the per-customer re-read included.
+    db.mockImplementation((table) => makeBuilder(
+      String(table).startsWith('customers')
+        ? { rows: [{ ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }, CANDIDATE] }
+        : {},
+    ));
+    // A Tuesday late send for one customer the Monday run skipped: same week, one email.
+    const summary = await runWeeklyIrrigationEmailSweep({ now: new Date('2026-07-07T07:00:00-04:00'), customerIds: ['cust-2'] });
+    expect(summary).toMatchObject({ weekEnding: WEEK_ENDING, candidates: 1, sent: 1 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].recipientId).toBe('cust-2');
+    // An id outside the audience sends nothing.
+    jest.clearAllMocks();
+    const none = await runWeeklyIrrigationEmailSweep({ now: NOW, customerIds: ['cust-9'] });
+    expect(none).toMatchObject({ candidates: 0, sent: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('template-library dedupe (re-run same week) counts as deduped, not sent', async () => {

@@ -1527,6 +1527,7 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  * runExclusive in the cron wiring prevents concurrent sweeps.
  */
 async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN, inProgressRetryMs = IN_PROGRESS_RETRY_MS,
+  customerIds = null,
 } = {}) {
   const startedAt = now || new Date();
   // The wall clock is re-read PER CUSTOMER (and again at each queue
@@ -1540,7 +1541,11 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   const weekPlanGate = gateEnvValue('GATE_IRRIGATION_WEEK_PLAN');
   const appPublication = gateEnvValue('GATE_IRRIGATION_APP_PLAN') && weekPlanGate;
   const emailEnabled = isEnabled('irrigationWeeklyEmail');
-  const candidates = await findEligibleCustomers({ now: startedAt, includeApp: appPublication });
+  // `customerIds` narrows a hand run to those customers (a late send for one the
+  // Monday run skipped); the cron passes none. Each must still be eligible.
+  const only = Array.isArray(customerIds) ? new Set(customerIds.map(String)) : null;
+  const candidates = (await findEligibleCustomers({ now: startedAt, includeApp: appPublication }))
+    .filter((c) => !only || only.has(String(c.id)));
 
   if (!emailEnabled && !appPublication) {
     logger.info(`[irrigation-weekly-email] shadow mode (gate off): ${candidates.length} candidate(s) for week ending ${weekEnding} — no emails sent`);
@@ -1576,6 +1581,14 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
 
   const pendingEmails = [];
+  // For the rain-unknown bells after the run (irrigation-rain-unknown-alert.js).
+  const sentCustomerIds = new Set();
+  const rainUnknownCustomerIds = [];
+  const countSkip = (decision, customer) => {
+    if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
+    else summary.skipped.unknown += 1;
+    if (decision.reason === 'rain_unknown') rainUnknownCustomerIds.push(customer.id);
+  };
   // Both preparation failures and ambiguous provider outcomes use the same
   // durable delivery reconciliation before releasing a snapshot claim.
   const recordFailure = async (err, customer, snapshotArgs) => {
@@ -1847,6 +1860,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         summary.deduped += 1;
       } else if (result.sent) {
         summary.sent += 1;
+        sentCustomerIds.add(String(customer.id));
         await logEmailAttempt({
           customerId: customer.id,
           templateKey: decision.templateKey,
@@ -1953,8 +1967,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.
       let decision = buildWeeklyEmailDecision(decisionInputs);
       if (!decision.shouldSend) {
-        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
-        else summary.skipped.unknown += 1;
+        countSkip(decision, customer);
         continue;
       }
       const upcoming = frozen ? { rainInches: frozen.forecastRainInches, et0Inches: frozen.forecastEt0Inches } : await fetchUpcomingWeekForecast({
@@ -1972,8 +1985,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // Defensive recheck — today the forecast only reroutes a deficit to the
       // on-track template (still a send), but a no-send here must be counted.
       if (!decision.shouldSend) {
-        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
-        else summary.skipped.unknown += 1;
+        countSkip(decision, customer);
         continue;
       }
 
@@ -2132,6 +2144,8 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     + `${summary.sent} sent, ${summary.deduped} deduped, ${summary.blocked} suppressed, `
     + `${summary.skipped.rain_unknown} rain-unknown, ${summary.failed} failed`,
   );
+  // The office hears about each rain-unknown skip; a customer emailed now closes theirs.
+  await require('./irrigation-rain-unknown-alert').settleRainUnknownAlerts({ sentCustomerIds, rainUnknownCustomerIds, weekEnding });
   return summary;
 }
 
