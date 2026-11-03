@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
     return chain;
   });
   conn.transaction = async fn => fn(conn);
+  conn.raw = jest.fn(async () => mockConfig.advisory());
   return conn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -56,6 +57,9 @@ const visit = (overrides = {}) => ({
   p_latitude: '27.58', p_longitude: '-82.42',
   ...overrides,
 });
+// The visit's property as stored, matching visit()'s p_ columns.
+const sourceProperty = (overrides = {}) => ({ active: true, customer_id: 'c1', address_line1: '104 Sample Way', address_line2: null,
+  city: 'Parrish', state: 'FL', zip: '34219', latitude: '27.58', longitude: '-82.42', ...overrides });
 const opsOf = (table) => mockRecorded.filter(rec => rec.table === table);
 const hasOp = (rec, name, ...args) => rec.ops.some(op => op[0] === name && args.every((arg, i) => JSON.stringify(op[i + 1]) === JSON.stringify(arg)));
 const propertyWrites = () => opsOf('customer_properties').filter(rec => rec.ops.some(op => op[0] === 'update'));
@@ -73,7 +77,8 @@ beforeEach(() => {
   process.env.GATE_GEOCODE_COUNTY_FALLBACK = 'true';
   db.mockClear();
   mockRecorded = [];
-  state = { candidates: [], customer: customerRow(), review: undefined, prune: [], visitPages: [[]] };
+  state = { candidates: [], customer: customerRow(), review: undefined, prune: [], primaries: [], sourceProperty: sourceProperty(),
+    lockedProperty: { id: 'p1' }, visitPages: [[]] };
   mockConfig = {
     rows: jest.fn((rec) => {
       if (rec.table === 'customer_properties as p') return state.candidates;
@@ -82,11 +87,16 @@ beforeEach(() => {
         return state.visitPages[offset / 25] || [];
       }
       if (rec.table === 'customers') return state.customer;
-      if (rec.table === 'customer_geocode_reviews') return state.review;
-      if (rec.table === 'customer_properties' && rec.ops.some(op => op[0] === 'whereIn')) return state.prune;
-      return undefined;
+      const whereIn = rec.ops.find(op => op[0] === 'whereIn');
+      if (rec.table === 'customer_geocode_reviews') return whereIn ? [state.review].filter(Boolean) : state.review;
+      if (rec.table !== 'customer_properties') return undefined;
+      if (whereIn?.[1] === 'id') return state.prune; // pruneUnresolvedProperties
+      if (whereIn?.[1] === 'customer_id') return state.primaries; // serviceReviewContexts
+      if (rec.ops.some(op => op[0] === 'forUpdate')) return state.lockedProperty; // the write fence's row lock
+      return rec.ops.some(op => op[0] === 'forShare') ? state.sourceProperty : undefined;
     }),
     update: jest.fn(() => 1),
+    advisory: jest.fn(() => ({ rows: [{ locked: true }] })),
   };
   countyLotPinForAddress.mockReset().mockResolvedValue(LOT);
   persistServicePin.mockReset().mockResolvedValue(true);
@@ -135,15 +145,40 @@ describe('sweepUnpinnedProperties', () => {
     }
   });
 
-  test('the write runs under the customer review fence, even with the review gate off', async () => {
-    const fence = jest.spyOn(review, 'withCustomerReviewWriteFence');
+  test('the write takes the background fence\'s try-locks on the customer and this row', async () => {
     state.candidates = [property()];
-    delete process.env.GATE_GEOCODE_REVIEW;
     await sweepUnpinnedProperties();
-    expect(fence).toHaveBeenCalledWith('c1', db, expect.any(Function), { lockWhenDisabled: true });
-    fence.mockRestore();
-    expect(opsOf('customers').some(rec => rec.ops.some(op => op[0] === 'forUpdate'))).toBe(true);
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_try_advisory_xact_lock'), ['property-preferences', 'c1']);
+    const customerLock = opsOf('customers').find(rec => rec.ops.some(op => op[0] === 'forUpdate'));
+    expect(customerLock.ops.map(op => op[0])).toEqual(expect.arrayContaining(['forUpdate', 'noWait']));
+    const rowLock = opsOf('customer_properties').find(rec => rec.ops.some(op => op[0] === 'forUpdate'));
+    expect(hasOp(rowLock, 'where', { id: 'p1', customer_id: 'c1', active: true })).toBe(true);
+    expect(rowLock.ops.map(op => op[0])).toContain('noWait');
     expect(propertyWrites()).toHaveLength(1);
+  });
+
+  test.each([
+    ['the preferences lock', () => { mockConfig.advisory.mockReturnValue({ rows: [{ locked: false }] }); }],
+    ['a row lock (55P03)', () => {
+      const rows = mockConfig.rows.getMockImplementation();
+      mockConfig.rows.mockImplementation((rec) => {
+        if (rec.table === 'customers' && rec.ops.some(op => op[0] === 'noWait')) throw Object.assign(new Error('could not obtain lock'), { code: '55P03' });
+        return rows(rec);
+      });
+    }],
+  ])('%s held by another transaction: nothing is written and the next run retries', async (_name, hold) => {
+    state.candidates = [property()];
+    hold();
+    expect(await sweepUnpinnedProperties()).toEqual({ checked: 1, pinned: 0, unresolved: 1 });
+    expect(propertyWrites()).toHaveLength(0);
+    expect(_unresolvedProperties.size).toBe(0);
+  });
+
+  test('a property no longer active (or moved to another customer) is left alone', async () => {
+    state.candidates = [property()];
+    state.lockedProperty = undefined;
+    expect(await sweepUnpinnedProperties()).toEqual({ checked: 1, pinned: 0, unresolved: 1 });
+    expect(propertyWrites()).toHaveLength(0);
   });
 
   test('a review that holds a primary row\'s address blocks the write inside the fence', async () => {
@@ -256,7 +291,7 @@ describe('sweepPropertyVisitPins', () => {
     expect(Object.keys(snapshot)).toEqual(SNAPSHOT_COLUMNS);
     expect(snapshot).toMatchObject({ id: 'v1', technician_id: 't1', status: 'pending', lat: null, lng: null });
     expect(pin).toEqual({ lat: 27.58, lng: -82.42 });
-    expect(options).toEqual({ source: 'property_pin' });
+    expect(options).toEqual({ source: 'property_pin', recheck: expect.any(Function) });
     expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'v1', qualityDates: expect.any(Set) });
     expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
     expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ dates: ['2026-11-05'], now: NOW }, db);
@@ -281,6 +316,37 @@ describe('sweepPropertyVisitPins', () => {
     await sweepPropertyVisitPins({ now: NOW });
     expect(persistServicePin.mock.calls.map(call => call[1].id)).toEqual(['later']);
     expect(hasOp(opsOf('scheduled_services as s')[0], 'offset', 25)).toBe(true);
+  });
+
+  test('visits a review withholds do not count toward the batch, so they cannot starve a later visit', async () => {
+    state.review = { customer_id: 'c1', status: 'needs_pin', reason: 'partial_match',
+      address_snapshot: ['104 Sample Way', null, 'Parrish', 'FL', '34219'], updated_at: '2026-11-01T00:00:00Z' };
+    state.visitPages = [[...new Array(25)].map((_, i) => visit({ id: `withheld-${i}` })), [visit({ id: 'later', customer_id: 'c2' })]];
+    await sweepPropertyVisitPins({ now: NOW });
+    expect(persistServicePin.mock.calls.map(call => call[1].id)).toEqual(['later']);
+  });
+
+  test('the visit write rechecks its source property under a NOWAIT share lock', async () => {
+    state.visitPages = [[visit()]];
+    await sweepPropertyVisitPins({ now: NOW });
+    const { recheck } = persistServicePin.mock.calls[0][3];
+    mockRecorded = [];
+    await expect(recheck(db)).resolves.toBe(true);
+    const read = opsOf('customer_properties')[0];
+    expect(hasOp(read, 'where', { id: 'p1' })).toBe(true);
+    expect(read.ops.map(op => op[0])).toEqual(expect.arrayContaining(['forShare', 'noWait']));
+    for (const change of [{ latitude: '27.59' }, { active: false }, { customer_id: 'c2' }, { address_line1: '106 Sample Way' }]) {
+      state.sourceProperty = sourceProperty(change);
+      await expect(recheck(db)).resolves.toBe(false);
+    }
+    state.sourceProperty = undefined;
+    await expect(recheck(db)).resolves.toBe(false);
+  });
+
+  test('a source property a staff transaction holds is left for the next run', async () => {
+    state.visitPages = [[visit()]];
+    persistServicePin.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+    expect(await sweepPropertyVisitPins({ now: NOW })).toEqual({ checked: 1, pinned: 0, stale: 1, failed: 0 });
   });
 
   test('a refused write counts as stale, a thrown one as failed, and the pass goes on', async () => {

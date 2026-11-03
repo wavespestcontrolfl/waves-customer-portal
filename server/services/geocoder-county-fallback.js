@@ -77,28 +77,35 @@ const customerAsRead = (customer, row) => ADDRESS_COLUMNS.every(column => (custo
   && ['latitude', 'longitude'].every(column => coordinate(customer[column]) === coordinate(row[`c_${column}`]));
 
 /**
- * The property pin, under the customer and primary-property locks that staff review actions take
- * (withCustomerReviewWriteFence). The customer's address and pin, the row and its primary flag must
- * be as read, and a review that holds this primary row's address blocks the write, so a staff
- * decision made during the county call wins. `lot` null = copy the customer's pin, read here through
+ * The property pin, under the background property write fence (call-property-lookup
+ * withReviewWriteFence): try-locks on the customer and this row, so the pass never waits on a staff
+ * transaction, and a staff geocode decision, which locks the customer first, cannot interleave. The
+ * customer's address and pin, the row and its primary flag must be as read, and a review that holds
+ * this primary row's address blocks the write. `lot` null = copy the customer's pin, read here through
  * the review: a pin the review withholds is never copied.
- * Resolves 'pinned', 'withheld', or 'stale' (something changed; the next run reads the row again).
+ * Resolves 'pinned', 'withheld', or 'stale' (something changed or a lock was held; the next run retries).
  */
-async function writePropertyPin(conn, row, lot) {
+async function writePropertyPin(row, lot) {
+  const { withReviewWriteFence, isReviewFenceBusy } = require('./call-property-lookup');
   const review = require('./customer-geocode-review');
-  const outcome = await review.withCustomerReviewWriteFence(row.customer_id, conn, async (trx) => {
-    const customer = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first();
-    if (!customer || !customerAsRead(customer, row)) return 'stale';
-    const located = lot ? null : await review.reviewedCustomerLocation(customer, trx);
-    const pin = lot || (located && hasCoordinates(located) ? { lat: Number(located.latitude), lng: Number(located.longitude) } : null);
-    if (!pin) return 'withheld';
-    const write = whereUnchanged(trx('customer_properties').where({ id: row.id, active: true }), row,
-      [...ADDRESS_COLUMNS, 'latitude', 'longitude', 'is_primary']);
-    const count = await review.excludePrimaryPropertyReviewForId(write, row.id)
-      .update({ latitude: pin.lat, longitude: pin.lng, updated_at: new Date() });
-    return count ? 'pinned' : 'stale';
-  }, { lockWhenDisabled: true });
-  return outcome || 'stale';
+  try {
+    const outcome = await withReviewWriteFence({ propertyId: row.id, customerId: row.customer_id }, async (trx) => {
+      const customer = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first();
+      if (!customer || !customerAsRead(customer, row)) return 'stale';
+      const located = lot ? null : await review.reviewedCustomerLocation(customer, trx);
+      const pin = lot || (located && hasCoordinates(located) ? { lat: Number(located.latitude), lng: Number(located.longitude) } : null);
+      if (!pin) return 'withheld';
+      const write = whereUnchanged(trx('customer_properties').where({ id: row.id, active: true }), row,
+        [...ADDRESS_COLUMNS, 'latitude', 'longitude', 'is_primary']);
+      const count = await review.excludePrimaryPropertyReviewForId(write, row.id)
+        .update({ latitude: pin.lat, longitude: pin.lng, updated_at: new Date() });
+      return count ? 'pinned' : 'stale';
+    });
+    return outcome || 'stale';
+  } catch (err) {
+    if (isReviewFenceBusy(err)) return 'stale';
+    throw err;
+  }
 }
 
 async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, conn = db } = {}) {
@@ -127,7 +134,7 @@ async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, conn = db } = {
         continue;
       }
     }
-    const outcome = await writePropertyPin(conn, row, lot);
+    const outcome = await writePropertyPin(row, lot);
     if (outcome === 'pinned') {
       results.pinned += 1;
       continue;
@@ -167,22 +174,36 @@ function unpinnedVisitsQuery(conn, now, snapshotColumns) {
       'p.latitude as p_latitude', 'p.longitude as p_longitude');
 }
 
+// Inside the visit write: the source property, share-locked against a concurrent pin correction, is still
+// active, the visit customer's, and at the address and pin the pass read. NOWAIT, so this background pass
+// never waits on a staff transaction; a held row is retried next run.
+const sourcePropertyAsRead = row => async (trx) => {
+  const current = await trx('customer_properties').where({ id: row.property_id }).forShare().noWait()
+    .first('active', 'customer_id', ...ADDRESS_COLUMNS, 'latitude', 'longitude');
+  return !!current && current.active === true && String(current.customer_id) === String(row.customer_id)
+    && ADDRESS_COLUMNS.every(column => (current[column] ?? null) === (row[`p_${column}`] ?? null))
+    && ['latitude', 'longitude'].every(column => coordinate(current[column]) === coordinate(row[`p_${column}`]));
+};
+
 /**
  * Each visit goes through persistServicePin, the service-location backstop's write: the technician-day
- * lock, the review recheck under it (a withheld pin writes nothing, a staff-verified point wins), and a
- * write only on the visit exactly as read. Needs GATE_ROUTE_REORDER + GATE_ROUTE_REORDER_REPAIR like
- * that backstop. Returns { checked, pinned, stale, failed }.
+ * lock, the source property recheck and the review recheck under it (a withheld pin writes nothing, a
+ * staff-verified point wins), and a write only on the visit exactly as read. Needs GATE_ROUTE_REORDER +
+ * GATE_ROUTE_REORDER_REPAIR like that backstop. Returns { checked, pinned, stale, failed }.
  */
 async function sweepPropertyVisitPins({ limit = VISIT_BATCH, now = new Date(), conn = db } = {}) {
   const results = { checked: 0, pinned: 0, stale: 0, failed: 0 };
   if (!countyFallbackLive()) return results;
   const { SNAPSHOT_COLUMNS, persistServicePin } = require('./geocoder-service-locations');
+  const { isReviewFenceBusy } = require('./call-property-lookup');
+  const review = require('./customer-geocode-review');
   const query = unpinnedVisitsQuery(conn, now, SNAPSHOT_COLUMNS);
-  // Page past visits stamped for another address, so they cannot starve later ones.
+  // Page past visits stamped for another address or withheld by a review (filterServiceReviewBlocks,
+  // as the service-location backstop does), so they cannot starve later ones.
   const visits = [];
   for (let offset = 0; visits.length < limit; offset += limit) {
     const batch = await query.clone().orderBy('s.scheduled_date').orderBy('s.id').offset(offset).limit(limit);
-    visits.push(...batch.filter(stampIsProperty));
+    visits.push(...await review.filterServiceReviewBlocks(batch.filter(stampIsProperty), conn));
     if (batch.length < limit) break;
   }
   const dates = new Set();
@@ -190,7 +211,8 @@ async function sweepPropertyVisitPins({ limit = VISIT_BATCH, now = new Date(), c
     results.checked += 1;
     const snapshot = Object.fromEntries(SNAPSHOT_COLUMNS.map(column => [column, row[column]]));
     try {
-      if (!await persistServicePin(conn, snapshot, { lat: Number(row.p_latitude), lng: Number(row.p_longitude) }, { source: 'property_pin' })) {
+      const pin = { lat: Number(row.p_latitude), lng: Number(row.p_longitude) };
+      if (!await persistServicePin(conn, snapshot, pin, { source: 'property_pin', recheck: sourcePropertyAsRead(row) })) {
         results.stale += 1;
         continue;
       }
@@ -199,6 +221,10 @@ async function sweepPropertyVisitPins({ limit = VISIT_BATCH, now = new Date(), c
       await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: row.id, qualityDates: dates })
         .catch(error => logger.error(`[geocoder] county visit refresh failed for ${row.id} (${error.code || 'broadcast_error'})`));
     } catch (error) {
+      if (isReviewFenceBusy(error)) {
+        results.stale += 1;
+        continue;
+      }
       results.failed += 1;
       logger.error(`[geocoder] county visit pin failed for ${row.id}`, { code: error.code });
     }

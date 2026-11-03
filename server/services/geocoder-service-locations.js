@@ -62,11 +62,13 @@ function candidatesQuery(conn, now) {
     )`);
 }
 
-// `source` names a non-geocode pin in the audit row (the county pass: 'property_pin').
-async function persistServicePin(conn, snapshot, location, { source } = {}) {
+// `source` names a non-geocode pin in the audit row (the county pass: 'property_pin'). `recheck(trx)`
+// re-reads under the day lock whatever the caller's pin came from; a false answer writes nothing.
+async function persistServicePin(conn, snapshot, location, { source, recheck } = {}) {
   return conn.transaction(async trx => {
     await lockTechDays(trx, [{ techId: snapshot.technician_id, date: toDateStr(snapshot.scheduled_date) }]);
     if (!enabled()) return false;
+    if (recheck && !await recheck(trx)) return false;
     // Staff can revoke a still-null pin while the provider call is in flight.
     // Recheck under the same day lock as that action, even if the service row
     // itself is unchanged. A verified address uses the staff-selected point.

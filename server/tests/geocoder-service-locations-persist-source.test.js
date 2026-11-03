@@ -36,7 +36,7 @@ afterAll(() => { delete process.env.GATE_ROUTE_REORDER; delete process.env.GATE_
 const auditSource = () => recordAuditEvent.mock.calls[0][0].metadata.source;
 
 test('a caller-named source labels the audit row, under the technician-day lock', async () => {
-  await expect(persistServicePin(conn, SNAPSHOT, PIN, { source: 'property_pin' })).resolves.toBe(true);
+  await expect(persistServicePin(conn, SNAPSHOT, PIN, { source: 'property_pin', recheck: async () => true })).resolves.toBe(true);
   expect(lockTechDays).toHaveBeenCalledWith(expect.anything(), [{ techId: 't1', date: '2026-11-05' }]);
   expect(updates[0]).toMatchObject({ lat: 27.58, lng: -82.42 });
   expect(auditSource()).toBe('property_pin');
@@ -52,6 +52,14 @@ test('a staff-verified point wins over the caller\'s pin and its label', async (
   await persistServicePin(conn, SNAPSHOT, PIN, { source: 'property_pin' });
   expect(updates[0]).toMatchObject({ lat: 27.5, lng: -82.5 });
   expect(auditSource()).toBe('staff_verified_pin');
+});
+
+test('a false recheck under the day lock writes nothing', async () => {
+  const recheck = jest.fn(async () => false);
+  await expect(persistServicePin(conn, SNAPSHOT, PIN, { source: 'property_pin', recheck })).resolves.toBe(false);
+  expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(recheck.mock.invocationCallOrder[0]);
+  expect(updates).toHaveLength(0);
+  expect(recordAuditEvent).not.toHaveBeenCalled();
 });
 
 test('a pin the review withholds writes nothing', async () => {
