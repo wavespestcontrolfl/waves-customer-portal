@@ -31,7 +31,7 @@ jest.mock('../services/irrigation-rain-unknown-alert', () => ({ settleRainUnknow
 
 const db = require('../models/db');
 const { settleRainUnknownAlerts } = require('../services/irrigation-rain-unknown-alert');
-const { isEnabled, autoDispatchMowingDaysMode } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue, autoDispatchMowingDaysMode } = require('../config/feature-gates');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { fetchServiceWeekWeather } = require('../services/service-report/application-conditions');
 const {
@@ -558,6 +558,24 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(settled.rainUnknownCustomerIds).toEqual(['cust-1']);
     expect([...settled.sentCustomerIds]).toEqual([]);
     expect(settled.weekEnding).toBe(WEEK_ENDING);
+  });
+
+  test('an app-only customer (email off) skipped as rain-unknown gets no missed-email bell', async () => {
+    // App publication on: an email-off customer stays a candidate for the app plan.
+    gateEnvValue.mockImplementation(() => true);
+    try {
+      db.mockImplementation((table) => makeBuilder(
+        String(table).startsWith('customers') ? { rows: [{ ...CANDIDATE, email_enabled: false }] } : {},
+      ));
+      fetchServiceWeekWeather.mockResolvedValue({ rainInches: null, et0Inches: null, dailyRain: null });
+      // Tuesday: the plan window is closed, so the run takes the pre-plan path.
+      const summary = await runWeeklyIrrigationEmailSweep({ now: new Date('2026-07-07T07:00:00-04:00') });
+      expect(summary.skipped.rain_unknown).toBe(1);
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+      expect(settleRainUnknownAlerts.mock.calls[0][0].rainUnknownCustomerIds).toEqual([]);
+    } finally {
+      gateEnvValue.mockImplementation(() => false);
+    }
   });
 
   test('a sent customer is handed to the rain-unknown bells (a later email closes theirs); a balanced week is not rain-unknown', async () => {

@@ -1584,10 +1584,12 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   // For the rain-unknown bells after the run (irrigation-rain-unknown-alert.js).
   const sentCustomerIds = new Set();
   const rainUnknownCustomerIds = [];
-  const countSkip = (decision, customer) => {
+  // Only a customer the email could reach gets a bell: an app-only one (no email, or email
+  // off) was never going to be emailed, so there is no missed email to decide on.
+  const countSkip = (decision, customer, canEmail) => {
     if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
     else summary.skipped.unknown += 1;
-    if (decision.reason === 'rain_unknown') rainUnknownCustomerIds.push(customer.id);
+    if (decision.reason === 'rain_unknown' && canEmail) rainUnknownCustomerIds.push(customer.id);
   };
   // Both preparation failures and ambiguous provider outcomes use the same
   // durable delivery reconciliation before releasing a snapshot claim.
@@ -1967,7 +1969,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.
       let decision = buildWeeklyEmailDecision(decisionInputs);
       if (!decision.shouldSend) {
-        countSkip(decision, customer);
+        countSkip(decision, customer, canEmail);
         continue;
       }
       const upcoming = frozen ? { rainInches: frozen.forecastRainInches, et0Inches: frozen.forecastEt0Inches } : await fetchUpcomingWeekForecast({
@@ -1985,7 +1987,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // Defensive recheck — today the forecast only reroutes a deficit to the
       // on-track template (still a send), but a no-send here must be counted.
       if (!decision.shouldSend) {
-        countSkip(decision, customer);
+        countSkip(decision, customer, canEmail);
         continue;
       }
 
