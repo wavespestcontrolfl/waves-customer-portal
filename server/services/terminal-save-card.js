@@ -168,9 +168,9 @@ async function completeTerminalSetup({ handoff, setupIntentId, ip = null, userAg
     setupIntentId,
     ip,
     userAgent,
-    // The sticky-window echo is a /secure page artifact; the Tap to Pay
-    // screen does not render that disclosure, so none is claimed.
-    disclosureVersion: null,
+    // The sticky cancel-window echo the /secure page rendered, stored at mint
+    // (null when the tap did not start from that page).
+    disclosureVersion: handoff.disclosure_version || null,
     consentSource: TAP_CONSENT_SOURCE,
   });
   if (!finished.ok) return finished;

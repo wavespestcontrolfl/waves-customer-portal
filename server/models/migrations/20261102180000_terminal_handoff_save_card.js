@@ -11,6 +11,8 @@
  *                               row; /complete-setup checks it.
  *   consent_text_version        the card consent version the technician's app
  *                               attested at mint time.
+ *   disclosure_version          the sticky cancel-window disclosure echo the
+ *                               /secure page rendered (sticky_v1), or NULL.
  *
  * Additive only. Existing rows read as 'collect', so the payment sweepers and
  * the orphaned-validated partial index keep their meaning (save_card rows have
@@ -24,7 +26,8 @@ exports.up = async function up(knex) {
   const needRequest = !(await has('appointment_card_request_id'));
   const needSetup = !(await has('stripe_setup_intent_id'));
   const needConsent = !(await has('consent_text_version'));
-  if (!(needKind || needRequest || needSetup || needConsent)) return;
+  const needDisclosure = !(await has('disclosure_version'));
+  if (!(needKind || needRequest || needSetup || needConsent || needDisclosure)) return;
   await knex.schema.alterTable('terminal_handoff_tokens', (t) => {
     if (needKind) t.string('kind', 16).notNullable().defaultTo('collect');
     if (needRequest) {
@@ -33,6 +36,7 @@ exports.up = async function up(knex) {
     }
     if (needSetup) t.string('stripe_setup_intent_id', 100);
     if (needConsent) t.string('consent_text_version', 64);
+    if (needDisclosure) t.string('disclosure_version', 32);
   });
 };
 
@@ -41,7 +45,7 @@ exports.down = async function down(knex) {
   const has = (col) => knex.schema.hasColumn('terminal_handoff_tokens', col);
   const hadRequest = await has('appointment_card_request_id');
   const dropCols = [];
-  for (const col of ['kind', 'stripe_setup_intent_id', 'consent_text_version']) {
+  for (const col of ['kind', 'stripe_setup_intent_id', 'consent_text_version', 'disclosure_version']) {
     if (await has(col)) dropCols.push(col);
   }
   if (!hadRequest && dropCols.length === 0) return;

@@ -104,6 +104,7 @@ jest.mock('../services/stripe', () => ({
 }));
 jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn() }));
 jest.mock('../services/appointment-card-request', () => ({
+  STICKY_DISCLOSURE_VERSION: 'sticky_v1',
   secureVisitStillNeedsCard: (...args) => mockStillNeeds(...args),
   finishVerifiedSecureCapture: (...args) => mockFinish(...args),
 }));
@@ -304,6 +305,15 @@ describe('POST /save-card-handoff', () => {
     expect(mockAudit.auditTerminalHandoffMint).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'save_card', card_request_id: 'req-1', tech_user_id: 'tech-1',
     }));
+  });
+
+  test('stores the sticky disclosure echo only when it is the accepted value', async () => {
+    await withServer(async (base) => {
+      await post(base, '/save-card-handoff', mintBody({ disclosure_version: 'sticky_v1' }), ADMIN);
+      await post(base, '/save-card-handoff', mintBody({ disclosure_version: 'bogus' }), ADMIN);
+      await post(base, '/save-card-handoff', mintBody(), ADMIN);
+    });
+    expect(mockState.tables.terminal_handoff_tokens.map((r) => r.disclosure_version)).toEqual(['sticky_v1', null, null]);
   });
 
   test('shares the per-tech hourly mint budget and creates nothing when limited', async () => {
@@ -507,6 +517,14 @@ describe('POST /complete-setup', () => {
       stripePaymentMethodId: 'pm_generated1', setupIntentId: 'seti_1', consentSource: 'admin_tap_to_pay',
       ip: '203.0.113.9', userAgent: 'WavesAdmin/1.8', disclosureVersion: null,
     }));
+  });
+
+  test('passes the stored disclosure echo through, null when absent', async () => {
+    mockState.tables.terminal_handoff_tokens[0].disclosure_version = 'sticky_v1';
+    await withServer(async (base) => {
+      await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth());
+    });
+    expect(mockFinish).toHaveBeenCalledWith(expect.objectContaining({ disclosureVersion: 'sticky_v1' }));
   });
 
   test('a retry after the save finished answers the same without saving again', async () => {

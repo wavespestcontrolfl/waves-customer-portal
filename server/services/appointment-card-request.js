@@ -4055,6 +4055,7 @@ module.exports = {
   // Shared with the Tap to Pay card save (services/terminal-save-card.js).
   secureVisitStillNeedsCard,
   finishVerifiedSecureCapture,
+  STICKY_DISCLOSURE_VERSION,
   _test: {
     dateLineFor,
     resolveExemption,

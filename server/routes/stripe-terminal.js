@@ -854,7 +854,7 @@ function saveCardMintRefusal(body) {
 // limited mint creates nothing at Stripe; a Stripe failure rolls the whole
 // mint back (no row, no token). The idempotency key is the jti, so a retried
 // create replays the same intent.
-async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion }) {
+async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, disclosureVersion = null }) {
   const out = { rateLimited: false, count: 0, retryAfter: 3600, jti: null, expiresAt: null, setupIntentId: null };
   await db.transaction(async (trx) => {
     await trx.raw(
@@ -898,6 +898,7 @@ async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVers
       appointment_card_request_id: request.id,
       stripe_setup_intent_id: setupIntent.id,
       consent_text_version: consentTextVersion,
+      disclosure_version: disclosureVersion,
       expires_at: expiresAt,
       staff_mfa: req.staffToken.mfa === true,
     });
@@ -924,7 +925,9 @@ async function resolveSaveCardMintTarget(secureToken) {
 
 // POST /api/stripe/terminal/save-card-handoff
 // Admin-only (same session/MFA rules as /handoff). Body:
-//   { secure_token, consent_text_version, agreed }
+//   { secure_token, consent_text_version, agreed, disclosure_version? }
+// disclosure_version (optional): the sticky cancel-window echo the /secure page
+// rendered ('sticky_v1'); any other value is stored as NULL.
 // Returns: { token, deep_link, jti, expires_at }
 router.post('/save-card-handoff', tapSaveCardGate, adminAuthenticate, requireAdmin, async (req, res) => {
   try {
@@ -941,7 +944,10 @@ router.post('/save-card-handoff', tapSaveCardGate, adminAuthenticate, requireAdm
     const { request, stripeCustomerId } = target;
     const consentTextVersion = String(req.body.consent_text_version).trim();
 
-    const minted = await mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion });
+    // Only the echo the /secure complete route honors is kept; else NULL.
+    const { STICKY_DISCLOSURE_VERSION } = require('../services/appointment-card-request');
+    const disclosureVersion = req.body.disclosure_version === STICKY_DISCLOSURE_VERSION ? STICKY_DISCLOSURE_VERSION : null;
+    const minted = await mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, disclosureVersion });
     if (minted.rateLimited) {
       auditTerminalHandoffRateLimited({
         tech_user_id: req.technicianId,
