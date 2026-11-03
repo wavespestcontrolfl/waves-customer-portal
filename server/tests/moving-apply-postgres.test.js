@@ -407,6 +407,11 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'primary_role_unavailable' });
     await trx('customers').where({ id: customerId }).update({ contact_role: null });
 
+    // A legacy visit with no status after move-out would stay booked: refused, named.
+    const legacy = await insertVisit({ scheduled_date: day(150), recurring_parent_id: s.pestRoot, recurring_pattern: 'quarterly', property_id: oldHouseId, status: null });
+    await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'legacy_visits', message: expect.stringContaining('Quarterly Pest Control Service') });
+    await trx('scheduled_services').where({ id: legacy }).del();
+
     // A plan whose visits name a third address cannot be tied to one house.
     const odd = await insertVisit({
       service_type: 'Tree & Shrub Care', scheduled_date: AFTER_1, is_recurring: true, recurring_pattern: 'monthly', recurring_ongoing: true,

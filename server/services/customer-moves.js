@@ -1140,9 +1140,10 @@ async function oldHousePlans(conn, customerId, { to, from, flipped, today, cutFr
     .where({ customer_id: customerId, recurring_ongoing: true })
     .whereNull('recurring_parent_id')
     .select('id');
+  // A legacy NULL status is a live visit too (20260829000050's rule).
   const afterRows = await conn('scheduled_services')
     .where({ customer_id: customerId })
-    .whereIn('status', LIVE_VISIT_STATUSES)
+    .where((q) => q.whereIn('status', LIVE_VISIT_STATUSES).orWhereNull('status'))
     .where('scheduled_date', '>=', cutFrom)
     .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'id', order: 'asc' }])
     .select(SERIES_ROW_COLUMNS);
@@ -1187,6 +1188,13 @@ async function oldHousePlans(conn, customerId, { to, from, flipped, today, cutFr
   if (unresolved.length) {
     throw applyError('unresolved_series', 409,
       `These plans could not be tied to one house: ${[...new Set(unresolved.map((u) => u.name))].join(', ')}. Fix their visit addresses first, or move them by hand.`);
+  }
+  // The series cancel only cancels pending, confirmed and rescheduled visits:
+  // a legacy visit with no status would stay booked after its plan stopped.
+  const noStatus = stops.flatMap((st) => st.targets).filter((r) => r.status == null);
+  if (noStatus.length) {
+    throw applyError('legacy_visits', 409,
+      `These visits at the old house have no status: ${noStatus.map((r) => `${planItem(r).name} ${prettyDate(visitDay(r))}`).join(', ')}. Give each one a status on the schedule first, then apply.`);
   }
   const oldOneOffs = afterRows.filter((r) => !inSeries(r) && visitAtHouse(r, from, { primaryIsHouse: !flipped }));
   return {
