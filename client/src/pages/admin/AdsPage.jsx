@@ -702,18 +702,26 @@ function ServiceLinesTab() {
   const [period, setPeriod] = useState("30d");
   const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    // The period buttons stay clickable during a load, so a slower answer for
+    // an older period must not land under the newer period's button.
+    let current = true;
     setLoading(true);
     setError(null);
     adminFetch(`/admin/ads/service-lines?period=${period}`)
       .then((d) => {
+        if (!current) return;
         setData(d);
         setLoading(false);
       })
       .catch((e) => {
+        if (!current) return;
         setData(null);
         setError(`Service-line data did not load: ${e.message}`);
         setLoading(false);
       });
+    return () => {
+      current = false;
+    };
   }, [period, reloadKey]);
   // The period buttons stay on screen in every state, so an empty or failed
   // period never hides the way to another period.

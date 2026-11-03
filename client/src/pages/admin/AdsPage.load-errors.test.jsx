@@ -115,6 +115,27 @@ it("Services: an empty period keeps the period buttons, so another period can be
   expect(screen.queryByText(/No leads in this period/)).not.toBeInTheDocument();
 });
 
+it("Services: a slower answer for an older period never replaces the newer period's data", async () => {
+  let release7;
+  routes["GET /admin/ads/service-lines?period=30d"] = () => json({ totalLeads: 0, byBucket: [] });
+  routes["GET /admin/ads/service-lines?period=7d"] = () =>
+    new Promise((resolve) => {
+      release7 = () => resolve(json({ error: "Old period failed" }, 500));
+    });
+  routes["GET /admin/ads/service-lines?period=90d"] = () => json({ totalLeads: 0, byBucket: [] });
+  open("service-lines");
+
+  await screen.findByText(/No leads in this period/);
+  fireEvent.click(screen.getByRole("button", { name: "7 Days" }));
+  fireEvent.click(screen.getByRole("button", { name: "90 Days" }));
+  expect(await screen.findByText(/No leads in this period/)).toBeInTheDocument();
+
+  release7();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByText(/No leads in this period/)).toBeInTheDocument();
+});
+
 it("Services: a failed read says so, keeps the period buttons, and retries", async () => {
   let fail = true;
   routes["GET /admin/ads/service-lines?period=30d"] = () =>
