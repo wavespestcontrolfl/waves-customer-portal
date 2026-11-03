@@ -463,7 +463,7 @@ jest.setTimeout(30000);
     };
     await run({ ok: true, json: decision });
     const [bell] = await bellsFor(line.id);
-    expect(bell.message || bell.body || JSON.stringify(bell)).toMatch(/restock request for Taurus SC is still open/);
+    expect(bell.detail || bell.body || JSON.stringify(bell)).toMatch(/restock request for Taurus SC is still open/);
   });
 
   test('an EXISTING count product whose default_unit is still the admin default and never used yet: the restock fixes it to each (review item 1)', async () => {
