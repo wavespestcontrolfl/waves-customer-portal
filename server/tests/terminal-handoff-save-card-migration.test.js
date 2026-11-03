@@ -29,21 +29,21 @@ function fakeKnex(existingColumns = []) {
 }
 
 describe('terminal_handoff_tokens save-card migration', () => {
-  test('up adds the five columns, kind defaulting to collect', async () => {
+  test('up adds the four columns, kind defaulting to collect', async () => {
     const knex = fakeKnex();
     await migration.up(knex);
     expect([...knex.columns].sort()).toEqual([
-      'appointment_card_request_id', 'consent_text_version', 'disclosure_version', 'kind', 'stripe_setup_intent_id',
+      'appointment_card_request_id', 'consent_text_version', 'kind', 'stripe_setup_intent_id',
     ]);
     expect(knex.calls).toEqual(expect.arrayContaining([
       ['string', 'kind', 16], ['defaultTo', 'collect'], ['notNullable'],
       ['inTable', 'appointment_card_requests'], ['onDelete', 'SET NULL'],
-      ['string', 'stripe_setup_intent_id', 100], ['string', 'consent_text_version', 64], ['string', 'disclosure_version', 32],
+      ['string', 'stripe_setup_intent_id', 100], ['string', 'consent_text_version', 64],
     ]));
   });
 
   test('up is a no-op when the columns already exist', async () => {
-    const knex = fakeKnex(['kind', 'appointment_card_request_id', 'stripe_setup_intent_id', 'consent_text_version', 'disclosure_version']);
+    const knex = fakeKnex(['kind', 'appointment_card_request_id', 'stripe_setup_intent_id', 'consent_text_version']);
     await migration.up(knex);
     expect(knex.calls).toEqual([]);
   });

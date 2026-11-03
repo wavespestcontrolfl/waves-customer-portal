@@ -122,7 +122,7 @@ beforeEach(() => {
     payment_methods: [],
     terminal_handoff_tokens: [{
       jti: 'jti-1', kind: 'save_card', stripe_setup_intent_id: 'seti_1', appointment_card_request_id: 'req-1',
-      tech_user_id: 'tech-1', used_at: new Date(), disclosure_version: 'sticky_v1',
+      tech_user_id: 'tech-1', used_at: new Date(),
     }],
   };
   mockRetrieveSetupIntent.mockImplementation(async () => tapIntent());
@@ -147,12 +147,44 @@ describe('setup_intent.succeeded for a Tap to Pay card save', () => {
     expect(mockEnroll).toHaveBeenCalledTimes(1);
   });
 
-  test('stamps the sticky disclosure from the save_card row onto the fee terms', async () => {
+  const feeMeta = (extra = {}) => ({
+    appointment_card_request_id: 'req-1', scheduled_service_id: 'visit-1', source: 'admin_tap_to_pay',
+    consent_text_version: CONSENT_VERSION, fee_terms_agreed: 'true', fee_terms_amount_cents: '4900',
+    disclosure_version: 'sticky_v1', ...extra,
+  });
+
+  test('verified fee consent in the intent metadata stamps the fee terms (sticky too)', async () => {
     request().no_show_fee_amount = '49.00';
-    await handle(tapIntent());
+    mockRetrieveSetupIntent.mockImplementation(async () => tapIntent({ metadata: feeMeta() }));
+    await handle(tapIntent({ metadata: feeMeta() }));
+    expect(request().status).toBe('completed');
     expect(request().fee_agreed_at).toBeInstanceOf(Date);
     expect(request().sticky_window_disclosed).toBe(true);
-    mockState.tables.terminal_handoff_tokens[0].disclosure_version = null;
+  });
+
+  test.each([
+    ['no fee consent in the metadata', { fee_terms_agreed: 'false', fee_terms_amount_cents: undefined, disclosure_version: undefined }],
+    ['a fee amount that is not the row\'s', { fee_terms_amount_cents: '2500' }],
+  ])('%s: the card saves and Auto Pay enrolls but no fee agreement is stamped', async (_label, extra) => {
+    request().no_show_fee_amount = '49.00';
+    mockRetrieveSetupIntent.mockImplementation(async () => tapIntent({ metadata: feeMeta(extra) }));
+    await handle(tapIntent({ metadata: feeMeta(extra) }));
+    expect(request().status).toBe('completed');
+    expect(request().stripe_payment_method_id).toBe('pm_generated1');
+    expect(mockEnroll).toHaveBeenCalledTimes(1);
+    expect(request().fee_agreed_at).toBeUndefined();
+    expect(request().sticky_window_disclosed).toBeUndefined();
+    expect(request().no_show_fee_amount).toBeNull();
+  });
+
+  test('recovery needs no handoff row: it reads the evidence from the intent after cleanup deleted the row', async () => {
+    mockState.tables.terminal_handoff_tokens = [];
+    request().no_show_fee_amount = '49.00';
+    mockRetrieveSetupIntent.mockImplementation(async () => tapIntent({ metadata: feeMeta() }));
+    await handle(tapIntent({ metadata: feeMeta() }));
+    expect(request().status).toBe('completed');
+    expect(request().fee_agreed_at).toBeInstanceOf(Date);
+    expect(request().sticky_window_disclosed).toBe(true);
   });
 
   test('the webhook then /complete-setup is idempotent: one save, one consent, one enrollment', async () => {

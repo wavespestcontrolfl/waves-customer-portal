@@ -87,6 +87,43 @@ async function saveCardEligibility(request) {
   return { ok: true };
 }
 
+// Money as whole cents, the way the fee columns compare (numeric(10,2)).
+function toCents(value) {
+  const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 100) : null;
+}
+
+/**
+ * Was the customer shown THIS request's cancellation fee? Verified only when
+ * the row carries a fee (no_show_fee_amount > 0) and the amount the technician's
+ * app says the /secure page showed equals it exactly. Recorded at mint in the
+ * SetupIntent metadata (server-side, so the client cannot change it later).
+ */
+function feeTermsVerified(request, feeDisclosedAmount) {
+  const rowCents = toCents(request?.no_show_fee_amount);
+  return rowCents != null && rowCents > 0 && toCents(feeDisclosedAmount) === rowCents;
+}
+
+// The SetupIntent metadata keys the mint writes and completion reads.
+function feeMetadata(request, { feeDisclosedAmount, disclosureVersion }) {
+  const agreed = feeTermsVerified(request, feeDisclosedAmount);
+  return {
+    fee_terms_agreed: agreed ? 'true' : 'false',
+    ...(agreed ? { fee_terms_amount_cents: String(toCents(request.no_show_fee_amount)) } : {}),
+    ...(disclosureVersion ? { disclosure_version: disclosureVersion } : {}),
+  };
+}
+
+// Fee consent as completion judges it: from the retrieved SetupIntent's
+// metadata only, and only while the row still carries the amount agreed to.
+function feeConsentFromIntent(setupIntent, request) {
+  const meta = setupIntent?.metadata || {};
+  const agreed = meta.fee_terms_agreed === 'true'
+    && toCents(request.no_show_fee_amount) > 0
+    && String(toCents(request.no_show_fee_amount)) === meta.fee_terms_amount_cents;
+  return { feeTermsAgreed: agreed, disclosureVersion: agreed ? meta.disclosure_version || null : null };
+}
+
 function idOf(value) {
   if (!value) return null;
   return typeof value === 'string' ? value : value.id || null;
@@ -132,7 +169,7 @@ async function verifyTerminalSetupIntent(request, setupIntentId) {
   if (setupIntent.status !== 'succeeded') return { ok: false, code: 'setup_not_succeeded' };
   const generatedCard = generatedCardId(setupIntent);
   if (!generatedCard) return { ok: false, code: 'no_generated_card' };
-  return { ok: true, generatedCard };
+  return { ok: true, generatedCard, setupIntent };
 }
 
 /**
@@ -144,7 +181,7 @@ async function verifyTerminalSetupIntent(request, setupIntentId) {
  * { ok: false, code, status? } where a code is one of SAVE_CARD_REFUSALS' keys,
  * `not_found`, `verification_failed`, or `consent_version_stale`.
  */
-async function completeTerminalSetupForRequest({ requestId, setupIntentId, disclosureVersion = null, ip = null, userAgent = null }) {
+async function completeTerminalSetupForRequest({ requestId, setupIntentId, ip = null, userAgent = null }) {
   const request = await db('appointment_card_requests').where({ id: requestId }).first();
   if (!request) return { ok: false, code: 'not_found' };
 
@@ -169,9 +206,11 @@ async function completeTerminalSetupForRequest({ requestId, setupIntentId, discl
     setupIntentId,
     ip,
     userAgent,
-    // The sticky cancel-window echo the /secure page rendered, stored at mint
-    // (null when the tap did not start from that page).
-    disclosureVersion: disclosureVersion || null,
+    // Fee consent and the sticky echo come ONLY from the retrieved
+    // SetupIntent's metadata (written server-side at mint). Without verified
+    // fee disclosure the tail saves the card and enrolls Auto Pay but stamps
+    // no fee agreement.
+    ...feeConsentFromIntent(verified.setupIntent, request),
     consentSource: TAP_CONSENT_SOURCE,
   });
   if (!finished.ok) return finished;
@@ -186,7 +225,6 @@ function completeTerminalSetup({ handoff, setupIntentId, ip = null, userAgent = 
   return completeTerminalSetupForRequest({
     requestId: handoff.appointment_card_request_id,
     setupIntentId,
-    disclosureVersion: handoff.disclosure_version,
     ip,
     userAgent,
   });
@@ -206,12 +244,9 @@ const WEBHOOK_RETRY_CODES = new Set(['completion_failed', 'completion_in_progres
 async function completeTerminalSetupFromWebhook(setupIntent) {
   const requestId = setupIntent?.metadata?.appointment_card_request_id;
   if (!requestId || !setupIntent.id) return { ok: false, retry: false, code: 'no_request_id' };
-  const handoff = await db('terminal_handoff_tokens')
-    .where({ stripe_setup_intent_id: setupIntent.id, kind: 'save_card' }).first('disclosure_version');
   const result = await completeTerminalSetupForRequest({
     requestId,
     setupIntentId: setupIntent.id,
-    disclosureVersion: handoff?.disclosure_version || null,
   });
   if (result.ok) return { ok: true, retry: false, alreadyCompleted: result.alreadyCompleted === true };
   if (result.code === 'no_generated_card') await alertNoGeneratedCard(requestId, setupIntent.id);
@@ -251,5 +286,7 @@ module.exports = {
   completeTerminalSetup,
   completeTerminalSetupForRequest,
   completeTerminalSetupFromWebhook,
+  feeMetadata,
+  feeTermsVerified,
   generatedCardId,
 };

@@ -1914,7 +1914,13 @@ async function secureVisitStillNeedsCard(request, { database = db } = {}) {
 // `consentSource`: the payment_method_consents.source the authorization row is
 // recorded under — 'appointment_card_request' for the /secure page, and
 // 'admin_tap_to_pay' when a technician's Tap to Pay save completes the request.
-async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null, consentSource = 'appointment_card_request' }) {
+async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null, consentSource = 'appointment_card_request', feeTermsAgreed = true }) {
+  // Fee terms are stamped as agreed (fee_agreed_at / sticky_window_disclosed)
+  // only when the capture verified the customer was shown them. Every existing
+  // caller keeps the default (true); the Tap to Pay save passes the verified
+  // value from its SetupIntent metadata, and without it the card still saves
+  // and Auto Pay still enrolls but no cancellation fee is ever enforceable.
+  if (!feeTermsAgreed) disclosureVersion = null;
   const stillNeeded = await secureVisitStillNeedsCard(request);
   if (!stillNeeded.ok) return stillNeeded;
 
@@ -2172,7 +2178,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       const disclosed = await db('appointment_card_requests')
         .where({ id: request.id })
         .first('no_show_fee_amount');
-      if (Number(disclosed?.no_show_fee_amount) > 0) {
+      if (feeTermsAgreed && Number(disclosed?.no_show_fee_amount) > 0) {
         frozenFeeTerms.fee_agreed_at = new Date();
         // Sticky marker rides ONLY with consent, from the completing tab's
         // own echo — a missing/legacy echo (old bundle, webhook backstop)
@@ -2206,6 +2212,10 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
           completed_at: new Date(),
           updated_at: new Date(),
           ...frozenFeeTerms,
+          // No verified fee disclosure: drop the earlier-rendered terms so no
+          // surface (secured note, cancel preview) repeats a fee the customer
+          // never agreed to.
+          ...(feeTermsAgreed ? {} : { no_show_fee_amount: null }),
         });
     });
     logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);

@@ -307,13 +307,28 @@ describe('POST /save-card-handoff', () => {
     }));
   });
 
-  test('stores the sticky disclosure echo only when it is the accepted value', async () => {
-    await withServer(async (base) => {
-      await post(base, '/save-card-handoff', mintBody({ disclosure_version: 'sticky_v1' }), ADMIN);
-      await post(base, '/save-card-handoff', mintBody({ disclosure_version: 'bogus' }), ADMIN);
-      await post(base, '/save-card-handoff', mintBody(), ADMIN);
-    });
-    expect(mockState.tables.terminal_handoff_tokens.map((r) => r.disclosure_version)).toEqual(['sticky_v1', null, null]);
+  test('verifies fee consent and writes it into the SetupIntent metadata, never the row', async () => {
+    seed({ request: { no_show_fee_amount: '49.00' } });
+    const metadataOf = async (extra) => {
+      mockStripe.setupIntents.create.mockClear();
+      await withServer(async (base) => { await post(base, '/save-card-handoff', mintBody(extra), ADMIN); });
+      return mockStripe.setupIntents.create.mock.calls[0][0].metadata;
+    };
+    expect(await metadataOf({ fee_disclosed_amount: 49, disclosure_version: 'sticky_v1' })).toEqual(expect.objectContaining({
+      fee_terms_agreed: 'true', fee_terms_amount_cents: '4900', disclosure_version: 'sticky_v1',
+    }));
+    const wrongAmount = await metadataOf({ fee_disclosed_amount: 25 });
+    expect(wrongAmount).toEqual(expect.objectContaining({ fee_terms_agreed: 'false' }));
+    expect(wrongAmount.fee_terms_amount_cents).toBeUndefined();
+    expect(wrongAmount.disclosure_version).toBeUndefined();
+    expect((await metadataOf({})).fee_terms_agreed).toBe('false');
+    expect((await metadataOf({ fee_disclosed_amount: 49, disclosure_version: 'bogus' })).disclosure_version).toBeUndefined();
+    expect(mockState.tables.terminal_handoff_tokens.every((r) => r.disclosure_version === undefined)).toBe(true);
+  });
+
+  test('a request with no fee never verifies fee consent, whatever the app says', async () => {
+    await withServer(async (base) => { await post(base, '/save-card-handoff', mintBody({ fee_disclosed_amount: 49 }), ADMIN); });
+    expect(mockStripe.setupIntents.create.mock.calls[0][0].metadata.fee_terms_agreed).toBe('false');
   });
 
   test('shares the per-tech hourly mint budget and creates nothing when limited', async () => {
@@ -590,16 +605,28 @@ describe('POST /complete-setup', () => {
     expect(mockFinish).toHaveBeenCalledTimes(1);
     expect(mockFinish).toHaveBeenCalledWith(expect.objectContaining({
       stripePaymentMethodId: 'pm_generated1', setupIntentId: 'seti_1', consentSource: 'admin_tap_to_pay',
-      ip: '203.0.113.9', userAgent: 'WavesAdmin/1.8', disclosureVersion: null,
+      ip: '203.0.113.9', userAgent: 'WavesAdmin/1.8', disclosureVersion: null, feeTermsAgreed: false,
     }));
   });
 
-  test('passes the stored disclosure echo through, null when absent', async () => {
-    mockState.tables.terminal_handoff_tokens[0].disclosure_version = 'sticky_v1';
-    await withServer(async (base) => {
-      await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth());
-    });
-    expect(mockFinish).toHaveBeenCalledWith(expect.objectContaining({ disclosureVersion: 'sticky_v1' }));
+  test('passes verified fee consent and the sticky echo from the intent metadata', async () => {
+    seed({ request: { no_show_fee_amount: '49.00' } });
+    seedSaveCardRow({ used_at: new Date() });
+    mockRetrieveSetupIntent.mockResolvedValue(succeeded({
+      metadata: { appointment_card_request_id: 'req-1', source: 'admin_tap_to_pay', fee_terms_agreed: 'true', fee_terms_amount_cents: '4900', disclosure_version: 'sticky_v1' },
+    }));
+    await withServer(async (base) => { await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth()); });
+    expect(mockFinish).toHaveBeenCalledWith(expect.objectContaining({ feeTermsAgreed: true, disclosureVersion: 'sticky_v1' }));
+  });
+
+  test('metadata claiming fee consent for an amount the row no longer carries is not consent', async () => {
+    seed({ request: { no_show_fee_amount: '25.00' } });
+    seedSaveCardRow({ used_at: new Date() });
+    mockRetrieveSetupIntent.mockResolvedValue(succeeded({
+      metadata: { appointment_card_request_id: 'req-1', source: 'admin_tap_to_pay', fee_terms_agreed: 'true', fee_terms_amount_cents: '4900', disclosure_version: 'sticky_v1' },
+    }));
+    await withServer(async (base) => { await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth()); });
+    expect(mockFinish).toHaveBeenCalledWith(expect.objectContaining({ feeTermsAgreed: false, disclosureVersion: null }));
   });
 
   test('a retry after the save finished answers the same without saving again', async () => {

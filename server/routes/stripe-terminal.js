@@ -855,7 +855,7 @@ function saveCardMintRefusal(body) {
 // limited mint creates nothing at Stripe; a Stripe failure rolls the whole
 // mint back (no row, no token). The idempotency key is the jti, so a retried
 // create replays the same intent.
-async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, disclosureVersion = null }) {
+async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, feeMetadata = {} }) {
   const out = { rateLimited: false, count: 0, retryAfter: 3600, jti: null, expiresAt: null, setupIntentId: null };
   await db.transaction(async (trx) => {
     await trx.raw(
@@ -888,6 +888,7 @@ async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVers
         // The deferred-capture rule (finishVerifiedSecureCapture) records a
         // consent only under a current stamp.
         consent_text_version: consentTextVersion,
+        ...feeMetadata,
       },
     }, { idempotencyKey: `tap_save_card_${jti}` });
     await trx('terminal_handoff_tokens').insert({
@@ -899,7 +900,6 @@ async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVers
       appointment_card_request_id: request.id,
       stripe_setup_intent_id: setupIntent.id,
       consent_text_version: consentTextVersion,
-      disclosure_version: disclosureVersion,
       expires_at: expiresAt,
       staff_mfa: req.staffToken.mfa === true,
     });
@@ -926,9 +926,16 @@ async function resolveSaveCardMintTarget(secureToken) {
 
 // POST /api/stripe/terminal/save-card-handoff
 // Admin-only (same session/MFA rules as /handoff). Body:
-//   { secure_token, consent_text_version, agreed, disclosure_version? }
-// disclosure_version (optional): the sticky cancel-window echo the /secure page
-// rendered ('sticky_v1'); any other value is stored as NULL.
+//   { secure_token, consent_text_version, agreed, disclosure_version?,
+//     fee_disclosed_amount? }
+// fee_disclosed_amount (optional number): the cancellation fee the /secure page
+// showed the customer. Fee consent is verified only when the request row has
+// no_show_fee_amount > 0 and this equals it exactly; otherwise the capture saves
+// the card and enrolls Auto Pay but stamps no fee agreement.
+// disclosure_version (optional): the sticky cancel-window echo ('sticky_v1');
+// any other value is ignored. Both are written into the SetupIntent metadata
+// (fee_terms_agreed, fee_terms_amount_cents, disclosure_version), which is the
+// only place completion (the app or the webhook) reads them from.
 // Returns: { token, deep_link, jti, expires_at }
 router.post('/save-card-handoff', tapSaveCardGate, noStore, adminAuthenticate, requireAdmin, async (req, res) => {
   try {
@@ -945,10 +952,16 @@ router.post('/save-card-handoff', tapSaveCardGate, noStore, adminAuthenticate, r
     const { request, stripeCustomerId } = target;
     const consentTextVersion = String(req.body.consent_text_version).trim();
 
-    // Only the echo the /secure complete route honors is kept; else NULL.
+    // Fee consent is verified here and written into the SetupIntent metadata
+    // (the one source completion reads). Only the sticky echo the /secure
+    // complete route honors is kept.
     const { STICKY_DISCLOSURE_VERSION } = require('../services/appointment-card-request');
     const disclosureVersion = req.body.disclosure_version === STICKY_DISCLOSURE_VERSION ? STICKY_DISCLOSURE_VERSION : null;
-    const minted = await mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, disclosureVersion });
+    const feeMetadata = require('../services/terminal-save-card').feeMetadata(request, {
+      feeDisclosedAmount: req.body.fee_disclosed_amount,
+      disclosureVersion,
+    });
+    const minted = await mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, feeMetadata });
     if (minted.rateLimited) {
       auditTerminalHandoffRateLimited({
         tech_user_id: req.technicianId,
