@@ -39,7 +39,11 @@ jest.mock('../scripts/align-waveguard-portal-records', () => ({ scanAlignment: j
 jest.mock('../services/recurring-schedule-audit', () => ({ auditRecurringScheduleAnomalies: jest.fn() }));
 jest.mock('../services/stale-visit-sweep', () => ({ _private: { findStaleVisits: jest.fn(), countsByStatus: jest.fn(() => ({ pending: 1 })) } }));
 jest.mock('../services/estimate-conversion-guard', () => ({ convertedOpenEstimatesQuery: jest.fn() }));
-jest.mock('../config/completion-lane-registry', () => ({ ALL_LISTS: { A: ['known_key', 'gone_key'] }, classifyCatalogRow: jest.fn() }));
+jest.mock('../config/completion-lane-registry', () => ({
+  ALL_LISTS: { A: ['known_key', 'gone_key', 'absent_by_design_key'] },
+  ABSENT_FROM_PROD_BY_DESIGN_KEYS: ['absent_by_design_key'],
+  classifyCatalogRow: jest.fn(),
+}));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
 jest.mock('../services/customer-properties', () => ({
   customersWithStreetLineHoldingLocality: jest.fn(), customersWithUnpinnedSavedAddress: jest.fn(), customersWithIncompleteAddress: jest.fn(),
@@ -378,6 +382,20 @@ describe('detector adapters', () => {
       'paused_lawn (ok: inactive_service_with_upcoming_visits:1)',
     ]);
     expect(out.detail).toEqual({ activeServices: 2, ghostLanes: 2 });
+  });
+
+  test('completion_lane_coverage: a key absent from prod by design is not registry-only, but an active row or ghost lane for it is still a defect', async () => {
+    mockTables.services = mockChain({ select: [{ service_key: 'known_key' }, { service_key: 'absent_by_design_key' }] });
+    classifyCatalogRow.mockImplementation((row) => row.service_key === 'absent_by_design_key' ? { lane: 'generic', flags: ['no_profile'] } : { lane: 'ok', flags: [] });
+    db.raw.mockResolvedValueOnce({ rows: [{ service_key: 'absent_by_design_key', is_archived: true, upcoming: '2' }] });
+    const out = await byKey('completion_lane_coverage').run({ now: NOW });
+    expect(out.ids).toEqual([
+      'absent_by_design_key (generic: no_profile)',
+      'registry-only:gone_key',
+      'absent_by_design_key (generic: archived_service_with_upcoming_visits:2,no_profile)',
+    ]);
+    expect(out.ids).not.toContain('registry-only:absent_by_design_key');
+    expect(out.count).toBe(3);
   });
 
   test('closeout_failed_facts flags failed facts/contradictions and treats unevaluable visits as findings', async () => {

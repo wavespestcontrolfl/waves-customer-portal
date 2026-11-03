@@ -193,6 +193,44 @@ describe('legacy cutovers and project-backed visits', () => {
   });
 });
 
+describe('internal test customer exclusion', () => {
+  const { internalTestVisitSql, NOT_INTERNAL_TEST_VISIT } = _private;
+  const IDS = ['00000000-0000-4000-8000-000000000001'];
+  const NAMES = ['test person'];
+
+  test('matches by customer id or lowercased "first last" name, the same normalization the dashboard exclusions use', () => {
+    const sql = internalTestVisitSql('ss', IDS, NAMES);
+    expect(sql).toContain('FROM customers itc WHERE itc.id = ss.customer_id');
+    expect(sql).toContain("itc.id::text IN ('00000000-0000-4000-8000-000000000001')");
+    expect(sql).toContain("LOWER(COALESCE(itc.first_name, '') || ' ' || COALESCE(itc.last_name, '')) IN ('test person')");
+  });
+
+  test('literals are quoted safely and an empty list adds no IN ()', () => {
+    expect(internalTestVisitSql('ss', [], ["o'brien test"])).toContain("IN ('o''brien test')");
+    const idsOnly = internalTestVisitSql('ss', IDS, []);
+    expect(idsOnly).toContain('itc.id::text IN');
+    expect(idsOnly).not.toContain('LOWER(');
+    expect(internalTestVisitSql('ss', [], [])).toBe('FALSE');
+    expect(internalTestVisitSql('ss', [], [])).not.toContain('IN ()');
+  });
+
+  test('the live constants produce a real fragment and no predicate carries an empty IN ()', () => {
+    expect(NOT_INTERNAL_TEST_VISIT).toMatch(/^NOT \(EXISTS \(SELECT 1 FROM customers itc /);
+    for (const key of KEYS) expect(PREDICATES[key].sql).not.toContain('IN ()');
+  });
+
+  test('every predicate skips internal test customers\' visits', () => {
+    for (const key of KEYS.filter((k) => k !== 'duplicate_completed_records_per_visit')) {
+      expect(PREDICATES[key].sql).toContain(NOT_INTERNAL_TEST_VISIT);
+    }
+    // The duplicate scan has no ss alias: it resolves the visit's customer through its own join.
+    const dup = PREDICATES.duplicate_completed_records_per_visit.sql;
+    expect(dup).toContain('FROM scheduled_services tv');
+    expect(dup).toContain('tv.id = sr.scheduled_service_id');
+    expect(dup).toContain(internalTestVisitSql('tv'));
+  });
+});
+
 describe('runPredicate', () => {
   test('maps the single aggregate row to the sweep adapter shape', async () => {
     const knex = { raw: jest.fn(async () => ({ rows: [{ n: '3', sample: ['a', 'b', 'c'] }] })) };

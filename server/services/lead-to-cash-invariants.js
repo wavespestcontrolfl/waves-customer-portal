@@ -120,7 +120,7 @@ const DETECTORS = Object.freeze([
     href: '/admin/service-library',
     provenance: 'universal one-time services plan §5 Phase B — ops/agents/completion-lane-coverage.js',
     async run({ now }) {
-      const { ALL_LISTS, classifyCatalogRow } = require('../config/completion-lane-registry');
+      const { ALL_LISTS, ABSENT_FROM_PROD_BY_DESIGN_KEYS, classifyCatalogRow } = require('../config/completion-lane-registry');
       const rows = await db('services as s')
         .leftJoin('service_completion_profiles as p', 'p.service_key', 's.service_key')
         .where({ 's.is_active': true, 's.is_archived': false })
@@ -135,7 +135,11 @@ const DETECTORS = Object.freeze([
       // for their scheduled visits) and are not defects by themselves.
       const registryKeys = Array.from(new Set(Object.values(ALL_LISTS).flat()));
       const known = new Set((await db('services').whereIn('service_key', registryKeys).select('service_key')).map((r) => r.service_key));
-      const stale = registryKeys.filter((k) => !known.has(k)).map((k) => `registry-only:${k}`);
+      // Keys absent from prod BY DESIGN are not stale (they would be flagged
+      // every day forever); only this list skips them, never active rows or ghosts.
+      const stale = registryKeys
+        .filter((k) => !known.has(k) && !ABSENT_FROM_PROD_BY_DESIGN_KEYS.includes(k))
+        .map((k) => `registry-only:${k}`);
       // Ghost lanes (mirrors the canonical audit): an inactive/archived
       // service with UPCOMING non-terminal visits is a live routing lane no
       // matter what the catalog flags say — the completion resolver matches
