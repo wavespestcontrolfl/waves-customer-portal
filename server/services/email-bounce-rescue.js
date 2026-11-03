@@ -568,6 +568,18 @@ function bounceSuggestionHeadlineAndSummary(candidate) {
   };
 }
 
+// What the alert-relevance sweep reads to close this alert once the owner's
+// record holds a different working address (admin-alert-relevance.js, class
+// email_bounce_fix; owner 2026-11-03): the bounced address, its owner and the
+// field it bounced from. The sweep repeats the doneWhen value; a test pins it.
+const BOUNCE_ALERT_DONE_WHEN = 'bounced_email_replaced';
+function bounceAlertMetadata({ bouncedEmail, owner }) {
+  let ownerRef = null;
+  if (owner?.customer?.id) ownerRef = { customerId: String(owner.customer.id), ownerField: owner.field || 'email' };
+  else if (owner?.lead?.id) ownerRef = { leadId: String(owner.lead.id), ownerField: 'email' };
+  return ownerRef ? { doneWhen: BOUNCE_ALERT_DONE_WHEN, bouncedEmail, ...ownerRef } : {};
+}
+
 async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier, evidence, owner, reason }) {
   const email = require('./email');
   const name = owner.customer
@@ -601,6 +613,7 @@ async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier,
     count: 1,
     newCount: 1,
     link: '/admin/customers',
+    metadata: bounceAlertMetadata({ bouncedEmail, owner }),
     sendEmail: () => email.send({
       to: suggestionRecipient(),
       subject,
@@ -903,5 +916,8 @@ module.exports = {
   consensusCandidates,
   validateCandidate,
   bounceSuggestionHeadlineAndSummary,
+  bounceAlertMetadata,
+  BOUNCE_ALERT_DONE_WHEN,
+  CUSTOMER_EMAIL_FIELDS,
   sendSuggestionEmail,
 };

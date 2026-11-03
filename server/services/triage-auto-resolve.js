@@ -17,6 +17,10 @@
  *   - missing_last_name → a trusted, pre-existing, live customer record has
  *     a surname the call did not itself supply, for a caller whose first
  *     name agrees with that record
+ *   - email_bounce_reverify → the card's own customer, still the call's and
+ *     live, holds a different valid email, and no email field on the record
+ *     is an address the card says bounced (bounceCardAnswered; owner
+ *     2026-11-03: a hand-fixed email left the card open with a stale guess)
  *   (Scheduling-doubt cards get NO booking-based auto-resolution from call
  *   linkage alone: linkage timestamps can't distinguish a current routing
  *   outcome from a stale pre-reprocess booking. The evidence rule below
@@ -69,8 +73,9 @@
  *   cancellation_request, after_hours_emergency, prior_complaint_unresolved,
  *   commercial_requires_quote, auto_booking_skipped_after_approval, the
  *   existing-appointment holds, outbound_booking_review, …),
- *   email_bounce_reverify (owns its lifecycle in email-bounce-reverify.js),
- *   extraction/v2 failures, and anything in_progress (human-claimed).
+ *   email_bounce_reverify on anything but the rule above (filing,
+ *   annotation and reopen stay in email-bounce-reverify.js; it never ages
+ *   out), extraction/v2 failures, and anything in_progress (human-claimed).
  *
  * Mirrors the event-driven auto-resolution precedent (outbound-review-confirm,
  * customer-email-fanout, the processor's hallucination dismissal) including
@@ -171,6 +176,7 @@ const RULE_NOTES = {
   address_moot: 'Auto-resolved: customer record now has a service address on file (street + zip); address flag is moot.',
   name_moot: 'Auto-resolved: customer record now has a last name; flag is moot.',
   first_name_moot: 'Auto-resolved: customer record now has a first name (the card was filed while it was blank); flag is moot.',
+  bounced_email_replaced: 'Auto-resolved: the customer record now holds a different, valid email, and the bounced address is on none of its email fields.',
   // Evidence rules (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE) — each proves the
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
@@ -979,6 +985,23 @@ function trustedPreexistingCustomer(item) {
     && customerPredatesCall(item);
 }
 const filled = (v) => String(v || '').trim() !== '';
+
+// email_bounce_reverify: answered once the card's own customer (still the
+// call's customer, live) holds a valid primary email and no mail field on
+// the record is an address the card says bounced (bouncedEmailReplaced, the
+// rule the bounce alert closes on too). A card still analyzing is never
+// judged: the re-listen's final write reopens a card closed mid-analysis.
+function bounceCardAnswered(item) {
+  const p = parseMaybeJson(item.payload) || {};
+  if (p.analyzing || !p.customer_id || item.customer_deleted_at) return false;
+  if (String(p.customer_id) !== String(item.call_customer_id || '')) return false;
+  return require('../utils/email-equivalence').bouncedEmailReplaced({
+    replacement: item.customer_email,
+    onFile: [item.customer_service_contact_email, item.customer_service_contact2_email,
+      item.customer_service_contact3_email, item.customer_billing_email],
+    bounced: [p.bounced_email, ...(Array.isArray(p.additional_bounced_emails) ? p.additional_bounced_emails : [])],
+  });
+}
 // The record now names the SAME premise the caller stated on a
 // house-number-conflict card: same street key (house + street name, unit
 // and suffix spelling aside) and, where both sides carry one, the same ZIP.
@@ -1069,6 +1092,10 @@ const CLASSIFY_RULES = [
     when: (item) => item.reason_code === 'missing_first_name'
       && Number(item.owed_total) > 0
       && Number(item.owed_named) === Number(item.owed_total) },
+  // A bounce card asks for a working address after its address hard-bounced
+  // (see bounceCardAnswered).
+  { rule: 'bounced_email_replaced', action: 'resolve',
+    when: (item) => item.reason_code === 'email_bounce_reverify' && bounceCardAnswered(item) },
   // Evidence rules: each flag is true only when the proof postdates the
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
@@ -1227,6 +1254,13 @@ function loadCandidateItems(conn, itemIds = null) {
       'c.city as customer_city',
       'c.first_name as customer_first_name',
       'c.last_name as customer_last_name',
+      // The bounce card's rule: the primary address and every other mail
+      // field on the record (bounceCardAnswered).
+      'c.email as customer_email',
+      'c.service_contact_email as customer_service_contact_email',
+      'c.service_contact2_email as customer_service_contact2_email',
+      'c.service_contact3_email as customer_service_contact3_email',
+      conn.raw('(SELECT np.billing_email FROM notification_prefs np WHERE np.customer_id = c.id LIMIT 1) as customer_billing_email'),
       'c.phone as customer_phone',
       'c.service_contact_phone as customer_service_contact_phone',
       'c.service_contact2_phone as customer_service_contact2_phone',
