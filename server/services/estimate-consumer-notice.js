@@ -36,6 +36,8 @@ const TERMITE_FAMILY_KEYS = new Set([
 const SERVICE_NAME = 'Florida consumer notice (FDACS-13692)';
 const CALL_US = 'We couldn’t prepare the notice online. Please call us and we will finish it with you.';
 const REQUIRED_MESSAGE = 'Please sign the Florida consumer notice above before you accept.';
+// Shown on the secure card page in hand-off mode (Book at the Table), where the form itself is signed separately.
+const HANDOFF_NOTICE_TEXT = 'Florida law asks you to read and sign the state’s Consumer Notice Form (FDACS-13692) before a termite treatment. You sign it separately. It is not signed on this page.';
 
 const estimateRoute = () => require('../routes/estimate-public');
 const refusal = (status, code, error) => ({ ok: false, status, code, error });
@@ -474,6 +476,7 @@ module.exports = {
   SNAPSHOT_SOURCE,
   MANUAL_ACCEPT_SOURCE,
   REQUIRED_MESSAGE,
+  HANDOFF_NOTICE_TEXT,
   estimateNeedsConsumerNotice,
   consumerNoticeState,
   consumerNoticeCtaFor,

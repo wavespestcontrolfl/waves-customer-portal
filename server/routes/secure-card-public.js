@@ -3,7 +3,7 @@
  * /api/public/secure-card) — the card-on-file capture page the
  * appointment-card-request funnel texts a link to.
  *
- *   GET  /api/public/secure-card/:token           → page payload by state
+ *   GET  /api/public/secure-card/:token           → page payload by state (+ `handoff` with `?handoff=1`)
  *   POST /api/public/secure-card/:token/replace-intent → "use a different payment method"
  *   POST /api/public/secure-card/:token/complete  → live-verify + save card
  *
@@ -111,6 +111,12 @@ router.get('/:token', async (req, res) => {
       // instead" fallback), so it needs the key too.
       data.publishableKey = require('../config/stripe-config').publishableKey;
     }
+    // Hand-off mode (Book at the Table, GATE_IN_PERSON_CARD): `?handoff=1` adds a
+    // `handoff` block with the estimate terms the customer ticks on the owner's
+    // phone. Without the param, with a dark gate, or with no terms to show, the
+    // payload is untouched.
+    const handoff = await require('../services/in-person-handoff').buildHandoffBlock(req, { token, data });
+    if (handoff) data.handoff = handoff;
     return res.json(data);
   } catch (err) {
     logger.error(`[secure-card-public] page load failed: ${err.message}`);

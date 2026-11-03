@@ -2,16 +2,21 @@
 //
 // Shown by CreateAppointmentModal after a booking saved with "Customer saves
 // it here, now". On open it asks POST /admin/schedule/:id/card-request/in-person
-// for the secure card page, then offers: hand the phone to the customer, show a
-// QR code of the page, text the link, or skip. Nothing is charged and no text
-// goes out unless staff tap "Text the link". The booking stays whatever happens
-// here.
+// for the secure card page, then offers: hand the phone to the customer (only
+// when the Waves Admin app can open the hand-off), show a QR code of the page,
+// text the link, or skip. Nothing is charged and no text goes out unless staff
+// tap "Text the link". The booking stays whatever happens here.
+//
+// Hand-off: the app shows the secure page to the customer in a separate,
+// isolated web view and covers this page; this tab never navigates. While the
+// card step is open the sheet answers one relay for that view (see
+// window.wavesAdminInPersonTerms below).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useInRouterContext, useNavigate } from 'react-router-dom';
 import QRCode from 'qrcode';
 import useModalFocus from '../../hooks/useModalFocus';
 import { describeCardRequestResult } from './cardLinkStatus';
+import { HANDOFF_OPEN, getAdminCapabilities, openHandoff } from '../../lib/wavesAdminHandoff';
 
 // Same zinc admin palette as CreateAppointmentModal's D.
 const D = {
@@ -92,6 +97,8 @@ function QrPanel({ url, firstName, saved }) {
   );
 }
 
+const cardSaved = (state) => state?.request?.status === 'completed' || !!state?.autopayActive;
+
 // Poll the visit's card state every 4 s while `active` (the QR code is on
 // screen) and stop for good once the card is saved.
 function useSavedPolling({ active, adminFetch, visitId }) {
@@ -103,7 +110,7 @@ function useSavedPolling({ active, adminFetch, visitId }) {
       adminFetch(`/admin/schedule/${visitId}/card-request`)
         .then((state) => {
           if (stopped) return;
-          if (state?.request?.status === 'completed' || state?.autopayActive) setSaved(true);
+          if (cardSaved(state)) setSaved(true);
         })
         .catch(() => {});
     };
@@ -116,9 +123,78 @@ function useSavedPolling({ active, adminFetch, visitId }) {
 const toneColor = (t) => (t === 'good' ? D.text : t === 'bad' ? D.red : D.muted);
 const sectionLabel = { fontSize: 14, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, marginBottom: 4 };
 
+// The secure token is the last segment of the secure page path (/secure/:token).
+function secureTokenOf(secureUrl) {
+  try { return new URL(secureUrl, window.location.origin).pathname.split('/').filter(Boolean).pop() || ''; } catch { return ''; }
+}
+
+// The secure page in hand-off mode, as an absolute link for the app.
+function handoffHref(secureUrl) {
+  const url = new URL(secureUrl, window.location.origin);
+  url.searchParams.set('handoff', '1');
+  return url.href;
+}
+
+// While the card step is open, the app's customer view can ask this signed-in page
+// to record the terms the customer ticked (the view itself holds no sign-in).
+// Answers only for this visit's own secure token and goes away with the sheet.
+// Same shape as window.wavesAdminConnectionToken in lib/tapToPay.js.
+function useInPersonTermsRelay({ adminFetch, visitId, secureToken }) {
+  useEffect(() => {
+    const relay = async ({ secureToken: askedToken, termsVersion, consumerNoticeShown } = {}) => {
+      if (!secureToken || askedToken !== secureToken) return { ok: false };
+      try {
+        const r = await adminFetch(`/admin/schedule/${visitId}/in-person-terms`, {
+          method: 'POST',
+          body: JSON.stringify({ terms_version: termsVersion, consumer_notice_shown: consumerNoticeShown === true }),
+        });
+        return { ok: r?.success === true };
+      } catch (err) {
+        return { ok: false, message: err?.message || null };
+      }
+    };
+    window.wavesAdminInPersonTerms = relay;
+    return () => { if (window.wavesAdminInPersonTerms === relay) delete window.wavesAdminInPersonTerms; };
+  }, [adminFetch, visitId, secureToken]);
+}
+
+// "Hand the phone to {first}": shown only when the app answers the capabilities
+// ask with 'handoffOpen'. Taps open the isolated customer view; when it ends the
+// card state is read again and the result is said plainly.
+function useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef }) {
+  const [canHandoff, setCanHandoff] = useState(false);
+  const [phase, setPhase] = useState('idle'); // idle | with
+  const [result, setResult] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    getAdminCapabilities().then((caps) => { if (!cancelled) setCanHandoff(caps.includes(HANDOFF_OPEN)); });
+    return () => { cancelled = true; };
+  }, []);
+  const start = async () => {
+    if (phase === 'with') return;
+    setPhase('with');
+    setResult(null);
+    const outcome = await openHandoff({ url: handoffHref(secureUrl), firstName });
+    if (!mountedRef.current) return;
+    if (outcome.status === 'failed') {
+      setPhase('idle');
+      setResult({ tone: 'bad', text: outcome.message || 'The hand-off did not start. Use the QR code instead.' });
+      return;
+    }
+    let state = null;
+    try { state = await adminFetch(`/admin/schedule/${visitId}/card-request`); } catch { /* said below */ }
+    if (!mountedRef.current) return;
+    setPhase('idle');
+    if (cardSaved(state)) setResult({ tone: 'good', text: 'Saved. Auto Pay is on.' });
+    else if (state) setResult({ tone: 'muted', text: 'Not saved yet. Hand the phone over again or use the QR code.' });
+    else setResult({ tone: 'bad', text: 'Could not check whether the card was saved.' });
+  };
+  return { canHandoff, phase, result, start };
+}
+
 // The four choices once the card page exists: hand over the phone, QR code,
 // text the link, or not now.
-function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onClose }) {
+function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
   const [qrOpen, setQrOpen] = useState(false);
   const [textState, setTextState] = useState(null); // null | 'sending' | { tone, text }
   const mountedRef = useRef(true);
@@ -128,12 +204,8 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onCl
   }, []);
   const saved = useSavedPolling({ active: qrOpen, adminFetch, visitId });
   const first = firstName || 'the customer';
-
-  const handoff = () => {
-    let path = secureUrl;
-    try { path = new URL(secureUrl, window.location.origin).pathname; } catch { /* keep as given */ }
-    navigate(`${path}?handoff=1`);
-  };
+  useInPersonTermsRelay({ adminFetch, visitId, secureToken: secureTokenOf(secureUrl) });
+  const handoff = useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef });
   const textTheLink = () => {
     setTextState('sending');
     adminFetch(`/admin/schedule/${visitId}/card-request`, { method: 'POST' })
@@ -148,7 +220,14 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onCl
         {first} saves a card on your phone now. Nothing is charged today. Auto Pay charges after each completed service.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <button type="button" style={primaryButton} onClick={handoff}>Hand the phone to {first}</button>
+        {handoff.canHandoff && (
+          <button type="button" style={primaryButton} disabled={handoff.phase === 'with'} onClick={handoff.start}>
+            {handoff.phase === 'with' ? `With ${first}…` : `Hand the phone to ${first}`}
+          </button>
+        )}
+        {handoff.result && (
+          <div role="status" style={{ fontSize: 14, color: toneColor(handoff.result.tone) }}>{handoff.result.text}</div>
+        )}
         <button type="button" style={secondaryButton} aria-expanded={qrOpen} onClick={() => setQrOpen((open) => !open)}>
           {qrOpen ? 'Hide the QR code' : 'Show a QR code'}
         </button>
@@ -167,7 +246,7 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onCl
 
 function SheetBody({
   visitId, date, time, serviceName, estimateAccepted, estimateRef, confirmationText,
-  firstName, adminFetch, onClose, navigate,
+  firstName, adminFetch, onClose,
 }) {
   const dialogRef = useModalFocus(true, onClose);
   const [phase, setPhase] = useState('loading'); // loading | error | result
@@ -238,24 +317,13 @@ function SheetBody({
         )}
 
         {phase === 'result' && secureUrl && (
-          <CardActions secureUrl={secureUrl} firstName={firstName} adminFetch={adminFetch} visitId={visitId} navigate={navigate} onClose={onClose} />
+          <CardActions secureUrl={secureUrl} firstName={firstName} adminFetch={adminFetch} visitId={visitId} onClose={onClose} />
         )}
       </div>
     </div>
   );
 }
 
-// useNavigate needs a router; the app always has one, a bare render (some
-// tests) does not and then falls back to a full page load.
-function WithRouter(props) {
-  const navigate = useNavigate();
-  return <SheetBody {...props} navigate={navigate} />;
-}
-
 export default function InPersonCardSheet(props) {
-  const inRouter = useInRouterContext();
-  const body = inRouter
-    ? <WithRouter {...props} />
-    : <SheetBody {...props} navigate={(to) => window.location.assign(to)} />;
-  return createPortal(body, document.body);
+  return createPortal(<SheetBody {...props} />, document.body);
 }

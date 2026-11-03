@@ -160,7 +160,7 @@ describe("card choice in the booking window", () => {
     expect(await screen.findByRole("heading", { name: "Booked" })).toBeInTheDocument();
     expect(screen.getByText("Quarterly Pest Control Service")).toBeInTheDocument();
     expect(screen.getByText("Confirmation text going out")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Hand the phone to Pat" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Show a QR code" })).toBeInTheDocument();
     expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/admin/schedule/appt-1/card-request/in-person"), expect.objectContaining({ method: "POST" }));
 
     // Callers close on a non-background report: both reports say background, so they stay mounted.

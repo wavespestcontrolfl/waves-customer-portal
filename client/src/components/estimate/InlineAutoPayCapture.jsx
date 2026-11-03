@@ -70,7 +70,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // savedFor: what the replayed saved method is "already saved for" —
   // "this plan" (estimate accept, default), "this visit" (one-time secure
   // appointment), "Auto Pay" (standalone link). Copy only.
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, prepayAfterVisit = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false },
+  // hideWallets: hand-off mode (Book at the Table) — the owner's phone is in the
+  // customer's hand, so Apple Pay and Google Pay (his own wallet) are never offered.
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, prepayAfterVisit = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false, hideWallets = false },
   ref,
 ) {
   const held = paused || autopayOff;
@@ -182,7 +184,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       });
       // Bank first (owner 2026-11-01); a card-only intent has no bank tab, so
       // the order simply resolves to card.
-      const paymentElement = elements.create('payment', { paymentMethodOrder: ['us_bank_account', 'card'] });
+      const paymentElement = elements.create('payment', {
+        paymentMethodOrder: ['us_bank_account', 'card'],
+        ...(hideWallets ? { wallets: { applePay: 'never', googlePay: 'never' } } : {}),
+      });
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
       paymentElement.on('change', (event) => {
@@ -204,7 +209,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       }
     });
     return () => { cancelled = true; };
-  }, [clientSecret, publishableKey, loadStripeSdk, glassActive, website, replay]);
+  }, [clientSecret, publishableKey, loadStripeSdk, glassActive, website, replay, hideWallets]);
 
   const handleReplace = async () => {
     if (!onReplace || !intent?.setupIntentId) return;
