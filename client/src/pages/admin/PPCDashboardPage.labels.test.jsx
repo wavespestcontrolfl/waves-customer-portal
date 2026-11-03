@@ -73,3 +73,17 @@ it("keeps the combined totals platform-neutral when a Meta campaign is active", 
   expect(screen.queryByText(/Google-reported/)).not.toBeInTheDocument();
   expect(screen.getByText(/\$20\.30 of \$105\.00 base\s+budget/)).toBeInTheDocument();
 });
+
+// 10-29 Ads screen audit #2: spend from a campaign paused in Google Ads stays
+// in the 7-day totals; the budget yardstick counts active campaigns only.
+it("keeps a paused campaign's 7-day spend in the totals and leaves its budget out", async () => {
+  mount([
+    campaign(),
+    campaign({
+      id: 5, campaign_name: "Paused Search", status: "paused",
+      last7d: { spend: 20, conversionValue: 40, conversions: 2, clicks: 9, impressions: 300 },
+    }),
+  ]);
+  // $0.30 active + $20.00 paused spend, against the active campaign's $5 x 7 base budget.
+  expect(await screen.findByText(/\$20\.30 of \$35\.00 base\s+budget/)).toBeInTheDocument();
+});
