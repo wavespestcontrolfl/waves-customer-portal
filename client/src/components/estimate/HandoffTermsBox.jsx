@@ -3,8 +3,9 @@
  * owner 2026-11-02). The booking was accepted by staff, which records no terms, so
  * the customer ticks "I accept estimate {ref} and its terms" on the owner's phone and
  * the record matches an online accept. `terms` is the server's handoff.terms:
- * { estimateRef, version, lines, consumerNotice: null | { text } }. The lines are
- * shown verbatim; the page owns the checkbox state and the Save gate.
+ * { estimateRef, version, scope, lines }. The lines are
+ * shown verbatim; the page owns the checkbox state and the Save gate. The Florida
+ * notice line (informational, signed separately) is rendered by the page, not here.
  */
 import { useState } from 'react';
 
@@ -16,11 +17,6 @@ export default function HandoffTermsBox({ terms, checked, onChange, disabled = f
   if (!terms) return null;
   return (
     <div data-testid="handoff-terms" style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(4,57,94,0.18)', textAlign: 'left' }}>
-      {terms.consumerNotice?.text ? (
-        <p role="note" style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 12px' }}>
-          {terms.consumerNotice.text}
-        </p>
-      ) : null}
       <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
         <input
           type="checkbox"

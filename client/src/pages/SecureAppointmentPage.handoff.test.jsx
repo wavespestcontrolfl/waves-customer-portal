@@ -165,6 +165,66 @@ describe('SecureAppointmentPage hand-off mode', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
   });
 
+  it('Prepay the year without the terms tick shows no QR and asks for the tick; select-plan is not called', async () => {
+    const fetchMock = installFetch({ ...RECURRING, handoff: { terms: TERMS } });
+    render(<SecureAppointmentPage />);
+    // The box is outside the card form: it is there before any plan is picked.
+    expect(await screen.findByLabelText('I accept estimate EST-2026-0001 and its terms.')).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: /Prepay the year/ }));
+    expect(await screen.findByText(/Please tick .I accept estimate EST-2026-0001 and its terms\..* before you choose to prepay\./)).toBeInTheDocument();
+    expect(screen.queryByTestId('handoff-prepay-qr')).toBeNull();
+    expect(posted).toEqual([]);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/select-plan'))).toBe(false);
+  });
+
+  it('Prepay the year with the tick records the terms FIRST, then shows the QR, and never asks again', async () => {
+    const order = [];
+    window.webkit.messageHandlers.wavesCustomer.postMessage.mockImplementation((message) => {
+      order.push(message.type);
+      posted.push(message);
+      queueMicrotask(() => window.dispatchEvent(new CustomEvent('waveshandoff:terms', { detail: { requestId: message.requestId, status: 'ok' } })));
+    });
+    const fetchMock = installFetch({ ...RECURRING, handoff: { terms: TERMS } }, {
+      selectPlan: (body) => { order.push(`select-plan:${body.plan}`); return json({ success: true, payUrl: 'https://pay.example.test/p/1' }); },
+    });
+    render(<SecureAppointmentPage />);
+    fireEvent.click(await screen.findByLabelText('I accept estimate EST-2026-0001 and its terms.'));
+    fireEvent.click(screen.getByRole('button', { name: /Prepay the year/ }));
+    expect(await screen.findByTestId('handoff-prepay-qr')).toBeInTheDocument();
+    expect(order).toEqual(['acceptTerms', 'select-plan:prepay_annual']);
+    expect(posted[0]).toMatchObject({ termsVersion: 'v2026-10', termsScope: 'plan' });
+    expect(assign).not.toHaveBeenCalled();
+    // Recorded once: the box is gone and a switch back to per-application asks nothing.
+    expect(screen.queryByTestId('handoff-terms')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Pay per application' }));
+    await screen.findByRole('button', { name: 'Save card & confirm my plan' });
+    expect(posted).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/select-plan'))).toHaveLength(2);
+  });
+
+  it('a failed terms record before prepay shows the error and no QR', async () => {
+    installBridge({ termsAnswer: { status: 'failed', message: 'Could not record the terms.' } });
+    const fetchMock = installFetch({ ...RECURRING, handoff: { terms: TERMS } });
+    render(<SecureAppointmentPage />);
+    fireEvent.click(await screen.findByLabelText('I accept estimate EST-2026-0001 and its terms.'));
+    fireEvent.click(screen.getByRole('button', { name: /Prepay the year/ }));
+    expect(await screen.findByText('Could not record the terms.')).toBeInTheDocument();
+    expect(screen.queryByTestId('handoff-prepay-qr')).toBeNull();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/select-plan'))).toBe(false);
+  });
+
+  it('a termite estimate: the separate-signature note shows with no terms box, for both plan choices', async () => {
+    installFetch({ ...RECURRING, handoff: { consumerNotice: { text: 'Florida law asks you to sign the notice separately.' } } });
+    render(<SecureAppointmentPage />);
+    expect(await screen.findByText('Florida law asks you to sign the notice separately.')).toBeInTheDocument();
+    expect(screen.queryByTestId('handoff-terms')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Pay per application/ }));
+    await screen.findByRole('button', { name: 'Save card & confirm my plan' });
+    expect(screen.getByText('Florida law asks you to sign the notice separately.')).toBeInTheDocument();
+    // No tick is needed for the note: Save is gated only by the card authorization.
+    expect(posted).toEqual([]);
+  });
+
   it('terms_changed shows the reload text and a Reload button, and stops Save', async () => {
     installBridge({ termsAnswer: { status: 'failed', message: 'The terms changed. Reload this page to see them.', code: 'terms_changed' } });
     const fetchMock = installFetch({ ...READY, handoff: { terms: TERMS } });

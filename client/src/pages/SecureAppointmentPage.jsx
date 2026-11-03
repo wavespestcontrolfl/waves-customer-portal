@@ -132,7 +132,7 @@ export default function SecureAppointmentPage() {
   // Hand-off mode (see the header): decided once, from the URL and the app's bridge.
   const [handoffMode] = useState(() => isHandoffMode(searchParams.toString()));
   const [termsAccepted, setTermsAccepted] = useState(false);
-  const termsRecordedRef = useRef(false);
+  const [termsRecorded, setTermsRecorded] = useState(false);
   const [prepayQr, setPrepayQr] = useState(false);
   const [termsChanged, setTermsChanged] = useState(false);
   // Plan-choice lane (payload carries planContext only while the gate is
@@ -392,10 +392,13 @@ export default function SecureAppointmentPage() {
   // Hand-off terms (D2): the customer's "I accept estimate {ref} and its terms" is
   // recorded through the app's relay BEFORE the card is saved; a failure stops the
   // save. The server stamps once per estimate, so a retry after a card error is safe.
-  const handoffTerms = handoffMode ? (data?.handoff?.terms || null) : null;
+  // Once recorded they are not asked for again this visit. The box and the termite
+  // note live outside the card form, so both plan choices see them.
+  const handoffTerms = handoffMode && !termsRecorded ? (data?.handoff?.terms || null) : null;
+  const handoffNotice = handoffMode ? (data?.handoff?.consumerNotice || data?.handoff?.terms?.consumerNotice || null) : null;
   const termsBlocking = !!handoffTerms && !termsAccepted;
   const recordHandoffTerms = useCallback(async () => {
-    if (!handoffTerms || termsRecordedRef.current) return true;
+    if (!handoffTerms) return true;
     const outcome = await requestTermsAcceptance({
       termsVersion: handoffTerms.version,
       termsScope: handoffTerms.scope,
@@ -407,7 +410,7 @@ export default function SecureAppointmentPage() {
       setError(outcome.changed ? TERMS_CHANGED_MESSAGE : (outcome.message || 'We could not record your acceptance. Please try again.'));
       return false;
     }
-    termsRecordedRef.current = true;
+    setTermsRecorded(true);
     return true;
   }, [handoffTerms]);
 
@@ -505,6 +508,13 @@ export default function SecureAppointmentPage() {
     setPlanBusy(true);
     setError(null);
     try {
+      // Hand-off mode: the prepay hand-off never reaches a card save, so the estimate
+      // terms are ticked and recorded BEFORE the plan is chosen (and the QR shown).
+      if (plan === 'prepay_annual' && termsBlocking) {
+        setError(`Please tick “I accept estimate ${handoffTerms.estimateRef} and its terms.” before you choose to prepay.`);
+        return;
+      }
+      if (plan === 'prepay_annual' && !(await recordHandoffTerms())) return;
       const res = await fetch(`${API_BASE}/public/secure-card/${token}/select-plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -548,7 +558,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setPlanBusy(false);
     }
-  }, [planBusy, token, refresh, state, handoffMode]);
+  }, [planBusy, token, refresh, state, handoffMode, termsBlocking, handoffTerms, recordHandoffTerms]);
 
   const greeting = data?.firstName ? `${data.firstName}, you` : 'You';
   // Standalone Auto Pay setup link (GATE_AUTOPAY_SETUP_LINK): no visit,
@@ -804,6 +814,21 @@ export default function SecureAppointmentPage() {
             disabled={planBusy || busy}
           />
         ) : null}
+        {handoffNotice?.text ? (
+          <p role="note" data-testid="handoff-notice" style={{ fontSize: 14, color: S.body, lineHeight: 1.5, margin: '14px 0 0' }}>
+            {handoffNotice.text}
+          </p>
+        ) : null}
+        <HandoffTermsBox terms={handoffTerms} checked={termsAccepted} onChange={setTermsAccepted} disabled={busy || planBusy} />
+        {termsChanged ? (
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            style={{ ...PRIMARY_CTA, marginTop: 12, background: '#FFFFFF', color: S.text, border: `1px solid ${S.border}` }}
+          >
+            Reload
+          </button>
+        ) : null}
         {handoffMode && planRecurring && prepayQr && selectedPlan === 'prepay_annual' ? (
           <HandoffPrepayQr url={secureLinkUrl} onBack={() => selectPlan('per_application')} busy={planBusy} />
         ) : null}
@@ -827,18 +852,8 @@ export default function SecureAppointmentPage() {
               // Hand-off mode: the owner's own Apple Pay / Google Pay is never offered.
               hideWallets={handoffMode}
             />
-            <HandoffTermsBox terms={handoffTerms} checked={termsAccepted} onChange={setTermsAccepted} disabled={busy} />
             {error ? (
               <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
-            ) : null}
-            {termsChanged ? (
-              <button
-                type="button"
-                onClick={() => window.location.reload()}
-                style={{ ...PRIMARY_CTA, marginTop: 12, background: '#FFFFFF', color: S.text, border: `1px solid ${S.border}` }}
-              >
-                Reload
-              </button>
             ) : null}
             <button
               type="button"
