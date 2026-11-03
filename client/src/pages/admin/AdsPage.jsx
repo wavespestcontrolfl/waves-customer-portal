@@ -30,13 +30,20 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
 // Semantic green/amber/red preserved for status/alert accents.
 
+// A 4xx/5xx body is JSON too ({error}). Without the r.ok check a failed read
+// rendered as empty data, and a refused bridge run as "0 updates applied".
+async function readJson(r) {
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(body?.error || `HTTP ${r.status}`);
+  return body;
+}
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
-  }).then((r) => r.json());
+  }).then(readJson);
 }
 function adminPost(path, body) {
   return fetch(`${API_BASE}${path}`, {
@@ -46,7 +53,7 @@ function adminPost(path, body) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then(readJson);
 }
 function fmt(n) {
   return (
@@ -223,19 +230,30 @@ function bridgeDisplayTone(match) {
 function OverviewTab() {
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
+    setLoading(true);
+    setError(null);
     adminFetch("/admin/ads/campaigns")
       .then((d) => {
         setCampaigns(d.campaigns || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch((e) => {
+        setError(`Campaigns did not load: ${e.message}`);
+        setLoading(false);
+      });
+  }, [reloadKey]);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
         Loading campaigns...
       </div>
+    );
+  if (error)
+    return (
+      <LoadError message={error} onRetry={() => setReloadKey((k) => k + 1)} />
     );
   if (campaigns.length === 0) return <EmptyState />;
   const total7 = campaigns.reduce(
@@ -353,6 +371,18 @@ function OverviewTab() {
     </div>
   );
 }
+// A failed read is not "no data": say so and offer a retry.
+function LoadError({ message, onRetry }) {
+  return (
+    <UiCard className="[padding:16px] flex flex-col items-start [gap:8px]">
+      <AdvisorAlert message={message} />
+      <Button onClick={onRetry} variant="secondary">
+        Try again
+      </Button>
+    </UiCard>
+  );
+}
+
 function EmptyState() {
   return (
     <UiCard className="text-center [padding:60px]">
@@ -386,9 +416,11 @@ function CallBridgeTab() {
         setLoading(false);
       })
       .catch((e) => {
+        // Never leave an older period's preview under the new period's buttons.
+        setData(null);
         setMessage({
           tone: "#991B1B",
-          text: e.message || "Bridge preview failed",
+          text: `Bridge preview did not load: ${e.message}`,
         });
         setLoading(false);
       });
@@ -410,9 +442,10 @@ function CallBridgeTab() {
         text: `${fmtInt(result.appliedCount || 0)} bridge update${Number(result.appliedCount || 0) === 1 ? "" : "s"} applied`,
       });
     } catch (e) {
+      // The preview on screen stays: nothing was applied.
       setMessage({
         tone: "#991B1B",
-        text: e.message || "Bridge apply failed",
+        text: `Bridge apply did not run: ${e.message}`,
       });
     } finally {
       setApplying(false);
@@ -442,7 +475,8 @@ function CallBridgeTab() {
   // RESOLVES persisted ambiguity records — the only way a 31–90-day scan
   // can clear an old record the daily cron's window never reaches. The
   // server treats an empty apply as a no-op plus that bookkeeping.
-  const canApply = configured && !scanFailed && !applying;
+  // No apply without a preview that loaded.
+  const canApply = !!data && configured && !scanFailed && !applying;
   const applyLabel = applying
     ? "Applying..."
     : readyCount > 0 && leadRetryCount > 0
@@ -664,30 +698,66 @@ function CallBridgeTab() {
 function ServiceLinesTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [period, setPeriod] = useState("30d");
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     setLoading(true);
+    setError(null);
     adminFetch(`/admin/ads/service-lines?period=${period}`)
       .then((d) => {
         setData(d);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, [period]);
-  if (loading)
+      .catch((e) => {
+        setData(null);
+        setError(`Service-line data did not load: ${e.message}`);
+        setLoading(false);
+      });
+  }, [period, reloadKey]);
+  // The period buttons stay on screen in every state, so an empty or failed
+  // period never hides the way to another period.
+  const periodBar = (
+    <div className="flex justify-between items-center">
+      {" "}
+      <div className="text-ui-body text-ink-secondary">
+        Service Line Performance
+      </div>{" "}
+      <div className="flex [gap:4px] bg-zinc-100 rounded-md [padding:3px]">
+        {["7d", "30d", "90d"].map((p) => (
+          <Button
+            key={p}
+            onClick={() => setPeriod(p)}
+            variant={period === p ? "primary" : "secondary"}
+          >
+            {p === "7d" ? "7 Days" : p === "30d" ? "30 Days" : "90 Days"}
+          </Button>
+        ))}
+      </div>{" "}
+    </div>
+  );
+  if (loading || error || !data || data.totalLeads === 0)
     return (
-      <div className="text-ink-secondary [padding:40px] text-center">
-        Loading service-line data...
+      <div className="flex flex-col [gap:20px]">
+        {periodBar}
+        {loading ? (
+          <div className="text-ink-secondary [padding:40px] text-center">
+            Loading service-line data...
+          </div>
+        ) : error ? (
+          <LoadError
+            message={error}
+            onRetry={() => setReloadKey((k) => k + 1)}
+          />
+        ) : (
+          <UiCard className="text-center [padding:40px]">
+            <div className="text-ink-secondary">
+              No leads in this period. Leads will appear here as they come in
+              through your ad campaigns.
+            </div>
+          </UiCard>
+        )}
       </div>
-    );
-  if (!data || data.totalLeads === 0)
-    return (
-      <UiCard className="text-center [padding:40px]">
-        <div className="text-ink-secondary">
-          No attribution data yet. Leads will appear here as they come in
-          through your ad campaigns.
-        </div>
-      </UiCard>
     );
   const bucketIcons = {
     recurring: "",
@@ -704,23 +774,7 @@ function ServiceLinesTab() {
   return (
     <div className="flex flex-col [gap:20px]">
       {" "}
-      <div className="flex justify-between items-center">
-        {" "}
-        <div className="text-ui-body text-ink-secondary">
-          Service Line Performance
-        </div>{" "}
-        <div className="flex [gap:4px] bg-zinc-100 rounded-md [padding:3px]">
-          {["7d", "30d", "90d"].map((p) => (
-            <Button
-              key={p}
-              onClick={() => setPeriod(p)}
-              variant={period === p ? "primary" : "secondary"}
-            >
-              {p === "7d" ? "7 Days" : p === "30d" ? "30 Days" : "90 Days"}
-            </Button>
-          ))}
-        </div>{" "}
-      </div>
+      {periodBar}
       {(data.byBucket || []).map((b) => (
         <UiCard key={b.bucket} className="p-6">
           {" "}

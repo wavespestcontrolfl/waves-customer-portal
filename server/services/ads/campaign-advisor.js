@@ -444,11 +444,14 @@ class CampaignAdvisor {
   }
 
   async loadAdvisorInputs(now) {
+    const today = etDateString(now);
     const d7 = etDateString(addETDays(now, -7));
     const d30 = etDateString(addETDays(now, -30));
 
-    const last7days = await db('ad_performance_daily').where('date', '>=', d7);
-    const last30days = await db('ad_performance_daily').where('date', '>=', d30);
+    // Complete ET days, as on the Ads screens: today's row is only what the
+    // 6 AM sync saw, and `>= today-7` alone was 8 dates.
+    const last7days = await db('ad_performance_daily').where('date', '>=', d7).where('date', '<', today);
+    const last30days = await db('ad_performance_daily').where('date', '>=', d30).where('date', '<', today);
 
     // Search terms count as current only when a COMPLETE sync ran recently:
     // syncSearchTerms records that per run (an empty snapshot included) and

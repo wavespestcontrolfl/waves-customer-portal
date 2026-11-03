@@ -50,23 +50,36 @@ describe("PPC platform attribution", () => {
     }
   });
 
-  it("does not attribute non-Search channels, other providers, or paused campaigns to Search", async () => {
+  it("does not attribute non-Search channels or other providers to Search", async () => {
     const card = await mount([
       campaign(1, "google_ads", "SEARCH", 20, 90, 3),
       campaign(2, "google_ads", "DISPLAY", 1000, 2000, 100),
       campaign(3, "google_ads", "PERFORMANCE_MAX", 1000, 2000, 100),
       campaign(4, "facebook", "SEARCH", 1000, 2000, 100),
-      campaign(5, "google_ads", "SEARCH", 1000, 2000, 100, "paused"),
-      campaign(6, "google_ads", "google_search", 1000, 2000, 100, "paused"),
       campaign(7, "google_ads", null, 1000, 2000, 100),
       campaign(8, "google_ads", "3", 1000, 2000, 100),
       campaign(9, "google_ads", "10", 1000, 2000, 100),
       campaign(10, "google_ads", "11", 1000, 2000, 100),
       campaign(11, "facebook", "2", 1000, 2000, 100),
-      campaign(12, "google_ads", "2", 1000, 2000, 100, "paused"),
+      campaign(12, "facebook", "2", 1000, 2000, 100, "paused"),
     ]);
     for (const value of ["$20.00", "$90.00", "3", "4.5x"]) {
       expect(card("google_search").getByText(value, { exact: true })).toBeInTheDocument();
     }
+  });
+
+  // 10-29 Ads screen audit #2: a campaign paused in Google Ads still spent money
+  // before the pause; that spend stays in the period it was spent in.
+  it("keeps a paused Search campaign's spend in the 30-day card; a paused one with no spend adds nothing", async () => {
+    const card = await mount([
+      campaign(1, "google_ads", "SEARCH", 20, 90, 3),
+      campaign(5, "google_ads", "SEARCH", 30, 60, 1, "paused"),
+      campaign(6, "google_lsa", "google_lsa", 0, 0, 0, "paused"),
+    ]);
+    for (const value of ["$50.00", "$150.00", "4", "3.0x"]) {
+      expect(card("google_search").getByText(value, { exact: true })).toBeInTheDocument();
+    }
+    // An LSA campaign that is paused and spent nothing in the period gets no card.
+    expect(screen.queryByText("Local Service Ads")).not.toBeInTheDocument();
   });
 });
