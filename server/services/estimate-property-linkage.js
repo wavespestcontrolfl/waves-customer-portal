@@ -25,6 +25,7 @@ const {
 } = require('./customer-properties');
 
 const customerPropertiesGateOn = () => process.env.GATE_CUSTOMER_PROPERTIES === 'true';
+const { movingEstimateLive } = require('../config/feature-gates');
 
 /**
  * Parse the single free-text estimates.address snapshot — typically a Google
@@ -241,9 +242,25 @@ function parseEstimateAddress(raw) {
  * in the table yet must not be un-flagged by an accept.
  */
 async function hasTwoActiveProperties(customerId, database = db) {
-  const [{ count } = {}] = await database('customer_properties')
-    .where({ customer_id: customerId, active: true })
-    .count('id as count');
+  const query = database('customer_properties')
+    .where({ customer_id: customerId, active: true });
+  // Moving PR B1 (GATE_MOVING_ESTIMATE): the house a customer is leaving is
+  // not a second home. A property that a submitted or applied move leaves
+  // from does not count, so the new house's accept cannot qualify the
+  // account for the 10% Multi-Home Discount.
+  if (movingEstimateLive()) {
+    query.whereNotExists(function movingAway() {
+      this.select(database.raw('1'))
+        .from('customer_moves as m')
+        .whereRaw('m.from_property_id = customer_properties.id')
+        .where('m.customer_id', customerId)
+        .where(function liveOrApplied() {
+          this.where('m.status', 'submitted')
+            .orWhere(function applied() { this.where('m.status', 'closed').where('m.closed_reason', 'applied'); });
+        });
+    });
+  }
+  const [{ count } = {}] = await query.count('id as count');
   return Number(count) >= 2;
 }
 

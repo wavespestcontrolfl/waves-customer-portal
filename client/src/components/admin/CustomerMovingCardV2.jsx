@@ -75,10 +75,35 @@ const EMAIL_REASONS = {
   prefs_unavailable: "Email settings could not be read. Try again.",
 };
 
+// The new-home estimate action the server picked for one move.
+function NewHomeAction({ move, customerId }) {
+  const { action, estimateId, reason } = move.new_home;
+  if (action === "start") {
+    const href = `/admin/estimates?tab=new&moveId=${encodeURIComponent(move.id)}&customerId=${encodeURIComponent(customerId)}`;
+    return (
+      <div className="mt-2" data-testid="new-home-action">
+        <a className={buttonStyles({ variant: "secondary", size: "sm" })} href={href}>Estimate for new home</a>
+      </div>
+    );
+  }
+  if (action === "open" && estimateId) {
+    return (
+      <div className="mt-2" data-testid="new-home-action">
+        <a className={buttonStyles({ variant: "secondary", size: "sm" })} href={`/admin/estimates?editEstimateId=${encodeURIComponent(estimateId)}`}>Open new-home estimate</a>
+      </div>
+    );
+  }
+  if (action === "blocked" && reason) {
+    return <div className="text-14 text-ink-secondary mt-2" data-testid="new-home-action">{reason}</div>;
+  }
+  return null;
+}
+
 export default function CustomerMovingCardV2({ customerId }) {
   const [enabled, setEnabled] = useState(false);
   const [moves, setMoves] = useState([]);
   const [text, setText] = useState(null);
+  const [estimateEnabled, setEstimateEnabled] = useState(false);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const [manualUrl, setManualUrl] = useState("");
@@ -93,6 +118,7 @@ export default function CustomerMovingCardV2({ customerId }) {
       setEnabled(data.enabled === true);
       setMoves(Array.isArray(data.moves) ? data.moves : []);
       setText(data.text || null);
+      setEstimateEnabled(data.estimateEnabled === true);
     } catch {
       // The card is optional: a failed read leaves it hidden.
     }
@@ -103,6 +129,7 @@ export default function CustomerMovingCardV2({ customerId }) {
     setEnabled(false);
     setMoves([]);
     setText(null);
+    setEstimateEnabled(false);
     setNote("");
     setManualUrl("");
     const ac = new AbortController();
@@ -152,6 +179,8 @@ export default function CustomerMovingCardV2({ customerId }) {
 
   if (!enabled) return null;
   const textLink = textHref(customerId, text);
+  // New-home estimate (GATE_MOVING_ESTIMATE): only moves the server marked.
+  const newHomeMoves = estimateEnabled ? moves.filter((m) => m?.new_home) : [];
 
   return (
     <div className="mt-5" data-testid="customer-moving-card">
@@ -175,6 +204,9 @@ export default function CustomerMovingCardV2({ customerId }) {
             </Button>
           )}
         </div>
+        {newHomeMoves.map((move) => (
+          <NewHomeAction key={move.id} move={move} customerId={customerId} />
+        ))}
         {note && <div className="text-12 text-ink-secondary mt-1.5" role="status">{note}</div>}
         {manualUrl && (
           <input

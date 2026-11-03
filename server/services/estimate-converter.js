@@ -234,12 +234,48 @@ async function byCityFirstDay(customer, estimateId) {
   return date ? { date, via: `zone: ${avail.zone}` } : null;
 }
 
-// Fallback — today + 7, nudged off closed days (weekly days off + one-off
-// blackouts) via the shared helper; was a Sunday-only snap before the
-// weekly-days-off setting existed. Bounded walk, fail-open like the helper.
-async function fallbackFirstServiceDate(customer) {
-  const fallback = new Date(Date.now() + 7 * 86400000);
+// Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate's first visit is
+// placed from the NEW address's city and never before the move-in date. Until
+// the move is applied the customer's own pin and city are the old house's, so
+// pickFirstServiceDate would route the visit there.
+async function moveFirstServiceDate(move, estimateId, { serviceKey = '' } = {}) {
+  const moveIn = move.move_in_date || null;
+  const city = (move.normalized_address && move.normalized_address.city) || null;
+  try {
+    let days = [];
+    if (multiTechTextTimesLive() && serviceKey) {
+      const pin = await require('./scheduling/text-offer-times').cityCentre(city);
+      if (pin) {
+        const { availabilityForPin } = require('../routes/booking')._internals;
+        const availability = await availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey, internal: true });
+        days = (availability?.days || []).filter((d) => d.slots?.length);
+      }
+    } else if (city) {
+      days = (await AvailabilityEngine.getAvailableSlots(city, estimateId))?.days || [];
+    }
+    const day = days.find((d) => d && d.date && (!moveIn || d.date >= moveIn));
+    if (day) {
+      logger.info(`[estimate-converter] Move estimate ${estimateId}: first visit on route day ${day.date} at the new address`);
+      return day.date;
+    }
+  } catch (e) {
+    // The code only: a knex message carries the query's bindings.
+    logger.error(`[estimate-converter] Move estimate ${estimateId}: availability lookup failed (${e?.code || e?.name || 'error'}), falling back`);
+  }
+  return fallbackFirstServiceDate({ city }, { notBefore: moveIn });
+}
+
+// Fallback — today + 7 (or `notBefore` when later), nudged off closed days
+// (weekly days off + one-off blackouts) via the shared helper; was a
+// Sunday-only snap before the weekly-days-off setting existed. Bounded walk,
+// fail-open like the helper.
+async function fallbackFirstServiceDate(customer, { notBefore = null } = {}) {
+  let fallback = new Date(Date.now() + 7 * 86400000);
   let dateStr = fallback.toISOString().split('T')[0];
+  if (notBefore && dateStr < notBefore) {
+    fallback = new Date(`${notBefore}T12:00:00Z`);
+    dateStr = notBefore;
+  }
   try {
     const { isBlackoutDate } = require('./scheduling/blackout-dates');
     for (let i = 0; i < 14 && (await isBlackoutDate(dateStr)); i++) {
@@ -5698,6 +5734,10 @@ const EstimateConverter = {
     if (typeof estimateData === 'string') {
       try { estimateData = JSON.parse(estimateData); } catch { estimateData = {}; }
     }
+    // Moving PR B1: a new-home estimate converts only while its move still
+    // stands behind it. Every accept path converts inside its own
+    // transaction, so the move row is share-locked through that commit.
+    const newHomeMove = await require('./customer-moves').lockMoveForConversion(database, estimateData);
     estimateData = estimateData || {};
 
     // Termite annual-plan sign-before-pay (slice 3a restructure, owner
@@ -7806,9 +7846,11 @@ const EstimateConverter = {
       // today in createTermForAnnualPrepay).
       if (annualPrepayTermStart) termStartDate = annualPrepayTermStart;
     } else {
-      const firstServiceDate = await pickFirstServiceDate(customer, estimateId, {
-        serviceKey: multiTechTextTimesLive() ? funnelKeyForEstimate(recurringServicesForConversion, estimate) : '',
-      });
+      const firstVisitServiceKey = multiTechTextTimesLive() ? funnelKeyForEstimate(recurringServicesForConversion, estimate) : '';
+      // Moving PR B1: a new-home estimate places its first visit at the new house.
+      const firstServiceDate = newHomeMove
+        ? await moveFirstServiceDate(newHomeMove, estimateId, { serviceKey: firstVisitServiceKey })
+        : await pickFirstServiceDate(customer, estimateId, { serviceKey: firstVisitServiceKey });
       termStartDate = firstServiceDate;
       // Earliest date actually inserted by the loop below (declared at the
       // function top and returned) — replaces the picked date when a seasonal
@@ -9551,3 +9593,4 @@ module.exports.frozenMistingInstall = frozenMistingInstall;
 module.exports.frozenPrepayOneTimeLines = frozenPrepayOneTimeLines;
 module.exports.mistingInstallSchedulePayload = mistingInstallSchedulePayload;
 module.exports.raiseMistingInstallBell = raiseMistingInstallBell;
+module.exports.moveFirstServiceDate = moveFirstServiceDate;

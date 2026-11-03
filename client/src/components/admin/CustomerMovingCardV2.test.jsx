@@ -82,6 +82,41 @@ describe('CustomerMovingCardV2', () => {
     expect(await screen.findByRole('button', { name: 'Text moving link' })).toBeDisabled();
   });
 
+  it('new-home estimate: start, open and blocked each show their own control', async () => {
+    const submitted = { status: 'submitted', typed_address: '12 Example Way', move_out_date: '2026-11-15', move_in_date: '2026-11-20', submitted_at: '2026-11-03T15:00:00Z' };
+    state.list = {
+      enabled: true,
+      estimateEnabled: true,
+      text: null,
+      moves: [
+        { ...submitted, id: 'move-start', new_home: { action: 'start', estimateId: null, reason: null } },
+        { ...submitted, id: 'move-open', new_home: { action: 'open', estimateId: 'est-9', reason: null } },
+        { ...submitted, id: 'move-blocked', new_home: { action: 'blocked', estimateId: null, reason: 'This customer prepaid for the year. Ask the owner.' } },
+      ],
+    };
+    render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    expect(await screen.findByRole('link', { name: 'Estimate for new home' }))
+      .toHaveAttribute('href', `/admin/estimates?tab=new&moveId=move-start&customerId=${CUSTOMER}`);
+    expect(screen.getByRole('link', { name: 'Open new-home estimate' })).toHaveAttribute('href', '/admin/estimates?editEstimateId=est-9');
+    expect(screen.getByText('This customer prepaid for the year. Ask the owner.')).toBeInTheDocument();
+    expect(screen.getAllByTestId('new-home-action')).toHaveLength(3);
+    // The blocked move has no button or link of its own.
+    expect(screen.getAllByRole('link', { name: /new home|new-home/i })).toHaveLength(2);
+  });
+
+  it('shows nothing new when estimateEnabled is false', async () => {
+    state.list = {
+      enabled: true,
+      estimateEnabled: false,
+      text: null,
+      moves: [{ id: 'move-start', status: 'submitted', new_home: { action: 'start', estimateId: null, reason: null } }],
+    };
+    render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    expect(await screen.findByTestId('moving-status')).toBeInTheDocument();
+    expect(screen.queryByTestId('new-home-action')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Estimate for new home' })).toBeNull();
+  });
+
   it('Email moving link posts the email route and reports the outcome', async () => {
     render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Email moving link' }));
