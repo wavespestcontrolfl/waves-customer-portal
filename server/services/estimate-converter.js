@@ -5724,9 +5724,10 @@ const EstimateConverter = {
     // scheduled_services rows. isNewRecurringSignupCandidate checks for any
     // prior recurring series, so once this conversion inserts its rows the
     // check would always return false. Captured here, it gates the welcome
-    // SMS to genuinely new recurring signups (no prior series or completed
-    // service) — existing customers accepting an add-on estimate don't
-    // re-trigger the welcome. Reads committed prior state via the shared db.
+    // SMS to genuinely new recurring signups (no prior series, and no
+    // serviced visit older than its new-customer window) — existing customers
+    // accepting an add-on estimate don't re-trigger the welcome. Reads
+    // committed prior state via the shared db.
     const wasNewRecurringSignup = await isNewRecurringSignupCandidate(customerId);
 
     // Parse estimate data
