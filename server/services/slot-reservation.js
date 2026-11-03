@@ -737,17 +737,19 @@ function slotDateRefusal(date, todayEt, offerArrivalGrace) {
   return null;
 }
 
-// Moving PR B1 (GATE_MOVING_ESTIMATE): the booking-time move check, run INSIDE
-// the booking transaction. The move row is share-locked first (a concurrent
-// moving-page submit waits for this commit); then a new-home estimate whose
-// move no longer stands behind it books nothing (the stale-call-link answer),
-// and nothing books before the move-in date. Returns the error to throw, or null.
-async function moveBookingRefusal(conn, estimateId, estimateData, date) {
-  // Only a new-home estimate (estimate_data.move, server-stamped) has a move.
+// Moving PR B1: the booking-time move check, run INSIDE the booking
+// transaction, for a new-home estimate only (estimate_data.move, server-
+// stamped). The stamped move is share-locked and judged whatever the gate
+// (lockMoveForConversion, the rule every accept runs): a stale move books
+// nothing (the stale-call-link answer). The move-in limit applies while
+// GATE_MOVING_ESTIMATE is on. Returns the error to throw, or null.
+async function moveBookingRefusal(conn, estimateData, date) {
   if (!estimateData?.move?.moveId) return null;
-  const Moves = require('./customer-moves');
-  const move = await Moves.moveForEstimate(estimateId, conn, { lock: true });
-  if (await Moves.moveLinkBlock(conn, estimateData)) {
+  let move = null;
+  try {
+    move = await require('./customer-moves').lockMoveForConversion(conn, estimateData);
+  } catch (moveErr) {
+    if (moveErr.code !== 'MOVE_ESTIMATE_STALE') throw moveErr;
     const err = new Error('estimate is no longer for its move');
     err.code = 'ESTIMATE_NOT_FOUND';
     return err;
@@ -1108,7 +1110,7 @@ async function reserveSlot({
           }
         }
         // Moving PR B1: the move behind a new-home estimate, on locked rows.
-        const moveRefusal = await moveBookingRefusal(trx, estimateId, reservationData, date);
+        const moveRefusal = await moveBookingRefusal(trx, reservationData, date);
         if (moveRefusal) throw moveRefusal;
       }
 
@@ -1882,7 +1884,7 @@ async function commitReservation({
       if (typeof raw === 'string') {
         try { holdData = JSON.parse(raw); } catch { holdData = null; }
       }
-      const moveRefusal = await moveBookingRefusal(client, row.source_estimate_id, holdData, dateOnly(row.scheduled_date));
+      const moveRefusal = await moveBookingRefusal(client, holdData, dateOnly(row.scheduled_date));
       if (moveRefusal) throw moveRefusal;
     }
     // Graduating inside the grace window: reservation_expires_at itself has

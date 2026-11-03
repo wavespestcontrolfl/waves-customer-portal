@@ -7110,9 +7110,10 @@ stops at the 90-day reserve horizon; an explicit window loses only the days
 before it; the offer cache keys on the date), `/reserve` refuses an earlier
 slot (`SLOT_UNAVAILABLE`), and the accept-time commit of a hold refuses one
 the move-in date has since passed (`SLOT_UNAVAILABLE`, the recoverable
-pick-another-time answer). Both booking checks read the move under a share
-lock inside the booking transaction (`slot-reservation.js`
-`moveBookingRefusal`), so a moving-page resubmit waits for that commit. The
+pick-another-time answer). Both booking checks lock and judge the stamped
+move inside the booking transaction whatever the gate (`slot-reservation.js`
+`moveBookingRefusal` through `lockMoveForConversion`: a stale move refuses
+like a stale call link), so a moving-page resubmit waits for that commit. The
 estimate page offers no existing visit before the move-in date for adoption
 (`findLinkedUpcomingAppointment`), and the accept compares an adopted
 (non-hold) visit's date with the move-in date read under its move lock (409
