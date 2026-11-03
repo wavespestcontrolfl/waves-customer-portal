@@ -2033,6 +2033,14 @@ const gates = {
   // note and clears the intake state, as before.
   leadRepeatForm: process.env.GATE_LEAD_REPEAT_FORM === 'true',
 
+  // Current Customer Quote Text — a current or past customer who sends the
+  // website quote form gets the lead text's CALL or TEXT offer (at most one a
+  // day per phone, no STOP line) and rings one Leads alert; a CALL or TEXT
+  // reply to that text is then handled as a lead's (owner 2026-11-02, "text
+  // and bell"). Off unless exactly 'true'; off, the form writes its note
+  // only, as before. See services/lead-auto-reply.js.
+  currentCustomerQuoteText: process.env.GATE_CURRENT_CUSTOMER_QUOTE_TEXT === 'true',
+
   // Nightly lead repeat sweep (owner 2026-11-01, Action inbox agents A). Boot-log
   // entry only; the call-time reader is leadRepeatSweepLive().
   leadRepeatSweep: process.env.GATE_LEAD_REPEAT_SWEEP === 'true',

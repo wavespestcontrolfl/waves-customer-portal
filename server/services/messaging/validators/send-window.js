@@ -120,6 +120,10 @@ const OPERATOR_ENTRY_POINTS = new Set([
 //     the moment. Those are the night-blast incidents this window exists
 //     to stop; unfencing them is a new owner ruling, not a PR nit.
 const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
+  // Owner 2026-11-02 ("text and bell"): the CALL or TEXT offer to a current or
+  // past customer who just sent the quote form goes out at once, at any hour,
+  // like the lead text (services/lead-auto-reply.js).
+  'current_customer_quote_text',
   'customer_service_request',
   'estimate_accept_annual_prepay',
   'estimate_accept_onetime_booking',

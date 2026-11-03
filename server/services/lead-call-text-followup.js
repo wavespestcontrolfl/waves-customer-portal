@@ -18,14 +18,17 @@
  * lands this gate stays off.
  *
  * Only a reply to OUR lead text counts (the ring's own check), never an
- * existing customer, one follow-up of each kind per phone per 24 h, one open
- * follow-up per phone, one booked call per slot (lead_callback_requests).
+ * existing customer unless our current-customer quote text reached them
+ * (GATE_CURRENT_CUSTOMER_QUOTE_TEXT; their TEXT answer then goes to a person,
+ * not the intake machine), one follow-up of each kind per phone per 24 h, one
+ * open follow-up per phone, one booked call per slot (lead_callback_requests).
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { parseCallTextReply } = require('./sms-service-intent');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+const { CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { etParts, etDateString, addETDays, parseETDateTime, formatETTime, dateOnlyString } = require('../utils/datetime-et');
 
 const ENTRY_POINT = 'lead_call_text_followup';
@@ -36,8 +39,7 @@ const ANSWER_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FIRST_SLOT_MINUTES = 8 * 60;
 const LAST_SLOT_MINUTES = 19 * 60 + 45;
 const SLOT_MINUTES = 15;
-// Same set as lead-call-reply-ring.js: a row in one of these is a customer.
-const REAL_CUSTOMER_STAGES = ['active_customer', 'won', 'at_risk'];
+const CUSTOMER_OR_FORMER_STAGES = [...CUSTOMER_STAGES, ...FORMER_CUSTOMER_STAGES];
 
 // Code only in logs: a knex message carries the bindings (the phone digits).
 const errCode = (err) => String(err?.code || err?.name || 'error');
@@ -273,11 +275,14 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
   const cancelledFirst = kind === 'call_request' && outcome === 'not_sent'
     && (await db('lead_callback_requests').where({ id: requestId }).first('state'))?.state === 'cancelled';
   await settleSend(requestId, outcome, { sentState: kind === 'text_reply' ? 'done' : 'asked', now });
-  if (kind === 'text_reply' && outcome !== 'not_sent') {
-    // We asked which service: the intake machine must read the answer as
-    // one. A cleared state (a repeat form) or one waiting on the address goes
-    // back to awaiting_service; a drafted quote is left alone. A question
-    // that provably never left changes nothing.
+  // We asked which service: the intake machine must read the answer as
+  // one. A cleared state (a repeat form) or one waiting on the address goes
+  // back to awaiting_service; a drafted quote is left alone. A question
+  // that provably never left changes nothing. A current or past customer
+  // (one our current-customer quote text reached) never enters the intake
+  // machine, by stage alone: existing customers never enter lead
+  // acquisition (lead-webhook.js), so a person answers them from the Inbox.
+  if (kind === 'text_reply' && outcome !== 'not_sent' && !CUSTOMER_OR_FORMER_STAGES.includes(customer.pipeline_stage)) {
     await db('customers').where({ id: customer.id })
       .where((q) => q.whereNull('lead_intake_status').orWhere('lead_intake_status', 'awaiting_address'))
       .update({ lead_intake_status: 'awaiting_service', updated_at: now });
@@ -409,8 +414,10 @@ async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now
       .orderBy('created_at', 'desc')
       .first();
     if (!open) return { action: 'none', reason: 'no_open_ask' };
-    // Still a lead? A row that became a customer since the question closes.
-    if (REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) {
+    // Still a lead? A row that became a customer since the question closes,
+    // unless the question answered our current-customer quote text.
+    const { customerBlocker } = require('./lead-call-reply-ring');
+    if (await customerBlocker({ customer, digits, asOf: open.created_at })) {
       await db('lead_callback_requests').where({ id: open.id, state: 'asked' }).update({ state: 'cancelled', updated_at: now });
       return { action: 'none', reason: 'existing_customer' };
     }
@@ -430,5 +437,5 @@ module.exports = {
   NIGHT_CALL_BODY,
   _test: { targetDateFor, slotInstant, bookSlot, dateText },
   // For lead-callback-scheduler.js (part 2b): the same send and bell rules.
-  _shared: { sendFollowup, raiseLeadBell, REAL_CUSTOMER_STAGES },
+  _shared: { sendFollowup, raiseLeadBell },
 };

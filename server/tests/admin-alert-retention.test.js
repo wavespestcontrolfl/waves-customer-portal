@@ -98,6 +98,7 @@ describe('re-ring list', () => {
   test('each emitter with dedupeOpenOnly has a decision, and its keys resolve to it', () => {
     const keyed = (dedupeKey) => row({ metadata: { dedupeKey } });
     expect(retention.ringRiskFor(keyed('lead-repeat-form:abc')).emitter).toBe('lead-repeat-form');
+    expect(retention.ringRiskFor(keyed('customer-quote-form:abc')).emitter).toBe('customer-quote-form');
     expect(retention.ringRiskFor(keyed('stock-shortfall:p1')).emitter).toBe('stock-shortfall');
     expect(retention.ringRiskFor(keyed('ib:model-failure:tech')).emitter).toBe('ib-model-failure');
     expect(retention.ringRiskFor(keyed('series-price-guard:cancelled-root:r')).kind).toBe('periodic');

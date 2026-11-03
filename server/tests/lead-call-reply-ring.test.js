@@ -9,6 +9,10 @@ const mockState = {};
 function resetState() {
   Object.assign(mockState, {
     gate: true,
+    quoteGate: false,
+    quoteText: null,
+    quoteReads: [],
+    savepoints: 0,
     leadText: { id: 'sms-1' },
     priorRing: null,
     recentCall: null,
@@ -33,6 +37,7 @@ function mockQuery(table) {
     q.filters.push(args); return q;
   };
   q.first = async () => {
+    if (table === 'current_customer_quote_texts') { mockState.quoteReads.push(q.filters); return mockState.quoteText; }
     if (table === 'sms_log') return mockState.leadText;
     if (table === 'leads') return mockState.lead;
     if (table === 'call_log') {
@@ -54,11 +59,16 @@ mockDb.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
 mockDb.transaction = async (fn) => {
   const trx = (table) => mockQuery(table);
   trx.raw = async (sql, bindings) => { mockState.locks.push(bindings); return {}; };
+  // A savepoint on the locked transaction runs on that same transaction.
+  trx.isTransaction = true;
+  trx.transaction = async (inner) => { mockState.savepoints += 1; return inner(trx); };
   return fn(trx);
 };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'leadCallReplyRing' && mockState.gate }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (key) => (key === 'leadCallReplyRing' && mockState.gate) || (key === 'currentCustomerQuoteText' && mockState.quoteGate),
+}));
 const mockBridge = jest.fn(async () => ({ callSid: 'CA-ring', callLogId: 'log-1' }));
 const mockInsertRow = jest.fn(async () => 'log-1');
 jest.mock('../services/call-bridge', () => ({
@@ -130,6 +140,27 @@ test.each([
   expect(mockInsertRow).not.toHaveBeenCalled();
   expect(mockBridge).not.toHaveBeenCalled();
   expect(mockBell).not.toHaveBeenCalled();
+});
+
+test('a current customer our quote text reached rings like a lead (GATE_CURRENT_CUSTOMER_QUOTE_TEXT)', async () => {
+  mockState.quoteGate = true;
+  mockState.quoteText = { phone_digits: '9415550100' };
+  const out = await ring({ customer: { ...LEAD, pipeline_stage: 'active_customer' } });
+  expect(out).toMatchObject({ rang: true });
+  expect(mockBridge).toHaveBeenCalledTimes(1);
+  // The witness is read for this customer and phone, under the ring's lock, in a savepoint.
+  expect(mockState.quoteReads[0]).toEqual(expect.arrayContaining([[{ phone_digits: '9415550100', customer_id: 'cust-1' }]]));
+  expect(mockState.savepoints).toBe(1);
+});
+
+test.each([
+  ['switch on, no quote text', () => { mockState.quoteGate = true; }],
+  ['a quote text, switch off', () => { mockState.quoteText = { phone_digits: '9415550100' }; }],
+])('%s: a current customer does not ring', async (_label, arrange) => {
+  arrange();
+  const out = await ring({ customer: { ...LEAD, pipeline_stage: 'won' } });
+  expect(out).toEqual({ rang: false, reason: 'existing_customer' });
+  expect(mockBridge).not.toHaveBeenCalled();
 });
 
 test('a definite ring failure raises the missed bell at once', async () => {

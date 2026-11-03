@@ -13,8 +13,10 @@
  *
  * Only a reply to OUR lead text counts (a "Reply CALL" text to this phone
  * in the last 7 days that Twilio did not report failed), never an existing
- * customer, at most one ring per phone per 24 h, and none while another
- * call to the phone is already going. Night CALL replies and TEXT replies do nothing here.
+ * customer unless our current-customer quote text reached them
+ * (GATE_CURRENT_CUSTOMER_QUOTE_TEXT, customerBlocker), at most one ring per
+ * phone per 24 h, and none while another call to the phone is already going.
+ * Night CALL replies and TEXT replies do nothing here.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -59,10 +61,46 @@ function displayName(customer) {
     .join(' ') || 'a lead';
 }
 
+// 'existing_customer' for a customer row, else null. A customer counts as a
+// lead here only after our current-customer quote text reached them on this
+// phone in the 7 days up to `asOf` (the reply, or the call request it
+// opened): GATE_CURRENT_CUSTOMER_QUOTE_TEXT, a current_customer_quote_texts
+// claim row lead-auto-reply.js stamped with the real Twilio sid. A text sent
+// after `asOf` never counts: a later quote form cannot keep a call request a
+// lead opened before becoming a customer. Gate off, or a read that fails,
+// keeps the customer out. Shared with the call/text follow-ups and the
+// booked-call scheduler.
+async function customerBlocker({ customer, digits, asOf }, conn = db) {
+  if (!REAL_CUSTOMER_STAGES.includes(customer?.pipeline_stage)) return null;
+  return (await reachedByCustomerQuoteText({ customerId: customer.id, digits, asOf }, conn)) ? null : 'existing_customer';
+}
+
+async function reachedByCustomerQuoteText({ customerId, digits, asOf }, conn = db) {
+  if (!isEnabled('currentCustomerQuoteText') || !customerId || String(digits || '').length !== 10) return false;
+  const at = new Date(asOf);
+  const read = (q) => q('current_customer_quote_texts')
+    .where({ phone_digits: String(digits), customer_id: customerId })
+    .whereRaw("COALESCE(twilio_sid, '') ~ '^(SM|MM)'")
+    .where('claimed_at', '>=', new Date(at.getTime() - LEAD_TEXT_WINDOW_MS))
+    .where('claimed_at', '<=', at)
+    .first('id');
+  try {
+    // Inside the caller's transaction (the ring's per-phone lock) the read runs
+    // in a savepoint, so a failed read never aborts that transaction.
+    const row = conn.isTransaction ? await conn.transaction((sp) => read(sp)) : await read(conn);
+    return !!row;
+  } catch (err) {
+    logger.warn(`[lead-call-reply-ring] quote text check failed for customer ${customerId} (${String(err?.code || err?.name || 'error')})`);
+    return false;
+  }
+}
+
 // The lead-text half of the rule, shared with lead-call-text-followup.js: a
-// lead (not a customer) who got our "Reply CALL" text in the last 7 days.
+// lead (not a customer, see customerBlocker) who got our "Reply CALL" text in
+// the last 7 days.
 async function leadTextBlocker({ customer, digits, now }, conn = db) {
-  if (REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) return 'existing_customer';
+  const notLead = await customerBlocker({ customer, digits, asOf: now }, conn);
+  if (notLead) return notLead;
 
   const leadText = await conn('sms_log')
     .where({ direction: 'outbound' })
@@ -324,6 +362,7 @@ module.exports = {
   placeRing,
   settleUnstartedRing,
   leadTextBlocker,
+  customerBlocker,
   noteRingEnded,
   inRingHours,
   LEAD_CALL_REPLY_RING_SOURCE: SOURCE,

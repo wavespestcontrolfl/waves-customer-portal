@@ -21,6 +21,7 @@ jest.mock('../utils/customer-comms-lock', () => ({ withSmsConsentLock: (conn, _k
 jest.mock('../services/admin-alert-compose', () => ({ ...jest.requireActual('../services/admin-alert-compose'), raiseAdminAlert: jest.fn(async () => ({ id: 'n1' })) }));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { isEnabled } = require('../config/feature-gates');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
 // Every bell spec must pass the real notification rule (it throws under test).
 const bellSpecs = () => raiseAdminAlert.mock.calls.map(([, spec]) => { composeAdminAlert(spec); return spec; });
@@ -36,7 +37,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('lead call/text follow-up on PostgreSQL', () => {
   let database;
   const schema = `lead_cb_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['customers', 'leads', 'sms_log', 'lead_callback_requests'];
+  const tables = ['customers', 'leads', 'sms_log', 'lead_callback_requests', 'current_customer_quote_texts'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -52,6 +53,7 @@ jest.setTimeout(30000);
   });
   beforeEach(() => {
     jest.clearAllMocks();
+    isEnabled.mockImplementation(() => true);
     sendCustomerMessage.mockResolvedValue(REAL_SEND);
   });
   afterEach(async () => {
@@ -76,6 +78,87 @@ jest.setTimeout(30000);
   }
   const reply = (customer, body, now) => handleLeadReply({ customer, body, fromPhone: customer.phone, smsLogId: randomUUID(), now });
   const sentBodies = () => sendCustomerMessage.mock.calls.map(([input]) => input.body);
+
+  // A current customer whose current-customer quote text (GATE_CURRENT_CUSTOMER_QUOTE_TEXT) reached
+  // them an hour before `when`: the same "Reply CALL" words, and the claim row stamped with a real sid.
+  async function quotedCustomer(phone, { when = NIGHT, stage = 'active_customer', sid = `SM${randomUUID().replaceAll('-', '')}`, sentAt } = {}) {
+    const customer = await lead(phone, { stage, intake: null, when });
+    await database('current_customer_quote_texts').insert({
+      id: randomUUID(), phone_digits: phone.slice(-10), customer_id: customer.id, twilio_sid: sid, claimed_at: sentAt || new Date(when.getTime() - 3600000),
+    });
+    return customer;
+  }
+
+  test('a current customer our quote text reached: TEXT gets the service question, and the intake machine stays off', async () => {
+    const c = await quotedCustomer('+19415550130');
+    await expect(reply(c, 'Text', NIGHT)).resolves.toMatchObject({ action: 'text_reply_sent', outcome: 'sent' });
+    expect(sentBodies()).toEqual([TEXT_REPLY_BODY]);
+    expect((await database('customers').where({ id: c.id }).first()).lead_intake_status).toBeNull();
+  });
+
+  test('a past customer our quote text reached stays out of the intake machine too', async () => {
+    const c = await quotedCustomer('+19415550135', { stage: 'churned' });
+    await expect(reply(c, 'text', NIGHT)).resolves.toMatchObject({ action: 'text_reply_sent' });
+    expect((await database('customers').where({ id: c.id }).first()).lead_intake_status).toBeNull();
+  });
+
+  // The time answer reads the text against the call request's own created_at, which the database stamps
+  // with its real now(); the test clock drives only the replies, so the request is moved onto that clock.
+  const onTestClock = (c, at) => database('lead_callback_requests').where({ customer_id: c.id }).update({ created_at: at });
+
+  test('a current customer our quote text reached: a night CALL asks for a time, and the answer books it', async () => {
+    const c = await quotedCustomer('+19415550131');
+    await expect(reply(c, 'call', NIGHT)).resolves.toMatchObject({ action: 'time_asked' });
+    await onTestClock(c, NIGHT);
+    await expect(reply(c, '10am', new Date(NIGHT.getTime() + 60000))).resolves.toMatchObject({ action: 'booked' });
+    expect(sentBodies()).toEqual([NIGHT_CALL_BODY, "You're all set. We'll call you tomorrow at 10:00 AM."]);
+  });
+
+  test('a quote text sent after a lead\'s call request never keeps it once they became a customer', async () => {
+    const c = await lead('+19415550137');
+    await reply(c, 'call', NIGHT);
+    await onTestClock(c, NIGHT);
+    await database('customers').where({ id: c.id }).update({ pipeline_stage: 'active_customer' });
+    await database('current_customer_quote_texts').insert({
+      id: randomUUID(), phone_digits: '9415550137', customer_id: c.id, twilio_sid: `SM${randomUUID().replaceAll('-', '')}`, claimed_at: new Date(NIGHT.getTime() + 30 * 60000),
+    });
+    await expect(reply({ ...c, pipeline_stage: 'active_customer' }, '10am', new Date(NIGHT.getTime() + 60 * 60000))).resolves.toMatchObject({ reason: 'existing_customer' });
+    expect((await database('lead_callback_requests').where({ customer_id: c.id }).first()).state).toBe('cancelled');
+  });
+
+  test.each([
+    ['a claim with no real sid', { sid: null }],
+    ['a quote text over 7 days old', { sentAt: new Date(NIGHT.getTime() - 8 * 24 * 3600000) }],
+  ])('%s does not make a current customer a lead', async (_label, opts) => {
+    const c = await quotedCustomer('+19415550132', opts);
+    await expect(reply(c, 'text', NIGHT)).resolves.toMatchObject({ reason: 'existing_customer' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an earlier delivered quote text still counts after a later attempt that never settled', async () => {
+    const c = await quotedCustomer('+19415550136', { sentAt: new Date(NIGHT.getTime() - 2 * 24 * 3600000) });
+    // The next day's form: its claim row is still unresolved (an ambiguous send keeps it, sid NULL).
+    await database('current_customer_quote_texts').insert({ id: randomUUID(), phone_digits: '9415550136', customer_id: c.id, twilio_sid: null, claimed_at: new Date(NIGHT.getTime() - 3600000) });
+    await expect(reply(c, 'text', NIGHT)).resolves.toMatchObject({ action: 'text_reply_sent' });
+  });
+
+  test('switch off: a current customer our quote text reached is still not answered', async () => {
+    const c = await quotedCustomer('+19415550133');
+    isEnabled.mockImplementation((key) => key !== 'currentCustomerQuoteText');
+    await expect(reply(c, 'text', NIGHT)).resolves.toMatchObject({ reason: 'existing_customer' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a quote-text read that fails inside a transaction leaves the transaction usable', async () => {
+    const { customerBlocker } = require('../services/lead-call-reply-ring');
+    const c = await quotedCustomer('+19415550134');
+    await expect(database.transaction(async (trx) => {
+      await trx.raw('ALTER TABLE current_customer_quote_texts RENAME COLUMN claimed_at TO claimed_at_gone');
+      await expect(customerBlocker({ customer: c, digits: '9415550134', asOf: NIGHT }, trx)).resolves.toBe('existing_customer');
+      await expect(trx('customers').where({ id: c.id }).first('id')).resolves.toEqual({ id: c.id });
+      throw new Error('roll back the rename');
+    })).rejects.toThrow('roll back the rename');
+  });
 
   test('TEXT gets the service question once, and a cleared intake state comes back', async () => {
     const c = await lead('+19415550100', { intake: null });
