@@ -307,6 +307,27 @@ describe('schema validation', () => {
       expect(flatView(odd).billing_choice).toBeNull();
     });
 
+    test('1.30.0: the household safety notes survive normalization and read in the flat view, null when absent, blank or not text', () => {
+      const KEYS = ['household_children_or_elderly', 'no_spray_areas', 'chemical_sensitivity_note'];
+      const out = validModelOutput();
+      out.meta.schema_version = '1.30.0'; // flatView reads only a stamped (V2) extraction
+      KEYS.forEach((key, i) => { out.property[key] = `  note ${i}  `; });
+      const normalized = normalizeExtractionV2(out);
+      KEYS.forEach((key, i) => {
+        expect(normalized.property[key]).toBe(`  note ${i}  `);
+        expect(flatView(out)[key]).toBe(`note ${i}`); // trimmed in the flat view
+      });
+      const bare = validModelOutput();
+      bare.meta.schema_version = '1.30.0';
+      for (const key of KEYS) expect(flatView(bare)[key]).toBeNull();
+      const odd = validModelOutput();
+      odd.meta.schema_version = '1.30.0';
+      for (const key of KEYS) odd.property[key] = '   ';
+      for (const key of KEYS) expect(flatView(odd)[key]).toBeNull();
+      for (const key of KEYS) odd.property[key] = true;
+      for (const key of KEYS) expect(flatView(odd)[key]).toBeNull();
+    });
+
     test('1.18.0: a family_member caller validates in both schemas', () => {
       const out = validModelOutput();
       out.caller.relationship_to_property = 'family_member';
