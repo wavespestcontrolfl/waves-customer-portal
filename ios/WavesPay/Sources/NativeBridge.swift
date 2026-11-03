@@ -67,7 +67,8 @@ final class NativeBridge {
     private func startSaveCard(_ body: [String: Any], requestId: String?, from page: WKWebView) {
         // One save at a time, and never over an open payment.
         if app.cardSaveOpen || app.flow.isActive {
-            return fail("Another payment is already open in Waves Admin.", requestId: requestId, to: page)
+            let busy = app.cardSaveOpen ? AppState.cardSaveOpenMessage : "A payment is open in Waves Admin. Finish it first."
+            return fail(busy, requestId: requestId, to: page)
         }
         guard let link = body["deepLink"] as? String, let url = URL(string: link),
               let token = SaveCardSession.token(from: url)
