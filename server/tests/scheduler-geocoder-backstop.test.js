@@ -22,6 +22,7 @@ jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons:
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 jest.mock('../services/geocoder', () => ({ sweepUngeocodedCustomers: jest.fn() }));
 jest.mock('../services/geocoder-service-locations', () => ({ sweepUngeocodedServices: jest.fn() }));
+jest.mock('../services/geocoder-county-fallback', () => ({ sweepCountyFallback: jest.fn() }));
 jest.mock('../services/scheduling/quality-after-change', () => ({ retryScheduleQualityRefreshes: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
@@ -29,6 +30,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 const { sweepUngeocodedCustomers } = require('../services/geocoder');
 const { sweepUngeocodedServices } = require('../services/geocoder-service-locations');
+const { sweepCountyFallback } = require('../services/geocoder-county-fallback');
 const { retryScheduleQualityRefreshes } = require('../services/scheduling/quality-after-change');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -74,6 +76,20 @@ test('successful service and customer sweeps run in order under the same existin
   expect(sweepUngeocodedServices.mock.invocationCallOrder[0])
     .toBeLessThan(sweepUngeocodedCustomers.mock.invocationCallOrder[0]);
   expect(logger.error).not.toHaveBeenCalled();
+});
+
+test('the county pass runs last under the same lease, and a customer sweep failure does not suppress it', async () => {
+  const tick = registeredTick();
+  await tick();
+  expect(sweepCountyFallback).toHaveBeenCalledTimes(1);
+  expect(sweepUngeocodedCustomers.mock.invocationCallOrder[0])
+    .toBeLessThan(sweepCountyFallback.mock.invocationCallOrder[0]);
+
+  sweepCountyFallback.mockClear();
+  sweepUngeocodedCustomers.mockRejectedValueOnce(new Error('synthetic customer query failure'));
+  await tick();
+  expect(sweepCountyFallback).toHaveBeenCalledTimes(1);
+  expect(logger.error).toHaveBeenCalledWith('[geocoder] backstop sweep failed: synthetic customer query failure');
 });
 
 test('a customer sweep rejection still reaches the existing outer failure handler', async () => {

@@ -792,6 +792,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
   try {
     await deliverOpsDigest({
       fallOff: true, // retired by retireIfClean on the clean run
+      supersedePrior: true, // a new send closes the older open copy (ops-digest supersedeOlderDigests)
       key: 'unworked-comms',
       subject: composed.subject,
       html: composed.html,
@@ -804,7 +805,10 @@ async function runUnworkedCommsWatcher(opts = {}) {
       // No dedupe/refresh here on purpose (pre-push audit P1): the loaders
       // drop callbacks, follow-ups and texts older than 30 days, so a
       // refreshed standing row could erase an unresolved item's evidence
-      // when it ages out while other work remains. One row per send.
+      // when it ages out while other work remains. One row per send, and
+      // supersedePrior closes the older OPEN copy (owner 2026-11-02: 29
+      // "callbacks waiting" rows sat open). The closed rows keep their lists
+      // as history in Activity.
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

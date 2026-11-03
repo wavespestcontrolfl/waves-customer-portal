@@ -962,6 +962,8 @@ async function lookupCountyParcelAttributesById(county, parcelId, options = {}) 
 // [A-Z0-9] only, so no quoting is reachable. Resolves to [] for no lot, or for
 // a page-capped answer (the home's lot could be past the cap), and THROWS when
 // the county cannot answer, so a caller never reads an outage as "no lot".
+// options.withGeometry asks for each lot's polygon (WGS84 rings, `rings`) for
+// the county-lot pin (county-lot-pin.js); unset, the request is unchanged.
 const ADDRESS_LOTS_PAGE = 200;
 async function lookupCountyParcelsByAddress(county, { houseNumber, streetWord }, options) {
   if (isDisabled()) throw new Error('county parcel GIS disabled');
@@ -971,13 +973,15 @@ async function lookupCountyParcelsByAddress(county, { houseNumber, streetWord },
   if (!layer || !/^\d{1,7}$/.test(number) || word.length < 2) return [];
   const [field] = SITUS_QUERY_FIELDS[county];
 
+  const withGeometry = options?.withGeometry === true;
   const params = new URLSearchParams({
     f: 'json',
     where: `UPPER(${field}) LIKE '${number} %${word}%'`,
     outFields: layer.outFields.join(','),
-    returnGeometry: 'false',
+    returnGeometry: withGeometry ? 'true' : 'false',
     resultRecordCount: String(ADDRESS_LOTS_PAGE),
   });
+  if (withGeometry) params.set('outSR', '4326');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMsFor(options));
   const t0 = Date.now();
@@ -989,7 +993,11 @@ async function lookupCountyParcelsByAddress(county, { houseNumber, streetWord },
     if (data.error) throw new Error(`${county} address GIS error: ${data.error.message || data.error.code}`);
     const truncated = Boolean(data.exceededTransferLimit);
     const lots = truncated ? [] : (data.features || [])
-      .map((f) => ({ ...layer.parse(ciAttr(f.attributes)), county }))
+      .map((f) => ({
+        ...layer.parse(ciAttr(f.attributes)),
+        county,
+        ...(withGeometry ? { rings: f.geometry?.rings || null } : {}),
+      }))
       .filter((lot) => lot.parcelId);
     // County + counts only — no address values in logs (PII rule).
     logger.info('[county-parcel-gis] address lots query', { county, lots: lots.length, truncated, elapsedMs: Date.now() - t0 });

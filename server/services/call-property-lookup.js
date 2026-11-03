@@ -1220,6 +1220,9 @@ module.exports = {
   enqueueCallPropertyLookup,
   sweepUnenrichedProperties,
   sweepUnenrichedPropertiesAfterKill,
+  // The background property write fence, also used by the county pass (geocoder-county-fallback.js).
+  withReviewWriteFence,
+  isReviewFenceBusy,
   _private: {
     snakePropertyType, propertyRowAddress, fetchBackfillCandidates, recentLookupVerdict, backfillBatchSize,
     backfillBudgetLeft, reconcileVisitCoordinates, reconcileCustomerMirrors, withReviewWriteFence, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,

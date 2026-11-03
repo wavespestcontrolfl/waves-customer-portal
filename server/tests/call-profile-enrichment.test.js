@@ -294,3 +294,148 @@ describe('the dated tag on a note line', () => {
     expect(providerAlreadyNoted('[call 2026-10-07] Switching from: Acme Pest', when, 'Acme Pest')).toBe(false);
   });
 });
+
+// Household safety facts (extraction schema 1.30.0): kids/elderly at home, areas not to spray, a
+// chemical sensitivity. They land on fields the visit brief already shows, append-only.
+describe('household safety facts', () => {
+  const { safetyFactsFrom, safetyUpdates } = _test;
+  const DAY = '2026-11-02T15:00:00Z';
+
+  function setupRow(row, { phone = null } = {}) {
+    isEnabled.mockReturnValue(true);
+    const writes = [];
+    db.mockImplementation((table) => {
+      const builder = {
+        where: () => builder,
+        forUpdate: () => builder,
+        first: async () => {
+          if (table === 'property_preferences') return row;
+          return table === 'customers' && phone ? { phone } : null;
+        },
+        update: async (u) => { writes.push({ table, op: 'update', u }); return 1; },
+        insert: async (u) => { writes.push({ table, op: 'insert', u }); },
+      };
+      return builder;
+    });
+    return writes;
+  }
+
+  test('no stated fact means no facts and no columns', () => {
+    expect(safetyFactsFrom({})).toBeNull();
+    expect(safetyFactsFrom({ household_children_or_elderly: null, no_spray_areas: '   ', chemical_sensitivity_note: 42 })).toBeNull();
+    expect(safetyUpdates({}, null, DAY)).toEqual({});
+  });
+
+  test('notes are flattened to one line and capped at 200 characters', () => {
+    const facts = safetyFactsFrom({ no_spray_areas: `vegetable\n garden  ${'x'.repeat(400)}` });
+    expect(facts.noSpray.startsWith('vegetable garden xxx')).toBe(true);
+    expect(facts.noSpray.length).toBeLessThanOrEqual(200);
+  });
+
+  test('a new row gets all three facts', async () => {
+    const writes = setupRow(null);
+    const res = await enrichFromCall({
+      customerId: 'c1',
+      callCreatedAt: DAY,
+      extraction: { property: {
+        household_children_or_elderly: 'two toddlers live here',
+        no_spray_areas: 'vegetable garden by the back fence',
+        chemical_sensitivity_note: 'daughter has asthma, reacts to sprays',
+      } },
+    });
+    const row = writes.find((w) => w.op === 'insert').u;
+    expect(row.special_instructions).toBe('[call 2026-11-02] Kids/elderly at home: two toddlers live here\n[call 2026-11-02] Do not spray: vegetable garden by the back fence');
+    expect(row.chemical_sensitivities).toBe(true);
+    expect(row.chemical_sensitivity_details).toBe('[call 2026-11-02] Caller reports: daughter has asthma, reacts to sprays');
+    expect(res.applied).toContain('property_preferences_created');
+  });
+
+  test('staff text survives: the call lines are appended after it', async () => {
+    const writes = setupRow({
+      customer_id: 'c1',
+      special_instructions: 'Staff: call before arriving',
+      chemical_sensitivities: true,
+      chemical_sensitivity_details: 'Staff: fragrance sensitivity',
+    });
+    await enrichFromCall({
+      customerId: 'c1',
+      callCreatedAt: DAY,
+      extraction: { property: { no_spray_areas: 'koi pond', chemical_sensitivity_note: 'husband is asthmatic' } },
+    });
+    const u = writes.find((w) => w.op === 'update').u;
+    expect(u.special_instructions).toBe('Staff: call before arriving\n[call 2026-11-02] Do not spray: koi pond');
+    expect(u.chemical_sensitivity_details).toBe('Staff: fragrance sensitivity\n[call 2026-11-02] Caller reports: husband is asthmatic');
+    expect(u.chemical_sensitivities).toBe(true);
+  });
+
+  test('a reprocess of the same call writes nothing and does not re-raise a cleared flag', async () => {
+    const writes = setupRow({
+      customer_id: 'c1',
+      special_instructions: '[call 2026-11-02] Do not spray: koi pond',
+      chemical_sensitivities: false, // staff cleared it after reading the note
+      chemical_sensitivity_details: '[call 2026-11-02] Caller reports: husband is asthmatic',
+    });
+    const res = await enrichFromCall({
+      customerId: 'c1',
+      callCreatedAt: DAY,
+      extraction: { property: { no_spray_areas: 'koi pond', chemical_sensitivity_note: 'husband is asthmatic' } },
+    });
+    expect(writes).toEqual([]);
+    expect(res.applied).toEqual([]);
+  });
+
+  test('a call with no safety facts leaves special instructions and the sensitivity alone', async () => {
+    const writes = setupRow({ customer_id: 'c1', special_instructions: 'Staff note', chemical_sensitivities: false, chemical_sensitivity_details: null, pet_details: null });
+    await enrichFromCall({ customerId: 'c1', callCreatedAt: DAY, extraction: { property: { pets_on_property: { details: 'one cat' } } } });
+    const u = writes.find((w) => w.op === 'update').u;
+    expect(u.pet_details).toContain('one cat');
+    expect(u).not.toHaveProperty('special_instructions');
+    expect(u).not.toHaveProperty('chemical_sensitivities');
+  });
+
+  test('with the caller ID gate on, a caller whose number is not on file files no safety facts (Codex security #7529)', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setupRow(null, { phone: '+19415550100' });
+    try {
+      await enrichFromCall({
+        customerId: 'c1',
+        callCreatedAt: DAY,
+        callerPhone: '+19415559999',
+        extraction: { property: { access_notes: 'gate code is 4545', no_spray_areas: 'herb garden', chemical_sensitivity_note: 'asthma, reacts to sprays', household_children_or_elderly: 'two toddlers' } },
+      });
+    } finally { callEnrichCodesRequireAniLive.mockReturnValue(false); }
+    expect(writes).toEqual([]);
+  });
+
+  test('with the caller ID gate on, the primary phone calling files the safety facts', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setupRow(null, { phone: '+19415550100' });
+    try {
+      await enrichFromCall({
+        customerId: 'c1',
+        callCreatedAt: DAY,
+        callerPhone: '(941) 555-0100',
+        extraction: { property: { no_spray_areas: 'herb garden', chemical_sensitivity_note: 'asthma, reacts to sprays' } },
+      });
+    } finally { callEnrichCodesRequireAniLive.mockReturnValue(false); }
+    const row = writes.find((w) => w.op === 'insert').u;
+    expect(row.special_instructions).toContain('Do not spray: herb garden');
+    expect(row.chemical_sensitivities).toBe(true);
+  });
+
+  test('a pet fact still files when the caller ID gate withholds the safety facts', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setupRow(null);
+    try {
+      await enrichFromCall({
+        customerId: 'c1',
+        callCreatedAt: DAY,
+        callerPhone: '+19415559999',
+        extraction: { property: { no_spray_areas: 'herb garden', pets_on_property: { details: 'one cat' } } },
+      });
+    } finally { callEnrichCodesRequireAniLive.mockReturnValue(false); }
+    const row = writes.find((w) => w.op === 'insert').u;
+    expect(row.pet_details).toContain('one cat');
+    expect(row).not.toHaveProperty('special_instructions');
+  });
+});

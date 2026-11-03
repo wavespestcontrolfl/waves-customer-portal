@@ -203,7 +203,12 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // recurring plan, judged over the whole call in the caller's own words and pinned with the
 // caller's quote under /service_request/billing_choice (prompt v32). Staff explaining the options
 // is not a choice. Older payloads still validate and read as "no choice".
-const SCHEMA_VERSION = '1.29.0';
+// 1.30.0: additive — property.household_children_or_elderly, property.no_spray_areas and
+// property.chemical_sensitivity_note (optional nullable short strings in both schemas, never
+// `required`; prompt v34). Safety facts the CALLER states on the call (children or elderly people
+// at the home, areas not to spray, a chemical sensitivity); call-profile-enrichment files them on
+// the property preferences the technician's visit brief shows. Older payloads still validate.
+const SCHEMA_VERSION = '1.30.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

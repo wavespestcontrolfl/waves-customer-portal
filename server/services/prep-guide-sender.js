@@ -17,7 +17,7 @@
  *             (auto_*_no_email, three pests) or reason no_upcoming_visit.
  *   • both  → email + the text above.
  *
- * The Communications route allow-lists every PREP_CONFIG entry — the eight
+ * The Communications route allow-lists every PREP_CONFIG entry — the nine
  * live prep.* guides (prep.wildlife stays archived: wildlife is a prohibited
  * Waves service, migration 20260707000002) plus the sprinkler timer guide.
  * Wire a new one by adding its config here.
@@ -48,6 +48,7 @@ const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../confi
 const { countyConfirmedAfterMove, parseConfirmedFields } = require('./irrigation-schedule-confirmation');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { BED_BUG_HEAT_KEYWORDS } = require('../utils/bed-bug-heat-service');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_GROUP = 'service_operational';
@@ -71,8 +72,19 @@ const PREP_CONFIG = Object.freeze({
   bed_bug: {
     label: 'Bed Bug Treatment Service',
     serviceKeywords: ['bed bug'],
+    // Heat and hybrid jobs have their own sheet below; this guide is the
+    // chemical one (owner ruling 2026-09-24).
+    excludeKeywords: [...BED_BUG_HEAT_KEYWORDS],
     emailTemplateKey: 'prep.bed_bug',
     smsStandaloneKey: 'auto_bed_bug_no_email',
+  },
+  // smsStandaloneKey null: the chemical inline steps would mislead a heat
+  // customer, so a heat text is always the guide link (needs an upcoming visit).
+  bed_bug_heat: {
+    label: 'Bed Bug Heat Treatment',
+    serviceKeywords: [...BED_BUG_HEAT_KEYWORDS],
+    emailTemplateKey: 'prep.bed_bug_heat',
+    smsStandaloneKey: null,
   },
   cockroach: {
     label: 'Cockroach Treatment Service',

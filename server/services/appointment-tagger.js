@@ -10,6 +10,7 @@ const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-g
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
+const { isBedBugHeatServiceType } = require('../utils/bed-bug-heat-service');
 
 // Structured-output contract for the AI WDO pre-inspection brief (llm/call.js
 // jsonSchema). Same six fields the deterministic template emits; the template
@@ -33,6 +34,11 @@ const WDO_BRIEF_SCHEMA = {
 const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
   cockroach: 'prep.cockroach',
   bed_bug: 'prep.bed_bug',
+  // Heat and hybrid bed bug jobs get their own prep sheet (the chemical
+  // guide is chemical-only, owner ruling 2026-09-24). Not in
+  // TREATMENT_AUTOMATION_BY_PEST_TYPE below: that sequence's step 0 is the
+  // chemical guide, so a heat job takes the transactional prep email only.
+  bed_bug_heat: 'prep.bed_bug_heat',
   flea: 'prep.flea',
 });
 
@@ -123,7 +129,7 @@ class AppointmentTagger {
       switch (type.tag) {
         case 'wdo_inspection': await this.triggerWDOPrep(service); break;
         case 'german_roach': case 'cockroach': await this.triggerPestPrep(service, 'cockroach'); break;
-        case 'bed_bug': await this.triggerPestPrep(service, 'bed_bug'); break;
+        case 'bed_bug': await this.triggerPestPrep(service, isBedBugHeatServiceType(service.service_type) ? 'bed_bug_heat' : 'bed_bug'); break;
         case 'flea': await this.triggerPestPrep(service, 'flea'); break;
       }
     } catch (err) {
@@ -802,6 +808,7 @@ class AppointmentTagger {
     const PREP_FAMILY_TAGS = {
       cockroach: ['german_roach', 'cockroach'],
       bed_bug: ['bed_bug'],
+      bed_bug_heat: ['bed_bug'],
       flea: ['flea'],
     };
     const tags = PREP_FAMILY_TAGS[pestType];
@@ -852,7 +859,11 @@ class AppointmentTagger {
     //   • companion  → auto_*     — references the emailed treatment guide.
     //   • standalone → auto_*_no_email — carries the prep steps inline for a
     //     phone-only customer with no email to reference.
-    const COMPANION_KEYS = { cockroach: 'auto_cockroach', bed_bug: 'auto_bed_bug', flea: 'auto_flea' };
+    // bed_bug_heat has a companion text (it only points at the emailed guide)
+    // but no standalone one: auto_bed_bug_no_email carries the CHEMICAL steps
+    // inline, so a phone-only heat customer gets the guide link from the
+    // manual send instead.
+    const COMPANION_KEYS = { cockroach: 'auto_cockroach', bed_bug: 'auto_bed_bug', bed_bug_heat: 'auto_bed_bug', flea: 'auto_flea' };
     const STANDALONE_KEYS = {
       cockroach: 'auto_cockroach_no_email',
       bed_bug: 'auto_bed_bug_no_email',

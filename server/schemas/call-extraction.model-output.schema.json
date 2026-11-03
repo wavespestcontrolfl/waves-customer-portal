@@ -743,6 +743,27 @@
             "null"
           ],
           "description": "1.23.0, additive/optional (never `required`): the extraction's FINAL judgement of whole_building_occupancy, made over the WHOLE call. true ONLY when whole_building_occupancy is true AND the caller never hedged about occupying the entire building (\"I think we own the whole building\", \"probably\", \"might\"), never corrected it to a part (\"we only lease the second floor\", a suite, space, storefront, side, unit or bay), never said they share the building with another tenant, and the claim was a plain statement, not a question (\"do we own the whole building?\") or a condition (\"if closing happens we'll own it\"). A hedge about a SIDE detail (when the sale closed, who signed) does not make it false; a hedge about WHETHER they occupy the entire building does. false when any of those happened; null when whole_building_occupancy is not true or unstated. The server uses it only to verify; it never waives on whole_building_occupancy alone."
+        },
+        "household_children_or_elderly": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "1.30.0, additive/optional (never `required`): a SHORT note (a few words, at most 200 characters) that children or elderly people LIVE at the service address or will be PRESENT at the visit, ONLY when the CALLER says so (\"we have two toddlers\", \"my elderly mother lives with us\", \"my grandkids are here all summer\"). null when unstated. Visiting relatives who are not there at service time, a neighbor's family, and anything inferred from the home or the caller's voice are null. Pin the caller's sentence to /property/household_children_or_elderly with speaker \"caller\" when set."
+        },
+        "no_spray_areas": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "1.30.0, additive/optional (never `required`): a SHORT note (at most 200 characters) naming areas of THIS property the caller asks us NOT to spray or treat (\"vegetable garden by the back fence\", \"fruit trees\", \"koi pond\", \"bee hives\"). Only areas the caller names or asks to protect; null when none were named. A pond or garden merely mentioned with no request to avoid it is null. Pin the caller's sentence to /property/no_spray_areas with speaker \"caller\" when set."
+        },
+        "chemical_sensitivity_note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "1.30.0, additive/optional (never `required`): a SHORT note (at most 200 characters) that someone in the home is sensitive to chemicals, sprays or strong smells, or is pregnant, asthmatic or immune-compromised AND the caller ties it to the treatment (\"my husband has asthma and reacts to sprays\", \"I'm sensitive to chemicals\"). Only what the caller states; null when unstated. A caller who only prefers a pet-safe or natural product, with no health reason given, is null. Pin the caller's sentence to /property/chemical_sensitivity_note with speaker \"caller\" when set."
         }
       }
     },

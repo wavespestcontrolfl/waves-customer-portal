@@ -125,6 +125,12 @@ const FIELD_GROUPS = {
     'phone_note',
     // The plan the caller chose for a recurring plan (schema 1.29.0): drift must show.
     'billing_choice',
+    // Household safety notes the caller stated (schema 1.30.0): children or elderly at the
+    // home, areas not to spray, a chemical sensitivity. They file onto the technician's visit
+    // brief, so an extractor that drops, invents or rewrites one must show in the replay.
+    'household_children_or_elderly',
+    'no_spray_areas',
+    'chemical_sensitivity_note',
     // ani_cannot_text / text_phone (schema 1.25.0) — decide which number a
     // call's texts go to (new customer phone, the swap card, the booking-link
     // text); a model that drifts on them must show up here.
