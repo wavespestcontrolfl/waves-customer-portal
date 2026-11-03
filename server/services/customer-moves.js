@@ -615,6 +615,7 @@ const NEW_HOME_REFUSALS = {
 const LEFT_OUT = [
   { re: /termite/i, reason: 'Termite stations and treatments stay with the old house.' },
   { re: /mist/i, reason: 'The misting system stays with the old house.' },
+  { re: /palm/i, reason: 'Palm treatments depend on the palms at the new home. Add them after counting.' },
 ];
 
 function newHomeError(code, status = 409) {

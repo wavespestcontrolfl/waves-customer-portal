@@ -43,10 +43,12 @@ const data = {
 };
 
 describe('moveEstimateForm', () => {
-  it('keeps only the six recurring service flags and forces every other svc flag off', () => {
+  it('keeps only the five recurring service flags and forces every other svc flag off', () => {
     const { form } = moveEstimateForm(data, { base, clearedProperty });
+    expect(MOVE_KEPT_SERVICE_FLAGS).toEqual(['svcLawn', 'svcPest', 'svcTs', 'svcMosquito', 'svcRodentBait']);
     for (const key of MOVE_KEPT_SERVICE_FLAGS) expect(form[key]).toBe(true);
-    for (const key of ['svcTermiteBait', 'svcFoamRecurring', 'svcMisting', 'svcOnetimePest', 'svcWdo']) expect(form[key]).toBe(false);
+    // Palm injection stays off: a one-time palm treatment must not become a paid recurring program (codex #7532 r3).
+    for (const key of ['svcInjection', 'svcTermiteBait', 'svcFoamRecurring', 'svcMisting', 'svcOnetimePest', 'svcWdo']) expect(form[key]).toBe(false);
     expect(form.mistingTier).toBe('');
     expect(form.mistingRefillsPerYear).toBe('4');
     // Cadence for the kept services still copies; a retired T&S program opens standard.

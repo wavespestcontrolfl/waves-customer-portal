@@ -194,6 +194,10 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
         property_id: otherHouse, address: '9 Beach Lane, Venice, FL 34285', accepted_at: new Date('2026-06-01T15:00:00Z'),
         estimate_data: JSON.stringify({ inputs: { svcLawn: true } }),
       });
+      await trx('scheduled_services').insert({
+        customer_id: customerId, scheduled_date: '2026-12-01', service_type: 'Palm Tree Injection', status: 'pending',
+        is_recurring: true, recurring_ongoing: true, recurring_pattern: 'semi_annual',
+      });
       const move = await insertMove({ from_property_id: oldHouseId });
       const source = await Moves.moveEstimateSource(customerId, move.id);
       expect(source.move).toEqual({ id: move.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
@@ -207,6 +211,7 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       expect(source.planServices.map((s) => s.name)).not.toContain('Re-service Callback');
       expect(source.leftOut).toEqual([
         { name: 'Mosquito Misting Service', reason: 'The misting system stays with the old house.' },
+        { name: 'Palm Tree Injection', reason: 'Palm treatments depend on the palms at the new home. Add them after counting.' },
         { name: 'Termite Bait Monitoring', reason: 'Termite stations and treatments stay with the old house.' },
       ]);
     });

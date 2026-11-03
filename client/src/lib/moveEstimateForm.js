@@ -12,13 +12,13 @@
 // Recurring services that move with the customer, and the only settings each
 // one carries over: its schedule or program. Everything else starts from the
 // builder's defaults, because it describes the old house or the old sale
-// (sizes, grass type, palm and station counts, roach condition, price
-// overrides, one-time work, termite, recurring termite foam and misting).
+// (sizes, grass type, station counts, roach condition, price overrides,
+// one-time work, termite, recurring termite foam, misting, and palm
+// injection, whose program depends on the palms at each house).
 const MOVE_PROGRAM_KEYS = Object.freeze({
   svcLawn: ["lawnFreq"],
   svcPest: ["pestFreq"],
   svcTs: ["tsTier"],
-  svcInjection: [],
   svcMosquito: ["mosquitoProgram"],
   svcRodentBait: [],
 });
