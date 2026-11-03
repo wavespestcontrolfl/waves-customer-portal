@@ -1867,7 +1867,11 @@ async function runPause(move, plan) {
   return progress;
 }
 
-/** Pause one move whose customer moved out with no new address. Returns its outcome. */
+/**
+ * Pause one move whose customer moved out with no new address. Returns its
+ * outcome. Every step, the office hand-off included, is awaited inside the
+ * try: the move fence is released only after it commits or rolls back.
+ */
 async function pauseMove(moveId, { today, now }) {
   let release;
   try {
@@ -1880,19 +1884,19 @@ async function pauseMove(moveId, { today, now }) {
     const move = await db('customer_moves').where({ id: moveId }).first();
     if (!pauseDue(move, today)) return 'not_due';
     const block = await billingBlock(db, move.customer_id);
-    if (block === 'customer_gone') return handPauseToOffice(move, 'The customer record is not active.', { now, alert: false });
-    if (PAUSE_OFFICE_NOTES[block]) return handPauseToOffice(move, PAUSE_OFFICE_NOTES[block], { now });
+    if (block === 'customer_gone') return await handPauseToOffice(move, 'The customer record is not active.', { now, alert: false });
+    if (PAUSE_OFFICE_NOTES[block]) return await handPauseToOffice(move, PAUSE_OFFICE_NOTES[block], { now });
     let plan;
     try {
       plan = await pausePlan(move, today);
     } catch (err) {
-      if (err instanceof MoveError) return handPauseToOffice(move, err.message, { now });
+      if (err instanceof MoveError) return await handPauseToOffice(move, err.message, { now });
       throw err;
     }
     const progress = await runPause(move, plan);
     if (progress.refusal) {
       const done = progress.stopped.length ? `Stopped: ${progress.stopped.join(', ')}. ` : '';
-      return handPauseToOffice(move, `Not stopped: ${progress.refusal}`, { now, done });
+      return await handPauseToOffice(move, `Not stopped: ${progress.refusal}`, { now, done });
     }
     const summary = [
       `Customer moved out with no new address: plans at ${propertyLine(plan.from)} paused after ${prettyDate(plan.moveOut)}`,

@@ -414,6 +414,26 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect((await moveRow(s.move.id)).status).toBe('submitted');
   });
 
+  test('the office hand-off commits before the move fence is released', async () => {
+    const s = await seed({ customer: { billing_mode: 'annual_prepay' } });
+    const other = await database.client.acquireConnection();
+    let heldDuringItem = null;
+    try {
+      // The item is the hand-off's last write: the fence must still be held when it runs.
+      Notifications.notifyAdmin.mockImplementationOnce(async () => {
+        await new Promise((resolve) => { setTimeout(resolve, 50); });
+        const res = await other.query('SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS got', ['customer-move-apply', s.move.id]);
+        heldDuringItem = res.rows[0].got === false;
+        if (!heldDuringItem) await other.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', ['customer-move-apply', s.move.id]);
+        return { id: 'n-office' };
+      });
+      expect(await Moves.runMovePauseJob()).toMatchObject({ office: 1 });
+    } finally {
+      await database.client.releaseConnection(other);
+    }
+    expect(heldDuringItem).toBe(true);
+  });
+
   test('the pause waits for a running Apply or customer update on the same move (the move fence)', async () => {
     const s = await seed();
     const other = await database.client.acquireConnection();
