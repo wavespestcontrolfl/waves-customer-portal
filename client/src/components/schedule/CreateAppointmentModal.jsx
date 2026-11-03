@@ -1578,7 +1578,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the loop fails partway (e.g. quarterly succeeded, monthly errored), a
   // retry click skips the keys that landed so we don't double-book the
   // customer. Reset on successful close.
-  const createdGroupKeysRef = useRef(new Set());
+  // Value = the committed booking response for that group (null for a recovered
+  // duplicate-series outcome, which has no response). The Booked sheet reads the
+  // first group's id and estimate flag from here, so they survive retries.
+  const createdGroupKeysRef = useRef(new Map());
   // Codex pre-push audit P1 (round 5, PR #4656): committedGroupPricesRef
   // freezes each group's displayed total at the exact moment it commits
   // (see groupStackedPerVisitTotal's own comment) — read FIRST, ahead of
@@ -4559,7 +4562,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // regardless of what happens to a sibling group's preview later
           // in this same modal session.
           committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
-          createdGroupKeysRef.current.add(key);
+          createdGroupKeysRef.current.set(key, r);
           // Codex pre-push audit P1 (round 5): the immutable half of the
           // freeze-on-commit fix — each of THIS group's lines' own stable
           // lineId (never recomputed, unlike the group's own cadence-
@@ -4593,7 +4596,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             // saved (from an earlier attempt) at whatever total is
             // currently displayed for it.
             committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
-            createdGroupKeysRef.current.add(key);
+            createdGroupKeysRef.current.set(key, null);
             group.lines.forEach((s) => { if (s?.lineId) committedLineIdsRef.current.add(s.lineId); });
             setCommittedGroupKeysVersion((v) => v + 1);
             // Same lock as the success path above — a recoverable
@@ -4709,20 +4712,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // "Customer saves it here, now": keep the modal open on the Booked sheet.
       // The callers close on a non-background report, so report the save as
       // background (their lists still refresh) and let the sheet's Done close.
-      if (inPersonAvailable && cardHere && results[0]?.id && submitIsCurrent()) {
-        createdGroupKeysRef.current = new Set();
+      // The card request belongs to the booking's FIRST group (the parent visit
+      // the confirmation text and card link also ride on). Its id and lines come
+      // from the same group, held across retries in createdGroupKeysRef.
+      const firstGroup = groups[0];
+      const firstCommitted = firstGroup ? createdGroupKeysRef.current.get(groupKey(firstGroup)) : null;
+      if (inPersonAvailable && cardHere && firstCommitted?.id && submitIsCurrent()) {
+        const bookedEstimateAccepted = Array.from(createdGroupKeysRef.current.values()).some((r) => r?.estimateAccepted);
+        createdGroupKeysRef.current = new Map();
         committedGroupPricesRef.current = new Map();
         committedLineIdsRef.current = new Set();
         appointmentDiscountCommittedGroupKeyRef.current = null;
-        const bookedAppointment = { id: results[0].id, scheduledDate: apptDate };
+        const bookedAppointment = { id: firstCommitted.id, scheduledDate: apptDate };
         onCreated?.(bookedAppointment, { background: true });
         onChange?.(bookedAppointment, { background: true });
         setBookedSheet({
-          visitId: results[0].id,
+          visitId: firstCommitted.id,
           date: apptDate,
           time: (HOURLY_TIME_OPTIONS.find((o) => o.value === windowStart) || {}).label || windowStart,
-          serviceName: groups[0].lines.map((line) => line.name).filter(Boolean).join(' + '),
-          estimateAccepted: results.some((r) => r?.estimateAccepted),
+          serviceName: firstGroup.lines.map((line) => line.name).filter(Boolean).join(' + '),
+          estimateAccepted: bookedEstimateAccepted,
           estimateRef: linkedEstimate?.estimateSlug || null,
           confirmationText: !!sendSms,
           firstName: selectedCustomer?.firstName || selectedCustomer?.first_name || '',
@@ -4734,7 +4743,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           reportBackground();
           return;
         }
-        createdGroupKeysRef.current = new Set();
+        createdGroupKeysRef.current = new Map();
         committedGroupPricesRef.current = new Map();
         committedLineIdsRef.current = new Set();
         appointmentDiscountCommittedGroupKeyRef.current = null;

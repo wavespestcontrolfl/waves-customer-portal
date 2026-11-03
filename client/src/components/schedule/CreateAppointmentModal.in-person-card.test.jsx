@@ -33,14 +33,21 @@ function futureDate(days = 30) {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0")].join("-");
 }
 
-function installFetch({ availability, inPersonResult }) {
+function installFetch({ availability, inPersonResult, catalog = null, postReplies = null }) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes("/admin/triage?")) return Promise.resolve(json({ items: [] }));
     if (url.includes("/admin/services?")) {
+      if (catalog) {
+        const q = (new URL(url, "http://test").searchParams.get("search") || "").toLowerCase();
+        return Promise.resolve(json({ services: catalog.filter((c) => c.name.toLowerCase().includes(q)) }));
+      }
       return Promise.resolve(json({ services: [{ id: "svc-1", service_key: "pest_control_quarterly", name: "Quarterly Pest Control Service", billing_type: "recurring", frequency: "quarterly", base_price: 100, default_duration_minutes: 30 }] }));
     }
-    if (url.endsWith("/admin/schedule") && options.method === "POST") return Promise.resolve(json({ id: "appt-1" }));
+    if (url.endsWith("/admin/schedule") && options.method === "POST") {
+      const reply = postReplies ? postReplies.shift() : { id: "appt-1" };
+      return Promise.resolve(reply.error ? json({ error: reply.error }, { ok: false, status: 500 }) : json(reply));
+    }
     if (url.endsWith("/card-request/in-person")) return Promise.resolve(json(inPersonResult));
     if (url.includes("/properties?context=appointment_address")) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
     if (url.includes("/schedule-estimates")) return Promise.resolve(json({ estimates: [] }));
@@ -165,5 +172,45 @@ describe("card choice in the booking window", () => {
     // Not now closes through the caller's own onClose.
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
     expect(h.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("partial save then retry: the sheet keeps the FIRST group's appointment id and lines", async () => {
+    const catalog = [
+      { id: "svc-q", service_key: "pest_control_quarterly", name: "Quarterly Pest Control Service", billing_type: "recurring", frequency: "quarterly", base_price: 100, default_duration_minutes: 30 },
+      { id: "svc-m", service_key: "mosquito_seasonal", name: "Seasonal Mosquito Control Service", billing_type: "recurring", frequency: "seasonal_feb_oct", visits_per_year: 9, base_price: 80, default_duration_minutes: 30 },
+    ];
+    const fetcher = installFetch({
+      availability: { enabled: true, inPerson: true },
+      inPersonResult: { requested: true, action: "link_created", reason: "created", secureUrl: "https://portal.example.test/secure/tok123" },
+      catalog,
+      postReplies: [{ id: "appt-g1" }, { error: "Group two failed" }, { id: "appt-g2" }],
+    });
+    vi.spyOn(window, "alert").mockImplementation(() => {});
+    const h = handlers();
+    render(
+      <MemoryRouter>
+        <CreateAppointmentModal defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" {...h} />
+      </MemoryRouter>,
+    );
+    fireEvent.change(screen.getByPlaceholderText("Search services"), { target: { value: "Quarterly" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Quarterly Pest Control Service/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText("Search to add service"), { target: { value: "Mosquito" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Seasonal Mosquito Control Service/ }));
+    fireEvent.click(await screen.findByRole("radio", { name: /Customer saves it here, now/ }));
+
+    await submit();
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(screen.queryByRole("heading", { name: "Booked" })).toBeNull();
+
+    await submit();
+    expect(await screen.findByRole("heading", { name: "Booked" })).toBeInTheDocument();
+    expect(schedulePosts(fetcher)).toHaveLength(3);
+    // Group 1's visit and group 1's service, never the retry's group 2.
+    expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/admin/schedule/appt-g1/card-request/in-person"), expect.objectContaining({ method: "POST" }));
+    expect(fetcher.mock.calls.some(([u]) => String(u).includes("appt-g2/card-request"))).toBe(false);
+    expect(screen.getByText("Quarterly Pest Control Service")).toBeInTheDocument();
+    expect(screen.queryByText(/Mosquito/)).toBeNull();
+    expect(h.onChange).toHaveBeenCalledWith({ id: "appt-g1", scheduledDate: expect.any(String) }, { background: true });
   });
 });
