@@ -23,10 +23,12 @@ maybeDescribe('ops digest supersede (live Postgres)', () => {
   afterEach(async () => { await trx.rollback(); });
   afterAll(async () => { await db.destroy(); });
 
+  // hoursAgo 0 leaves created_at to the column default (now(), microseconds),
+  // as production inserts do; a JS Date would only carry milliseconds.
   const add = async (hoursAgo, metadata = {}, cols = {}) => {
     const [row] = await trx('notifications').insert({
       recipient_type: 'admin', category: 'ops_digest', title: 'Fixture digest',
-      created_at: new Date(Date.now() - hoursAgo * 60 * 60 * 1000),
+      ...(hoursAgo ? { created_at: new Date(Date.now() - hoursAgo * 60 * 60 * 1000) } : {}),
       metadata: JSON.stringify({ opsKey: key, ...metadata }), ...cols,
     }).returning('*');
     return row;

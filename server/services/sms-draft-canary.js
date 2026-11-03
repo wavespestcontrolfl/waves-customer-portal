@@ -51,7 +51,8 @@ const ROUTE_LABELS = {
 const alertKey = (key) => `sms-draft-canary:${key}`;
 
 // Raise (or quietly refresh) the one open FAILING bell for this route.
-// Returns true when this call made a fresh bell (a new episode).
+// Returns { fresh, stored }: fresh = this call made a new bell (a new episode);
+// stored = a keyed row is confirmed open (created now, or the standing one).
 async function raiseFailing({ key, label, reason }) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const dedupeKey = alertKey(key);
@@ -75,8 +76,12 @@ async function raiseFailing({ key, label, reason }) {
     ringOnRefresh: () => false,
     metadata: { source: 'sms-draft-canary', route: key, reason, model: label },
   });
-  // null = the write failed: treat as a fresh episode so Adam still gets the text.
-  return !result || (!result.suppressed && !result.deduped);
+  // null = the write failed: treat as a fresh episode so Adam still gets the text,
+  // but nothing is stored, so the old rows must stay open.
+  return {
+    fresh: !result || (!result.suppressed && !result.deduped),
+    stored: Boolean(result && !result.suppressed),
+  };
 }
 
 // The route answers: close its open bell, if any. Returns rows closed.
@@ -163,12 +168,15 @@ async function probeRoute({ key, route, laneId }) {
   const reason = result.ok ? 'empty_response' : (result.reason || 'error');
   logger.error(`[sms-draft-canary] ${key} (${label}) FAILED: ${reason}`);
   let fresh = true;
+  let stored = false;
   try {
-    fresh = await raiseFailing({ key, label, reason });
+    ({ fresh, stored } = await raiseFailing({ key, label, reason }));
   } catch (err) {
     logger.error(`[sms-draft-canary] admin notification failed: ${err.message}`);
   }
-  await closeLegacyFailing(key, 'Replaced by a newer alert for the same route');
+  // Old keyless rows are the only persistent alert if the keyed write failed:
+  // retire them only once the keyed row is confirmed open.
+  if (stored) await closeLegacyFailing(key, 'Replaced by a newer alert for the same route');
   if (fresh) {
     await smsAdam(
       'SMS draft route FAILING',

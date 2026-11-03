@@ -218,6 +218,32 @@ describe('old keyless FAILING rows', () => {
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
+  test('a failed keyed write leaves the old rows open', async () => {
+    const q = legacyChain();
+    dispatch.mockResolvedValue({ ok: false, reason: 'openai_401' });
+
+    raiseAdminAlert.mockResolvedValue(null);
+    await runSmsDraftCanary();
+    raiseAdminAlert.mockRejectedValue(new Error('db down'));
+    await runSmsDraftCanary();
+    raiseAdminAlert.mockResolvedValue({ suppressed: true });
+    await runSmsDraftCanary();
+
+    expect(q.update).not.toHaveBeenCalled();
+    // Adam still gets the text for the failed write
+    expect(TwilioService.sendSMS).toHaveBeenCalled();
+  });
+
+  test('a standing keyed row (deduped) is enough to retire the old rows', async () => {
+    const q = legacyChain();
+    dispatch.mockResolvedValue({ ok: false, reason: 'openai_401' });
+    raiseAdminAlert.mockResolvedValue({ id: 'n1', deduped: true });
+
+    await runSmsDraftCanary();
+
+    expect(q.update).toHaveBeenCalledTimes(CANARY_ROUTES.length);
+  });
+
   test('a failed sweep never breaks the probe', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     dispatch.mockResolvedValue({ ok: false, reason: 'openai_401' });

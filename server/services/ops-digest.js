@@ -671,7 +671,10 @@ async function supersedeOlderDigests({ key, row, conn = null, enabled }) {
     }
     const at = new Date();
     let q = openRows().where('id', '<>', keepId);
-    if (row.created_at) q = q.where('created_at', '<=', row.created_at);
+    // Compared in the database: created_at defaults to now() with microseconds,
+    // while a JS Date from the insert result carries only milliseconds, which
+    // would put the new row itself just past its own cutoff.
+    q = q.whereRaw('created_at <= (SELECT created_at FROM notifications WHERE id = ?)', [row.id]);
     const closed = await q.update({
       ...ns._private.doneColumns({ by: key, resolution: SUPERSEDED_RESOLUTION, at, keepExisting: true, conn: db }),
       // Same stamp a clean-run retire writes, minus the dedupeKey, so the
