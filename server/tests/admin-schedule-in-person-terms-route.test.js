@@ -71,10 +71,10 @@ describe('POST /admin/schedule/:id/in-person-terms', () => {
   });
 
   test('passes the visit, admin, version and notice flag to the service', async () => {
-    const res = await post(VISIT, { terms_version: ' v2026-10 ', consumer_notice_shown: true });
+    const res = await post(VISIT, { terms_version: ' v2026-10 ', terms_scope: ' plan ', consumer_notice_shown: true });
     expect(res).toEqual({ status: 200, body: { success: true, recorded: true } });
     expect(mockRecord).toHaveBeenCalledWith(expect.objectContaining({
-      visitId: VISIT, technician: { id: 'tech-1' }, termsVersion: 'v2026-10', consumerNoticeShown: true,
+      visitId: VISIT, technician: { id: 'tech-1' }, termsVersion: 'v2026-10', termsScope: 'plan', consumerNoticeShown: true,
     }));
   });
 
@@ -86,6 +86,11 @@ describe('POST /admin/schedule/:id/in-person-terms', () => {
   test('a service refusal maps to its status and code', async () => {
     mockRecord.mockResolvedValue({ ok: false, status: 409, code: 'TERMS_VERSION_STALE', error: 'The terms were updated.' });
     expect(await post(VISIT, { terms_version: 'v2026-01' })).toEqual({ status: 409, body: { error: 'The terms were updated.', code: 'TERMS_VERSION_STALE' } });
+  });
+
+  test('terms_changed from the service is a 409 with the reload text', async () => {
+    mockRecord.mockResolvedValue({ ok: false, status: 409, code: 'terms_changed', error: 'The terms changed. Reload this page to see them.' });
+    expect(await post(VISIT, { terms_version: 'v2026-10', terms_scope: 'base' })).toEqual({ status: 409, body: { error: 'The terms changed. Reload this page to see them.', code: 'terms_changed' } });
   });
 
   test('a malformed visit id is 404 before the service runs', async () => {

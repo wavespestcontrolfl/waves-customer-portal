@@ -32,6 +32,7 @@ const acceptanceTerms = require('./acceptance-terms-text');
 const ACCEPTANCE_METHOD = 'in_person_handoff';
 
 const refusal = (status, code, error) => ({ ok: false, status, code, error });
+const TERMS_CHANGED_MESSAGE = 'The terms changed. Reload this page to see them.';
 
 // The estimate the visit was booked from (accept-on-book stamps source_estimate_id
 // on every row of the series); a later occurrence falls back to its series parent.
@@ -80,6 +81,7 @@ function termsPayload({ estimate, scope, noticeApplies }) {
   return {
     estimateRef: estimateRefOf(estimate),
     version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
+    scope,
     lines: acceptanceTerms.acceptanceTermsSnapshot(scope).split('\n'),
     consumerNotice: noticeApplies ? { text: require('./estimate-consumer-notice').HANDOFF_NOTICE_TEXT } : null,
   };
@@ -99,25 +101,31 @@ async function buildHandoffBlock(req, { token, data }) {
 
 // Stamp the acceptance terms for the visit's estimate. Idempotent: a second call
 // (or an estimate that already carries a terms version) changes nothing.
-async function recordInPersonTerms({ visitId, technician, termsVersion, consumerNoticeShown, ip = null, userAgent = null }) {
+async function recordInPersonTerms({ visitId, technician, termsVersion, termsScope, consumerNoticeShown, ip = null, userAgent = null }) {
   if (termsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
     return refusal(409, 'TERMS_VERSION_STALE', 'The terms were updated. Reload the page and read them again.');
   }
+  // The scope the page showed ('plan' carries the annual rate review sentence, 'base'
+  // does not); both share one version, so it is attested beside it, as the online
+  // accept does with acceptedTermsScope.
+  const shownScope = acceptanceTerms.normalizeAcceptanceTermsScope(termsScope);
+  if (!shownScope) return refusal(409, 'terms_changed', TERMS_CHANGED_MESSAGE);
   const { visit, estimate } = await linkedEstimateFor(visitId);
   if (!visit) return refusal(404, 'visit_not_found', 'Scheduled service not found');
   if (!estimate || estimate.terms_version) return { ok: true, recorded: false };
-  const context = await termsContextFor(estimate);
-  if (!context) return refusal(409, 'terms_not_applicable', 'No terms are needed for this estimate.');
-  if (context.noticeApplies && consumerNoticeShown !== true) {
-    return refusal(409, 'consumer_notice_required', 'The Florida consumer notice must be shown before the terms are accepted.');
-  }
   const { recordAuditEvent } = require('./audit-log');
   const acceptedAt = new Date();
   const recorded = await db.transaction(async (trx) => {
     // Locked and re-read: a second tap, or the customer's own online accept,
-    // landing first leaves exactly one record.
-    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'customer_id', 'status', 'terms_version');
+    // landing first leaves exactly one record. The terms are judged on THIS row.
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!locked || locked.status !== 'accepted' || locked.terms_version) return false;
+    const context = await termsContextFor(locked);
+    if (!context) return refusal(409, 'terms_not_applicable', 'No terms are needed for this estimate.');
+    if (context.scope !== shownScope) return refusal(409, 'terms_changed', TERMS_CHANGED_MESSAGE);
+    if (context.noticeApplies && consumerNoticeShown !== true) {
+      return refusal(409, 'consumer_notice_required', 'The Florida consumer notice must be shown before the terms are accepted.');
+    }
     await trx('estimate_acceptances').insert({
       estimate_id: locked.id,
       customer_id: locked.customer_id || null,
@@ -161,6 +169,7 @@ async function recordInPersonTerms({ visitId, technician, termsVersion, consumer
     });
     return true;
   });
+  if (recorded && recorded.ok === false) return recorded;
   return { ok: true, recorded };
 }
 

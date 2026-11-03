@@ -6,15 +6,21 @@
 // The page cannot reach the signed-in admin page, so the app relays the one thing
 // it needs. Page -> app (window.webkit.messageHandlers.wavesCustomer):
 //
-//   { type: 'acceptTerms', requestId, termsVersion, consumerNoticeShown }
+//   { type: 'acceptTerms', requestId, termsVersion, termsScope, consumerNoticeShown }
 //
 // and the app answers with a CustomEvent on window:
 //
-//   'waveshandoff:terms' { requestId, status: 'ok' | 'failed', message? }
+//   'waveshandoff:terms' { requestId, status: 'ok' | 'failed', message?, code? }
+//
+// termsScope ('plan' | 'base') is the scope of the terms the page showed; the server
+// refuses the record with 409 terms_changed if the estimate's terms moved since.
 
 export const TERMS_EVENT = 'waveshandoff:terms';
 // The relay goes app -> admin page -> server and back; give up after this.
 export const TERMS_TIMEOUT_MS = 30000;
+
+// The server's 409 terms_changed text (the app forwards `message`, and `code` when it can).
+export const TERMS_CHANGED_MESSAGE = 'The terms changed. Reload this page to see them.';
 
 const NO_ANSWER = 'We could not record your acceptance. Please try again.';
 
@@ -38,7 +44,7 @@ function newRequestId() {
  * Ask the app to record the customer's acceptance of the estimate terms.
  * Resolves { ok: true } on 'ok', else { ok: false, message }. Never rejects.
  */
-export function requestTermsAcceptance({ termsVersion, consumerNoticeShown }) {
+export function requestTermsAcceptance({ termsVersion, termsScope, consumerNoticeShown }) {
   const requestId = newRequestId();
   return new Promise((resolve) => {
     let timer = null;
@@ -50,7 +56,9 @@ export function requestTermsAcceptance({ termsVersion, consumerNoticeShown }) {
     function onAnswer(event) {
       const detail = event?.detail || {};
       if (detail.requestId !== requestId) return;
-      finish(detail.status === 'ok' ? { ok: true } : { ok: false, message: detail.message || NO_ANSWER });
+      finish(detail.status === 'ok'
+        ? { ok: true }
+        : { ok: false, message: detail.message || NO_ANSWER, changed: detail.code === 'terms_changed' || detail.message === TERMS_CHANGED_MESSAGE });
     }
     window.addEventListener(TERMS_EVENT, onAnswer);
     timer = setTimeout(() => finish({ ok: false, message: NO_ANSWER }), TERMS_TIMEOUT_MS);
@@ -59,6 +67,7 @@ export function requestTermsAcceptance({ termsVersion, consumerNoticeShown }) {
         type: 'acceptTerms',
         requestId,
         termsVersion,
+        termsScope,
         consumerNoticeShown: consumerNoticeShown === true,
       });
     } catch {

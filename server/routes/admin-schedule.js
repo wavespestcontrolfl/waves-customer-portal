@@ -26057,6 +26057,7 @@ router.post('/:id/in-person-terms', requireAdmin, async (req, res, next) => {
       visitId: req.params.id,
       technician: req.technician || { id: req.technicianId },
       termsVersion: typeof req.body?.terms_version === 'string' ? req.body.terms_version.trim() : '',
+      termsScope: typeof req.body?.terms_scope === 'string' ? req.body.terms_scope.trim() : '',
       consumerNoticeShown: req.body?.consumer_notice_shown === true,
       ip: ipFromReq(req),
       userAgent: uaFromReq(req),

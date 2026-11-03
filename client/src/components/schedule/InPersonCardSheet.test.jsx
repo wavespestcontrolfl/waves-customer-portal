@@ -157,12 +157,12 @@ describe("InPersonCardSheet", () => {
       expect(typeof window.wavesAdminInPersonTerms).toBe("function");
       expect(await window.wavesAdminInPersonTerms({ secureToken: "other", termsVersion: "v2026-10", consumerNoticeShown: false })).toEqual({ ok: false });
       expect(fetcher.mock.calls.some(([p]) => p.endsWith("/in-person-terms"))).toBe(false);
-      const result = await window.wavesAdminInPersonTerms({ secureToken: "tok123", termsVersion: "v2026-10", consumerNoticeShown: true });
+      const result = await window.wavesAdminInPersonTerms({ secureToken: "tok123", termsVersion: "v2026-10", termsScope: "plan", consumerNoticeShown: true });
       expect(result).toEqual({ ok: true });
       const call = fetcher.mock.calls.find(([p]) => p.endsWith("/in-person-terms"));
       expect(call[0]).toBe("/admin/schedule/visit-1/in-person-terms");
       expect(call[1].method).toBe("POST");
-      expect(JSON.parse(call[1].body)).toEqual({ terms_version: "v2026-10", consumer_notice_shown: true });
+      expect(JSON.parse(call[1].body)).toEqual({ terms_version: "v2026-10", terms_scope: "plan", consumer_notice_shown: true });
       unmount();
       expect(window.wavesAdminInPersonTerms).toBeUndefined();
     });
@@ -174,7 +174,7 @@ describe("InPersonCardSheet", () => {
       });
       renderSheet({}, fetcher);
       await screen.findByText("Card for Auto Pay");
-      expect(await window.wavesAdminInPersonTerms({ secureToken: "tok123", termsVersion: "old", consumerNoticeShown: false })).toEqual({ ok: false, message: "The terms were updated." });
+      expect(await window.wavesAdminInPersonTerms({ secureToken: "tok123", termsVersion: "old", consumerNoticeShown: false })).toEqual({ ok: false, message: "The terms were updated.", code: null });
     });
 
     it("is not defined while no card page exists", async () => {

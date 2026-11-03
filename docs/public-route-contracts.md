@@ -7720,7 +7720,9 @@ claim mechanics as security-critical.
 the GET accepts an optional `?handoff=1`. With it, while the gate is live, the
 request is `ready` and its visit is linked to an ACCEPTED estimate with no
 recorded `terms_version` that the acceptance terms apply to, the payload gains
-`handoff: { terms: { estimateRef, version, lines, consumerNotice } }` (`lines`
+`handoff: { terms: { estimateRef, version, scope, lines, consumerNotice } }` (`scope` =
+`'plan' | 'base'`, the terms scope shown, attested back when the terms are recorded;
+`lines`
 = the current terms for the estimate's scope, verbatim; `consumerNotice` =
 `{ text }` or `null`). It is data about the token holder's own estimate: no
 sign-in, no internal ids, still 200 for everyone, privacy headers unchanged

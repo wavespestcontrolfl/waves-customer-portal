@@ -37,6 +37,7 @@ const json = (body, { ok = true, status = 200 } = {}) => ({ ok, status, json: as
 const TERMS = {
   estimateRef: 'EST-2026-0001',
   version: 'v2026-10',
+  scope: 'plan',
   lines: ['Accepting authorizes these services at the price shown. Cancel anytime.', 'Services — at the price and frequency shown.'],
   consumerNotice: null,
 };
@@ -148,7 +149,7 @@ describe('SecureAppointmentPage hand-off mode', () => {
     await waitFor(() => expect(save).toBeEnabled());
     fireEvent.click(save);
     await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(true));
-    expect(posted).toEqual([expect.objectContaining({ type: 'acceptTerms', termsVersion: 'v2026-10', consumerNoticeShown: true })]);
+    expect(posted).toEqual([expect.objectContaining({ type: 'acceptTerms', termsVersion: 'v2026-10', termsScope: 'plan', consumerNoticeShown: true })]);
   });
 
   it('a failed terms record shows a plain error and does not save the card', async () => {
@@ -161,6 +162,21 @@ describe('SecureAppointmentPage hand-off mode', () => {
     await waitFor(() => expect(save).toBeEnabled());
     fireEvent.click(save);
     expect(await screen.findByText('Could not record the terms.')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
+  });
+
+  it('terms_changed shows the reload text and a Reload button, and stops Save', async () => {
+    installBridge({ termsAnswer: { status: 'failed', message: 'The terms changed. Reload this page to see them.', code: 'terms_changed' } });
+    const fetchMock = installFetch({ ...READY, handoff: { terms: TERMS } });
+    render(<SecureAppointmentPage />);
+    fireEvent.click(await screen.findByLabelText(/I authorize Waves to charge this card/));
+    fireEvent.click(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.'));
+    const save = screen.getByRole('button', { name: 'Save card & secure my visit' });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
+    expect(await screen.findByText('The terms changed. Reload this page to see them.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument();
+    await waitFor(() => expect(save).toBeDisabled());
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
   });
 

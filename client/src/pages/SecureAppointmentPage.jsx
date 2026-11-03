@@ -37,7 +37,7 @@ import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
 import HandoffTermsBox from '../components/estimate/HandoffTermsBox';
 import HandoffPrepayQr from '../components/estimate/HandoffPrepayQr';
-import { isHandoffMode, requestTermsAcceptance } from '../lib/wavesCustomerHandoff';
+import { isHandoffMode, requestTermsAcceptance, TERMS_CHANGED_MESSAGE } from '../lib/wavesCustomerHandoff';
 import { fmtMoney } from '../lib/money';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import { CONSENT_VERSION, consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE } from '../lib/paymentMethodConsentText';
@@ -134,6 +134,7 @@ export default function SecureAppointmentPage() {
   const [termsAccepted, setTermsAccepted] = useState(false);
   const termsRecordedRef = useRef(false);
   const [prepayQr, setPrepayQr] = useState(false);
+  const [termsChanged, setTermsChanged] = useState(false);
   // Plan-choice lane (payload carries planContext only while the gate is
   // on). selectedPlan mirrors the server's recorded choice; per-application
   // must be picked before the card form appears on plan-bearing pages.
@@ -397,10 +398,13 @@ export default function SecureAppointmentPage() {
     if (!handoffTerms || termsRecordedRef.current) return true;
     const outcome = await requestTermsAcceptance({
       termsVersion: handoffTerms.version,
+      termsScope: handoffTerms.scope,
       consumerNoticeShown: !!handoffTerms.consumerNotice,
     });
     if (!outcome.ok) {
-      setError(outcome.message || 'We could not record your acceptance. Please try again.');
+      // The terms moved since this page loaded: only a reload shows the current ones.
+      setTermsChanged(!!outcome.changed);
+      setError(outcome.changed ? TERMS_CHANGED_MESSAGE : (outcome.message || 'We could not record your acceptance. Please try again.'));
       return false;
     }
     termsRecordedRef.current = true;
@@ -749,7 +753,7 @@ export default function SecureAppointmentPage() {
   // Recurring plan pages hold the card form back until a plan is picked;
   // everything else (one-time, gate off) shows it immediately as today.
   const showCapture = !planRecurring || selectedPlan === 'per_application';
-  const saveDisabled = busy || !(captureState.ready && captureState.agreed) || termsBlocking;
+  const saveDisabled = busy || !(captureState.ready && captureState.agreed) || termsBlocking || termsChanged;
 
   return (
     <Shell locked={handoffMode}>
@@ -826,6 +830,15 @@ export default function SecureAppointmentPage() {
             <HandoffTermsBox terms={handoffTerms} checked={termsAccepted} onChange={setTermsAccepted} disabled={busy} />
             {error ? (
               <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
+            ) : null}
+            {termsChanged ? (
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{ ...PRIMARY_CTA, marginTop: 12, background: '#FFFFFF', color: S.text, border: `1px solid ${S.border}` }}
+              >
+                Reload
+              </button>
             ) : null}
             <button
               type="button"

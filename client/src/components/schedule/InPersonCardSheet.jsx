@@ -141,16 +141,16 @@ function handoffHref(secureUrl) {
 // Same shape as window.wavesAdminConnectionToken in lib/tapToPay.js.
 function useInPersonTermsRelay({ adminFetch, visitId, secureToken }) {
   useEffect(() => {
-    const relay = async ({ secureToken: askedToken, termsVersion, consumerNoticeShown } = {}) => {
+    const relay = async ({ secureToken: askedToken, termsVersion, termsScope, consumerNoticeShown } = {}) => {
       if (!secureToken || askedToken !== secureToken) return { ok: false };
       try {
         const r = await adminFetch(`/admin/schedule/${visitId}/in-person-terms`, {
           method: 'POST',
-          body: JSON.stringify({ terms_version: termsVersion, consumer_notice_shown: consumerNoticeShown === true }),
+          body: JSON.stringify({ terms_version: termsVersion, terms_scope: termsScope, consumer_notice_shown: consumerNoticeShown === true }),
         });
         return { ok: r?.success === true };
       } catch (err) {
-        return { ok: false, message: err?.message || null };
+        return { ok: false, message: err?.message || null, code: err?.body?.code || null };
       }
     };
     window.wavesAdminInPersonTerms = relay;

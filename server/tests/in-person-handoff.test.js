@@ -80,6 +80,7 @@ describe('buildHandoffBlock (GET /api/public/secure-card/:token)', () => {
       terms: {
         estimateRef: 'EST-2026-0001',
         version: VERSION,
+        scope: 'plan',
         lines: acceptanceTerms.acceptanceTermsSnapshot('plan').split('\n'),
         consumerNotice: null,
       },
@@ -136,7 +137,7 @@ describe('buildHandoffBlock (GET /api/public/secure-card/:token)', () => {
 
 describe('recordInPersonTerms', () => {
   const args = (over = {}) => ({
-    visitId: 'visit-1', technician: { id: 'tech-1' }, termsVersion: VERSION, consumerNoticeShown: false, ip: '203.0.113.9', userAgent: 'jest', ...over,
+    visitId: 'visit-1', technician: { id: 'tech-1' }, termsVersion: VERSION, termsScope: 'plan', consumerNoticeShown: false, ip: '203.0.113.9', userAgent: 'jest', ...over,
   });
 
   test('stamps the same fields the online accept stamps, as an in-person record', async () => {
@@ -177,7 +178,7 @@ describe('recordInPersonTerms', () => {
 
   test('a base-scope estimate gets no rate-review stamp', async () => {
     mockRoute.acceptanceTermsScopeFor.mockReturnValue('base');
-    await recordInPersonTerms(args());
+    await recordInPersonTerms(args({ termsScope: 'base' }));
     expect(writes.filter((w) => w.table === 'estimates').map((w) => w.data)).toEqual([{ terms_version: VERSION }]);
     expect(writes.find((w) => w.table === 'estimate_acceptances').data.terms_text).toBe(acceptanceTerms.acceptanceTermsSnapshot('base'));
   });
@@ -192,6 +193,34 @@ describe('recordInPersonTerms', () => {
     expect(await recordInPersonTerms(args())).toEqual({ ok: true, recorded: false });
     expect(writes).toEqual([]);
     expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('the scope the customer saw must match the locked estimate: a mismatch is a reloadable 409 and writes nothing', async () => {
+    // The page showed 'base' terms; the estimate now computes 'plan' (the rate review sentence).
+    const result = await recordInPersonTerms(args({ termsScope: 'base' }));
+    expect(result).toEqual({ ok: false, status: 409, code: 'terms_changed', error: 'The terms changed. Reload this page to see them.' });
+    expect(writes).toEqual([]);
+    expect(mockAudit).not.toHaveBeenCalled();
+    // And the other way round.
+    mockRoute.acceptanceTermsScopeFor.mockReturnValue('base');
+    expect(await recordInPersonTerms(args({ termsScope: 'plan' }))).toMatchObject({ ok: false, status: 409, code: 'terms_changed' });
+    expect(writes).toEqual([]);
+  });
+
+  test('the scope is judged on the estimate under the row lock', async () => {
+    await recordInPersonTerms(args());
+    // The lock read returns the full row, and the scope is computed from it.
+    expect(mockRoute.acceptanceTermsScopeFor).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'est-1', status: 'accepted' }), expect.anything(), expect.anything());
+  });
+
+  test.each([[undefined], [''], ['wide']])('a missing or unknown scope (%p) is refused as terms_changed', async (termsScope) => {
+    expect(await recordInPersonTerms(args({ termsScope }))).toMatchObject({ ok: false, status: 409, code: 'terms_changed' });
+    expect(writes).toEqual([]);
+  });
+
+  test('a matching base scope records the base text', async () => {
+    mockRoute.acceptanceTermsScopeFor.mockReturnValue('base');
+    expect(await recordInPersonTerms(args({ termsScope: 'base' }))).toEqual({ ok: true, recorded: true });
   });
 
   test('a version other than the current one is refused before anything is read', async () => {
