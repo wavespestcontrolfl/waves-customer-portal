@@ -25,14 +25,14 @@ final class NativeBridge {
     static let saveCardEvent = "wavesadmin:savecard"
 
     private let lock: HandoffLock
-    // True while a payment sheet is open (AppState.flow).
-    private let paymentIsOpen: () -> Bool
+    // Owns the shared busy state: app.cardSaveOpen is true from the moment a
+    // save opens until it ends, whatever the outcome.
+    private let app: AppState
     private var saveCardController: UIViewController?
-    private var saveCardRunning = false
 
-    init(lock: HandoffLock? = nil, paymentIsOpen: @escaping () -> Bool) {
+    init(lock: HandoffLock? = nil, app: AppState) {
         self.lock = lock ?? HandoffLock.shared
-        self.paymentIsOpen = paymentIsOpen
+        self.app = app
     }
 
     func handle(_ body: [String: Any], from page: WKWebView) {
@@ -66,7 +66,7 @@ final class NativeBridge {
 
     private func startSaveCard(_ body: [String: Any], requestId: String?, from page: WKWebView) {
         // One save at a time, and never over an open payment.
-        if saveCardRunning || paymentIsOpen() {
+        if app.cardSaveOpen || app.flow.isActive {
             return fail("Another payment is already open in Waves Admin.", requestId: requestId, to: page)
         }
         guard let link = body["deepLink"] as? String, let url = URL(string: link),
@@ -83,7 +83,7 @@ final class NativeBridge {
         guard present(controller) else {
             return fail("Waves Admin could not open the card screen. Try again.", requestId: requestId, to: page)
         }
-        saveCardRunning = true
+        app.cardSaveOpen = true
         saveCardController = controller
         // Connect the reader while the link is checked.
         TerminalManager.shared.prepare()
@@ -107,7 +107,7 @@ final class NativeBridge {
     private func finishSaveCard() {
         saveCardController?.dismiss(animated: true)
         saveCardController = nil
-        saveCardRunning = false
+        app.cardSaveOpen = false
     }
 
     private func fail(_ message: String, requestId: String?, to page: WKWebView) {

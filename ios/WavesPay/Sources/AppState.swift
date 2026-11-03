@@ -14,6 +14,13 @@ final class AppState: ObservableObject {
     // clears; a later close() reports nothing.
     private var pendingResult: PendingResult?
 
+    // True while a save-card screen is open (NativeBridge sets and clears it).
+    // A card save and a payment share the one Terminal reader and the one
+    // terminal token, so each entry path refuses while the other is open.
+    var cardSaveOpen = false
+
+    static let cardSaveOpenMessage = "A card save is open in Waves Admin. Finish it first."
+
     // Counts payments. A server check that answers after its payment ended
     // (closed, or its screen could not open) belongs to no payment: dropped.
     private var paymentSerial = 0
@@ -75,11 +82,11 @@ final class AppState: ObservableObject {
     // Starts a payment from wavespay://collect?t=<handoff jwt>. The page's
     // bridge message passes its requestId; a link from Safari has none.
     func startCollect(from url: URL, requestId: String?) {
-        guard !flow.isActive else {
+        guard !flow.isActive, !cardSaveOpen else {
             // One payment at a time: answer the new request, keep the open one.
             portal?.deliver(TapToPayResult(
                 requestId: requestId, status: .failed,
-                message: "Another payment is already open in Waves Admin."
+                message: cardSaveOpen ? Self.cardSaveOpenMessage : "Another payment is already open in Waves Admin."
             ))
             return
         }

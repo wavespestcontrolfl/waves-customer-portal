@@ -242,7 +242,7 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     private var flowWatch: AnyCancellable?
     private let googleSignIn = GoogleSignInSession()
     // Save-card mode and the hand-off lock (NativeBridge.swift).
-    private lazy var bridge = NativeBridge(paymentIsOpen: { [weak self] in self?.app.flow.isActive ?? false })
+    private lazy var bridge = NativeBridge(app: app)
 
     init(app: AppState) {
         self.app = app
@@ -277,11 +277,11 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
 
     private func startPayment(_ body: [String: Any], from sender: WKWebView) {
         let requestId = body["requestId"] as? String
-        if app.flow.isActive {
+        if app.flow.isActive || app.cardSaveOpen {
             // One payment at a time: answer this page, keep the open payment.
             deliver(TapToPayResult(
                 requestId: requestId, status: .failed,
-                message: "Another payment is already open in Waves Admin."
+                message: app.cardSaveOpen ? AppState.cardSaveOpenMessage : "Another payment is already open in Waves Admin."
             ), to: sender)
             return
         }
