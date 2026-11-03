@@ -7,8 +7,11 @@
  * is the server half of the D2 terms step:
  *
  *   buildHandoffBlock    the optional `handoff` block on GET /api/public/secure-card/:token
- *                        when the request carries `handoff=1`: `{ terms }`, the estimate
- *                        acceptance terms the customer ticks on the phone. It is data about
+ *                        when the request carries `handoff=1`: `{ terms?, consumerNotice? }`.
+ *                        `terms` = the estimate acceptance terms the customer ticks on the
+ *                        phone; `consumerNotice` = the Florida notice line for a termite
+ *                        estimate (signed separately, so it needs no tick and does not
+ *                        depend on `terms`, which exclude termite estimates). It is data about
  *                        the token holder's own estimate, so it needs no sign-in. Absent
  *                        (payload byte-identical) without `handoff=1`, with a dark gate,
  *                        or when no terms are needed.
@@ -26,6 +29,7 @@
  */
 
 const db = require('../models/db');
+const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const acceptanceTerms = require('./acceptance-terms-text');
 
@@ -49,14 +53,18 @@ async function linkedEstimateFor(visitId, conn = db) {
 }
 
 // Mirrors the online accept's applicability check (estimate-public.js): the Florida
-// notice applies while the gate is live and the customer has no signed notice on file.
-// An unreadable state shows the notice (disclosure errs toward the customer).
+// notice applies while the gate is live and the estimate needs it (a termite or WDO
+// line) and the customer has no signed notice on file. Independent of the
+// cancel-anytime acceptance terms, which exclude exactly those estimates. An
+// unreadable state shows nothing (the notice is informational here; it is signed
+// on its own page).
 async function consumerNoticeApplies(estimate) {
-  if (!featureGates.estimateConsumerNoticeLive()) return false;
+  if (!estimate || !featureGates.estimateConsumerNoticeLive()) return false;
   try {
     return await require('./estimate-consumer-notice').consumerNoticeBlocksAccept(estimate);
-  } catch {
-    return true;
+  } catch (err) {
+    logger.warn(`[in-person-handoff] consumer notice check skipped: ${err.code || err.message}`);
+    return false;
   }
 }
 
@@ -96,7 +104,14 @@ async function buildHandoffBlock(req, { token, data }) {
   if (!request || request.kind === 'customer' || !request.scheduled_service_id) return null;
   const { estimate } = await linkedEstimateFor(request.scheduled_service_id);
   const context = await termsContextFor(estimate);
-  return context ? { terms: termsPayload(context) } : null;
+  const block = {};
+  if (context) block.terms = termsPayload(context);
+  // The separate-signature Florida notice rides the block on its own: a termite
+  // estimate has no acceptance terms but still needs the customer told.
+  if (estimate?.status === 'accepted' && await consumerNoticeApplies(estimate)) {
+    block.consumerNotice = { text: require('./estimate-consumer-notice').HANDOFF_NOTICE_TEXT };
+  }
+  return Object.keys(block).length ? block : null;
 }
 
 // Stamp the acceptance terms for the visit's estimate. Idempotent: a second call

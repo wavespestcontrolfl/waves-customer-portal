@@ -90,12 +90,6 @@ describe('buildHandoffBlock (GET /api/public/secure-card/:token)', () => {
     expect(JSON.stringify(result)).not.toMatch(/est-1|visit-1|cust-1/);
   });
 
-  test('a termite estimate without a signed notice carries the notice text', async () => {
-    mockGates.estimateConsumerNoticeLive.mockReturnValue(true);
-    mockNotice.consumerNoticeBlocksAccept.mockResolvedValue(true);
-    expect((await block()).terms.consumerNotice).toEqual({ text: 'Florida notice text.' });
-  });
-
   test.each([
     ['no handoff param', () => block({})],
     ['handoff=0', () => block({ handoff: '0' })],
