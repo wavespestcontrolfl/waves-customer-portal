@@ -72,6 +72,9 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
     // Admin-page calls (terms, save link) that have not answered yet. Hand back
     // waits for them, and none may act after the hand-off ends.
     private var pendingCalls = 0
+    // True from the moment Hand back starts its device check; new terms and
+    // save requests are refused. Reset if the check is denied.
+    private var ending = false
 
     init(url: URL, secureToken: String, firstName: String, requestId: String?, adminPage: WKWebView,
          app: AppState, lock: HandoffLock,
@@ -125,12 +128,14 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
             controller?.showNote("Finishing the card save…")
             return
         }
+        guard !ending else { return }
+        ending = true
         Task {
             switch await lock.end() {
             case .ended(let unavailable):
                 finish(unavailable ? ["status": "ended", "auth": "unavailable"] : ["status": "ended"])
             case .denied:
-                break
+                ending = false
             }
         }
     }
@@ -167,7 +172,12 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
         }
     }
 
+    private static let endingMessage = "Waves is taking the phone back."
+
     private func acceptTerms(_ body: [String: Any], _ requestId: String?) {
+        guard !ending else {
+            return reply(Self.termsEvent, ["status": "failed", "message": Self.endingMessage], requestId)
+        }
         let args: [String: Any] = [
             "secureToken": secureToken,
             "termsVersion": Self.scalar(body["termsVersion"]),
@@ -194,6 +204,9 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
     }
 
     private func saveCard(_ body: [String: Any], _ requestId: String?) {
+        guard !ending else {
+            return reply(Self.saveCardEvent, ["status": "failed", "message": Self.endingMessage], requestId)
+        }
         guard !saveInFlight else {
             return reply(Self.saveCardEvent, ["status": "failed", "message": AppState.cardSaveOpenMessage], requestId)
         }
