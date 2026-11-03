@@ -66,9 +66,8 @@ function reentryFields({ ext, int, seeds }) {
 // choice only while the visit invoices and the text is on, else true.
 const payLinkPosted = ({ noPayLink, willInvoice, sendSms, includePayLink }) => (noPayLink ? false : (willInvoice && sendSms ? includePayLink : true));
 
-// The mark a re-service sheet's Wrap-up puts on a review ask (owner 2026-10-10, "show on"): the server
-// refuses a marked ask once GATE_FAST_COMPLETE_WRAP_UP is off, so a gate turned off under an open sheet
-// stops the new re-service asks. Only beside requestReview:true, and only where the sheet asks `reviewMarker`.
+// The mark a re-service sheet's Wrap-up puts on a review ask (owner 2026-10-10, "show on"). Only beside
+// requestReview:true, and only where the sheet asks `reviewMarker`.
 const reviewMarkerFields = ({ reviewMarker, willReview }) => (reviewMarker && willReview ? { wrapUpReviewAsk: true } : {});
 
 // The body fragment. Untouched it is the four customer-text flags the sheets always posted; every

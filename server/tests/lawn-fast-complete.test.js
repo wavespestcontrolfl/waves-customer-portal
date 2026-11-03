@@ -477,24 +477,14 @@ describe('buildLawnFastContext', () => {
     });
   });
 
-  describe('Wrap-up (GATE_FAST_COMPLETE_WRAP_UP)', () => {
-    afterEach(() => { delete process.env.GATE_FAST_COMPLETE_WRAP_UP; });
+  describe('Wrap-up', () => {
     const read = () => buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
 
-    test('gate off: the context carries no wrapUp key', async () => {
-      delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
-      expect('wrapUp' in await read()).toBe(false);
-    });
-
-    test('gate on (exactly true): wrapUp is true; any other value stays off', async () => {
-      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+    test('an eligible visit carries wrapUp: true', async () => {
       expect((await read()).wrapUp).toBe(true);
-      process.env.GATE_FAST_COMPLETE_WRAP_UP = '1';
-      expect('wrapUp' in await read()).toBe(false);
     });
 
-    test('an ineligible visit carries no wrapUp even with the gate on', async () => {
-      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+    test('an ineligible visit carries no wrapUp', async () => {
       resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
       expect('wrapUp' in await read()).toBe(false);
     });

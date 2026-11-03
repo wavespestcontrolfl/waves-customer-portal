@@ -1,6 +1,6 @@
 /**
  * GET /admin/dispatch/:serviceId/pest-recap/context is what the pest Fast Complete sheet opens with. With
- * GATE_FAST_COMPLETE_WRAP_UP exactly 'true' the answer also carries `wrapUp: true`; otherwise it is unchanged.
+ * the answer always carries `wrapUp: true` (the Wrap-up section is part of the sheet) beside the context.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -61,8 +61,7 @@ const dbWithOwner = (technician_id) => (table) => {
   return chain;
 };
 
-describe('GET pest-recap/context carries the Wrap-up gate (GATE_FAST_COMPLETE_WRAP_UP)', () => {
-  const saved = process.env.GATE_FAST_COMPLETE_WRAP_UP;
+describe('GET pest-recap/context carries the Wrap-up key', () => {
   // No serviceType reads as a pest visit, so every answer here also carries stockAdvisory.
   const CONTEXT = { ok: true, eligible: true, service: { id: 'visit-1' }, products: [] };
   beforeEach(() => {
@@ -70,27 +69,16 @@ describe('GET pest-recap/context carries the Wrap-up gate (GATE_FAST_COMPLETE_WR
     PestRecap.buildRecapContext.mockReset().mockResolvedValue(CONTEXT);
   });
   afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = saved;
     mockDbCurrent = null;
   });
 
-  test.each([undefined, '', 'false', '1', 'TRUE', 'on'])('gate %p: the answer is the context exactly as before, with no wrapUp key', async (value) => {
-    if (value === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = value;
-    const res = await invoke('get', CONTEXT_PATH, { params });
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ ...CONTEXT, stockAdvisory: true });
-    expect('wrapUp' in res.body).toBe(false);
-  });
-
-  test('gate on (exactly true): wrapUp is true beside the unchanged context', async () => {
-    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+  test('wrapUp is true beside the unchanged context', async () => {
     const res = await invoke('get', CONTEXT_PATH, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ ...CONTEXT, wrapUp: true, stockAdvisory: true });
   });
 
-  test('gate on: a refused context carries no wrapUp, and a technician cannot read another technician\'s visit', async () => {
-    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+  test('a refused context carries no wrapUp, and a technician cannot read another technician\'s visit', async () => {
     PestRecap.buildRecapContext.mockResolvedValue({ ok: false, reason: 'not_found' });
     const missing = await invoke('get', CONTEXT_PATH, { params });
     expect(missing.statusCode).toBe(404);
@@ -103,17 +91,14 @@ describe('GET pest-recap/context carries the Wrap-up gate (GATE_FAST_COMPLETE_WR
 
 describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)', () => {
   const saved = process.env.GATE_ONE_TAP_REPORT;
-  const savedWrap = process.env.GATE_FAST_COMPLETE_WRAP_UP;
   // A visit of a recurring series: the one-tap report is the recurring pest sheet only.
   const CONTEXT = { ok: true, eligible: true, service: { id: 'visit-1', isRecurring: true }, products: [] };
   beforeEach(() => {
-    delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
     mockDbCurrent = dbWithOwner('tech-1');
     PestRecap.buildRecapContext.mockReset().mockResolvedValue(CONTEXT);
   });
   afterEach(() => {
     if (saved === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = saved;
-    if (savedWrap === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = savedWrap;
     mockDbCurrent = null;
   });
 
@@ -121,7 +106,7 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
     if (value === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = value;
     const res = await invoke('get', CONTEXT_PATH, { params });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ ...CONTEXT, stockAdvisory: true });
+    expect(res.body).toEqual({ ...CONTEXT, wrapUp: true, stockAdvisory: true });
     expect('oneTap' in res.body).toBe(false);
   });
 
@@ -129,10 +114,7 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
     process.env.GATE_ONE_TAP_REPORT = 'true';
     const res = await invoke('get', CONTEXT_PATH, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ ...CONTEXT, oneTap: true, stockAdvisory: true });
-    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
-    const both = await invoke('get', CONTEXT_PATH, { params });
-    expect(both.body).toEqual({ ...CONTEXT, wrapUp: true, oneTap: true, stockAdvisory: true });
+    expect(res.body).toEqual({ ...CONTEXT, wrapUp: true, oneTap: true, stockAdvisory: true });
   });
 
   test.each([false, undefined])('gate on, a visit outside a recurring series (isRecurring %p): no oneTap key', async (isRecurring) => {
@@ -141,7 +123,7 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
     PestRecap.buildRecapContext.mockResolvedValue(oneTime);
     const res = await invoke('get', CONTEXT_PATH, { params });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ ...oneTime, stockAdvisory: true });
+    expect(res.body).toEqual({ ...oneTime, wrapUp: true, stockAdvisory: true });
   });
 
   test.each([
@@ -153,7 +135,7 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
     PestRecap.buildRecapContext.mockResolvedValue(reservice);
     const res = await invoke('get', CONTEXT_PATH, { params });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ ...reservice, oneTap: true, stockAdvisory: true });
+    expect(res.body).toEqual({ ...reservice, wrapUp: true, oneTap: true, stockAdvisory: true });
   });
 
   test('gate on: a refused context carries no oneTap', async () => {
@@ -167,31 +149,28 @@ describe('GET pest-recap/context carries the one-tap gate (GATE_ONE_TAP_REPORT)'
 
 describe('GET pest-recap/context carries the pest stock advisory', () => {
   const savedOneTap = process.env.GATE_ONE_TAP_REPORT;
-  const savedWrap = process.env.GATE_FAST_COMPLETE_WRAP_UP;
   const CONTEXT = { ok: true, eligible: true, service: { id: 'visit-1', serviceType: 'Quarterly Pest Control' }, products: [] };
   beforeEach(() => {
     delete process.env.GATE_ONE_TAP_REPORT;
-    delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
     mockDbCurrent = dbWithOwner('tech-1');
     PestRecap.buildRecapContext.mockReset().mockResolvedValue(CONTEXT);
   });
   afterEach(() => {
     if (savedOneTap === undefined) delete process.env.GATE_ONE_TAP_REPORT; else process.env.GATE_ONE_TAP_REPORT = savedOneTap;
-    if (savedWrap === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = savedWrap;
     mockDbCurrent = null;
   });
 
   test('a pest visit: stockAdvisory is true, on any pest sheet (not only one-tap)', async () => {
     const res = await invoke('get', CONTEXT_PATH, { params });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ ...CONTEXT, stockAdvisory: true });
+    expect(res.body).toEqual({ ...CONTEXT, wrapUp: true, stockAdvisory: true });
   });
 
   test('a visit /complete still refuses below zero (mosquito): no stockAdvisory key', async () => {
     const mosquito = { ...CONTEXT, service: { id: 'visit-1', serviceType: 'Mosquito Control' } };
     PestRecap.buildRecapContext.mockResolvedValue(mosquito);
     const res = await invoke('get', CONTEXT_PATH, { params });
-    expect(res.body).toEqual(mosquito);
+    expect(res.body).toEqual({ ...mosquito, wrapUp: true });
   });
 });
 

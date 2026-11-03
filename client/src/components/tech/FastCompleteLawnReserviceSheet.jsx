@@ -130,7 +130,7 @@ export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Rec
 // (SchedulePage: sendSms starts true; includePayLink is true whenever there is
 // no invoice to link). The review ask is the one flag that differs: the owner
 // kept it off re-services (the pest sheet's rule), so it is false here. With the
-// Wrap-up on (GATE_FAST_COMPLETE_WRAP_UP) a re-service asks for a review by
+// Wrap-up, a re-service asks for a review by
 // default (owner 2026-10-10) and the section's choices stand in for these.
 const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: false, includePayLink: true };
 
@@ -284,7 +284,7 @@ function contextFrom(data, service) {
     lastVisit: data?.lastVisit && typeof data.lastVisit === 'object' ? data.lastVisit : null,
     customerRequest: data?.customerRequest && typeof data.customerRequest === 'object' ? data.customerRequest : null,
     visitIdentity: recapVisitIdentity(data?.service),
-    // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+    // The Wrap-up section is on when the server says so.
     wrapUp: data?.wrapUp === true,
   };
 }
@@ -596,7 +596,7 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     }
     setCheckingStock(false);
   };
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section. A re-service asks for a review by default
+  // The Wrap-up: the full form's bottom section. A re-service asks for a review by default
   // (owner 2026-10-10); this sheet posted no `reviewTiming` before, and its pay link follows the usual
   // will-invoice rule (a free callback does not invoice, so it shows none).
   const wrapUp = useWrapUp({
