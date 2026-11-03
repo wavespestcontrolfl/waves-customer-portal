@@ -302,7 +302,7 @@ export default function AdminLayoutV2() {
           {/* Bell renders for every role — the feed itself is role-scoped
               server-side (fail-closed techVisible allowlist, #3499), so a
               technician sees only their day-to-day triggers. */}
-          <NotificationBell type="admin" />
+          <NotificationBell type="admin" sessionReady={sessionReady} />
         </div>
       )}
 
@@ -327,7 +327,7 @@ export default function AdminLayoutV2() {
             overflowY: "hidden",
           }}
         >
-          <AdminWorkspaceNavigation user={user} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} />
+          <AdminWorkspaceNavigation user={user} sessionReady={sessionReady} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} />
         </aside>
       )}
 

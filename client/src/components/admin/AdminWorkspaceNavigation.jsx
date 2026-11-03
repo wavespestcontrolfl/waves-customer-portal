@@ -63,7 +63,7 @@ export function PinnedWorkspaceLinks({ onNavigate, source = 'sidebar' }) {
   </div>;
 }
 
-export default function AdminWorkspaceNavigation({ user, onClose, onAsk, onSearch, onLogout, unreadCount }) {
+export default function AdminWorkspaceNavigation({ user, sessionReady, onClose, onAsk, onSearch, onLogout, unreadCount }) {
   const navigation = useAdminNavigation();
   if (!navigation) return null;
   const { groups } = navigation;
@@ -72,7 +72,7 @@ export default function AdminWorkspaceNavigation({ user, onClose, onAsk, onSearc
       <img src="/waves-logo.png" alt="Waves" className="h-7" />
       <span className="text-16 font-medium" aria-hidden>Waves</span>
       <span className="flex-1" />
-      <NotificationBell type="admin" />
+      <NotificationBell type="admin" sessionReady={sessionReady} />
     </div>
     <div className="shrink-0 space-y-1 px-3 py-2">
       <Button variant="secondary" onClick={onSearch} className="w-full !justify-start" aria-label="Search pages"><Search size={18} aria-hidden /><span className="flex-1 text-left">Search</span><kbd className="text-14 font-normal">⌘K</kbd></Button>

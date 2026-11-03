@@ -17,7 +17,9 @@
 // A tapped alert, while a staff page is open, arrives as a cancelable
 // 'wavesadmin:openlink' window event (detail = { url }). The page cancels it
 // (so the app does not load the link itself) and navigates, so its
-// unsaved-changes prompt and the field visit lock still apply.
+// unsaved-changes prompt and the field visit lock still apply. An alert's
+// Call action arrives the same way as 'wavesadmin:alertcall' (detail =
+// { value }); the bell takes it (NotificationBell.jsx).
 
 import { adminFetch } from '../lib/adminFetch';
 import { isWavesAdminApp } from './platform';

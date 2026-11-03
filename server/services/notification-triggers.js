@@ -210,6 +210,10 @@ const TRIGGER_REGISTRY = {
         title: p.title || 'New lead',
         body: bodyParts.join(' - '),
         link: p.leadId ? `/admin/leads?lead=${p.leadId}` : (p.link || '/admin/leads'),
+        // Call: the Leads page's Call Now for the lead, else the customer page's Call (a web form whose lead row
+        // failed sends the customer id as leadId), else the Communications thread's Call back for an unknown
+        // sender's text (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+        ...callButtonAlert({ leadId: p.leadId === p.customerId ? null : p.leadId, customerId: p.customerId, smsSid: p.twilioSid }),
       };
     },
   },
@@ -1450,6 +1454,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       return { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true };
     }
 
+    let bellRowId = null;
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
@@ -1464,6 +1469,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           // returned.
           const created = await writeBell(bellMetadata);
           if (created && !created.suppressed) bellWritten = true;
+          if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
           if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead')) dedupedNoPush = true;
@@ -1573,6 +1579,15 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
         const beforeDispatch = typeof beforePush === 'function'
           ? () => Promise.resolve(beforePush({ dispatching: true })).catch(() => true)
           : null;
+        // The Call action on the Waves Admin push (alert-call-button.js): the row this emission wrote, when it
+        // carries a Call button, for admin-role recipients only (the bell runs buttons for admins only).
+        const pushCall = bellRowId
+          ? await require('./alert-call-button').pushCallAction(bellRowId).catch((e) => {
+            logger.warn(`[notification-triggers] push call action skipped: ${e.message}`);
+            return null;
+          })
+          : null;
+        const adminRoleIds = new Set(activeAdmins.filter((u) => u.role === 'admin').map((u) => u.id));
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
@@ -1598,6 +1613,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               // banner. The admin's sound preference still holds (silent/vibrate above).
               renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask',
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
+              ...(pushCall && adminRoleIds.has(adminUserId) ? pushCall : {}),
             };
           },
           { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
