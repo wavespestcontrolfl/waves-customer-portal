@@ -9,7 +9,7 @@
  */
 
 const { mergeMrmsIntoWeek, rainMrmsMode } = require('../services/service-report/application-conditions');
-const { fetchMrmsDailyRain } = require('../services/mrms-qpe');
+const { fetchMrmsDailyRain, _test: mrmsInternals } = require('../services/mrms-qpe');
 
 const OM_WEEK = {
   rainInches: 1.18,
@@ -143,7 +143,7 @@ describe('mergeMrmsIntoWeek', () => {
 
 describe('fetchMrmsDailyRain payload handling', () => {
   const realFetch = global.fetch;
-  afterEach(() => { global.fetch = realFetch; });
+  afterEach(() => { global.fetch = realFetch; mrmsInternals.clearWindowLedger(); });
 
   test('parses IEM rows, materializes gaps for missing dates', async () => {
     global.fetch = jest.fn().mockResolvedValue({
@@ -325,5 +325,102 @@ describe('fetchMrmsDailyRain payload handling', () => {
       expect(await fetchMrmsDailyRain({ ...HOME, latitude: 27.52, longitude: -82.53 })).not.toBeNull();
       expect(global.fetch).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+// IEM keys its one-hour cache on the window and the NEAREST 0.125 degree IEMRE
+// point, and serves the first requester's 1 km cell to every later request
+// there. On 2026-11-02 two neighbors held all three of one home's windows, in
+// the same sweep order every Monday, so that home got no rain and no email.
+describe('fetchMrmsDailyRain window ledger', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; mrmsInternals.clearWindowLedger(); jest.restoreAllMocks(); });
+
+  const WEEK = { start: '2026-10-26', end: '2026-11-01' };
+  const weekDates = ['2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01'];
+  const rainOf = (i, j) => (i - 4300) + (j - 400) / 100;
+  const parse = (url) => {
+    const [start, end, lat, lon] = url.split('/multiday/')[1].split('/');
+    return { window: `${start}/${end}`, lat: Number(lat), lon: Number(lon) };
+  };
+  const ownCell = ({ lat, lon }) => ({ mrms_iemre_grid_i: Math.floor((lon + 126) * 100), mrms_iemre_grid_j: Math.floor((lat - 23) * 100) });
+  const answer = (cell) => ({ ok: true, json: async () => ({ ...cell, data: weekDates.map((date) => ({ date, mrms_precip_in: rainOf(cell.mrms_iemre_grid_i, cell.mrms_iemre_grid_j) })) }) });
+  // A relay with IEM's cache rule. Coordinates sit mid-cell, so float edges never matter.
+  const fakeIem = () => {
+    const cache = new Map();
+    return jest.fn(async (url) => {
+      const asked = parse(url);
+      const key = `${asked.window}|${Math.round((asked.lon + 126) / 0.125)}:${Math.round((asked.lat - 23) / 0.125)}`;
+      if (!cache.has(key)) cache.set(key, ownCell(asked));
+      return answer(cache.get(key));
+    });
+  };
+  // One home at the middle of each of the 144 1 km cells in the IEMRE cell around 27.5N / 82.375W.
+  const homes = [];
+  for (let a = 0; a < 12; a += 1) {
+    for (let b = 0; b < 12; b += 1) homes.push({ latitude: Number((27.445 + 0.01 * b).toFixed(4)), longitude: Number((-82.425 + 0.01 * a).toFixed(4)) });
+  }
+  const ownRain = ({ latitude, longitude }) => Math.round(rainOf(Math.floor((longitude + 126) * 100), Math.floor((latitude - 23) * 100)) * 100) / 100;
+
+  test('the cache cell is the nearest IEMRE point; a coordinate halfway between two points takes both', () => {
+    // -82.43 is 0.56 of the way across its cell: nearest is the next point, not the floor.
+    expect(mrmsInternals.iemreCacheCells(27.5, -82.43)).toEqual(['349:36']);
+    expect(mrmsInternals.iemreCacheCells(27.5, -82.44)).toEqual(['348:36']);
+    expect(mrmsInternals.iemreCacheCells(27.5, -82.4375)).toEqual(['348:36', '349:36']);
+  });
+
+  test('every home in one cache cell gets its own rain, one sweep after another', async () => {
+    global.fetch = fakeIem();
+    for (let sweep = 0; sweep < 2; sweep += 1) {
+      for (const home of homes) {
+        const out = await fetchMrmsDailyRain({ ...home, ...WEEK });
+        expect(out).toEqual({ days: weekDates.map((date) => ({ date, inches: ownRain(home) })), complete: true });
+      }
+    }
+    // One request per home per sweep: the ledger sends it straight to a window no neighbor holds.
+    expect(global.fetch).toHaveBeenCalledTimes(2 * homes.length);
+  });
+
+  test('without the ledger the same sweep leaves a home with no rain (the 11-02 failure)', async () => {
+    global.fetch = fakeIem();
+    const missed = [];
+    for (const home of homes) {
+      mrmsInternals.clearWindowLedger();
+      if (await fetchMrmsDailyRain({ ...home, ...WEEK }) == null) missed.push(home);
+    }
+    expect(missed.length).toBeGreaterThan(0);
+  });
+
+  test("a window the relay answered with a stranger's cell is skipped by the next home", async () => {
+    const [home, neighbor] = homes;
+    // Something outside this process asked the week first in this cache cell.
+    const stranger = { mrms_iemre_grid_i: 4350, mrms_iemre_grid_j: 460 };
+    global.fetch = jest.fn(async (url) => {
+      const asked = parse(url);
+      return answer(asked.window === `${WEEK.start}/${WEEK.end}` ? stranger : ownCell(asked));
+    });
+    expect((await fetchMrmsDailyRain({ ...home, ...WEEK })).complete).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    global.fetch.mockClear();
+    expect((await fetchMrmsDailyRain({ ...neighbor, ...WEEK })).complete).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][0]).not.toContain(`/${WEEK.start}/${WEEK.end}/`);
+  });
+
+  test('a hold ends after the hour, and the same home reuses its own window', async () => {
+    const [home, neighbor] = homes;
+    let now = Date.parse('2026-11-02T12:00:00Z');
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    global.fetch = fakeIem();
+    await fetchMrmsDailyRain({ ...home, ...WEEK });
+    await fetchMrmsDailyRain({ ...home, ...WEEK });
+    expect(global.fetch.mock.calls.map(([url]) => parse(url).window)).toEqual([`${WEEK.start}/${WEEK.end}`, `${WEEK.start}/${WEEK.end}`]);
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ data: weekDates.map((date) => ({ date, mrms_precip_in: 0 })) }) }));
+    await fetchMrmsDailyRain({ ...neighbor, ...WEEK });
+    expect(global.fetch.mock.calls[0][0]).not.toContain(`/${WEEK.start}/${WEEK.end}/`);
+    now += 65 * 60 * 1000;
+    global.fetch.mockClear();
+    await fetchMrmsDailyRain({ ...neighbor, ...WEEK });
+    expect(global.fetch.mock.calls[0][0]).toContain(`/${WEEK.start}/${WEEK.end}/`);
   });
 });
