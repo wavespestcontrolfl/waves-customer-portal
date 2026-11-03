@@ -169,22 +169,37 @@ function mapInsightRow(row) {
 // Options on every sync* entry point:
 //   throwOnError — opt-in for the scheduler: a failed fetch/write rethrows so
 //     runExclusive records job_health 'failed' (and ops-queue surfaces it).
-//     Default callers (admin route, tests) keep the historical "[] on failure"
-//     contract. Either way the runExclusive body now throws on error, so the
-//     job_health row for these jobs no longer reads 'success' after an API
-//     failure.
-async function syncCampaigns({ throwOnError = false } = {}) {
+//     Default callers (tests) keep the historical "[] on failure" contract.
+//     Either way the runExclusive body now throws on error, so the job_health
+//     row for these jobs no longer reads 'success' after an API failure.
+//   throwOnSkip — opt-in for the admin /sync/meta route: when another run holds
+//     the lock (the 6:15 cron, another instance, a second manual sync), throw
+//     a SYNC_RUNNING error instead of returning [] as if nothing synced. The
+//     scheduler leaves it off: a skipped tick is normal, the holder does the work.
+async function syncCampaigns({ throwOnError = false, throwOnSkip = false } = {}) {
   if (!isConfigured()) return [];
   // Serialize across overlapping Railway instances / the admin /sync/meta
   // endpoint: ad_campaigns has no unique (platform, platform_campaign_id), so two
   // concurrent first-time syncs could both insert and duplicate a campaign.
+  let out;
   try {
-    const out = await runExclusive('meta-ads-campaigns', () => syncCampaignsLocked());
-    return Array.isArray(out) ? out : [];
+    out = await runExclusive('meta-ads-campaigns', () => syncCampaignsLocked());
   } catch (err) {
     if (throwOnError) throw err;
     return [];
   }
+  if (throwOnSkip) throwIfSkipped(out, 'meta-ads-campaigns');
+  return Array.isArray(out) ? out : [];
+}
+
+// runExclusive answers { skipped: true, reason } when it did not run the body.
+const SYNC_RUNNING = 'sync_running';
+function throwIfSkipped(out, jobName) {
+  if (!out || out.skipped !== true) return;
+  throw Object.assign(new Error(`${jobName} did not run: another sync holds the lock (${out.reason || 'busy'})`), {
+    code: SYNC_RUNNING,
+    reason: out.reason,
+  });
 }
 
 async function syncCampaignsLocked() {
@@ -253,15 +268,17 @@ async function markMissingCampaignsRemoved(returnedIds, fetchStartedAt) {
 // ---------------------------------------------------------------------------
 // syncDailyPerformance — per-campaign daily insights into ad_performance_daily
 // ---------------------------------------------------------------------------
-async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
+async function syncDailyPerformance(days = 7, { throwOnError = false, throwOnSkip = false } = {}) {
   if (!isConfigured()) return [];
+  let out;
   try {
-    const out = await runExclusive('meta-ads-performance', () => syncDailyPerformanceLocked(days));
-    return Array.isArray(out) ? out : [];
+    out = await runExclusive('meta-ads-performance', () => syncDailyPerformanceLocked(days));
   } catch (err) {
     if (throwOnError) throw err;
     return [];
   }
+  if (throwOnSkip) throwIfSkipped(out, 'meta-ads-performance');
+  return Array.isArray(out) ? out : [];
 }
 
 async function syncDailyPerformanceLocked(days = 7) {
@@ -318,6 +335,7 @@ module.exports = {
   graphGet,
   syncCampaigns,
   syncDailyPerformance,
+  SYNC_RUNNING,
   _private: {
     apiVersion,
     accountId,
