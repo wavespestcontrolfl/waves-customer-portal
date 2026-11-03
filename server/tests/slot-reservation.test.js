@@ -626,7 +626,7 @@ describe('slot reservation helpers', () => {
         moveForEstimate.mockResolvedValueOnce({ id: 'move-1', move_in_date: '2027-05-21' });
         await expect(slotReservation.commitReservation({
           scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
-          estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+          estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control', estimate_data: { move: { moveId: 'move-1' } } }, trx,
         })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is before the move-in date' });
         expect(moveForEstimate).toHaveBeenCalledWith('estimate-456', trx, { lock: true });
         expect(updateBuilder.update).not.toHaveBeenCalled();

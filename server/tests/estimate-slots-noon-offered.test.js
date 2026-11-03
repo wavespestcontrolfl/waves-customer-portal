@@ -134,6 +134,9 @@ describe('estimate slots — noon is a normal hour', () => {
         const all = await original(args);
         return { ...all, slots: all.slots.filter((slot) => slot.date >= args.dateFrom && slot.date <= args.dateTo) };
       });
+      // A new-home estimate: only a stamped estimate reads its move.
+      const priorData = ESTIMATE_ROW.estimate_data;
+      ESTIMATE_ROW.estimate_data = JSON.stringify({ move: { moveId: 'move-1' } });
       try {
         moveForEstimate.mockResolvedValue({ id: 'move-1', move_in_date: '2027-05-21' });
         expect(allOffered(await getAvailableSlots('est-lunch-1', opts))).toEqual([]);
@@ -145,7 +148,13 @@ describe('estimate slots — noon is a normal hour', () => {
         expect(rolling.length).toBeGreaterThan(0);
         expect(rolling.every((slot) => slot.date >= '2027-05-25')).toBe(true);
         expect(moveForEstimate).toHaveBeenCalledWith('est-lunch-1');
+        // An ordinary estimate never reads a move, so no move-in date limits it.
+        ESTIMATE_ROW.estimate_data = null;
+        moveForEstimate.mockClear();
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts)).length).toBeGreaterThan(0);
+        expect(moveForEstimate).not.toHaveBeenCalled();
       } finally {
+        ESTIMATE_ROW.estimate_data = priorData;
         findAvailableSlots.mockImplementation(original);
         moveForEstimate.mockResolvedValue(null);
       }
