@@ -5,6 +5,7 @@ import { formatETDateOnly } from '../../lib/timezone';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import { WAVES_PHONE_DISPLAY } from '../../theme-customer';
 import { showCustomerAlert } from '../brand/CustomerDialogHost';
+import MovingEntry from './MovingEntry';
 
 // =========================================================================
 // CANCEL FLOW (C1) — the three-screen cancellation inside "Account Options".
@@ -92,7 +93,7 @@ const isoDaysFromNow = (days) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-export default function CancelFlow({ tierName, styles, compact, onOpenRequest, refreshCustomer }) {
+export default function CancelFlow({ tierName, styles, compact, onOpenRequest, refreshCustomer, movingEntryEnabled }) {
   const { muted, subtle, primaryButton, secondaryButton, smallLinkButton } = styles;
   const [stage, setStage] = useState('entry');
   const [busy, setBusy] = useState(false);
@@ -492,7 +493,11 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
           <button type="button" onClick={() => setMoreReasons(true)} className="waves-focus-ring" aria-expanded={false} style={{ ...backLink, marginTop: 6 }}>More reasons</button>
         )}
         {reason === 'moving_or_property_change' && (
-          <input type="text" value={newAddress} onChange={(e) => setNewAddress(e.target.value)} placeholder="New address (optional)" aria-label="New address" autoComplete="street-address" className="waves-focus-ring" style={field} />
+          <>
+            <input type="text" value={newAddress} onChange={(e) => setNewAddress(e.target.value)} placeholder="New address (optional)" aria-label="New address" autoComplete="street-address" className="waves-focus-ring" style={field} />
+            {/* GATE_MOVING_PORTAL: the customer's own moving page instead of a cancellation. */}
+            <MovingEntry enabled={movingEntryEnabled} variant="link" styles={{ smallLinkButton }} />
+          </>
         )}
         {reason === 'health_or_chemicals' && (
           <label style={checkRow}>

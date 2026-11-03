@@ -161,6 +161,26 @@ describe('Screen 2 — reason and resolution', () => {
     expect(screen.queryByText(/one option may fit better/i)).not.toBeInTheDocument();
   });
 
+  it('Moving reason: offers "Take WaveGuard with you instead" only when the moving entry is on (GATE_MOVING_PORTAL)', async () => {
+    const { unmount } = renderFlow({ movingEntryEnabled: true });
+    await openReview();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: /what's driving this change/i });
+    expect(screen.queryByTestId('moving-entry-link')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Moving' }));
+    expect(screen.getByRole('button', { name: 'Take WaveGuard with you instead' })).toBeInTheDocument();
+    expect(screen.getByLabelText('New address')).toBeInTheDocument();
+    unmount();
+
+    renderFlow();
+    await openReview();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: /what's driving this change/i });
+    fireEvent.click(screen.getByRole('button', { name: 'Moving' }));
+    expect(screen.getByLabelText('New address')).toBeInTheDocument();
+    expect(screen.queryByTestId('moving-entry-link')).not.toBeInTheDocument();
+  });
+
   it('hard_stop skips the card and shows one neutral line on the confirm screen', async () => {
     renderFlow();
     await openReview();

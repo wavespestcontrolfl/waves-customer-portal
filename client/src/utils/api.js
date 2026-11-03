@@ -705,6 +705,16 @@ export class ApiClient {
     });
   }
 
+  // Moving flow PR 2a (GATE_MOVING_PORTAL): whether My Plan offers "Take
+  // WaveGuard with you", and the signed-in customer's own moving page path.
+  getMovingEntry() {
+    return this.request('/property/moving');
+  }
+
+  startMove() {
+    return this.request('/property/moving', { method: 'POST', body: JSON.stringify({}) });
+  }
+
   // C4: a cancelled customer asks to restart — the server mints (or reuses)
   // a normal estimate at today's price and answers { url } to open it.
   restartPlan() {
