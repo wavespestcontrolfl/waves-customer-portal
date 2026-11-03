@@ -73,6 +73,7 @@ describe('movePauseText', () => {
     })).toBe('Reminder text sent Nov 8. Visits paused after Nov 15, held until Jan 14');
     expect(movePauseText({ ...submitted, pause_state: 'office', pause_note: 'They prepay for the year, so the automatic pause skipped them. Pause their visits by hand.' }))
       .toBe('Pause left to the office: They prepay for the year, so the automatic pause skipped them. Pause their visits by hand.');
+    expect(movePauseText({ ...submitted, paused_at: '2026-11-15T15:20:00Z' })).toBe('Pause started Nov 15, not finished yet');
     // A closed move has its own status line.
     expect(movePauseText({ status: 'closed', closed_reason: 'pause_expired', pause_state: 'paused' })).toBeNull();
   });

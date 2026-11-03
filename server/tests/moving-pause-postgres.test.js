@@ -347,7 +347,9 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     Notifications.notifyAdmin.mockRejectedValueOnce(new Error('insert failed'));
     expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 0, failed: 1 });
     expect(await statusOf(s.pestAfter1)).toBe('cancelled');
-    expect((await moveRow(s.move.id)).pause_state).toBeNull();
+    // The claim stands (a started pause); the end state did not.
+    expect(await moveRow(s.move.id)).toMatchObject({ pause_state: null });
+    expect((await moveRow(s.move.id)).paused_at).not.toBeNull();
     expect(await trx('activity_log').where({ customer_id: customerId, action: 'moving_paused' }).count({ n: '*' }).first()).toEqual({ n: '0' });
     expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1, failed: 0 });
     expect((await moveRow(s.move.id)).pause_state).toBe('paused');
@@ -450,9 +452,12 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(await statusOf(s.pestAfter1)).toBe('cancelled');
   });
 
-  test('a run that stopped after its cancels resumes: the follow-through replays and the move is marked', async () => {
-    const s = await seed();
-    // Simulate a run that cancelled the pest plan and died before its follow-through and the mark.
+  // A run that claimed the pause, cancelled the pest plan and stopped before that cancel's
+  // follow-through (and before the lawn plan and the end state).
+  async function crashAfterPestCancel(s) {
+    await trx('customer_moves').where({ id: s.move.id }).update({
+      paused_at: new Date(), pause_ends_on: etDateString(addETDays(new Date(`${MOVE_OUT}T12:00:00Z`), 60)),
+    });
     const actual = jest.requireActual('../services/recurring-series-cancel');
     const FT = jest.requireActual('../services/visit-cancellation-followthrough');
     FollowThrough.runVisitCancellationFollowThrough.mockImplementationOnce(async () => { throw Object.assign(new Error('process stopped'), { statusCode: 500 }); });
@@ -466,15 +471,60 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect((await trx('scheduled_services').where({ id: s.pestAfter1 }).first('track_state')).track_state).not.toBe('cancelled');
     FollowThrough.runVisitCancellationFollowThrough.mockReset();
     FollowThrough.runVisitCancellationFollowThrough.mockImplementation((...args) => FT.runVisitCancellationFollowThrough(...args));
-
-    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
+  }
+  async function expectPestReplayed(s) {
     const replay = FollowThrough.runVisitCancellationFollowThrough.mock.calls.map(([args]) => args)
       .find((args) => args.targetIds.includes(s.pestAfter1));
     expect(replay).toMatchObject({ waiveFee: true, source: 'moving-pause', linkedChildren: [] });
     expect([...replay.targetIds].sort()).toEqual([s.pestAfter1, s.pestAfter2].sort());
     expect(await trx('scheduled_services').whereIn('id', [s.pestAfter1, s.pestAfter2]).pluck('track_state')).toEqual(['cancelled', 'cancelled']);
+  }
+
+  test('a started pause resumes on the next run: the follow-through replays, the rest stops, the move is marked', async () => {
+    const s = await seed();
+    await crashAfterPestCancel(s);
+    // While it is unfinished the receipt promises nothing and no reminder goes.
+    expect((await Moves.submitMove(await moveRow(s.move.id), { moveOutDate: MOVE_OUT })).pauseLane).toBeNull();
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
+    await expectPestReplayed(s);
     expect(await statusOf(s.lawnAfter)).toBe('cancelled');
     expect((await moveRow(s.move.id)).pause_state).toBe('paused');
+  });
+
+  test('a started pause whose move-out date changed meanwhile goes to the office after the replay, with no more cancels', async () => {
+    const s = await seed();
+    await crashAfterPestCancel(s);
+    await Moves.submitMove(await moveRow(s.move.id), { moveOutDate: day(20) });
+    expect((await moveRow(s.move.id)).pause_state).toBeNull();
+    expect(await Moves.runMovePauseJob()).toMatchObject({ office: 1, paused: 0 });
+    await expectPestReplayed(s);
+    expect(await statusOf(s.lawnAfter)).toBe('pending');
+    const after = await moveRow(s.move.id);
+    expect(after.pause_state).toBe('office');
+    expect(after.pause_note).toContain('changed the move-out date');
+    const [[, , why]] = alertCalls('office');
+    expect(why).toMatch(/^The automatic pause for the move-out on .+ did not finish; the item says what stopped\.$/);
+  });
+
+  test('a started pause whose customer added the address meanwhile ends paused after the replay; Apply move takes the rest', async () => {
+    const s = await seed();
+    await crashAfterPestCancel(s);
+    await trx('customer_moves').where({ id: s.move.id }).update({
+      typed_address: NEW_ADDRESS, normalized_address: JSON.stringify(NEW_HOUSE), address_verdict: 'in_area',
+    });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
+    await expectPestReplayed(s);
+    expect(await statusOf(s.lawnAfter)).toBe('pending');
+    expect((await moveRow(s.move.id)).pause_state).toBe('paused');
+    expect(alertCalls('office')).toHaveLength(0);
+  });
+
+  test('a customer with no recurring plan is left alone: no pause, no item, and the move never ends on its own', async () => {
+    const s = await seed({ customer: { billing_mode: 'one_time' } });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ office: 1, paused: 0 });
+    expect(await statusOf(s.pestAfter1)).toBe('pending');
+    expect(await moveRow(s.move.id)).toMatchObject({ status: 'submitted', pause_state: 'office', pause_note: 'They have no recurring plan to pause.' });
+    expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('60 days after move-out with still no address, the move closes and the office gets one item', async () => {

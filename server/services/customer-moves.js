@@ -1605,6 +1605,12 @@ async function applyAction(move, conn = db) {
 const REMINDER_DAYS = 7;
 const PAUSE_PASS_LIMIT = 50;
 const REMINDER_TEMPLATE = 'moving_address_reminder';
+// Moves the job leaves alone with no office item, by billingBlock code: no
+// plan to pause, or no customer.
+const PAUSE_SKIP_NOTES = {
+  customer_gone: 'The customer record is not active.',
+  no_plan: 'They have no recurring plan to pause.',
+};
 // Why the office has a pause, by billingBlock code.
 const PAUSE_OFFICE_NOTES = {
   prepay: 'They prepay for the year, so the automatic pause skipped them. Pause their visits by hand.',
@@ -1654,8 +1660,9 @@ function pauseDue(move, today) {
  */
 async function pauseLane(move, conn = db) {
   if (!movingPauseLive() || !move || move.normalized_address || !move.move_out_date) return null;
-  // A pause that already ran (or went to the office) decides it.
+  // A pause that ended (or went to the office) decides it; one still running promises nothing.
   if (move.pause_state) return move.pause_state === 'paused' ? 'auto' : 'office';
+  if (move.paused_at) return null;
   const block = await billingBlock(conn, move.customer_id);
   if (!block) return 'auto';
   return PAUSE_OFFICE_NOTES[block] ? 'office' : null;
@@ -1716,6 +1723,7 @@ async function sendMoveReminder(move) {
 function reminderDue(query, today) {
   return query
     .whereNull('pause_reminder_at')
+    .whereNull('paused_at')
     .where('move_out_date', '>=', today)
     .where('move_out_date', '<=', plusDays(today, REMINDER_DAYS))
     .whereRaw("(submitted_at AT TIME ZONE 'America/New_York')::date < ?::date", [today]);
@@ -1772,68 +1780,99 @@ async function pausePlan(move, today) {
   return { ...ctx, ...old, moveOut, stations: stationState.rented.length > 0 || stationState.flaggedRental === true };
 }
 
-// The office takes this pause, once: nothing more runs for it automatically.
-async function handPauseToOffice(move, note, { now, done = '', alert = true }) {
-  const text = `${done}${note}`.trim();
+// A pause that started and has not finished: paused_at is set before the
+// first cancel (claimPause), pause_state only at its end (settlePause).
+const pauseStarted = (move) => !!(move && move.paused_at && !move.pause_state);
+
+// The office item for a pause the office takes over.
+const officeItem = (note, why) => ({ action: (name) => `pause ${name}'s plan by hand`, why, detail: note });
+
+// The office takes a pause that never started (the customer's billing plan or
+// record rules it out), once: nothing more runs for it automatically.
+async function handPauseToOffice(move, note, { now, alert = true }) {
   return db.transaction(async (trx) => {
     const updated = await trx('customer_moves')
       .where({ id: move.id, status: 'submitted' })
       .whereNull('pause_state')
-      .update({ pause_state: 'office', paused_at: now, pause_note: text.slice(0, 300), updated_at: now });
+      .whereNull('paused_at')
+      .update({ pause_state: 'office', paused_at: now, pause_note: note.slice(0, 300), updated_at: now });
     if (!updated) return 'not_due';
     await trx('activity_log').insert({
       customer_id: move.customer_id,
       action: 'moving_pause_office',
-      description: `Move pause left to the office: ${text}`,
+      description: `Move pause left to the office: ${note}`,
       metadata: JSON.stringify({ move_id: move.id }),
     });
     if (alert) {
-      await raisePauseAlert(trx, move, 'office', {
-        action: (name) => `pause ${name}'s plan by hand`,
-        why: `Their move-out is ${prettyDate(dateOnlyString(move.move_out_date))} with no new address on file; the automatic pause did not run.`,
-        detail: text,
-      });
+      await raisePauseAlert(trx, move, 'office', officeItem(note,
+        `Their move-out is ${prettyDate(dateOnlyString(move.move_out_date))} with no new address on file; the automatic pause did not run.`));
     }
     return 'office';
   });
 }
 
-// Records the pause and its last day under the move's row lock, with the
-// office item for any visit the pause left booked at the old house.
-async function markPaused(move, plan, { now, summary }) {
+// Claims the pause before any cancel, under the move's row lock and only
+// while it is still due: paused_at and its last day (move-out + 60).
+async function claimPause(move, today, now) {
   return db.transaction(async (trx) => {
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
-    if (!pauseDue(locked, plan.today) || dateOnlyString(locked.move_out_date) !== plan.moveOut) return false;
-    await trx('customer_moves').where({ id: move.id }).update({
-      pause_state: 'paused', paused_at: now, pause_ends_on: plusDays(plan.moveOut, PAUSE_DAYS), updated_at: now,
-    });
-    await trx('activity_log').insert({
-      customer_id: move.customer_id,
-      action: 'moving_paused',
-      description: summary,
-      metadata: JSON.stringify({ move_id: move.id, from_property_id: plan.from.id, move_out_date: plan.moveOut }),
-    });
-    const left = [...plan.oneOffs, ...plan.pastOpen];
-    if (left.length) {
-      await raisePauseAlert(trx, move, 'left_booked', {
-        action: (name) => `check ${name}'s old-house visits`,
-        why: `The plans paused after the move-out, but ${left.length} visit${left.length === 1 ? ' is' : 's are'} still booked at the old house.`,
-        detail: `Still booked at ${propertyLine(plan.from)}: ${left.map((v) => `${v.name} ${prettyDate(v.date)}`).join(', ')}. Cancel any that should not run.`,
-      });
-    }
-    return true;
+    if (!pauseDue(locked, today) || locked.paused_at) return null;
+    const [claimed] = await trx('customer_moves').where({ id: move.id }).update({
+      paused_at: now, pause_ends_on: plusDays(dateOnlyString(locked.move_out_date), PAUSE_DAYS), updated_at: now,
+    }).returning('*');
+    return claimed;
   });
 }
 
-// Stops every plan at the house left, replays an earlier run's unfinished
-// follow-through, and opens the termite task. A refusal from a cancel hands
-// the pause to the office with what already stopped; any other failure throws
-// and the next run resumes.
+// Ends a started pause under the move's row lock, only if the move still has
+// the status, move-out date and address the run acted on, with its office
+// items in the same transaction.
+async function settlePause(move, facts, { state, note = null, summary = null, why = null, left = [], house = null, now }) {
+  return db.transaction(async (trx) => {
+    const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
+    if (!pauseStarted(locked) || locked.status !== facts.status
+      || (dateOnlyString(locked.move_out_date) || null) !== facts.moveOut || !!locked.normalized_address !== facts.hasAddress) return 'not_due';
+    await trx('customer_moves').where({ id: move.id }).update({
+      pause_state: state, ...(note ? { pause_note: note.slice(0, 300) } : {}), updated_at: now,
+    });
+    await trx('activity_log').insert({
+      customer_id: move.customer_id,
+      action: state === 'paused' ? 'moving_paused' : 'moving_pause_office',
+      description: summary || `Move pause left to the office: ${note}`,
+      metadata: JSON.stringify({ move_id: move.id, move_out_date: facts.moveOut }),
+    });
+    if (state === 'office' && why) await raisePauseAlert(trx, locked, 'office', officeItem(note, why));
+    if (left.length) {
+      await raisePauseAlert(trx, locked, 'left_booked', {
+        action: (name) => `check ${name}'s old-house visits`,
+        why: `The plans paused after the move-out, but ${left.length} visit${left.length === 1 ? ' is' : 's are'} still booked at the old house.`,
+        detail: `Still booked at ${propertyLine(house)}: ${left.map((v) => `${v.name} ${prettyDate(v.date)}`).join(', ')}. Cancel any that should not run.`,
+      });
+    }
+    return state;
+  });
+}
+
+// An earlier run's cancels whose follow-through did not finish (the process
+// stopped): replayed, found by the visit note naming the move (the same
+// repair as Apply move's; each step finds nothing left to do when it ran).
+async function replayPauseFollowThrough(move) {
+  const note = pauseVisitNote(move.id);
+  const { priorCancelledVisits } = require('./cancellation-processor');
+  const earlier = await priorCancelledVisits(move.customer_id, note);
+  if (!earlier.length) return;
+  await require('./visit-cancellation-followthrough').runVisitCancellationFollowThrough({
+    targetIds: earlier.map((v) => v.id), actorId: null, waiveFee: true, reason: note, source: 'moving-pause', linkedChildren: [],
+  });
+}
+
+// Stops every plan at the house left and opens the termite task. A refusal
+// from a cancel returns with what already stopped; any other failure throws
+// and the next run resumes the claimed pause.
 async function runPause(move, plan) {
   const customerId = move.customer_id;
   const note = pauseVisitNote(move.id);
   const progress = { plansStopped: 0, visitsCancelled: 0, stopped: [], stationTask: false };
-  const cancelledNow = new Set();
   for (const stop of plan.stops) {
     try {
       const out = await stopHousePlan(stop, {
@@ -1841,7 +1880,6 @@ async function runPause(move, plan) {
         primaryIsHouse: async (trx) => sameId(await primaryPropertyId(customerId, trx), plan.from.id),
         changed: `${stop.name} changed while the pause was running.`,
       });
-      for (const t of out.targets) cancelledNow.add(String(t.id));
       progress.plansStopped += 1;
       progress.visitsCancelled += out.cancelledCount;
       progress.stopped.push(stop.name);
@@ -1852,13 +1890,6 @@ async function runPause(move, plan) {
       return progress;
     }
   }
-  const { priorCancelledVisits } = require('./cancellation-processor');
-  const earlier = (await priorCancelledVisits(customerId, note)).filter((v) => !cancelledNow.has(String(v.id)));
-  if (earlier.length) {
-    await require('./visit-cancellation-followthrough').runVisitCancellationFollowThrough({
-      targetIds: earlier.map((v) => v.id), actorId: null, waiveFee: true, reason: note, source: 'moving-pause', linkedChildren: [],
-    });
-  }
   if (plan.stations) {
     const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
     const task = await raiseTermiteRetrievalTask(customerId, move.service_request_id, { retrieveAfter: plan.moveOut });
@@ -1867,10 +1898,55 @@ async function runPause(move, plan) {
   return progress;
 }
 
+// Runs a claimed pause to its end, whatever changed since the claim. It first
+// replays an earlier run's unfinished cancel follow-through. A move closed
+// since, or with a new move-out date, goes to the office (no more cancels);
+// a move with an address added since ends 'paused' (the new-home estimate
+// and Apply move take over). Otherwise every plan at the house left stops; a
+// refused cancel goes to the office with what already stopped.
+async function finishPause(move, { today, now }) {
+  const claimedMoveOut = plusDays(dateOnlyString(move.pause_ends_on), -PAUSE_DAYS);
+  const facts = { status: move.status, moveOut: dateOnlyString(move.move_out_date) || null, hasAddress: !!move.normalized_address };
+  const why = `The automatic pause for the move-out on ${prettyDate(claimedMoveOut)} did not finish; the item says what stopped.`;
+  await replayPauseFollowThrough(move);
+  if (move.status !== 'submitted') {
+    return settlePause(move, facts, { state: 'office', note: 'The move closed while the pause was running.', now });
+  }
+  if (facts.moveOut !== claimedMoveOut) {
+    const note = `The customer changed the move-out date to ${prettyDate(facts.moveOut) || 'not known yet'} while the pause for ${prettyDate(claimedMoveOut)} was running. Check the old-house visits against the new date.`;
+    return settlePause(move, facts, { state: 'office', note, why, now });
+  }
+  if (facts.hasAddress) {
+    return settlePause(move, facts, {
+      state: 'paused', now,
+      summary: `The customer added the new address while the pause was running; the plans at the old house stay stopped after ${prettyDate(claimedMoveOut)}.`,
+    });
+  }
+  let plan;
+  try {
+    plan = await pausePlan(move, today);
+  } catch (err) {
+    if (!(err instanceof MoveError)) throw err;
+    return settlePause(move, facts, { state: 'office', note: err.message, why, now });
+  }
+  const progress = await runPause(move, plan);
+  if (progress.refusal) {
+    const done = progress.stopped.length ? `Stopped: ${progress.stopped.join(', ')}. ` : '';
+    return settlePause(move, facts, { state: 'office', note: `${done}Not stopped: ${progress.refusal}`, why, now });
+  }
+  const summary = [
+    `Customer moved out with no new address: plans at ${propertyLine(plan.from)} paused after ${prettyDate(plan.moveOut)}`,
+    `(${progress.plansStopped} plans, ${progress.visitsCancelled} visits cancelled, no customer text, no fee), held until ${prettyDate(dateOnlyString(move.pause_ends_on))}.`,
+    progress.stationTask ? 'Termite station pickup task opened.' : '',
+  ].join(' ').trim();
+  return settlePause(move, facts, { state: 'paused', summary, left: [...plan.oneOffs, ...plan.pastOpen], house: plan.from, now });
+}
+
 /**
- * Pause one move whose customer moved out with no new address. Returns its
- * outcome. Every step, the office hand-off included, is awaited inside the
- * try: the move fence is released only after it commits or rolls back.
+ * Pause one move whose customer moved out with no new address, or finish one
+ * an earlier run started. Returns its outcome. Every step, the office
+ * hand-off included, is awaited inside the try: the move fence is released
+ * only after it commits or rolls back.
  */
 async function pauseMove(moveId, { today, now }) {
   let release;
@@ -1882,30 +1958,13 @@ async function pauseMove(moveId, { today, now }) {
   }
   try {
     const move = await db('customer_moves').where({ id: moveId }).first();
+    if (pauseStarted(move)) return await finishPause(move, { today, now });
     if (!pauseDue(move, today)) return 'not_due';
     const block = await billingBlock(db, move.customer_id);
-    if (block === 'customer_gone') return await handPauseToOffice(move, 'The customer record is not active.', { now, alert: false });
-    if (PAUSE_OFFICE_NOTES[block]) return await handPauseToOffice(move, PAUSE_OFFICE_NOTES[block], { now });
-    let plan;
-    try {
-      plan = await pausePlan(move, today);
-    } catch (err) {
-      if (err instanceof MoveError) return await handPauseToOffice(move, err.message, { now });
-      throw err;
-    }
-    const progress = await runPause(move, plan);
-    if (progress.refusal) {
-      const done = progress.stopped.length ? `Stopped: ${progress.stopped.join(', ')}. ` : '';
-      return await handPauseToOffice(move, `Not stopped: ${progress.refusal}`, { now, done });
-    }
-    const summary = [
-      `Customer moved out with no new address: plans at ${propertyLine(plan.from)} paused after ${prettyDate(plan.moveOut)}`,
-      `(${progress.plansStopped} plans, ${progress.visitsCancelled} visits cancelled, no customer text, no fee), held until ${prettyDate(plusDays(plan.moveOut, PAUSE_DAYS))}.`,
-      progress.stationTask ? 'Termite station pickup task opened.' : '',
-    ].join(' ').trim();
-    if (!(await markPaused(move, plan, { now, summary }))) return 'not_due';
-    logger.info(`[customer-moves] paused move ${moveId}: ${progress.plansStopped} plans, ${progress.visitsCancelled} visits`);
-    return 'paused';
+    if (PAUSE_SKIP_NOTES[block]) return await handPauseToOffice(move, PAUSE_SKIP_NOTES[block], { now, alert: false });
+    if (block) return await handPauseToOffice(move, PAUSE_OFFICE_NOTES[block] || PAUSE_OFFICE_NOTES.billing, { now });
+    const claimed = await claimPause(move, today, now);
+    return claimed ? await finishPause(claimed, { today, now }) : 'not_due';
   } finally {
     await release();
   }
@@ -1913,7 +1972,12 @@ async function pauseMove(moveId, { today, now }) {
 
 async function pauseDueMoves({ today, now }) {
   const out = { paused: 0, office: 0, busy: 0, failed: 0 };
-  await forEachMove(noAddressMoves().whereNull('pause_state').where('move_out_date', '<=', today), async (id) => {
+  // Due moves, and every pause an earlier run started, whatever changed since.
+  const due = db('customer_moves').whereNull('pause_state').where((q) => q
+    .whereNotNull('paused_at')
+    .orWhere((fresh) => fresh.where({ status: 'submitted' }).whereNull('normalized_address').whereNotNull('move_out_date')
+      .where('move_out_date', '<=', today)));
+  await forEachMove(due, async (id) => {
     try {
       const outcome = await pauseMove(id, { today, now });
       if (outcome in out) out[outcome] += 1;

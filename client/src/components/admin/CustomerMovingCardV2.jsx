@@ -85,6 +85,8 @@ export function movePauseText(move) {
     parts.push(`Visits paused after ${dayOnly(move.move_out_date)}, held until ${dayOnly(move.pause_ends_on)}`);
   } else if (move.pause_state === "office") {
     parts.push(`Pause left to the office: ${move.pause_note || "pause the visits by hand"}`);
+  } else if (move.paused_at) {
+    parts.push(`Pause started ${shortDate(move.paused_at)}, not finished yet`);
   }
   return parts.length ? parts.join(". ") : null;
 }
