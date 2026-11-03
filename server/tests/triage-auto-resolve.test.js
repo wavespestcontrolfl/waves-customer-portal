@@ -401,7 +401,7 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     'auto_booking_skipped_after_approval', 'existing_appointment_same_date',
     'ambiguous_existing_appointment', 'outbound_booking_review',
     'unassigned_auto_booking', 'booking_time_conflict',
-    'email_bounce_reverify', 'extraction_failed_permanent',
+    'extraction_failed_permanent',
     'v2_extraction_invalid', 'shared_phone_ambiguous', 'out_of_service_area',
     'do_not_contact_requested', 'hoa_common_area_requires_approval',
     'implied_consent_non_ani_recipient',
@@ -423,6 +423,14 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
       item({ reason_code: 'missing_last_name', customer_last_name: null, created_at: OLD_31D }),
       noBookings, { now: NOW },
     )).toBeNull();
+  });
+  // email_bounce_reverify never AGE-dismisses either; only bounced_email_replaced
+  // closes it (asserted with that rule below).
+  test('email_bounce_reverify aged 31d with the bounced address still on file stays open', () => {
+    expect(classifyTriageItem(item({
+      reason_code: 'email_bounce_reverify', created_at: OLD_31D, call_customer_id: 'cust-1', customer_email: 'm.sample@example.net',
+      payload: { flag: 'email_bounce_reverify', bounced_email: 'm.sample@example.net', customer_id: 'cust-1' },
+    }), noBookings, { now: NOW })).toBeNull();
   });
   test.each(owedCodes)('%s stays open even when ancient', (code) => {
     expect(classifyTriageItem(item({ reason_code: code, created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
@@ -2315,5 +2323,49 @@ describe('visit_passed (booking_time_conflict / booking_out_of_hours on a done v
 
   test('the note carries the rule name', () => {
     expect(RULE_NOTES.visit_passed).toMatch(/^Auto-resolved/);
+  });
+});
+
+// Owner 2026-11-03: a hand-fixed email left the bounce card open with a stale
+// guess. It closes once the card's customer holds a different working email.
+describe('bounced_email_replaced — a bounce card closes once its customer holds a different email', () => {
+  const bounceCard = (over = {}, payload = {}) => item({
+    reason_code: 'email_bounce_reverify', call_customer_id: 'cust-1', customer_email: 'msample@example.net', ...over,
+    payload: { flag: 'email_bounce_reverify', bounced_email: 'm.sample@example.net', customer_id: 'cust-1', email_candidates: [{ value: 'sample@example.net', confidence: 0.85 }], ...payload },
+  });
+  const RESOLVED = { action: 'resolve', rule: 'bounced_email_replaced' };
+  const verdict = (card) => classifyTriageItem(card, noBookings, { now: NOW });
+
+  test('a different valid email on the record resolves it, with an audit note', () => {
+    expect(verdict(bounceCard())).toEqual(RESOLVED);
+    expect(verdict(bounceCard({ payload: JSON.stringify({ flag: 'email_bounce_reverify', bounced_email: 'm.sample@example.net', customer_id: 'cust-1' }) }))).toEqual(RESOLVED);
+    expect(RULE_NOTES.bounced_email_replaced).toBeTruthy();
+  });
+
+  test('the bounced address still on any email field of the record keeps it open', () => {
+    expect(verdict(bounceCard({ customer_email: 'M.Sample@example.net' }))).toBeNull();
+    for (const field of ['customer_service_contact_email', 'customer_service_contact2_email', 'customer_service_contact3_email', 'customer_billing_email']) {
+      expect(verdict(bounceCard({ [field]: 'm.sample@example.net' }))).toBeNull();
+    }
+    // A Gmail spelling of the bounced inbox is that inbox.
+    expect(verdict(bounceCard({ customer_email: 'msample@gmail.com' }, { bounced_email: 'm.sample@gmail.com' }))).toBeNull();
+    // An annotated second bounced address counts too.
+    expect(verdict(bounceCard({ customer_email: 'second@example.net' }, { additional_bounced_emails: ['second@example.net'] }))).toBeNull();
+    expect(verdict(bounceCard({}, { additional_bounced_emails: ['second@example.net'] }))).toEqual(RESOLVED);
+  });
+
+  test('an emptied or invalid email keeps it open: nobody has a working address yet', () => {
+    for (const customer_email of [null, '', 'not-an-email']) expect(verdict(bounceCard({ customer_email }))).toBeNull();
+  });
+
+  test('never judged while the re-listen is analyzing, for another customer, or with the customer gone', () => {
+    expect(verdict(bounceCard({}, { analyzing: true }))).toBeNull();
+    expect(verdict(bounceCard({}, { customer_id: null }))).toBeNull();
+    expect(verdict(bounceCard({ call_customer_id: 'cust-2' }))).toBeNull();
+    expect(verdict(bounceCard({ customer_deleted_at: FRESH }))).toBeNull();
+  });
+
+  test('no other card closes on this rule', () => {
+    expect(verdict(bounceCard({ reason_code: 'email_unverified' }))).toBeNull();
   });
 });

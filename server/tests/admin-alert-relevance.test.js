@@ -444,6 +444,60 @@ describe('class rules', () => {
     expect(mockQueries.filter((q) => q.table === 'customers')).toEqual([]);
   });
 
+  // Owner 2026-11-03: a hand-fixed email left the "bounce needs a fix" alert open with a stale guess.
+  const bounceBell = (over = {}) => note({ category: 'ops_digest', link: '/admin/customers', metadata: {
+    opsKey: 'email-bounce-rescue', kind: 'ACT', doneWhen: 'bounced_email_replaced', bouncedEmail: 'm.sample@example.net', customerId: CUST, ownerField: 'email', ...over,
+  } });
+  const bounceOwner = (over = {}) => ({ id: CUST, email: 'msample@example.net', service_contact_email: null, service_contact2_email: null, service_contact3_email: null, deleted_at: null, ...over });
+  const CHANGED = { cls: 'email_bounce_fix', reason: 'Email on file was changed' };
+
+  test('bounced-email alert: done once the field that bounced holds a different valid address and no email field is the bounced one', async () => {
+    mockTables.notification_prefs = [];
+    mockTables.customers = [bounceOwner()];
+    expect(await reasonFor(bounceBell())).toEqual(CHANGED);
+    // The bounced address still in the field (any case), or kept on another email field: stays.
+    mockTables.customers = [bounceOwner({ email: 'M.Sample@example.net' })];
+    expect((await reasonFor(bounceBell())).reason).toBeNull();
+    mockTables.customers = [bounceOwner({ service_contact2_email: 'm.sample@example.net' })];
+    expect((await reasonFor(bounceBell())).reason).toBeNull();
+    mockTables.customers = [bounceOwner()];
+    mockTables.notification_prefs = [{ customer_id: CUST, billing_email: 'm.sample@example.net' }];
+    expect((await reasonFor(bounceBell())).reason).toBeNull();
+    // The field emptied, or the owner gone (a soft-deleted row is not loaded): stays, nobody has a working address.
+    mockTables.notification_prefs = [];
+    mockTables.customers = [bounceOwner({ email: null })];
+    expect((await reasonFor(bounceBell())).reason).toBeNull();
+    mockTables.customers = [bounceOwner({ deleted_at: AFTER_BELL })];
+    expect((await reasonFor(bounceBell())).reason).toBeNull();
+    mockTables.customers = [];
+    expect((await reasonFor(bounceBell())).reason).toBeNull();
+    // The field it bounced from is the one judged: a billing bounce closes on a new billing address only.
+    mockTables.customers = [bounceOwner({ email: 'other@example.net' })];
+    mockTables.notification_prefs = [{ customer_id: CUST, billing_email: 'billing@example.net' }];
+    expect(await reasonFor(bounceBell({ ownerField: 'billing_email' }))).toEqual(CHANGED);
+    mockTables.notification_prefs = [];
+    expect((await reasonFor(bounceBell({ ownerField: 'billing_email' }))).reason).toBeNull();
+    // A lead owner, by its own email.
+    mockTables.leads = [{ id: LEAD, email: 'msample@example.net', deleted_at: null }];
+    expect(await reasonFor(bounceBell({ customerId: undefined, leadId: LEAD }))).toEqual(CHANGED);
+    mockTables.leads = [{ id: LEAD, email: 'm.sample@example.net', deleted_at: null }];
+    expect((await reasonFor(bounceBell({ customerId: undefined, leadId: LEAD }))).reason).toBeNull();
+  });
+
+  test('bounced-email alert: only the rescue digest that names its owner is this class, and no other bell reads an email record', async () => {
+    // A legacy row with no doneWhen, another digest, or another category: not this class.
+    expect(classify(note({ category: 'ops_digest', metadata: { opsKey: 'email-bounce-rescue', kind: 'ACT' } }))).toBeNull();
+    expect(classify(note({ category: 'ops_digest', metadata: { opsKey: 'other-check', doneWhen: 'bounced_email_replaced' } }))).toBeNull();
+    expect(classify(note({ category: 'system', metadata: { dedupeKey: 'email-rescue-suggestion:m.sample@example.net', doneWhen: 'bounced_email_replaced', opsKey: 'email-bounce-rescue' } }))).toBeNull();
+    // No usable owner, address or field: judged as still relevant, and no record is read.
+    mockQueries = [];
+    for (const over of [{ customerId: 'not-an-id' }, { bouncedEmail: '' }, { ownerField: 'phone' }]) {
+      expect(await reasonFor(bounceBell(over))).toEqual({ cls: 'email_bounce_fix', reason: null });
+    }
+    await loadSubjects([staleNote(uid(43))]);
+    expect(mockQueries.filter((q) => ['customers', 'leads', 'notification_prefs'].includes(q.table))).toEqual([]);
+  });
+
   test('promise chaser: settled once the promise it chases is closed; a missing promise or another missed-call bell is never judged (owner 2026-10-03)', async () => {
     const P = uid(520);
     const chaser = (over = {}) => note({
@@ -982,6 +1036,20 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1, retired: 0 });
     expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
     expect(JSON.parse(row.metadata).retired).toBeUndefined();
+  });
+
+  test('a bounced-email alert is retired by the sweep once the address is replaced, and put back if the bounced address comes back', async () => {
+    const row = note({ category: 'ops_digest', link: '/admin/customers', metadata: {
+      opsKey: 'email-bounce-rescue', kind: 'ACT', doneWhen: 'bounced_email_replaced', bouncedEmail: 'm.sample@example.net', customerId: CUST, ownerField: 'email',
+    } });
+    mockTables.customers = [{ id: CUST, email: 'msample@example.net' }];
+    mockTables.notification_prefs = [];
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 1, byClass: { email_bounce_fix: 1 } });
+    expect(row).toMatchObject({ done_at: NOW, done_by: 'relevance', resolution: 'Email on file was changed' });
+    mockTables.customers[0].email = 'm.sample@example.net';
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1, retired: 0 });
+    expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
   });
 
   test('a promise-chaser retirement is final: the promise reopened later does not put the bell back (its emitter\'s own close is final too)', async () => {

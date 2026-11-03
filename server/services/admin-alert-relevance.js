@@ -85,7 +85,12 @@
  * (owner 2026-10-08) closes once its visit is closed, gone, moved off the
  * date or start it was booked for, or past its date. A call last-name
  * suggestion (owner 2026-10-08) closes once its customer has a last name or is
- * gone. Every other missed-call bell stays a person's to close, and so does a
+ * gone. A bounced-email alert (owner 2026-11-03, doneWhen
+ * `bounced_email_replaced`) closes once its owner's record holds a different
+ * valid address in the field that bounced and no email field on it is the
+ * bounced address; its owner gone keeps it, and its fallback bell (a stable
+ * dedupeKey) is a person's to close. Every other missed-call bell stays a
+ * person's to close, and so does a
  * portal chat topic that no person has answered (owner 2026-10-31: "A chat item
  * closes itself when someone texts, calls or emails that customer after the
  * request"; below). A promise-chaser retirement is final (`rearm: false`),
@@ -162,6 +167,12 @@ const portalBookingGate = () => (require('../config/feature-gates').portalBookin
 // The dedupeKey prefix of the unfinished-booking bells (portal-unfinished-bookings.js KEY_PREFIX). Repeated, not
 // imported: that module reads the database at load. A test pins the two together.
 const UNFINISHED_BOOKING_PREFIX = 'portal-unfinished-';
+// The bounced-email alert's doneWhen (email-bounce-rescue.js BOUNCE_ALERT_DONE_WHEN) and the
+// customer email fields a bounce can come from (its CUSTOMER_EMAIL_FIELDS; billing_email is on
+// notification_prefs). Repeated, not imported: that module pulls in the transcript rescue. A test
+// pins them together.
+const BOUNCE_DONE_WHEN = 'bounced_email_replaced';
+const BOUNCE_CUSTOMER_FIELDS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
 
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;
@@ -246,7 +257,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), contactMode: 'off', contactFailed: false });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactMode: 'off', contactFailed: false });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -528,6 +539,47 @@ async function loadLeadHandoffs(rows, data, conn) {
   }
 }
 
+// The address a bounced-email alert is about, its owner and the field it bounced from, from the
+// alert's own metadata (email-bounce-rescue.js bounceAlertMetadata), else null. Only that class
+// names one, so no other bell loads an email.
+function bounceRefOf(meta) {
+  if (meta.doneWhen !== BOUNCE_DONE_WHEN) return null;
+  const bouncedEmail = String(meta.bouncedEmail || '').trim().toLowerCase();
+  const customerId = uuidOrNull(meta.customerId);
+  const leadId = customerId ? null : uuidOrNull(meta.leadId);
+  const field = customerId ? meta.ownerField : 'email';
+  const fields = customerId ? [...BOUNCE_CUSTOMER_FIELDS, 'billing_email'] : ['email'];
+  if (!bouncedEmail || !(customerId || leadId) || !fields.includes(field)) return null;
+  return { bouncedEmail, field, customerId, leadId, key: customerId ? `customer:${customerId}` : `lead:${leadId}` };
+}
+
+// The bounced-email alerts' owners, live ones only (a soft-deleted record is not in the map, which
+// keeps the alert): every email field on the record, keyed `customer:<id>` / `lead:<id>`.
+async function loadBounceRecords(rows, data, conn) {
+  const refs = rows.map((row) => bounceRefOf(parseMeta(row.metadata))).filter(Boolean);
+  const customerIds = [...new Set(refs.map((r) => r.customerId).filter(Boolean))];
+  const leadIds = [...new Set(refs.map((r) => r.leadId).filter(Boolean))];
+  if (customerIds.length) {
+    const prefs = await conn('notification_prefs').whereIn('customer_id', customerIds).select('customer_id', 'billing_email');
+    const billing = new Map(prefs.map((p) => [String(p.customer_id), p.billing_email ?? null]));
+    const customers = await conn('customers').whereIn('id', customerIds).whereNull('deleted_at').select('id', ...BOUNCE_CUSTOMER_FIELDS);
+    for (const c of customers) {
+      const record = Object.fromEntries(BOUNCE_CUSTOMER_FIELDS.map((f) => [f, c[f] ?? null]));
+      data.bounceRecords.set(`customer:${String(c.id).toLowerCase()}`, { ...record, billing_email: billing.get(String(c.id)) ?? null });
+    }
+  }
+  if (leadIds.length) {
+    const leads = await conn('leads').whereIn('id', leadIds).whereNull('deleted_at').select('id', 'email');
+    for (const l of leads) data.bounceRecords.set(`lead:${String(l.id).toLowerCase()}`, { email: l.email ?? null });
+  }
+}
+
+// A bounced-email alert's subject: its ref and the owner's live record (undefined = gone), else null.
+function bounceSubject(meta, data) {
+  const ref = bounceRefOf(meta);
+  return ref ? { ref, record: data.bounceRecords.get(ref.key) } : null;
+}
+
 // The live records for a batch of notification rows: one query per table per
 // batch (a lead's estimate is only known once the lead is loaded, so estimates
 // run second). Plain reads — never a lock.
@@ -550,6 +602,7 @@ async function loadSubjects(rows, conn = db) {
   }
   await loadQuoteHandoffs(rows, data, conn);
   await loadUnfinishedBookings(rows, data, conn);
+  await loadBounceRecords(rows, data, conn);
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
     // host's midnight, the previous ET day on a UTC host.
@@ -653,6 +706,8 @@ function subjectFor(row, data, todayET) {
     contact: data.contact.get(String(row.id)) || null,
     // When a visit for the bell's customer was completed after the bell (text-note bells only).
     noteVisitDoneAt: data.noteVisits.get(String(row.id)) || null,
+    // A bounced-email alert's address and its owner's live record (those alerts only).
+    bounce: bounceSubject(resolved.refs.meta, data),
   };
 }
 
@@ -848,6 +903,19 @@ function callBookingRainSettled(s) {
   if (DATE_RE.test(bookedDay) && day !== bookedDay) return 'Visit was moved';
   if (bookedStart && String(s.visit.window_start || '').slice(0, 5) !== bookedStart) return 'Visit was moved';
   return DATE_RE.test(day) && day < s.todayET ? 'Visit date has passed' : null;
+}
+
+// A bounced-email alert (email-bounce-rescue.js sendSuggestionEmail, doneWhen 'bounced_email_replaced';
+// owner 2026-11-03: a hand-fixed email left the alert open with a stale guess) is done once its owner's
+// record holds a different valid address in the field that bounced, and no email field on the record is
+// the bounced address (email-equivalence.js bouncedEmailReplaced, the Triage bounce card's rule too). An
+// owner gone, or the field emptied, keeps it: nobody has a working address yet.
+function bouncedEmailFixed(s) {
+  const b = s.bounce;
+  if (!b?.record) return null;
+  const { bouncedEmailReplaced } = require('../utils/email-equivalence');
+  const replaced = bouncedEmailReplaced({ replacement: b.record[b.ref.field], onFile: Object.values(b.record), bounced: [b.ref.bouncedEmail] });
+  return replaced ? 'Email on file was changed' : null;
 }
 
 // A last-name suggestion (call-last-name-lookup.js: one bell per customer who
@@ -1079,6 +1147,11 @@ const CLASSES = [
   },
   { // call-last-name-lookup.js — one suggestion per customer
     key: 'call_last_name_suggestion', categories: ['customer'], prefix: SUGGESTION_KEY_PREFIX, rule: lastNameSaved,
+  },
+  { // email-bounce-rescue.js sendSuggestionEmail — a fresh row per examined bounce, never refreshed on a key.
+    // Its fallback bell (suggestionFallbackBell) keeps a stable dedupeKey, so that one stays a person's to close.
+    key: 'email_bounce_fix', categories: ['ops_digest'], doneWhen: BOUNCE_DONE_WHEN,
+    match: (meta) => meta.doneWhen === BOUNCE_DONE_WHEN && meta.opsKey === 'email-bounce-rescue', rule: bouncedEmailFixed,
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
