@@ -731,12 +731,30 @@ async function prepareReservationCommit(scheduledServiceId, options = {}) {
 // graced offer minted before ET midnight for "tomorrow" is now same-day,
 // and same-day picks never get grace (Codex r3 P2 on #5314), so the
 // customer must refresh into a grace-0 offer.
-function slotDateRefusal(date, todayEt, offerArrivalGrace, moveInDate = null) {
+function slotDateRefusal(date, todayEt, offerArrivalGrace) {
   if (date < todayEt) return 'slot date has already passed';
   if (date === todayEt && offerArrivalGrace > 0) return 'graced offer is now same-day';
-  // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate never books
-  // before the move-in date (the offer side filters the same days).
-  if (moveInDate && date < moveInDate) return 'slot is before the move-in date';
+  return null;
+}
+
+// Moving PR B1 (GATE_MOVING_ESTIMATE): the booking-time move check, run INSIDE
+// the booking transaction. The move row is share-locked first (a concurrent
+// moving-page submit waits for this commit); then a new-home estimate whose
+// move no longer stands behind it books nothing (the stale-call-link answer),
+// and nothing books before the move-in date. Returns the error to throw, or null.
+async function moveBookingRefusal(conn, estimateId, estimateData, date) {
+  const Moves = require('./customer-moves');
+  const move = await Moves.moveForEstimate(estimateId, conn, { lock: true });
+  if (await Moves.moveLinkBlock(conn, estimateData)) {
+    const err = new Error('estimate is no longer for its move');
+    err.code = 'ESTIMATE_NOT_FOUND';
+    return err;
+  }
+  if (move && move.move_in_date && date < move.move_in_date) {
+    const err = new Error('slot is before the move-in date');
+    err.code = 'SLOT_UNAVAILABLE';
+    return err;
+  }
   return null;
 }
 
@@ -873,8 +891,7 @@ async function reserveSlot({
   // A graced offer minted before ET midnight for "tomorrow" is now same-day,
   // and same-day picks never get grace (Codex r3 P2 on #5314): refuse it so
   // the customer refreshes into a grace-0 offer.
-  const moveInDate = (await require('./customer-moves').moveForEstimate(estimateId))?.move_in_date || null;
-  const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace, moveInDate);
+  const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace);
   if (dateRefusal) {
     const err = new Error(dateRefusal);
     err.code = 'SLOT_UNAVAILABLE';
@@ -1088,6 +1105,9 @@ async function reserveSlot({
             throw err;
           }
         }
+        // Moving PR B1: the move behind a new-home estimate, on locked rows.
+        const moveRefusal = await moveBookingRefusal(trx, estimateId, reservationData, date);
+        if (moveRefusal) throw moveRefusal;
       }
 
       // Caller-supplied no-booking revalidation on the LOCKED row, before the profile resolve, any capacity
@@ -1848,15 +1868,20 @@ async function commitReservation({
       err.code = 'SLOT_UNAVAILABLE';
       throw err;
     }
-    // Moving PR B1: a new-home estimate's hold that the customer's move-in
-    // date has since moved past is not graduated (same recoverable code).
-    const holdMoveIn = row.source_estimate_id
-      ? (await require('./customer-moves').moveForEstimate(row.source_estimate_id, client))?.move_in_date
-      : null;
-    if (holdMoveIn && dateOnly(row.scheduled_date) < holdMoveIn) {
-      const err = new Error('slot is before the move-in date');
-      err.code = 'SLOT_UNAVAILABLE';
-      throw err;
+    // Moving PR B1: a new-home estimate's hold graduates only while its move
+    // still stands behind it and the move-in date has not moved past it (the
+    // date refusal is the recoverable code: the customer picks another time).
+    if (row.source_estimate_id) {
+      const holdEstimate = estimate && String(estimate.id) === String(row.source_estimate_id)
+        ? estimate
+        : await client('estimates').where({ id: row.source_estimate_id }).first('id', 'estimate_data');
+      const raw = holdEstimate && holdEstimate.estimate_data;
+      let holdData = raw && typeof raw === 'object' ? raw : null;
+      if (typeof raw === 'string') {
+        try { holdData = JSON.parse(raw); } catch { holdData = null; }
+      }
+      const moveRefusal = await moveBookingRefusal(client, row.source_estimate_id, holdData, dateOnly(row.scheduled_date));
+      if (moveRefusal) throw moveRefusal;
     }
     // Graduating inside the grace window: reservation_expires_at itself has
     // passed (the row would have 409ed before this PR), but not by enough to

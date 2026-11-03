@@ -855,12 +855,17 @@ function withMoveSetupWaiver(base) {
   };
 }
 
-/** The submitted move this estimate was made for (gate on), with dates as YYYY-MM-DD, or null. */
-async function moveForEstimate(estimateId, conn = db) {
+/**
+ * The submitted move this estimate was made for (gate on), with dates as
+ * YYYY-MM-DD, or null. `lock` share-locks the row for a booking transaction,
+ * so a moving-page submit cannot change the dates until that commit.
+ */
+async function moveForEstimate(estimateId, conn = db, { lock = false } = {}) {
   if (!movingEstimateLive() || !estimateId) return null;
-  const move = await conn('customer_moves')
-    .where({ estimate_id: estimateId, status: 'submitted', address_verdict: 'in_area' })
-    .first('id', 'customer_id', 'normalized_address', 'move_out_date', 'move_in_date', 'from_property_id');
+  const query = conn('customer_moves')
+    .where({ estimate_id: estimateId, status: 'submitted', address_verdict: 'in_area' });
+  if (lock) query.forShare();
+  const move = await query.first('id', 'customer_id', 'normalized_address', 'move_out_date', 'move_in_date', 'from_property_id');
   if (!move) return null;
   return {
     ...move,

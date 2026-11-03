@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 // Moving PR B1: no move by default; one test sets a move-in date.
-jest.mock('../services/customer-moves', () => ({ moveForEstimate: jest.fn(async () => null) }));
+jest.mock('../services/customer-moves', () => ({ moveForEstimate: jest.fn(async () => null), moveLinkBlock: jest.fn(async () => null) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -344,20 +344,28 @@ describe('slot reservation helpers', () => {
     }
   });
 
-  test('reserveSlot refuses a new-home estimate\'s slot before the move-in date, before any hold (moving PR B1)', async () => {
+  test('reserveSlot refuses a new-home estimate\'s slot before the move-in date, read under a lock in the hold transaction (moving PR B1)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
-    const { moveForEstimate } = require('../services/customer-moves');
+    const { moveForEstimate, moveLinkBlock } = require('../services/customer-moves');
     try {
-      moveForEstimate.mockResolvedValueOnce({ id: 'move-1', move_in_date: '2027-05-21' });
-      db.transaction = jest.fn();
-      await expect(slotReservation.reserveSlot({
+      const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', estimate_data: JSON.stringify({ move: { moveId: 'move-1' } }) });
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder] });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      const reserve = () => slotReservation.reserveSlot({
         estimateId: 'estimate-456',
         slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
         selectedFrequency: 'quarterly',
-      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is before the move-in date' });
-      expect(moveForEstimate).toHaveBeenCalledWith('estimate-456');
-      expect(db.transaction).not.toHaveBeenCalled();
+      });
+      moveForEstimate.mockResolvedValueOnce({ id: 'move-1', move_in_date: '2027-05-21' });
+      await expect(reserve()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is before the move-in date' });
+      expect(moveForEstimate).toHaveBeenCalledWith('estimate-456', trx, { lock: true });
+      expect(moveLinkBlock).toHaveBeenCalledWith(trx, { move: { moveId: 'move-1' } });
+      // A move that no longer stands behind the estimate: the generic not-found.
+      moveLinkBlock.mockResolvedValueOnce('move_closed');
+      await expect(reserve()).rejects.toMatchObject({ code: 'ESTIMATE_NOT_FOUND' });
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
     }
@@ -605,6 +613,22 @@ describe('slot reservation helpers', () => {
           scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
           estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
         })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: expect.stringMatching(/notice window/) });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    test('a new-home estimate\'s hold the move-in date has moved past is refused SLOT_UNAVAILABLE on the locked move (moving PR B1)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-10T15:00:00Z'));
+      const { moveForEstimate } = require('../services/customer-moves');
+      try {
+        const { trx, updateBuilder } = wire({ reservationExpiresAt: '2027-05-10T15:15:00.000Z' });
+        moveForEstimate.mockResolvedValueOnce({ id: 'move-1', move_in_date: '2027-05-21' });
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+          estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is before the move-in date' });
+        expect(moveForEstimate).toHaveBeenCalledWith('estimate-456', trx, { lock: true });
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { jest.useRealTimers(); }
     });
