@@ -91,7 +91,7 @@ const SCOPE_GUARDS_ADDENDUM = `
 
 ADDITIONAL SKIP RULE: skip when the sender is coordinating logistics for service already booked or covered for an existing customer — their own service, or a third party texting on a customer's behalf ("this is X with customer Y at <address>, can you treat before Saturday"). That is an operations request, not a quote.
 
-SKIP CATEGORY: whenever decision="skip", also set "skip_category" to exactly one of: "out_of_scope" (the work maps to no vocabulary key / Waves doesn't offer it), "not_a_quote" (wrong number, vendor, complaint, reschedule), "existing_job" (the additional skip rule above), "ambiguous" (cannot tell what service is wanted), "needs_human_scoping" (mixed-use/multi-parcel or other human scoping). When decision="draft", use null or omit it.`;
+SKIP CATEGORY: whenever decision="skip", also set "skip_category" to exactly one of: "out_of_scope" (the work maps to no vocabulary key / Waves doesn't offer it), "not_a_quote" (wrong number, vendor, complaint, reschedule, or the caller only booked an inspection/assessment and asked for no price), "existing_job" (the additional skip rule above), "ambiguous" (cannot tell what service is wanted), "needs_human_scoping" (mixed-use/multi-parcel or other human scoping). When decision="draft", use null or omit it.`;
 
 // Gated prompt addendum (GATE_UNIT_BAND_PRICING): the caller-stated
 // bedroom count of an apartment/condo unit as a structured field. Kept

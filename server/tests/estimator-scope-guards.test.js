@@ -1716,3 +1716,101 @@ describe('clarify suppression in the red lane', () => {
     expect(mockParkClarify).toHaveBeenCalled();
   });
 });
+
+describe('call red-lane copy: composer skip_category not_a_quote (quote promised vs no quote request)', () => {
+  const { runDraftPipeline, _private: enginePrivate } = require('../services/estimator-engine');
+  const { validateIntent } = jest.requireActual('../services/estimator-engine/intent-schema');
+  const S = enginePrivate.CALL_ORIGIN.strings;
+  const OLD_TITLE = 'Quote promised on call — send it';
+  const REASON = 'The caller booked an on-site inspection and asked for no price.';
+
+  const baseSkip = {
+    decision: 'skip', skip_reason: REASON, customer_name: 'Pat Sample', customer_phone: null,
+    customer_email: null, address: null, category: 'RESIDENTIAL', is_commercial: false,
+    services: {}, evidence: [], constraint_flags: [], uncertainties: [], confidence: 'high',
+  };
+  const draftIntent = {
+    ...baseSkip, decision: 'draft', skip_reason: null, skip_category: null,
+    services: { generalPestControl: {} }, address: '1 Test St',
+  };
+
+  const CALL_CONTEXT = {
+    call: { twilio_call_sid: 'CA-synthetic-1' },
+    phone: '+19415550000',
+    lead: null,
+    leadIsForThisCall: false,
+    customer: null,
+    customerPhoneAmbiguous: false,
+    extraction: {},
+    transcript: 'synthetic call transcript for the composer',
+  };
+
+  const runCall = (intent, reasons) => {
+    mockClassifyLane.mockReturnValue({ lane: 'red', reasons, causes: [] });
+    mockComposeIntent.mockResolvedValue({ intent, model: 'test-model' });
+    return runDraftPipeline({
+      context: { ...CALL_CONTEXT },
+      origin: enginePrivate.CALL_ORIGIN,
+      result: { lane: null, created: false },
+      quotePromised: true,
+    });
+  };
+  const lastBell = () => mockNotifyAdmin.mock.calls[mockNotifyAdmin.mock.calls.length - 1];
+
+  test('skip_category not_a_quote: check copy, promise metadata kept', async () => {
+    await runCall({ ...baseSkip, skip_category: 'not_a_quote' }, [`composer skipped: ${REASON}`]);
+    const [type, title, body, opts] = lastBell();
+    expect(type).toBe('lead');
+    expect(title).toBe('Quote promised? Check the call — Pat Sample');
+    expect(body).toBe(
+      `Pat Sample: the call notes say a quote was promised, but the estimator read this call as no quote request (${REASON}). Check the call. Send a quote only if one was promised; if not, mark this done.`,
+    );
+    expect(body).not.toMatch(/send it manually/i);
+    expect(opts.metadata).toMatchObject({ quote_promised: true, promise: true, estimator_engine: true, lane: 'red' });
+  });
+
+  test.each(['out_of_scope', 'existing_job', 'ambiguous', 'needs_human_scoping', null, undefined])(
+    'skip_category %p keeps today\'s send-it copy byte-for-byte',
+    async (kind) => {
+      const intent = kind === undefined ? { ...baseSkip } : { ...baseSkip, skip_category: kind };
+      await runCall(intent, [`composer skipped: ${REASON}`]);
+      const [, title, body, opts] = lastBell();
+      expect(title).toBe(OLD_TITLE);
+      expect(body).toBe(`Pat Sample: quote promised, no auto-draft (composer skipped: ${REASON}). Send it manually before end of day.`);
+      expect(opts.metadata).toMatchObject({ quote_promised: true, promise: true });
+    },
+  );
+
+  test('a non-skip red reason keeps today\'s copy even if skip_category is stale on the intent', async () => {
+    await runCall({ ...draftIntent, skip_category: 'not_a_quote' }, ['no service address established on the call or profile']);
+    const [, title, body] = lastBell();
+    expect(title).toBe(OLD_TITLE);
+    expect(body).toBe('Pat Sample: quote promised, no auto-draft (no service address established on the call or profile). Send it manually before end of day.');
+  });
+
+  test('redBellCopy: blank skip_reason still reads cleanly; an origin without check copy (SMS) is unchanged', () => {
+    const { redBellCopy } = enginePrivate;
+    const blank = redBellCopy(S, { ...baseSkip, skip_reason: '  ', skip_category: 'not_a_quote' }, 'Pat Sample', ['x']);
+    expect(blank.body).toContain('(no reason given)');
+    const smsStrings = { redTitle: 'T', redBody: (l, r) => `B ${l} ${r}` };
+    expect(redBellCopy(smsStrings, { ...baseSkip, skip_category: 'not_a_quote' }, 'Pat Sample', ['a', 'b']))
+      .toEqual({ title: 'T', body: 'B Pat Sample a; b' });
+  });
+
+  test('the scope-guards addendum widens not_a_quote and keeps the other categories', () => {
+    const addendum = jest.requireActual('../services/estimator-engine/intent-composer')._private.SCOPE_GUARDS_ADDENDUM;
+    expect(addendum).toContain('"not_a_quote" (wrong number, vendor, complaint, reschedule, or the caller only booked an inspection/assessment and asked for no price)');
+    expect(addendum).toContain('"out_of_scope" (the work maps to no vocabulary key / Waves doesn\'t offer it)');
+    expect(addendum).toContain('"existing_job" (the additional skip rule above)');
+    expect(addendum).toContain('"ambiguous" (cannot tell what service is wanted)');
+    expect(addendum).toContain('"needs_human_scoping" (mixed-use/multi-parcel or other human scoping)');
+    expect(addendum).not.toContain('skip_kind');
+  });
+
+  test('no skip_kind field exists: the schema stays on skip_category', () => {
+    const base = { decision: 'skip', skip_reason: 'x', category: 'RESIDENTIAL', is_commercial: false, services: {}, evidence: [], confidence: 'high' };
+    expect(validateIntent({ ...base, skip_category: 'not_a_quote' }).valid).toBe(true);
+    expect(validateIntent({ ...base, skip_kind: 'not_a_quote_request' }).valid).toBe(false);
+    expect(jest.requireActual('../services/estimator-engine/intent-composer')._private.SYSTEM_PROMPT).not.toContain('skip_kind');
+  });
+});
