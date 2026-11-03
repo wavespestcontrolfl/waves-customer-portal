@@ -2125,8 +2125,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
   const routeCheckMode = routeCheckModeFor(userOpts);
   // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
-  // visit before the move-in date, which the customer can still change.
-  const moveInDate = (await require('./customer-moves').moveForEstimate(estimateId))?.move_in_date || null;
+  // visit before the move-in date, which the customer can still change. Only
+  // a stamped estimate reads its move; every other estimate skips the lookup.
+  const moveInDate = parseEstimateData(estimate.estimate_data)?.move?.moveId
+    ? (await require('./customer-moves').moveForEstimate(estimateId))?.move_in_date || null
+    : null;
   const cacheKey = [
     estimateId,
     `move-in:${moveInDate || 'none'}`,

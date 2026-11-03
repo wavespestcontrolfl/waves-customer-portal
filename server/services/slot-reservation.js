@@ -743,6 +743,8 @@ function slotDateRefusal(date, todayEt, offerArrivalGrace) {
 // move no longer stands behind it books nothing (the stale-call-link answer),
 // and nothing books before the move-in date. Returns the error to throw, or null.
 async function moveBookingRefusal(conn, estimateId, estimateData, date) {
+  // Only a new-home estimate (estimate_data.move, server-stamped) has a move.
+  if (!estimateData?.move?.moveId) return null;
   const Moves = require('./customer-moves');
   const move = await Moves.moveForEstimate(estimateId, conn, { lock: true });
   if (await Moves.moveLinkBlock(conn, estimateData)) {
