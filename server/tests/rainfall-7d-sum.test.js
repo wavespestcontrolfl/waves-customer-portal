@@ -133,3 +133,60 @@ describe('fetchServiceWeekWeather — dailyRain mirrors rainInches (no partial c
     expect(res.et0Inches).toBeNull();
   });
 });
+
+describe('fetchServiceWeekWeather — the Monday sweep budget retries a missed Open-Meteo week', () => {
+  const { fetchServiceWeekWeather } = require('../services/service-report/application-conditions');
+  const { createOpenMeteoRetry } = require('../services/open-meteo-retry');
+  const realFetch = global.fetch;
+  // The paid key, as in production: no archive, so each try is ONE forecast-endpoint request.
+  beforeEach(() => { process.env.OPEN_METEO_API_KEY = 'test-key'; });
+  afterEach(() => { global.fetch = realFetch; });
+
+  // Two days ago keeps the window inside the paid endpoint's 92 past days.
+  const serviceDate = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+  const window = rainWindowEndingOn(serviceDate, 7);
+  function okWeek() {
+    const days = [];
+    for (let d = new Date(`${window.start}T00:00:00Z`); d <= new Date(`${window.end}T00:00:00Z`); d = new Date(d.getTime() + 86400000)) {
+      days.push(d.toISOString().slice(0, 10));
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        daily: { time: days, precipitation_sum: days.map(() => 0.1), et0_fao_evapotranspiration: days.map(() => 0.2) },
+        daily_units: { et0_fao_evapotranspiration: 'inch' },
+      }),
+    };
+  }
+  const budget = () => createOpenMeteoRetry({ sleep: async () => {} });
+
+  // 11-02 7:00: the city-grid request timed out for 32 of 45 homes, and 25 emails lost the ET0 target.
+  test('a timed-out week gets one second try and keeps its ET0', async () => {
+    const retry = budget();
+    global.fetch = jest.fn().mockRejectedValueOnce(new Error('This operation was aborted')).mockResolvedValueOnce(okWeek());
+    const res = await fetchServiceWeekWeather({ latitude: 26.51, longitude: -81.51, serviceDate, openMeteoRetry: retry });
+    expect(res).toMatchObject({ rainInches: 0.7, et0Inches: 1.4 });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(String(global.fetch.mock.calls[1][0])).toBe(String(global.fetch.mock.calls[0][0]));
+    expect(retry.stats).toMatchObject({ used: 1, recovered: 1 });
+  });
+
+  test('without the budget (service report, public page) a miss stays one request', async () => {
+    global.fetch = jest.fn().mockRejectedValueOnce(new Error('This operation was aborted')).mockResolvedValueOnce(okWeek());
+    const res = await fetchServiceWeekWeather({ latitude: 26.52, longitude: -81.52, serviceDate });
+    expect(res).toMatchObject({ rainInches: null, et0Inches: null });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a 503 gets the second try; a 400 does not', async () => {
+    const retry = budget();
+    global.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 503 }).mockResolvedValueOnce(okWeek());
+    await expect(fetchServiceWeekWeather({ latitude: 26.53, longitude: -81.53, serviceDate, openMeteoRetry: retry }))
+      .resolves.toMatchObject({ et0Inches: 1.4 });
+    global.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 400 }).mockResolvedValueOnce(okWeek());
+    await expect(fetchServiceWeekWeather({ latitude: 26.54, longitude: -81.54, serviceDate, openMeteoRetry: retry }))
+      .resolves.toMatchObject({ et0Inches: null });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(retry.stats.used).toBe(1);
+  });
+});
