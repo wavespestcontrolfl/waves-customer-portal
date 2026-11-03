@@ -169,10 +169,13 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
         Task {
             do {
                 let result = try await callAdmin("wavesAdminInPersonTerms", args)
-                if let dict = result as? [String: Any], dict["ok"] as? Bool == false {
-                    reply(Self.termsEvent, ["status": "failed", "message": Self.text(dict) ?? Self.plainFailure], requestId)
-                } else {
+                // Only an explicit { ok: true } records the terms; anything
+                // else (missing value, ok absent or false) is a failure.
+                let dict = result as? [String: Any]
+                if dict?["ok"] as? Bool == true {
                     reply(Self.termsEvent, ["status": "ok"], requestId)
+                } else {
+                    reply(Self.termsEvent, ["status": "failed", "message": dict.flatMap { Self.text($0) } ?? Self.plainFailure], requestId)
                 }
             } catch {
                 reply(Self.termsEvent, ["status": "failed", "message": Self.plainFailure], requestId)
