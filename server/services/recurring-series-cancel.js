@@ -39,8 +39,8 @@ class SeriesCancelError extends Error {
  * @param {boolean} [opts.notifyCustomer]  false = no cancellation text (reminders are still cancelled)
  * @param {boolean} [opts.waiveFee]        settle card holds without the late-cancel fee
  * @param {boolean} [opts.allowEmpty]      stop the plan even when no visit is left to cancel
- * @param {Function} [opts.checkTargets]   (lockedTargets) => null | message: called inside the
- *                                         transaction once the targets are locked; a message refuses
+ * @param {Function} [opts.checkTargets]   async (lockedTargets, trx) => null | message: called inside
+ *                                         the transaction once the series is locked; a message refuses
  *                                         the cancel (409 series_changed) before any write
  * @param {object[]} [opts.linkedChildren] the follow-through's approved linked visits (call follow-ups,
  *                                         package visit 2): [] cancels none of them; omitted keeps the
@@ -158,7 +158,7 @@ async function cancelSeriesRemainder({
       if (!targets.length && !allowEmpty) return;
       // The moving flow approved exactly these visits at exactly that house:
       // re-checked here, under the locks, before any write.
-      changed = checkTargets ? checkTargets(targets) : null;
+      changed = checkTargets ? await checkTargets(targets, trx) : null;
       if (changed) throw new Error('SERIES_CHANGED');
 
       // Money already taken for a target (annual prepay term, hand-

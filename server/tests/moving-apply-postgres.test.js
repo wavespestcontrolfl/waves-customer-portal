@@ -218,7 +218,7 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     const stops = await trx('recurring_plan_alerts').where({ customer_id: customerId, resolved_action: 'cancel_series' }).pluck('recurring_parent_id');
     expect(stops.sort()).toEqual([s.pestRoot, s.lawnRoot, mosquitoRoot].sort());
     const notes = await trx('job_status_history').whereIn('job_id', [s.pestAfter1, s.lawnAfter]).pluck('notes');
-    expect(notes).toEqual([expect.stringContaining(`moved out on ${MOVE_OUT}`), expect.stringContaining(`moved out on ${MOVE_OUT}`)]);
+    expect(notes).toEqual([expect.stringContaining(`Apply move ${s.move.id}`), expect.stringContaining(`Apply move ${s.move.id}`)]);
 
     // New home, the one-time visit and the linked call follow-up are untouched.
     expect(await trx('scheduled_services').where({ id: s.newRoot }).first('status', 'recurring_ongoing', 'property_id'))
@@ -289,6 +289,28 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     expect((await trx('customer_moves').where({ id: s.move.id }).first('status')).status).toBe('submitted');
   });
 
+  test('a plan with no visit to cancel, moved to another house while Apply runs, is not stopped there', async () => {
+    const s = await seed();
+    const mosquitoRoot = await insertVisit({
+      service_type: 'Mosquito Control', scheduled_date: KEEP, is_recurring: true, recurring_pattern: 'monthly', recurring_ongoing: true, property_id: oldHouseId,
+    });
+    const preview = await Moves.applyMovePreview(customerId, s.move.id);
+    expect(preview.stops).toContainEqual(expect.objectContaining({ name: 'Mosquito Control', cancelCount: 0 }));
+    const actual = jest.requireActual('../services/recurring-series-cancel');
+    SeriesCancel.cancelSeriesRemainder.mockImplementation(async (args) => {
+      if (args.parentId === mosquitoRoot) await trx('scheduled_services').where({ id: mosquitoRoot }).update({ property_id: newHouseId });
+      return actual.cancelSeriesRemainder(args);
+    });
+    try {
+      const err = await Moves.applyMove(customerId, s.move.id, { version: preview.version, actorId: ADMIN.id }).catch((e) => e);
+      expect(err).toMatchObject({ code: 'series_changed', step: 'plans' });
+      expect(err.message).toContain('Mosquito Control changed');
+      expect((await trx('scheduled_services').where({ id: mosquitoRoot }).first('recurring_ongoing')).recurring_ongoing).toBe(true);
+    } finally {
+      SeriesCancel.cancelSeriesRemainder.mockImplementation((...args) => actual.cancelSeriesRemainder(...args));
+    }
+  });
+
   test('a visit confirmed while Apply runs is refused under the series locks too', async () => {
     const s = await seed();
     const preview = await Moves.applyMovePreview(customerId, s.move.id);
@@ -317,6 +339,8 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     expect(cancelledFirst.length).toBeGreaterThan(0);
 
     FollowThrough.runVisitCancellationFollowThrough.mockClear();
+    // The customer changes the move-out date before the office tries again: recovery still finds the earlier cancels.
+    await trx('customer_moves').where({ id: s.move.id }).update({ move_out_date: day(21) });
     const again = await Moves.applyMovePreview(customerId, s.move.id);
     const result = await Moves.applyMove(customerId, s.move.id, { version: again.version, actorId: ADMIN.id });
     expect(result.applied).toBe(true);

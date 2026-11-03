@@ -1397,9 +1397,10 @@ async function applyMove(customerId, moveId, opts = {}) {
       return 'failed';
     });
 
-    // The note every visit Apply cancels carries (job_status_history): it names
-    // this move, so a later attempt can find what an earlier one cancelled.
-    const note = `Customer moved out on ${plan.moveOut} (moving flow, Apply move ${plan.move.id})`;
+    // The note every visit Apply cancels carries (job_status_history). It names
+    // only this move (never its dates, which a resubmit can change), so a later
+    // attempt finds what an earlier one cancelled.
+    const note = `Customer moved; plan stopped after the move-out date (moving flow, Apply move ${plan.move.id})`;
     const cancelledNow = new Set();
     const { cancelSeriesRemainder } = require('./recurring-series-cancel');
     for (const stop of plan.stops) {
@@ -1421,12 +1422,17 @@ async function applyMove(customerId, moveId, opts = {}) {
           // the preview lists them as one-time visits that stay booked, so none is cancelled.
           linkedChildren: [],
           // Under the series locks: exactly the visits the preview approved (same
-          // date and status), still at the old house.
-          checkTargets: (locked) => {
+          // date and status), and every live visit of the series, the root and
+          // the ones that stay included, still at the old house.
+          checkTargets: async (locked, trx) => {
             const approved = new Map(stop.targets.map((t) => [String(t.id), `${visitDay(t)}|${t.status}`]));
             const same = locked.length === approved.size
               && locked.every((t) => approved.get(String(t.id)) === `${visitDay(t)}|${t.status}`);
-            return same && locked.every((t) => visitAtHouse(t, plan.from, { primaryIsHouse: false }))
+            const series = await trx('scheduled_services')
+              .where((q) => q.where('id', stop.rootId).orWhere('recurring_parent_id', stop.rootId))
+              .where((q) => q.whereNull('status').orWhereNotIn('status', SETTLED_VISIT_STATUSES))
+              .select('property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+            return same && series.every((v) => visitAtHouse(v, plan.from, { primaryIsHouse: false }))
               ? null
               : `${stop.name} changed while Apply move was running. Read the new preview, then apply again.`;
           },
