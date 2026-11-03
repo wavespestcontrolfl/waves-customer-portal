@@ -130,8 +130,8 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
         ending = true
         Task {
             switch await lock.end() {
-            case .ended(let unavailable):
-                finish(unavailable ? ["status": "ended", "auth": "unavailable"] : ["status": "ended"])
+            case .ended:
+                finish(["status": "ended"])
             case .denied:
                 ending = false
             }
@@ -401,8 +401,8 @@ final class CustomerHandoffController: UIViewController {
 // If the app starts with hand-off mode still on (it was closed while the
 // customer held the phone), the customer view is gone. RootView shows this
 // screen INSTEAD of the portal web view, which is not created until the device
-// check passes (Face ID, Touch ID or the passcode). A phone with no passcode
-// cannot be checked and unlocks at once, as Hand back does.
+// check passes (Face ID, Touch ID or the passcode). Nothing else unlocks it,
+// not even a phone with no passcode (setting one lets the check pass).
 struct HandoffLockedView: View {
     let onUnlocked: () -> Void
     @State private var checking = false

@@ -1,5 +1,5 @@
-// Logic check for HandoffLock (start, end, denied, unavailable, persisted flag,
-// staff alerts paused and resumed). There is no XCTest target. From ios/WavesPay:
+// Logic check for HandoffLock (start, end, denied, persisted flag, staff alerts
+// paused and resumed). There is no XCTest target. From ios/WavesPay:
 //   swiftc -o /tmp/handoff-check Sources/HandoffLock.swift Tests/main.swift && /tmp/handoff-check
 import Foundation
 @MainActor func check(_ c: Bool, _ m: String) { if !c { print("FAIL", m); exit(1) } else { print("ok", m) } }
@@ -13,12 +13,11 @@ import Foundation
     check(!lock.isActive, "starts off")
     lock.start(); check(lock.isActive && paused == 1, "start sets flag and pauses alerts")
     check(HandoffLock(defaults: d, authenticate: { .denied }).isActive, "flag persists to a new instance (relaunch)")
-    check(await lock.end() == .denied && lock.isActive && resumed == 0, "denied stays locked, alerts stay paused")
+    check(await lock.end() == .denied && lock.isActive && resumed == 0,
+          "a failed check (cancel, failure, no passcode) stays locked, alerts stay paused")
     next = .success
-    check(await lock.end() == .ended(unavailable: false) && !lock.isActive && resumed == 1, "success unlocks and resumes alerts")
-    lock.start(); next = .unavailable
-    check(await lock.end() == .ended(unavailable: true) && !lock.isActive && resumed == 2, "unavailable ends with auth flag, resumes alerts")
-    lock.start(); lock.clear(); check(!lock.isActive && resumed == 2, "sign-out clears without resuming alerts")
+    check(await lock.end() == .ended && !lock.isActive && resumed == 1, "only a passed check unlocks; alerts resume")
+    lock.start(); lock.clear(); check(!lock.isActive && resumed == 1, "sign-out clears without resuming alerts")
     check(HandoffLock.presentation(handoffActive: true) == [.badge], "locked: badge only, no banner, sound or list")
     check(HandoffLock.presentation(handoffActive: false) == [.banner, .list, .sound, .badge], "unlocked: unchanged")
     // overlapping end is denied
@@ -28,7 +27,7 @@ import Foundation
     try? await Task.sleep(nanoseconds: 50_000_000)
     let b = await slow.end()
     check(b == .denied, "overlapping end denied")
-    check(await a == .ended(unavailable: false), "first end completes")
+    check(await a == .ended, "first end completes")
     d.removePersistentDomain(forName: suite)
 }
 Task { @MainActor in await run(); exit(0) }

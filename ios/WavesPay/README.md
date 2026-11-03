@@ -220,8 +220,8 @@ on the web view that asked; `requestId` comes back unchanged):
 
 | Page posts | App answers (event: `detail`) |
 | --- | --- |
-| `{ type: 'capabilities', requestId }` | `wavesadmin:capabilities`: `{ requestId, capabilities: ['handoffOpen'] }` |
-| `{ type: 'handoffOpen', requestId, url, firstName }` | `wavesadmin:handoff`, once, when the hand-off ends: `{ requestId, status: 'ended' }` (or `auth: 'unavailable'` on a phone with no passcode), or `{ requestId, status: 'failed', message }` |
+| `{ type: 'capabilities', requestId }` | `wavesadmin:capabilities`: `{ requestId, capabilities: ['handoffOpen'] }`, or `capabilities: []` on an iPhone that cannot ask for Face ID, Touch ID or the passcode (no passcode set) |
+| `{ type: 'handoffOpen', requestId, url, firstName }` | `wavesadmin:handoff`, once, when the hand-off ends: `{ requestId, status: 'ended' }`, or `{ requestId, status: 'failed', message }` (also on an iPhone with no passcode) |
 
 `url` must be the portal's own origin, a path starting `/secure/<token>` and
 `handoff=1`; anything else answers `failed`.
@@ -237,8 +237,10 @@ on the web view that asked; `requestId` comes back unchanged):
 - A top bar "Handed to {firstName}" with **Hand back**: Face ID / Touch ID with
   the passcode as fallback (`.deviceOwnerAuthentication`, reason "Take the
   phone back"). Success closes the screen and answers the admin page `ended`.
-  Cancel or failure stays on the customer view. A phone with no passcode ends
-  with `auth: 'unavailable'`. Hand back is ignored (the bar says "Finishing the card save…") while a terms or save request is pending or the card-save screen is open; a request that finishes after the hand-off ends opens nothing.
+  Cancel or failure stays on the customer view. Only a passed check ends it:
+  the app never starts a hand-off on an iPhone with no passcode, and if the
+  passcode is turned off during one, the lock stays until a passcode is set
+  again. Hand back is ignored (the bar says "Finishing the card save…") while a terms or save request is pending or the card-save screen is open; a request that finishes after the hand-off ends opens nothing.
 - Opening it pauses the staff alerts (`StaffAlerts.pauseForHandoff`): the
   alerts already in Notification Center are cleared and the install
   unregisters from APNs, so none shows in the list, on the lock screen or with
@@ -254,8 +256,8 @@ on the web view that asked; `requestId` comes back unchanged):
 - If the app restarts with the flag still on (it was closed during a hand-off),
   the customer view is gone. `RootView` shows a "Waves Admin is locked" screen
   INSTEAD of the portal: the portal web view is not created, so it shows
-  nothing and takes no input, until the same device check passes (no passcode:
-  it unlocks, as Hand back does). Wavespay payment links are ignored meanwhile.
+  nothing and takes no input, until the same device check passes (nothing
+  else unlocks it). Wavespay payment links are ignored meanwhile.
   Logic check for the flag:
   `swiftc -o /tmp/handoff-check Sources/HandoffLock.swift Tests/main.swift &&
   /tmp/handoff-check`.
@@ -298,7 +300,9 @@ opened from Safari starts nothing: the app shows "Open this from Waves Admin."
    cookies or localStorage; `window.webkit.messageHandlers.wavesAdmin` is
    undefined; `wavesCustomer` is defined.
 5. Tap a tel:, sms:, mailto: or outside link on the page: nothing happens.
-6. Send a staff alert with the app open: no banner and no sound.
+6. Start a hand-off with staff alerts in Notification Center: they are gone.
+   Send a staff alert, app open and then in the background: nothing shows
+   (no banner, no sound, no list entry, nothing on the lock screen).
 7. Customer page `capabilities`, `saveCard`: answers as above.
    Run a full card save: "Getting the card reader ready…", Apple's sheet,
    "Saving the card…", "Card saved", then `succeeded` in the customer view.
@@ -306,7 +310,8 @@ opened from Safari starts nothing: the app shows "Open this from Waves Admin."
 9. Customer closes Apple's sheet: `canceled`.
 10. **Hand back**, cancel Face ID: stays on the customer view. Pass Face ID:
     the admin page gets `ended`; the next alert shows a banner.
-11. Phone with no passcode: Hand back ends with `auth: 'unavailable'`.
+11. Phone with no passcode: `capabilities` answers `[]` (no hand button) and
+    `handoffOpen` answers `failed` ("Set a passcode on this iPhone first…").
 12. Force-quit during a hand-off, relaunch: "Waves Admin is locked" replaces the
     portal (not loaded) until Face ID passes; alerts stay silent until then.
 13. Open `wavespay://save-card?t=x` from Safari: "Open this from Waves Admin."

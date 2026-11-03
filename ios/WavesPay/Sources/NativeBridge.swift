@@ -7,8 +7,10 @@ import WebKit
 //
 //   { type: 'capabilities', requestId }  -> 'wavesadmin:capabilities'
 //        { requestId, capabilities: ['handoffOpen'] }
+//        (capabilities: [] on an iPhone that cannot ask for Face ID, Touch ID
+//        or the passcode, e.g. no passcode set: nothing could end a hand-off)
 //   { type: 'handoffOpen', requestId, url, firstName } -> 'wavesadmin:handoff'
-//        { requestId, status: 'ended', auth?: 'unavailable' }
+//        { requestId, status: 'ended' }
 //        | { requestId, status: 'failed', message }
 //      url is the portal's own /secure/<token>?handoff=1 page. The app shows
 //      it full screen in an isolated web view (no admin sign-in) until the
@@ -39,7 +41,8 @@ final class NativeBridge {
         let requestId = body["requestId"] as? String
         switch body["type"] as? String {
         case "capabilities":
-            Self.dispatch(Self.capabilitiesEvent, ["capabilities": Self.capabilities], requestId: requestId, to: page)
+            let offered = HandoffLock.ownerCheckAvailable() ? Self.capabilities : []
+            Self.dispatch(Self.capabilitiesEvent, ["capabilities": offered], requestId: requestId, to: page)
         case "handoffOpen":
             openHandoff(body, requestId: requestId, from: page)
         default:
@@ -55,6 +58,9 @@ final class NativeBridge {
         }
         if customerHandoff != nil || app.cardSaveOpen || app.flow.isActive {
             return failed("A payment or a hand-off is already open in Waves Admin. Finish it first.")
+        }
+        guard HandoffLock.ownerCheckAvailable() else {
+            return failed("Set a passcode on this iPhone first. Waves Admin asks for Face ID or the passcode to take the phone back.")
         }
         guard let link = body["url"] as? String, let checked = CustomerHandoff.validate(link) else {
             return failed("This card link is not valid. Start again from the booking page.")

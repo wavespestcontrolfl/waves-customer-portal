@@ -24,13 +24,10 @@ final class HandoffLock {
     static let reason = "Take the phone back"
 
     // What the device check said.
-    enum AuthResult: Equatable { case success, denied, unavailable }
+    enum AuthResult: Equatable { case success, denied }
 
-    // How an end request went. `ended(unavailable: false)` is a normal unlock.
-    enum EndResult: Equatable {
-        case ended(unavailable: Bool)
-        case denied
-    }
+    // How an end request went.
+    enum EndResult: Equatable { case ended, denied }
 
     private let defaults: UserDefaults
     private let authenticate: () async -> AuthResult
@@ -61,25 +58,25 @@ final class HandoffLock {
         defaults.removeObject(forKey: Self.defaultsKey)
     }
 
-    // Asks the device to confirm the owner. Success (or a device with no
-    // passcode, which cannot ask) turns hand-off mode off. A cancel or a
-    // failure leaves it on. A second request during a check is denied.
+    // Asks the device to confirm the owner. Only a passed check turns hand-off
+    // mode off. A cancel, a failure or a phone with no passcode (the app does
+    // not start a hand-off there: ownerCheckAvailable) leaves it on. A second
+    // request during a check is denied.
     func end() async -> EndResult {
         guard !checking else { return .denied }
         checking = true
         defer { checking = false }
-        switch await authenticate() {
-        case .success:
-            clear()
-            resumeAlerts()
-            return .ended(unavailable: false)
-        case .unavailable:
-            clear()
-            resumeAlerts()
-            return .ended(unavailable: true)
-        case .denied:
-            return .denied
-        }
+        guard await authenticate() == .success else { return .denied }
+        clear()
+        resumeAlerts()
+        return .ended
+    }
+
+    // False when this iPhone cannot ask for Face ID, Touch ID or the passcode
+    // (above all, no passcode is set): nothing could prove the owner at
+    // hand-back, so NativeBridge neither offers nor opens a hand-off.
+    nonisolated static func ownerCheckAvailable() -> Bool {
+        LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: nil)
     }
 
     // What a foreground alert shows. Hand-off mode: the badge only (no banner,
@@ -89,19 +86,12 @@ final class HandoffLock {
     }
 
     // The real check: .deviceOwnerAuthentication is Face ID or Touch ID with
-    // the passcode as the fallback. A phone with no passcode cannot be checked.
+    // the passcode as the fallback. Anything but a passed check (no passcode,
+    // lockout, a busy or missing sensor, a cancel) is not proof of the owner,
+    // so the lock stays on.
     nonisolated static func deviceOwnerCheck() async -> AuthResult {
         let context = LAContext()
-        var policyError: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
-            // Only a phone with no passcode at all counts as "cannot check".
-            // Every other reason (lockout, a busy or missing sensor, ...) is
-            // not proof of the owner, so the lock stays on.
-            if let code = policyError?.code, code == LAError.passcodeNotSet.rawValue {
-                return .unavailable
-            }
-            return .denied
-        }
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { return .denied }
         do {
             let ok = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
             return ok ? .success : .denied
