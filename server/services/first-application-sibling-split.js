@@ -312,6 +312,46 @@ function neverRanCoveredMembers(anchor, members, { includeAnchor = false } = {})
   });
 }
 
+// Pure: the member ids whose BASE application the governing invoice still
+// bills, read from its parsed lines. A combined invoice tags each member's
+// base line client_id `scheduled_<memberId>_primary`
+// (estimate-first-application-invoice.js); a billed line must also carry a
+// POSITIVE amount (same billing-evidence test as invoiceBillsBaseApplication:
+// a credited / zeroed line is not the application being billed). Only exact
+// tags for the given covered members count: an untagged or legacy line
+// (described "First service application", no client_id), a tag for some
+// other visit, or an unreadable line list proves nothing, so it adds no id.
+// Returns the Set of covered member ids found (possibly empty); the caller
+// treats an EMPTY set as "no evidence either way" and keeps alerting.
+function taggedBilledMemberIds(governingLines, members) {
+  const billed = new Set();
+  if (!Array.isArray(governingLines)) return billed;
+  const byTag = new Map(members.map((m) => [`scheduled_${m.id}_primary`, String(m.id)]));
+  for (const li of governingLines) {
+    const memberId = byTag.get(li?.client_id);
+    if (memberId === undefined) continue;
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    if (Number.isFinite(amt) && amt > 0) billed.add(memberId);
+  }
+  return billed;
+}
+
+// Never-ran members the settled governing invoice still bills, or might.
+// Fail-safe line rule (office hand-split case, prod 2026-10-31): a never-ran
+// member drops out ONLY when the invoice's lines are readable, carry at
+// least one positive base line tagged for some covered member, and carry NO
+// positive base line tagged for THIS member — i.e. the office already
+// removed this member's share, so there is nothing to refund or wait on.
+// Anything less (no lines, unreadable lines, zero tagged lines, untagged
+// legacy lines) leaves every never-ran member in place and the alert stands.
+function neverRanStillBilled(anchor, members, governingLines) {
+  const neverRanMembers = neverRanCoveredMembers(anchor, members, { includeAnchor: true });
+  const billed = taggedBilledMemberIds(governingLines, members);
+  if (!billed.size) return neverRanMembers;
+  return neverRanMembers.filter((m) => billed.has(String(m.id)));
+}
+
 // Pure: the verdict for a group whose GOVERNING invoice is settled (paid,
 // prepaid, processing, or the void/refunded/canceled vocabulary).
 //
@@ -323,12 +363,13 @@ function neverRanCoveredMembers(anchor, members, { includeAnchor = false } = {})
 // the member's STAMP, not only by a shared scheduled_date, so completing or
 // charging a moved sibling reuses/suppresses on the paid combined invoice
 // instead of minting a second charge (Codex round 14 P1, PR #5021). Only a
-// never-ran covered member (anchor included) needs a money-side alert.
-function settledInvoiceVerdict(anchor, members, invoiceStatus) {
+// never-ran covered member (anchor included) that the invoice's lines still
+// bill (neverRanStillBilled) needs a money-side alert.
+function settledInvoiceVerdict(anchor, members, invoiceStatus, governingLines) {
   const paid = isInvoicePaid(invoiceStatus);
   const pending = isInvoicePaymentPending(invoiceStatus);
   if (paid || pending) {
-    const neverRanMembers = neverRanCoveredMembers(anchor, members, { includeAnchor: true });
+    const neverRanMembers = neverRanStillBilled(anchor, members, governingLines);
     if (neverRanMembers.length) {
       return { action: 'alert', reason: paid ? 'paid_never_ran' : 'payment_pending_never_ran', diverging: neverRanMembers };
     }
@@ -341,7 +382,9 @@ function settledInvoiceVerdict(anchor, members, invoiceStatus) {
 // invoice's current status, decide whether to alert, clear a standing
 // alert, or do nothing. No DB access — the sweep and every unit test call
 // this the same way.
-function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
+function evaluateGroupDivergence({
+  anchor, members, invoiceStatus, governingLines = null,
+}) {
   if (!anchor || !Array.isArray(members) || members.length < 2) {
     return { action: 'clear', reason: 'no_group' };
   }
@@ -362,8 +405,13 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
     // lookup (findFirstApplicationInvoiceForEstimateService) finds the paid
     // combined invoice by stamp once a sibling moves, so completion / Charge
     // Now never mint a second charge for it. See settledInvoiceVerdict.
-    return settledInvoiceVerdict(anchor, members, invoiceStatus);
+    return settledInvoiceVerdict(anchor, members, invoiceStatus, governingLines);
   }
+  // governingLines feeds ONLY the settled (paid / pending) verdict above. The
+  // still-open review below deliberately ignores it: an open invoice's lines
+  // are still editable (a mid-edit split must not clear the alert early),
+  // and the same branch carries the date-divergence and failed-void-of-a-
+  // cancelled-anchor cases that line evidence says nothing about.
   const diverging = divergingSiblings(anchor, members);
   // A diverging sibling that has already picked up its OWN live invoice
   // has been split off by hand — the office completed the instructed
@@ -975,7 +1023,7 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
   // loadCandidates' own invoice status is read outside any per-estimate
   // transaction and could already be stale by the time this runs.
   const freshInvoice = await conn('invoices').where({ id: invoiceId }).forUpdate()
-    .first('id', 'status', 'invoice_number', 'total', 'scheduled_service_id');
+    .first('id', 'status', 'invoice_number', 'total', 'scheduled_service_id', 'line_items');
   if (!freshInvoice) {
     // The invoice row is gone from under the stamp (ON DELETE SET NULL
     // means this should be unreachable in practice — a deleted invoice
@@ -1046,7 +1094,16 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
   });
   const anchorWithFlag = members.find((m) => String(m.id) === String(anchor.id));
 
-  const verdict = evaluateGroupDivergence({ anchor: anchorWithFlag, members, invoiceStatus: governingInvoice.status });
+  // The governing invoice's parsed lines let a paid / pending verdict skip a
+  // never-ran member the invoice no longer bills (see neverRanStillBilled).
+  // parseInvoiceLineItems reads an unreadable value as [] -> no evidence ->
+  // the alert stands.
+  const verdict = evaluateGroupDivergence({
+    anchor: anchorWithFlag,
+    members,
+    invoiceStatus: governingInvoice.status,
+    governingLines: InvoiceService._parseInvoiceLineItems(governingInvoice.line_items),
+  });
   if (verdict.action === 'clear') {
     const cleared = await clearStandingAlerts(conn, prefix);
     return {
@@ -1197,6 +1254,9 @@ module.exports = {
   PAYMENT_PENDING_INVOICE_STATUSES,
   divergingSiblings,
   neverRanCoveredMembers,
+  taggedBilledMemberIds,
+  neverRanStillBilled,
+  settledInvoiceVerdict,
   evaluateGroupDivergence,
   divergenceStateFingerprint,
   resolveGoverningInvoice,
