@@ -84,16 +84,17 @@ const ANDROID_EMOJI_SMS_REACTION_RE = new RegExp(`^${ZERO_WIDTH_PAD}*(${EMOJI_SE
 // ("Thanks, but you missed the backyard") falls through to the normal
 // pipeline. The drafter's own contract already defines this class as
 // "warrants NO reply" — this is the deterministic notification-side twin.
-const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|all\s+good|good\s+deal|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|see\s+(?:you|ya)\s+(?:then|soon|tomorrow|there)|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|cheers|my\s+pleasure|(?:you'?re\s+)?welcome|(?:so|very)\s+much|again|a\s+lot|for\s+(?:the\s+)?(?:update|info|heads\s+up|letting\s+(?:me|us)\s+know)|i\s+appreciate\s+(?:it|you|that)|we\s+appreciate\s+(?:it|you|that)|(?:that'?s|that\s+is)\s+(?:great|perfect|fine|awesome)|all\s+set|(?:will|talk\s+to\s+you)\s+(?:then|soon|later))`;
+const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|all\s+good|good\s+deal|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|see\s+(?:you|ya)\s+(?:then|soon|tomorrow|there)|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|cheers|my\s+pleasure|(?:you'?re\s+)?welcome|(?:so|very)\s+much|again|a\s+lot|for\s+(?:the\s+)?(?:update|info|heads\s+up|letting\s+(?:me|us)\s+know)|i\s+appreciate\s+(?:it|you|that)|we\s+appreciate\s+(?:it|you|that)|(?:that'?s|that\s+is)\s+(?:great|perfect|fine|awesome)|all\s+set|(?:will|talk\s+to\s+you)\s+(?:then|soon|later)|good)`;
 // Tokens that only close a thread when they sit NEXT TO a real closer: a bare
 // "Ok" / "Okay" can answer an operational question ("does 9am work?") the
 // same way a bare "yes" does, so alone it stays loud. Bare affirmatives
 // (sure/yep/yup) and greetings are not in the grammar at all (hook P1).
 const WEAK_ONLY_RE = /^(?:ok(?:ay)?)[\s,.!\-]*$/iu;
 // Compositional fragments in the grammar ("again", "a lot", "so much", "for
-// the update") only ride along with a real closer word; alone they are
-// content ("Again" = the pests are back). At least one anchor is required
-// (hook P1).
+// the update", a bare "good") only ride along with a real closer word; alone
+// they are content ("Again" = the pests are back, "Good" can answer "how did
+// it go?"). At least one anchor is required (hook P1). "Ok good" closes the
+// same way "Ok great" does (admin alert audit 2026-11-02, finding 5).
 const CLOSER_ANCHOR_RE = new RegExp(String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|all\s+good|good\s+deal|appreciate|much\s+appreciated|see\s+(?:you|ya)|have\s+a\s+(?:good|great|nice|wonderful)|cheers|my\s+pleasure|welcome|all\s+set)`, 'iu');
 const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
 // One trailing addressee after a THANKS-family token ("Thanks Adam", "Thank
