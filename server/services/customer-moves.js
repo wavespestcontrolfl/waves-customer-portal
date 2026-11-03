@@ -606,6 +606,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // The billing lanes a new-home estimate serves (billing-lane.js resolveBillingLane).
 const NEW_HOME_BILLING_MODES = new Set(['per_application', 'per_visit']);
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+const UNDERWAY_STATUSES = ['en_route', 'on_site'];
 const DEAD_ESTIMATE_STATUSES = ['declined', 'expired'];
 const MOVE_WAIVER_REASON = 'Customer is moving: the $99 setup fee is waived for every move (owner 2026-11-02, Q2).';
 const NEW_HOME_REFUSALS = {
@@ -1140,10 +1141,11 @@ async function oldHousePlans(conn, customerId, { to, from, flipped, today, cutFr
     .where({ customer_id: customerId, recurring_ongoing: true })
     .whereNull('recurring_parent_id')
     .select('id');
-  // A legacy NULL status is a live visit too (20260829000050's rule).
+  // A legacy NULL status is a live visit too (20260829000050's rule), and so is
+  // one under way (en route, on site).
   const afterRows = await conn('scheduled_services')
     .where({ customer_id: customerId })
-    .where((q) => q.whereIn('status', LIVE_VISIT_STATUSES).orWhereNull('status'))
+    .where((q) => q.whereIn('status', [...LIVE_VISIT_STATUSES, ...UNDERWAY_STATUSES]).orWhereNull('status'))
     .where('scheduled_date', '>=', cutFrom)
     .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'id', order: 'asc' }])
     .select(SERIES_ROW_COLUMNS);
@@ -1190,11 +1192,17 @@ async function oldHousePlans(conn, customerId, { to, from, flipped, today, cutFr
       `These plans could not be tied to one house: ${[...new Set(unresolved.map((u) => u.name))].join(', ')}. Fix their visit addresses first, or move them by hand.`);
   }
   // The series cancel only cancels pending, confirmed and rescheduled visits:
-  // a legacy visit with no status would stay booked after its plan stopped.
-  const noStatus = stops.flatMap((st) => st.targets).filter((r) => r.status == null);
+  // a plan visit under way, or a legacy one with no status, would stay active
+  // after its plan stopped, so Apply waits for it.
+  const named = (rows) => rows.map((r) => `${planItem(r).name} ${prettyDate(visitDay(r))}`).join(', ');
+  const planVisits = stops.flatMap((st) => st.targets);
+  const underway = planVisits.filter((r) => UNDERWAY_STATUSES.includes(r.status));
+  if (underway.length) {
+    throw applyError('visit_underway', 409, `A visit at the old house is under way: ${named(underway)}. Let the technician finish it, then apply.`);
+  }
+  const noStatus = planVisits.filter((r) => r.status == null);
   if (noStatus.length) {
-    throw applyError('legacy_visits', 409,
-      `These visits at the old house have no status: ${noStatus.map((r) => `${planItem(r).name} ${prettyDate(visitDay(r))}`).join(', ')}. Give each one a status on the schedule first, then apply.`);
+    throw applyError('legacy_visits', 409, `These visits at the old house have no status: ${named(noStatus)}. Give each one a status on the schedule first, then apply.`);
   }
   const oldOneOffs = afterRows.filter((r) => !inSeries(r) && visitAtHouse(r, from, { primaryIsHouse: !flipped }));
   return {

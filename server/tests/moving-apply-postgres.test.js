@@ -407,6 +407,13 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'primary_role_unavailable' });
     await trx('customers').where({ id: customerId }).update({ contact_role: null });
 
+    // A plan visit under way today after a past move-out: Apply waits for it.
+    await trx('customer_moves').where({ id: s.move.id }).update({ move_out_date: day(-3) });
+    const underway = await insertVisit({ scheduled_date: day(0), recurring_parent_id: s.pestRoot, recurring_pattern: 'quarterly', property_id: oldHouseId, status: 'on_site' });
+    await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'visit_underway', message: expect.stringContaining('Let the technician finish it') });
+    await trx('scheduled_services').where({ id: underway }).del();
+    await trx('customer_moves').where({ id: s.move.id }).update({ move_out_date: MOVE_OUT });
+
     // A legacy visit with no status after move-out would stay booked: refused, named.
     const legacy = await insertVisit({ scheduled_date: day(150), recurring_parent_id: s.pestRoot, recurring_pattern: 'quarterly', property_id: oldHouseId, status: null });
     await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'legacy_visits', message: expect.stringContaining('Quarterly Pest Control Service') });
