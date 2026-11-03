@@ -779,7 +779,7 @@
     },
     {
       "endpoint": "/admin/email-templates",
-      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field. Re-reviewed 2026-11-02 (bed bug heat prep, Drive audit item 3): the only chain change is the protected template and automation key sets gaining prep.bed_bug_heat (constants); signals and unresolved unchanged, no new read or write.",
       "scope": "broad",
       "office": true,
       "query": [
@@ -815,11 +815,11 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "7eca8f5c382949092cebdbb948877d81"
+      "hash": "bde4baf555a45475bc944cde32cd3dc6"
     },
     {
       "endpoint": "/admin/email-templates/automations",
-      "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field. Re-reviewed 2026-11-02 (bed bug heat prep, Drive audit item 3): the only chain change is the protected template and automation key sets gaining prep.bed_bug_heat (constants); signals and unresolved unchanged, no new read or write.",
       "scope": "broad",
       "office": true,
       "keywords": [
@@ -852,7 +852,7 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "19248f920bdbcbfd4dcb1e5d3019ad67"
+      "hash": "78656695b66527b13bdf411fa7484db8"
     },
     {
       "endpoint": "/admin/estimates",
