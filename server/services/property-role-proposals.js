@@ -1095,7 +1095,13 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       };
       const loc = resolveLocation(newPrimary.city || '');
       if (loc?.id) mirror.nearest_location_id = loc.id;
-      const formerHomeKey = addressKey(await trx('customers').where({ id: customerId }).first() || {});
+      const formerHome = await trx('customers').where({ id: customerId }).first() || {};
+      const formerHomeKey = addressKey(formerHome);
+      // The same house: the stored key, or the premise test an address edit and a merge use (it reads a street line
+      // that also holds its city and ZIP as that address saved in parts). Promoting another saved copy of the house is
+      // a duplicate cleanup, not a move (owner 2026-11-02: a stamped cleanup told a customer his address had changed).
+      const sameHomeFlip = !!formerHomeKey && (formerHomeKey === addressKey(newPrimary)
+        || !require('./customer-address-fanout').homesDiffer(formerHome, newPrimary));
       await trx('customers').where({ id: customerId }).update(mirror);
       const { reviewedAreas, hasAreaMeasurementsColumn } = require('./property-service-areas');
       const { withTurfProfileFence } = require('./customer-pricing-ai');
@@ -1108,7 +1114,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // Persisted measurements survive the UI kill switch. Keep this
         // invariant active while dark, under the canonical customer fence.
         const lawnSqft = reviewedAreas(newPrimary).lawn?.sqft ?? null;
-        if (lawnSqft === null && formerHomeKey && formerHomeKey === addressKey(newPrimary)) return;
+        if (lawnSqft === null && sameHomeFlip) return;
         await fencedTrx('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: lawnSqft })
           .onConflict('customer_id').merge({ lawn_sqft: lawnSqft, updated_at: fencedTrx.fn.now() });
       });
@@ -1118,18 +1124,16 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       await require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId, trx);
       // The primary HOME changed: the customer's sprinkler settings described
       // the demoted property — same move guard as an address edit, same
-      // transaction (codex #3565 gh-r26).
-      // The new-sod record is a fact about the home: a same-address flip (the mirror already
-      // described the promoted property) keeps it, like the lawn measurement above.
-      const sameHomeFlip = !!formerHomeKey && formerHomeKey === addressKey(newPrimary);
-      await require('./customer-address-fanout').markSprinklerSettingsMoved(customerId, trx, { clearNewSod: !sameHomeFlip });
-      // The move marker just cleared the confirmation ledger. The promoted property's own reviewed lawn (or, on a
-      // same-address flip, the lawn the turf row already described) IS the current home's area, so re-establish it
-      // for the weekly plan's gallons line at once (its own ledger entry — codex #6498 r1 P2).
-      if (await hasAreaMeasurementsColumn(trx)) {
+      // transaction (codex #3565 gh-r26). A same-house flip stamps nothing:
+      // the settings, the new-sod record and the confirmation ledger all still
+      // describe the home, like the lawn measurement above.
+      if (!sameHomeFlip) await require('./customer-address-fanout').markSprinklerSettingsMoved(customerId, trx);
+      // The move marker just cleared the confirmation ledger. The promoted property's own reviewed lawn IS the
+      // current home's area, so re-establish it for the weekly plan's gallons line at once (its own ledger entry —
+      // codex #6498 r1 P2).
+      if (!sameHomeFlip && await hasAreaMeasurementsColumn(trx)) {
         const promotedLawn = reviewedAreas(newPrimary).lawn?.sqft ?? null;
-        const keptLawn = sameHomeFlip ? (await trx('customer_turf_profiles').where({ customer_id: customerId }).first('lawn_sqft'))?.lawn_sqft : null;
-        if (Number(promotedLawn) > 0 || Number(keptLawn) > 0) {
+        if (Number(promotedLawn) > 0) {
           const { confirmIrrigationFields, LAWN_SQFT_CONFIRMED_FIELD } = require('./irrigation-schedule-confirmation');
           await confirmIrrigationFields(trx, customerId, [LAWN_SQFT_CONFIRMED_FIELD]);
         }
