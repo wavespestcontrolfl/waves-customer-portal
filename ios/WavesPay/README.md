@@ -257,7 +257,7 @@ customer web view; accepted only from its top frame on a `/secure/` page):
 | Page posts | App answers (event: `detail`) |
 | --- | --- |
 | `{ type: 'capabilities', requestId }` | `waveshandoff:capabilities`: `{ requestId, capabilities: ['saveCard', 'acceptTerms'] }` |
-| `{ type: 'acceptTerms', requestId, termsVersion, consumerNoticeShown }` | `waveshandoff:terms`: `{ requestId, status: 'ok' }` or `{ status: 'failed', message? }` |
+| `{ type: 'acceptTerms', requestId, termsVersion, termsScope, consumerNoticeShown }` | `waveshandoff:terms`: `{ requestId, status: 'ok' }` or `{ status: 'failed', message? }` |
 | `{ type: 'saveCard', requestId, consentTextVersion, agreed, feeDisclosedAmount, disclosureVersion }` | `waveshandoff:savecard`: `{ requestId, status: 'succeeded', card: { brand, last4, funding } }`, `{ status: 'failed', message }`, or `{ status: 'canceled' }` |
 
 The customer page holds no staff credential. For `acceptTerms` the app calls

@@ -14,7 +14,7 @@ import WebKit
 // answered once with a window event on the customer web view:
 //   { type: 'capabilities', requestId } -> 'waveshandoff:capabilities'
 //        { requestId, capabilities: ['saveCard', 'acceptTerms'] }
-//   { type: 'acceptTerms', requestId, termsVersion, consumerNoticeShown }
+//   { type: 'acceptTerms', requestId, termsVersion, termsScope, consumerNoticeShown }
 //        -> 'waveshandoff:terms' { requestId, status: 'ok' | 'failed', message? }
 //   { type: 'saveCard', requestId, consentTextVersion, agreed,
 //     feeDisclosedAmount, disclosureVersion }
@@ -181,6 +181,7 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
         let args: [String: Any] = [
             "secureToken": secureToken,
             "termsVersion": Self.scalar(body["termsVersion"]),
+            "termsScope": Self.scalar(body["termsScope"]),
             "consumerNoticeShown": (body["consumerNoticeShown"] as? Bool) ?? false,
         ]
         pendingCalls += 1
