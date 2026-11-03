@@ -22,6 +22,13 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('useMovingEntry', () => {
+  it('asks nothing when told not to (a cancelled account)', async () => {
+    const off = renderHook(() => useMovingEntry(false));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(api.getMovingEntry).not.toHaveBeenCalled();
+    expect(off.result.current).toBe(false);
+  });
+
   it('reads the server flag once; a failed read keeps the button hidden', async () => {
     api.getMovingEntry.mockResolvedValueOnce({ enabled: true });
     const on = renderHook(() => useMovingEntry());
@@ -42,9 +49,11 @@ describe('MovingEntry', () => {
 
   it('section: the live cancel-card promise, and the button opens the moving page', async () => {
     api.startMove.mockResolvedValueOnce({ path: '/moving/abc123' });
-    render(<MovingEntry enabled />);
+    // My Plan's real values: muted is a color string, secondaryButton a style object.
+    render(<MovingEntry enabled styles={{ muted: '#475569', secondaryButton: { minHeight: 40 } }} />);
     expect(screen.getByText('Moving?')).toBeInTheDocument();
-    expect(screen.getByText(MOVING_BODY)).toBeInTheDocument();
+    expect(screen.getByText(MOVING_BODY).style.color).toBe('rgb(71, 85, 105)');
+    expect(screen.getByRole('button', { name: MOVING_HEADLINE }).style.minHeight).toBe('40px');
     fireEvent.click(screen.getByRole('button', { name: MOVING_HEADLINE }));
     await waitFor(() => expect(assign).toHaveBeenCalledWith('/moving/abc123'));
     expect(showCustomerAlert).not.toHaveBeenCalled();

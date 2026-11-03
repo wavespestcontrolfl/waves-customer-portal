@@ -11773,8 +11773,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     : (!!activeTierName || !!nextService
       || upcomingServices.length > 0
       || Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0) > 0);
-  // "Take WaveGuard with you" (GATE_MOVING_PORTAL): the server says whether to offer it.
-  const movingEntryEnabled = useMovingEntry();
+  // "Take WaveGuard with you" (GATE_MOVING_PORTAL): the server says whether to offer it. Asked only
+  // while Account Options can render: a cancelled account's read-only portal never calls the route.
+  const movingEntryEnabled = useMovingEntry(hasCancellableAccount && !cancelledAccount);
 
   const detectCatalogServiceId = (service) => {
     for (const svc of SERVICE_CATALOG) {
@@ -12559,7 +12560,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
           {hasCancellableAccount && !cancelledAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div data-glass="chip" style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
-            <MovingEntry enabled={movingEntryEnabled} styles={{ muted, subtle, secondaryButton }} />
+            <MovingEntry enabled={movingEntryEnabled} styles={{ muted, secondaryButton }} />
             {/* C1 three-screen cancel flow (GATE_CANCEL_FLOW_V2); falls back to
                 the H0 single-step form inside the component when the gate is off. */}
             <CancelFlow

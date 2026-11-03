@@ -26,22 +26,29 @@ export async function openMovingPage() {
   }
 }
 
-// Whether the server offers the button (one read per mount).
-export function useMovingEntry() {
+// Whether the server offers the button. `ask` false (a cancelled account, no
+// Account Options) skips the read: the route is not open to a read-only portal.
+export function useMovingEntry(ask = true) {
   const [enabled, setEnabled] = useState(false);
   useEffect(() => {
+    if (!ask) {
+      setEnabled(false);
+      return undefined;
+    }
     let live = true;
     // Inside the promise chain, so a missing method also just hides the button.
     Promise.resolve().then(() => api.getMovingEntry())
       .then((res) => { if (live) setEnabled(res?.enabled === true); })
       .catch(() => { /* optional: a failed read leaves the button hidden */ });
     return () => { live = false; };
-  }, []);
+  }, [ask]);
   return enabled;
 }
 
 // variant 'section': the Account Options row (headline, one line, button).
 // variant 'link': one button under the cancel flow's Moving reason.
+// styles: muted is a text COLOR (My Plan's palette value); secondaryButton and
+// smallLinkButton are style objects.
 export default function MovingEntry({ enabled, variant = 'section', styles = {} }) {
   const [busy, setBusy] = useState(false);
   if (!enabled) return null;
@@ -59,8 +66,8 @@ export default function MovingEntry({ enabled, variant = 'section', styles = {} 
   }
   return (
     <div data-testid="moving-entry" style={{ marginBottom: 16 }}>
-      <div style={{ ...styles.muted, fontWeight: 600 }}>Moving?</div>
-      <div style={{ ...styles.subtle, marginTop: 2 }}>{MOVING_BODY}</div>
+      <div style={{ fontSize: 14, fontWeight: 700 }}>Moving?</div>
+      <div style={{ fontSize: 14, color: styles.muted, marginTop: 2, lineHeight: 1.45 }}>{MOVING_BODY}</div>
       <button type="button" onClick={open} disabled={busy} className="waves-focus-ring" style={{ ...styles.secondaryButton, marginTop: 10 }}>
         {busy ? 'Opening…' : MOVING_HEADLINE}
       </button>
