@@ -3361,6 +3361,7 @@ const PREFILL_PARAM_KEYS = [
   "customerEmail",
   "serviceInterest",
   "editEstimateId",
+  "moveId",
   "first_name",
   "last_name",
   "phone",
@@ -4702,6 +4703,7 @@ function EstimatesWorkspace() {
         "customerEmail",
         "serviceInterest",
         "editEstimateId",
+        "moveId",
         "first_name",
         "last_name",
         "phone",
@@ -4724,6 +4726,8 @@ function EstimatesWorkspace() {
       // Reopen this existing estimate in the builder for in-place editing
       // (set by the row menus' "Edit estimate" action).
       editEstimateId: params.get("editEstimateId") || "",
+      // Start a new-home estimate for this customer move (Moving card).
+      moveId: params.get("moveId") || "",
     };
   }, []);
 
@@ -4739,7 +4743,8 @@ function EstimatesWorkspace() {
     prefill.customerPhone ||
     prefill.customerEmail ||
     prefill.serviceInterest ||
-    prefill.editEstimateId
+    prefill.editEstimateId ||
+    prefill.moveId
   );
   const initialTab = TABS.some((t) => t.key === searchParams.get("tab"))
     ? searchParams.get("tab")
@@ -4801,7 +4806,8 @@ function EstimatesWorkspace() {
       incoming.customerPhone ||
       incoming.customerEmail ||
       incoming.serviceInterest ||
-      incoming.editEstimateId
+      incoming.editEstimateId ||
+      incoming.moveId
     );
     const tabParam = searchParams.get("tab");
     const hasTabParam = TABS.some((t) => t.key === tabParam);
@@ -4866,6 +4872,7 @@ function EstimatesWorkspace() {
       customerEmail: "",
       serviceInterest: "",
       editEstimateId: "",
+      moveId: "",
     });
   }, [activeTab, hasPrefill]);
   const selectTab = useCallback(
@@ -4914,6 +4921,7 @@ function EstimatesWorkspace() {
                 customerEmail: "",
                 serviceInterest: "",
                 editEstimateId: "",
+                moveId: "",
               });
               selectTab("new");
             }}
@@ -4935,6 +4943,7 @@ function EstimatesWorkspace() {
           initialCustomerEmail={prefill.customerEmail}
           initialServiceInterest={prefill.serviceInterest}
           editEstimateId={prefill.editEstimateId}
+          moveId={prefill.moveId}
           onBack={() => selectTab("leads")}
           onStartNew={() => {
             setPrefill(readLeadPrefill(new URLSearchParams()));

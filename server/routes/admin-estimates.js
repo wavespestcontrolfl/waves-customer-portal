@@ -1237,6 +1237,8 @@ router.post('/', async (req, res, next) => {
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
+      // Moving PR B1: only an admin may start a new-home estimate (body.moveId).
+      moveAllowed: req.techRole === 'admin',
     });
     notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     res.status(reused ? 200 : 201).json({
@@ -1472,6 +1474,11 @@ router.get('/:id/edit-source', async (req, res, next) => {
       // can offer the explicit confirmation the revise route honors
       // (`confirmAddress: true`) — without it staff could only clear the
       // block by changing the premise (pre-push audit P1 on #4667).
+      // Moving PR B1: a new-home estimate reopens with its move, so the
+      // builder previews with the setup fee waived (calculate moveEstimateId).
+      moveEstimate: estData.move && typeof estData.move === 'object'
+        ? { moveId: estData.move.moveId || null, moveOutDate: estData.move.moveOutDate || null, moveInDate: estData.move.moveInDate || null }
+        : null,
       addressUnverified: estData.addressUnverified === true
         ? {
           reason: String(estData.addressUnverifiedFlag?.reason || 'County records could not confirm this house number.').slice(0, 600),

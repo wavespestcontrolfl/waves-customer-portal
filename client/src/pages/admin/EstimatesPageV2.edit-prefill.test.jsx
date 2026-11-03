@@ -36,6 +36,15 @@ const EDIT_SOURCE = {
   engineProfile: null,
 };
 
+const MOVE_SOURCE = {
+  move: { id: "move-1", address: "123 Palm Ave, Venice, FL 34285", moveOutDate: "2026-11-15", moveInDate: "2026-11-20" },
+  customer: { id: "cust-1", name: "Jane Veteran", phone: "+19415550123", email: "jane@example.com" },
+  isRecurringCustomer: true,
+  source: { estimateId: "est-old", inputs: { svcPest: true, svcMisting: true, manualDiscountPreset: "multi_home", manualDiscountType: "PERCENT", manualDiscountValue: "10", manualDiscountLabel: "Multi-Home Discount" } },
+  planServices: [{ name: "Pest Control", frequency: "quarterly" }],
+  leftOut: [{ name: "Mosquito Misting", reason: "installed system" }],
+};
+
 function jsonResponse(body) {
   return Promise.resolve({
     ok: true,
@@ -55,6 +64,7 @@ beforeEach(() => {
     vi.fn((url) => {
       const path = String(url);
       if (path.includes("/edit-source")) return jsonResponse(EDIT_SOURCE);
+      if (path.includes("/estimate-source")) return jsonResponse(MOVE_SOURCE);
       if (path.includes("/admin/discounts")) return jsonResponse([]);
       if (path.includes("/admin/estimates")) return jsonResponse({ estimates: [] });
       return jsonResponse({});
@@ -99,5 +109,28 @@ describe("edit-estimate prefill survives the legacy redirect's injected tab para
     // goes to" line that stands in for the closed contact boxes.
     expect(screen.getAllByText(/Jane Veteran/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("estimate-contact-summary")).toHaveTextContent("Jane Veteran");
+  });
+
+  it("moveId starts a new-home estimate: fetches the move source and shows the move banner", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/pipeline?tab=new&moveId=move-1&customerId=cust-1"]}>
+        <Routes>
+          <Route path="/admin/pipeline" element={<EstimatesPageV2 />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const banner = await screen.findByTestId("move-estimate-banner");
+    await waitFor(() => expect(banner).toHaveTextContent("123 Palm Ave, Venice, FL 34285"));
+    expect(banner).toHaveTextContent("The $99 setup fee is waived for this move.");
+    expect(banner).toHaveTextContent("Today's plan: Pest Control (quarterly)");
+    expect(banner).toHaveTextContent("Not copied: Mosquito Misting (installed system)");
+    expect(banner).toHaveTextContent("The old estimate had a discount (Multi-Home Discount). Add it again if it still applies.");
+    expect(
+      vi.mocked(fetch).mock.calls.some(([url]) =>
+        String(url).includes("/api/admin/customers/cust-1/moves/move-1/estimate-source"),
+      ),
+    ).toBe(true);
+    // A move is not an edit: the builder stays in create mode.
+    expect(screen.queryByText(/Editing existing estimate/i)).toBeNull();
   });
 });

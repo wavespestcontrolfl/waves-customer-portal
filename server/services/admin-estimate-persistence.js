@@ -32,11 +32,25 @@ const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence, is
 const { findCustomersAtAddress } = require('./customer-address-match');
 const { computeMembershipContext, membershipScopeArgs } = require('./estimate-membership-context');
 const { autoFillSoldBy } = require('./estimate-sold-by');
+// Moving PR B1: the new-home estimate's move checks, waiver stamp and link.
+const Moves = require('./customer-moves');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
   err.statusCode = statusCode;
   return err;
+}
+
+// A moving check's refusal (customer-moves MoveError) as this module's HTTP error.
+async function moveOrHttpError(check) {
+  try {
+    return await check();
+  } catch (err) {
+    if (!(err instanceof Moves.MoveError)) throw err;
+    const httpErr = errorWithStatus(err.message, err.status);
+    httpErr.code = err.code;
+    throw httpErr;
+  }
 }
 
 function normalizeLinkedLeadId(leadId) {
@@ -1975,6 +1989,7 @@ async function resolveEstimateWritePayload({
   storedEstimateData = null, // revise only: the ROW's parsed estimate_data (the offer-tier parked state lives there)
   requireLivePricing = false,
   priorPhone = null, // revise only: the ROW's customer_phone, so an unchanged echo is not re-judged
+  moveAllowed = false, // create only: the saver is an admin, so body.moveId may start a new-home estimate
 }) {
   // A US-shaped phone that can never be texted (area code or exchange starting
   // 0/1, Twilio 21211) is refused at save, not first at Send (codex #6028 P2).
@@ -2010,6 +2025,29 @@ async function resolveEstimateWritePayload({
     delete trustedEstimateData.groupLinkViewableThrough;
     delete trustedEstimateData.groupPublishedByEstimateId;
     delete trustedEstimateData.deliveryState;
+  }
+  // Moving PR B1 (GATE_MOVING_ESTIMATE): estimate_data.move and its setup-fee
+  // waiver are server-owned. A create naming a move (body.moveId) takes them
+  // from the verified move; a revise carries the stored row's; a browser copy
+  // is never read. Stamped BEFORE pricing, so the recompute drops the $99
+  // (owner Q2: waived for every move).
+  if (trustedEstimateData) delete trustedEstimateData.move;
+  const storedMove = storedEstimateData && storedEstimateData.move && typeof storedEstimateData.move === 'object'
+    ? storedEstimateData.move : null;
+  if (storedMove && trustedEstimateData) {
+    trustedEstimateData.move = storedMove;
+    trustedEstimateData.operatorPriceAdjustment = Moves.withMoveSetupWaiver(storedEstimateData.operatorPriceAdjustment);
+  } else if (body.moveId && !storedEstimateData) {
+    if (!moveAllowed) throw errorWithStatus('Only an admin can start a new-home estimate.', 403);
+    if (body.groupWithEstimateId || body.estimateGroupId) {
+      throw errorWithStatus('A new-home estimate cannot join a multi-property group.', 400);
+    }
+    if (!trustedEstimateData) throw errorWithStatus('A new-home estimate needs its estimate data.', 400);
+    const move = await moveOrHttpError(() => Moves.verifyMoveForEstimate({
+      moveId: body.moveId, customerId: body.customerId, address: body.address,
+    }, database));
+    trustedEstimateData.move = Moves.moveEstimateStamp(move);
+    trustedEstimateData.operatorPriceAdjustment = Moves.withMoveSetupWaiver(null);
   }
   // Before anything downstream derives from the payload (quoteRequired reads
   // proposal.enabled through buildPricingBundle): the browser's proposal is
@@ -2336,6 +2374,7 @@ async function createOrReuseAdminEstimate({
   dryRun = false,
   expectedEngineResultDigest = null,
   requireLivePricing = false,
+  moveAllowed = false,
 }) {
   const clientDraftId = body.clientDraftId || null;
   if (clientDraftId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientDraftId)) {
@@ -2356,6 +2395,7 @@ async function createOrReuseAdminEstimate({
     recompute,
     pricingOut,
     requireLivePricing,
+    moveAllowed,
   });
   const expiresAt = estimateExpiresAt(now);
   const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
@@ -2389,6 +2429,13 @@ async function createOrReuseAdminEstimate({
         return { estimate: prior, reused: true, memberLinkageWarning };
       }
     }
+    // Moving PR B1: the move is re-checked under its row lock (a second live
+    // estimate for the same move is refused) and linked after the insert.
+    const lockedMove = body.moveId && moveAllowed
+      ? await moveOrHttpError(() => Moves.lockMoveForEstimate(trx, {
+        moveId: body.moveId, customerId: body.customerId, address: body.address,
+      }))
+      : null;
     let canReplaceLinkedEstimate = false;
 
     // "Add another property": the builder passes the FIRST estimate's id and
@@ -2594,6 +2641,7 @@ async function createOrReuseAdminEstimate({
       token,
       expires_at: expiresAt,
     }).returning('*');
+    if (lockedMove) await Moves.attachMoveEstimate(trx, lockedMove.id, created.id);
 
     if (linkedLeadId) {
       await attachLeadToEstimate({
@@ -2933,7 +2981,9 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // the locked pass mirrors the locked row exactly, so a client payload can
 // neither drop it nor invent one.
 const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception'];
-const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception'];
+// move: a new-home estimate's link to its customer_moves row (moving PR B1),
+// stamped only by a create that names a verified move.
+const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception', 'move'];
 // The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
 // is carried across an ORDINARY revision (the public link and the send
 // guard both refuse while it stands), and cleared by the two staff actions
@@ -3224,6 +3274,17 @@ async function reviseAdminEstimate({
     pricingOut,
     requireLivePricing,
   });
+  // Moving PR B1: a new-home estimate stays at its move's new address. A
+  // revise that changes the premise is refused; staff start a normal estimate.
+  if (storedEstimateData?.move?.moveId) {
+    const nextAddress = writeFields.address === undefined ? estimate.address : writeFields.address;
+    const move = await database('customer_moves').where({ id: storedEstimateData.move.moveId }).first('id', 'normalized_address');
+    if (move && !Moves.addressMatchesMove(nextAddress, move)) {
+      const err = errorWithStatus('This estimate is for the move to the new address, so its address cannot change. Start a normal estimate for another address.', 409);
+      err.code = 'move_address_changed';
+      throw err;
+    }
+  }
   // Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
   // pre-push codex P0): a delivered estimate's bearer link renders whatever
   // is stored, so a revision whose recompute fell back to the browser

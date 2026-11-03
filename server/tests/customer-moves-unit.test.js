@@ -201,3 +201,40 @@ test('the token shape is 48 hex characters', () => {
   expect(Moves.TOKEN_RE.test('a'.repeat(64))).toBe(false);
   expect(Moves.TOKEN_RE.test('g'.repeat(48))).toBe(false);
 });
+
+describe('the new-home estimate stamps (moving PR B1)', () => {
+  const move = {
+    id: 'move-1',
+    move_out_date: new Date('2026-11-20T00:00:00Z'),
+    move_in_date: '2026-11-25',
+    normalized_address: { line1: '40 Sample Road', line2: null, city: 'Venice', state: 'FL', zip: '34285' },
+  };
+
+  test('the waiver keeps a stored discount and always waives the setup fee', () => {
+    expect(Moves.withMoveSetupWaiver(null)).toEqual({
+      type: null, value: 0, label: null,
+      internalReason: expect.stringMatching(/moving.*\$99 setup fee is waived/i),
+      floorBreachAcknowledged: false, waiveSetupFee: true,
+    });
+    expect(Moves.withMoveSetupWaiver({ type: 'PERCENT', value: 10, label: 'Neighbor', internalReason: 'Office', waiveSetupFee: false })).toEqual({
+      type: 'PERCENT', value: 10, label: 'Neighbor', internalReason: 'Office', floorBreachAcknowledged: false, waiveSetupFee: true,
+    });
+    expect(Moves.withMoveSetupWaiver(['not', 'an', 'object']).waiveSetupFee).toBe(true);
+  });
+
+  test('the move stamp carries calendar dates, never a time-zone-shifted day', () => {
+    expect(Moves.moveEstimateStamp(move)).toEqual({ moveId: 'move-1', moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
+    expect(Moves.moveEstimateStamp({ id: 'm', move_out_date: null, move_in_date: null })).toEqual({ moveId: 'm', moveOutDate: null, moveInDate: null });
+  });
+
+  test('only the move\'s new street, in its city or ZIP, matches', () => {
+    expect(Moves.addressMatchesMove('40 Sample Road, Venice, FL 34285', move)).toBe(true);
+    expect(Moves.addressMatchesMove('40 Sample Rd, Venice, FL 34285', move)).toBe(true);
+    expect(Moves.addressMatchesMove('40 Sample Road, Venice FL', move)).toBe(true);
+    expect(Moves.addressMatchesMove('41 Sample Road, Venice, FL 34285', move)).toBe(false);
+    expect(Moves.addressMatchesMove('40 Sample Road, Bradenton, FL 34205', move)).toBe(false);
+    expect(Moves.addressMatchesMove('40 Sample Road', move)).toBe(false);
+    expect(Moves.addressMatchesMove('', move)).toBe(false);
+    expect(Moves.addressMatchesMove('40 Sample Road, Venice, FL 34285', { normalized_address: null })).toBe(false);
+  });
+});

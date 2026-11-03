@@ -9,7 +9,11 @@
  * office item (a service_requests row, category 'moving') and one admin alert.
  *
  * What this service never does: create a property, move or cancel a visit,
- * change a price, change a primary property, or send a message by itself.
+ * change a primary property, or send a message by itself.
+ *
+ * PR B1 (GATE_MOVING_ESTIMATE) adds the new-home estimate checks: which moves
+ * may get an estimate for the new house, the $99 setup-fee waiver the estimate
+ * save stamps on it (owner Q2), and the link from the move to that estimate.
  *
  * Spend: Google Address Validation is a paid call. Each link allows at most
  * DAILY_CHECK_CAP checks per Eastern day (claimed atomically BEFORE the call),
@@ -35,6 +39,7 @@ const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-e
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validateAddress, STATUSES } = require('./address-validation');
 const { moveVerdictLabel } = require('./move-address-verdict');
+const { movingEstimateLive } = require('../config/feature-gates');
 
 const TOKEN_RE = /^[a-f0-9]{48}$/;
 const DAILY_CHECK_CAP = 10;
@@ -556,13 +561,274 @@ async function recentMoves(customerId, limit = 5) {
     .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
     .limit(limit)
-    .select('id', 'status', 'link_sent_at', 'link_channel', 'submitted_at', 'typed_address', 'normalized_address',
-      'address_verdict', 'move_out_date', 'move_in_date', 'service_request_id');
+    .select('id', 'customer_id', 'status', 'link_sent_at', 'link_channel', 'submitted_at', 'typed_address', 'normalized_address',
+      'address_verdict', 'move_out_date', 'move_in_date', 'service_request_id', 'estimate_id');
   return rows.map((row) => ({
     ...row,
     move_out_date: dateOnlyString(row.move_out_date) || null,
     move_in_date: dateOnlyString(row.move_in_date) || null,
   }));
+}
+
+
+// ── New-home estimate (moving PR B1, GATE_MOVING_ESTIMATE) ──────────────────
+//
+// The office starts the new house's estimate from the Moving card. The server
+// owns three things: which moves may get one, the $99 setup-fee waiver on it
+// (owner Q2: waived for every move), and the link back to the move. B1 serves
+// customers billed per visit; an annual prepay (owner Q3: keeps its paid price
+// until renewal) and a monthly membership move in a later PR, so both are
+// refused here.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NEW_HOME_BILLING_MODES = new Set(['per_application', 'per_visit', '']);
+const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+const DEAD_ESTIMATE_STATUSES = ['declined', 'expired'];
+const MOVE_WAIVER_REASON = 'Customer is moving: the $99 setup fee is waived for every move (owner 2026-11-02, Q2).';
+const NEW_HOME_REFUSALS = {
+  gate_off: 'New-home estimates are off.',
+  not_found: 'That move was not found for this customer.',
+  not_submitted: 'The customer has not sent the new address yet.',
+  out_of_area: 'The new address is outside our service area.',
+  no_address: 'The new address is not complete.',
+  customer_gone: 'This customer record is not active.',
+  prepay: 'This customer prepays for the year. New-home estimates for prepay plans come in a later update.',
+  monthly: 'This customer pays a monthly membership. New-home estimates for monthly plans come in a later update.',
+  billing: 'This customer\'s billing plan is not one the new-home estimate handles yet.',
+  estimate_exists: 'This move already has a new-home estimate. Open that one instead.',
+};
+// Plan services the new-home estimate does not copy, and why.
+const LEFT_OUT = [
+  { re: /termite/i, reason: 'Termite stations and treatments stay with the old house.' },
+  { re: /mist/i, reason: 'The misting system stays with the old house.' },
+];
+
+function newHomeError(code, status = 409) {
+  return new MoveError(code, NEW_HOME_REFUSALS[code] || 'This move is not ready for a new-home estimate.', status);
+}
+
+function addressComplete(n) {
+  return !!(n && n.line1 && n.city && n.state && n.zip);
+}
+
+// The move's live estimate (not declined, expired or archived), or null.
+async function liveMoveEstimate(move, conn = db) {
+  if (!move || !move.estimate_id) return null;
+  return conn('estimates')
+    .where({ id: move.estimate_id })
+    .whereNull('archived_at')
+    .whereNotIn('status', DEAD_ESTIMATE_STATUSES)
+    .first('id', 'status');
+}
+
+// Why this move cannot get a new-home estimate (a NEW_HOME_REFUSALS code), or null.
+async function newHomeBlock(move, conn = db) {
+  if (move.status !== 'submitted') return 'not_submitted';
+  if (move.address_verdict !== 'in_area') return 'out_of_area';
+  if (!addressComplete(parseJson(move.normalized_address))) return 'no_address';
+  const customer = await conn('customers')
+    .where({ id: move.customer_id })
+    .whereNull('deleted_at')
+    .first('id', 'billing_mode');
+  if (!customer) return 'customer_gone';
+  const mode = String(customer.billing_mode || '');
+  if (mode === 'annual_prepay') return 'prepay';
+  if (mode === 'monthly_membership') return 'monthly';
+  if (!NEW_HOME_BILLING_MODES.has(mode)) return 'billing';
+  // A prepaid visit still on the books is a live prepay term, whatever the mode says.
+  const prepaid = await conn('scheduled_services')
+    .where({ customer_id: move.customer_id })
+    .whereNotNull('annual_prepay_term_id')
+    .whereIn('status', LIVE_VISIT_STATUSES)
+    .first('id');
+  return prepaid ? 'prepay' : null;
+}
+
+/** The Moving card's new-home action for one move: null, or { action, estimateId, reason }. */
+async function newHomeAction(move, conn = db) {
+  if (!movingEstimateLive() || !move || move.status !== 'submitted') return null;
+  const existing = await liveMoveEstimate(move, conn);
+  if (existing) return { action: 'open', estimateId: existing.id, reason: null };
+  const block = await newHomeBlock(move, conn);
+  if (block) return { action: 'blocked', estimateId: null, reason: NEW_HOME_REFUSALS[block] };
+  return { action: 'start', estimateId: null, reason: null };
+}
+
+/**
+ * Does this estimate address name the move's new house? Same street (unit-aware)
+ * and at least one matching locality field (city or ZIP) on both sides.
+ */
+function addressMatchesMove(address, move) {
+  const { makeEstimateScopeKeys, sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
+  const want = makeEstimateScopeKeys(addressLine(parseJson(move && move.normalized_address)));
+  const got = makeEstimateScopeKeys(String(address || ''));
+  if (!want || !got || !want.estimateKey || !got.estimateKey) return false;
+  return sameScopeKey(want.estimateKey, got.estimateKey) && scopeKeysShareLocality(want.estimateKey, got.estimateKey);
+}
+
+// The newest accepted builder estimate, preferring the house being left.
+async function sourceEstimateFor(move, conn = db) {
+  const rows = await conn('estimates')
+    .where({ customer_id: move.customer_id, status: 'accepted' })
+    .orderBy([{ column: 'accepted_at', order: 'desc', nulls: 'last' }, { column: 'created_at', order: 'desc' }])
+    .limit(10)
+    .select('id', 'property_id', 'estimate_data');
+  const usable = rows
+    .map((row) => ({ row, inputs: (parseJson(row.estimate_data) || {}).inputs }))
+    .filter(({ inputs }) => inputs && typeof inputs === 'object' && !Array.isArray(inputs));
+  const pick = usable.find(({ row }) => move.from_property_id && String(row.property_id || '') === String(move.from_property_id))
+    || usable[0];
+  return pick ? { estimateId: pick.row.id, inputs: pick.inputs } : null;
+}
+
+// Today's live recurring plan, one line per service and cadence.
+async function planServicesFor(customerId, conn = db) {
+  const rows = await conn('scheduled_services')
+    .where({ customer_id: customerId, recurring_ongoing: true })
+    .where(function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); })
+    .whereNotNull('service_type')
+    .distinct('service_type', 'recurring_pattern')
+    .orderBy('service_type');
+  return rows
+    .map((r) => ({
+      name: String(r.service_type || '').trim(),
+      frequency: String(r.recurring_pattern || '').replace(/_/g, ' ').trim() || null,
+    }))
+    .filter((r) => r.name);
+}
+
+/**
+ * Everything the estimator needs to start the new house's estimate. Throws a
+ * MoveError (404 / 409) when the move cannot get one; 409 estimate_exists
+ * carries the live estimate's id.
+ */
+async function moveEstimateSource(customerId, moveId, conn = db) {
+  if (!movingEstimateLive()) throw newHomeError('gate_off', 404);
+  if (!UUID_RE.test(String(moveId || ''))) throw newHomeError('not_found', 404);
+  const move = await conn('customer_moves').where({ id: moveId, customer_id: customerId }).first();
+  if (!move) throw newHomeError('not_found', 404);
+  const existing = await liveMoveEstimate(move, conn);
+  if (existing) {
+    const err = newHomeError('estimate_exists');
+    err.estimateId = existing.id;
+    throw err;
+  }
+  const block = await newHomeBlock(move, conn);
+  if (block) throw newHomeError(block);
+  const { isActivePlanCustomer } = require('./waveguard-existing-services');
+  const [customer, source, planServices, recurring] = await Promise.all([
+    conn('customers').where({ id: customerId }).first('id', 'first_name', 'last_name', 'phone', 'email'),
+    sourceEstimateFor(move, conn),
+    planServicesFor(customerId, conn),
+    isActivePlanCustomer(conn, customerId).catch(() => false),
+  ]);
+  const leftOut = [];
+  for (const svc of planServices) {
+    const rule = LEFT_OUT.find(({ re }) => re.test(svc.name));
+    if (rule && !leftOut.some((x) => x.name === svc.name)) leftOut.push({ name: svc.name, reason: rule.reason });
+  }
+  return {
+    move: {
+      id: move.id,
+      address: addressLine(parseJson(move.normalized_address)),
+      moveOutDate: dateOnlyString(move.move_out_date) || null,
+      moveInDate: dateOnlyString(move.move_in_date) || null,
+    },
+    customer: {
+      id: customer.id,
+      name: [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim(),
+      phone: customer.phone || null,
+      email: customer.email || null,
+    },
+    isRecurringCustomer: recurring === true,
+    source,
+    planServices,
+    leftOut,
+  };
+}
+
+/**
+ * Read-only check for a preview or a save that names a move: the move row, or
+ * a MoveError. The create transaction repeats it under a row lock
+ * (lockMoveForEstimate).
+ */
+async function verifyMoveForEstimate({ moveId, customerId, address }, conn = db) {
+  if (!movingEstimateLive()) throw newHomeError('gate_off');
+  if (!UUID_RE.test(String(moveId || ''))) throw newHomeError('not_found', 404);
+  const move = await conn('customer_moves').where({ id: moveId }).first();
+  if (!move || String(move.customer_id) !== String(customerId || '')) throw newHomeError('not_found', 404);
+  const block = await newHomeBlock(move, conn);
+  if (block) throw newHomeError(block);
+  if (!addressMatchesMove(address, move)) {
+    throw new MoveError('move_address', `This estimate must be for the new address: ${addressLine(parseJson(move.normalized_address))}.`, 409);
+  }
+  return move;
+}
+
+/**
+ * The create transaction's check: locks the move row, repeats every check,
+ * refuses a second live estimate, and records the house the customer leaves
+ * (their primary property now) so the Multi-Home count can skip it.
+ */
+async function lockMoveForEstimate(trx, { moveId, customerId, address }) {
+  if (!UUID_RE.test(String(moveId || ''))) throw newHomeError('not_found', 404);
+  await trx('customer_moves').where({ id: moveId }).forUpdate().first('id');
+  const move = await verifyMoveForEstimate({ moveId, customerId, address }, trx);
+  const existing = await liveMoveEstimate(move, trx);
+  if (existing) {
+    const err = newHomeError('estimate_exists');
+    err.estimateId = existing.id;
+    throw err;
+  }
+  const primaryId = await primaryPropertyId(move.customer_id, trx);
+  if (primaryId && String(primaryId) !== String(move.from_property_id || '')) {
+    await trx('customer_moves').where({ id: move.id }).update({ from_property_id: primaryId, updated_at: trx.fn.now() });
+    move.from_property_id = primaryId;
+  }
+  return move;
+}
+
+async function attachMoveEstimate(trx, moveId, estimateId) {
+  await trx('customer_moves').where({ id: moveId }).update({ estimate_id: estimateId, updated_at: trx.fn.now() });
+}
+
+// estimate_data.move: server-owned, carried across every revise.
+function moveEstimateStamp(move) {
+  return {
+    moveId: move.id,
+    moveOutDate: dateOnlyString(move.move_out_date) || null,
+    moveInDate: dateOnlyString(move.move_in_date) || null,
+  };
+}
+
+// estimate_data.operatorPriceAdjustment with the setup fee waived. `base` is
+// the stored row's adjustment on a revise (its other fields are kept), or null
+// on a create (a browser never supplies this field for a move).
+function withMoveSetupWaiver(base) {
+  const adj = base && typeof base === 'object' && !Array.isArray(base) ? base : {};
+  return {
+    type: adj.type === 'PERCENT' || adj.type === 'FIXED' ? adj.type : null,
+    value: Number(adj.value) > 0 ? Number(adj.value) : 0,
+    label: adj.label || null,
+    internalReason: adj.internalReason || MOVE_WAIVER_REASON,
+    floorBreachAcknowledged: adj.floorBreachAcknowledged === true,
+    waiveSetupFee: true,
+  };
+}
+
+/** The submitted move this estimate was made for (gate on), with dates as YYYY-MM-DD, or null. */
+async function moveForEstimate(estimateId, conn = db) {
+  if (!movingEstimateLive() || !estimateId) return null;
+  const move = await conn('customer_moves')
+    .where({ estimate_id: estimateId, status: 'submitted' })
+    .first('id', 'customer_id', 'normalized_address', 'move_out_date', 'move_in_date', 'from_property_id');
+  if (!move) return null;
+  return {
+    ...move,
+    normalized_address: parseJson(move.normalized_address),
+    move_out_date: dateOnlyString(move.move_out_date) || null,
+    move_in_date: dateOnlyString(move.move_in_date) || null,
+  };
 }
 
 module.exports = {
@@ -582,5 +848,15 @@ module.exports = {
   recentMoves,
   textTarget,
   planServiceNames,
+  NEW_HOME_REFUSALS,
+  newHomeAction,
+  addressMatchesMove,
+  moveEstimateSource,
+  verifyMoveForEstimate,
+  lockMoveForEstimate,
+  attachMoveEstimate,
+  moveEstimateStamp,
+  withMoveSetupWaiver,
+  moveForEstimate,
   _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert },
 };

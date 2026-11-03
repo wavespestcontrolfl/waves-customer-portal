@@ -6327,6 +6327,35 @@ router.post('/calculate-estimate', async (req, res) => {
     if (pricingEngine.needsSync && pricingEngine.needsSync()) {
       await pricingEngine.syncConstantsFromDB();
     }
+    // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate previews with
+    // the $99 setup fee waived, exactly as its save stamps it (owner Q2). The
+    // move is checked first, so staff never price a move that cannot get one.
+    let moveSetupFeeWaived = false;
+    if (options?.moveId) {
+      // Admin only, like the Moving card: this router also admits technicians.
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Only an admin can price a new-home estimate.' });
+      const Moves = require('../services/customer-moves');
+      try {
+        await Moves.verifyMoveForEstimate({ moveId: options.moveId, customerId: options.existingCustomerId, address: options.address });
+      } catch (moveErr) {
+        if (moveErr instanceof Moves.MoveError) return res.status(moveErr.status).json({ error: moveErr.message, code: moveErr.code });
+        throw moveErr;
+      }
+      moveSetupFeeWaived = true;
+    } else if (options?.moveEstimateId) {
+      // Reopening a saved new-home estimate: its revise carries the stored
+      // waiver whatever the move's status now, so its preview does too.
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Only an admin can price a new-home estimate.' });
+      const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const stored = UUID.test(String(options.moveEstimateId))
+        ? await require('../models/db')('estimates').where({ id: String(options.moveEstimateId) }).first('customer_id', 'estimate_data')
+        : null;
+      const storedData = stored && (typeof stored.estimate_data === 'string'
+        ? (() => { try { return JSON.parse(stored.estimate_data); } catch { return null; } })()
+        : stored.estimate_data);
+      moveSetupFeeWaived = !!(storedData && storedData.move && typeof storedData.move === 'object'
+        && String(stored.customer_id || '') === String(options.existingCustomerId || ''));
+    }
     let v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
     // Canonical qualifying families of the MATCHED account (codex #3591 r16
     // P1): the estimator forwards only existingCustomerId (+ the quoted
@@ -6353,7 +6382,15 @@ router.post('/calculate-estimate', async (req, res) => {
     v1Input = await require('../services/pricing-engine/trusted-catalog-pricing')
       .withTrustedCatalogPricing(v1Input);
     const v1 = pricingEngine.generateEstimate(v1Input);
+    // The same zeroing the save-time recompute applies to a waived setup fee
+    // (initialFee is only the $99 WaveGuard setup), before the mapper sums it.
+    if (moveSetupFeeWaived && Array.isArray(v1?.lineItems)) {
+      for (const li of v1.lineItems) {
+        if (li && Number(li.initialFee) > 0) li.initialFee = 0;
+      }
+    }
     const mapped = mapV1ToLegacyShape(v1);
+    if (moveSetupFeeWaived) mapped.moveSetupFeeWaived = true;
     // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): tell the estimate tool
     // when this result may be marked for the tier picker, so it can default
     // the option on. Same stored-facts predicate the save applies (plus the
