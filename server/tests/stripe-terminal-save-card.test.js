@@ -454,6 +454,56 @@ describe('privacy headers', () => {
   });
 });
 
+describe('privacy headers ahead of the limiter, parsers and dark gate', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const rateLimit = require('express-rate-limit');
+  const { noStore } = require('../middleware/no-store');
+  const PATHS = ['/save-card-handoff', '/validate-save-card-handoff', '/complete-setup'];
+
+  test('server/index.js mounts noStore for exactly the three paths before the limiter and every body parser', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+    const mount = src.indexOf("'/api/stripe/terminal/save-card-handoff',");
+    expect(mount).toBeGreaterThan(0);
+    const block = src.slice(mount - 40, src.indexOf('.noStore);', mount) + 10);
+    PATHS.forEach((p) => expect(block).toContain(`'/api/stripe/terminal${p}'`));
+    expect(block).toContain("require('./middleware/no-store').noStore");
+    expect(mount).toBeLessThan(src.indexOf("app.use('/api/', limiter);"));
+    expect(mount).toBeLessThan(src.indexOf('app.use(express.json('));
+    expect(mount).toBeLessThan(src.indexOf("app.use('/api/stripe/terminal', require('./routes/stripe-terminal'));"));
+  });
+
+  test('mounted that way, the dark 404, a malformed-JSON 400 and a limiter 429 all carry the headers', async () => {
+    const app = express();
+    app.use(PATHS.map((p) => `/api/stripe/terminal${p}`), noStore);
+    app.use('/api/', rateLimit({ windowMs: 60000, max: 2, standardHeaders: true, legacyHeaders: false }));
+    app.use(express.json());
+    app.use('/api/stripe/terminal', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: 'bad' }));
+    const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+    const base = `http://127.0.0.1:${server.address().port}/api/stripe/terminal`;
+    const noStoreHeaders = (res) => {
+      expect(res.headers.get('cache-control')).toContain('no-store');
+      expect(res.headers.get('x-robots-tag')).toContain('noindex');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    };
+    try {
+      mockState.gateOn = false;
+      const dark = await fetch(`${base}/save-card-handoff`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(dark.status).toBe(404);
+      noStoreHeaders(dark);
+      const malformed = await fetch(`${base}/validate-save-card-handoff`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{nope' });
+      expect(malformed.status).toBe(400);
+      noStoreHeaders(malformed);
+      const limited = await fetch(`${base}/complete-setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(limited.status).toBe(429);
+      noStoreHeaders(limited);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
 describe('the charge fence', () => {
   const saveCardAuth = () => ({
     authorization: `Bearer ${jwt.sign({

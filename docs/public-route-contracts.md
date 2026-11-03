@@ -6342,7 +6342,7 @@ secret and a terminal bearer token, so `/validate-save-card-handoff` (and
 the saved card's brand, last four and funding) answer with the shared `noStore`
 middleware (`Cache-Control: no-store, no-cache, must-revalidate`, `Pragma:
 no-cache`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`)
-on every outcome, success and refusal. WEBHOOK RECOVERY: a `setup_intent.succeeded`
+on every outcome, success and refusal: it is mounted at those three exact paths in `server/index.js` BEFORE the global `/api` limiter and the body parsers (so a 429, a malformed-JSON 400 or a 413 carries it) and ahead of the mint's dark-gate 404, and the router re-stamps it. WEBHOOK RECOVERY: a `setup_intent.succeeded`
 event whose SetupIntent metadata has `source: 'admin_tap_to_pay'` and an
 `appointment_card_request_id` (no `purpose`) runs the SAME verify and completion
 tail as `/complete-setup` (`completeTerminalSetupForRequest`), so a save the app

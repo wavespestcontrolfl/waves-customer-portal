@@ -557,6 +557,16 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
 // the appointment route's visitPrepPreParserGuard above.
 app.use('/api/public/reservice', require('./routes/reservice-public').reservicePhotosPreParserGuard);
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+// Tap to Pay card save (GATE_TAP_SAVE_CARD): these three answers carry a
+// SetupIntent client secret, a terminal bearer token, a customer name or the
+// saved card's details. Privacy headers land BEFORE the mint's dark-gate 404,
+// the global /api limiter (429) and the body parsers (400/413), so no outcome
+// is cacheable. The router re-stamps them (docs/public-route-contracts.md).
+app.use([
+  '/api/stripe/terminal/save-card-handoff',
+  '/api/stripe/terminal/validate-save-card-handoff',
+  '/api/stripe/terminal/complete-setup',
+], require('./middleware/no-store').noStore);
 
 // Estimate map-image proxy: privacy headers + the dark overlay 404 must land
 // BEFORE the global limiter, or an over-budget IP gets a 429 (and no
