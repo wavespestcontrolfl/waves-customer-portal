@@ -238,14 +238,16 @@ on the web view that asked; `requestId` comes back unchanged):
   the passcode as fallback (`.deviceOwnerAuthentication`, reason "Take the
   phone back"). Success closes the screen and answers the admin page `ended`.
   Cancel or failure stays on the customer view. A phone with no passcode ends
-  with `auth: 'unavailable'`. Hand back waits while a card save is open.
+  with `auth: 'unavailable'`. Hand back is ignored (the bar says "Finishing the card save…") while a terms or save request is pending or the card-save screen is open; a request that finishes after the hand-off ends opens nothing.
 - While it is open, a staff alert that arrives with the app open shows no
   banner and plays no sound (it still goes to the list and the badge). The
   flag is `handoffLockActive` in UserDefaults; sign-out clears it.
 - If the app restarts with the flag still on (it was closed during a hand-off),
-  the customer view is gone. A full-screen "Waves Admin is locked" cover asks
-  for the same device check before the admin screens show
-  (`HandoffRelaunchGate`). Logic check for the flag:
+  the customer view is gone. `RootView` shows a "Waves Admin is locked" screen
+  INSTEAD of the portal: the portal web view is not created, so it shows
+  nothing and takes no input, until the same device check passes (no passcode:
+  it unlocks, as Hand back does). Wavespay payment links are ignored meanwhile.
+  Logic check for the flag:
   `swiftc -o /tmp/handoff-check Sources/HandoffLock.swift Tests/main.swift &&
   /tmp/handoff-check`.
 
@@ -298,8 +300,8 @@ opened from Safari starts nothing: the app shows "Open this from Waves Admin."
 10. **Hand back**, cancel Face ID: stays on the customer view. Pass Face ID:
     the admin page gets `ended`; the next alert shows a banner.
 11. Phone with no passcode: Hand back ends with `auth: 'unavailable'`.
-12. Force-quit during a hand-off, relaunch: "Waves Admin is locked" covers the
-    portal until Face ID passes; alerts stay silent until then.
+12. Force-quit during a hand-off, relaunch: "Waves Admin is locked" replaces the
+    portal (not loaded) until Face ID passes; alerts stay silent until then.
 13. Open `wavespay://save-card?t=x` from Safari: "Open this from Waves Admin."
 14. Existing `tapToPay`, `prepareReader`, `registerPush` still work, and
     `tapToPay` during a card save answers `failed`.

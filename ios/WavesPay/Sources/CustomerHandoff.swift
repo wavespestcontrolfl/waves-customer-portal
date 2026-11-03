@@ -69,6 +69,9 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
     private let onEnded: ([String: Any]) -> Void
     private var controller: CustomerHandoffController?
     private var saveInFlight = false
+    // Admin-page calls (terms, save link) that have not answered yet. Hand back
+    // waits for them, and none may act after the hand-off ends.
+    private var pendingCalls = 0
 
     init(url: URL, secureToken: String, firstName: String, requestId: String?, adminPage: WKWebView,
          app: AppState, lock: HandoffLock,
@@ -116,8 +119,12 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
     // MARK: - Hand back
 
     private func handBack() {
-        // A card save in progress finishes first.
-        guard !app.cardSaveOpen else { return }
+        // A request in progress finishes first: a pending terms or save-link
+        // call, or the open card-save screen.
+        guard pendingCalls == 0, !saveInFlight, !app.cardSaveOpen else {
+            controller?.showNote("Finishing the card save…")
+            return
+        }
         Task {
             switch await lock.end() {
             case .ended(let unavailable):
@@ -166,9 +173,12 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
             "termsVersion": Self.scalar(body["termsVersion"]),
             "consumerNoticeShown": (body["consumerNoticeShown"] as? Bool) ?? false,
         ]
+        pendingCalls += 1
         Task {
+            defer { pendingCalls -= 1 }
             do {
                 let result = try await callAdmin("wavesAdminInPersonTerms", args)
+                guard controller != nil else { return }
                 // Only an explicit { ok: true } records the terms; anything
                 // else (missing value, ok absent or false) is a failure.
                 let dict = result as? [String: Any]
@@ -195,13 +205,17 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
             "feeDisclosedAmount": Self.scalar(body["feeDisclosedAmount"]),
             "disclosureVersion": Self.scalar(body["disclosureVersion"]),
         ]
+        pendingCalls += 1
         Task {
+            defer { pendingCalls -= 1 }
             let result: Any?
             do {
                 result = try await callAdmin("wavesAdminSaveCardHandoff", args)
             } catch {
                 return failSave(Self.plainFailure, requestId)
             }
+            // The hand-off ended while the admin page worked: open nothing.
+            guard controller != nil else { saveInFlight = false; return }
             let dict = result as? [String: Any]
             guard let link = dict?["deep_link"] as? String, let linkURL = URL(string: link),
                   let token = SaveCardSession.token(from: linkURL)
@@ -308,6 +322,8 @@ final class CustomerHandoffController: UIViewController {
     private let firstName: String
     private let onHandBack: () -> Void
     private var offlineLabel: UILabel?
+    private let titleLabel = UILabel()
+    private var barTitle: String { firstName.isEmpty ? "Handed to you" : "Handed to \(firstName)" }
 
     init(webView: WKWebView, firstName: String, onHandBack: @escaping () -> Void) {
         self.webView = webView
@@ -329,8 +345,8 @@ final class CustomerHandoffController: UIViewController {
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.contentView.backgroundColor = UIColor.white.withAlphaComponent(0.45)
 
-        let label = UILabel()
-        label.text = firstName.isEmpty ? "Handed to you" : "Handed to \(firstName)"
+        let label = titleLabel
+        label.text = barTitle
         label.font = .systemFont(ofSize: 17, weight: .semibold)
         label.textColor = UIColor(Brand.ink)
         label.adjustsFontSizeToFitWidth = true
@@ -370,6 +386,15 @@ final class CustomerHandoffController: UIViewController {
         ])
     }
 
+    // A short line in the top bar; the name returns after a moment.
+    func showNote(_ text: String) {
+        titleLabel.text = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self else { return }
+            self.titleLabel.text = self.barTitle
+        }
+    }
+
     func showOffline() {
         guard offlineLabel == nil else { return }
         let label = UILabel()
@@ -394,30 +419,12 @@ final class CustomerHandoffController: UIViewController {
 }
 
 // If the app starts with hand-off mode still on (it was closed while the
-// customer held the phone), the customer view is gone. The admin screens stay
-// covered until the device check passes (Face ID, Touch ID or the passcode).
-// A phone with no passcode cannot be checked and opens at once.
-enum HandoffRelaunchGate {
-    @MainActor
-    static func presentIfLocked(tries: Int = 10) {
-        let lock = HandoffLock.shared
-        guard lock.isActive else { return }
-        guard let top = TopViewController.current(), !top.isBeingDismissed, !top.isBeingPresented else {
-            if tries > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { presentIfLocked(tries: tries - 1) }
-            }
-            return
-        }
-        let controller = UIHostingController(rootView: HandoffLockedView())
-        controller.modalPresentationStyle = .fullScreen
-        controller.isModalInPresentation = true
-        controller.overrideUserInterfaceStyle = .light
-        top.present(controller, animated: false)
-    }
-}
-
-private struct HandoffLockedView: View {
-    @Environment(\.dismiss) private var dismiss
+// customer held the phone), the customer view is gone. RootView shows this
+// screen INSTEAD of the portal web view, which is not created until the device
+// check passes (Face ID, Touch ID or the passcode). A phone with no passcode
+// cannot be checked and unlocks at once, as Hand back does.
+struct HandoffLockedView: View {
+    let onUnlocked: () -> Void
     @State private var checking = false
 
     var body: some View {
@@ -448,6 +455,6 @@ private struct HandoffLockedView: View {
         guard !checking else { return }
         checking = true
         defer { checking = false }
-        if case .ended = await HandoffLock.shared.end() { dismiss() }
+        if case .ended = await HandoffLock.shared.end() { onUnlocked() }
     }
 }

@@ -10,12 +10,14 @@ import UserNotifications
 // CustomerHandoff starts it when the customer view opens and ends it when the
 // owner hands back, which asks for Face ID, Touch ID or the passcode. Only a
 // successful check ends it. The flag is saved in UserDefaults, so a relaunch
-// finds it still on and HandoffRelaunchGate asks for the same check before the
-// admin screens show. Sign-out clears it.
+// finds it still on and RootView shows a lock screen instead of the portal until
+// the same check passes. Sign-out clears it.
 @MainActor
 final class HandoffLock {
     static let shared = HandoffLock()
-    static let defaultsKey = "handoffLockActive"
+    nonisolated static let defaultsKey = "handoffLockActive"
+    // The saved flag, readable before any lock object exists (RootView).
+    nonisolated static var persistedActive: Bool { UserDefaults.standard.bool(forKey: defaultsKey) }
     static let reason = "Take the phone back"
 
     // What the device check said.

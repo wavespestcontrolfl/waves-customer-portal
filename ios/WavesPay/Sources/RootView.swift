@@ -6,21 +6,26 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject var app: AppState
     @Environment(\.scenePhase) private var scenePhase
+    // Hand-off mode still on at launch: the app was closed while a customer held
+    // the phone. The portal web view is not created, so it shows nothing and
+    // takes no input, until the device check passes.
+    @State private var locked = HandoffLock.persistedActive
 
     var body: some View {
-        PortalView()
-            .ignoresSafeArea()
-            .onAppear {
-                TerminalManager.shared.configure()
-                HandoffRelaunchGate.presentIfLocked()
-            }
-            // Back from another app: reconnect the reader if it dropped.
-            .onChange(of: scenePhase) { phase in
-                if phase == .active { TerminalManager.shared.prepare() }
-            }
-            #if DEBUG
-            .task { await PaymentPreview.show(in: app) }
-            #endif
+        if locked {
+            HandoffLockedView { locked = false }
+        } else {
+            PortalView()
+                .ignoresSafeArea()
+                .onAppear { TerminalManager.shared.configure() }
+                // Back from another app: reconnect the reader if it dropped.
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active { TerminalManager.shared.prepare() }
+                }
+                #if DEBUG
+                .task { await PaymentPreview.show(in: app) }
+                #endif
+        }
     }
 }
 
