@@ -13,25 +13,23 @@ import WebKit
 // Customer page -> app (window.webkit.messageHandlers.wavesCustomer), each
 // answered once with a window event on the customer web view:
 //   { type: 'capabilities', requestId } -> 'waveshandoff:capabilities'
-//        { requestId, capabilities: ['saveCard', 'acceptTerms'] }
-//   { type: 'acceptTerms', requestId, termsVersion, termsScope, consumerNoticeShown }
-//        -> 'waveshandoff:terms' { requestId, status: 'ok' | 'failed', message? }
+//        { requestId, capabilities: ['saveCard'] }
 //   { type: 'saveCard', requestId, consentTextVersion, agreed,
 //     feeDisclosedAmount, disclosureVersion }
 //        -> 'waveshandoff:savecard' { requestId, status: 'succeeded', card }
 //           | { status: 'failed', message } | { status: 'canceled' }
 //
 // The customer page never holds a staff credential. The app runs the staff
-// calls in the covered admin page (window.wavesAdminInPersonTerms and
-// window.wavesAdminSaveCardHandoff) under the staff sign-in, with the secure
-// token read from the URL the admin page opened, never from the customer page.
+// call in the covered admin page (window.wavesAdminSaveCardHandoff) under the
+// staff sign-in, with the secure token read from the URL the admin page
+// opened, never from the customer page. (The customer accepts the estimate
+// terms on the page itself, through its own secure link.)
 @MainActor
 final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
     static let handlerName = "wavesCustomer"
     static let capabilitiesEvent = "waveshandoff:capabilities"
-    static let termsEvent = "waveshandoff:terms"
     static let saveCardEvent = "waveshandoff:savecard"
-    static let capabilities = ["saveCard", "acceptTerms"]
+    static let capabilities = ["saveCard"]
 
     private static let plainFailure = "Something went wrong. Hand the phone back and try again."
 
@@ -163,8 +161,6 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
         switch body["type"] as? String {
         case "capabilities":
             reply(Self.capabilitiesEvent, ["capabilities": Self.capabilities], requestId)
-        case "acceptTerms":
-            acceptTerms(body, requestId)
         case "saveCard":
             saveCard(body, requestId)
         default:
@@ -173,36 +169,6 @@ final class CustomerHandoff: NSObject, WKScriptMessageHandler, WKNavigationDeleg
     }
 
     private static let endingMessage = "Waves is taking the phone back."
-
-    private func acceptTerms(_ body: [String: Any], _ requestId: String?) {
-        guard !ending else {
-            return reply(Self.termsEvent, ["status": "failed", "message": Self.endingMessage], requestId)
-        }
-        let args: [String: Any] = [
-            "secureToken": secureToken,
-            "termsVersion": Self.scalar(body["termsVersion"]),
-            "termsScope": Self.scalar(body["termsScope"]),
-            "consumerNoticeShown": (body["consumerNoticeShown"] as? Bool) ?? false,
-        ]
-        pendingCalls += 1
-        Task {
-            defer { pendingCalls -= 1 }
-            do {
-                let result = try await callAdmin("wavesAdminInPersonTerms", args)
-                guard controller != nil else { return }
-                // Only an explicit { ok: true } records the terms; anything
-                // else (missing value, ok absent or false) is a failure.
-                let dict = result as? [String: Any]
-                if dict?["ok"] as? Bool == true {
-                    reply(Self.termsEvent, ["status": "ok"], requestId)
-                } else {
-                    reply(Self.termsEvent, ["status": "failed", "message": dict.flatMap { Self.text($0) } ?? Self.plainFailure], requestId)
-                }
-            } catch {
-                reply(Self.termsEvent, ["status": "failed", "message": Self.plainFailure], requestId)
-            }
-        }
-    }
 
     private func saveCard(_ body: [String: Any], _ requestId: String?) {
         guard !ending else {

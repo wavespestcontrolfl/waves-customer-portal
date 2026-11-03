@@ -256,13 +256,11 @@ customer web view; accepted only from its top frame on a `/secure/` page):
 
 | Page posts | App answers (event: `detail`) |
 | --- | --- |
-| `{ type: 'capabilities', requestId }` | `waveshandoff:capabilities`: `{ requestId, capabilities: ['saveCard', 'acceptTerms'] }` |
-| `{ type: 'acceptTerms', requestId, termsVersion, termsScope, consumerNoticeShown }` | `waveshandoff:terms`: `{ requestId, status: 'ok' }` or `{ status: 'failed', message? }` |
+| `{ type: 'capabilities', requestId }` | `waveshandoff:capabilities`: `{ requestId, capabilities: ['saveCard'] }` |
 | `{ type: 'saveCard', requestId, consentTextVersion, agreed, feeDisclosedAmount, disclosureVersion }` | `waveshandoff:savecard`: `{ requestId, status: 'succeeded', card: { brand, last4, funding } }`, `{ status: 'failed', message }`, or `{ status: 'canceled' }` |
 
-The customer page holds no staff credential. For `acceptTerms` the app calls
-the covered admin page's `window.wavesAdminInPersonTerms({ secureToken,
-termsVersion, consumerNoticeShown })`. For `saveCard` it calls
+The customer page holds no staff credential (it accepts the estimate terms
+through its own secure link, with no app relay). For `saveCard` the app calls
 `window.wavesAdminSaveCardHandoff({ secureToken, consentTextVersion, agreed,
 feeDisclosedAmount, disclosureVersion })`, which resolves `{ deep_link }`
 (`wavespay://save-card?t=<jwt>`). `secureToken` is the token in the opened URL
@@ -292,7 +290,7 @@ opened from Safari starts nothing: the app shows "Open this from Waves Admin."
    undefined; `wavesCustomer` is defined.
 5. Tap a tel:, sms:, mailto: or outside link on the page: nothing happens.
 6. Send a staff alert with the app open: no banner and no sound.
-7. Customer page `capabilities`, `acceptTerms`, `saveCard`: answers as above.
+7. Customer page `capabilities`, `saveCard`: answers as above.
    Run a full card save: "Getting the card reader ready…", Apple's sheet,
    "Saving the card…", "Card saved", then `succeeded` in the customer view.
 8. `saveCard` when the admin function is missing (older admin page): `failed`.
