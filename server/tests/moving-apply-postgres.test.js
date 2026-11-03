@@ -244,8 +244,30 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     const { version } = await Moves.applyMovePreview(customerId, s.move.id);
     await insertVisit({ scheduled_date: day(200), recurring_parent_id: s.pestRoot, recurring_pattern: 'quarterly', recurring_ongoing: true, property_id: oldHouseId });
     await expect(Moves.applyMove(customerId, s.move.id, { version, actorId: ADMIN.id })).rejects.toMatchObject({ code: 'apply_changed' });
+    // So does moving a visit Apply would cancel to another date, still after move-out.
+    const fresh = await Moves.applyMovePreview(customerId, s.move.id);
+    await trx('scheduled_services').where({ id: s.pestAfter2 }).update({ scheduled_date: day(140) });
+    await expect(Moves.applyMove(customerId, s.move.id, { version: fresh.version, actorId: ADMIN.id })).rejects.toMatchObject({ code: 'apply_changed' });
     expect((await trx('customer_properties').where({ id: oldHouseId }).first('is_primary')).is_primary).toBe(true);
     expect(await statusOf(s.pestAfter1)).toBe('pending');
+  });
+
+  test('a plan moved to another house while Apply runs is refused under the series locks, never cancelled there', async () => {
+    const s = await seed();
+    const preview = await Moves.applyMovePreview(customerId, s.move.id);
+    const actual = jest.requireActual('../services/recurring-series-cancel');
+    // Between the primary change and the cancel, someone moves a pest visit to the new home.
+    SeriesCancel.cancelSeriesRemainder.mockImplementationOnce(async (args) => {
+      await trx('scheduled_services').where({ id: s.pestAfter1 }).update({ property_id: newHouseId });
+      return actual.cancelSeriesRemainder(args);
+    });
+    const err = await Moves.applyMove(customerId, s.move.id, { version: preview.version, actorId: ADMIN.id }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'series_changed', status: 409, step: 'plans', progress: expect.objectContaining({ primaryChanged: true }) });
+    expect(err.message).toContain('Quarterly Pest Control Service changed while Apply move was running');
+    expect(await statusOf(s.pestAfter1)).toBe('pending');
+    expect(await statusOf(s.pestAfter2)).toBe('pending');
+    expect((await trx('scheduled_services').where({ id: s.pestRoot }).first('recurring_ongoing')).recurring_ongoing).toBe(true);
+    expect((await trx('customer_moves').where({ id: s.move.id }).first('status')).status).toBe('submitted');
   });
 
   test('refusals: gate off, estimate not accepted, no move-out date, prepay, paid visits, tenant, unresolved plan', async () => {

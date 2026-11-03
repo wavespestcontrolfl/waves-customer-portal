@@ -1236,16 +1236,20 @@ async function applyPlan(customerId, moveId, conn = db) {
   const stations = stationState.rented.length || stationState.flaggedRental
     ? { count: stationState.rented.length, flagged: stationState.flaggedRental === true }
     : null;
-  const version = crypto.createHash('sha256').update(JSON.stringify([
-    ctx.move.id, new Date(ctx.move.updated_at).toISOString(), ctx.estimate.id, ctx.to.id, ctx.from.id, ctx.flipped, ctx.cancelFrom,
-    old.stops.map((st) => [st.rootId, st.targets.map((t) => String(t.id))]),
-    old.oneOffs.map((o) => String(o.id)), old.pastOpen.map((o) => String(o.id)), stations,
+  const plan = { ...ctx, ...old, stations, newPlan: newHome.plan };
+  // Every fact the preview shows, plus each visit Apply would cancel (its id,
+  // date and status) and the rows it acts on, so a confirm made from an older
+  // preview is refused (apply_changed).
+  plan.version = crypto.createHash('sha256').update(JSON.stringify([
+    applyPreviewFacts(plan),
+    plan.move.id, new Date(plan.move.updated_at).toISOString(), plan.estimate.id, plan.to.id, plan.from.id, plan.cancelFrom,
+    plan.stops.map((st) => [st.rootId, st.targets.map((t) => [String(t.id), visitDay(t), t.status])]),
   ])).digest('hex');
-  return { ...ctx, ...old, stations, newPlan: newHome.plan, version };
+  return plan;
 }
 
-// The preview the Moving card shows: plain facts, no internal rows.
-function applyPreviewView(plan) {
+// The facts the Moving card's preview shows: plain words, no internal rows.
+function applyPreviewFacts(plan) {
   return {
     moveId: plan.move.id,
     fromAddress: propertyLine(plan.from),
@@ -1261,13 +1265,13 @@ function applyPreviewView(plan) {
     oneOffs: plan.oneOffs,
     pastOpen: plan.pastOpen,
     stations: plan.stations,
-    version: plan.version,
   };
 }
 
 /** The Apply move preview for the Moving card, or a MoveError. */
 async function applyMovePreview(customerId, moveId) {
-  return applyPreviewView(await applyPlan(customerId, moveId));
+  const plan = await applyPlan(customerId, moveId);
+  return { ...applyPreviewFacts(plan), version: plan.version };
 }
 
 // One Apply per move at a time: a session advisory lock on its own pooled
@@ -1404,6 +1408,14 @@ async function applyMove(customerId, moveId, opts = {}) {
           waiveFee: true,
           source: 'moving-apply',
           allowEmpty: true,
+          // Under the series locks: the same visits the preview approved, still at the old house.
+          checkTargets: (locked) => {
+            const approved = new Set(stop.targets.map((t) => String(t.id)));
+            const same = locked.length === approved.size && locked.every((t) => approved.has(String(t.id)));
+            return same && locked.every((t) => visitAtHouse(t, plan.from, { primaryIsHouse: false }))
+              ? null
+              : `${stop.name} changed while Apply move was running. Read the new preview, then apply again.`;
+          },
         });
         progress.plansStopped += 1;
         progress.visitsCancelled += out.cancelledCount;

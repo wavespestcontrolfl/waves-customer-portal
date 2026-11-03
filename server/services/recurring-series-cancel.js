@@ -39,10 +39,13 @@ class SeriesCancelError extends Error {
  * @param {boolean} [opts.notifyCustomer]  false = no cancellation text (reminders are still cancelled)
  * @param {boolean} [opts.waiveFee]        settle card holds without the late-cancel fee
  * @param {boolean} [opts.allowEmpty]      stop the plan even when no visit is left to cancel
+ * @param {Function} [opts.checkTargets]   (lockedTargets) => null | message: called inside the
+ *                                         transaction once the targets are locked; a message refuses
+ *                                         the cancel (409 series_changed) before any write
  */
 async function cancelSeriesRemainder({
   parentId, customerId, serviceType, recurringPattern, scope,
-  fromDate, anchorId, notifyCustomer, notes, lat, lng, actorId, waiveFee, source, allowEmpty,
+  fromDate, anchorId, notifyCustomer, notes, lat, lng, actorId, waiveFee, source, allowEmpty, checkTargets,
 }) {
   const cancellableStatuses = ['pending', 'confirmed', 'rescheduled'];
   const terminalStatuses = ['completed', 'skipped', 'cancelled'];
@@ -72,9 +75,11 @@ async function cancelSeriesRemainder({
 
   let targets = [];
   let ongoingStopped = 0;
-  // Set INSIDE the transaction when a target is already paid for; the
-  // trx is rolled back by the throw and the 409 is answered after it.
+  // Set INSIDE the transaction when a target is already paid for, or when the
+  // caller's checkTargets refuses the locked set; the trx is rolled back by
+  // the throw and the 409 is answered after it.
   let billingCovered = null;
+  let changed = null;
   // Shared claim token for every target's trx claim — declared out
   // here because the post-commit series handler needs it too.
   const seriesClaimToken = require('./job-status').nextClaimTs();
@@ -143,10 +148,15 @@ async function cancelSeriesRemainder({
       targets = await targetQuery
         .orderBy('scheduled_date', 'asc')
         .forUpdate()
-        .select('id', 'status', 'customer_id', 'service_type', 'scheduled_date', 'annual_prepay_term_id', 'prepaid_amount');
+        .select('id', 'status', 'customer_id', 'service_type', 'scheduled_date', 'annual_prepay_term_id', 'prepaid_amount',
+          'property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
       // Nothing to cancel: nothing written (the caller answers 409), unless
       // the caller only needs the plan stopped (allowEmpty).
       if (!targets.length && !allowEmpty) return;
+      // The moving flow approved exactly these visits at exactly that house:
+      // re-checked here, under the locks, before any write.
+      changed = checkTargets ? checkTargets(targets) : null;
+      if (changed) throw new Error('SERIES_CHANGED');
 
       // Money already taken for a target (annual prepay term, hand-
       // collected prepayment, an invoice holding money) refuses the WHOLE cancel — the same contract
@@ -215,6 +225,7 @@ async function cancelSeriesRemainder({
       }
     });
   } catch (err) {
+    if (changed) throw new SeriesCancelError(409, { error: changed, code: 'series_changed' });
     if (!billingCovered) throw err;
     throw new SeriesCancelError(409, {
       error: `Can't cancel ${scope === 'series' ? 'this plan' : 'the rest of this plan'}: the ${billingCovered.firstDate || 'later'} visit is ${billingCovered.reason}`
