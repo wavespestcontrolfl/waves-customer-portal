@@ -64,6 +64,17 @@ describe('ringOnRefreshAfterConversion', () => {
     expect(longRing({ title: changed.title, body: changed.body, detail: changed.detail, link: old.link }, {})).toBe(true);
   });
 
+  test('a long old body that changed only past the cut still rings (the full text is in detail)', () => {
+    const { normalizeAdminText } = require('../services/notification-service');
+    const longBody = 'Reorder 10 each from Sample Vendor at $1.00 each. Vendor page: https://vendor.example.com/products/sample-sku-0001?ref=waves-restock-bell';
+    const newerBody = longBody.replace('sample-sku-0001', 'sample-sku-0002');
+    const before = normalizeAdminText({ category: 'system', title: old.title, body: longBody, detail: null });
+    const after = normalizeAdminText({ category: 'system', title: old.title, body: newerBody, detail: null });
+    expect(before.body).toBe(after.body); // the change sits past the cut
+    const ringNewer = ringOnRefreshAfterConversion({ category: 'system', title: old.title, body: newerBody, link: old.link });
+    expect(ringNewer({ title: before.title, body: before.body, detail: before.detail, link: old.link }, {})).toBe(true);
+  });
+
   test('a row already carrying the composed fields rings on any content change', () => {
     expect(ring({ title: 'a', body: 'b', link: 'c' }, { area: 'Inventory' })).toBe(true);
   });

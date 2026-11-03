@@ -23,16 +23,17 @@ function raiserFor(notify) {
 // has no metadata.area, and its title and body are in the old format. The first refresh onto the new format
 // would count as changed content and ring a row the office already has. This rings on that refresh only
 // when the OLD title, body or link would have changed too, so the conversion adds no ring. A row already in
-// the new format keeps the default (every content change rings). The stored row holds the old text in the
-// form notification-service saved it: emoji-stripped and, for a body over 110 characters, cut with the full
-// text in detail (or whole, if it was stored before that guard). Either form counts as unchanged.
+// the new format keeps the default (every content change rings). The old emitters passed no detail, so a
+// stored row holds the old body whole in `body`, or (over 110 characters) cut in `body` with the whole text
+// in `detail`, emoji-stripped either way. The whole stored text is compared, so a change past the cut rings.
 function ringOnRefreshAfterConversion({ category, title, body, link }) {
   return (existing, existingMeta) => {
     if (existingMeta && existingMeta.area) return true;
     const { normalizeAdminText } = require('./notification-service');
     const stored = normalizeAdminText({ category, title, body, detail: null });
     const sameTitle = existing.title === title || existing.title === stored.title;
-    const sameBody = (existing.body || null) === (body || null) || (existing.body || null) === (stored.body || null);
+    const storedWhole = existing.detail || existing.body || null;
+    const sameBody = storedWhole === (body || null) || storedWhole === (stored.detail || stored.body || null);
     return !(sameTitle && sameBody && existing.link === link);
   };
 }
