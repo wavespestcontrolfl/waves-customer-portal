@@ -24,6 +24,10 @@ ios/WavesPay/
 │   ├── AppState.swift        — payment flow state, deep-link parser, JWT reader
 │   ├── PortalView.swift      — staff portal web view + Tap to Pay bridge
 │   ├── StaffAlerts.swift     — staff alerts: push registration, badge, taps
+│   ├── NativeBridge.swift    — admin bridge: capabilities, handoffOpen, save-card run
+│   ├── CustomerHandoff.swift — isolated customer web view + its bridge
+│   ├── HandoffLock.swift     — hand-off mode flag + Face ID check
+│   ├── SaveCardFlow.swift    — save a card with Tap to Pay, no charge
 │   ├── HowToTap.swift        — Apple's "How to Tap" lesson (iOS 18+)
 │   ├── Keychain.swift        — terminal token storage
 │   ├── API.swift             — portal HTTP client
@@ -203,6 +207,116 @@ request while a sheet is open answers `busy`. The page side is
 `client/src/native/wavesAdminGoogleSignIn.js`; it detects support by the
 `WavesAdmin/1.7` user agent. A `wavespay://google-signin` link that reaches
 `handleIncomingURL` is ignored and never starts a payment.
+
+## Bridge messages: customer hand-off and save card (1.9)
+
+Book at the Table: the owner hands his admin phone to a customer to save a
+card. The customer never sees the signed-in admin web view. The admin page asks
+the app to open the secure card page in a separate screen (`NativeBridge.swift`,
+`CustomerHandoff.swift`).
+
+**Admin page** (handler `wavesAdmin`; the app answers once with a window event
+on the web view that asked; `requestId` comes back unchanged):
+
+| Page posts | App answers (event: `detail`) |
+| --- | --- |
+| `{ type: 'capabilities', requestId }` | `wavesadmin:capabilities`: `{ requestId, capabilities: ['handoffOpen'] }`, or `capabilities: []` on an iPhone that cannot ask for Face ID, Touch ID or the passcode (no passcode set) |
+| `{ type: 'handoffOpen', requestId, url, firstName }` | `wavesadmin:handoff`, once, when the hand-off ends: `{ requestId, status: 'ended' }`, or `{ requestId, status: 'failed', message }` (also on an iPhone with no passcode) |
+
+`url` must be the portal's own origin, a path starting `/secure/<token>` and
+`handoff=1`; anything else answers `failed`.
+
+**Customer view.** A full-screen screen that cannot be swiped away:
+- A new web view with a non-persistent data store (no admin cookies,
+  localStorage or IndexedDB), and one bridge handler, `wavesCustomer`. It has
+  no `wavesAdmin` handler, no connection-token, push or badge paths.
+- Main-frame loads stay on the portal's `/secure/` pages (and `about:blank`).
+  Frames inside the page (Stripe card fields) load. Everything else, including
+  tel:, sms:, mailto:, other sites, downloads and new windows, is blocked
+  silently; nothing opens outside the app.
+- A top bar "Handed to {firstName}" with **Hand back**: Face ID / Touch ID with
+  the passcode as fallback (`.deviceOwnerAuthentication`, reason "Take the
+  phone back"). Success closes the screen and answers the admin page `ended`.
+  Cancel or failure stays on the customer view. Only a passed check ends it:
+  the app never starts a hand-off on an iPhone with no passcode, and if the
+  passcode is turned off during one, the lock stays until a passcode is set
+  again. Hand back is ignored (the bar says "Finishing the card save…") while a terms or save request is pending or the card-save screen is open; a request that finishes after the hand-off ends opens nothing.
+- Opening it pauses the staff alerts (`StaffAlerts.pauseForHandoff`): the
+  alerts already in Notification Center are cleared and the install
+  unregisters from APNs, so none shows in the list, on the lock screen or with
+  the app in the background (a push sent meanwhile gets Unregistered and the
+  server deactivates the row). One that still arrives with the app open shows
+  only the badge. While the flag is on, `register()` (a `registerPush` from
+  the covered admin page, or a task still waiting) does not register, and a
+  token that arrives late unregisters again and is not sent to the page. A
+  successful Hand back registers again
+  (`resumeAfterHandoff`); the token event re-sends `native-subscribe`, which
+  turns the row active again. The flag is `handoffLockActive` in UserDefaults;
+  sign-out clears it without turning the alerts back on.
+- If the app restarts with the flag still on (it was closed during a hand-off),
+  the customer view is gone. `RootView` shows a "Waves Admin is locked" screen
+  INSTEAD of the portal: the portal web view is not created, so it shows
+  nothing and takes no input, until the same device check passes (nothing
+  else unlocks it). Wavespay payment links are ignored meanwhile.
+  Logic check for the flag:
+  `swiftc -o /tmp/handoff-check Sources/HandoffLock.swift Tests/main.swift &&
+  /tmp/handoff-check`.
+
+**Customer page** (handler `wavesCustomer`; answers are window events on the
+customer web view; accepted only from its top frame on a `/secure/` page):
+
+| Page posts | App answers (event: `detail`) |
+| --- | --- |
+| `{ type: 'capabilities', requestId }` | `waveshandoff:capabilities`: `{ requestId, capabilities: ['saveCard'] }` |
+| `{ type: 'saveCard', requestId, consentTextVersion, agreed, feeDisclosedAmount, disclosureVersion }` | `waveshandoff:savecard`: `{ requestId, status: 'succeeded', card: { brand, last4, funding } }`, `{ status: 'failed', message }`, or `{ status: 'canceled' }` |
+
+The customer page holds no staff credential (it accepts the estimate terms
+through its own secure link, with no app relay). For `saveCard` the app calls
+`window.wavesAdminSaveCardHandoff({ secureToken, consentTextVersion, agreed,
+feeDisclosedAmount, disclosureVersion })`, which resolves `{ deep_link }`
+(`wavespay://save-card?t=<jwt>`). `secureToken` is the token in the opened URL
+path, never read from the customer page. A missing or throwing admin function
+answers `failed` with a plain message.
+
+**Save card.** From the deep link the app posts the token to
+`/stripe/terminal/validate-save-card-handoff`, connects the reader (the
+returned `auth_token` fetches the connection token when no signed-in page
+did), then `retrieveSetupIntent`, `collectSetupIntentPaymentMethod(_:allowRedisplay: .limited)`
+and `confirmSetupIntent` (Apple's tap sheet), and last posts
+`/stripe/terminal/complete-setup { setup_intent_id }`. It never shows an
+amount or a surcharge and never calls `/payment-intent` or `/apply-surcharge`.
+`failed.message` is the server's `error` text when it sent one. One card save
+or payment at a time (`AppState.cardSaveOpen`). A `wavespay://save-card` link
+opened from Safari starts nothing: the app shows "Open this from Waves Admin."
+
+### Manual test checklist (real iPhone, TestFlight or Xcode build)
+
+1. Admin page posts `capabilities`: answer is `['handoffOpen']`.
+2. `handoffOpen` with a bad url (other host, `/admin/...`, no `handoff=1`):
+   answer `failed`; no screen opens.
+3. `handoffOpen` with a good url: the customer view opens full screen with
+   "Handed to {name}". Swiping down does nothing.
+4. In the customer view, open Safari's Web Inspector (Debug build): no admin
+   cookies or localStorage; `window.webkit.messageHandlers.wavesAdmin` is
+   undefined; `wavesCustomer` is defined.
+5. Tap a tel:, sms:, mailto: or outside link on the page: nothing happens.
+6. Start a hand-off with staff alerts in Notification Center: they are gone.
+   Send a staff alert, app open and then in the background: nothing shows
+   (no banner, no sound, no list entry, nothing on the lock screen).
+7. Customer page `capabilities`, `saveCard`: answers as above.
+   Run a full card save: "Getting the card reader ready…", Apple's sheet,
+   "Saving the card…", "Card saved", then `succeeded` in the customer view.
+8. `saveCard` when the admin function is missing (older admin page): `failed`.
+9. Customer closes Apple's sheet: `canceled`.
+10. **Hand back**, cancel Face ID: stays on the customer view. Pass Face ID:
+    the admin page gets `ended`; the next alert shows a banner.
+11. Phone with no passcode: `capabilities` answers `[]` (no hand button) and
+    `handoffOpen` answers `failed` ("Set a passcode on this iPhone first…").
+12. Force-quit during a hand-off, relaunch: "Waves Admin is locked" replaces the
+    portal (not loaded) until Face ID passes; alerts stay silent until then.
+13. Open `wavespay://save-card?t=x` from Safari: "Open this from Waves Admin."
+14. Existing `tapToPay`, `prepareReader`, `registerPush` still work, and
+    `tapToPay` during a card save answers `failed`.
 
 ## Security notes
 

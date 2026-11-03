@@ -66,16 +66,24 @@ final class StaffAlerts {
     // registered either way (iOS issues it without permission and only hides
     // the alerts), so alerts start as soon as the staff member allows them,
     // even later in iPhone Settings. Every later call refreshes the token.
+    // Never during a hand-off (the covered admin page can ask again after a
+    // reload, or this task can still be waiting): the hand-back registers.
     func register() {
         signedIn = true
         Task {
             _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
-            guard signedIn else { return }
+            guard signedIn, !HandoffLock.persistedActive else { return }
             UIApplication.shared.registerForRemoteNotifications()
         }
     }
 
     func received(deviceToken: Data) {
+        // A registration that finished after a hand-off began: off again, and
+        // the page gets no token, until the hand-back registers.
+        if HandoffLock.persistedActive {
+            UIApplication.shared.unregisterForRemoteNotifications()
+            return
+        }
         onToken?(deviceToken.map { String(format: "%02x", $0) }.joined())
     }
 
@@ -89,9 +97,29 @@ final class StaffAlerts {
     // and the server deactivates the row); the next sign-in registers again.
     func signOut() {
         signedIn = false
+        HandoffLock.shared.clear()
         UIApplication.shared.unregisterForRemoteNotifications()
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         setBadge(0)
+    }
+
+    // Hand-off mode (HandoffLock.start): a customer holds the phone. The alerts
+    // already shown leave Notification Center and the install stops getting
+    // notifications, so none shows in the list, on the lock screen or with the
+    // app in the background. A push sent meanwhile gets APNs Unregistered and
+    // the server deactivates the row; the portal's alert list still has it.
+    func pauseForHandoff() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        UIApplication.shared.unregisterForRemoteNotifications()
+    }
+
+    // A successful hand-back: register again. The token event re-sends
+    // native-subscribe, which turns the row active again. After a relaunch
+    // nothing has registered yet (signedIn is false): the portal page asks for
+    // the token when it loads behind the unlocked lock screen.
+    func resumeAfterHandoff() {
+        guard signedIn else { return }
+        UIApplication.shared.registerForRemoteNotifications()
     }
 
     // Set by PortalCoordinator: runs the push's Call on the open page, else loads its link.
@@ -127,6 +155,16 @@ final class StaffAlerts {
     }
 }
 
+extension HandoffLock {
+    // The app's lock: a hand-off pauses the staff alerts and a successful
+    // hand-back turns them on again. Built here so HandoffLock.swift compiles
+    // alone for its logic check (Tests/main.swift).
+    static let shared = HandoffLock(
+        pauseAlerts: { StaffAlerts.shared.pauseForHandoff() },
+        resumeAlerts: { StaffAlerts.shared.resumeAfterHandoff() }
+    )
+}
+
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(
         _ application: UIApplication,
@@ -153,7 +191,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound, .badge]
+        // Hand-off mode (a customer holds the phone): the badge only, nothing
+        // in the list (one can still arrive before the pause takes effect).
+        // presentation(handoffActive:) is a pure nonisolated helper; the flag
+        // is read from the persisted value, so nothing here needs the main actor.
+        HandoffLock.presentation(handoffActive: HandoffLock.persistedActive)
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
