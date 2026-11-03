@@ -111,9 +111,16 @@ describe('POST /:token/accept-terms', () => {
     expect(mockRecord).not.toHaveBeenCalled();
   });
 
-  test('a service error is a 500 without detail', async () => {
-    mockRecord.mockRejectedValue(new Error('db down'));
+  test('a service error is a 500 without detail, and the log carries only the error code', async () => {
+    // A Knex error message carries the SQL and its bound values: the token, ip and agent.
+    const err = Object.assign(new Error(`insert into "estimate_acceptances" values ('${TOKEN}', '203.0.113.5', 'jest-agent')`), { code: '23505' });
+    mockRecord.mockRejectedValue(err);
     expect(await drive('post', '/:token/accept-terms', { body })).toMatchObject({ statusCode: 500, payload: { error: 'Something went wrong' } });
+    const logger = require('../services/logger');
+    const logged = logger.error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('code=23505');
+    expect(logged).not.toContain(TOKEN);
+    expect(logged).not.toContain('203.0.113.5');
   });
 });
 

@@ -239,7 +239,10 @@ router.post('/:token/accept-terms', async (req, res) => {
     if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code });
     return res.json({ success: true, recorded: result.recorded });
   } catch (err) {
-    logger.error(`[secure-card-public] accept-terms failed: ${err.message}`);
+    // Code only: a Knex error message carries the SQL and its bound values (the token,
+    // the customer's ip and agent).
+    const code = err && (typeof err.code === 'string' || typeof err.code === 'number') ? String(err.code).slice(0, 32) : 'unknown';
+    logger.error(`[secure-card-public] accept-terms failed (code=${code})`);
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });
