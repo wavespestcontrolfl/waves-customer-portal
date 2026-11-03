@@ -331,10 +331,16 @@ describe('estimate converter: a new-home estimate\'s first service day', () => {
     expect(mockBook.customerBookingLocation).not.toHaveBeenCalled();
   });
 
+  // A move-in date a month out, from today's clock: the fallback picks the later
+  // of today + 7 and move-in, so fixed dates would age out.
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const MOVE_IN = etDateString(addETDays(new Date(), 30));
+  const TWO_WEEKS_LATER = etDateString(addETDays(new Date(), 44));
+
   test('no offered day on or after move-in: the move-in date itself, nudged off closed days', async () => {
     mockOld.getAvailableSlots.mockResolvedValue({ zone: 'South', days: [{ date: '2026-10-07' }] });
-    const out = await moveFirstServiceDate(move({ move_in_date: '2027-03-15' }), ESTIMATE_ID, {});
-    expect(out >= '2027-03-15' && out <= '2027-03-29').toBe(true);
+    const out = await moveFirstServiceDate(move({ move_in_date: MOVE_IN }), ESTIMATE_ID, {});
+    expect(out >= MOVE_IN && out <= TWO_WEEKS_LATER).toBe(true);
   });
 
   test('no move-in date: the first offered day', async () => {
@@ -344,7 +350,7 @@ describe('estimate converter: a new-home estimate\'s first service day', () => {
 
   test('the engine failing falls back without failing the acceptance', async () => {
     mockOld.getAvailableSlots.mockRejectedValue(new Error('engine down'));
-    const out = await moveFirstServiceDate(move({ move_in_date: '2027-03-15' }), ESTIMATE_ID, {});
-    expect(out >= '2027-03-15').toBe(true);
+    const out = await moveFirstServiceDate(move({ move_in_date: MOVE_IN }), ESTIMATE_ID, {});
+    expect(out >= MOVE_IN && out <= TWO_WEEKS_LATER).toBe(true);
   });
 });
