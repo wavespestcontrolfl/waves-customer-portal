@@ -129,17 +129,24 @@ describe('attemptReviewedGeocode with the county fallback', () => {
 
 describe('retryCountyNeedsPin', () => {
   // The candidate query is SQL; these tests feed it rows and check what the pass does with them.
+  // `rows`, or `{ pages }` served by the query's offset (10 rows a page).
   function withCandidates(rows) {
     const db = require('../models/db');
     const real = db.getMockImplementation();
     const bindings = [];
+    const offsets = [];
     db.mockImplementation((table) => {
       if (!String(table).includes(' as r')) return real(table);
-      const chain = new Proxy({}, { get: (_t, op) => op === 'then' ? (resolve) => resolve(rows)
-        : (...args) => { if (op === 'whereRaw') bindings.push(args[1]); return chain; } });
+      let offset = 0;
+      const chain = new Proxy({}, { get: (_t, op) => op === 'then' ? (resolve) => resolve(rows.pages ? rows.pages[offset / 10] || [] : rows)
+        : (...args) => {
+          if (op === 'whereRaw') bindings.push(args[1]);
+          if (op === 'offset') { offset = args[0]; offsets.push(offset); }
+          return chain;
+        } });
       return chain;
     });
-    return { bindings, restore: () => db.mockImplementation(real) };
+    return { bindings, offsets, restore: () => db.mockImplementation(real) };
   }
   const needsPin = (evidence = null) => ({ status: 'needs_pin', reason: 'partial_match', source: 'google', evidence, updated_at: '2026-11-01T00:00:00Z' });
 
@@ -204,6 +211,26 @@ describe('retryCountyNeedsPin', () => {
     expect((await retryCountyNeedsPin({ now: NOW })).checked).toBe(0);
     queue.restore();
     expect(countyLotPinForAddress).not.toHaveBeenCalled();
+  });
+
+  test('rows that no longer qualify do not hold back later ones', async () => {
+    seed({ review: needsPin() });
+    const gone = [...new Array(10)].map((_, i) => ({ customer_id: `gone-${i}` })); // deleted customers: skipped
+    const queue = withCandidates({ pages: [gone, [{ customer_id: CUSTOMER }]] });
+    const result = await retryCountyNeedsPin({ now: NOW });
+    queue.restore();
+    expect(queue.offsets).toEqual([0, 10]);
+    expect(result).toEqual({ checked: 1, pinned: 1, customerIds: [CUSTOMER] });
+    expect(countyLotPinForAddress).toHaveBeenCalledTimes(1);
+  });
+
+  test('a county outage ends the run after the first failed lookup', async () => {
+    seed({ review: needsPin() });
+    countyLotPinForAddress.mockRejectedValue(new Error('county down'));
+    const queue = withCandidates([{ customer_id: CUSTOMER }, { customer_id: CUSTOMER }]);
+    expect((await retryCountyNeedsPin({ now: NOW })).checked).toBe(0);
+    queue.restore();
+    expect(countyLotPinForAddress).toHaveBeenCalledTimes(1);
   });
 
   test('gate off: the query never runs', async () => {
