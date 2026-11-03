@@ -56,6 +56,20 @@ describe('buildApnsPayload', () => {
     expect(p.aps.badge).toBeUndefined();
   });
 
+  test('a named sound file rides in aps.sound; no sound given keeps the default', () => {
+    expect(buildApnsPayload({ body: 'x', sound: 'waves-text.caf' }).aps.sound).toBe('waves-text.caf');
+    expect(buildApnsPayload({ body: 'x' }).aps.sound).toBe('default');
+    expect(buildApnsPayload({ body: 'x', silent: false }).aps.sound).toBe('default');
+  });
+
+  test('silent: true sends no aps.sound and never leaks into the custom data', () => {
+    const p = buildApnsPayload({ body: 'x', silent: true, sound: 'waves-text.caf', serviceId: 'abc' });
+    expect(p.aps).toEqual({ alert: { title: 'Waves', body: 'x' } });
+    expect('sound' in p.aps).toBe(false);
+    expect('silent' in p).toBe(false);
+    expect(p.serviceId).toBe('abc');
+  });
+
   test('passes through extra data keys but never a caller-supplied aps', () => {
     const p = buildApnsPayload({ body: 'x', serviceId: 'abc', aps: { hacked: true } });
     expect(p.serviceId).toBe('abc');

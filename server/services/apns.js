@@ -76,7 +76,8 @@ function providerToken(nowMs = Date.now()) {
 /**
  * Pure: map our generic notification shape ({ title, body, url, badge, ...data })
  * into an APNs payload. Extra keys ride along as top-level data (read by the
- * Capacitor push listener in client/src/native/nativePush.js).
+ * Capacitor push listener in client/src/native/nativePush.js). `sound` names a
+ * file in the app bundle (default 'default'); `silent: true` sends no sound.
  */
 /**
  * Pure: APNs `apns-collapse-id` for a push. Mirrors the web-push `tag`
@@ -95,11 +96,12 @@ function apnsCollapseId(tag) {
 }
 
 function buildApnsPayload(notification = {}) {
-  const { title, body, badge, sound, url, aps: _ignore, apnsCategory, ...rest } = notification;
+  const { title, body, badge, sound, silent, url, aps: _ignore, apnsCategory, ...rest } = notification;
   const aps = {
     alert: { title: title || 'Waves', body: body || '' },
-    sound: sound || 'default',
   };
+  // `silent: true` (an admin who turned Sound off) leaves aps.sound out: iOS shows the banner with no sound.
+  if (silent !== true) aps.sound = sound || 'default';
   if (typeof badge === 'number') aps.badge = badge;
   // The notification category an app registered with action buttons (Waves Admin: WAVES_CALL, the bell's Call;
   // alert-call-button.js). An app that registered none shows the notification as before.

@@ -422,6 +422,31 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  test('an iPhone alert sound rides on the admin push only when the Sound switch is on and the trigger has one', async () => {
+    const PushService = require('../services/push-notifications');
+    const soundPref = (soundEnabled) => (table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1' }])
+        : table === 'notification_preferences'
+          ? tableMock([{ admin_user_id: 'admin-1', trigger_key: 'customer_missed_call', bell_enabled: true, push_enabled: true, sound_enabled: soundEnabled }])
+          : tableMock([]));
+    const missed = { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' };
+    const pushFor = async (trigger, payload) => {
+      PushService.sendToAdminUsers.mockClear();
+      await triggerNotification(trigger, payload, { pushOnly: true });
+      return PushService.sendToAdminUsers.mock.calls[0][1]('admin-1');
+    };
+    db.mockImplementation(soundPref(true));
+    expect(await pushFor('customer_missed_call', missed)).toMatchObject({ sound: 'waves-missed-call.caf', silent: false });
+    expect(await pushFor('portal_ask', { itemKey: 'request:r-9', title: 't', body: 'b' })).toMatchObject({ sound: 'waves-text.caf' });
+    // An alert type with no file sends no sound, so APNs plays the default.
+    expect(await pushFor('twilio_failure', {})).not.toHaveProperty('sound');
+    // Sound switch off: the push stays silent and names no file.
+    db.mockImplementation(soundPref(false));
+    const quiet = await pushFor('customer_missed_call', missed);
+    expect(quiet).toMatchObject({ silent: true, vibrate: [0] });
+    expect(quiet).not.toHaveProperty('sound');
+  });
+
   test('portal_ask is a pushOnly page: it writes no bell row and pushes one banner tagged by the ask', async () => {
     const PushService = require('../services/push-notifications');
     PushService.sendToAdminUsers.mockClear();

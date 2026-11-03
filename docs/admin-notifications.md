@@ -413,6 +413,13 @@ so the queue tab leaves it to its own tab.
 | Send to Claude (section 5): a bell alert our own code wrote (system with no customer, marked Claude's, or a reviewed check class) can be moved to Claude's queue from "What to do"; fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` gives each alert's customer id and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | enforced while `GATE_ALERT_SEND_TO_CLAUDE` and `GATE_ALERT_EXPLAINER` are on (dark by default); the `needs-me` CLI always adds customer ids |
 | Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
 
+Alert sounds (owner 2026-11-03): a Waves Admin iPhone push plays a sound per alert type. The map from
+trigger key to sound file lives in `server/services/alert-sounds.js`; `triggerNotification` and the
+missed-call re-push add the name to the push only when the admin's Sound switch is on. The files ship in the
+app bundle (`ios/WavesPay/Resources/Sounds`). iOS plays its default sound when the named file is missing, so an
+older app version still rings. A Sound switch set to off now holds on iOS too: `apns.js` sends no `aps.sound`
+for a `silent` push. A new alert type gets a sound by adding a line to the map and a file to the app.
+
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
 
