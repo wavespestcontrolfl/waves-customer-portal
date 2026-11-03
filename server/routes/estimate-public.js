@@ -15057,9 +15057,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // credit coverage for the specific reason; the generic outcome gets
     // neutral "nothing is due" copy instead.
     let invoiceSettledReason = null;
-    // Quiet-hours cohort (GH Codex P2 r5): a phone-only after-hours accept
-    // queues the invoice SMS for the 8 AM window open (sms.scheduled) and
-    // returns ok:false — delivery is in flight, not failed. Tracked apart
+    // Held-text cohort (GH Codex P2 r5): a phone-only accept whose pay-link
+    // SMS hit a replay hold (an App leg in flight, a preparation hold; the
+    // 8 AM window no longer holds it — customerInitiated below) queues it on
+    // the scheduled rail (sms.scheduled) and returns ok:false — delivery is
+    // in flight, not failed. Tracked apart
     // from invoiceLinkDelivered so ONLY the acceptance-text gate below
     // counts it; the prepay stamp resolution and the accept notification
     // still require a CONFIRMED delivery.
@@ -15203,7 +15205,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // here, post-commit.
     if (acceptConversion?.welcomeSms) {
       const { sendNewRecurringWelcome } = require('../services/new-recurring-welcome-sms');
-      void sendNewRecurringWelcome(acceptConversion.welcomeSms)
+      // customerActionAt: this accept is the customer's own action, so the
+      // welcome it queues goes out at any hour while that action is fresh,
+      // like this route's other customer texts (owner 2026-11-02).
+      void sendNewRecurringWelcome({ ...acceptConversion.welcomeSms, customerActionAt: new Date().toISOString() })
         .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
     }
     // The converter deferred the commercial-schedule admin notification
@@ -16392,6 +16397,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const runDelivery = () => InvoiceService.sendViaSMSAndEmail(invoiceId, {
           // The customer's own accept: dispute-hold exempt.
           holdExempt: 'customer',
+          // ...and the pay-link text answers it at any hour, not at 8 AM
+          // (owner 2026-11-02). Never persisted: a deferred replay of this
+          // delivery stays inside the send window.
+          customerInitiated: true,
           payUrlParams: estimateInvoicePayUrlParams({
             billingTerm,
             saveCard: !treatAsOneTime,
@@ -16459,8 +16468,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // prepay has none — never invent "Bronze") ⇒ no text. Kill switch:
     // disable the estimate_accepted_annual_prepay admin SMS template.
     // invoiceSmsQueued counts as delivery here (GH Codex P2 r5): the queued
-    // pay-link SMS goes out at 8 AM and the channel-neutral copy ("is on
-    // the way") stays truthful — without it the phone-only after-hours
+    // pay-link SMS goes out on its replay and the channel-neutral copy ("is
+    // on the way") stays truthful — without it the phone-only held-text
     // cohort would never receive this one-shot text.
     if (annualPrepaySelected && invoiceId && (invoiceLinkDelivered || invoiceSmsQueued)) {
       try {

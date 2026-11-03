@@ -241,8 +241,10 @@ describe('checkSendWindow validator', () => {
     // debits, card-on-file sweeps, no-show fees). Only sends the handler
     // marked customerInitiated pass at night; unmarked ones — the
     // machine-charge notices and receipts — hold and ride their retry
-    // rails to the window open.
-    for (const entryPoint of ['stripe_webhook', 'invoice_receipt_sms']) {
+    // rails to the window open. invoice_send_via_sms is the same split
+    // (owner 2026-11-02): the estimate accept's pay-link text vs every
+    // automated resend.
+    for (const entryPoint of ['stripe_webhook', 'invoice_receipt_sms', 'invoice_send_via_sms']) {
       expect(checkSendWindow({ ...SMS, entryPoint, customerInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
       const machine = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);
       expect(machine.ok).toBe(false);

@@ -6531,6 +6531,9 @@ async function createSelfBooking(payload = {}) {
           row.id === serviceRow.id ? 'booking_new' : 'booking_followup',
           {
             sendConfirmation: row.id === serviceRow.id,
+            // The customer booked this themselves: the confirmation goes out
+            // at once at any hour, not at 8 AM (owner 2026-11-02).
+            ...(row.id === serviceRow.id ? { customerInitiated: true } : {}),
             ...(isWindowlessFollowUp ? { closeReminderWindows: true } : {}),
           },
         );
