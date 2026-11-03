@@ -15,6 +15,11 @@
  * may get an estimate for the new house, the $99 setup-fee waiver the estimate
  * save stamps on it (owner Q2), and the link from the move to that estimate.
  *
+ * PR B2 (GATE_MOVING_APPLY) adds "Apply move": once the customer has accepted
+ * the new-home estimate, the office's confirm makes the new home the primary
+ * property and stops the old house's plans after the move-out date (see the
+ * Apply move section). It sends nothing to the customer.
+ *
  * Spend: Google Address Validation is a paid call. Each link allows at most
  * DAILY_CHECK_CAP checks per Eastern day (claimed atomically BEFORE the call),
  * and the same typed address is answered from the row for 24 hours. Submit can
@@ -39,7 +44,7 @@ const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-e
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validateAddress, STATUSES } = require('./address-validation');
 const { moveVerdictLabel } = require('./move-address-verdict');
-const { movingEstimateLive } = require('../config/feature-gates');
+const { movingEstimateLive, movingApplyLive } = require('../config/feature-gates');
 
 const TOKEN_RE = /^[a-f0-9]{48}$/;
 const DAILY_CHECK_CAP = 10;
@@ -573,8 +578,8 @@ async function recentMoves(customerId, limit = 5) {
     .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
     .limit(limit)
-    .select('id', 'customer_id', 'status', 'link_sent_at', 'link_channel', 'submitted_at', 'typed_address', 'normalized_address',
-      'address_verdict', 'move_out_date', 'move_in_date', 'service_request_id', 'estimate_id');
+    .select('id', 'customer_id', 'status', 'closed_reason', 'link_sent_at', 'link_channel', 'submitted_at', 'typed_address',
+      'normalized_address', 'address_verdict', 'move_out_date', 'move_in_date', 'service_request_id', 'estimate_id', 'applied_at');
   return rows.map((row) => ({
     ...row,
     move_out_date: dateOnlyString(row.move_out_date) || null,
@@ -928,6 +933,526 @@ async function moveForEstimate(estimateId, conn = db) {
   };
 }
 
+
+// ── Apply move (moving PR B2, GATE_MOVING_APPLY) ────────────────────────────
+//
+// After the customer accepts the new-home estimate, the office presses "Apply
+// move" on the Moving card, reads the preview, and confirms. Apply then:
+//   1. makes the new home the primary property (customer-properties
+//      changePrimaryProperty: the account address, coordinates and measurements
+//      follow it; old-house visits stay pinned to the old house) and saves the
+//      estimate's confirmed lawn size on it;
+//   2. stops every plan at the old house after the move-out date through the
+//      dispatch board's own series cancel (services/recurring-series-cancel.js):
+//      visits after move-out are cancelled with no customer text and no
+//      late-cancel fee, and the plan stops; visits on or before move-out stay;
+//   3. opens the termite station pickup task when Waves-owned stations are
+//      rented (cancellation-processor raiseTermiteRetrievalTask, dated after
+//      move-out);
+//   4. closes the move as applied.
+// One-time visits at the old house after move-out are listed for the office,
+// never cancelled here. Each step commits on its own and is safe to run again,
+// so an Apply that stops partway resumes where it stopped on the next confirm.
+// Customers billed per visit only, like B1; annual prepay and monthly members
+// are refused until a later PR.
+
+const APPLY_REFUSALS = {
+  gate_off: 'Apply move is off.',
+  not_found: NEW_HOME_REFUSALS.not_found,
+  already_applied: 'This move is already applied.',
+  not_submitted: NEW_HOME_REFUSALS.not_submitted,
+  out_of_area: NEW_HOME_REFUSALS.out_of_area,
+  no_address: NEW_HOME_REFUSALS.no_address,
+  customer_gone: NEW_HOME_REFUSALS.customer_gone,
+  prepay: 'This customer prepays for the year. Apply move for prepay plans comes in a later update.',
+  monthly: 'This customer pays a monthly membership. Apply move for monthly plans comes in a later update.',
+  billing: 'This customer\'s billing plan is not one Apply move handles yet.',
+  no_plan: 'This customer has no recurring plan to move.',
+  no_move_out: 'The customer has not given a move-out date. Ask them to add it with the same moving link.',
+  no_estimate: 'Make the new-home estimate first.',
+  estimate_not_accepted: 'The customer has not accepted the new-home estimate yet.',
+  no_new_property: 'The new home is not saved as a property yet. Check the accepted estimate\'s address.',
+  no_new_plan: 'The accepted estimate put no recurring plan on the new home.',
+  from_unknown: 'The house the customer is leaving is not saved as a property.',
+  primary_changed: 'The customer\'s primary property is not the house they are leaving. Check the properties first.',
+  apply_changed: 'The customer, the move or the plans changed since this preview. Read the new preview, then apply again.',
+  apply_in_progress: 'Apply move is already running for this move. Wait for it to finish, then refresh.',
+  apply_lock_unavailable: 'Apply move could not start. Try again in a moment.',
+};
+const APPLY_LOCK_NS = 'customer-move-apply';
+const SETTLED_VISIT_STATUSES = ['cancelled', 'skipped'];
+
+function applyError(code, status = 409, message = null) {
+  return new MoveError(code, message || APPLY_REFUSALS[code] || 'This move cannot be applied.', status);
+}
+
+// The calendar day after a YYYY-MM-DD date.
+function nextDay(iso) {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function propertyLine(p) {
+  if (!p) return '';
+  const cityLine = [p.city, [p.state, p.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return [p.address_line1, p.address_line2, cityLine].filter(Boolean).join(', ');
+}
+
+function visitAddressKey(v) {
+  const { addressKey } = require('./customer-properties');
+  return addressKey({
+    address_line1: v.service_address_line1, address_line2: v.service_address_line2,
+    city: v.service_address_city, zip: v.service_address_zip,
+  });
+}
+
+// Is this visit at the old house? Linked to it, stamped with its address, or
+// (before the primary change) unstamped: an unstamped visit reads as the
+// primary, and the primary change pins it to the old house.
+function visitAtHouse(v, house, { primaryIsHouse }) {
+  const { addressKey } = require('./customer-properties');
+  if (v.property_id) return String(v.property_id) === String(house.id);
+  if (v.service_address_line1) return visitAddressKey(v) === addressKey(house);
+  return primaryIsHouse;
+}
+
+// Which saved property a series belongs to: customer-properties'
+// seriesAgreedPropertyId, plus the case it cannot decide because no live
+// visit is linked to a property: every visit at the old house by the rule
+// above. Anything else is null (unresolved).
+async function seriesHouseId(conn, rootId, customerId, from, { primaryIsFrom }) {
+  const { seriesAgreedPropertyId } = require('./customer-properties');
+  const agreed = await seriesAgreedPropertyId(rootId, customerId, conn);
+  if (agreed) return String(agreed);
+  const visits = await conn('scheduled_services')
+    .where((q) => q.where('id', rootId).orWhere('recurring_parent_id', rootId))
+    .where({ customer_id: customerId })
+    .where((q) => q.whereNull('status').orWhereNotIn('status', SETTLED_VISIT_STATUSES))
+    .select('property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+  if (!visits.length || visits.some((v) => v.property_id)) return null;
+  return visits.every((v) => visitAtHouse(v, from, { primaryIsHouse: primaryIsFrom })) ? String(from.id) : null;
+}
+
+const SERIES_ROW_COLUMNS = ['id', 'status', 'customer_id', 'service_type', 'scheduled_date', 'annual_prepay_term_id', 'prepaid_amount',
+  'recurring_parent_id', 'is_recurring', 'recurring_pattern', 'property_id', 'service_address_line1', 'service_address_line2',
+  'service_address_city', 'service_address_zip'];
+
+const sameId = (a, b) => a != null && b != null && String(a) === String(b);
+const visitDay = (row) => dateOnlyString(row.scheduled_date);
+const inSeries = (row) => !!(row.recurring_parent_id || row.is_recurring || row.recurring_pattern);
+
+// One plan or visit in plain words: { name, frequency }.
+function planItem(row) {
+  return {
+    name: String(row.service_type || '').trim() || 'Service',
+    frequency: String(row.recurring_pattern || '').replace(/_/g, ' ').trim() || null,
+  };
+}
+
+function visitView(row) {
+  return { id: row.id, date: visitDay(row), name: planItem(row).name };
+}
+
+async function activeProperty(conn, customerId, id) {
+  if (!id) return null;
+  return conn('customer_properties').where({ id, customer_id: customerId, active: true }).first();
+}
+
+// The move and its dates, or the refusal that needs no house. Visits after
+// move-out stop, but only from today on: an open visit dated between a past
+// move-out and today may have been done and not closed out, so it is listed
+// for the office and never cancelled here.
+async function applyMoveRow(conn, customerId, moveId) {
+  if (!movingApplyLive()) throw applyError('gate_off', 404);
+  if (!UUID_RE.test(String(moveId || ''))) throw applyError('not_found', 404);
+  const move = await conn('customer_moves').where({ id: moveId, customer_id: customerId }).first();
+  if (!move) throw applyError('not_found', 404);
+  if (move.status === 'closed' && move.closed_reason === 'applied') throw applyError('already_applied');
+  const block = await newHomeBlock(move, conn);
+  if (block) throw applyError(block);
+  const moveOut = dateOnlyString(move.move_out_date);
+  if (!moveOut) throw applyError('no_move_out');
+  const today = etDateString();
+  const cutFrom = nextDay(moveOut);
+  return { move, moveOut, today, cutFrom, cancelFrom: cutFrom > today ? cutFrom : today };
+}
+
+// The accepted new-home estimate, the house left (from) and the new home (to),
+// and whether the primary already moved (a resumed Apply), or the refusal.
+async function applyHouses(conn, customerId, move) {
+  const estimate = move.estimate_id
+    ? await conn('estimates').where({ id: move.estimate_id, customer_id: customerId }).first('id', 'status', 'property_id', 'address', 'estimate_data')
+    : null;
+  const stamp = estimate ? (parseJson(estimate.estimate_data) || {}).move : null;
+  if (!stamp || typeof stamp !== 'object' || moveRowBlock(move, stamp)) throw applyError('no_estimate');
+  if (estimate.status !== 'accepted') throw applyError('estimate_not_accepted');
+  const to = await activeProperty(conn, customerId, estimate.property_id);
+  if (!to || !sameAddressLine(propertyLine(to), addressLine(parseJson(move.normalized_address)))) throw applyError('no_new_property');
+  const from = await activeProperty(conn, customerId, move.from_property_id);
+  if (!from || sameId(from.id, to.id)) throw applyError('from_unknown');
+  const primaryId = await primaryPropertyId(customerId, conn);
+  const flipped = sameId(primaryId, to.id);
+  if (!flipped && !sameId(primaryId, from.id)) throw applyError('primary_changed');
+  if (!flipped) {
+    // The primary change's own refusals (a tenant account, a home recorded as
+    // a rental, an incomplete address) come before anything is written.
+    const { previewManualPropertyChange } = require('./customer-properties');
+    await previewManualPropertyChange(customerId, 'primary', {}, to.id, conn).catch((err) => {
+      throw err.statusCode < 500 ? applyError(err.code || 'primary_unavailable', 409, err.message) : err;
+    });
+  }
+  return { estimate, to, from, flipped };
+}
+
+// The accepted estimate's live series at the new home, as plan lines, and the
+// ids of every series that estimate seeded (never an old-house plan).
+async function newHomePlan(conn, customerId, { estimate, to, from, flipped }) {
+  const roots = await conn('scheduled_services as r')
+    .where({ 'r.customer_id': customerId, 'r.source_estimate_id': estimate.id })
+    .whereNull('r.recurring_parent_id')
+    .where((q) => q.where('r.is_recurring', true).orWhereNotNull('r.recurring_pattern'))
+    .where((q) => q.where('r.recurring_ongoing', true).orWhereExists(function liveVisit() {
+      this.select(conn.raw('1')).from('scheduled_services as c')
+        .whereRaw('(c.id = r.id OR c.recurring_parent_id = r.id)')
+        .whereIn('c.status', LIVE_VISIT_STATUSES);
+    }))
+    .select('r.id', 'r.service_type', 'r.recurring_pattern');
+  const plan = [];
+  for (const root of roots) {
+    if (sameId(await seriesHouseId(conn, root.id, customerId, from, { primaryIsFrom: !flipped }), to.id)) plan.push(planItem(root));
+  }
+  if (!plan.length) throw applyError('no_new_plan');
+  return { plan, rootIds: new Set(roots.map((r) => String(r.id))) };
+}
+
+// The old house's plans: which stop (with the visits they cancel and the ones
+// before move-out that stay), which belong to another property, and the
+// old-house visits left alone: one-time visits from the cancel date on, and
+// open visits dated between a past move-out and today.
+async function oldHousePlans(conn, customerId, { to, from, flipped, today, cutFrom, cancelFrom }, newRootIds) {
+  // Every plan still running, plus any series with a live visit after move-out.
+  const ongoing = await conn('scheduled_services')
+    .where({ customer_id: customerId, recurring_ongoing: true })
+    .whereNull('recurring_parent_id')
+    .select('id');
+  const afterRows = await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('status', LIVE_VISIT_STATUSES)
+    .where('scheduled_date', '>=', cutFrom)
+    .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .select(SERIES_ROW_COLUMNS);
+  const rootIds = [...new Set([
+    ...ongoing.map((r) => String(r.id)),
+    ...afterRows.filter(inSeries).map((r) => String(r.recurring_parent_id || r.id)),
+  ])].filter((id) => !newRootIds.has(id)).sort();
+
+  const stops = [];
+  const others = [];
+  const unresolved = [];
+  for (const rootId of rootIds) {
+    const root = await conn('scheduled_services').where({ id: rootId, customer_id: customerId })
+      .first('id', 'service_type', 'recurring_pattern', 'recurring_ongoing');
+    if (!root) continue;
+    const house = await seriesHouseId(conn, rootId, customerId, from, { primaryIsFrom: !flipped });
+    if (sameId(house, to.id)) continue;
+    if (!sameId(house, from.id)) {
+      (house ? others : unresolved).push(planItem(root));
+      continue;
+    }
+    const afterMoveOut = afterRows.filter((r) => String(r.recurring_parent_id || r.id) === rootId);
+    if (!afterMoveOut.length && root.recurring_ongoing !== true) continue;
+    const kept = await conn('scheduled_services')
+      .where((q) => q.where('id', rootId).orWhere('recurring_parent_id', rootId))
+      .where({ customer_id: customerId })
+      .whereIn('status', LIVE_VISIT_STATUSES)
+      .where('scheduled_date', '>=', today)
+      .where('scheduled_date', '<', cutFrom)
+      .count({ n: '*' })
+      .first();
+    const targets = afterMoveOut.filter((r) => visitDay(r) >= cancelFrom);
+    stops.push({
+      rootId, ...planItem(root), serviceType: root.service_type, recurringPattern: root.recurring_pattern,
+      targets,
+      pastOpen: afterMoveOut.filter((r) => visitDay(r) < cancelFrom),
+      cancelCount: targets.length,
+      firstCancelDate: targets.length ? visitDay(targets[0]) : null,
+      keepCount: Number(kept.n) || 0,
+    });
+  }
+  if (unresolved.length) {
+    throw applyError('unresolved_series', 409,
+      `These plans could not be tied to one house: ${[...new Set(unresolved.map((u) => u.name))].join(', ')}. Fix their visit addresses first, or move them by hand.`);
+  }
+  const oldOneOffs = afterRows.filter((r) => !inSeries(r) && visitAtHouse(r, from, { primaryIsHouse: !flipped }));
+  return {
+    stops,
+    others,
+    oneOffs: oldOneOffs.filter((r) => visitDay(r) >= cancelFrom).map(visitView),
+    pastOpen: [...stops.flatMap((st) => st.pastOpen), ...oldOneOffs.filter((r) => visitDay(r) < cancelFrom)]
+      .sort((a, b) => visitDay(a).localeCompare(visitDay(b)) || String(a.id).localeCompare(String(b.id)))
+      .map(visitView),
+  };
+}
+
+// Money already taken for a visit Apply would cancel, or a payable prepay
+// invoice: the series cancel refuses both, so the preview refuses first.
+async function assertOldVisitsUnpaid(conn, customerId, stops) {
+  const targets = stops.flatMap((st) => st.targets);
+  if (targets.length) {
+    const { findBillingCoveredVisits } = require('../routes/admin-schedule');
+    const covered = await findBillingCoveredVisits(conn, targets, { feeRails: false });
+    if (covered.size > 0) {
+      const [firstId, reason] = [...covered.entries()][0];
+      const first = targets.find((t) => t.id === firstId);
+      throw applyError('paid_visits', 409,
+        `The ${prettyDate(visitDay(first))} ${planItem(first).name} visit at the old house is ${reason}. Handle the billing first, then apply.`);
+    }
+  }
+  const { findPendingPrepayInvoice } = require('./admin-cancellation');
+  const { familyOfServiceRow } = require('./cancellation-processor');
+  for (const stop of stops) {
+    const family = familyOfServiceRow({ service_type: stop.serviceType });
+    const pending = await findPendingPrepayInvoice(customerId, family ? [family] : null, conn);
+    if (pending) {
+      throw applyError('pending_prepay_invoice', 409,
+        `An unpaid annual-prepay invoice (${pending.invoice.invoice_number || pending.invoice.id}) is still payable for ${stop.name}. Void it first, then apply.`);
+    }
+  }
+}
+
+/**
+ * What Apply move would do for this move, read-only, or a MoveError saying why
+ * it cannot run. `version` binds the office's confirm to these facts.
+ */
+async function applyPlan(customerId, moveId, conn = db) {
+  const ctx = await applyMoveRow(conn, customerId, moveId);
+  Object.assign(ctx, await applyHouses(conn, customerId, ctx.move));
+  const newHome = await newHomePlan(conn, customerId, ctx);
+  const old = await oldHousePlans(conn, customerId, ctx, newHome.rootIds);
+  await assertOldVisitsUnpaid(conn, customerId, old.stops);
+  const { rentedTermiteStationState } = require('./cancellation-processor');
+  const stationState = await rentedTermiteStationState(customerId);
+  const stations = stationState.rented.length || stationState.flaggedRental
+    ? { count: stationState.rented.length, flagged: stationState.flaggedRental === true }
+    : null;
+  const version = crypto.createHash('sha256').update(JSON.stringify([
+    ctx.move.id, new Date(ctx.move.updated_at).toISOString(), ctx.estimate.id, ctx.to.id, ctx.from.id, ctx.flipped, ctx.cancelFrom,
+    old.stops.map((st) => [st.rootId, st.targets.map((t) => String(t.id))]),
+    old.oneOffs.map((o) => String(o.id)), old.pastOpen.map((o) => String(o.id)), stations,
+  ])).digest('hex');
+  return { ...ctx, ...old, stations, newPlan: newHome.plan, version };
+}
+
+// The preview the Moving card shows: plain facts, no internal rows.
+function applyPreviewView(plan) {
+  return {
+    moveId: plan.move.id,
+    fromAddress: propertyLine(plan.from),
+    toAddress: propertyLine(plan.to),
+    moveOutDate: plan.moveOut,
+    moveInDate: dateOnlyString(plan.move.move_in_date) || null,
+    primaryChange: !plan.flipped,
+    newPlan: plan.newPlan,
+    stops: plan.stops.map((s) => ({
+      name: s.name, frequency: s.frequency, cancelCount: s.cancelCount, firstCancelDate: s.firstCancelDate, keepCount: s.keepCount,
+    })),
+    others: plan.others,
+    oneOffs: plan.oneOffs,
+    pastOpen: plan.pastOpen,
+    stations: plan.stations,
+    version: plan.version,
+  };
+}
+
+/** The Apply move preview for the Moving card, or a MoveError. */
+async function applyMovePreview(customerId, moveId) {
+  return applyPreviewView(await applyPlan(customerId, moveId));
+}
+
+// One Apply per move at a time: a session advisory lock on its own pooled
+// connection (the same pattern as admin-cancellation acquireCancelCommitLock),
+// so the steps can run their own transactions while it is held.
+async function acquireApplyLock(moveId) {
+  let conn = null;
+  try {
+    conn = await db.client.acquireConnection();
+    const res = await conn.query('SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS locked', [APPLY_LOCK_NS, String(moveId)]);
+    if (!(res && res.rows && res.rows[0] && res.rows[0].locked === true)) {
+      const held = conn;
+      conn = null;
+      try { await db.client.releaseConnection(held); } catch { /* pool reaps */ }
+      throw applyError('apply_in_progress');
+    }
+  } catch (err) {
+    if (conn) { try { await db.client.releaseConnection(conn); } catch { /* pool reaps */ } }
+    if (err instanceof MoveError) throw err;
+    logger.error(`[customer-moves] apply lock unavailable for move ${moveId} (${errCode(err)})`);
+    throw applyError('apply_lock_unavailable', 503);
+  }
+  return async function release() {
+    try {
+      await conn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [APPLY_LOCK_NS, String(moveId)]);
+    } catch (err) {
+      // A session still holding the lock must not go back to the pool: knex
+      // destroys a __knex__disposed connection, and ending it frees the lock.
+      conn.__knex__disposed = err;
+      logger.warn(`[customer-moves] apply lock release failed for move ${moveId} (${errCode(err)}); connection disposed`);
+    }
+    try { await db.client.releaseConnection(conn); } catch { /* pool reaps */ }
+  };
+}
+
+// The last step: the move closes as applied, under its row lock, only if it
+// still names the estimate the plan was read from.
+async function closeAppliedMove(plan, { actorId, summary, now }) {
+  await db.transaction(async (trx) => {
+    const locked = await trx('customer_moves').where({ id: plan.move.id }).forUpdate().first();
+    if (!locked || locked.status !== 'submitted' || String(locked.estimate_id || '') !== String(plan.estimate.id)) {
+      throw applyError('apply_changed');
+    }
+    await trx('customer_moves').where({ id: locked.id }).update({
+      status: 'closed',
+      closed_reason: 'applied',
+      closed_at: now,
+      applied_at: now,
+      applied_by: actorId || null,
+      to_property_id: plan.to.id,
+      updated_at: now,
+    });
+    await trx('activity_log').insert({
+      customer_id: locked.customer_id,
+      admin_user_id: actorId || null,
+      action: 'moving_applied',
+      description: summary,
+      metadata: JSON.stringify({
+        move_id: locked.id, estimate_id: plan.estimate.id, from_property_id: plan.from.id, to_property_id: plan.to.id,
+        move_out_date: plan.moveOut,
+      }),
+    });
+  });
+}
+
+// A step that failed: where Apply stopped and what it already did. A refusal
+// from the step (a MoveError, the series cancel's 409, the primary change's
+// 409) keeps its code and message; anything else is a plain stop.
+function applyStepError(err, step, progress) {
+  let out = err;
+  if (!(err instanceof MoveError)) {
+    const status = Number(err.statusCode || err.status) || 500;
+    const refused = status < 500;
+    out = applyError(refused ? String(err.code || 'apply_refused') : 'apply_failed', refused ? 409 : 500,
+      refused ? ((err.body && err.body.error) || err.message) : `Apply move stopped at ${step}. Try again; it resumes where it stopped.`);
+  }
+  out.progress = progress;
+  out.step = step;
+  return out;
+}
+
+/**
+ * Apply the move the office confirmed. `version` is the preview's; a plan
+ * that no longer matches it is refused (409 apply_changed) before any write.
+ * A step that fails throws a MoveError carrying `progress` (what already
+ * happened); confirming again resumes from there.
+ */
+async function applyMove(customerId, moveId, opts = {}) {
+  if (!movingApplyLive()) throw applyError('gate_off', 404);
+  if (!UUID_RE.test(String(moveId || ''))) throw applyError('not_found', 404);
+  const actorId = opts.actorId || null;
+  const release = await acquireApplyLock(moveId);
+  const progress = { primaryChanged: false, lawn: null, plansStopped: 0, visitsCancelled: 0, stationTask: false };
+  const step = async (name, fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      throw applyStepError(err, name, progress);
+    }
+  };
+  try {
+    const plan = await applyPlan(customerId, moveId);
+    if (String(opts.version || '') !== plan.version) throw applyError('apply_changed');
+
+    if (!plan.flipped) {
+      await step('primary', async () => {
+        const { previewManualPropertyChange, changePrimaryProperty } = require('./customer-properties');
+        const preview = await previewManualPropertyChange(customerId, 'primary', {}, plan.to.id);
+        await changePrimaryProperty(customerId, plan.to.id, { actorId, expectedVersion: preview._version });
+        progress.primaryChanged = true;
+      });
+    }
+    // The lawn size is a convenience the office can set by hand: never stop Apply for it.
+    progress.lawn = await require('./lawn-size-sync').applyEstimateLawnSqft(db, {
+      customerId, estimate: plan.estimate, estimateData: plan.estimate.estimate_data, trigger: 'move_apply', actorId,
+    }).then((lawn) => (lawn ? lawn.status : null), (err) => {
+      logger.warn(`[customer-moves] lawn size after apply failed for move ${moveId} (${errCode(err)})`);
+      return 'failed';
+    });
+
+    const { cancelSeriesRemainder } = require('./recurring-series-cancel');
+    for (const stop of plan.stops) {
+      await step('plans', async () => {
+        const out = await cancelSeriesRemainder({
+          parentId: stop.rootId,
+          customerId,
+          serviceType: stop.serviceType,
+          recurringPattern: stop.recurringPattern,
+          scope: 'following',
+          fromDate: plan.cancelFrom,
+          notifyCustomer: false,
+          notes: `Customer moved out on ${plan.moveOut} (moving flow, Apply move)`,
+          actorId,
+          waiveFee: true,
+          source: 'moving-apply',
+          allowEmpty: true,
+        });
+        progress.plansStopped += 1;
+        progress.visitsCancelled += out.cancelledCount;
+      });
+    }
+
+    if (plan.stations) {
+      await step('termite', async () => {
+        const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
+        const task = await raiseTermiteRetrievalTask(customerId, plan.move.service_request_id, { retrieveAfter: plan.moveOut });
+        progress.stationTask = task.raised === true;
+      });
+    }
+
+    const summary = [
+      `New home is primary: ${propertyLine(plan.to)}.`,
+      `Old-house plans stopped after ${prettyDate(plan.moveOut)}: ${plan.stops.length} (${progress.visitsCancelled} visits cancelled, no customer text, no fee).`,
+      progress.stationTask ? 'Termite station pickup task opened.' : '',
+    ].join(' ').trim();
+    await step('close', () => closeAppliedMove(plan, { actorId, summary, now: opts.now || new Date() }));
+    await require('./portal-inbox')
+      .resolveRequestQuietly(plan.move.service_request_id, customerId, 'Move applied from the Moving card.', { notAfter: new Date(), now: new Date() })
+      .catch((err) => logger.warn(`[customer-moves] office item close failed for move ${moveId} (${errCode(err)})`));
+    logger.info(`[customer-moves] applied move ${moveId} for customer ${customerId} by ${actorId || 'unknown'}`);
+    return { applied: true, ...progress, oneOffs: plan.oneOffs, pastOpen: plan.pastOpen, summary };
+  } finally {
+    await release();
+  }
+}
+
+/** The Moving card's Apply action for one move: null, or { action: 'review' | 'blocked' | 'applied', reason }. */
+async function applyAction(move, conn = db) {
+  if (!movingApplyLive() || !move) return null;
+  if (move.status === 'closed') return move.closed_reason === 'applied' ? { action: 'applied', reason: null } : null;
+  if (move.status !== 'submitted' || !move.estimate_id) return null;
+  try {
+    await applyPlan(move.customer_id, move.id, conn);
+    return { action: 'review', reason: null };
+  } catch (err) {
+    if (err instanceof MoveError) {
+      // Nothing to apply yet: the estimate step owns those moves.
+      if (['no_estimate', 'estimate_not_accepted'].includes(err.code)) return null;
+      return { action: 'blocked', reason: err.message };
+    }
+    logger.warn(`[customer-moves] apply action read failed for move ${move.id} (${errCode(err)})`);
+    return null;
+  }
+}
+
 module.exports = {
   MoveError,
   TOKEN_RE,
@@ -958,5 +1483,9 @@ module.exports = {
   lockMoveForConversion,
   withMoveSetupWaiver,
   moveForEstimate,
-  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert },
+  APPLY_REFUSALS,
+  applyAction,
+  applyMovePreview,
+  applyMove,
+  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse },
 };
