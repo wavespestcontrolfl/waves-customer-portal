@@ -463,7 +463,7 @@ jest.setTimeout(30000);
     };
     await run({ ok: true, json: decision });
     const [bell] = await bellsFor(line.id);
-    expect(bell.message || bell.body || JSON.stringify(bell)).toMatch(/restock request for Taurus SC is still open/);
+    expect(bell.detail || bell.body || JSON.stringify(bell)).toMatch(/restock request for Taurus SC is still open/);
   });
 
   test('an EXISTING count product whose default_unit is still the admin default and never used yet: the restock fixes it to each (review item 1)', async () => {
@@ -1069,7 +1069,7 @@ jest.setTimeout(30000);
     const movement = await mockConn('product_inventory_movements').where({ id: saved.movement_id }).first();
     expect(movement.metadata).toMatchObject({ source: 'amazon_delivery' });
     const [bell] = await bellsFor(line.id);
-    expect(bell).toMatchObject({ title: 'Purchase logged' });
+    expect(bell).toMatchObject({ title: 'Inventory — receipt rules logged a purchase' });
   });
 
   test('the receipt rules\' duplicate check still holds a queued line they resolve', async () => {
@@ -1624,7 +1624,7 @@ jest.setTimeout(30000);
     // through, so this is a real, repeatable apply-time throw, not a
     // contrived one.
     const flakyNotify = async (category, title, body, opts) => {
-      if (title === 'Inventory agent logged a purchase') throw new Error('notification service down');
+      if (/^Inventory — (agent logged a purchase|check the restock request for a logged purchase)$/.test(title)) throw new Error('notification service down');
       return notifications.notifyAdmin(category, title, body, opts);
     };
     const runOnce = () => runInventoryAgent({ conn: mockConn, llm: async () => ({ ok: true, json: decision }), notifyAdmin: flakyNotify });
@@ -1793,7 +1793,7 @@ jest.setTimeout(30000);
       const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
       expect(saved.status).toBe('agent_unsure');
       const [bell] = await bellsFor(line.id);
-      expect(bell.title).toBe('Inventory agent: not added');
+      expect(bell.title).toBe('Inventory — log a purchase the agent could not add');
       expect(bell.detail || bell.body).toMatch(/the title has a product-line word \("complete"\) that "Gentrol" does not/);
       expect(bell.detail || bell.body).not.toMatch(/Closest guess/);
     });

@@ -26,6 +26,7 @@ VOICE — this is what makes Waves content distinct:
 - Casual, technically knowledgeable, SWFL-specific
 - Like a helpful neighbor who's also a pest control expert
 - Slightly snarky, never corporate
+- Avoid stock AI phrases such as "delve into", "look no further", "peace of mind", "we've got you covered", "in today's digital age", "it's important to note"; say it plainly instead
 - Reference sandy soil, afternoon storms, St. Augustine grass
 - In Sarasota and Manatee counties, fertilizer containing nitrogen or phosphorus is restricted/prohibited from June 1 through September 30. Do NOT call this only a "nitrogen blackout" — phosphorus is part of the rule. When relevant, suggest summer alternatives: iron, micronutrients, compost, Florida-Friendly planting, and mowing-height/irrigation adjustments. Verify the current local rule before stating restriction details for any other county or municipality.
 

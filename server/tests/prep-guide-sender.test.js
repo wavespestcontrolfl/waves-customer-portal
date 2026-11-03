@@ -343,7 +343,7 @@ describe('sendPrepToCustomer', () => {
     const keys = Object.keys(PREP_CONFIG);
     // prep.wildlife stays archived — wildlife is a prohibited Waves service.
     expect(keys.sort()).toEqual([
-      'bed_bug', 'cockroach', 'flea', 'interior_pest', 'lawn', 'mosquito', 'rodent', 'sprinkler_timer', 'termite',
+      'bed_bug', 'bed_bug_heat', 'cockroach', 'flea', 'interior_pest', 'lawn', 'mosquito', 'rodent', 'sprinkler_timer', 'termite',
     ]);
     for (const pestType of keys) {
       jest.clearAllMocks();
@@ -352,6 +352,28 @@ describe('sendPrepToCustomer', () => {
       expect(result.ok).toBe(true);
       expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].templateKey).toBe(PREP_CONFIG[pestType].emailTemplateKey);
     }
+  });
+
+  test('chemical and heat bed bug guides never claim the same visit name', () => {
+    const { PREP_CONFIG } = require('../services/prep-guide-sender');
+    const { BED_BUG_HEAT_KEYWORDS } = require('../utils/bed-bug-heat-service');
+    const matches = (config, name) => {
+      const lower = name.toLowerCase();
+      return config.serviceKeywords.some((k) => lower.includes(k))
+        && !(config.excludeKeywords || []).some((k) => lower.includes(k));
+    };
+    for (const name of ['Bed Bug Heat Treatment', 'Bed Bug Hybrid Heat + Residual Program', 'Heat Bed Bug Treatment']) {
+      expect(matches(PREP_CONFIG.bed_bug_heat, name)).toBe(true);
+      expect(matches(PREP_CONFIG.bed_bug, name)).toBe(false);
+    }
+    for (const name of ['Bed Bug Treatment Service', 'Bed Bug Chemical/IPM Program']) {
+      expect(matches(PREP_CONFIG.bed_bug_heat, name)).toBe(false);
+      expect(matches(PREP_CONFIG.bed_bug, name)).toBe(true);
+    }
+    expect(PREP_CONFIG.bed_bug_heat.serviceKeywords).toEqual([...BED_BUG_HEAT_KEYWORDS]);
+    // A heat text is always the guide link: the chemical inline steps would mislead.
+    expect(PREP_CONFIG.bed_bug_heat.smsStandaloneKey).toBeNull();
+    expect(PREP_CONFIG.bed_bug_heat.emailTemplateKey).toBe('prep.bed_bug_heat');
   });
 
   test('service-contact account: email greets the contact, SMS greets the phone owner', async () => {

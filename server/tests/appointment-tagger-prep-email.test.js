@@ -378,6 +378,71 @@ describe('appointment tagger prep email automation', () => {
     expect(call.payload.project_type).toBe('Bed Bug Treatment Service');
   });
 
+  describe('bed bug heat and hybrid jobs get the heat prep sheet', () => {
+    test('heat pest type maps to prep.bed_bug_heat and the companion text reuses auto_bed_bug', async () => {
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Heat Treatment' }), 'bed_bug_heat');
+
+      expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+      expect(executor.processTrigger.mock.calls[0][0].automationKey).toBe('prep.bed_bug_heat');
+      expect(renderSmsTemplate).toHaveBeenCalledWith('auto_bed_bug', { first_name: 'Taylor' }, expect.any(Object));
+    });
+
+    test('a heat job takes the transactional email even with the sequence gate on (step 0 is the chemical guide)', async () => {
+      isEnabled.mockImplementation(() => true);
+      const automationRunner = require('../services/automation-runner');
+      await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Hybrid Heat + Residual Program' }), 'bed_bug_heat');
+
+      expect(automationRunner.enrollCustomer).not.toHaveBeenCalled();
+      expect(executor.processTrigger.mock.calls[0][0].automationKey).toBe('prep.bed_bug_heat');
+    });
+
+    test('a phone-only heat customer gets no inline chemical steps', async () => {
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug_heat');
+
+      expect(renderSmsTemplate).not.toHaveBeenCalledWith('auto_bed_bug_no_email', expect.anything(), expect.anything());
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a prior chemical bed bug booking counts as the same family for heat (first-time only)', async () => {
+      priorBookingRow = { id: 'earlier' };
+      await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Heat Treatment' }), 'bed_bug_heat');
+
+      expect(executor.processTrigger).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['Bed Bug Heat Treatment', 'bed_bug_heat'],
+      ['Bed Bug Hybrid Heat + Residual Program', 'bed_bug_heat'],
+      ['Heat Bed Bug Treatment', 'bed_bug_heat'],
+      ['Bed Bug Treatment Service', 'bed_bug'],
+      ['Bed Bug Chemical/IPM Program', 'bed_bug'],
+    ])('onServiceScheduled routes %s to the %s guide', async (serviceType, pestType) => {
+      let served = false;
+      db.mockImplementation((table) => {
+        if (table !== 'scheduled_services') return customersQuery();
+        const q = priorBookingQuery();
+        const defaultFirst = q.first;
+        q.leftJoin = jest.fn(() => q);
+        q.select = jest.fn(() => q);
+        q.first = jest.fn(async (...args) => {
+          if (!served) { served = true; return service({ service_type: serviceType }); }
+          return defaultFirst(...args);
+        });
+        return q;
+      });
+      const spy = jest.spyOn(AppointmentTagger, 'triggerPestPrep').mockResolvedValue(undefined);
+      try {
+        await AppointmentTagger.onServiceScheduled('svc-1');
+        expect(spy).toHaveBeenCalledWith(expect.objectContaining({ service_type: serviceType }), pestType);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   test('DATE column returned as a UTC-midnight Date keeps the ET calendar day', async () => {
     await AppointmentTagger.triggerPestPrep(
       service({ scheduled_date: new Date(`${FUTURE_DATE}T00:00:00Z`) }),

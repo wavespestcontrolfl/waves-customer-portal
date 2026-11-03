@@ -52,6 +52,7 @@ import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
 import { formatETTime } from '../../lib/timezone';
+import InPersonCardSheet from './InPersonCardSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1577,7 +1578,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the loop fails partway (e.g. quarterly succeeded, monthly errored), a
   // retry click skips the keys that landed so we don't double-book the
   // customer. Reset on successful close.
-  const createdGroupKeysRef = useRef(new Set());
+  // Value = the committed booking response for that group (null for a recovered
+  // duplicate-series outcome, which has no response). The Booked sheet reads the
+  // first group's id and estimate flag from here, so they survive retries.
+  const createdGroupKeysRef = useRef(new Map());
   // Codex pre-push audit P1 (round 5, PR #4656): committedGroupPricesRef
   // freezes each group's displayed total at the exact moment it commits
   // (see groupStackedPerVisitTotal's own comment) — read FIRST, ahead of
@@ -2234,10 +2238,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // failure keeps it hidden for the same reason.
   const [sendCardLink, setSendCardLink] = useState(false);
   const [cardLinkAvailable, setCardLinkAvailable] = useState(false);
+  // Book at the Table (GATE_IN_PERSON_CARD, owner 2026-11-02): the availability
+  // read also says `inPerson` while that gate is on. Then the checkbox below
+  // becomes a three-way "Card for Auto Pay" choice; `cardHere` is the
+  // "Customer saves it here, now" pick. "Text them the link" is exactly
+  // today's sendCardLink, so firstGroupSendFlags is untouched. Off or a failed
+  // read keeps today's checkbox.
+  const [inPersonAvailable, setInPersonAvailable] = useState(false);
+  const [cardHere, setCardHere] = useState(false);
+  // Set after a "here, now" booking saves: the Booked sheet replaces the form.
+  const [bookedSheet, setBookedSheet] = useState(null);
   useEffect(() => {
     let cancelled = false;
     adminFetch('/admin/schedule/card-request-availability')
-      .then(r => { if (!cancelled) setCardLinkAvailable(!!r?.enabled); })
+      .then(r => {
+        if (cancelled) return;
+        setCardLinkAvailable(!!r?.enabled);
+        setInPersonAvailable(!!r?.enabled && r?.inPerson === true);
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -4544,7 +4562,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // regardless of what happens to a sibling group's preview later
           // in this same modal session.
           committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
-          createdGroupKeysRef.current.add(key);
+          createdGroupKeysRef.current.set(key, r);
           // Codex pre-push audit P1 (round 5): the immutable half of the
           // freeze-on-commit fix — each of THIS group's lines' own stable
           // lineId (never recomputed, unlike the group's own cadence-
@@ -4578,7 +4596,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             // saved (from an earlier attempt) at whatever total is
             // currently displayed for it.
             committedGroupPricesRef.current.set(key, groupStackedPerVisitTotal(group));
-            createdGroupKeysRef.current.add(key);
+            createdGroupKeysRef.current.set(key, null);
             group.lines.forEach((s) => { if (s?.lineId) committedLineIdsRef.current.add(s.lineId); });
             setCommittedGroupKeysVersion((v) => v + 1);
             // Same lock as the success path above — a recoverable
@@ -4691,12 +4709,41 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // pending manager approval) books fine but couldn't be auto-accepted — tell
       // the operator so they can record the win from the Estimates page.
       showBookingWarnings(apptWarnings, 'Appointment saved.\n\n');
+      // "Customer saves it here, now": keep the modal open on the Booked sheet.
+      // The callers close on a non-background report, so report the save as
+      // background (their lists still refresh) and let the sheet's Done close.
+      // The card request belongs to the booking's FIRST group (the parent visit
+      // the confirmation text and card link also ride on). Its id and lines come
+      // from the same group, held across retries in createdGroupKeysRef.
+      const firstGroup = groups[0];
+      const firstCommitted = firstGroup ? createdGroupKeysRef.current.get(groupKey(firstGroup)) : null;
+      if (inPersonAvailable && cardHere && firstCommitted?.id && submitIsCurrent()) {
+        const bookedEstimateAccepted = Array.from(createdGroupKeysRef.current.values()).some((r) => r?.estimateAccepted);
+        createdGroupKeysRef.current = new Map();
+        committedGroupPricesRef.current = new Map();
+        committedLineIdsRef.current = new Set();
+        appointmentDiscountCommittedGroupKeyRef.current = null;
+        const bookedAppointment = { id: firstCommitted.id, scheduledDate: apptDate };
+        onCreated?.(bookedAppointment, { background: true });
+        onChange?.(bookedAppointment, { background: true });
+        setBookedSheet({
+          visitId: firstCommitted.id,
+          date: apptDate,
+          time: (HOURLY_TIME_OPTIONS.find((o) => o.value === windowStart) || {}).label || windowStart,
+          serviceName: firstGroup.lines.map((line) => line.name).filter(Boolean).join(' + '),
+          estimateAccepted: bookedEstimateAccepted,
+          estimateRef: linkedEstimate?.estimateSlug || null,
+          confirmationText: !!sendSms,
+          firstName: selectedCustomer?.firstName || selectedCustomer?.first_name || '',
+        });
+        return true;
+      }
       setTimeout(() => {
         if (!submitIsCurrent()) {
           reportBackground();
           return;
         }
-        createdGroupKeysRef.current = new Set();
+        createdGroupKeysRef.current = new Map();
         committedGroupPricesRef.current = new Map();
         committedLineIdsRef.current = new Set();
         appointmentDiscountCommittedGroupKeyRef.current = null;
@@ -5300,6 +5347,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       </select>
     </div>
   );
+
+  if (bookedSheet) {
+    return <InPersonCardSheet {...bookedSheet} adminFetch={adminFetch} onClose={onClose} />;
+  }
 
   return createPortal(
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -6862,13 +6913,37 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
               <span style={{ fontSize: 13, color: D.text }}>Send confirmation SMS</span>
             </label>
-            {cardLinkAvailable && (
+            {cardLinkAvailable && (inPersonAvailable ? (
+              <fieldset style={{ border: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <legend style={{ ...labelStyle, fontSize: 14, padding: 0, marginBottom: 2 }}>Card for Auto Pay</legend>
+                {[
+                  { value: 'here', label: 'Customer saves it here, now', hint: 'At the table, by QR code. Nothing charged today.' },
+                  { value: 'text', label: 'Text them the link', hint: 'Texts a secure link to save a card.' },
+                  { value: 'none', label: 'No card ask', hint: '' },
+                ].map((option) => (
+                  <label key={option.value} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', minHeight: 44, padding: '6px 0' }}>
+                    <input
+                      type="radio"
+                      name="new-appt-card-choice"
+                      value={option.value}
+                      checked={(cardHere ? 'here' : (sendCardLink ? 'text' : 'none')) === option.value}
+                      onChange={() => { setCardHere(option.value === 'here'); setSendCardLink(option.value === 'text'); }}
+                      style={{ width: 18, height: 18, marginTop: 2, accentColor: D.green }}
+                    />
+                    <span style={{ display: 'flex', flexDirection: 'column' }}>
+                      <span style={{ fontSize: 14, color: D.text }}>{option.label}</span>
+                      {option.hint && <span style={{ fontSize: 14, color: D.muted }}>{option.hint}</span>}
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            ) : (
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
                 <input type="checkbox" checked={sendCardLink} onChange={e => setSendCardLink(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
                 <span style={{ fontSize: 13, color: D.text }}>Text card-on-file link (Auto Pay setup)</span>
               </label>
-            )}
-            {cardLinkAvailable && sendCardLink && (
+            ))}
+            {cardLinkAvailable && !inPersonAvailable && sendCardLink && (
               <div style={{ fontSize: 12, color: D.muted, paddingLeft: 26 }}>
                 Texts a secure link to save a card — nothing charged today, Auto Pay enrolls on save.
                 Skipped automatically if a card is already on file or the visit bills a third-party payer.

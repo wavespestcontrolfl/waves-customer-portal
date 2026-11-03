@@ -1028,6 +1028,52 @@ describe('inline delivery (the /book wizard card step)', () => {
   });
 });
 
+describe('inPerson option (Book at the Table, owner 2026-11-02)', () => {
+  test('existing customer + inPerson → the page is offered (link_created)', async () => {
+    mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'admin', delivery: 'inline', inPerson: true });
+    expect(res.action).toBe('link_created');
+    expect(res.requested).toBe(true);
+    expect(res.secureUrl).toMatch(/\/secure\/[A-Za-z0-9_-]{22}$/);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('existing customer WITHOUT inPerson → still skipped existing_customer', async () => {
+    mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'admin', delivery: 'inline' });
+    expect(res).toMatchObject({ requested: false, action: 'skipped', reason: 'existing_customer' });
+    expect(res.secureUrl).toBeUndefined();
+  });
+
+  test('existing customer with a consented saved card + inPerson → still auto_secured', async () => {
+    mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+    mockFindConsentedChargeableCard.mockResolvedValueOnce({ id: 'pm-row-1', stripe_payment_method_id: 'pm_x' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'admin', delivery: 'inline', inPerson: true });
+    expect(res).toEqual({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
+  });
+
+  test('inPerson lifts nothing else: payer exemption, unpriced and past visits still skip', async () => {
+    mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
+    const exempt = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline', inPerson: true });
+    expect(exempt.reason).toBe('payer_billed');
+
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, estimated_price: null });
+    const unpriced = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline', inPerson: true });
+    expect(unpriced.reason).toBe('unpriced_visit');
+
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, scheduled_date: '2020-01-01' });
+    const past = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline', inPerson: true });
+    expect(past.reason).toBe('visit_in_past');
+  });
+
+  test('inPerson does not bypass the gate', async () => {
+    delete process.env.APPOINTMENT_CARD_REQUEST;
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline', inPerson: true });
+    expect(res.reason).toBe('gate_off');
+  });
+});
+
 describe('dateLineFor', () => {
   test('renders a clause for a real date and empty for junk', () => {
     expect(_test.dateLineFor('2099-07-20')).toMatch(/^ on \w{3}, Jul 20$/);

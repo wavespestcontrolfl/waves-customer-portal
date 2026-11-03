@@ -846,6 +846,11 @@ const CALL_ORIGIN = {
   strings: {
     redTitle: 'Quote promised on call — send it',
     redBody: (label, reasons) => `${label}: quote promised, no auto-draft (${reasons}). Send it manually before end of day.`,
+    // Composer read the call as NOT a quote request although the extractor
+    // set quote_promised: ask the office to check the call instead of
+    // demanding a send. The promise metadata is untouched (see redBellCopy).
+    redCheckTitle: (label) => `Quote promised? Check the call — ${label}`,
+    redCheckBody: (label, skipReason) => `${label}: the call notes say a quote was promised, but the estimator read this call as no quote request (${skipReason}). Check the call. Send a quote only if one was promised; if not, mark this done.`,
     composerFailBody: (label) => `${label}: a quote was promised but the estimator engine could not compose a draft. Send it manually before end of day.`,
     errorBody: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
     blockedTitle: 'Quote promised on call — estimate already open',
@@ -854,6 +859,25 @@ const CALL_ORIGIN = {
     proposalBody: (label) => `${label}: commercial relationship quote — prospect research and an unpriced proposal scaffold are drafted. Price it in the proposal builder.`,
   },
 };
+
+// Red-lane bell copy. A composer skip with skip_category not_a_quote
+// (GATE_ESTIMATOR_SCOPE_GUARDS prompt addendum; absent with the gate off,
+// which keeps the old copy) on an origin that defines the check copy (calls
+// only) turns the "send it" demand into a "check the call" prompt; every
+// other red reason, skip category (or a missing one) and origin keeps the historical copy byte-for-byte. Only the
+// words change: the caller still passes quotePromised to notify(), so the
+// quote_promised / promise metadata the dedupe, watchdogs and closers read
+// is exactly as before and the promise is never dropped.
+function redBellCopy(S, intent, label, reasons) {
+  if (intent?.decision === 'skip'
+    && intent.skip_category === 'not_a_quote'
+    && typeof S.redCheckTitle === 'function'
+    && typeof S.redCheckBody === 'function') {
+    const skipReason = String(intent.skip_reason || '').trim() || 'no reason given';
+    return { title: S.redCheckTitle(label), body: S.redCheckBody(label, skipReason) };
+  }
+  return { title: S.redTitle, body: S.redBody(label, reasons.join('; ')) };
+}
 
 /**
  * Main entry. Non-throwing by contract: every path resolves to a result
@@ -3126,14 +3150,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         logger.warn(`[estimator-engine] commercial proposal lane failed (red bell takes over): ${proposalErr.message}`);
       }
       if (quotePromised) {
+        const redCopy = redBellCopy(S, intent, callerLabel(intent, context), reasons);
         await notify({
           call: context.call,
           context,
           lane,
           quotePromised,
           threadKey,
-          title: S.redTitle,
-          body: S.redBody(callerLabel(intent, context), reasons.join('; ')),
+          title: redCopy.title,
+          body: redCopy.body,
         });
         // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): the two
         // machine-readable red causes are askable — park an approval-gated
@@ -3515,6 +3540,6 @@ module.exports = {
     classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
-    clearDraftBlockOnCall,
+    clearDraftBlockOnCall, redBellCopy, CALL_ORIGIN,
   },
 };

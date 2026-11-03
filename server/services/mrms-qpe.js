@@ -25,6 +25,12 @@
  *   response for another cell is re-requested under a window (= cache key)
  *   derived from this property's cell, and is never returned as this
  *   property's rain.
+ * - The cache cell is the NEAREST 0.125 degree IEMRE point. Re-request windows
+ *   spread by cell can still meet: on 2026-11-02 two neighbors held all three
+ *   of one home's windows, in the same sweep order every Monday, so that home
+ *   got no rain and no watering email. This process keeps a ledger of the
+ *   windows it asked in each cache cell during the hour, and a property never
+ *   asks a window another property already holds there.
  */
 
 const logger = require('./logger');
@@ -45,6 +51,21 @@ const CELL_E4 = 100;
 // Earlier-start offsets for the re-request: two attempts, each spread over 29
 // windows by the property's own cell, so neighbors do not meet again.
 const RETRY_SPREAD_DAYS = 29;
+// Requests per year segment: the window first, then up to two re-requests.
+const MAX_REQUESTS = 3;
+// IEM's cache cell: the nearest point of the 0.125 degree IEMRE grid from
+// 126W / 23N, in the same ten-thousandths as the MRMS cell.
+const IEMRE_CELL_E4 = 1250;
+// IEM holds a response for an hour from the first request; a few minutes more
+// covers clock drift between this process and the relay.
+const CACHE_HOLD_MS = 65 * 60 * 1000;
+const LEDGER_PRUNE_SIZE = 2000;
+// The holder of a window that answered with a cell no property here asked
+// for (another process, or a request from before a restart).
+const FOREIGN = 'foreign';
+// `${cacheCell}|${start}/${end}` -> { holder, at }: who first asked that window
+// in that cache cell during the last hour.
+const windowLedger = new Map();
 
 function axisCells(coordE4, originE4) {
   const offset = coordE4 + originE4;
@@ -60,6 +81,42 @@ function expectedMrmsCell(lat, lon) {
   const iCells = axisCells(lonE4, MRMS_WEST_E4);
   const jCells = axisCells(latE4, -MRMS_SOUTH_E4);
   return { i: iCells[iCells.length - 1], j: jCells[jCells.length - 1], iCells, jCells };
+}
+
+// A coordinate exactly halfway between two IEMRE points belongs to both.
+function nearestAxisPoints(offsetE4) {
+  const below = Math.floor(offsetE4 / IEMRE_CELL_E4);
+  const twice = 2 * (offsetE4 - below * IEMRE_CELL_E4);
+  if (twice === IEMRE_CELL_E4) return [below, below + 1];
+  return [twice < IEMRE_CELL_E4 ? below : below + 1];
+}
+
+// Every cache cell the relay may file this coordinate under.
+function iemreCacheCells(lat, lon) {
+  const latE4 = Math.round(Number(lat.toFixed(4)) * 10000);
+  const lonE4 = Math.round(Number(lon.toFixed(4)) * 10000);
+  const jPoints = nearestAxisPoints(latE4 - MRMS_SOUTH_E4);
+  return nearestAxisPoints(lonE4 + MRMS_WEST_E4).flatMap((i) => jPoints.map((j) => `${i}:${j}`));
+}
+
+function heldByOther(cacheCells, key, holder, now) {
+  return cacheCells.some((cacheCell) => {
+    const entry = windowLedger.get(`${cacheCell}|${key}`);
+    return entry != null && now - entry.at < CACHE_HOLD_MS && entry.holder !== holder;
+  });
+}
+
+// The first request in a cache cell sets what IEM serves there for the hour,
+// so a holder's own repeat keeps the original time.
+function holdWindow(cacheCells, key, holder, now) {
+  if (windowLedger.size > LEDGER_PRUNE_SIZE) {
+    for (const [ledgerKey, entry] of windowLedger) if (now - entry.at >= CACHE_HOLD_MS) windowLedger.delete(ledgerKey);
+  }
+  for (const cacheCell of cacheCells) {
+    const ledgerKey = `${cacheCell}|${key}`;
+    const entry = windowLedger.get(ledgerKey);
+    if (holder === FOREIGN || entry == null || now - entry.at >= CACHE_HOLD_MS) windowLedger.set(ledgerKey, { holder, at: now });
+  }
 }
 
 // true = the response was read at this property's cell; false = it is another
@@ -94,21 +151,25 @@ function daysBetween(fromYmd, toYmd) {
   return Math.round((Date.parse(`${toYmd}T00:00:00Z`) - Date.parse(`${fromYmd}T00:00:00Z`)) / 86400000);
 }
 
-// Another window (= cache key) that still covers [start, end] inside its year:
+// Other windows (= cache keys) that still cover [start, end] inside its year:
 // an earlier start, or for a window that starts on January 1 a later end (the
-// relay answers a window that runs past today with the days it has). Null
-// when the year has no other day left.
-function retryWindow({ start, end }, cell, attempt) {
+// relay answers a window that runs past today with the days it has). The
+// first two are the cell's spread re-requests; the rest walk on from the
+// first, one day at a time, until the year has no other day left.
+function* retryWindows({ start, end }, cell) {
   const year = start.slice(0, 4);
   const back = daysBetween(`${year}-01-01`, start);
   const forward = daysBetween(end, `${year}-12-31`);
   const room = back > 0 ? back : forward;
-  if (!(room > 0)) return null;
-  const spread = attempt === 1
-    ? (cell.i * 131 + cell.j) % RETRY_SPREAD_DAYS
-    : (cell.i * 17 + cell.j * 7) % RETRY_SPREAD_DAYS;
-  const shift = 1 + (((attempt - 1) * RETRY_SPREAD_DAYS + spread) % room);
-  return back > 0 ? { start: shiftYmd(start, -shift), end } : { start, end: shiftYmd(end, shift) };
+  if (!(room > 0)) return;
+  const first = (cell.i * 131 + cell.j) % RETRY_SPREAD_DAYS;
+  const second = RETRY_SPREAD_DAYS + (cell.i * 17 + cell.j * 7) % RETRY_SPREAD_DAYS;
+  const offsets = [first, second];
+  for (let step = 1; step < room; step += 1) offsets.push(first + step);
+  for (const offset of offsets) {
+    const shift = 1 + (offset % room);
+    yield back > 0 ? { start: shiftYmd(start, -shift), end } : { start, end: shiftYmd(end, shift) };
+  }
 }
 
 // One request per attempt, each under its own timeout: a slow request ends
@@ -116,13 +177,19 @@ function retryWindow({ start, end }, cell, attempt) {
 // caller's cancellation and ends every attempt. Returns the rows read at this
 // property's cell, or null (unreachable, or another cell every time).
 async function fetchOwnCellRows({ lat, lon, segment, cell, signal }) {
-  const tried = new Set();
-  for (let attempt = 0; attempt <= 2; attempt += 1) {
-    const window = attempt === 0 ? segment : retryWindow(segment, cell, attempt);
-    const key = window && `${window.start}/${window.end}`;
-    // No other window left inside the year: nothing new to ask.
-    if (!window || tried.has(key)) break;
-    tried.add(key);
+  const cacheCells = iemreCacheCells(lat, lon);
+  const holder = `${cell.i}:${cell.j}`;
+  const seen = new Set();
+  let requests = 0;
+  for (const window of [segment, ...retryWindows(segment, cell)]) {
+    if (requests >= MAX_REQUESTS) break;
+    const key = `${window.start}/${window.end}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // Another property's rain is what IEM serves under this window here.
+    if (heldByOther(cacheCells, key, holder, Date.now())) continue;
+    holdWindow(cacheCells, key, holder, Date.now());
+    requests += 1;
     const url = `${IEMRE_BASE}/${key}/${lat.toFixed(4)}/${lon.toFixed(4)}/json`;
     const controller = new AbortController();
     const onCallerAbort = () => controller.abort();
@@ -136,12 +203,15 @@ async function fetchOwnCellRows({ lat, lon, segment, cell, signal }) {
       if (!response.ok) return null;
       const payload = await response.json();
       if (responseCellMatches(payload, cell) !== false) return Array.isArray(payload?.data) ? payload.data : null;
+      holdWindow(cacheCells, key, FOREIGN, Date.now());
     } finally {
       clearTimeout(timeout);
       if (signal) signal.removeEventListener('abort', onCallerAbort);
     }
   }
-  logger.warn('[mrms-qpe] relay answered with another cell on every attempt; no MRMS value');
+  logger.warn(requests
+    ? `[mrms-qpe] relay answered with another cell on all ${requests} request(s); no MRMS value`
+    : '[mrms-qpe] other properties hold every window in this cache cell this hour; no MRMS value');
   return null;
 }
 
@@ -192,4 +262,7 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end, signal } = 
   }
 }
 
-module.exports = { fetchMrmsDailyRain, _test: { round2, expectedMrmsCell, retryWindow, yearSegments } };
+module.exports = {
+  fetchMrmsDailyRain,
+  _test: { round2, expectedMrmsCell, iemreCacheCells, retryWindows, yearSegments, clearWindowLedger: () => windowLedger.clear() },
+};

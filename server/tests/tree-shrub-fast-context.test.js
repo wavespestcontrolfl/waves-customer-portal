@@ -676,11 +676,7 @@ describe('GATE_TS_WATCH_LIST: the fast-context watchList', () => {
   });
 });
 
-describe('GATE_FAST_COMPLETE_WRAP_UP: the fast-context wrapUp', () => {
-  const saved = process.env.GATE_FAST_COMPLETE_WRAP_UP;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = saved;
-  });
+describe('the fast-context wrapUp', () => {
   const build = () => buildTreeShrubFastContext('visit-1', fakeKnex({
     scheduled_services: visit(), products_catalog: [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })],
   }));
@@ -689,22 +685,13 @@ describe('GATE_FAST_COMPLETE_WRAP_UP: the fast-context wrapUp', () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
   });
 
-  test('gate off: the key is absent', async () => {
-    delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
+  test('an eligible visit carries wrapUp: true', async () => {
     const ctx = await build();
     expect(ctx.eligible).toBe(true);
-    expect('wrapUp' in ctx).toBe(false);
+    expect(ctx.wrapUp).toBe(true);
   });
 
-  test('gate on (exactly true): wrapUp is true; any other value stays off', async () => {
-    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
-    expect((await build()).wrapUp).toBe(true);
-    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'on';
-    expect('wrapUp' in await build()).toBe(false);
-  });
-
-  test('an ineligible visit carries no wrapUp even with the gate on', async () => {
-    process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+  test('an ineligible visit carries no wrapUp', async () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
     const ctx = await build();
     expect(ctx.eligible).toBe(false);

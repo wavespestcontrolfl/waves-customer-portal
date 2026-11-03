@@ -107,6 +107,32 @@ maybeDescribe('sms-draft-canary durable alert (live Postgres)', () => {
     expect(TwilioService.sendSMS.mock.calls.filter((c) => /FAILING/.test(c[1]))).toHaveLength(CANARY_ROUTES.length);
   });
 
+  test('old keyless FAILING rows close on the next pass, the other title and routes stay', async () => {
+    const legacy = (body, over = {}) => db('notifications').insert({
+      recipient_type: 'admin', category: 'system', title: 'SMS draft route FAILING', body, ...over,
+    }).returning('id');
+    const [{ id: mine }] = await legacy('smsDraftDefault (fixture/model) failed the canary: openai_401.');
+    const [{ id: otherRoute }] = await legacy('smsDraftSaveSale (fixture/model) failed the canary: openai_401.');
+    const [{ id: otherTitle }] = await legacy('smsDraftDefault (fixture/model) is answering again.', { title: 'SMS draft route recovered' });
+    try {
+      // freshCanary() loads the canary in jest.isolateModules, so its ROUTES
+      // objects are not this file's: match the route by its lane id.
+      dispatch.mockImplementation(async (route, opts) => (opts?.laneId === 'sms_canary_default'
+        ? { ok: true, text: 'ok', model: 'x' } : { ok: false, reason: 'openai_401' }));
+      await freshCanary().runSmsDraftCanary();
+
+      const state = Object.fromEntries((await db('notifications').whereIn('id', [mine, otherRoute, otherTitle]).select('id', 'done_at', 'resolution'))
+        .map((r) => [r.id, r]));
+      expect(state[mine].done_at).not.toBeNull();
+      expect(state[mine].resolution).toMatch(/^Recovered/);
+      expect(state[otherRoute].done_at).not.toBeNull();
+      expect(state[otherRoute].resolution).toMatch(/^Replaced by a newer alert/);
+      expect(state[otherTitle].done_at).toBeNull();
+    } finally {
+      await db('notifications').whereIn('id', [mine, otherRoute, otherTitle]).del();
+    }
+  });
+
   test('success with nothing open writes nothing', async () => {
     dispatch.mockResolvedValue({ ok: true, text: 'ok', model: 'x' });
     await freshCanary().runSmsDraftCanary();

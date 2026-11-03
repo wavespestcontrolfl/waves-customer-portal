@@ -258,8 +258,8 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     // (complete-scheduled-service.js isStockAdvisoryCompletion), so the sheet never refuses what the server accepts.
     stockAdvisory: require('./complete-scheduled-service').isStockAdvisoryCompletion({ service_type: svc.service_type }),
     lastVisit,
-    // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. Gate off = no key at all.
-    ...(require('../config/feature-gates').fastCompleteWrapUpLive() && { wrapUp: true }),
+    // The sheet shows its Wrap-up section (a sheet from before the section was permanent still reads this key).
+    wrapUp: true,
     // GATE_ONE_TAP_REPORT: the sheet reads no note for products (its "fill from the note" tap goes); the note's mic
     // stays. Gate off = no key at all.
     ...(require('../config/feature-gates').oneTapReportLive() && { oneTap: true }),

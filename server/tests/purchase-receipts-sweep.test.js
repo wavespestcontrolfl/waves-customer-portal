@@ -243,11 +243,15 @@ describe('processReceiptEmail', () => {
   });
 
   test.each([
-    ['possible_duplicate', 'possibleDuplicate', 'A manual restock or count was logged around the same time, so check the count.'],
-    ['size_mismatch', 'sizeMismatch', "The listing's size or pack count doesn't match the catalog container size, so log it by hand."],
-    ['needs_size', 'needsSize', 'The product has no container size in the catalog, so log it by hand.'],
-    ['no_order_number', 'noOrderNumber', "The email's order number couldn't be read, so log it by hand."],
-  ])('a %s line is held with one bell saying why', async (status, bucket, reason) => {
+    ['possible_duplicate', 'possibleDuplicate', 'A manual restock or count was logged around the same time, so check the count.',
+      'check the count for the Amazon delivery', 'A manual restock or count was logged around then, so check the count.', 'count_checked'],
+    ['size_mismatch', 'sizeMismatch', "The listing's size or pack count doesn't match the catalog container size, so log it by hand.",
+      'log the Amazon delivery by hand', 'The listing size or pack count does not match the catalog, so log it by hand.', 'line_logged_by_hand'],
+    ['needs_size', 'needsSize', 'The product has no container size in the catalog, so log it by hand.',
+      'log the Amazon delivery by hand', 'The product has no container size in the catalog, so log it by hand.', 'line_logged_by_hand'],
+    ['no_order_number', 'noOrderNumber', "The email's order number couldn't be read, so log it by hand.",
+      'log the Amazon delivery by hand', 'The order number could not be read, so log it by hand.', 'line_logged_by_hand'],
+  ])('a %s line is held with one bell saying why', async (status, bucket, reason, action, why, doneWhen) => {
     mockState.outcomes = [{ status, product: taurus, inserted: true, lineId: 'line-9' }, unmatched];
     const notify = jest.fn(async () => ({}));
     const result = await processReceiptEmail(deliveredEmail, { notify });
@@ -255,9 +259,14 @@ describe('processReceiptEmail', () => {
     expect(result.logged).toEqual([]);
     expect(notify).toHaveBeenCalledTimes(1);
     const [, title, body, opts] = notify.mock.calls[0];
-    expect(title).toBe('Amazon delivery not added');
-    expect(body).toBe(`Amazon delivery: Taurus SC ×2 wasn't added. ${reason}`);
-    expect(opts).toMatchObject({ bell: true, dedupeKey: 'purchase-receipt:line-9', trx: 'trx-stub', metadata: { emailId: 'e1', productId: 'p1', status } });
+    // Raised through raiseAdminAlert (alert step E2): same bell tag, dedupe key and link; the old text rides in detail.
+    expect(title).toBe(`Inventory — ${action}`);
+    expect(body).toBe(why);
+    expect(opts.detail).toBe(`Amazon delivery: Taurus SC ×2 wasn't added. ${reason}`);
+    expect(opts).toMatchObject({
+      bell: true, dedupeKey: 'purchase-receipt:line-9', trx: 'trx-stub', link: '/admin/inventory?tab=products',
+      metadata: { emailId: 'e1', productId: 'p1', status, area: 'Inventory', severity: 'needs-you', who: 'person', doneWhen, subject: { type: 'check', id: 'purchase-receipt:line-9' } },
+    });
   });
 
   test('a bell that can\'t be saved fails its line: recorded as an error, and (rolled back) retried next sweep', async () => {
@@ -287,7 +296,7 @@ describe('processReceiptEmail', () => {
     const notify = jest.fn(async () => ({}));
     await processReceiptEmail({ ...deliveredEmail, body_text: 'Order # 900-1000001-1000001\n\n* Taurus SC Termiticide 78 oz\n  Quantity: unknown\n' }, { notify });
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ item: { title: 'Taurus SC Termiticide 78 oz', quantity: 0 }, holdAs: 'unverified' });
-    expect(notify.mock.calls[0][2]).toBe("Amazon delivery: Taurus SC wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
+    expect(notify.mock.calls[0][3].detail).toBe("Amazon delivery: Taurus SC wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
   });
 
   test('an already-processed line lands in alreadyProcessed with no bell', async () => {
@@ -313,7 +322,7 @@ describe('processReceiptEmail', () => {
       orderNumber: '900-7000007-7000007', item: { title: 'Delivered: 2 Lawn & Garden items', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
     });
     expect(result.noItems).toEqual([{ title: 'Delivered: 2 Lawn & Garden items', productId: null, receivedQty: null, receivedUnit: null }]);
-    expect(notify.mock.calls[0][2]).toBe('Amazon delivery "2 Lawn & Garden items" wasn\'t added. The email doesn\'t name the item. If it\'s stock, log it by hand.');
+    expect(notify.mock.calls[0][3].detail).toBe('Amazon delivery "2 Lawn & Garden items" wasn\'t added. The email doesn\'t name the item. If it\'s stock, log it by hand.');
   });
 });
 
@@ -414,7 +423,7 @@ describe('SiteOne invoices in the sweep', () => {
     const notify = jest.fn(async () => ({}));
     await runPurchaseReceiptRestockSweep({ notify });
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ holdAs: 'unverified' });
-    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
+    expect(notify.mock.calls[0][3].detail).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
   });
 
   test('on an invoice that doesn\'t reconcile, a 0 line is kept (it may be the misread) and held', async () => {
@@ -424,7 +433,7 @@ describe('SiteOne invoices in the sweep', () => {
     const notify = jest.fn(async () => ({}));
     await runPurchaseReceiptRestockSweep({ notify });
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ lineNo: 1, holdAs: 'unverified' });
-    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
+    expect(notify.mock.calls[0][3].detail).toBe("SiteOne invoice 900000001-001: Taurus SC wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
   });
 
   test.each([
@@ -521,7 +530,7 @@ describe('SiteOne invoices in the sweep', () => {
     const notify = jest.fn(async () => ({}));
     await runPurchaseReceiptRestockSweep({ notify });
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ lineNo: 1, forcedStatus: 'unreadable' });
-    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001 wasn't added. The invoice couldn't be read. If it has stock, log it by hand.");
+    expect(notify.mock.calls[0][3].detail).toBe("SiteOne invoice 900000001-001 wasn't added. The invoice couldn't be read. If it has stock, log it by hand.");
   });
 
   test('one invoice that can\'t be read is recorded as an error and never stops the next', async () => {

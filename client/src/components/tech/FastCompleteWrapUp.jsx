@@ -1,6 +1,6 @@
 // client/src/components/tech/FastCompleteWrapUp.jsx
 //
-// The "Wrap-up" section of the Fast Complete sheets (GATE_FAST_COMPLETE_WRAP_UP): the bottom of the
+// The "Wrap-up" section of the Fast Complete sheets: the bottom of the
 // full Complete Service form (SchedulePage's CompletionPanel, "Options" and "Next scheduled visit")
 // on the sheet. Always open: the sheets are made to be fast, not short. Its rows and the rules for
 // showing, disabling and posting each one are the full form's, from the same lib functions
@@ -47,7 +47,7 @@ const REENTRY_STEPS = { exterior: 5, interior: 15 };
 const NEXT_VISIT_DATE = { weekday: 'short', month: 'short', day: 'numeric' };
 const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: true, reviewOptOutReason: null, reviewTiming: REVIEW_TIMING_DEFAULT, reviewCustomAt: '', adjusted: '', nextVisitNote: '' };
 
-// `gate` is the context's `wrapUp` (GATE_FAST_COMPLETE_WRAP_UP). Off, the section is not `enabled`: nothing is
+// `gate` is the context's `wrapUp`. Without it, the section is not `enabled`: nothing is
 // read, drawn or sent, and `fields(fallback)` is the fallback the sheet always posted. `applicationsRecorded`: the sheet
 // records a product (the full form's spray evidence), which brings the re-entry steppers back on
 // a no-spray visit. `customerConcern`: the full form's fourth customer choice, which suppresses
@@ -55,7 +55,7 @@ const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: tru
 // posted no `reviewTiming` before (the pest report flow), so the key stays absent while the timing is
 // Automatic. `noPayLink`: the sheet's text carries no pay link (a pest re-service), so the row is not
 // shown and `includePayLink` posts false. `reviewMarker`: a re-service sheet, whose review ask rides the body with
-// `wrapUpReviewAsk: true` (the server refuses it once the gate is off). `onChecking(busy)`: the sheet that owns Close and the lock
+// `wrapUpReviewAsk: true` (the server refuses it when the fixed text was asked for and not honored). `onChecking(busy)`: the sheet that owns Close and the lock
 // hears when the submit-time check starts and ends.
 export function useWrapUp({ gate, submission, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, noPayLink, reviewMarker, onChecking }) {
   const enabled = gate === true;

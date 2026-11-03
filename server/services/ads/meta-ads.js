@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../../models/db');
 const logger = require('../../services/logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { runExclusive } = require('../../utils/cron-lock');
 
 // ---------------------------------------------------------------------------
@@ -161,9 +162,6 @@ function mapInsightRow(row) {
   };
 }
 
-function dateStr(d) {
-  return new Date(d).toISOString().split('T')[0];
-}
 
 // ---------------------------------------------------------------------------
 // syncCampaigns — upsert into ad_campaigns (platform='facebook')
@@ -269,8 +267,10 @@ async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
 async function syncDailyPerformanceLocked(days = 7) {
   try {
     logger.info(`[meta-ads] Syncing daily performance (last ${days} days)`);
-    const since = dateStr(Date.now() - days * 86400000);
-    const until = dateStr(Date.now());
+    // ET calendar days, as in the Google sync: a UTC date is tomorrow after 8 PM ET.
+    const now = new Date();
+    const since = etDateString(addETDays(now, -days));
+    const until = etDateString(now);
 
     const { rows, complete } = await graphGetPaged('insights', {
       fields: 'campaign_id,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start',

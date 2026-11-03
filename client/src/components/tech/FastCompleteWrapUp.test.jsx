@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// The Fast Complete Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP): its defaults, the full form's
+// The Fast Complete Wrap-up section: its defaults, the full form's
 // show / hide / disable rules for each row, the body fragment it yields and the submit-time
 // guards on the review send-time preview. Synthetic data only; every request is a stub.
 import React from 'react';

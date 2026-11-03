@@ -1,11 +1,10 @@
 /**
- * The review ask after Fast Complete's fixed pest re-service text (GATE_FAST_COMPLETE_WRAP_UP; owner 2026-10-10 "show on"),
+ * The review ask after Fast Complete's fixed pest re-service text (owner 2026-10-10 "show on"),
  * through the real completeScheduledService transaction. Fixed mode is honored (GATE_RESERVICE_FAST_COMPLETE and
- * GATE_FAST_COMPLETE_RECAP on, the pest_re_service profile, a performed visit). Gate off, fixed mode never asks for a
- * review; gate on, the body's requestReview decides, and the ask goes through enrollPostService as its own message, never
- * inside the fixed text (that text is byte-identical in every case). The sheets' marker (`wrapUpReviewAsk`) makes an ask
- * depend on the gate being live at completion time, so a gate turned off under an open sheet stops it; a body without the
- * marker (the full form) is untouched. Runs against a migrated, private Postgres; the SMS send
+ * GATE_FAST_COMPLETE_RECAP on, the pest_re_service profile, a performed visit). The body's requestReview decides, and the
+ * ask goes through enrollPostService as its own message, never inside the fixed text (that text is byte-identical in every
+ * case). A fixed text that was asked for and not honored sends no ask, marker or not; a body without the
+ * sheets' marker (`wrapUpReviewAsk`, the full form) is untouched. Runs against a migrated, private Postgres; the SMS send
  * and the review scheduler are mocked, nothing real is sent.
  *
  * Wiring copied from complete-scheduled-service-invoiced-visit-postgres.test.js.
@@ -130,21 +129,18 @@ const completionTexts = () => sendCustomerMessage.mock.calls.map(([input]) => in
 const normalized = (text) => text.replace(/\/(?:l|report|r)\/[A-Za-z0-9_-]+/g, '/LINK');
 
 postgres('the review ask on a pest re-service', () => {
-  const wrapUpWas = process.env.GATE_FAST_COMPLETE_WRAP_UP;
   beforeAll(async () => {
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     mockPg = knex({ client: 'pg', connection: testUrl, pool: { min: 0, max: 4 } });
   });
-  afterEach(() => { if (wrapUpWas === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = wrapUpWas; });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
 
   // One completion. Returns the completion text the customer was sent (links normalized), how many review asks were
-  // scheduled, and whether the text carries a bundled review link. `gate`: GATE_FAST_COMPLETE_WRAP_UP live at completion time.
-  async function run({ gate, shape, extra }) {
+  // scheduled, and whether the text carries a bundled review link.
+  async function run({ shape, extra }) {
     sendCustomerMessage.mockClear();
     ReviewService.enrollPostService.mockClear();
     ReviewService.createInline.mockClear();
-    if (gate) process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true'; else delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
     const f = await seedReservice();
     try {
       const out = await complete(f, shape, extra);
@@ -158,41 +154,36 @@ postgres('the review ask on a pest re-service', () => {
   const MARKED = { requestReview: true, wrapUpReviewAsk: true };
 
   describe('fixed text (the short form)', () => {
-    test('gate off, requestReview true: the fixed text goes and no review ask is scheduled', async () => {
-      const off = await run({ gate: false, shape: 'fixed', extra: ASK });
-      expect(off.asks).toBe(0);
-      expect(off.text).toMatch(/^Your re-service is done\. We treated outside\./);
-      expect(off.text).not.toMatch(/review|google/i);
-    });
-
-    test('gate on, marked requestReview true: one review ask through enrollPostService; the fixed text is byte-identical and has no review link', async () => {
-      const off = await run({ gate: false, shape: 'fixed', extra: ASK });
-      const on = await run({ gate: true, shape: 'fixed', extra: MARKED });
+    test('marked requestReview true: one review ask through enrollPostService; the fixed text is byte-identical and has no review link', async () => {
+      const none = await run({ shape: 'fixed', extra: { requestReview: false } });
+      const on = await run({ shape: 'fixed', extra: MARKED });
+      expect(none.text).toMatch(/^Your re-service is done\. We treated outside\./);
+      expect(none.text).not.toMatch(/review|google/i);
       expect(on.asks).toBe(1);
-      expect(on.text).toBe(off.text);
+      expect(on.text).toBe(none.text);
       expect(on.bundled).toBe(false);
     });
 
-    test('gate on, requestReview false: no review ask, same fixed text', async () => {
-      const off = await run({ gate: false, shape: 'fixed', extra: ASK });
-      const on = await run({ gate: true, shape: 'fixed', extra: { requestReview: false } });
-      expect(on.asks).toBe(0);
-      expect(on.text).toBe(off.text);
+    test('NO marker, requestReview true: the ask goes the same way, same fixed text', async () => {
+      const none = await run({ shape: 'fixed', extra: { requestReview: false } });
+      const plain = await run({ shape: 'fixed', extra: ASK });
+      expect(plain.asks).toBe(1);
+      expect(plain.text).toBe(none.text);
+      expect(plain.bundled).toBe(false);
     });
 
-    test('gate off, a marked ask from a sheet left open: refused, fixed text unchanged', async () => {
-      const off = await run({ gate: false, shape: 'fixed', extra: ASK });
-      const stale = await run({ gate: false, shape: 'fixed', extra: MARKED });
-      expect(stale.asks).toBe(0);
-      expect(stale.text).toBe(off.text);
+    test('requestReview false: no review ask, same fixed text', async () => {
+      const off = await run({ shape: 'fixed', extra: { requestReview: false } });
+      expect(off.asks).toBe(0);
+      expect(off.text).toMatch(/^Your re-service is done\. We treated outside\./);
     });
 
-    test('fixed text asked for but not honored (GATE_FAST_COMPLETE_RECAP off server-side), marked, gate on: no completion text and no review ask', async () => {
+    test('fixed text asked for but not honored (GATE_FAST_COMPLETE_RECAP off server-side), marked: no completion text and no review ask', async () => {
       const featureGates = require('../config/feature-gates');
       const real = featureGates.isEnabled;
       jest.spyOn(featureGates, 'isEnabled').mockImplementation((gate) => (gate === 'fastCompleteRecap' ? false : real(gate)));
       try {
-        const out = await run({ gate: true, shape: 'fixed', extra: MARKED });
+        const out = await run({ shape: 'fixed', extra: MARKED });
         expect(out.texts).toEqual([]);
         expect(out.asks).toBe(0);
       } finally { jest.restoreAllMocks(); }
@@ -200,31 +191,21 @@ postgres('the review ask on a pest re-service', () => {
   });
 
   describe('no fixed text (the pest report flow, the lawn re-service sheet and the full form)', () => {
-    test('gate off, marked requestReview true (a sheet left open): no review ask and no review link in the completion text', async () => {
-      const out = await run({ gate: false, shape: 'plain', extra: MARKED });
-      expect(out.texts.length).toBeGreaterThan(0);
-      expect(out.asks).toBe(0);
-      expect(out.bundled).toBe(false);
-    });
-
-    test('gate on, marked requestReview true: the review ask goes (Automatic timing: its own message, not bundled)', async () => {
-      const out = await run({ gate: true, shape: 'plain', extra: MARKED });
+    test('marked requestReview true: the review ask goes (Automatic timing: its own message, not bundled)', async () => {
+      const out = await run({ shape: 'plain', extra: MARKED });
       expect(out.asks).toBe(1);
       expect(out.bundled).toBe(false);
     });
 
-    test('timing Now: a report-lane re-service never bundles the ask into its text; gate on schedules it, gate off does not', async () => {
+    test('timing Now: a report-lane re-service never bundles the ask into its text; it schedules the ask', async () => {
       const now = { ...MARKED, reviewTiming: 'now', reviewDelayMinutes: 0 };
-      const on = await run({ gate: true, shape: 'plain', extra: now });
+      const on = await run({ shape: 'plain', extra: now });
       expect(on.bundled).toBe(false);
       expect(on.asks).toBe(1);
-      const stale = await run({ gate: false, shape: 'plain', extra: now });
-      expect(stale.bundled).toBe(false);
-      expect(stale.asks).toBe(0);
     });
 
-    test('gate off, NO marker, requestReview true (the full form\'s body): the ask goes as it does on main', async () => {
-      const out = await run({ gate: false, shape: 'plain', extra: ASK });
+    test('NO marker, requestReview true (the full form\'s body): the ask goes as it does on main', async () => {
+      const out = await run({ shape: 'plain', extra: ASK });
       expect(out.asks).toBe(1);
       expect(out.bundled).toBe(false);
     });
