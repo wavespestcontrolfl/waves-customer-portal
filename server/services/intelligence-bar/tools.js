@@ -482,9 +482,12 @@ async function queryCustomers(input, readCustomerIds = [], pageCustomerId = null
       'customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name',
       'customers.email', 'customers.phone', 'customers.city', 'customers.state', 'customers.zip',
       'customers.address_line1', 'customers.waveguard_tier', 'customers.pipeline_stage',
-      'customers.monthly_rate', 'customers.lifetime_revenue', 'customers.lead_score',
+      'customers.monthly_rate', 'customers.lead_score',
       'customers.active', 'customers.member_since', 'customers.lead_source',
       'customers.last_contact_date',
+      // customers.lifetime_revenue has no writer (it reads $0): net of paid
+      // payments, the same figure the admin customer list shows and sorts by.
+      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue"),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed')) as next_service_date"),
       db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC NULLS LAST, created_at DESC LIMIT 1) as health_score"),
@@ -1093,6 +1096,15 @@ async function getCustomerDetail(customerId) {
     .orderByRaw('scored_at DESC NULLS LAST, created_at DESC')
     .first();
 
+  // customers.lifetime_revenue has no writer (it reads $0): report the net of
+  // paid payments, as the admin customer page does. An unreadable sum is null,
+  // never a false $0.
+  const lifetimeRevenue = await db('payments')
+    .where({ customer_id: customerId, status: 'paid' })
+    .first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net'))
+    .then(row => parseFloat(row?.net || 0))
+    .catch(() => null);
+
   // The monthly bill by service (plan-rate ledger): monthly_rate is their sum,
   // so a rate edit must say which line changes (update_customer rate_service).
   // An unreadable ledger leaves the lines out rather than failing the read.
@@ -1120,7 +1132,7 @@ async function getCustomerDetail(customerId) {
       monthly_rate: parseFloat(customer.monthly_rate || 0),
       monthly_bill: monthlyBill,
       billing_mode: customer.billing_mode || null,
-      lifetime_revenue: parseFloat(customer.lifetime_revenue || 0),
+      lifetime_revenue: lifetimeRevenue,
       active: customer.active,
       member_since: customer.member_since,
       lead_source: customer.lead_source,
