@@ -7105,9 +7105,11 @@ never a multi-property group member or anchor. While `GATE_MOVING_ESTIMATE` is o
 (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the submitted,
 in-area move linked to the estimate (`customer_moves.estimate_id`,
 `moveForEstimate`) limits the first visit: `available-slots` / `find-slots`
-offer no day before the move-in date (the rolling window opens on it and
-stops at the 90-day reserve horizon; an explicit window loses only the days
-before it; the offer cache keys on the date), `/reserve` refuses an earlier
+offer no day before the move-in date (the rolling window opens on it, a
+seasonal selection at the first in-season day on or after it, and stops at
+the horizon `/reserve` accepts for that selection, the seasonal one included;
+an explicit window loses only the days before it; the offer cache keys on the
+date), `/reserve` refuses an earlier
 slot (`SLOT_UNAVAILABLE`), and the accept-time commit of a hold refuses one
 the move-in date has since passed (`SLOT_UNAVAILABLE`, the recoverable
 pick-another-time answer). Both booking checks lock and judge the stamped

@@ -796,6 +796,22 @@ function seasonalMaxHorizonDays(now = new Date()) {
   return Math.max(MAX_SLOT_HORIZON_DAYS, daysOut);
 }
 
+// Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate's offer window
+// never opens before the move-in date. The rolling window opens on it (a
+// seasonal selection at the first in-season day on or after it) and stops at
+// the horizon reserveSlot accepts for that selection (the seasonal one for a
+// seasonal profile); an explicit window only loses the days before move-in.
+// An empty window (dateFrom > dateTo) offers nothing.
+function moveInWindow({ moveInDate, dateFrom, dateTo, explicit, seasonal, windowDays, now = new Date() }) {
+  if (!moveInDate || dateFrom >= moveInDate) return { dateFrom, dateTo };
+  if (explicit) return { dateFrom: moveInDate, dateTo };
+  const span = Math.max(1, Number(windowDays) || DEFAULT_OPTS.windowDays);
+  const start = seasonal ? nextSeasonStartFrom(moveInDate) : moveInDate;
+  const end = seasonal ? seasonalWindowEnd(start, span) : etDateString(addETDays(new Date(`${start}T12:00:00Z`), span));
+  const horizon = etDateString(addETDays(now, seasonal ? seasonalMaxHorizonDays(now) : MAX_SLOT_HORIZON_DAYS));
+  return { dateFrom: start, dateTo: end < horizon ? end : horizon };
+}
+
 // In-season sub-ranges of a window. A straddling window (late-October start
 // crossing to February) must reach the slot GENERATORS as separate segments:
 // their candidate caps apply during date enumeration, so a continuous
@@ -2251,18 +2267,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     dateFrom = nextSeasonStartFrom(dateFrom);
     dateTo = seasonalWindowEnd(dateFrom, Number(opts.windowDays) || DEFAULT_OPTS.windowDays);
   }
-  // The rolling window of a new-home estimate opens on the move-in date and
-  // stops at the horizon reserveSlot accepts; an explicit window only loses
-  // the days before move-in (an empty window offers nothing).
-  if (moveInDate && dateFrom < moveInDate) {
-    if (!(opts.dateFrom && opts.dateTo)) {
-      const span = Math.max(1, Number(opts.windowDays) || DEFAULT_OPTS.windowDays);
-      const end = etDateString(addETDays(new Date(`${moveInDate}T12:00:00Z`), span));
-      const horizon = etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS));
-      dateTo = end < horizon ? end : horizon;
-    }
-    dateFrom = moveInDate;
-  }
+  ({ dateFrom, dateTo } = moveInWindow({
+    moveInDate, dateFrom, dateTo,
+    explicit: !!(opts.dateFrom && opts.dateTo),
+    seasonal: !!seasonalSelectionProfile(serviceProfile),
+    windowDays: opts.windowDays,
+  }));
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   // Resolved once per (uncached) generation and threaded through every
   // filterCollidingSlots pass — reserveSlot resolves the same zone (same
@@ -2792,6 +2802,7 @@ module.exports = {
   MAX_SLOT_HORIZON_DAYS,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
+    moveInWindow,
     oneTimeProfileServices,
     filterSeasonalSlots,
     parseAnchorTime,
