@@ -42,10 +42,13 @@ class SeriesCancelError extends Error {
  * @param {Function} [opts.checkTargets]   (lockedTargets) => null | message: called inside the
  *                                         transaction once the targets are locked; a message refuses
  *                                         the cancel (409 series_changed) before any write
+ * @param {object[]} [opts.linkedChildren] the follow-through's approved linked visits (call follow-ups,
+ *                                         package visit 2): [] cancels none of them; omitted keeps the
+ *                                         dispatch board's cascade
  */
 async function cancelSeriesRemainder({
   parentId, customerId, serviceType, recurringPattern, scope,
-  fromDate, anchorId, notifyCustomer, notes, lat, lng, actorId, waiveFee, source, allowEmpty, checkTargets,
+  fromDate, anchorId, notifyCustomer, notes, lat, lng, actorId, waiveFee, source, allowEmpty, checkTargets, linkedChildren,
 }) {
   const cancellableStatuses = ['pending', 'confirmed', 'rescheduled'];
   const terminalStatuses = ['completed', 'skipped', 'cancelled'];
@@ -272,6 +275,7 @@ async function cancelSeriesRemainder({
       waiveFee,
       reason: notes || null,
       source,
+      ...(Array.isArray(linkedChildren) ? { linkedChildren } : {}),
     });
   }
 

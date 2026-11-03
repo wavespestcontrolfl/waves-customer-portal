@@ -1094,15 +1094,15 @@ async function applyHouses(conn, customerId, move) {
   const primaryId = await primaryPropertyId(customerId, conn);
   const flipped = sameId(primaryId, to.id);
   if (!flipped && !sameId(primaryId, from.id)) throw applyError('primary_changed');
-  if (!flipped) {
-    // The primary change's own refusals (a tenant account, a home recorded as
-    // a rental, an incomplete address) come before anything is written.
-    const { previewManualPropertyChange } = require('./customer-properties');
-    await previewManualPropertyChange(customerId, 'primary', {}, to.id, conn).catch((err) => {
+  // The primary change's own preview: its refusals (a tenant account, a home
+  // recorded as a rental, an incomplete address) come before anything is
+  // written, and its version binds the write to what the office confirmed.
+  const primaryVersion = flipped ? null : await require('./customer-properties')
+    .previewManualPropertyChange(customerId, 'primary', {}, to.id, conn)
+    .then((preview) => preview._version, (err) => {
       throw err.statusCode < 500 ? applyError(err.code || 'primary_unavailable', 409, err.message) : err;
     });
-  }
-  return { estimate, to, from, flipped };
+  return { estimate, to, from, flipped, primaryVersion };
 }
 
 // The accepted estimate's live series at the new home, as plan lines, and the
@@ -1242,7 +1242,7 @@ async function applyPlan(customerId, moveId, conn = db) {
   // preview is refused (apply_changed).
   plan.version = crypto.createHash('sha256').update(JSON.stringify([
     applyPreviewFacts(plan),
-    plan.move.id, new Date(plan.move.updated_at).toISOString(), plan.estimate.id, plan.to.id, plan.from.id, plan.cancelFrom,
+    plan.move.id, new Date(plan.move.updated_at).toISOString(), plan.estimate.id, plan.to.id, plan.from.id, plan.cancelFrom, plan.primaryVersion,
     plan.stops.map((st) => [st.rootId, st.targets.map((t) => [String(t.id), visitDay(t), t.status])]),
   ])).digest('hex');
   return plan;
@@ -1378,9 +1378,8 @@ async function applyMove(customerId, moveId, opts = {}) {
 
     if (!plan.flipped) {
       await step('primary', async () => {
-        const { previewManualPropertyChange, changePrimaryProperty } = require('./customer-properties');
-        const preview = await previewManualPropertyChange(customerId, 'primary', {}, plan.to.id);
-        await changePrimaryProperty(customerId, plan.to.id, { actorId, expectedVersion: preview._version });
+        // The confirmed preview's version: the locked write refuses a change since (409 preview_changed).
+        await require('./customer-properties').changePrimaryProperty(customerId, plan.to.id, { actorId, expectedVersion: plan.primaryVersion });
         progress.primaryChanged = true;
       });
     }
@@ -1408,6 +1407,9 @@ async function applyMove(customerId, moveId, opts = {}) {
           waiveFee: true,
           source: 'moving-apply',
           allowEmpty: true,
+          // Linked follow-ups (call visit 2, package visit 2) are not part of the plan:
+          // the preview lists them as one-time visits that stay booked, so none is cancelled.
+          linkedChildren: [],
           // Under the series locks: the same visits the preview approved, still at the old house.
           checkTargets: (locked) => {
             const approved = new Set(stop.targets.map((t) => String(t.id)));

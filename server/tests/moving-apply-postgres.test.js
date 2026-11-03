@@ -1,9 +1,9 @@
 // Moving PR B2 against real PostgreSQL (one rolled-back transaction per test), dark behind
 // GATE_MOVING_APPLY: the Apply move preview, the confirm that makes the new home primary and
 // stops the old house's plans after move-out (no customer text, no fee), the refusals, a resumed
-// Apply after a failed step, and the termite pickup task. Sends, charges and texts nothing (the
-// reminder sender, the cancellation money rails and the admin bell writer are spies). All names
-// and addresses are synthetic.
+// Apply after a failed step, and the termite pickup task. Sends, charges and texts nothing: the
+// reminder sender and the admin bell writer are spies, and the cancellation follow-through runs
+// for real behind a call recorder. All names and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -20,7 +20,10 @@ jest.mock('../services/appointment-reminders', () => {
   const actual = jest.requireActual('../services/appointment-reminders');
   return { ...actual, handleSeriesCancellation: jest.fn(async () => null) };
 });
-jest.mock('../services/visit-cancellation-followthrough', () => ({ runVisitCancellationFollowThrough: jest.fn(async () => undefined) }));
+jest.mock('../services/visit-cancellation-followthrough', () => {
+  const actual = jest.requireActual('../services/visit-cancellation-followthrough');
+  return { runVisitCancellationFollowThrough: jest.fn((...args) => actual.runVisitCancellationFollowThrough(...args)) };
+});
 jest.mock('../services/notification-service', () => {
   const actual = jest.requireActual('../services/notification-service');
   return { ...actual, notifyAdmin: jest.fn(async () => ({ id: 'n-termite' })) };
@@ -121,6 +124,11 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     const lawnRoot = await insertVisit({ service_type: 'Lawn Care', scheduled_date: KEEP, is_recurring: true, recurring_pattern: 'monthly', recurring_ongoing: true });
     const lawnAfter = await insertVisit({ service_type: 'Lawn Care', scheduled_date: AFTER_1, recurring_parent_id: lawnRoot, recurring_pattern: 'monthly', recurring_ongoing: true });
     const oneOff = await insertVisit({ service_type: 'WDO Inspection', scheduled_date: AFTER_1, property_id: oldHouseId });
+    // A call-created visit 2 linked to a pest visit Apply cancels: one-time, so it stays booked.
+    const linkedFollowUp = await insertVisit({
+      service_type: 'Pest Control Follow-Up', scheduled_date: day(45), property_id: oldHouseId,
+      parent_service_id: pestAfter1, source_action: 'ai_call_pipeline_followup', customer_confirmed: false,
+    });
     const newRoot = await insertVisit({
       scheduled_date: NEW_FIRST, is_recurring: true, recurring_pattern: 'quarterly', recurring_ongoing: true,
       property_id: newHouseId, source_estimate_id: estimateId,
@@ -128,7 +136,7 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     });
     return {
       move: await trx('customer_moves').where({ id: moveRow.id }).first(),
-      estimateId, pestRoot, pestAfter1, pestAfter2, lawnRoot, lawnAfter, oneOff, newRoot,
+      estimateId, pestRoot, pestAfter1, pestAfter2, lawnRoot, lawnAfter, oneOff, linkedFollowUp, newRoot,
     };
   }
 
@@ -164,7 +172,10 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
       moveOutDate: MOVE_OUT,
       primaryChange: true,
       newPlan: [{ name: 'Quarterly Pest Control Service', frequency: 'quarterly' }],
-      oneOffs: [{ id: s.oneOff, date: AFTER_1, name: 'WDO Inspection' }],
+      oneOffs: [
+        { id: s.oneOff, date: AFTER_1, name: 'WDO Inspection' },
+        { id: s.linkedFollowUp, date: day(45), name: 'Pest Control Follow-Up' },
+      ],
       stations: null,
     });
     expect(preview.stops).toEqual(expect.arrayContaining([
@@ -209,17 +220,21 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     const notes = await trx('job_status_history').whereIn('job_id', [s.pestAfter1, s.lawnAfter]).pluck('notes');
     expect(notes).toEqual([expect.stringContaining(`moved out on ${MOVE_OUT}`), expect.stringContaining(`moved out on ${MOVE_OUT}`)]);
 
-    // New home and the one-time visit are untouched.
+    // New home, the one-time visit and the linked call follow-up are untouched.
     expect(await trx('scheduled_services').where({ id: s.newRoot }).first('status', 'recurring_ongoing', 'property_id'))
       .toEqual({ status: 'pending', recurring_ongoing: true, property_id: newHouseId });
     expect(await statusOf(s.oneOff)).toBe('pending');
+    expect(await statusOf(s.linkedFollowUp)).toBe('pending');
 
     // No customer text, no fee.
     expect(Reminders.handleSeriesCancellation).toHaveBeenCalledTimes(2);
     for (const [, , options] of Reminders.handleSeriesCancellation.mock.calls) expect(options.sendNotification).toBe(false);
+    expect(FollowThrough.runVisitCancellationFollowThrough).toHaveBeenCalledTimes(2);
     for (const [args] of FollowThrough.runVisitCancellationFollowThrough.mock.calls) {
-      expect(args).toMatchObject({ waiveFee: true, source: 'moving-apply' });
+      expect(args).toMatchObject({ waiveFee: true, source: 'moving-apply', linkedChildren: [] });
     }
+    // The real follow-through moved the cancelled visits' tracker off scheduled.
+    expect(await trx('scheduled_services').where({ id: s.pestAfter1 }).first('track_state')).toEqual({ track_state: 'cancelled' });
 
     // The move closes as applied; the estimate stays open to the customer; the office item closes.
     expect(await trx('customer_moves').where({ id: s.move.id }).first('status', 'closed_reason', 'to_property_id', 'applied_by'))
@@ -248,6 +263,10 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     const fresh = await Moves.applyMovePreview(customerId, s.move.id);
     await trx('scheduled_services').where({ id: s.pestAfter2 }).update({ scheduled_date: day(140) });
     await expect(Moves.applyMove(customerId, s.move.id, { version: fresh.version, actorId: ADMIN.id })).rejects.toMatchObject({ code: 'apply_changed' });
+    // And so does an edit to the customer's saved properties the primary change would act on.
+    const third = await Moves.applyMovePreview(customerId, s.move.id);
+    await trx('customer_properties').where({ id: oldHouseId }).update({ label: 'Home', updated_at: trx.raw("now() + interval '1 second'") });
+    await expect(Moves.applyMove(customerId, s.move.id, { version: third.version, actorId: ADMIN.id })).rejects.toMatchObject({ code: 'apply_changed' });
     expect((await trx('customer_properties').where({ id: oldHouseId }).first('is_primary')).is_primary).toBe(true);
     expect(await statusOf(s.pestAfter1)).toBe('pending');
   });
