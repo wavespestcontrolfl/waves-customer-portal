@@ -1068,6 +1068,12 @@ async function selectSecurePlan({ token, plan }) {
   });
   if (resolved?.payerId) throw fail('no_longer_needed');
 
+  // Book at the Table (GATE_IN_PERSON_CARD): no payable prepay invoice is minted for a
+  // request marked for the estimate terms until the customer's acceptance is recorded.
+  if (plan === 'prepay_annual' && await require('./in-person-handoff').assertTermsRecorded(request)) {
+    throw fail('terms_required');
+  }
+
   const context = await buildSecurePlanContext({ request, visitId: visit.id, consumeDisclosure: true });
   if (!context) throw fail('plan_unavailable');
   if (plan === 'prepay_annual' && !context.prepay) throw fail('plan_unavailable');
@@ -1399,8 +1405,11 @@ async function selectSecurePlan({ token, plan }) {
       // The request row is the idempotency anchor: only the FIRST selection
       // lands; a concurrent winner makes this update match 0 rows and the
       // whole mint rolls back (the loser re-reads the winner's link below).
+      // Book at the Table: the terms marker the check above judged is part of the
+      // CAS, so a mark that landed since rolls the mint back (selection_conflict;
+      // the page re-reads and shows the terms).
       const stamped = await trx('appointment_card_requests')
-        .where({ id: request.id, status: 'pending' })
+        .where({ id: request.id, status: 'pending', in_person_terms_required: !!request.in_person_terms_required })
         .whereNull('prepay_invoice_id')
         .update({
           selected_plan: 'prepay_annual',

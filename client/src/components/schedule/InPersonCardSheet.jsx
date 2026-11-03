@@ -2,15 +2,19 @@
 //
 // Shown by CreateAppointmentModal after a booking saved with "Customer saves
 // it here, now". On open it asks POST /admin/schedule/:id/card-request/in-person
-// for the secure card page, then offers: show a QR code of the page,
-// text the link, or skip. Nothing is charged and no text
-// goes out unless staff tap "Text the link". The booking stays whatever happens
-// here.
+// for the secure card page, then offers: hand the phone to the customer (only
+// when the Waves Admin app can open the hand-off), show a QR code of the page,
+// text the link, or skip. Nothing is charged and no text goes out unless staff
+// tap "Text the link". The booking stays whatever happens here.
+//
+// Hand-off: the app shows the secure page to the customer in a separate,
+// isolated web view and covers this page; this tab never navigates.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
 import useModalFocus from '../../hooks/useModalFocus';
 import { describeCardRequestResult } from './cardLinkStatus';
+import { HANDOFF_OPEN, getAdminCapabilities, openHandoff } from '../../lib/wavesAdminHandoff';
 
 // Same zinc admin palette as CreateAppointmentModal's D.
 const D = {
@@ -50,6 +54,9 @@ export function describeInPersonOutcome(result, firstName) {
     return { tone: 'muted', text: 'This visit bills a third-party payer, so no card is asked for.' };
   }
   if (reason === 'request_exists') return { tone: 'muted', text: 'A card request already exists for this visit.' };
+  if (reason === 'customer_already_chose') {
+    return { tone: 'muted', text: `${who} already chose how to pay on their own phone, so the estimate terms were not asked for here.` };
+  }
   if (reason === 'gate_off' || reason === 'template_inactive') {
     return { tone: 'muted', text: 'The card page is not available right now.' };
   }
@@ -91,6 +98,8 @@ function QrPanel({ url, firstName, saved }) {
   );
 }
 
+const cardSaved = (state) => state?.request?.status === 'completed' || !!state?.autopayActive;
+
 // Poll the visit's card state every 4 s while `active` (the QR code is on
 // screen) and stop for good once the card is saved.
 function useSavedPolling({ active, adminFetch, visitId }) {
@@ -102,7 +111,7 @@ function useSavedPolling({ active, adminFetch, visitId }) {
       adminFetch(`/admin/schedule/${visitId}/card-request`)
         .then((state) => {
           if (stopped) return;
-          if (state?.request?.status === 'completed' || state?.autopayActive) setSaved(true);
+          if (cardSaved(state)) setSaved(true);
         })
         .catch(() => {});
     };
@@ -115,8 +124,49 @@ function useSavedPolling({ active, adminFetch, visitId }) {
 const toneColor = (t) => (t === 'good' ? D.text : t === 'bad' ? D.red : D.muted);
 const sectionLabel = { fontSize: 14, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, marginBottom: 4 };
 
-// The four choices once the card page exists: QR code, text the link, or not
-// now.
+// The secure page in hand-off mode, as an absolute link for the app.
+function handoffHref(secureUrl) {
+  const url = new URL(secureUrl, window.location.origin);
+  url.searchParams.set('handoff', '1');
+  return url.href;
+}
+
+// "Hand the phone to {first}": shown only when the app answers the capabilities
+// ask with 'handoffOpen'. Taps open the isolated customer view; when it ends the
+// card state is read again and the result is said plainly.
+function useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef }) {
+  const [canHandoff, setCanHandoff] = useState(false);
+  const [phase, setPhase] = useState('idle'); // idle | with
+  const [result, setResult] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    getAdminCapabilities().then((caps) => { if (!cancelled) setCanHandoff(caps.includes(HANDOFF_OPEN)); });
+    return () => { cancelled = true; };
+  }, []);
+  const start = async () => {
+    if (phase === 'with') return;
+    setPhase('with');
+    setResult(null);
+    const outcome = await openHandoff({ url: handoffHref(secureUrl), firstName });
+    if (!mountedRef.current) return;
+    if (outcome.status === 'failed') {
+      setPhase('idle');
+      setResult({ tone: 'bad', text: outcome.message || 'The hand-off did not start. Use the QR code instead.' });
+      return;
+    }
+    let state = null;
+    try { state = await adminFetch(`/admin/schedule/${visitId}/card-request`); } catch { /* said below */ }
+    if (!mountedRef.current) return;
+    setPhase('idle');
+    if (cardSaved(state)) setResult({ tone: 'good', text: 'Saved. Auto Pay is on.' });
+    else if (state) setResult({ tone: 'muted', text: 'Not saved yet. Hand the phone over again or use the QR code.' });
+    else setResult({ tone: 'bad', text: 'Could not check whether the card was saved.' });
+  };
+  return { canHandoff, phase, result, start };
+}
+
+// The four choices once the card page exists: hand over the phone, QR code,
+// text the link, or not now.
 function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
   const [qrOpen, setQrOpen] = useState(false);
   const [textState, setTextState] = useState(null); // null | 'sending' | { tone, text }
@@ -127,7 +177,7 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
   }, []);
   const saved = useSavedPolling({ active: qrOpen, adminFetch, visitId });
   const first = firstName || 'the customer';
-
+  const handoff = useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef });
   const textTheLink = () => {
     setTextState('sending');
     adminFetch(`/admin/schedule/${visitId}/card-request`, { method: 'POST' })
@@ -139,10 +189,21 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
     <div>
       <div style={sectionLabel}>Card for Auto Pay</div>
       <p style={{ fontSize: 14, margin: '0 0 12px' }}>
-        {first} can save a card now on their own phone: show the QR code, or text the link. Nothing is charged today. Auto Pay charges after each completed service.
+        {handoff.canHandoff
+          ? `${first} can save a card now: hand them your phone, show the QR code for their own phone, or text the link.`
+          : `${first} can save a card now on their own phone: show the QR code, or text the link.`}
+        {' '}Nothing is charged today. Auto Pay charges after each completed service.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <button type="button" style={primaryButton} aria-expanded={qrOpen} onClick={() => setQrOpen((open) => !open)}>
+        {handoff.canHandoff && (
+          <button type="button" style={primaryButton} disabled={handoff.phase === 'with'} onClick={handoff.start}>
+            {handoff.phase === 'with' ? `With ${first}…` : `Hand the phone to ${first}`}
+          </button>
+        )}
+        {handoff.result && (
+          <div role="status" style={{ fontSize: 14, color: toneColor(handoff.result.tone) }}>{handoff.result.text}</div>
+        )}
+        <button type="button" style={secondaryButton} aria-expanded={qrOpen} onClick={() => setQrOpen((open) => !open)}>
           {qrOpen ? 'Hide the QR code' : 'Show a QR code'}
         </button>
         {qrOpen && <QrPanel url={absoluteHref(secureUrl)} firstName={firstName} saved={saved} />}

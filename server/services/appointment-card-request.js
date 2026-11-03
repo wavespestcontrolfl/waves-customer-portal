@@ -1931,6 +1931,18 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   const stillNeeded = await secureVisitStillNeedsCard(request);
   if (!stillNeeded.ok) return stillNeeded;
 
+  // Book at the Table (GATE_IN_PERSON_CARD): a request marked for the estimate terms
+  // saves no card until the customer's acceptance is recorded. Covers the page POST and
+  // the Stripe webhook backstop (the intent stays succeeded; /complete finishes it once
+  // the terms are in). Unmarked requests are untouched.
+  {
+    const termsRefusal = await require('./in-person-handoff').assertTermsRecorded(request);
+    if (termsRefusal) {
+      logger.warn(`[appt-card-request] capture refused for request ${request.id}: estimate terms not recorded`);
+      return { ok: false, code: termsRefusal.code };
+    }
+  }
+
   // Plan-choice lane (Codex #2980 r3): a plan-bearing RECURRING request
   // must carry a durable per_application selection before a card capture
   // may complete — otherwise a token holder could POST /complete directly
@@ -1999,8 +2011,11 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       claimRefusal = stillNeededLocked;
       return 0;
     }
+    // Book at the Table: the terms marker the pre-claim check judged is part of the CAS.
+    // The in-person route can mark the row after that read; the claim then fails
+    // (terms_required below) instead of saving a card the terms now hold.
     let claimQuery = trx('appointment_card_requests')
-      .where({ id: request.id, status: 'pending' });
+      .where({ id: request.id, status: 'pending', in_person_terms_required: !!request.in_person_terms_required });
     claimQuery = request.selected_plan == null
       ? claimQuery.whereNull('selected_plan')
       : claimQuery.where({ selected_plan: request.selected_plan });
@@ -2009,7 +2024,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   if (claimRefusal) return claimRefusal;
   if (claimed !== 1) {
     const fresh = await db('appointment_card_requests').where({ id: request.id })
-      .first('id', 'status', 'updated_at', 'stripe_setup_intent_id', 'fee_agreed_at', 'sticky_window_disclosed');
+      .first('id', 'status', 'updated_at', 'stripe_setup_intent_id', 'fee_agreed_at', 'sticky_window_disclosed', 'in_person_terms_required');
     if (fresh?.status === 'completed' || fresh?.status === 'satisfied') {
       // The webhook won BETWEEN this call's initial read (still pending)
       // and the claim above (Codex #3342 r9 P1) — its completion tail
@@ -2021,6 +2036,12 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       const echo = await recordWebhookFirstConsentEcho({ row: fresh, setupIntentId, disclosureVersion });
       if (!echo.ok) return echo;
       return { ok: true, alreadyCompleted: true };
+    }
+    // Book at the Table: marked for the estimate terms after the pre-claim read. The
+    // next try re-judges the terms (the page shows them; the webhook acks).
+    if (fresh?.status === 'pending' && !!fresh.in_person_terms_required !== !!request.in_person_terms_required) {
+      logger.warn(`[appt-card-request] capture refused for request ${request.id}: marked for the estimate terms during the claim`);
+      return { ok: false, code: 'terms_required' };
     }
     // Stale-claim lease (Codex #2771 r4): a worker killed between the
     // claim and the completed/revert write strands the row 'completing'
@@ -4083,7 +4104,8 @@ module.exports = {
   claimCardLinkSend,
   markCardLinkSendOutcome,
   startInvitationEmailLeg,
-  // Shared with the Tap to Pay card save (services/terminal-save-card.js).
+  // Shared with the Tap to Pay card save (services/terminal-save-card.js) and the
+  // estimate-terms hand-off (services/in-person-handoff.js).
   secureVisitStillNeedsCard,
   finishVerifiedSecureCapture,
   STICKY_DISCLOSURE_VERSION,

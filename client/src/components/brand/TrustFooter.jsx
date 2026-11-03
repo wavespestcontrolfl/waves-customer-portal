@@ -10,7 +10,7 @@ const UNKNOWN_GUARANTEE_TRUST_LINE = `Licensed & insured · ${WAVES_FL_LICENSE_L
 const PRIVACY_URL = 'https://wavespestcontrol.com/privacy-policy/';
 const TERMS_URL = 'https://wavespestcontrol.com/terms-of-service/';
 
-export default function TrustFooter({ tone = 'dark', align = 'center', variant = 'customer', noGuarantee = false }) {
+export default function TrustFooter({ tone = 'dark', align = 'center', variant = 'customer', noGuarantee = false, plain = false }) {
   const color =
     tone === 'light' ? 'rgba(255, 255, 255, 0.6)' : 'var(--text-subtle)';
   const linkColor =
@@ -43,9 +43,10 @@ export default function TrustFooter({ tone = 'dark', align = 'center', variant =
   return (
     <div style={base}>
       <div style={{ marginBottom: 4 }}>
-        <a href={PRIVACY_URL} target="_blank" rel="noopener noreferrer" style={link}>Privacy Policy</a>
+        {/* plain: hand-off mode shows the two names as text, nothing to tap. */}
+        {plain ? <span style={link}>Privacy Policy</span> : <a href={PRIVACY_URL} target="_blank" rel="noopener noreferrer" style={link}>Privacy Policy</a>}
         <span aria-hidden="true" style={{ margin: '0 6px' }}>·</span>
-        <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" style={link}>Terms of Service</a>
+        {plain ? <span style={link}>Terms of Service</span> : <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" style={link}>Terms of Service</a>}
       </div>
       <div>{RIGHTS_LINE}</div>
       <div>{noGuarantee === null ? UNKNOWN_GUARANTEE_TRUST_LINE : noGuarantee ? NO_GUARANTEE_TRUST_LINE : TRUST_LINE}</div>

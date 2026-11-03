@@ -115,7 +115,7 @@ beforeEach(() => {
   mockState.tables = {
     appointment_card_requests: [{
       id: 'req-1', status: 'pending', kind: 'visit', customer_id: 'cust-1', scheduled_service_id: 'visit-1',
-      selected_plan: null, no_show_fee_amount: null, accepted_amount: '135.00',
+      selected_plan: null, no_show_fee_amount: null, accepted_amount: '135.00', in_person_terms_required: false,
     }],
     customers: [{ id: 'cust-1', stripe_customer_id: 'cus_test1' }],
     scheduled_services: [{ id: 'visit-1', status: 'confirmed', scheduled_date: '2099-07-20', estimated_price: '135.00', is_recurring: false }],

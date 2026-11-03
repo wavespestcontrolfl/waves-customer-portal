@@ -7837,6 +7837,49 @@ request's own capture family, and a broken/canceled chain walks the
 generation salt as before. Treat the token, the verification
 gates, the selection/mint transaction, the replacement lock, and the
 claim mechanics as security-critical.
+**Estimate terms at the table (Book at the Table, `GATE_IN_PERSON_CARD`, owner
+2026-11-02):** when staff open the in-person card step for a visit whose estimate
+they accepted but that records no acceptance terms, the visit's pending request is
+marked `appointment_card_requests.in_person_terms_required` (additive boolean, default
+false; texted requests are never marked). For a marked request that is `ready` or
+`prepay_selected`, while the gate is live, the GET payload gains, on ANY device (the customer's own phone or
+the owner's in hand-off mode; no query param, no sign-in), `terms: { estimateRef,
+version, scope, lines }` (`scope` = `'plan' | 'base'`; `lines` = the current terms for
+the estimate's scope, verbatim) until they are recorded, and `consumerNotice: { text }`
+when the accepted estimate needs the Florida consumer notice (`GATE_ESTIMATE_CONSUMER_NOTICE`
+live, a termite/WDO line, no signed notice on file; informational, the form is signed
+separately, no tick; independent of `terms`, which exclude termite/WDO estimates).
+While `terms` rides a `prepay_selected` payload, its `payUrl` is `null` (the customer may
+have chosen prepay before the request was marked; the pay link returns once the terms are
+recorded). No internal ids ride either key. Unmarked requests, a dark gate or nothing to show leave the
+payload byte-identical to before. `POST /api/public/secure-card/:token/accept-terms`
+`{ terms_version, terms_scope, consumer_notice_shown }` (same token contract, same
+privacy headers on every outcome: `Cache-Control: private, no-store`,
+`Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`; while the gate is dark it is
+a uniform 404 answered in `server/index.js` BEFORE the global limiter and body parsers)
+answers `200 { success: true, recorded }` and stamps the fields an online accept stamps
+(`estimate_acceptances` row with `method = 'card_page_terms'`, the request ip and
+agent, `estimates.terms_version`, `customers.accepted_terms_version` never lowered, the
+rate-review stamp for plan scope) with none of the accept's side effects; it is idempotent
+(`recorded: false` when terms already exist), audited, and takes the estimate row lock. The
+attested version and scope are compared with the estimate's own under that lock:
+`409 { error: 'The terms changed. Reload this page to see them.', code: 'terms_changed' |
+'TERMS_VERSION_STALE' }`, nothing written; `409 consumer_notice_required` when the notice
+applies and was not shown; `409 request_closed` when the request (re-read under its row
+lock) is no longer pending or the visit no longer needs a card (the card save's own check:
+past, cancelled, unpriced, payer-covered); `503 try_again` when that check cannot run; an
+unknown token, an unmarked request, a standalone Auto Pay link or a dark gate are the same
+`404 { error: 'Not found' }`. ENFORCEMENT: while a marked request's terms are not recorded,
+`/select-plan` with `prepay_annual` and `/complete` (and the Stripe `setup_intent.succeeded`
+backstop, which leaves the row pending) refuse with `409 { error: 'Please accept the
+estimate terms first.', code: 'terms_required' }` before any invoice is minted or card saved;
+`per_application` selection is not held. Both claims' compare-and-set also carry the marker
+the check judged, so a mark that lands mid-request fails the claim (`/complete`: 409
+`terms_required`; `/select-plan`: 409 `selection_conflict`, the page re-reads). The acceptance copy-email sweep mails the copy
+like an online accept. Hand-off mode itself (inside the Waves Admin app's isolated customer
+web view: URL `handoff=1` AND the `wavesCustomer` message handler) only changes the page: it
+hides every contact and outside link, never offers Apple Pay / Google Pay, and shows a QR
+code instead of the pay page for "Prepay the year". No new request is made in normal mode.
 **One-time visits only (owner ruling 2026-10-29):** the late-cancel /
 no-show fee never applies to a recurring-lineage visit
 (`isRecurringLineageVisit`: `is_recurring`, `recurring_parent_id` or
