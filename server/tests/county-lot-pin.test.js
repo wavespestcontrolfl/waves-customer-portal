@@ -1,4 +1,4 @@
-const { parseCountyLotAddress, pinCountyForZip, lookupCountyLotPin, countyLotPinForAddress } = require('../services/property-lookup/county-lot-pin');
+const { parseCountyLotAddress, situsNamesAddress, pinCountyForZip, lookupCountyLotPin, countyLotPinForAddress } = require('../services/property-lookup/county-lot-pin');
 
 // ~14 m square lot centered on (lat, lng), as an ArcGIS polygon in WGS84.
 function lot({ lat, lng, parcelId = '1000', zip = '34219', situs = '104 SAMPLE WAY' }) {
@@ -23,6 +23,25 @@ describe('parseCountyLotAddress', () => {
 
   test.each(['Sample Ter', '', null, '12 N St'])('no usable number or street word: %p', (line) => {
     expect(parseCountyLotAddress(line)).toBeNull();
+  });
+});
+
+describe('situsNamesAddress', () => {
+  const ask = { houseNumber: '104', streetWord: 'MAPLE' };
+  test.each([
+    ['104 MAPLE WAY', true],
+    ['104 JAPANESE MAPLE TER', true], // a misheard or dropped first word still finds the lot
+    ['104 N MAPLE ST', true],
+    ['104 MAPLE GROVE CIR, VENICE FL, 34285', true],
+    ['104 ST MAPLE DR', true], // a leading ST is Saint, not the street type
+    ['104 MAPLEWOOD DR', false], // the LIKE matched a longer word
+    ['104 SUGARMAPLE WAY', false],
+    ['1040 MAPLE WAY', false],
+    ['104 OAK DR MAPLE FL, 34285', false], // a word after the street type is the city, not the street
+    ['', false],
+    [null, false],
+  ])('%p -> %p', (situs, expected) => {
+    expect(situsNamesAddress(situs, ask)).toBe(expected);
   });
 });
 
@@ -67,6 +86,26 @@ describe('lookupCountyLotPin', () => {
     const pin = await lookupCountyLotPin(ASK);
     expect(pin.lat).toBeCloseTo(27.5801, 5);
     expect(pin.lng).toBeCloseTo(-82.42, 5);
+  });
+
+  test('a lot whose street only contains the word is not this address', async () => {
+    answer([lot({ lat: 27.58, lng: -82.42, situs: '104 RESAMPLE WAY' })]);
+    expect(await lookupCountyLotPin(ASK)).toBeNull();
+  });
+
+  test('of two lots in the ZIP, the one whose street merely contains the word is dropped', async () => {
+    answer([lot({ lat: 27.58, lng: -82.42 }), lot({ lat: 27.59, lng: -82.42, parcelId: '1001', situs: '104 SAMPLEWOOD DR' })]);
+    expect((await lookupCountyLotPin(ASK)).parcelId).toBe('1000');
+  });
+
+  test('a Sarasota situs that runs on into the city lends no city word to the street', async () => {
+    const sarasota = (situs) => ({ attributes: { id: '2000', fulladdress: situs, loczip: '34285' },
+      geometry: lot({ lat: 27.1, lng: -82.44 }).geometry });
+    const ask = { county: 'Sarasota', houseNumber: '104', zip: '34285' };
+    answer([sarasota('104 OTHER RD VENICE FL, 34285')]);
+    expect(await lookupCountyLotPin({ ...ask, streetWord: 'VENICE' })).toBeNull();
+    answer([sarasota('104 SAMPLE WAY VENICE FL, 34285')]);
+    expect((await lookupCountyLotPin({ ...ask, streetWord: 'SAMPLE' })).parcelId).toBe('2000');
   });
 
   test('a lot with no polygon makes the answer ambiguous', async () => {

@@ -6,7 +6,8 @@
  * result, which the geocoder rejects on purpose. The county roll carries the
  * lot, so the roll's own situs line finds it: house number plus one street
  * word in a single LIKE (county-parcel-gis lookupCountyParcelsByAddress),
- * kept only where the situs ZIP equals the address ZIP. The polygon center
+ * kept only where the situs ZIP equals the address ZIP and the situs street
+ * name holds that word as a whole word (situsNamesAddress). The polygon center
  * is the home. Manatee and Sarasota only: they alone publish a situs ZIP,
  * and without it a SWFL grid street that repeats across cities could pin the
  * wrong city's house.
@@ -46,6 +47,22 @@ function parseCountyLotAddress(addressLine1) {
     return { houseNumber: match[1], streetWord: word };
   }
   return null;
+}
+
+// The roll's situs line names the asked address: the same house number, and the street word as a whole
+// word of the street name (the words before the first street-type word after it starts, so a leading
+// "ST" is Saint). The county LIKE also matches a
+// substring ("104 %PINE%" finds 104 ALPINE WAY), and a Sarasota situs runs on into the city
+// ("0 GIBBS RD VENICE FL, 34285"), so neither may stand in for the street.
+function situsNamesAddress(situs, { houseNumber, streetWord }) {
+  const tokens = String(situs || '').split(',')[0].toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+  if (tokens[0] !== String(houseNumber)) return false;
+  const name = [];
+  for (const token of tokens.slice(1)) {
+    if (name.length && STREET_TYPES.has(token)) break;
+    name.push(token);
+  }
+  return name.includes(streetWord);
 }
 
 // Pin counties only; a ZIP on a county line (34228, 34243, 34223) resolves to
@@ -105,7 +122,7 @@ async function lookupCountyLotPin({ county, houseNumber, streetWord, zip } = {})
   const zip5 = String(zip || '').trim().slice(0, 5);
   if (!PIN_COUNTIES.has(name) || !/^\d{5}$/.test(zip5)) return null;
   const lots = (await lookupCountyParcelsByAddress(name, { houseNumber, streetWord }, { withGeometry: true }))
-    .filter((lot) => lot.situsZip === zip5);
+    .filter((lot) => lot.situsZip === zip5 && situsNamesAddress(lot.situsAddress, { houseNumber, streetWord }));
   const centers = lots.map((lot) => ringCenter(lot.rings));
   if (!lots.length || centers.some((center) => !center) || !oneBuilding(centers)) return null;
   const lat = Number((centers.reduce((sum, c) => sum + c.lat, 0) / centers.length).toFixed(7));
@@ -121,4 +138,4 @@ async function countyLotPinForAddress(address) {
   return county ? lookupCountyLotPin({ county, ...parsed, zip: address.zip }) : null;
 }
 
-module.exports = { parseCountyLotAddress, pinCountyForZip, lookupCountyLotPin, countyLotPinForAddress };
+module.exports = { parseCountyLotAddress, situsNamesAddress, pinCountyForZip, lookupCountyLotPin, countyLotPinForAddress };
