@@ -327,8 +327,12 @@ test('a thrown error is contained — and rings ONE deduped bell so the miss is 
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
   const [category, title, , opts] = notifyAdmin.mock.calls[0];
   expect(category).toBe('system');
-  expect(title).toContain('Sign card');
+  // Raised through raiseAdminAlert (alert step E2): rule-format headline, one-sentence why, the old text in detail.
+  expect(title).toBe('Inventory — adjust Sign card stock by hand');
   expect(opts.bell).toBe(true);
+  expect(opts.detail).toMatch(/^Adjust the count by .* on the Inventory page\. Reason: /);
+  expect(opts.link).toBe('/admin/inventory');
+  expect(opts.metadata).toMatchObject({ area: 'Inventory', severity: 'needs-you', who: 'person', doneWhen: 'supplies_adjusted', subject: { type: 'visit', id: 'svc-1' } });
   expect(opts.dedupeKey).toBe('supplies-consumption-failed:prod-sign:svc-1');
 });
 

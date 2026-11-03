@@ -47,6 +47,8 @@ const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { findLiveRestockRequest, LIVE_RESTOCK_STATUSES } = require('./live-restock-request');
+const { fitAction } = require('../admin-alert-names');
+const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
@@ -112,30 +114,40 @@ async function dispatcherOrders(conn, vendorId) {
 }
 
 // The bell says exactly what the request row says (see the header).
+// Raised through raiseAdminAlert (alert step E2): same category, bell tag, dedupe key, link and
+// refreshOnDedupe as before. The old title and body ride in `detail`, so a refresh rings exactly when
+// they would have changed; a standing row still in the old format is rewritten without ringing.
 async function ringRestockBell({ notify, product, request }) {
-  const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
   const meta = parseMeta(request.metadata);
   const unit = request.unit || product.inventory_unit;
   const onHand = num(request.current_stock) ?? num(product.inventory_on_hand);
   const where = request.vendor ? ` from ${request.vendor}` : '';
   const link = meta.vendorProductUrl ? ` Order link: ${meta.vendorProductUrl}` : '';
-  return notifyAdmin(
-    'system',
-    `Restock: ${product.name} is low (${onHand} ${unit})`,
-    `Reorder ${num(request.requested_quantity)} ${unit}${where} — order manually, then mark the restock request ordered.${link}`,
-    {
-      // bell: true — required handoff: under GATE_ADMIN_BELL_POLICY a bare
-      // 'system' category is suppressed, and a suppressed restock alert is
-      // a silently unworked reorder (Codex r1 P1).
-      bell: true,
-      link: '/admin/inventory?tab=restock',
-      dedupeKey: `auto-reorder:${request.id}`,
-      // A later sweep that learned the vendor/price rewrites the standing
-      // bell (title/body/metadata) instead of leaving the linkless original.
-      refreshOnDedupe: true,
-      metadata: { restockRequestId: request.id, productId: product.id, vendorId: meta.vendorId || null, vendorSku: meta.vendorSku || null, vendorProductUrl: meta.vendorProductUrl || null },
-    },
-  );
+  const oldTitle = `Restock: ${product.name} is low (${onHand} ${unit})`;
+  const oldBody = `Reorder ${num(request.requested_quantity)} ${unit}${where} — order manually, then mark the restock request ordered.${link}`;
+  const bellLink = '/admin/inventory?tab=restock';
+  return raiserFor(notify)('system', {
+    area: 'Inventory',
+    action: fitAction('Inventory', product.name, [(n) => `restock ${n}, stock is low`, (n) => `restock ${n}`]),
+    why: 'Stock is low; order it manually, then mark the restock request ordered.',
+    severity: 'needs-you',
+    link: bellLink,
+    subject: { type: 'check', id: `auto-reorder:${request.id}` },
+    doneWhen: 'restock_request_ordered',
+    who: 'person',
+  }, {
+    // bell: true — required handoff: under GATE_ADMIN_BELL_POLICY a bare
+    // 'system' category is suppressed, and a suppressed restock alert is
+    // a silently unworked reorder (Codex r1 P1).
+    bell: true,
+    dedupeKey: `auto-reorder:${request.id}`,
+    // A later sweep that learned the vendor/price rewrites the standing
+    // bell (title/body/metadata) instead of leaving the linkless original.
+    refreshOnDedupe: true,
+    ringOnRefresh: ringOnRefreshAfterConversion({ title: oldTitle, body: oldBody, link: bellLink }),
+    detail: `${oldTitle}\n${oldBody}`,
+    metadata: { restockRequestId: request.id, productId: product.id, vendorId: meta.vendorId || null, vendorSku: meta.vendorSku || null, vendorProductUrl: meta.vendorProductUrl || null },
+  });
 }
 
 // The bell is the only handoff to staff, so a bell that did not land is a
