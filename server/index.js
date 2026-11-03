@@ -467,6 +467,16 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
+// Book at the Table (GATE_IN_PERSON_CARD): while dark, POST /:token/accept-terms is a
+// uniform 404 before the global limiter and the body parsers, never a 429/413/400
+// (privacy headers are already set above). Call-time gate read.
+app.use('/api/public/secure-card', (req, res, next) => {
+  if (req.method === 'POST' && /^\/[^/]+\/accept-terms\/?$/.test(req.path)
+    && !require('./config/feature-gates').inPersonCardLive()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 // Live-tracking pre-parser guard (middleware/track-public-preparser.js):
 // privacy headers on every outcome incl. the GLOBAL /api limiter's 429s
 // (same reasoning as secure-card above), and POST /:token/view's malformed-

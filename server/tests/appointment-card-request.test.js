@@ -170,6 +170,11 @@ jest.mock('../services/disclaimed-number-holds', () => ({
   disclaimedNumberHoldEvidenceForVisit: (...a) => mockDisclaimedNumberHoldEvidenceForVisit(...a),
 }));
 
+// Book at the Table: the estimate-terms gate (services/in-person-handoff.js). Unmarked
+// requests get null; its own rules are pinned in in-person-handoff.test.js.
+const mockAssertTerms = jest.fn(async () => null);
+jest.mock('../services/in-person-handoff', () => ({ assertTermsRecorded: (...a) => mockAssertTerms(...a) }));
+
 const {
   requestCardForAppointment,
   completeSecureCardCapture,
@@ -1127,6 +1132,7 @@ describe('verifySecureCardIntent — trust re-derived from Stripe, never the cli
 
 describe('completeSecureCardCapture — save → consent → enroll → complete', () => {
   beforeEach(() => {
+    mockAssertTerms.mockReset().mockResolvedValue(null);
     mockTableHandlers = {
       appointment_card_requests: { first: () => ({ ...REQUEST }) },
       payment_methods: { first: () => null },
@@ -1134,6 +1140,19 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
       scheduled_services: { first: () => ({ ...VISIT }) },
     };
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
+  });
+
+  test('a request marked for the estimate terms saves nothing until they are recorded, then completes (terms_required)', async () => {
+    mockAssertTerms.mockResolvedValueOnce({ ok: false, status: 409, code: 'terms_required' });
+    const refused = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(refused).toEqual({ ok: false, code: 'terms_required' });
+    expect(mockAssertTerms).toHaveBeenCalledWith(expect.objectContaining({ id: REQUEST.id }));
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockRecordConsent).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    const allowed = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(allowed.ok).toBe(true);
+    expect(mockSavePaymentMethod).toHaveBeenCalled();
   });
 
   test('visit cancelled since page load → no_longer_needed, nothing saved', async () => {

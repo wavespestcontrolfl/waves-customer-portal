@@ -1,31 +1,27 @@
 /**
- * Book at the Table, hand-off mode (owner 2026-11-02, GATE_IN_PERSON_CARD).
+ * Book at the Table, estimate terms at the table (owner 2026-11-02, GATE_IN_PERSON_CARD).
  *
- * The owner hands his admin iPhone to a customer at their table. The Waves Admin
- * app opens the texted secure card page (/secure/:token?handoff=1) in a separate,
- * isolated customer web view (no admin sign-in is reachable from it). This module
- * is the server half of the D2 terms step:
+ * A staff accept-on-book records no acceptance terms (estimate-manual-acceptance), so
+ * when staff open the in-person card step for a visit whose estimate still needs them,
+ * the visit's card request is marked `in_person_terms_required`. From then on, on the
+ * customer's own phone or on the owner's phone in hand-off mode alike:
  *
- *   buildHandoffBlock    the optional `handoff` block on GET /api/public/secure-card/:token
- *                        when the request carries `handoff=1`: `{ terms?, consumerNotice? }`.
- *                        `terms` = the estimate acceptance terms the customer ticks on the
- *                        phone; `consumerNotice` = the Florida notice line for a termite
- *                        estimate (signed separately, so it needs no tick and does not
- *                        depend on `terms`, which exclude termite estimates). It is data about
- *                        the token holder's own estimate, so it needs no sign-in. Absent
- *                        (payload byte-identical) without `handoff=1`, with a dark gate,
- *                        or when no terms are needed.
- *   recordInPersonTerms  stamps the estimate's acceptance terms once the customer ticks
- *                        "I accept estimate {ref} and its terms". A staff accept-on-book
- *                        records no terms (estimate-manual-acceptance), so this makes the
- *                        record match an online accept. It writes the same fields the
- *                        online accept writes and runs NONE of the accept's side effects:
- *                        the estimate is already accepted. Called only by the signed-in
- *                        admin page (POST /api/admin/schedule/:id/in-person-terms); the
- *                        customer page reaches it through the app's relay.
+ *   markTermsRequired      set by POST /admin/schedule/:id/card-request/in-person.
+ *   buildTermsPayload      GET /api/public/secure-card/:token adds `terms` (the terms to
+ *                          tick) and `consumerNotice` (the separate-signature Florida
+ *                          note for a termite estimate, informational) for a marked row.
+ *   recordCardPageTerms    POST /api/public/secure-card/:token/accept-terms stamps the
+ *                          SAME acceptance-terms fields an online accept stamps
+ *                          (method 'card_page_terms') with none of the accept's side
+ *                          effects, idempotent and audited. The acceptance copy-email
+ *                          sweep then mails the copy like an online accept.
+ *   assertTermsRecorded    the enforcement: the card save (/complete and the Stripe
+ *                          webhook backstop) and the annual-prepay choice (/select-plan)
+ *                          refuse with 409 terms_required while a marked row's terms are
+ *                          not recorded. Rows never marked (every texted request) are
+ *                          untouched.
  *
- * Nothing here is charged, texted or emailed. The acceptance copy-email catch-up
- * sweep skips these rows (method 'in_person_handoff').
+ * Nothing here is charged or texted.
  */
 
 const db = require('../models/db');
@@ -33,10 +29,11 @@ const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const acceptanceTerms = require('./acceptance-terms-text');
 
-const ACCEPTANCE_METHOD = 'in_person_handoff';
+const ACCEPTANCE_METHOD = 'card_page_terms';
 
 const refusal = (status, code, error) => ({ ok: false, status, code, error });
 const TERMS_CHANGED_MESSAGE = 'The terms changed. Reload this page to see them.';
+const TERMS_REQUIRED_MESSAGE = 'Please accept the estimate terms first.';
 
 // The estimate the visit was booked from (accept-on-book stamps source_estimate_id
 // on every row of the series); a later occurrence falls back to its series parent.
@@ -85,38 +82,73 @@ function estimateRefOf(estimate) {
   return slug || String(estimate.id || '').split('-')[0].toUpperCase();
 }
 
-function termsPayload({ estimate, scope, noticeApplies }) {
+function termsPayload({ estimate, scope }) {
   return {
     estimateRef: estimateRefOf(estimate),
     version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
     scope,
     lines: acceptanceTerms.acceptanceTermsSnapshot(scope).split('\n'),
-    consumerNotice: noticeApplies ? { text: require('./estimate-consumer-notice').HANDOFF_NOTICE_TEXT } : null,
   };
 }
 
-// The `handoff` block for GET /api/public/secure-card/:token, or null. `data` is
-// the page payload already built for the token.
-async function buildHandoffBlock(req, { token, data }) {
-  if (!data || data.state !== 'ready' || req.query?.handoff !== '1') return null;
-  if (!featureGates.inPersonCardLive()) return null;
-  const request = await db('appointment_card_requests').where({ token }).first('kind', 'scheduled_service_id');
-  if (!request || request.kind === 'customer' || !request.scheduled_service_id) return null;
+const noticePayload = () => ({ text: require('./estimate-consumer-notice').HANDOFF_NOTICE_TEXT });
+
+// The separate-signature Florida notice rides on its own: a termite estimate has no
+// acceptance terms (they exclude it) but still needs the customer told.
+async function noticeAppliesFor(estimate) {
+  return estimate?.status === 'accepted' && consumerNoticeApplies(estimate);
+}
+
+// Mark the visit's pending card request as needing the estimate terms, when its
+// estimate still needs them (accepted by staff, no recorded terms version, the terms
+// apply) or the Florida notice. Idempotent. Throws on a read error, so the in-person
+// route fails and the sheet can retry: an unmarked request would skip the gate.
+async function markTermsRequired(visitId) {
+  if (!featureGates.inPersonCardLive()) return { marked: false };
+  const { estimate } = await linkedEstimateFor(visitId);
+  const needed = (await termsContextFor(estimate)) || (await noticeAppliesFor(estimate));
+  if (!needed) return { marked: false };
+  const updated = await db('appointment_card_requests')
+    .where({ scheduled_service_id: visitId, kind: 'visit', status: 'pending', in_person_terms_required: false })
+    .update({ in_person_terms_required: true, updated_at: new Date() });
+  return { marked: updated > 0 };
+}
+
+// The `terms` and `consumerNotice` keys for GET /api/public/secure-card/:token, or
+// null. Only a ready page of a marked request, while the gate is live. `terms` leaves
+// once recorded.
+async function buildTermsPayload({ token, data }) {
+  if (!data || data.state !== 'ready' || !featureGates.inPersonCardLive()) return null;
+  const request = await db('appointment_card_requests').where({ token }).first('kind', 'scheduled_service_id', 'in_person_terms_required');
+  if (!request || request.kind === 'customer' || !request.scheduled_service_id || !request.in_person_terms_required) return null;
   const { estimate } = await linkedEstimateFor(request.scheduled_service_id);
   const context = await termsContextFor(estimate);
   const block = {};
   if (context) block.terms = termsPayload(context);
-  // The separate-signature Florida notice rides the block on its own: a termite
-  // estimate has no acceptance terms but still needs the customer told.
-  if (estimate?.status === 'accepted' && await consumerNoticeApplies(estimate)) {
-    block.consumerNotice = { text: require('./estimate-consumer-notice').HANDOFF_NOTICE_TEXT };
-  }
+  if (await noticeAppliesFor(estimate)) block.consumerNotice = noticePayload();
   return Object.keys(block).length ? block : null;
 }
 
-// Stamp the acceptance terms for the visit's estimate. Idempotent: a second call
-// (or an estimate that already carries a terms version) changes nothing.
-async function recordInPersonTerms({ visitId, technician, termsVersion, termsScope, consumerNoticeShown, ip = null, userAgent = null }) {
+// The enforcement. null = fine; else a refusal ({ status: 409, code: 'terms_required' }).
+// Applies only to a marked request while the gate is live and the estimate's terms are
+// still outstanding; a read error propagates (fail closed).
+async function assertTermsRecorded(request) {
+  if (!request?.in_person_terms_required || !request.scheduled_service_id) return null;
+  if (!featureGates.inPersonCardLive()) return null;
+  const { estimate } = await linkedEstimateFor(request.scheduled_service_id);
+  return (await termsContextFor(estimate)) ? refusal(409, 'terms_required', TERMS_REQUIRED_MESSAGE) : null;
+}
+
+// Stamp the acceptance terms for the marked request's estimate. Idempotent: a second
+// call (or an estimate that already carries a terms version) changes nothing.
+// `request` is the appointment_card_requests row the token names.
+async function recordCardPageTerms({ request, termsVersion, termsScope, consumerNoticeShown, ip = null, userAgent = null }) {
+  // Not a marked request: the same answer as an unknown token (no oracle).
+  if (!request || request.kind === 'customer' || !request.in_person_terms_required || !featureGates.inPersonCardLive()) {
+    return refusal(404, 'not_found', 'Not found');
+  }
+  if (request.status !== 'pending') return refusal(409, 'request_closed', 'This link is no longer open for changes. Refresh to see its current status.');
+  const visitId = request.scheduled_service_id;
   if (termsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
     // Same words as a scope change: the app relays only the message, and the
     // page offers Reload on exactly that text.
@@ -128,7 +160,7 @@ async function recordInPersonTerms({ visitId, technician, termsVersion, termsSco
   const shownScope = acceptanceTerms.normalizeAcceptanceTermsScope(termsScope);
   if (!shownScope) return refusal(409, 'terms_changed', TERMS_CHANGED_MESSAGE);
   const { visit, estimate } = await linkedEstimateFor(visitId);
-  if (!visit) return refusal(404, 'visit_not_found', 'Scheduled service not found');
+  if (!visit) return refusal(404, 'not_found', 'Not found');
   if (!estimate || estimate.terms_version) return { ok: true, recorded: false };
   const { recordAuditEvent } = require('./audit-log');
   const acceptedAt = new Date();
@@ -168,13 +200,14 @@ async function recordInPersonTerms({ visitId, technician, termsVersion, termsSco
         .update({ accepted_terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
     }
     await recordAuditEvent({
-      actor_type: 'technician',
-      actor_id: technician?.id || null,
-      action: 'estimate.acceptance_terms.in_person',
+      actor_type: 'customer',
+      actor_id: request.customer_id || null,
+      action: 'estimate.acceptance_terms.card_page',
       resource_type: 'estimate',
       resource_id: locked.id,
       metadata: {
         visit_id: visit.id,
+        request_id: request.id,
         terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
         scope: context.scope,
         consumer_notice_shown: context.noticeApplies && consumerNoticeShown === true,
@@ -192,6 +225,9 @@ async function recordInPersonTerms({ visitId, technician, termsVersion, termsSco
 
 module.exports = {
   ACCEPTANCE_METHOD,
-  buildHandoffBlock,
-  recordInPersonTerms,
+  TERMS_REQUIRED_MESSAGE,
+  markTermsRequired,
+  buildTermsPayload,
+  assertTermsRecorded,
+  recordCardPageTerms,
 };

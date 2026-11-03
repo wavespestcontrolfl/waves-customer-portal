@@ -1922,6 +1922,18 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   const stillNeeded = await secureVisitStillNeedsCard(request);
   if (!stillNeeded.ok) return stillNeeded;
 
+  // Book at the Table (GATE_IN_PERSON_CARD): a request marked for the estimate terms
+  // saves no card until the customer's acceptance is recorded. Covers the page POST and
+  // the Stripe webhook backstop (the intent stays succeeded; /complete finishes it once
+  // the terms are in). Unmarked requests are untouched.
+  {
+    const termsRefusal = await require('./in-person-handoff').assertTermsRecorded(request);
+    if (termsRefusal) {
+      logger.warn(`[appt-card-request] capture refused for request ${request.id}: estimate terms not recorded`);
+      return { ok: false, code: termsRefusal.code };
+    }
+  }
+
   // Plan-choice lane (Codex #2980 r3): a plan-bearing RECURRING request
   // must carry a durable per_application selection before a card capture
   // may complete — otherwise a token holder could POST /complete directly

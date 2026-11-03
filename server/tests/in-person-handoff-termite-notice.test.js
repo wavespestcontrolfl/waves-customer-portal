@@ -22,7 +22,7 @@ const db = require('../models/db');
 const { findConsumerNotice } = require('../services/consumer-notices');
 const { acceptanceTermsApplyTo } = require('../routes/estimate-public');
 const { HANDOFF_NOTICE_TEXT } = require('../services/estimate-consumer-notice');
-const { buildHandoffBlock } = require('../services/in-person-handoff');
+const { buildTermsPayload, markTermsRequired } = require('../services/in-person-handoff');
 
 const TOKEN = 'a'.repeat(22);
 const estimate = (recurring = [], oneTime = []) => ({
@@ -38,7 +38,7 @@ beforeEach(() => {
   findConsumerNotice.mockResolvedValue(null);
   db.mockImplementation((table) => {
     const rows = {
-      appointment_card_requests: { kind: 'visit', scheduled_service_id: 'visit-1' },
+      appointment_card_requests: { kind: 'visit', scheduled_service_id: 'visit-1', in_person_terms_required: true },
       scheduled_services: { id: 'visit-1', source_estimate_id: 'est-1', recurring_parent_id: null },
       estimates: est,
     };
@@ -46,11 +46,12 @@ beforeEach(() => {
     q.where = () => q;
     q.whereIn = () => q;
     q.first = async () => rows[table];
+    q.update = async () => 1;
     return q;
   });
 });
 
-const block = () => buildHandoffBlock({ query: { handoff: '1' }, headers: {} }, { token: TOKEN, data: { state: 'ready' } });
+const block = () => buildTermsPayload({ token: TOKEN, data: { state: 'ready' } });
 
 describe('termite estimate notice in the hand-off block', () => {
   test('the real acceptance terms exclude the termite estimate (the exclusion is not relayed)', () => {
@@ -78,6 +79,11 @@ describe('termite estimate notice in the hand-off block', () => {
     const result = await block();
     expect(result.terms.estimateRef).toBe('EST-2026-0002');
     expect(result.consumerNotice).toBeUndefined();
+  });
+
+  test('the in-person route marks the termite request, so the page gets the notice', async () => {
+    est = TERMITE;
+    expect(await markTermsRequired('visit-1')).toEqual({ marked: true });
   });
 
   test('an estimate staff have not accepted gets no notice', async () => {

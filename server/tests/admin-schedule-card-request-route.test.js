@@ -42,6 +42,8 @@ jest.mock('../services/appointment-card-request', () => ({
   requestCardForAppointment: (...args) => mockRequestCard(...args),
   isSecureCardLaneReady: (...args) => mockLaneReady(...args),
 }));
+const mockMarkTerms = jest.fn(async () => ({ marked: false }));
+jest.mock('../services/in-person-handoff', () => ({ markTermsRequired: (...args) => mockMarkTerms(...args) }));
 const mockOnAutopay = jest.fn(async () => false);
 jest.mock('../services/autopay-eligibility', () => ({
   customerOnAutopay: (...args) => mockOnAutopay(...args),
@@ -308,6 +310,19 @@ describe('Book at the Table (GATE_IN_PERSON_CARD)', () => {
     });
     expect(mockRequestCard).toHaveBeenCalledWith({
       scheduledServiceId: 'svc-1', trigger: 'admin', delivery: 'inline', inPerson: true,
+    });
+    // The visit's request is marked for the estimate terms (the service decides if it needs them).
+    expect(mockMarkTerms).toHaveBeenCalledWith('svc-1');
+  });
+
+  test('a failed terms mark fails the call (the sheet offers Try again) instead of leaving the gate off', async () => {
+    process.env.GATE_IN_PERSON_CARD = 'true';
+    stubTables({ scheduled_services: { id: 'svc-1' } });
+    mockRequestCard.mockResolvedValue({ requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.example.test/secure/abc' });
+    mockMarkTerms.mockRejectedValueOnce(new Error('read failed'));
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request/in-person`, { method: 'POST' });
+      expect(response.status).toBe(500);
     });
   });
 

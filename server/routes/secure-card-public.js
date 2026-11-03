@@ -3,9 +3,10 @@
  * /api/public/secure-card) — the card-on-file capture page the
  * appointment-card-request funnel texts a link to.
  *
- *   GET  /api/public/secure-card/:token           → page payload by state (+ `handoff` with `?handoff=1`)
+ *   GET  /api/public/secure-card/:token           → page payload by state (+ `terms` / `consumerNotice` for an in-person request)
  *   POST /api/public/secure-card/:token/replace-intent → "use a different payment method"
  *   POST /api/public/secure-card/:token/complete  → live-verify + save card
+ *   POST /api/public/secure-card/:token/accept-terms → estimate terms ticked at the table
  *
  * Token-scoped public routes, same trust contract as the other /:token
  * customer surfaces (reschedule/estimate/card): the 64-hex token IS the
@@ -19,6 +20,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { TERMS_REQUIRED_MESSAGE } = require('../services/in-person-handoff');
 const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const {
   loadSecureCardPageData,
@@ -111,12 +113,12 @@ router.get('/:token', async (req, res) => {
       // instead" fallback), so it needs the key too.
       data.publishableKey = require('../config/stripe-config').publishableKey;
     }
-    // Hand-off mode (Book at the Table, GATE_IN_PERSON_CARD): `?handoff=1` adds a
-    // `handoff` block with the estimate terms the customer ticks on the owner's
-    // phone. Without the param, with a dark gate, or with no terms to show, the
-    // payload is untouched.
-    const handoff = await require('../services/in-person-handoff').buildHandoffBlock(req, { token, data });
-    if (handoff) data.handoff = handoff;
+    // Book at the Table (GATE_IN_PERSON_CARD): a request marked for the estimate terms
+    // adds `terms` (and `consumerNotice` for a termite estimate) on every device, until
+    // the terms are recorded. An unmarked request, a dark gate or nothing to show leaves
+    // the payload untouched.
+    const inPerson = await require('../services/in-person-handoff').buildTermsPayload({ token, data });
+    if (inPerson) Object.assign(data, inPerson);
     return res.json(data);
   } catch (err) {
     logger.error(`[secure-card-public] page load failed: ${err.message}`);
@@ -142,6 +144,7 @@ router.post('/:token/select-plan', async (req, res) => {
     const code = err.code || null;
     if (code === 'gate_off' || code === 'not_found') return res.status(404).json({ error: 'Not found' });
     if (code === 'invalid_plan') return res.status(400).json({ error: 'Unknown plan.' });
+    if (code === 'terms_required') return res.status(409).json({ error: TERMS_REQUIRED_MESSAGE, code });
     if (code === 'already_secured') return res.status(409).json({ error: 'This appointment is already secured.', code });
     if (code === 'no_longer_needed') return res.status(409).json({ error: 'This appointment no longer needs a card on file.', code });
     if (code === 'prepay_overlap' || code === 'plan_unavailable' || code === 'selection_conflict') {
@@ -214,6 +217,33 @@ router.post('/:token/replace-intent', async (req, res) => {
   }
 });
 
+// Book at the Table (GATE_IN_PERSON_CARD, owner 2026-11-02): the customer ticks
+// "I accept estimate {ref} and its terms" on the secure page, on their own phone or on
+// the owner's in hand-off mode. Only for a request marked in_person_terms_required;
+// anything else (unknown token, unmarked row, dark gate) is the uniform 404. A stale
+// terms version or scope is a reloadable 409. The dark gate is also answered before the
+// limiter and body parsers (server/index.js).
+router.post('/:token/accept-terms', async (req, res) => {
+  const token = String(req.params.token || '');
+  if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+  try {
+    const request = await db('appointment_card_requests').where({ token }).first();
+    const result = await require('../services/in-person-handoff').recordCardPageTerms({
+      request,
+      termsVersion: typeof req.body?.terms_version === 'string' ? req.body.terms_version.trim() : '',
+      termsScope: typeof req.body?.terms_scope === 'string' ? req.body.terms_scope.trim() : '',
+      consumerNoticeShown: req.body?.consumer_notice_shown === true,
+      ip: req.ip || null,
+      userAgent: req.headers['user-agent'] || null,
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code });
+    return res.json({ success: true, recorded: result.recorded });
+  } catch (err) {
+    logger.error(`[secure-card-public] accept-terms failed: ${err.message}`);
+    return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 router.post('/:token/complete', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
@@ -241,6 +271,10 @@ router.post('/:token/complete', async (req, res) => {
         // Visit cancelled/past or now payer-billed since page load — the
         // client maps this to its "nothing needed" state.
         return res.status(409).json({ error: 'This appointment no longer needs a card on file.', code: 'no_longer_needed' });
+      }
+      if (result.code === 'terms_required') {
+        // Book at the Table: the estimate terms ticked at the table are not recorded yet.
+        return res.status(409).json({ error: TERMS_REQUIRED_MESSAGE, code: 'terms_required' });
       }
       if (result.code === 'plan_required') {
         // Plan-choice lane: a recurring plan-bearing request must record a

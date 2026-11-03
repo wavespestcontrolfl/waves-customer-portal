@@ -1068,6 +1068,12 @@ async function selectSecurePlan({ token, plan }) {
   });
   if (resolved?.payerId) throw fail('no_longer_needed');
 
+  // Book at the Table (GATE_IN_PERSON_CARD): no payable prepay invoice is minted for a
+  // request marked for the estimate terms until the customer's acceptance is recorded.
+  if (plan === 'prepay_annual' && await require('./in-person-handoff').assertTermsRecorded(request)) {
+    throw fail('terms_required');
+  }
+
   const context = await buildSecurePlanContext({ request, visitId: visit.id, consumeDisclosure: true });
   if (!context) throw fail('plan_unavailable');
   if (plan === 'prepay_annual' && !context.prepay) throw fail('plan_unavailable');

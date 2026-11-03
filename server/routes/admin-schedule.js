@@ -26033,37 +26033,14 @@ router.post('/:id/card-request/in-person', requireAdmin, async (req, res, next) 
       delivery: 'inline',
       inPerson: true,
     });
+    // The customer is at the table: if the estimate staff just accepted still needs its
+    // acceptance terms, mark this visit's pending request so the secure page asks for
+    // them and the card save / prepay choice wait for them. Idempotent; a read error
+    // fails the call (the sheet offers Try again) rather than leave the gate off.
+    await require('../services/in-person-handoff').markTermsRequired(visit.id);
     const body = { requested: result.requested, action: result.action, reason: result.reason };
     if (result.action === 'link_created' && result.secureUrl) body.secureUrl = result.secureUrl;
     res.json(body);
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/schedule/:id/in-person-terms — Book at the Table hand-off mode
-// (owner 2026-11-02, GATE_IN_PERSON_CARD): the customer ticked "I accept estimate
-// {ref} and its terms" on the owner's phone, so the estimate gets the same
-// acceptance-terms record an online accept writes. A staff accept-on-book records
-// none. Runs none of the accept's side effects (the estimate is already accepted)
-// and is idempotent. Dark gate answers 404 {enabled:false}.
-router.post('/:id/in-person-terms', requireAdmin, async (req, res, next) => {
-  try {
-    if (!require('../config/feature-gates').inPersonCardLive()) return res.status(404).json({ enabled: false });
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
-    const { recordInPersonTerms } = require('../services/in-person-handoff');
-    const { ipFromReq, uaFromReq } = require('../services/audit-log');
-    const result = await recordInPersonTerms({
-      visitId: req.params.id,
-      technician: req.technician || { id: req.technicianId },
-      termsVersion: typeof req.body?.terms_version === 'string' ? req.body.terms_version.trim() : '',
-      termsScope: typeof req.body?.terms_scope === 'string' ? req.body.terms_scope.trim() : '',
-      consumerNoticeShown: req.body?.consumer_notice_shown === true,
-      ip: ipFromReq(req),
-      userAgent: uaFromReq(req),
-    });
-    if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code });
-    res.json({ success: true, recorded: result.recorded });
   } catch (err) { next(err); }
 });
 
