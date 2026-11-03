@@ -244,6 +244,12 @@ router.post('/:token/accept-terms', async (req, res) => {
   }
 });
 
+// Completion holds the client answers by re-rendering (409 with the code).
+const COMPLETE_HOLDS = {
+  plan_required: 'Please choose how you’d like to pay first.',
+  terms_required: TERMS_REQUIRED_MESSAGE,
+};
+
 router.post('/:token/complete', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
@@ -272,15 +278,13 @@ router.post('/:token/complete', async (req, res) => {
         // client maps this to its "nothing needed" state.
         return res.status(409).json({ error: 'This appointment no longer needs a card on file.', code: 'no_longer_needed' });
       }
-      if (result.code === 'terms_required') {
-        // Book at the Table: the estimate terms ticked at the table are not recorded yet.
-        return res.status(409).json({ error: TERMS_REQUIRED_MESSAGE, code: 'terms_required' });
-      }
-      if (result.code === 'plan_required') {
+      if (COMPLETE_HOLDS[result.code]) {
         // Plan-choice lane: a recurring plan-bearing request must record a
         // per_application selection before the capture may complete — the
-        // client re-renders the plan choice.
-        return res.status(409).json({ error: 'Please choose how you’d like to pay first.', code: 'plan_required' });
+        // client re-renders the plan choice. Book at the Table: the estimate
+        // terms ticked at the table are not recorded yet — the client shows the
+        // terms box again.
+        return res.status(409).json({ error: COMPLETE_HOLDS[result.code], code: result.code });
       }
       if (result.code === 'bank_not_allowed') {
         // Standalone Auto Pay link: bank capture is no longer offered for
