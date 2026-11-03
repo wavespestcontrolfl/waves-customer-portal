@@ -414,7 +414,7 @@ describe('evaluateGroupDivergence', () => {
     test.each([['paid', 'paid_never_ran'], ['prepaid', 'paid_never_ran'], ['processing', 'payment_pending_never_ran']])(
       '%s invoice that bills only the anchor tag → never-ran sibling excluded, clear',
       (status) => {
-        expect(verdictFor(status, [line('anchor-1'), { description: 'Card processing fee', amount: 3.34 }]))
+        expect(verdictFor(status, [line('anchor-1'), { _kind: 'discount', description: 'Loyalty credit', amount: -11.52 }]))
           .toEqual({ action: 'clear', reason: 'invoice_settled' });
       },
     );
@@ -429,8 +429,8 @@ describe('evaluateGroupDivergence', () => {
       expect(verdictFor('paid', [legacy]).reason).toBe('paid_never_ran');
     });
 
-    test('legacy line plus a tag for the anchor only still excludes (readable, tagged, none for mosquito)', () => {
-      expect(verdictFor('paid', [legacy, line('anchor-1')]).action).toBe('clear');
+    test('legacy untagged line plus a tag for the anchor only → the alert stands (the legacy line may bill the sibling)', () => {
+      expect(verdictFor('paid', [legacy, line('anchor-1')]).reason).toBe('paid_never_ran');
     });
 
     test.each([[null], [undefined], ['not an array'], [[]], [{}]])('unreadable / empty lines %j → alert', (lines) => {
@@ -484,6 +484,20 @@ describe('evaluateGroupDivergence', () => {
       expect([...taggedBilledMemberIds([line('anchor-1'), line('mosquito-1', 0)], ms)]).toEqual(['anchor-1']);
       expect(taggedBilledMemberIds([{ client_id: 'scheduled_anchor-1_primary_extra', amount: 5 }], ms).size).toBe(0);
       expect([...taggedBilledMemberIds([{ client_id: 'scheduled_anchor-1_primary', quantity: 2, unit_price: 5 }], ms)]).toEqual(['anchor-1']);
+    });
+
+    test('an untagged positive charge next to the tags proves nothing → the alert stands', () => {
+      // A hand-typed or hand-edited line could still carry the sibling's share.
+      const v = verdictFor('paid', [line('anchor-1'), { description: 'Mosquito Control', quantity: 1, unit_price: 85, amount: 85 }]);
+      expect(v.action).toBe('alert');
+      expect(v.reason).toBe('paid_never_ran');
+      expect(v.diverging.map((m) => m.id)).toEqual(['mosquito-1']);
+      expect(taggedBilledMemberIds([line('anchor-1'), { description: 'Setup fee', amount: 49 }], [a, mosquito]).size).toBe(0);
+    });
+
+    test('an add-on line tagged to a visit is not an untagged charge → hand-split still clears', () => {
+      expect(verdictFor('paid', [line('anchor-1'), { client_id: 'scheduled_anchor-1_addon_2', description: 'Add-on', amount: 20 }]))
+        .toEqual({ action: 'clear', reason: 'invoice_settled' });
     });
   });
 

@@ -323,15 +323,25 @@ function neverRanCoveredMembers(anchor, members, { includeAnchor = false } = {})
 // other visit, or an unreadable line list proves nothing, so it adds no id.
 // Returns the Set of covered member ids found (possibly empty); the caller
 // treats an EMPTY set as "no evidence either way" and keeps alerting.
+function lineAmount(li) {
+  const qty = li?.quantity != null ? Number(li.quantity) : 1;
+  return li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+}
+
 function taggedBilledMemberIds(governingLines, members) {
   const billed = new Set();
   if (!Array.isArray(governingLines)) return billed;
+  // A positive charge with no visit tag (a fee line, a hand-typed or
+  // hand-edited line) could still carry a never-ran member's share, so the
+  // tags prove nothing about who is billed: no evidence, the alert stands.
+  const untaggedCharge = governingLines.some((li) => lineAmount(li) > 0
+    && !/^scheduled_.+_(?:primary|addon_.+)$/.test(String(li?.client_id || '')));
+  if (untaggedCharge) return billed;
   const byTag = new Map(members.map((m) => [`scheduled_${m.id}_primary`, String(m.id)]));
   for (const li of governingLines) {
     const memberId = byTag.get(li?.client_id);
     if (memberId === undefined) continue;
-    const qty = li?.quantity != null ? Number(li.quantity) : 1;
-    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    const amt = lineAmount(li);
     if (Number.isFinite(amt) && amt > 0) billed.add(memberId);
   }
   return billed;
@@ -339,12 +349,15 @@ function taggedBilledMemberIds(governingLines, members) {
 
 // Never-ran members the settled governing invoice still bills, or might.
 // Fail-safe line rule (office hand-split case, prod 2026-10-31): a never-ran
-// member drops out ONLY when the invoice's lines are readable, carry at
-// least one positive base line tagged for some covered member, and carry NO
-// positive base line tagged for THIS member — i.e. the office already
-// removed this member's share, so there is nothing to refund or wait on.
-// Anything less (no lines, unreadable lines, zero tagged lines, untagged
-// legacy lines) leaves every never-ran member in place and the alert stands.
+// member drops out ONLY when the governing invoice is the STAMPED combined
+// invoice (the caller passes no lines for a replacement), its lines are
+// readable, every positive line carries a visit tag, at least one positive
+// base line is tagged for some covered member, and NO positive base line is
+// tagged for THIS member — i.e. the office already removed this member's
+// share, so there is nothing to refund or wait on. Anything less (no lines,
+// unreadable lines, zero tagged lines, an untagged positive charge, untagged
+// legacy lines, a replacement invoice) leaves every never-ran member in
+// place and the alert stands.
 function neverRanStillBilled(anchor, members, governingLines) {
   const neverRanMembers = neverRanCoveredMembers(anchor, members, { includeAnchor: true });
   const billed = taggedBilledMemberIds(governingLines, members);
@@ -1094,15 +1107,20 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
   });
   const anchorWithFlag = members.find((m) => String(m.id) === String(anchor.id));
 
-  // The governing invoice's parsed lines let a paid / pending verdict skip a
+  // The STAMPED invoice's parsed lines let a paid / pending verdict skip a
   // never-ran member the invoice no longer bills (see neverRanStillBilled).
-  // parseInvoiceLineItems reads an unreadable value as [] -> no evidence ->
-  // the alert stands.
+  // Only the stamped combined invoice is itemized one tagged line per member
+  // (itemizeFirstApplication); a replacement on the anchor ("create invoice
+  // from service") tags only the anchor, whatever it bills, so its tags say
+  // nothing about the siblings' shares: no lines are passed for it and the
+  // alert stands. parseInvoiceLineItems reads an unreadable value as [] ->
+  // no evidence -> the alert stands.
+  const governingIsStamped = String(governingInvoice.id) === String(freshInvoice.id);
   const verdict = evaluateGroupDivergence({
     anchor: anchorWithFlag,
     members,
     invoiceStatus: governingInvoice.status,
-    governingLines: InvoiceService._parseInvoiceLineItems(governingInvoice.line_items),
+    governingLines: governingIsStamped ? InvoiceService._parseInvoiceLineItems(governingInvoice.line_items) : null,
   });
   if (verdict.action === 'clear') {
     const cleared = await clearStandingAlerts(conn, prefix);
