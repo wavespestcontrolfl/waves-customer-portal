@@ -81,7 +81,13 @@ final class HandoffLock {
         let context = LAContext()
         var policyError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
-            return .unavailable
+            // Only a phone with no passcode at all counts as "cannot check".
+            // Every other reason (lockout, a busy or missing sensor, ...) is
+            // not proof of the owner, so the lock stays on.
+            if let code = policyError?.code, code == LAError.passcodeNotSet.rawValue {
+                return .unavailable
+            }
+            return .denied
         }
         do {
             let ok = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
