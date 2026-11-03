@@ -662,7 +662,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // sends nothing more.
       if (!isDuplicateSubmission) {
         await ringRepeatFormAlert(customer, attachedLead?.id || null);
-        await answerCustomerQuoteForm({ customer, phoneFormatted, firstName, location, leadSource, serviceInterest });
+        await answerCustomerQuoteForm({ customer, phoneFormatted, location, leadSource, serviceInterest });
       }
       return res.json({
         success: true,
@@ -2120,13 +2120,13 @@ async function ringRepeatFormAlert(customer, attachedLeadId = null) {
 // CUSTOMER_STAGES and FORMER_CUSTOMER_STAGES. A lead row keeps its own rules
 // (ringRepeatFormAlert) and any other stage is unchanged. Never throws: the form is already saved, and the
 // text and the alert each run on their own.
-async function answerCustomerQuoteForm({ customer, phoneFormatted, firstName, location, leadSource, serviceInterest }) {
+async function answerCustomerQuoteForm({ customer, phoneFormatted, location, leadSource, serviceInterest }) {
   if (!isEnabled('currentCustomerQuoteText')) return;
   const { CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
   const current = CUSTOMER_STAGES.includes(customer?.pipeline_stage);
   if (!current && !FORMER_CUSTOMER_STAGES.includes(customer?.pipeline_stage)) return;
   try {
-    await sendCurrentCustomerQuoteText({ customer, phoneFormatted, firstName, location, leadSource });
+    await sendCurrentCustomerQuoteText({ customer, phoneFormatted, location, leadSource });
   } catch (e) {
     logger.error(`[lead-webhook] current-customer quote text failed for customer ${customer.id}: ${e.code || e.name || 'error'}`);
   }

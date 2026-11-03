@@ -4265,7 +4265,9 @@ row in `active_customer`, `won`, `at_risk`, `churned`, `past_customer` or
 existing-customer branch (its note; no leads row, intake state, draft
 or new-lead bell) and the response is unchanged. Outside the 5-minute duplicate
 window, the submitted phone (the one the row matched) gets ONE text, the lead
-text's CALL or TEXT offer without the STOP line (`sendCurrentCustomerQuoteText`,
+text's CALL or TEXT offer without the STOP line, greeted by the first name on
+the matched customer row (the submitted name is never sent back to the phone;
+`sendCurrentCustomerQuoteText`,
 template `current_customer_quote_text`, entry point
 `current_customer_quote_text`, at most one a day per phone through the
 `current_customer_quote_texts` claim rows, one per attempt), and one Leads admin

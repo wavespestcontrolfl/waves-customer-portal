@@ -47,13 +47,11 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 const { sendCurrentCustomerQuoteText } = require('../services/lead-auto-reply');
 
 const offer = (name) => `Hello ${name}, Waves here. We got your quote request. Reply CALL and we'll call you shortly, or TEXT to handle it right here.`;
-const args = (extra = {}) => ({
-  customer: { id: 'cust-1', first_name: 'Maria' },
+const args = (customer = {}) => ({
+  customer: { id: 'cust-1', first_name: 'Maria', ...customer },
   phoneFormatted: '+19415550142',
-  firstName: 'Maria',
   location: { id: 'loc-1' },
   leadSource: { source: 'website' },
-  ...extra,
 });
 // Every settle write names this attempt's row and nothing else.
 const ownRow = [['where', { id: 'claim-1' }]];
@@ -133,13 +131,20 @@ test('a template that will not render claims nothing and sends nothing', async (
   expect(mockSend).not.toHaveBeenCalled();
 });
 
-test('no typed first name: the profile name greets them', async () => {
-  await sendCurrentCustomerQuoteText(args({ firstName: '' }));
+test('the name on the customer row greets them; a typed name is never an input', async () => {
+  // A public form's typed "name" could be a link; the sender takes no name argument at all.
+  await sendCurrentCustomerQuoteText({ ...args(), firstName: 'Billing: https://example.invalid/x' });
   expect(mockRender.mock.calls[0][1]).toEqual({ first_name: 'Maria' });
+  expect(mockSend.mock.calls[0][0].body).toBe(offer('Maria'));
 });
 
-test('a name that would add a segment falls back to "there"', async () => {
-  await sendCurrentCustomerQuoteText(args({ firstName: 'Maximiliana Bartholomew-Featherstonehaugh Constantinople' }));
+test('no first name on file: "there"', async () => {
+  await sendCurrentCustomerQuoteText(args({ first_name: null }));
+  expect(mockRender.mock.calls[0][1]).toEqual({ first_name: 'there' });
+});
+
+test('a name on file that would add a segment falls back to "there"', async () => {
+  await sendCurrentCustomerQuoteText(args({ first_name: 'Maximiliana Bartholomew-Featherstonehaugh Constantinople' }));
   expect(mockRender).toHaveBeenCalledTimes(2);
   expect(mockSend.mock.calls[0][0].body).toBe(offer('there'));
 });

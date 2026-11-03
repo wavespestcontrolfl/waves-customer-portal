@@ -57,7 +57,6 @@ jest.setTimeout(30000);
   const input = (phone, customerId = randomUUID()) => ({
     customer: { id: customerId, first_name: 'Maria' },
     phoneFormatted: phone,
-    firstName: 'Maria',
     location: { id: 'loc-1' },
     leadSource: { source: 'website' },
   });

@@ -139,9 +139,8 @@ describe('gate on: a current or past customer sends the quote form', () => {
     expect(res.body).toMatchObject({ success: true, customerId: 'cust-1', existingCustomer: true, deduped: false });
     expect(mockQuoteText).toHaveBeenCalledTimes(1);
     expect(mockQuoteText.mock.calls[0][0]).toMatchObject({
-      customer: expect.objectContaining({ id: 'cust-1', pipeline_stage: 'active_customer' }),
+      customer: expect.objectContaining({ id: 'cust-1', first_name: 'Testy', pipeline_stage: 'active_customer' }),
       phoneFormatted: PHONE,
-      firstName: 'Testy',
       location: expect.objectContaining({ id: expect.any(String) }),
       leadSource: expect.objectContaining({ source: expect.any(String) }),
     });
@@ -171,6 +170,16 @@ describe('gate on: a current or past customer sends the quote form', () => {
     // The text goes before the alert, and the form never becomes a lead.
     expect(mockQuoteText.mock.invocationCallOrder[0]).toBeLessThan(notifyAdmin.mock.invocationCallOrder[0]);
     expect(mockCalls.some((c) => c.table === 'leads' && c.op === 'insert')).toBe(false);
+  });
+
+  test('a typed name never reaches the text: the sender gets the customer row only', async () => {
+    const router = load('true');
+    mockTables.customers = [row()];
+    await submit(router, { name: 'Billing: https://example.invalid/x' });
+    const sent = mockQuoteText.mock.calls[0][0];
+    expect(sent).not.toHaveProperty('firstName');
+    expect(sent.customer.first_name).toBe('Testy');
+    expect(JSON.stringify(sent)).not.toContain('example.invalid');
   });
 
   test('the service they asked about is in the why', async () => {

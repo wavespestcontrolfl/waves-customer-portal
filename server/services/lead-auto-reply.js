@@ -406,9 +406,12 @@ async function settleCurrentCustomerQuoteText(claimId, smsResult) {
   }
 }
 
-async function sendCurrentCustomerQuoteText({ customer, phoneFormatted, firstName, location, leadSource }) {
-  // Rendered before the claim: a template failure claims nothing.
-  const body = await renderLeadAutoReply(firstName || customer.first_name, customer.id, CURRENT_CUSTOMER_QUOTE_TEXT);
+async function sendCurrentCustomerQuoteText({ customer, phoneFormatted, location, leadSource }) {
+  // Greeted by the first name on the customer row, never the typed one: the
+  // form is public, so a typed "name" (a link, an instruction) must never reach
+  // a customer's phone from our number. Rendered before the claim: a template
+  // failure claims nothing.
+  const body = await renderLeadAutoReply(customer.first_name, customer.id, CURRENT_CUSTOMER_QUOTE_TEXT);
   const claimId = await claimCurrentCustomerQuoteText(String(phoneFormatted).slice(-10), customer.id);
   if (!claimId) {
     logger.info(`[lead-auto-reply] Current-customer quote text skipped for customer ${customer.id}: one went to this phone in the last day`);
