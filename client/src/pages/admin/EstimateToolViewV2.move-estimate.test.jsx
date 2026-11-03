@@ -88,4 +88,28 @@ describe('new-home estimate setup-fee waiver in the builder', () => {
     expect(options.moveId).toBe('move-1');
     expect(options).not.toHaveProperty('moveEstimateId');
   });
+
+  it('a move that fails to load keeps Generate off and offers a retry or a normal estimate, never a silent ordinary one', async () => {
+    let attempts = 0;
+    fetch.mockImplementation((url) => {
+      const path = String(url);
+      if (path.endsWith('/estimate-source')) {
+        attempts += 1;
+        return attempts === 1 ? response({ error: 'Could not load the move for an estimate' }, 500) : response(moveSource);
+      }
+      if (path.includes('/discounts')) return response([]);
+      return response({});
+    });
+    const onStartNew = vi.fn();
+    renderEditor({ moveId: 'move-1', initialCustomerId: 'cust-1', onStartNew });
+    const banner = await screen.findByTestId('move-estimate-banner');
+    await waitFor(() => expect(banner).toHaveTextContent('Could not load the move for an estimate'));
+    expect(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Start a normal estimate instead' }));
+    expect(onStartNew).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByDisplayValue('123 Palm Ave, Venice, FL 34285');
+    expect(attempts).toBe(2);
+    expect(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ })).not.toBeDisabled();
+  });
 });

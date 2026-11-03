@@ -41,6 +41,26 @@ function errorWithStatus(message, statusCode) {
   return err;
 }
 
+// Moving PR B1: a new-home estimate stays bound to its move: the move's own
+// customer and the move's new address. A revise that changes either is
+// refused (409); staff start a normal estimate instead.
+async function assertMoveEstimateBinding(conn, row, writeFields) {
+  const moveId = parseStoredEstimateData(row && row.estimate_data)?.move?.moveId;
+  if (!moveId) return;
+  const move = await conn('customer_moves').where({ id: moveId }).first('id', 'customer_id', 'normalized_address');
+  if (!move) return;
+  const nextCustomerId = writeFields.customer_id === undefined ? row.customer_id : writeFields.customer_id;
+  const nextAddress = writeFields.address === undefined ? row.address : writeFields.address;
+  const refusal = String(nextCustomerId || '') !== String(move.customer_id)
+    ? ['move_customer_changed', 'This estimate is for this customer\'s move, so its customer cannot change. Start a normal estimate instead.']
+    : !Moves.addressMatchesMove(nextAddress, move)
+      && ['move_address_changed', 'This estimate is for the move to the new address, so its address cannot change. Start a normal estimate for another address.'];
+  if (!refusal) return;
+  const err = errorWithStatus(refusal[1], 409);
+  err.code = refusal[0];
+  throw err;
+}
+
 // A moving check's refusal (customer-moves MoveError) as this module's HTTP error.
 async function moveOrHttpError(check) {
   try {
@@ -3274,17 +3294,8 @@ async function reviseAdminEstimate({
     pricingOut,
     requireLivePricing,
   });
-  // Moving PR B1: a new-home estimate stays at its move's new address. A
-  // revise that changes the premise is refused; staff start a normal estimate.
-  if (storedEstimateData?.move?.moveId) {
-    const nextAddress = writeFields.address === undefined ? estimate.address : writeFields.address;
-    const move = await database('customer_moves').where({ id: storedEstimateData.move.moveId }).first('id', 'normalized_address');
-    if (move && !Moves.addressMatchesMove(nextAddress, move)) {
-      const err = errorWithStatus('This estimate is for the move to the new address, so its address cannot change. Start a normal estimate for another address.', 409);
-      err.code = 'move_address_changed';
-      throw err;
-    }
-  }
+  // Moving PR B1: early answer for the dry-run preflight; the LOCKED pass below repeats it.
+  await assertMoveEstimateBinding(database, estimate, writeFields);
   // Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
   // pre-push codex P0): a delivered estimate's bearer link renders whatever
   // is stored, so a revision whose recompute fell back to the browser
@@ -3624,6 +3635,7 @@ async function reviseAdminEstimate({
     }
     await assertNoFallbackRevisionInScheduledGroup(trx, lockedPrior, writeFields);
     await assertLiveRowMayJoinGroup(trx, lockedPrior, writeFields);
+    await assertMoveEstimateBinding(trx, lockedPrior, writeFields);
     // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
     // r8c): writeFields.estimate_data was built from the pre-read
     // snapshot, so a delivery claim or an invalidation marker recorded

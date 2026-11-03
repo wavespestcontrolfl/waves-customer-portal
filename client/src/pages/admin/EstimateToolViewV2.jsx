@@ -2498,6 +2498,7 @@ export default function EstimateToolViewV2({
   // Never routed through addAnotherProperty: a move is not a multi-property
   // group (no groupAnchorId, no Multi-Home discount).
   const [moveSeed, setMoveSeed] = useState({ moveId: "", status: "idle", data: null, droppedDiscountLabel: "", error: "", estimateId: null });
+  const [moveSeedAttempt, setMoveSeedAttempt] = useState(0);
   useEffect(() => {
     if (!moveId || editEstimateId) return undefined;
     const customerId = initialCustomerId;
@@ -2545,9 +2546,12 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-  }, [moveId, editEstimateId, initialCustomerId]);
+  }, [moveId, editEstimateId, initialCustomerId, moveSeedAttempt]);
   const editMoveEstimate = editMode?.id && moveEstimate?.estimateId === editMode.id ? moveEstimate : null;
   const moveMode = !!moveId && !editEstimateId && !editMode?.id && moveSeed.moveId === moveId;
+  // Until this move's data has seeded the form (loading, failed, or the first
+  // render before the fetch starts), Generate and Save stay off.
+  const moveSeedPending = !!moveId && !editEstimateId && !editMode?.id && !(moveSeed.moveId === moveId && moveSeed.status === "ready");
   // Sent with calculate and create only after the move's data seeded the form.
   const moveRequestId = moveMode && moveSeed.status === "ready" ? moveId : "";
 
@@ -4894,6 +4898,9 @@ export default function EstimateToolViewV2({
   // the pre-generate value (React state doesn't update mid-handler).
   async function doSave(estimateOverride = null, { deferInvoiceTotals = false } = {}) {
     if (editEstimateId && !editMode) return null;
+    // A new-home estimate saves only once its move seeded the form: without
+    // it the save would be an ordinary estimate with no move link or waiver.
+    if (moveSeedPending) return null;
     if (saveInFlightRef.current) return null;
     const estimateToSave = estimateOverride || estimate;
     if (!estimateToSave) return null;
@@ -5462,7 +5469,7 @@ export default function EstimateToolViewV2({
   // Present-mode trust gates: a custom-quote estimate has no firm price to show,
   // and an unsaved one hasn't been through the server-authoritative recompute.
   const presentQuoteRequired = !!estimate && estimateRequiresQuote(estimate);
-  const generateBusy = generating || saving || sending || (!!editEstimateId && !editMode) || (moveMode && moveSeed.status === "loading");
+  const generateBusy = generating || saving || sending || (!!editEstimateId && !editMode) || moveSeedPending;
 
   // ═══════════════════════════════════════════════════════════════
   // RENDER
@@ -5520,6 +5527,10 @@ export default function EstimateToolViewV2({
                 {moveSeed.estimateId && (
                   <> <a className="underline" href={`/admin/estimates?editEstimateId=${encodeURIComponent(moveSeed.estimateId)}`}>Open new-home estimate</a></>
                 )}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setMoveSeedAttempt((n) => n + 1)}>Try again</Button>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => onStartNew?.()}>Start a normal estimate instead</Button>
+                </div>
               </div>
             )}
             {moveSeed.status === "ready" && (

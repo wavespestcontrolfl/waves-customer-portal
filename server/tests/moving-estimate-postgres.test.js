@@ -217,9 +217,9 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       const spy = async (estimateData) => { seen.push(JSON.parse(JSON.stringify(estimateData))); return { recomputed: false, reason: 'NO_INPUTS' }; };
       const { estimate } = await create(move, {}, { recompute: spy });
       expect(seen[0].operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true, type: null, value: 0 });
-      expect(seen[0].move).toEqual({ moveId: move.id, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
+      expect(seen[0].move).toEqual({ moveId: move.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
       const data = await storedData(estimate.id);
-      expect(data.move).toEqual({ moveId: move.id, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
+      expect(data.move).toEqual({ moveId: move.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
       expect(data.operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true });
       expect(data.operatorPriceAdjustment.internalReason).toMatch(/moving/i);
       const after = await trx('customer_moves').where({ id: move.id }).first();
@@ -271,9 +271,15 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       });
       await revise({ notes: 'Revised' });
       const data = await storedData(estimate.id);
-      expect(data.move).toEqual({ moveId: move.id, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
+      expect(data.move).toEqual({ moveId: move.id, address: NEW_ADDRESS, moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
       expect(data.operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true });
       await expect(revise({ address: '1 Old Street, Bradenton, FL 34205' })).rejects.toMatchObject({ statusCode: 409, code: 'move_address_changed' });
+      const otherCustomer = crypto.randomUUID();
+      await trx('customers').insert({ id: otherCustomer, first_name: 'Sam', last_name: 'Sample', phone: '+19415550199' });
+      // Another customer: the general linked-customer guard refuses first; the
+      // move binding repeats the check on the locked row.
+      await expect(revise({ customerId: otherCustomer })).rejects.toMatchObject({ statusCode: 409 });
+      expect((await trx('estimates').where({ id: estimate.id }).first('customer_id')).customer_id).toBe(customerId);
       // The waiver stays with the estimate after the gate goes off: the price the customer saw does not change.
       delete process.env.GATE_MOVING_ESTIMATE;
       await revise({ notes: 'Gate off' });
@@ -304,11 +310,34 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       expect(await Moves.moveForEstimate(estimate.id)).toMatchObject({ id: move.id, move_in_date: '2026-11-26' });
 
       const other = await resubmit(move.id, '52 Other Lane, Venice FL 34285', '52 Other Lane');
-      expect(other.estimate_id).toBeNull();
-      expect(await Moves.moveForEstimate(estimate.id)).toBeNull();
       const request = await trx('service_requests').where({ id: other.service_request_id }).first();
-      expect(request.description).toMatch(/differs from the one the new-home estimate was made for/);
+      expect(request.description).toMatch(/can no longer open or accept that estimate/);
+      // The old estimate leaves every customer surface through the shared estimate guard.
+      const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+      expect(await callSideBlockForEstimateData(trx, await storedData(estimate.id), { estimateStatus: 'draft' })).toBe('move_address_changed');
+      // The card offers a new estimate, and its save replaces the link.
       expect(await Moves.newHomeAction(other)).toEqual({ action: 'start', estimateId: null, reason: null });
+      const { estimate: replacement } = await create(move, {
+        address: '52 Other Lane, Venice, FL 34285',
+        estimateData: { inputs: { address: '52 Other Lane, Venice, FL 34285', svcPest: true }, result: { total: 60 } },
+      });
+      expect((await trx('customer_moves').where({ id: move.id }).first()).estimate_id).toBe(replacement.id);
+      expect(await callSideBlockForEstimateData(trx, await storedData(replacement.id), { estimateStatus: 'draft' })).toBeNull();
+    });
+
+    test('a cancelled or missing move takes its estimate off the customer surface; an applied one does not', async () => {
+      const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+      const move = await insertMove();
+      const { estimate } = await create(move);
+      const data = await storedData(estimate.id);
+      expect(await callSideBlockForEstimateData(trx, data)).toBeNull();
+      await trx('customer_moves').where({ id: move.id }).update({ status: 'closed', closed_reason: 'applied', closed_at: new Date() });
+      expect(await callSideBlockForEstimateData(trx, data)).toBeNull();
+      await trx('customer_moves').where({ id: move.id }).update({ closed_reason: 'cancelled' });
+      expect(await callSideBlockForEstimateData(trx, data)).toBe('move_closed');
+      expect(await callSideBlockForEstimateData(trx, { ...data, move: { ...data.move, moveId: crypto.randomUUID() } })).toBe('move_missing');
+      // An estimate with no move stamp is untouched by the move rule.
+      expect(await callSideBlockForEstimateData(trx, { inputs: {} })).toBeNull();
     });
 
     test('an out-of-area move steers no estimate', async () => {

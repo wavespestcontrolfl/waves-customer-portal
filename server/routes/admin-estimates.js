@@ -6105,7 +6105,10 @@ async function markAcceptedHandler(req, res, next) {
         const blocked = await callSideBlockForEstimateData(db, data, { estimateStatus: row?.status });
         if (blocked) {
           return res.status(409).json({
-            error: 'This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.',
+            error: String(blocked).startsWith('move_')
+              // Moving PR B1: the move behind a new-home estimate changed.
+              ? 'This new-home estimate no longer matches the customer\'s move and cannot be accepted. Make a new one from the Moving card.'
+              : 'This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.',
           });
         }
       }

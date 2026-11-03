@@ -223,8 +223,11 @@ describe('the new-home estimate stamps (moving PR B1)', () => {
   });
 
   test('the move stamp carries calendar dates, never a time-zone-shifted day', () => {
-    expect(Moves.moveEstimateStamp(move)).toEqual({ moveId: 'move-1', moveOutDate: '2026-11-20', moveInDate: '2026-11-25' });
-    expect(Moves.moveEstimateStamp({ id: 'm', move_out_date: null, move_in_date: null })).toEqual({ moveId: 'm', moveOutDate: null, moveInDate: null });
+    expect(Moves.moveEstimateStamp(move)).toEqual({
+      moveId: 'move-1', address: '40 Sample Road, Venice, FL 34285', moveOutDate: '2026-11-20', moveInDate: '2026-11-25',
+    });
+    expect(Moves.moveEstimateStamp({ id: 'm', move_out_date: null, move_in_date: null }))
+      .toEqual({ moveId: 'm', address: '', moveOutDate: null, moveInDate: null });
   });
 
   test('only the move\'s new street, in its city or ZIP, matches', () => {

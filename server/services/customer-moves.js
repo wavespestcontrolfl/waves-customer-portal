@@ -454,20 +454,19 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
     const description = requestDescription({ ...address, moveOut, moveIn, services });
     const subject = requestSubject(address.normalized, hasAddress);
     // Moving PR B1: a new-home estimate was priced for the address on file. A
-    // resubmitted address that is no longer that house (or not in area) drops
-    // the link, so the old estimate stops steering the move; the office makes a new one.
-    const dropsEstimate = !!locked.estimate_id && !(address.verdict === 'in_area'
-      && addressMatchesMove(addressLine(parseJson(locked.normalized_address)), { normalized_address: address.normalized }));
+    // resubmitted address that is not that house takes the estimate off the
+    // customer's surfaces (moveLinkBlock) and frees the card for a new one.
+    const estimateSuperseded = !!locked.estimate_id
+      && !addressMatchesMove(addressLine(parseJson(locked.normalized_address)), { normalized_address: address.normalized });
     const request = await writeOfficeItem(trx, {
       move: locked,
       subject,
-      description: dropsEstimate
-        ? `${description}\nThe new address differs from the one the new-home estimate was made for. Make a new estimate from the Moving card.`
+      description: estimateSuperseded
+        ? `${description}\nThe new address is not the one the new-home estimate was made for, so the customer can no longer open or accept that estimate. Make a new estimate from the Moving card.`
         : description,
       now,
     });
     const [updated] = await trx('customer_moves').where({ id: locked.id }).update({
-      ...(dropsEstimate ? { estimate_id: null } : {}),
       typed_address: address.typed,
       normalized_address: address.normalized ? JSON.stringify(address.normalized) : null,
       address_verdict: address.typed ? address.verdict : null,
@@ -624,14 +623,16 @@ function addressComplete(n) {
   return !!(n && n.line1 && n.city && n.state && n.zip);
 }
 
-// The move's live estimate (not declined, expired or archived), or null.
+// The move's live estimate (not declined, expired or archived, and still for
+// the move's current address), or null.
 async function liveMoveEstimate(move, conn = db) {
   if (!move || !move.estimate_id) return null;
-  return conn('estimates')
+  const estimate = await conn('estimates')
     .where({ id: move.estimate_id })
     .whereNull('archived_at')
     .whereNotIn('status', DEAD_ESTIMATE_STATUSES)
-    .first('id', 'status');
+    .first('id', 'status', 'address');
+  return estimate && addressMatchesMove(estimate.address, move) ? estimate : null;
 }
 
 // Why this move cannot get a new-home estimate (a NEW_HOME_REFUSALS code), or null.
@@ -805,13 +806,38 @@ async function attachMoveEstimate(trx, moveId, estimateId) {
   await trx('customer_moves').where({ id: moveId }).update({ estimate_id: estimateId, updated_at: trx.fn.now() });
 }
 
-// estimate_data.move: server-owned, carried across every revise.
+// estimate_data.move: server-owned, carried across every revise. The address
+// is the one the estimate was made for (moveLinkBlock compares it).
 function moveEstimateStamp(move) {
   return {
     moveId: move.id,
+    address: addressLine(parseJson(move.normalized_address)),
     moveOutDate: dateOnlyString(move.move_out_date) || null,
     moveInDate: dateOnlyString(move.move_in_date) || null,
   };
+}
+
+/**
+ * A new-home estimate's customer-surface verdict, read by the shared estimate
+ * guard (utils/estimate-claim-sql.js callSideBlockForEstimateData): null while
+ * its move still stands behind it; a reason once the move is gone, was
+ * cancelled, or now names another address. Fails closed.
+ */
+async function moveLinkBlock(conn, data) {
+  const stamp = data && data.move;
+  if (!stamp || typeof stamp !== 'object' || !stamp.moveId) return null;
+  try {
+    const move = await conn('customer_moves')
+      .where({ id: stamp.moveId })
+      .first('id', 'status', 'closed_reason', 'normalized_address');
+    if (!move) return 'move_missing';
+    if (move.status === 'closed' && move.closed_reason !== 'applied') return 'move_closed';
+    if (stamp.address && !addressMatchesMove(stamp.address, move)) return 'move_address_changed';
+    return null;
+  } catch (err) {
+    logger.warn(`[customer-moves] move link verdict failed (${errCode(err)})`);
+    return 'move_verdict_unavailable';
+  }
 }
 
 // estimate_data.operatorPriceAdjustment with the setup fee waived. `base` is
@@ -869,6 +895,7 @@ module.exports = {
   lockMoveForEstimate,
   attachMoveEstimate,
   moveEstimateStamp,
+  moveLinkBlock,
   withMoveSetupWaiver,
   moveForEstimate,
   _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert },
