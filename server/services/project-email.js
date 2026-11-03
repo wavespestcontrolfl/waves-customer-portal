@@ -37,7 +37,9 @@ const PREP_TEMPLATE_BY_PROJECT_TYPE = Object.freeze({
   wildlife_trapping: 'prep.wildlife',
 });
 
-const PREP_TEMPLATE_KEYS = new Set(Object.values(PREP_TEMPLATE_BY_PROJECT_TYPE));
+// prep.bed_bug_heat has no project type: it is chosen from the visit's service
+// name (utils/bed-bug-heat-service.js), so it joins the key set directly.
+const PREP_TEMPLATE_KEYS = new Set([...Object.values(PREP_TEMPLATE_BY_PROJECT_TYPE), 'prep.bed_bug_heat']);
 
 function clean(value) {
   return String(value || '').trim();
