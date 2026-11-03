@@ -40,6 +40,7 @@ const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(
 const OBSERVABLE_SETUP_INTENT_BRANCHES = new Set([
   'estimate_card_hold',
   'appointment_card_request',
+  'admin_tap_to_pay',
   'autopay_setup_link',
   'estimate_recurring_card',
   'covered_capture',
@@ -5018,6 +5019,22 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
   // the page path (only a pending row completes). Transient failures THROW
   // so Stripe's retry schedule re-runs it; permanent states (mismatch,
   // no-longer-needed visit, already completed) ack and drop.
+  // Tap to Pay card save (GATE_TAP_SAVE_CARD): a card_present SetupIntent with
+  // no `purpose`, marked by source + request id. Recovery for an app that
+  // disconnected after Stripe succeeded or whose terminal token expired; the
+  // same verify + completion tail as /complete-setup, so whichever finishes
+  // first wins. Transient states throw so Stripe redelivers; permanent states
+  // (empty generated_card, request closed) ack and drop.
+  if (setupIntent.metadata?.source === 'admin_tap_to_pay' && setupIntent.metadata?.appointment_card_request_id) {
+    const result = await require('../services/terminal-save-card').completeTerminalSetupFromWebhook(setupIntent);
+    if (!result.ok && result.retry) {
+      throw annotateSetupIntentWebhookError(
+        new Error(`tap card save ${setupIntent.id} ${result.code} — retry`),
+        { handlerBranch: 'admin_tap_to_pay', retryClass: 'expected_retry', reasonCode: result.code },
+      );
+    }
+    return;
+  }
   if (setupIntent.metadata?.purpose === 'appointment_card_request') {
     const AppointmentCardRequests = require('../services/appointment-card-request');
     const result = await AppointmentCardRequests.completeSecureCardCaptureFromWebhook(setupIntent);

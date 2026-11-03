@@ -6303,6 +6303,56 @@ adjustments do not add up to the handoff amount, every item carries
 never shows prices that disagree with the charge; a failure building them
 returns empty lists, never an error, because the jti is already burned. No
 contact field, address, note or other invoice rides this reply.
+`POST /api/stripe/terminal/validate-save-card-handoff` (machine-to-machine
+burn of the 60s single-use Tap to Pay CARD-SAVE handoff JWT — the token IS the
+auth; no charge ever happens on this surface). Minted by the admin-only,
+`GATE_TAP_SAVE_CARD`-gated `POST /save-card-handoff` (404 while dark; body
+`{ secure_token, consent_text_version, agreed }`; admin session and two-step
+rules as `/handoff`; same advisory-locked, per-tech `HANDOFF_MINTS_PER_HOUR`
+budget). Same secret, `iss` `waves-portal`, `aud` `waves-pay-ios` and 60s TTL as
+`/validate-handoff`; the JWT carries `kind: 'save_card'` and `card_request_id`
+and no invoice fields. Verification: signature/iss/aud/exp (401
+`signature_invalid`, 410 `expired`), `kind === 'save_card'` (a payment token is
+refused with 400 `wrong_token_kind` BEFORE the burn, and `/validate-handoff`
+refuses a save_card token the same way), then ONE atomic
+`UPDATE terminal_handoff_tokens SET used_at = now() WHERE jti = ? AND kind =
+'save_card' AND used_at IS NULL AND expires_at > now()` (410 `replay` /
+`expired`). The row, not the claim, is the authority: technician, two-step
+proof and card request must agree with the claims (else 401
+`signature_invalid`); the technician must still be active (409
+`technician_not_active`) with the same token version and two-step proof (401
+`staff_session_revoked`); the card request must still be pending, its visit
+still need a card and the plan rule hold (409 `request_changed`); the
+SetupIntent must still await a card (409 `setup_intent_not_usable`, 503
+`setup_intent_unavailable` when Stripe cannot be read). Every outcome is
+audited (`terminal.handoff.validate`, metadata `kind: 'save_card'`). RESPONSE:
+`kind: 'save_card'`, `auth_token` (a 15-minute `scope: 'terminal'` staff JWT
+with `save_card: true` and the `jti`), `setup_intent_client_secret`,
+`setup_intent_id`, `customer_name` (first + last, or null), `service_name` (the
+visit's stored `service_type`) and `card_request_id`. The client secret is the
+only secret in the reply and works only for that one `card_present`
+SetupIntent; no contact field, address, note, price or invoice rides it. THE
+CHARGE FENCE: `terminalAuthenticate` refuses any `save_card: true` token with
+403 `save_card_token` on `/payment-intent` and `/apply-surcharge` (and a
+save_card handoff row is refused by jti there too), `/connection-token` takes
+both kinds, and `/complete-setup` takes only a save_card token. The 5-minute sweeper of orphaned validated rows targets `kind = 'collect'` only.
+PRIVACY HEADERS: the reply carries a customer name, the SetupIntent client
+secret and a terminal bearer token, so `/validate-save-card-handoff` (and
+`/save-card-handoff` and `/complete-setup`, which return the handoff token and
+the saved card's brand, last four and funding) answer with the shared `noStore`
+middleware (`Cache-Control: no-store, no-cache, must-revalidate`, `Pragma:
+no-cache`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`)
+on every outcome, success and refusal: it is mounted at those three exact paths in `server/index.js` BEFORE the global `/api` limiter and the body parsers (so a 429, a malformed-JSON 400 or a 413 carries it) and ahead of the mint's dark-gate 404 (answered in `server/index.js` for the mint path only, before the limiter and parsers), and the router re-stamps it. WEBHOOK RECOVERY: a `setup_intent.succeeded`
+event whose SetupIntent metadata has `source: 'admin_tap_to_pay'` and an
+`appointment_card_request_id` (no `purpose`) runs the SAME verify and completion
+tail as `/complete-setup` (`completeTerminalSetupForRequest`), so a save the app
+never finished (disconnect, or the 15-minute terminal token expired) still saves
+the generated card and enrolls Auto Pay. Whichever of the webhook and
+`/complete-setup` finishes first wins; the other finds the completed row. A
+transient state (`verification_failed`, `completion_failed`,
+`completion_in_progress`) throws so Stripe redelivers; an empty `generated_card`
+leaves the request pending, acks, and raises one deduped Billing bell
+(`tap_card_not_saveable:<setup_intent_id>`).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).
@@ -7084,6 +7134,22 @@ reused and reopened on a resubmit), an `activity_log` row and one admin
 alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
 receipt sentences. It changes no visit, price, property or primary address
 and sends nothing to a customer.
+Move pause (moving PR 2b, owner Q4, 2026-11-02): while `GATE_MOVING_PAUSE`
+is on (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the
+receipt of a submit with no checked address on file and a move-out date
+follows the customer's billing lane (`customer-moves.js` `pauseLane`): a
+customer billed per visit reads that the visits pause after the move-out
+date until the new address comes in, for up to 60 days; an annual-prepay or
+monthly member, or a move whose pause the office took over (a move-out
+date changed after the pause ran), reads that we will contact them about the
+visits booked after that date; anyone else reads the plain no-address
+sentence. A resubmit that changes the move-out date of a paused move hands
+it to the office (`pause_state` `office`) under the move's row lock. The GET
+payload, the `view` and every other answer are unchanged. The daily
+move-pause job (not a route) closes a paused move with still no address 60
+days after its move-out date (`closed_reason` `pause_expired`); from then on
+its token is the generic 404, like any closed move. Gate off: the plain
+no-address sentence, and no move closes this way.
 New-home estimates on the estimate routes (moving PR B1, owner 2026-11-02):
 `/estimate/:token` and its data, accept and decline routes,
 `/api/public/estimates/:token/find-slots`, `/available-slots`, `/reserve`,
