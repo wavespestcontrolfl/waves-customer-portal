@@ -1045,7 +1045,12 @@ const SERIES_ROW_COLUMNS = ['id', 'status', 'customer_id', 'service_type', 'sche
 
 const sameId = (a, b) => a != null && b != null && String(a) === String(b);
 const visitDay = (row) => dateOnlyString(row.scheduled_date);
-const inSeries = (row) => !!(row.recurring_parent_id || row.is_recurring || row.recurring_pattern);
+// A visit of a recurring series: a child of one, or a root marked recurring.
+// 'one_time' is the codebase's one-time cadence marker (area add-on rows,
+// hand-repaired rows; recurring-schedule-audit and visit-prep skip it), never a plan.
+const ONE_TIME_PATTERN = 'one_time';
+const inSeries = (row) => !!(row.recurring_parent_id
+  || ((row.is_recurring || row.recurring_pattern) && row.recurring_pattern !== ONE_TIME_PATTERN));
 
 // One plan or visit in plain words: { name, frequency }.
 function planItem(row) {
@@ -1117,6 +1122,7 @@ async function newHomePlan(conn, customerId, { estimate, to, from, flipped }) {
     .where({ 'r.customer_id': customerId, 'r.source_estimate_id': estimate.id })
     .whereNull('r.recurring_parent_id')
     .where((q) => q.where('r.is_recurring', true).orWhereNotNull('r.recurring_pattern'))
+    .where((q) => q.whereNull('r.recurring_pattern').orWhereNot('r.recurring_pattern', ONE_TIME_PATTERN))
     .where((q) => q.where('r.recurring_ongoing', true).orWhereExists(function liveVisit() {
       this.select(conn.raw('1')).from('scheduled_services as c')
         .whereRaw('(c.id = r.id OR c.recurring_parent_id = r.id)')
@@ -1159,8 +1165,9 @@ async function oldHousePlans(conn, customerId, { to, from, flipped, today, cutFr
   const unresolved = [];
   for (const rootId of rootIds) {
     const root = await conn('scheduled_services').where({ id: rootId, customer_id: customerId })
-      .first('id', 'service_type', 'recurring_pattern', 'recurring_ongoing');
-    if (!root) continue;
+      .first('id', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_ongoing', 'recurring_parent_id');
+    // A one-time visit flagged ongoing is not a plan: it is listed with the one-time visits.
+    if (!root || !inSeries(root)) continue;
     const house = await seriesHouseId(conn, rootId, customerId, from, { primaryIsFrom: !flipped });
     if (sameId(house, to.id)) continue;
     if (!sameId(house, from.id)) {

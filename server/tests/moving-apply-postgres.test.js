@@ -124,6 +124,11 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     const lawnRoot = await insertVisit({ service_type: 'Lawn Care', scheduled_date: KEEP, is_recurring: true, recurring_pattern: 'monthly', recurring_ongoing: true });
     const lawnAfter = await insertVisit({ service_type: 'Lawn Care', scheduled_date: AFTER_1, recurring_parent_id: lawnRoot, recurring_pattern: 'monthly', recurring_ongoing: true });
     const oneOff = await insertVisit({ service_type: 'WDO Inspection', scheduled_date: AFTER_1, property_id: oldHouseId });
+    // A one-time visit carrying the 'one_time' cadence marker (even flagged ongoing) is not a plan.
+    const markedOneTime = await insertVisit({
+      service_type: 'Mosquito Event Treatment', scheduled_date: day(42), property_id: oldHouseId,
+      is_recurring: false, recurring_pattern: 'one_time', recurring_ongoing: true,
+    });
     // A call-created visit 2 linked to a pest visit Apply cancels: one-time, so it stays booked.
     const linkedFollowUp = await insertVisit({
       service_type: 'Pest Control Follow-Up', scheduled_date: day(45), property_id: oldHouseId,
@@ -136,7 +141,7 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     });
     return {
       move: await trx('customer_moves').where({ id: moveRow.id }).first(),
-      estimateId, pestRoot, pestAfter1, pestAfter2, lawnRoot, lawnAfter, oneOff, linkedFollowUp, newRoot,
+      estimateId, pestRoot, pestAfter1, pestAfter2, lawnRoot, lawnAfter, oneOff, markedOneTime, linkedFollowUp, newRoot,
     };
   }
 
@@ -174,6 +179,7 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
       newPlan: [{ name: 'Quarterly Pest Control Service', frequency: 'quarterly' }],
       oneOffs: [
         { id: s.oneOff, date: AFTER_1, name: 'WDO Inspection' },
+        { id: s.markedOneTime, date: day(42), name: 'Mosquito Event Treatment' },
         { id: s.linkedFollowUp, date: day(45), name: 'Pest Control Follow-Up' },
       ],
       stations: null,
@@ -224,6 +230,7 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     expect(await trx('scheduled_services').where({ id: s.newRoot }).first('status', 'recurring_ongoing', 'property_id'))
       .toEqual({ status: 'pending', recurring_ongoing: true, property_id: newHouseId });
     expect(await statusOf(s.oneOff)).toBe('pending');
+    expect(await statusOf(s.markedOneTime)).toBe('pending');
     expect(await statusOf(s.linkedFollowUp)).toBe('pending');
 
     // No customer text, no fee.
