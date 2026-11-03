@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// The pest sheet's report flow with the Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP): a recurring pest
+// The pest sheet's report flow with the Wrap-up section: a recurring pest
 // visit, a typed (cockroach) visit and a bait station visit post the customer text they always posted
-// when the gate is off or the section is untouched (no `reviewTiming`: the report flow never sent one);
+// when the context carries no wrapUp key or the section is untouched (no `reviewTiming`: the report flow never sent one);
 // each change rides the body; a re-service shows no Wrap-up; the sheet is
 // locked while the review send-time re-check reads. Synthetic data only.
 import React from 'react';
@@ -148,7 +148,7 @@ describe.each([
   ['a typed (cockroach) visit', 'roach', ROACH_SERVICE],
   ['a bait station visit', 'station', TERMITE_SERVICE],
 ])('%s', (_label, kind, service) => {
-  test('gate off: no Wrap-up, no extra reads, the customer text it always posted and no reviewTiming', async () => {
+  test('no wrapUp key: no Wrap-up, no extra reads, the customer text it always posted and no reviewTiming', async () => {
     const request = makeRequest({ kind, wrapUp: false });
     await openSheet(request, service);
     await generate();
@@ -158,7 +158,7 @@ describe.each([
     expect(request.reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
   });
 
-  test('gate on, untouched: the section is on the visit step and the report step with the clock, and the body is the same customer text with no reviewTiming', async () => {
+  test('wrapUp key, untouched: the section is on the visit step and the report step with the clock, and the body is the same customer text with no reviewTiming', async () => {
     const request = makeRequest({ kind });
     await openSheet(request, service);
     expect(wrapUpHeading()).toBeTruthy();
@@ -249,7 +249,7 @@ describe('a re-service in the report flow (owner 2026-10-10: the review request 
   const RESERVICE_VISIT = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' };
   const RESERVICE_SERVICE = { ...SERVICE, serviceType: 'Pest Control Re-Service' };
 
-  test('gate off: no Wrap-up, and the text, no pay link and no review ask it always posted', async () => {
+  test('no wrapUp key: no Wrap-up, and the text, no pay link and no review ask it always posted', async () => {
     const request = makeRequest({ service: RESERVICE_VISIT, wrapUp: false });
     await openSheet(request, RESERVICE_SERVICE);
     await generate();
@@ -259,7 +259,7 @@ describe('a re-service in the report flow (owner 2026-10-10: the review request 
     for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
   });
 
-  test('gate on, untouched: the one change is requestReview true; no pay-link row, pay link stays false, no reviewTiming', async () => {
+  test('wrapUp key, untouched: the one change is requestReview true; no pay-link row, pay link stays false, no reviewTiming', async () => {
     const request = makeRequest({ service: { ...RESERVICE_VISIT, estimatedPrice: 95, createInvoiceOnComplete: true } });
     await openSheet(request, { ...RESERVICE_SERVICE, estimatedPrice: 95, createInvoiceOnComplete: true });
     await generate();

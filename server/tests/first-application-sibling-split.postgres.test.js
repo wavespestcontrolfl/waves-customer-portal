@@ -1816,6 +1816,63 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(bell.body).not.toContain('split it by hand');
     }));
 
+    // Prod 2026-10-31 false alarm: the office hand-split the combined
+    // invoice so the paid one bills only the pest base line; the other
+    // program's visit was cancelled. No refund is owed, so no alert.
+    test('(a2) paid invoice re-lined to bill only the anchor tag + sibling cancelled → clear, standing alert auto-cleared', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'sent' });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+      // Open + never-ran sibling: the (unchanged) open review raises its alert.
+      const [first] = await sweepOnce(trx, ids.estimateId);
+      expect(first.action).toBe('alerted');
+
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        status: 'paid',
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${ids.pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1, unit_price: 115.2, amount: 115.2 },
+        ]),
+      });
+      const [second] = await sweepOnce(trx, ids.estimateId);
+      expect(second).toMatchObject({ action: 'cleared', reason: 'invoice_settled' });
+      const open = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' })
+        .whereRaw("metadata->>'dedupeKey' LIKE ?", [`%${ids.invoiceId}%`]).whereNull('read_at');
+      expect(open).toHaveLength(0);
+    }));
+
+    test('(a4) paid invoice with the anchor tag plus an UNTAGGED positive charge + sibling cancelled → refund alert stands', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'paid' });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${ids.pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1, unit_price: 115.2, amount: 115.2 },
+          { description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 },
+        ]),
+      });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      expect(await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]))).toBeTruthy();
+    }));
+
+    test('(a3) paid invoice tagged for BOTH members + sibling cancelled → still alerts; untagged legacy line also alerts', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'paid' });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${ids.pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1, unit_price: 115.2, amount: 115.2 },
+          { client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 },
+        ]),
+      });
+      const [tagged] = await sweepOnce(trx, ids.estimateId);
+      expect(tagged.action).toBe('alerted');
+      expect(tagged.divergingSiblingIds).toEqual([ids.lawnId]);
+      // The fixture's default untagged "First service application" line: no tag evidence, alert stands.
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 175.2, amount: 175.2 }]),
+      });
+      const [legacy] = await sweepOnce(trx, ids.estimateId);
+      expect(legacy.action).toBe('alerted');
+    }));
+
     test('(b) paid invoice + every member still active or completed → not a sweep candidate, no alert raised', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx, { invoiceStatus: 'paid' });
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'completed', completed_at: new Date() });

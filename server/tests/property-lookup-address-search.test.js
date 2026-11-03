@@ -23,7 +23,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   global.fetch = jest.fn(async () => ({
     ok: true,
-    url: 'https://www.sc-pa.com/propertysearch/Result',
+    url: 'https://www.sarasotapropertyappraiser.gov/propertysearch/Result',
     text: async () => SEARCH_HTML,
   }));
 });
@@ -35,6 +35,15 @@ describe('searchSarasotaParcel searchOnly mode', () => {
     const match = await _private.searchSarasotaParcel(address, 8000, Date.now(), { searchOnly: true });
     expect(match).toMatchObject({ parcelId: '0757010259' });
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  // sc-pa.com now 301s to sarasotapropertyappraiser.gov, and a 301 turns the search POST into a GET of the landing
+  // page (no results): the Sarasota address search found nothing for any address until the base moved.
+  test('the search POST goes straight to the current county host, never the redirecting old one', async () => {
+    await _private.searchSarasotaParcel(address, 8000, Date.now(), { searchOnly: true });
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(url).toBe('https://www.sarasotapropertyappraiser.gov/propertysearch/Result');
+    expect(init.method).toBe('POST');
   });
 
   test('default mode still follows up with the detail request (production contract unchanged)', async () => {

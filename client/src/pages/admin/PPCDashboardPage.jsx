@@ -26,6 +26,16 @@ function adminFetch(path) {
   });
 }
 
+// A period's spend stays in that period's totals whatever the campaign's status
+// is today: a campaign paused in Google Ads still spent money before the pause.
+// /campaigns already leaves out removed rows. Budgets stay active-only.
+const PERIOD_METRICS = ["spend", "conversionValue", "conversions", "clicks", "impressions"];
+function ranInPeriod(c, period) {
+  if (c.status === "active") return true;
+  const p = c[period];
+  return !!p && PERIOD_METRICS.some((k) => Number(p[k]) > 0);
+}
+
 // --- SYNC HEALTH ---
 const SYNC_STALE_MS = 36 * 60 * 60 * 1000;
 const SYNC_PLATFORM_LABELS = { google_ads: "Google Ads", facebook: "Meta Ads" };
@@ -434,19 +444,20 @@ export default function WavesPPCDashboard() {
   );
   const totals = useMemo(() => {
     const active = filtered.filter((c) => c.status === "active");
+    const ran = filtered.filter((c) => ranInPeriod(c, "last7d"));
     return {
-      spent: active.reduce((s, c) => s + (c.last7d?.spend || 0), 0),
+      spent: ran.reduce((s, c) => s + (c.last7d?.spend || 0), 0),
       // The budget rule moves daily_budget_current ($0.05 in Stop mode); the
       // yardstick for spend is the base budget, current only when base is unset.
       budget: active.reduce(
         (s, c) => s + Number(c.daily_budget_base ?? c.daily_budget_current ?? 0) * 7,
         0,
       ),
-      revenue: active.reduce((s, c) => s + (c.last7d?.conversionValue || 0), 0),
-      conversions: active.reduce((s, c) => s + (c.last7d?.conversions || 0), 0),
-      leads: active.reduce((s, c) => s + (c.last7d?.conversions || 0), 0),
-      clicks: active.reduce((s, c) => s + (c.last7d?.clicks || 0), 0),
-      impressions: active.reduce((s, c) => s + (c.last7d?.impressions || 0), 0),
+      revenue: ran.reduce((s, c) => s + (c.last7d?.conversionValue || 0), 0),
+      conversions: ran.reduce((s, c) => s + (c.last7d?.conversions || 0), 0),
+      leads: ran.reduce((s, c) => s + (c.last7d?.conversions || 0), 0),
+      clicks: ran.reduce((s, c) => s + (c.last7d?.clicks || 0), 0),
+      impressions: ran.reduce((s, c) => s + (c.last7d?.impressions || 0), 0),
     };
   }, [filtered]);
   const overallROAS =
@@ -462,7 +473,7 @@ export default function WavesPPCDashboard() {
   const serviceBreakdown = useMemo(() => {
     const map = {};
     campaigns
-      .filter((c) => c.status === "active")
+      .filter((c) => ranInPeriod(c, "last30d"))
       .forEach((c) => {
         const svc = c.service_category || "Other";
         if (!map[svc])
@@ -697,7 +708,7 @@ export default function WavesPPCDashboard() {
               // Retain existing manual types without treating Display/PMax as Search.
               const typeCamps = campaigns.filter(
                 (c) =>
-                  c.status === "active" &&
+                  ranInPeriod(c, "last30d") &&
                   (c.campaign_type === type ||
                     (type === "google_search" &&
                       c.platform === "google_ads" &&
@@ -1106,7 +1117,7 @@ export default function WavesPPCDashboard() {
                     {(() => {
                       const cityMap = {};
                       campaigns
-                        .filter((c) => c.status === "active")
+                        .filter((c) => ranInPeriod(c, "last30d"))
                         .forEach((c) => {
                           const city = c.target_area || "Other";
                           if (!cityMap[city])

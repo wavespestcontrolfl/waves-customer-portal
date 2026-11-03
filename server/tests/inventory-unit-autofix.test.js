@@ -278,9 +278,12 @@ describe('runInventoryUnitAutofixSweep', () => {
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = notifyAdmin.mock.calls[0];
     expect(category).toBe('system');
-    expect(title).toMatch(/1 unit alias auto-fixed/);
+    // Raised through raiseAdminAlert (alert step E2): rule-format headline, a one-sentence why, the sample in detail.
+    expect(title).toBe('Inventory — 1 unit alias fixed on their own');
     expect(body).toMatch(/4 products still need unit review/);
     expect(opts.link).toBe('/admin/inventory?tab=unit-review');
+    expect(opts.bell).toBeUndefined();
+    expect(opts.metadata).toMatchObject({ area: 'Inventory', severity: 'fyi', who: 'person', doneWhen: 'already_done' });
   });
 
   it('parked rows never consume the cap — a full page of unrecognizable units cannot starve fixable aliases behind it', async () => {
@@ -863,8 +866,9 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = notifyAdmin.mock.calls[0];
     expect(category).toBe('system');
-    expect(title).toBe('Inventory: 1 unit alias auto-fixed');
-    expect(body).toBe('Talstar P (Gallons → gal). Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row. 1 product still needs unit review.');
+    expect(title).toBe('Inventory — 1 unit alias fixed on their own');
+    expect(body).toBe('Spelling and plural renames only, no counts changed; 1 product still needs unit review.');
+    expect(opts.detail).toBe('Talstar P (Gallons → gal). Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row.');
     expect(opts.metadata.fixes).toEqual([{ productId: 'p1', name: 'Talstar P', from: 'Gallons', to: 'gal' }]);
   });
 });

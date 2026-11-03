@@ -2,6 +2,7 @@ const { GoogleAdsApi, enums } = require('google-ads-api');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../../models/db');
 const logger = require('../../services/logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
 // Google Ads API integration — syncs campaigns, performance, search terms
@@ -212,10 +213,10 @@ async function syncCampaigns({ throwOnError = false } = {}) {
 // range on segments.date (query_error 55 otherwise) AND 'YYYY-MM-DD' literals —
 // the old code used an open-ended `>= 'YYYYMMDD'`, which threw on every run, so
 // no performance/search-term rows were ever stored. Returns dashed start/end.
+// Dates are ET calendar days (the account's zone): a UTC date is already
+// tomorrow after 8 PM ET.
 function gaqlDateRange(days, now = new Date()) {
-  const fmt = (d) => d.toISOString().split('T')[0]; // YYYY-MM-DD
-  const since = new Date(now.getTime() - days * 86400000);
-  return { since: fmt(since), until: fmt(now) };
+  return { since: etDateString(addETDays(now, -days)), until: etDateString(now) };
 }
 
 async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
@@ -461,8 +462,7 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
 function buildCallViewQuery(days = 30, limit = 200) {
   const safeDays = Math.min(Math.max(parseInt(days, 10) || 30, 1), 90);
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 500);
-  const since = new Date(Date.now() - safeDays * 86400000);
-  const sinceStr = since.toISOString().split('T')[0];
+  const sinceStr = etDateString(addETDays(new Date(), -safeDays));
 
   return `
     SELECT
