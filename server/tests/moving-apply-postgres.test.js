@@ -289,6 +289,45 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     expect((await trx('customer_moves').where({ id: s.move.id }).first('status')).status).toBe('submitted');
   });
 
+  test('a visit confirmed while Apply runs is refused under the series locks too', async () => {
+    const s = await seed();
+    const preview = await Moves.applyMovePreview(customerId, s.move.id);
+    const actual = jest.requireActual('../services/recurring-series-cancel');
+    SeriesCancel.cancelSeriesRemainder.mockImplementation(async (args) => {
+      if (args.parentId === s.pestRoot) await trx('scheduled_services').where({ id: s.pestAfter2 }).update({ status: 'confirmed' });
+      return actual.cancelSeriesRemainder(args);
+    });
+    try {
+      const err = await Moves.applyMove(customerId, s.move.id, { version: preview.version, actorId: ADMIN.id }).catch((e) => e);
+      expect(err).toMatchObject({ code: 'series_changed', step: 'plans' });
+      expect(await statusOf(s.pestAfter1)).toBe('pending');
+    } finally {
+      SeriesCancel.cancelSeriesRemainder.mockImplementation((...args) => actual.cancelSeriesRemainder(...args));
+    }
+  });
+
+  test('a resumed Apply replays the follow-through an earlier attempt did not finish', async () => {
+    const s = await seed();
+    const first = await Moves.applyMovePreview(customerId, s.move.id);
+    // The first attempt's cancel commits, then its follow-through stops (as if the process died).
+    FollowThrough.runVisitCancellationFollowThrough.mockImplementationOnce(async () => { throw new Error('process stopped'); });
+    const err = await Moves.applyMove(customerId, s.move.id, { version: first.version, actorId: ADMIN.id }).catch((e) => e);
+    expect(err).toMatchObject({ step: 'plans', progress: expect.objectContaining({ primaryChanged: true }) });
+    const cancelledFirst = (await trx('scheduled_services').where({ customer_id: customerId, status: 'cancelled' }).pluck('id')).sort();
+    expect(cancelledFirst.length).toBeGreaterThan(0);
+
+    FollowThrough.runVisitCancellationFollowThrough.mockClear();
+    const again = await Moves.applyMovePreview(customerId, s.move.id);
+    const result = await Moves.applyMove(customerId, s.move.id, { version: again.version, actorId: ADMIN.id });
+    expect(result.applied).toBe(true);
+    // The replay names exactly the visits the first attempt cancelled, with the fee waived and no linked cascade.
+    const replay = FollowThrough.runVisitCancellationFollowThrough.mock.calls.map(([args]) => args)
+      .find((args) => args.targetIds.some((id) => cancelledFirst.includes(id)));
+    expect(replay).toMatchObject({ waiveFee: true, source: 'moving-apply', linkedChildren: [] });
+    expect([...replay.targetIds].sort()).toEqual(cancelledFirst);
+    expect(await trx('scheduled_services').whereIn('id', cancelledFirst).pluck('track_state')).toEqual(cancelledFirst.map(() => 'cancelled'));
+  });
+
   test('a customer resubmit waits for a running Apply, and a submission changed during Apply is never closed', async () => {
     const s = await seed();
     // Apply holds the move's advisory key on its own session; the moving-page submit waits for it.

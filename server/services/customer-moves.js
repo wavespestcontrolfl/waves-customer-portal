@@ -1397,6 +1397,10 @@ async function applyMove(customerId, moveId, opts = {}) {
       return 'failed';
     });
 
+    // The note every visit Apply cancels carries (job_status_history): it names
+    // this move, so a later attempt can find what an earlier one cancelled.
+    const note = `Customer moved out on ${plan.moveOut} (moving flow, Apply move ${plan.move.id})`;
+    const cancelledNow = new Set();
     const { cancelSeriesRemainder } = require('./recurring-series-cancel');
     for (const stop of plan.stops) {
       await step('plans', async () => {
@@ -1408,7 +1412,7 @@ async function applyMove(customerId, moveId, opts = {}) {
           scope: 'following',
           fromDate: plan.cancelFrom,
           notifyCustomer: false,
-          notes: `Customer moved out on ${plan.moveOut} (moving flow, Apply move)`,
+          notes: note,
           actorId,
           waiveFee: true,
           source: 'moving-apply',
@@ -1416,19 +1420,35 @@ async function applyMove(customerId, moveId, opts = {}) {
           // Linked follow-ups (call visit 2, package visit 2) are not part of the plan:
           // the preview lists them as one-time visits that stay booked, so none is cancelled.
           linkedChildren: [],
-          // Under the series locks: the same visits the preview approved, still at the old house.
+          // Under the series locks: exactly the visits the preview approved (same
+          // date and status), still at the old house.
           checkTargets: (locked) => {
-            const approved = new Set(stop.targets.map((t) => String(t.id)));
-            const same = locked.length === approved.size && locked.every((t) => approved.has(String(t.id)));
+            const approved = new Map(stop.targets.map((t) => [String(t.id), `${visitDay(t)}|${t.status}`]));
+            const same = locked.length === approved.size
+              && locked.every((t) => approved.get(String(t.id)) === `${visitDay(t)}|${t.status}`);
             return same && locked.every((t) => visitAtHouse(t, plan.from, { primaryIsHouse: false }))
               ? null
               : `${stop.name} changed while Apply move was running. Read the new preview, then apply again.`;
           },
         });
+        for (const t of out.targets) cancelledNow.add(String(t.id));
         progress.plansStopped += 1;
         progress.visitsCancelled += out.cancelledCount;
       });
     }
+    // An earlier attempt whose cancel committed but whose follow-through did
+    // not finish (the process stopped) left visits cancelled without their
+    // invoice void, card release or tracker cancel: replay it (the same
+    // repair as cancellation-processor priorCancelledVisits; every step of the
+    // follow-through finds nothing left to do when it already ran).
+    await step('plans', async () => {
+      const { priorCancelledVisits } = require('./cancellation-processor');
+      const earlier = (await priorCancelledVisits(customerId, note)).filter((v) => !cancelledNow.has(String(v.id)));
+      if (!earlier.length) return;
+      await require('./visit-cancellation-followthrough').runVisitCancellationFollowThrough({
+        targetIds: earlier.map((v) => v.id), actorId, waiveFee: true, reason: note, source: 'moving-apply', linkedChildren: [],
+      });
+    });
 
     if (plan.stations) {
       await step('termite', async () => {
