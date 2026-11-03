@@ -244,7 +244,10 @@ on the web view that asked; `requestId` comes back unchanged):
   unregisters from APNs, so none shows in the list, on the lock screen or with
   the app in the background (a push sent meanwhile gets Unregistered and the
   server deactivates the row). One that still arrives with the app open shows
-  only the badge. A successful Hand back registers again
+  only the badge. While the flag is on, `register()` (a `registerPush` from
+  the covered admin page, or a task still waiting) does not register, and a
+  token that arrives late unregisters again and is not sent to the page. A
+  successful Hand back registers again
   (`resumeAfterHandoff`); the token event re-sends `native-subscribe`, which
   turns the row active again. The flag is `handoffLockActive` in UserDefaults;
   sign-out clears it without turning the alerts back on.

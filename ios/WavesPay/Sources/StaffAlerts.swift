@@ -52,16 +52,24 @@ final class StaffAlerts {
     // registered either way (iOS issues it without permission and only hides
     // the alerts), so alerts start as soon as the staff member allows them,
     // even later in iPhone Settings. Every later call refreshes the token.
+    // Never during a hand-off (the covered admin page can ask again after a
+    // reload, or this task can still be waiting): the hand-back registers.
     func register() {
         signedIn = true
         Task {
             _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
-            guard signedIn else { return }
+            guard signedIn, !HandoffLock.persistedActive else { return }
             UIApplication.shared.registerForRemoteNotifications()
         }
     }
 
     func received(deviceToken: Data) {
+        // A registration that finished after a hand-off began: off again, and
+        // the page gets no token, until the hand-back registers.
+        if HandoffLock.persistedActive {
+            UIApplication.shared.unregisterForRemoteNotifications()
+            return
+        }
         onToken?(deviceToken.map { String(format: "%02x", $0) }.joined())
     }
 
