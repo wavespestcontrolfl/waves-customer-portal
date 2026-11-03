@@ -41,7 +41,7 @@ function renderSheet(props = {}, fetcher = makeFetch({ inPerson: LINK })) {
   return { fetcher, onClose, ...view };
 }
 
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); delete window.webkit; delete window.wavesAdminInPersonTerms; });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); delete window.webkit; });
 
 // The Waves Admin app's side of the bridge: answers capabilities, records every
 // message, and lets a test answer the hand-off itself.
@@ -143,56 +143,6 @@ describe("InPersonCardSheet", () => {
       await act(async () => { failing.answer("failed", { message: "Face ID is not set up." }); });
       expect(await screen.findByText("Face ID is not set up.")).toBeInTheDocument();
     });
-  });
-
-  describe("terms relay for the customer view", () => {
-    it("answers only for this visit's secure token and goes away with the sheet", async () => {
-      const fetcher = vi.fn(async (path, options = {}) => {
-        if (path.endsWith("/card-request/in-person")) return LINK;
-        if (path.endsWith("/in-person-terms")) return { success: true, recorded: true };
-        throw new Error(`unexpected ${path} ${options.method}`);
-      });
-      const { unmount } = renderSheet({}, fetcher);
-      await screen.findByText("Card for Auto Pay");
-      expect(typeof window.wavesAdminInPersonTerms).toBe("function");
-      expect(await window.wavesAdminInPersonTerms({ secureToken: "other", termsVersion: "v2026-10", consumerNoticeShown: false })).toEqual({ ok: false });
-      expect(fetcher.mock.calls.some(([p]) => p.endsWith("/in-person-terms"))).toBe(false);
-      const result = await window.wavesAdminInPersonTerms({ secureToken: "tok123", termsVersion: "v2026-10", termsScope: "plan", consumerNoticeShown: true });
-      expect(result).toEqual({ ok: true });
-      const call = fetcher.mock.calls.find(([p]) => p.endsWith("/in-person-terms"));
-      expect(call[0]).toBe("/admin/schedule/visit-1/in-person-terms");
-      expect(call[1].method).toBe("POST");
-      expect(JSON.parse(call[1].body)).toEqual({ terms_version: "v2026-10", terms_scope: "plan", consumer_notice_shown: true });
-      unmount();
-      expect(window.wavesAdminInPersonTerms).toBeUndefined();
-    });
-
-    it("reports a refused record as not ok", async () => {
-      const fetcher = vi.fn(async (path) => {
-        if (path.endsWith("/card-request/in-person")) return LINK;
-        throw new Error("The terms were updated.");
-      });
-      renderSheet({}, fetcher);
-      await screen.findByText("Card for Auto Pay");
-      expect(await window.wavesAdminInPersonTerms({ secureToken: "tok123", termsVersion: "old", consumerNoticeShown: false })).toEqual({ ok: false, message: "The terms were updated.", code: null });
-    });
-
-    it("is not defined while no card page exists", async () => {
-      renderSheet({}, makeFetch({ inPerson: { requested: false, action: "auto_secured", reason: "saved_method_satisfied" } }));
-      await screen.findByText("Auto Pay is already on for Pat.");
-      expect(window.wavesAdminInPersonTerms).toBeUndefined();
-    });
-  });
-
-  it("has no hand-off button and never navigates the admin tab", async () => {
-    const assign = vi.fn();
-    vi.stubGlobal("location", { ...window.location, assign, origin: window.location.origin });
-    renderSheet();
-    await screen.findByText("Card for Auto Pay");
-    expect(screen.queryByRole("button", { name: /Hand the phone/ })).toBeNull();
-    for (const button of screen.getAllByRole("button")) fireEvent.click(button);
-    expect(assign).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
   });
 
   it("auto_secured: says Auto Pay is on and offers only Done", async () => {

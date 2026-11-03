@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-// /secure/:token in hand-off mode (Book at the Table, owner 2026-11-02): the Waves
-// Admin app shows this page to a customer in a separate, isolated web view. The
-// page enters the mode only with ?handoff=1 AND the app's wavesCustomer handler.
+// /secure/:token in Book at the Table (owner 2026-11-02). Hand-off mode: the Waves Admin
+// app shows this page to a customer in a separate, isolated web view; the page enters the
+// mode only with ?handoff=1 AND the app's wavesCustomer handler. The estimate terms step
+// (payload `terms` / `consumerNotice`, POST /accept-terms) works the same on the owner's
+// phone and on the customer's own, so it is tested in both.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -39,7 +41,6 @@ const TERMS = {
   version: 'v2026-10',
   scope: 'plan',
   lines: ['Accepting authorizes these services at the price shown. Cancel anytime.', 'Services — at the price and frequency shown.'],
-  consumerNotice: null,
 };
 
 const READY = {
@@ -64,18 +65,14 @@ const RECURRING = {
   },
 };
 
+const accepted = [];
 const posted = [];
 let assign;
-function installBridge({ termsAnswer = { status: 'ok' } } = {}) {
+function installBridge() {
   window.webkit = {
     messageHandlers: {
       wavesCustomer: {
-        postMessage: vi.fn((message) => {
-          posted.push(message);
-          if (message.type === 'acceptTerms') {
-            queueMicrotask(() => window.dispatchEvent(new CustomEvent('waveshandoff:terms', { detail: { requestId: message.requestId, ...termsAnswer } })));
-          }
-        }),
+        postMessage: vi.fn((message) => { posted.push(message); }),
       },
     },
   };
@@ -85,7 +82,8 @@ function installFetch(pageBody, extra = {}) {
   const fetchMock = vi.fn(async (url, opts) => {
     const u = String(url);
     if (u.endsWith('/select-plan')) return extra.selectPlan ? extra.selectPlan(JSON.parse(opts.body)) : json({ success: true });
-    if (u.endsWith('/complete')) return json({ success: true });
+    if (u.endsWith('/complete')) return extra.complete ? extra.complete() : json({ success: true });
+    if (u.endsWith('/accept-terms')) { accepted.push(JSON.parse(opts.body)); return extra.acceptTerms ? extra.acceptTerms(JSON.parse(opts.body)) : json({ success: true, recorded: true }); }
     if (u.includes('/public/secure-card/')) return json(pageBody);
     throw new Error(`unexpected fetch ${u}`);
   });
@@ -100,6 +98,7 @@ beforeEach(() => {
   routerState.search = '?handoff=1';
   createCalls.length = 0;
   posted.length = 0;
+  accepted.length = 0;
   assign = vi.fn();
   vi.stubGlobal('location', { ...window.location, origin: ORIGIN, href: `${ORIGIN}/secure/${TOKEN}?handoff=1`, assign });
   installBridge();
@@ -107,11 +106,11 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); delete window.webkit; vi.restoreAllMocks(); });
 
 describe('SecureAppointmentPage hand-off mode', () => {
-  it('asks the server for hand-off data and renders no contact or outside links', async () => {
+  it('renders no contact or outside links, and sends the ordinary page request', async () => {
     const fetchMock = installFetch(READY);
     const { container } = render(<SecureAppointmentPage />);
     await screen.findByRole('button', { name: 'Save card & secure my visit' });
-    expect(String(fetchMock.mock.calls[0][0])).toMatch(/consentTextVersion=v\d+_\d{4}-\d{2}-\d{2}&handoff=1$/);
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/consentTextVersion=v\d+_\d{4}-\d{2}-\d{2}$/);
     expect(outsideLinks(container)).toHaveLength(0);
     expect(screen.queryByText('Text Waves')).toBeNull();
     expect(screen.queryByText('Call Waves')).toBeNull();
@@ -133,14 +132,58 @@ describe('SecureAppointmentPage hand-off mode', () => {
     expect(createCalls[0].options.wallets).toEqual({ applePay: 'never', googlePay: 'never' });
   });
 
+  it('Prepay the year shows a QR code of the absolute secure link instead of opening a pay page', async () => {
+    const fetchMock = installFetch(RECURRING, {
+      selectPlan: (b) => json({ success: true, payUrl: b.plan === 'prepay_annual' ? 'https://pay.example.test/p/1' : undefined }),
+    });
+    const { container } = render(<SecureAppointmentPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Prepay the year/ }));
+    expect(await screen.findByText(/Prepay is paid on your own phone\. Scan this code with your phone's camera\./)).toBeInTheDocument();
+    expect(assign).not.toHaveBeenCalled();
+    expect(QRCode.toDataURL).toHaveBeenCalledWith(`${ORIGIN}/secure/${TOKEN}`, expect.any(Object));
+    expect(outsideLinks(container)).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Pay per application' }));
+    await waitFor(() => expect(screen.queryByTestId('handoff-prepay-qr')).toBeNull());
+    const plans = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/select-plan')).map(([, o]) => JSON.parse(o.body).plan);
+    expect(plans).toEqual(['prepay_annual', 'per_application']);
+  });
+
+  it('the page sends the app nothing (the terms go to the server directly)', async () => {
+    installFetch({ ...READY, terms: TERMS });
+    render(<SecureAppointmentPage />);
+    fireEvent.click(await screen.findByLabelText(/I authorize Waves to charge this card/));
+    fireEvent.click(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.'));
+    const save = screen.getByRole('button', { name: 'Save card & secure my visit' });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
+    await waitFor(() => expect(accepted).toHaveLength(1));
+    expect(posted).toEqual([]);
+  });
+});
+
+// The estimate terms step is the same on the owner's phone (hand-off) and the customer's own.
+describe.each([
+  ['hand-off mode', true],
+  ['the customer\'s own phone', false],
+])('estimate terms on %s', (_name, handoff) => {
+  beforeEach(() => {
+    if (!handoff) {
+      routerState.search = '';
+      delete window.webkit;
+    }
+  });
+
   it('holds Save until the terms box is ticked, then records the terms BEFORE the card save', async () => {
-    const fetchMock = installFetch({ ...READY, handoff: { terms: { ...TERMS, consumerNotice: { text: 'Florida law asks you to sign the notice.' } } } });
+    const order = [];
+    const fetchMock = installFetch({ ...READY, terms: TERMS, consumerNotice: { text: 'Florida law asks you to sign the notice.' } }, {
+      acceptTerms: () => { order.push('accept-terms'); return json({ success: true, recorded: true }); },
+      complete: () => { order.push('complete'); return json({ success: true }); },
+    });
     render(<SecureAppointmentPage />);
     expect(await screen.findByText('Florida law asks you to sign the notice.')).toBeInTheDocument();
     const terms = screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.');
-    const authorization = screen.getByLabelText(/I authorize Waves to charge this card/);
     const save = screen.getByRole('button', { name: 'Save card & secure my visit' });
-    fireEvent.click(authorization);
+    fireEvent.click(screen.getByLabelText(/I authorize Waves to charge this card/));
     await waitFor(() => expect(save).toBeDisabled());
     expect(terms).not.toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: 'View terms' }));
@@ -148,86 +191,91 @@ describe('SecureAppointmentPage hand-off mode', () => {
     fireEvent.click(terms);
     await waitFor(() => expect(save).toBeEnabled());
     fireEvent.click(save);
-    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(true));
-    expect(posted).toEqual([expect.objectContaining({ type: 'acceptTerms', termsVersion: 'v2026-10', termsScope: 'plan', consumerNoticeShown: true })]);
+    await waitFor(() => expect(order).toEqual(['accept-terms', 'complete']));
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/accept-terms'));
+    expect(call[0]).toBe(`/api/public/secure-card/${TOKEN}/accept-terms`);
+    expect(call[1].method).toBe('POST');
+    expect(accepted).toEqual([{ terms_version: 'v2026-10', terms_scope: 'plan', consumer_notice_shown: true }]);
   });
 
-  it('a failed terms record shows a plain error and does not save the card', async () => {
-    installBridge({ termsAnswer: { status: 'failed', message: 'Could not record the terms.' } });
-    const fetchMock = installFetch({ ...READY, handoff: { terms: TERMS } });
+  it('a failed record shows a plain error and does not save the card', async () => {
+    const fetchMock = installFetch({ ...READY, terms: TERMS }, {
+      acceptTerms: () => json({ error: 'Something went wrong' }, { ok: false, status: 500 }),
+    });
     render(<SecureAppointmentPage />);
     fireEvent.click(await screen.findByLabelText(/I authorize Waves to charge this card/));
     fireEvent.click(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.'));
     const save = screen.getByRole('button', { name: 'Save card & secure my visit' });
     await waitFor(() => expect(save).toBeEnabled());
     fireEvent.click(save);
-    expect(await screen.findByText('Could not record the terms.')).toBeInTheDocument();
+    expect(await screen.findByText('Something went wrong')).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
   });
 
-  it('Prepay the year without the terms tick shows no QR and asks for the tick; select-plan is not called', async () => {
-    const fetchMock = installFetch({ ...RECURRING, handoff: { terms: TERMS } });
+  it('Prepay the year without the tick shows no QR or pay page and asks for the tick; select-plan is not called', async () => {
+    const fetchMock = installFetch({ ...RECURRING, terms: TERMS });
     render(<SecureAppointmentPage />);
     // The box is outside the card form: it is there before any plan is picked.
     expect(await screen.findByLabelText('I accept estimate EST-2026-0001 and its terms.')).not.toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: /Prepay the year/ }));
     expect(await screen.findByText(/Please tick .I accept estimate EST-2026-0001 and its terms\..* before you choose to prepay\./)).toBeInTheDocument();
     expect(screen.queryByTestId('handoff-prepay-qr')).toBeNull();
-    expect(posted).toEqual([]);
+    expect(assign).not.toHaveBeenCalled();
+    expect(accepted).toEqual([]);
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/select-plan'))).toBe(false);
   });
 
-  it('Prepay the year with the tick records the terms FIRST, then shows the QR, and never asks again', async () => {
+  it('Prepay the year with the tick records the terms FIRST, then goes on, and never asks again', async () => {
     const order = [];
-    window.webkit.messageHandlers.wavesCustomer.postMessage.mockImplementation((message) => {
-      order.push(message.type);
-      posted.push(message);
-      queueMicrotask(() => window.dispatchEvent(new CustomEvent('waveshandoff:terms', { detail: { requestId: message.requestId, status: 'ok' } })));
-    });
-    const fetchMock = installFetch({ ...RECURRING, handoff: { terms: TERMS } }, {
-      selectPlan: (body) => { order.push(`select-plan:${body.plan}`); return json({ success: true, payUrl: 'https://pay.example.test/p/1' }); },
+    const fetchMock = installFetch({ ...RECURRING, terms: TERMS }, {
+      acceptTerms: () => { order.push('accept-terms'); return json({ success: true, recorded: true }); },
+      selectPlan: (b) => { order.push(`select-plan:${b.plan}`); return json({ success: true, payUrl: 'https://pay.example.test/p/1' }); },
     });
     render(<SecureAppointmentPage />);
     fireEvent.click(await screen.findByLabelText('I accept estimate EST-2026-0001 and its terms.'));
     fireEvent.click(screen.getByRole('button', { name: /Prepay the year/ }));
-    expect(await screen.findByTestId('handoff-prepay-qr')).toBeInTheDocument();
-    expect(order).toEqual(['acceptTerms', 'select-plan:prepay_annual']);
-    expect(posted[0]).toMatchObject({ termsVersion: 'v2026-10', termsScope: 'plan' });
-    expect(assign).not.toHaveBeenCalled();
-    // Recorded once: the box is gone and a switch back to per-application asks nothing.
-    expect(screen.queryByTestId('handoff-terms')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Pay per application' }));
-    await screen.findByRole('button', { name: 'Save card & confirm my plan' });
-    expect(posted).toHaveLength(1);
-    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/select-plan'))).toHaveLength(2);
+    await waitFor(() => expect(order).toEqual(['accept-terms', 'select-plan:prepay_annual']));
+    if (handoff) {
+      expect(await screen.findByTestId('handoff-prepay-qr')).toBeInTheDocument();
+      expect(assign).not.toHaveBeenCalled();
+      // Recorded once: the box is gone and a switch back asks nothing.
+      expect(screen.queryByTestId('handoff-terms')).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Pay per application' }));
+      await screen.findByRole('button', { name: 'Save card & confirm my plan' });
+      expect(accepted).toHaveLength(1);
+      expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/select-plan'))).toHaveLength(2);
+    } else {
+      await waitFor(() => expect(assign).toHaveBeenCalledWith('https://pay.example.test/p/1'));
+    }
   });
 
-  it('a failed terms record before prepay shows the error and no QR', async () => {
-    installBridge({ termsAnswer: { status: 'failed', message: 'Could not record the terms.' } });
-    const fetchMock = installFetch({ ...RECURRING, handoff: { terms: TERMS } });
+  it('a failed record before prepay shows the error and no select-plan call', async () => {
+    const fetchMock = installFetch({ ...RECURRING, terms: TERMS }, {
+      acceptTerms: () => json({ error: 'We could not record that.' }, { ok: false, status: 500 }),
+    });
     render(<SecureAppointmentPage />);
     fireEvent.click(await screen.findByLabelText('I accept estimate EST-2026-0001 and its terms.'));
     fireEvent.click(screen.getByRole('button', { name: /Prepay the year/ }));
-    expect(await screen.findByText('Could not record the terms.')).toBeInTheDocument();
+    expect(await screen.findByText('We could not record that.')).toBeInTheDocument();
     expect(screen.queryByTestId('handoff-prepay-qr')).toBeNull();
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/select-plan'))).toBe(false);
   });
 
   it('a termite estimate: the separate-signature note shows with no terms box, for both plan choices', async () => {
-    installFetch({ ...RECURRING, handoff: { consumerNotice: { text: 'Florida law asks you to sign the notice separately.' } } });
+    installFetch({ ...RECURRING, consumerNotice: { text: 'Florida law asks you to sign the notice separately.' } });
     render(<SecureAppointmentPage />);
     expect(await screen.findByText('Florida law asks you to sign the notice separately.')).toBeInTheDocument();
     expect(screen.queryByTestId('handoff-terms')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /Pay per application/ }));
     await screen.findByRole('button', { name: 'Save card & confirm my plan' });
     expect(screen.getByText('Florida law asks you to sign the notice separately.')).toBeInTheDocument();
-    // No tick is needed for the note: Save is gated only by the card authorization.
-    expect(posted).toEqual([]);
+    expect(accepted).toEqual([]);
   });
 
-  it('terms_changed shows the reload text and a Reload button, and stops Save', async () => {
-    installBridge({ termsAnswer: { status: 'failed', message: 'The terms changed. Reload this page to see them.', code: 'terms_changed' } });
-    const fetchMock = installFetch({ ...READY, handoff: { terms: TERMS } });
+  it.each([['terms_changed'], ['TERMS_VERSION_STALE']])('a %s answer shows the reload text and a Reload button, and stops Save', async (code) => {
+    const fetchMock = installFetch({ ...READY, terms: TERMS }, {
+      acceptTerms: () => json({ error: 'The terms changed. Reload this page to see them.', code }, { ok: false, status: 409 }),
+    });
     render(<SecureAppointmentPage />);
     fireEvent.click(await screen.findByLabelText(/I authorize Waves to charge this card/));
     fireEvent.click(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.'));
@@ -240,18 +288,25 @@ describe('SecureAppointmentPage hand-off mode', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
   });
 
-  it('a stale terms version also offers Reload and stops Save', async () => {
-    installBridge({ termsAnswer: { status: 'failed', message: 'The terms were updated.', code: 'TERMS_VERSION_STALE' } });
-    const fetchMock = installFetch({ ...READY, handoff: { terms: TERMS } });
+  it('a 409 terms_required from the server (a stale page) shows the box again from fresh data', async () => {
+    let loads = 0;
+    const fetchMock = vi.fn(async (url, opts) => {
+      const u = String(url);
+      if (u.endsWith('/accept-terms')) return json({ success: true, recorded: true });
+      if (u.endsWith('/complete')) return json({ error: 'Please accept the estimate terms first.', code: 'terms_required' }, { ok: false, status: 409 });
+      loads += 1;
+      return json({ ...READY, terms: TERMS });
+    });
+    global.fetch = fetchMock;
     render(<SecureAppointmentPage />);
     fireEvent.click(await screen.findByLabelText(/I authorize Waves to charge this card/));
     fireEvent.click(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.'));
     const save = screen.getByRole('button', { name: 'Save card & secure my visit' });
     await waitFor(() => expect(save).toBeEnabled());
     fireEvent.click(save);
-    expect(await screen.findByRole('button', { name: 'Reload' })).toBeInTheDocument();
-    await waitFor(() => expect(save).toBeDisabled());
-    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
+    expect(await screen.findByText('Please accept the estimate terms first.')).toBeInTheDocument();
+    expect(loads).toBe(2);
+    expect(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.')).not.toBeChecked();
   });
 
   it('shows no terms box when the server sends none', async () => {
@@ -259,22 +314,6 @@ describe('SecureAppointmentPage hand-off mode', () => {
     render(<SecureAppointmentPage />);
     await screen.findByRole('button', { name: 'Save card & secure my visit' });
     expect(screen.queryByTestId('handoff-terms')).toBeNull();
-  });
-
-  it('Prepay the year shows a QR code of the absolute secure link instead of opening a pay page', async () => {
-    const fetchMock = installFetch(RECURRING, {
-      selectPlan: (body) => json({ success: true, payUrl: body.plan === 'prepay_annual' ? 'https://pay.example.test/p/1' : undefined }),
-    });
-    const { container } = render(<SecureAppointmentPage />);
-    fireEvent.click(await screen.findByRole('button', { name: /Prepay the year/ }));
-    expect(await screen.findByText(/Prepay is paid on your own phone\. Scan this code with your phone's camera\./)).toBeInTheDocument();
-    expect(assign).not.toHaveBeenCalled();
-    expect(QRCode.toDataURL).toHaveBeenCalledWith(`${ORIGIN}/secure/${TOKEN}`, expect.any(Object));
-    expect(outsideLinks(container)).toHaveLength(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Pay per application' }));
-    await waitFor(() => expect(screen.queryByTestId('handoff-prepay-qr')).toBeNull());
-    const bodies = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/select-plan')).map(([, o]) => JSON.parse(o.body).plan);
-    expect(bodies).toEqual(['prepay_annual', 'per_application']);
   });
 });
 
@@ -289,15 +328,14 @@ describe('SecureAppointmentPage without the app bridge', () => {
     expect(outsideLinks(container).length).toBeGreaterThan(0);
     await waitFor(() => expect(createCalls.length).toBeGreaterThan(0));
     expect(createCalls[0].options.wallets).toBeUndefined();
-    expect(screen.queryByTestId('handoff-terms')).toBeNull();
+    expect(fetchMock.mock.calls).toHaveLength(1);
   });
 
   it('the bridge without ?handoff=1 is also a normal page', async () => {
     routerState.search = '';
-    const fetchMock = installFetch({ ...READY, handoff: { terms: TERMS } });
-    render(<SecureAppointmentPage />);
+    installFetch(READY);
+    const { container } = render(<SecureAppointmentPage />);
     await screen.findByRole('button', { name: 'Save card & secure my visit' });
-    expect(String(fetchMock.mock.calls[0][0])).not.toMatch(/handoff/);
-    expect(screen.queryByTestId('handoff-terms')).toBeNull();
+    expect(outsideLinks(container).length).toBeGreaterThan(0);
   });
 });

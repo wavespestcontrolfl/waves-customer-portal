@@ -15,14 +15,19 @@
  * against Stripe before saving anything. A 3DS redirect returns here with
  * ?setup_intent=...&redirect_status=succeeded — completed on mount.
  *
- * Hand-off mode (Book at the Table, GATE_IN_PERSON_CARD): the Waves Admin app
- * opens this page in a separate, isolated web view for a customer at the table.
- * The page enters it only with ?handoff=1 AND the app's `wavesCustomer` message
- * handler (lib/wavesCustomerHandoff). There it shows no contact or outside links,
- * never offers Apple Pay / Google Pay, asks the customer to accept the estimate
- * terms when the server sends them (the app relays that to the signed-in admin
- * page), and shows a QR code for "Prepay the year" instead of a pay page. The app
- * draws its own hand-back bar. Without the bridge the page is unchanged.
+ * Estimate terms (Book at the Table, GATE_IN_PERSON_CARD): when the office marked the
+ * request, the payload carries `terms` (and `consumerNotice` for a termite estimate).
+ * The customer ticks "I accept estimate {ref} and its terms", the page records it with
+ * POST /accept-terms, and only then saves the card or shows the annual-prepay hand-off;
+ * the server refuses both until it is recorded (409 terms_required). Same on the
+ * customer's own phone and in hand-off mode.
+ *
+ * Hand-off mode: the Waves Admin app opens this page in a separate, isolated web view
+ * for a customer at the table. The page enters it only with ?handoff=1 AND the app's
+ * `wavesCustomer` message handler (lib/wavesCustomerHandoff). There it shows no contact
+ * or outside links, never offers Apple Pay / Google Pay, and shows a QR code for
+ * "Prepay the year" instead of a pay page. The app draws its own hand-back bar. Without
+ * the bridge the page is unchanged.
  *
  * Styling follows the customer-facing brand idiom used by ReschedulePage
  * (WavesShell customer variant + warm surface palette + inline styles).
@@ -37,7 +42,7 @@ import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
 import HandoffTermsBox from '../components/estimate/HandoffTermsBox';
 import HandoffPrepayQr from '../components/estimate/HandoffPrepayQr';
-import { isHandoffMode, requestTermsAcceptance, TERMS_CHANGED_MESSAGE } from '../lib/wavesCustomerHandoff';
+import { isHandoffMode, TERMS_CHANGED_MESSAGE } from '../lib/wavesCustomerHandoff';
 import { fmtMoney } from '../lib/money';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import { CONSENT_VERSION, consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE } from '../lib/paymentMethodConsentText';
@@ -51,7 +56,7 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // attests the saved-payment-method consent text version this bundle renders
 // beside the capture checkbox (codex #5434 r1 P1); the server stamps it on
 // the intent and refuses a stale one with 409 CONSENT_VERSION_STALE.
-const PAGE_URL = (token, handoff = false) => `${API_BASE}/public/secure-card/${token}?consentTextVersion=${encodeURIComponent(CONSENT_VERSION)}${handoff ? '&handoff=1' : ''}`;
+const PAGE_URL = (token) => `${API_BASE}/public/secure-card/${token}?consentTextVersion=${encodeURIComponent(CONSENT_VERSION)}`;
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const S = {
@@ -166,7 +171,7 @@ export default function SecureAppointmentPage() {
   // office edits the visit, a term appears). Server truth wins.
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(PAGE_URL(token, handoffMode));
+      const res = await fetch(PAGE_URL(token));
       if (res.status === 404) { setState('notfound'); return; }
       if (!res.ok) throw new Error('load_failed');
       const payload = await res.json();
@@ -176,7 +181,7 @@ export default function SecureAppointmentPage() {
     } catch {
       setState('unavailable');
     }
-  }, [token, handoffMode]);
+  }, [token]);
 
   // The retry on the unavailable card must not fan out. `refresh` leaves the
   // state at `unavailable` for the whole fetch, so the button stays live and
@@ -204,7 +209,7 @@ export default function SecureAppointmentPage() {
   // success the server has not; GH Codex #3726 r5 P2).
   const refreshOrSecured = useCallback(async (fallback = 'secured') => {
     try {
-      const res = await fetch(PAGE_URL(token, handoffMode));
+      const res = await fetch(PAGE_URL(token));
       if (res.ok) {
         const payload = await res.json();
         setData(payload);
@@ -219,7 +224,7 @@ export default function SecureAppointmentPage() {
     // without quoting terms we could not refresh.
     setData((d) => (d ? { ...d, cancelFeeNote: null } : d));
     setState(fallback);
-  }, [token, handoffMode]);
+  }, [token]);
 
   // The disclosure version THIS tab's render carried — the server stamps
   // the sticky-window consent marker from it, so it must come from the
@@ -314,7 +319,7 @@ export default function SecureAppointmentPage() {
             setSearchParams(cleaned, { replace: true });
           }
         }
-        const res = await fetch(PAGE_URL(token, handoffMode));
+        const res = await fetch(PAGE_URL(token));
         if (cancelled) return;
         if (res.status === 404) { setState('notfound'); return; }
         if (res.status === 409) {
@@ -389,30 +394,53 @@ export default function SecureAppointmentPage() {
     }
   }, [token, busy, refresh]);
 
-  // Hand-off terms (D2): the customer's "I accept estimate {ref} and its terms" is
-  // recorded through the app's relay BEFORE the card is saved; a failure stops the
-  // save. The server stamps once per estimate, so a retry after a card error is safe.
-  // Once recorded they are not asked for again this visit. The box and the termite
-  // note live outside the card form, so both plan choices see them.
-  const handoffTerms = handoffMode && !termsRecorded ? (data?.handoff?.terms || null) : null;
-  const handoffNotice = handoffMode ? (data?.handoff?.consumerNotice || data?.handoff?.terms?.consumerNotice || null) : null;
-  const termsBlocking = !!handoffTerms && !termsAccepted;
-  const recordHandoffTerms = useCallback(async () => {
-    if (!handoffTerms) return true;
-    const outcome = await requestTermsAcceptance({
-      termsVersion: handoffTerms.version,
-      termsScope: handoffTerms.scope,
-      consumerNoticeShown: !!handoffTerms.consumerNotice,
-    });
-    if (!outcome.ok) {
+  // Estimate terms (Book at the Table): a request the office marked for them carries
+  // `terms` on every device, until the customer's acceptance is recorded. The box and the
+  // termite note live outside the card form, so both plan choices see them. The card
+  // save and the annual-prepay choice are refused by the server (409 terms_required)
+  // until POST /accept-terms succeeds; this page ticks and records first, then goes on.
+  // Once recorded they are not asked for again this visit.
+  const terms = !termsRecorded ? (data?.terms || null) : null;
+  const termsNotice = data?.consumerNotice || null;
+  const termsBlocking = !!terms && !termsAccepted;
+  const recordTerms = useCallback(async () => {
+    if (!terms) return true;
+    try {
+      const res = await fetch(`${API_BASE}/public/secure-card/${token}/accept-terms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ terms_version: terms.version, terms_scope: terms.scope, consumer_notice_shown: !!termsNotice }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setTermsRecorded(true);
+        return true;
+      }
       // The terms moved since this page loaded: only a reload shows the current ones.
-      setTermsChanged(!!outcome.changed);
-      setError(outcome.changed ? TERMS_CHANGED_MESSAGE : (outcome.message || 'We could not record your acceptance. Please try again.'));
-      return false;
+      if (res.status === 409 && (body.code === 'terms_changed' || body.code === 'TERMS_VERSION_STALE')) {
+        setTermsChanged(true);
+        setError(TERMS_CHANGED_MESSAGE);
+        return false;
+      }
+      if (res.status === 409 && body.code === 'request_closed') {
+        await refresh();
+        return false;
+      }
+      setError(body.error || 'We could not record your acceptance. Please try again.');
+    } catch {
+      setError('We could not record your acceptance. Please try again.');
     }
-    setTermsRecorded(true);
-    return true;
-  }, [handoffTerms]);
+    return false;
+  }, [terms, termsNotice, token, refresh]);
+
+  // The server says the terms are still outstanding (another tab, a stale page): show the
+  // box again from fresh data.
+  const reopenTerms = useCallback(async (message) => {
+    setTermsRecorded(false);
+    setTermsAccepted(false);
+    await refresh();
+    setError(message || 'Please accept the estimate terms first.');
+  }, [refresh]);
 
   const handleSave = useCallback(async () => {
     if (busy || replacingRef.current || termsBlocking || !captureRef.current?.isReady()) return;
@@ -422,7 +450,7 @@ export default function SecureAppointmentPage() {
     // SAME SetupIntent — the server pins the webhook-first echo to it.
     let confirmedIntentId = null;
     try {
-      if (!(await recordHandoffTerms())) return;
+      if (!(await recordTerms())) return;
       const confirmed = await captureRef.current.confirmSetup();
       if (!confirmed.ok) {
         setError(confirmed.error || 'That card could not be saved. Try again.');
@@ -472,6 +500,10 @@ export default function SecureAppointmentPage() {
         await refreshOrSecured(data?.kind === 'customer' ? 'saving' : 'secured');
         return;
       }
+      if (err?.code === 'terms_required') {
+        await reopenTerms(err.message);
+        return;
+      }
       // The server requires a recorded plan selection before the capture
       // may complete (another tab may have changed it) — re-pull so the
       // plan choice renders with current truth.
@@ -501,20 +533,20 @@ export default function SecureAppointmentPage() {
     } finally {
       setBusy(false);
     }
-  }, [busy, termsBlocking, recordHandoffTerms, complete, refresh, refreshOrSecured, pendingStickyEcho, data?.kind]);
+  }, [busy, termsBlocking, recordTerms, reopenTerms, complete, refresh, refreshOrSecured, pendingStickyEcho, data?.kind]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;
     setPlanBusy(true);
     setError(null);
     try {
-      // Hand-off mode: the prepay hand-off never reaches a card save, so the estimate
-      // terms are ticked and recorded BEFORE the plan is chosen (and the QR shown).
+      // The annual-prepay choice never reaches a card save, so the estimate terms are
+      // ticked and recorded BEFORE the plan is chosen (and the QR or pay page shown).
       if (plan === 'prepay_annual' && termsBlocking) {
-        setError(`Please tick “I accept estimate ${handoffTerms.estimateRef} and its terms.” before you choose to prepay.`);
+        setError(`Please tick “I accept estimate ${terms.estimateRef} and its terms.” before you choose to prepay.`);
         return;
       }
-      if (plan === 'prepay_annual' && !(await recordHandoffTerms())) return;
+      if (plan === 'prepay_annual' && !(await recordTerms())) return;
       const res = await fetch(`${API_BASE}/public/secure-card/${token}/select-plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -545,6 +577,7 @@ export default function SecureAppointmentPage() {
         setSelectedPlan(plan);
         return;
       }
+      if (body.code === 'terms_required') { await reopenTerms(body.error); return; }
       if (body.code === 'no_longer_needed') { setState('closed'); return; }
       if (body.code === 'already_secured') { setState('secured'); return; }
       // plan_unavailable / conflicts: the server state moved — re-render truth.
@@ -558,7 +591,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setPlanBusy(false);
     }
-  }, [planBusy, token, refresh, state, handoffMode, termsBlocking, handoffTerms, recordHandoffTerms]);
+  }, [planBusy, token, refresh, state, handoffMode, termsBlocking, terms, recordTerms, reopenTerms]);
 
   const greeting = data?.firstName ? `${data.firstName}, you` : 'You';
   // Standalone Auto Pay setup link (GATE_AUTOPAY_SETUP_LINK): no visit,
@@ -814,12 +847,12 @@ export default function SecureAppointmentPage() {
             disabled={planBusy || busy}
           />
         ) : null}
-        {handoffNotice?.text ? (
-          <p role="note" data-testid="handoff-notice" style={{ fontSize: 14, color: S.body, lineHeight: 1.5, margin: '14px 0 0' }}>
-            {handoffNotice.text}
+        {termsNotice?.text ? (
+          <p role="note" data-testid="terms-notice" style={{ fontSize: 14, color: S.body, lineHeight: 1.5, margin: '14px 0 0' }}>
+            {termsNotice.text}
           </p>
         ) : null}
-        <HandoffTermsBox terms={handoffTerms} checked={termsAccepted} onChange={setTermsAccepted} disabled={busy || planBusy} />
+        <HandoffTermsBox terms={terms} checked={termsAccepted} onChange={setTermsAccepted} disabled={busy || planBusy} />
         {termsChanged ? (
           <button
             type="button"

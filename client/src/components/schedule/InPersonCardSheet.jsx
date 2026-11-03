@@ -8,9 +8,7 @@
 // tap "Text the link". The booking stays whatever happens here.
 //
 // Hand-off: the app shows the secure page to the customer in a separate,
-// isolated web view and covers this page; this tab never navigates. While the
-// card step is open the sheet answers one relay for that view (see
-// window.wavesAdminInPersonTerms below).
+// isolated web view and covers this page; this tab never navigates.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
@@ -123,39 +121,11 @@ function useSavedPolling({ active, adminFetch, visitId }) {
 const toneColor = (t) => (t === 'good' ? D.text : t === 'bad' ? D.red : D.muted);
 const sectionLabel = { fontSize: 14, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, marginBottom: 4 };
 
-// The secure token is the last segment of the secure page path (/secure/:token).
-function secureTokenOf(secureUrl) {
-  try { return new URL(secureUrl, window.location.origin).pathname.split('/').filter(Boolean).pop() || ''; } catch { return ''; }
-}
-
 // The secure page in hand-off mode, as an absolute link for the app.
 function handoffHref(secureUrl) {
   const url = new URL(secureUrl, window.location.origin);
   url.searchParams.set('handoff', '1');
   return url.href;
-}
-
-// While the card step is open, the app's customer view can ask this signed-in page
-// to record the terms the customer ticked (the view itself holds no sign-in).
-// Answers only for this visit's own secure token and goes away with the sheet.
-// Same shape as window.wavesAdminConnectionToken in lib/tapToPay.js.
-function useInPersonTermsRelay({ adminFetch, visitId, secureToken }) {
-  useEffect(() => {
-    const relay = async ({ secureToken: askedToken, termsVersion, termsScope, consumerNoticeShown } = {}) => {
-      if (!secureToken || askedToken !== secureToken) return { ok: false };
-      try {
-        const r = await adminFetch(`/admin/schedule/${visitId}/in-person-terms`, {
-          method: 'POST',
-          body: JSON.stringify({ terms_version: termsVersion, terms_scope: termsScope, consumer_notice_shown: consumerNoticeShown === true }),
-        });
-        return { ok: r?.success === true };
-      } catch (err) {
-        return { ok: false, message: err?.message || null, code: err?.body?.code || null };
-      }
-    };
-    window.wavesAdminInPersonTerms = relay;
-    return () => { if (window.wavesAdminInPersonTerms === relay) delete window.wavesAdminInPersonTerms; };
-  }, [adminFetch, visitId, secureToken]);
 }
 
 // "Hand the phone to {first}": shown only when the app answers the capabilities
@@ -204,7 +174,6 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
   }, []);
   const saved = useSavedPolling({ active: qrOpen, adminFetch, visitId });
   const first = firstName || 'the customer';
-  useInPersonTermsRelay({ adminFetch, visitId, secureToken: secureTokenOf(secureUrl) });
   const handoff = useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef });
   const textTheLink = () => {
     setTextState('sending');

@@ -1,11 +1,11 @@
 /**
- * Estimate terms box for the secure card page in hand-off mode (Book at the Table,
- * owner 2026-11-02). The booking was accepted by staff, which records no terms, so
- * the customer ticks "I accept estimate {ref} and its terms" on the owner's phone and
- * the record matches an online accept. `terms` is the server's handoff.terms:
- * { estimateRef, version, scope, lines }. The lines are
- * shown verbatim; the page owns the checkbox state and the Save gate. The Florida
- * notice line (informational, signed separately) is rendered by the page, not here.
+ * Estimate terms box for the secure card page (Book at the Table, owner 2026-11-02),
+ * on the customer's own phone and in hand-off mode alike. The booking was accepted by
+ * staff, which records no terms, so the customer ticks "I accept estimate {ref} and its
+ * terms" and the record matches an online accept. `terms` is the payload's `terms`:
+ * { estimateRef, version, scope, lines }. The lines are shown verbatim; the page owns the
+ * checkbox state, the POST /accept-terms call and the Save gate. The Florida notice line
+ * (informational, signed separately) is rendered by the page, not here.
  */
 import { useState } from 'react';
 
