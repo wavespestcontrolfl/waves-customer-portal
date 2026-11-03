@@ -15,6 +15,16 @@ jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), 
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/geocoder', () => ({ geocodeAddressWithStatus: jest.fn(async () => ({ location: { lat: 27.1, lng: -82.4 } })) }));
+// The paid address check, the short link and the alert writer are stubbed for the resubmit test.
+jest.mock('../services/address-validation', () => {
+  const actual = jest.requireActual('../services/address-validation');
+  return { ...actual, validateAddress: jest.fn() };
+});
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
+jest.mock('../services/admin-alert-compose', () => {
+  const actual = jest.requireActual('../services/admin-alert-compose');
+  return { ...actual, raiseAdminAlert: jest.fn(async () => ({ id: 'n1' })) };
+});
 
 const crypto = require('crypto');
 
@@ -268,6 +278,44 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       delete process.env.GATE_MOVING_ESTIMATE;
       await revise({ notes: 'Gate off' });
       expect((await storedData(estimate.id)).operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true });
+    });
+  });
+
+  describe('a resubmitted move', () => {
+    const NOW = new Date('2026-11-02T15:00:00Z');
+    const resubmit = async (moveId, typed, street) => {
+      const { validateAddress, STATUSES } = require('../services/address-validation');
+      validateAddress.mockResolvedValueOnce({
+        status: STATUSES.VALIDATED_ACCEPT, inServiceArea: true,
+        normalized: { street_line_1: street, city: 'Venice', state: 'FL', postal_code: '34285' },
+      });
+      const fresh = await trx('customer_moves').where({ id: moveId }).first();
+      const check = await Moves.checkMoveAddress(fresh, typed, { now: NOW });
+      const again = await trx('customer_moves').where({ id: moveId }).first();
+      await Moves.submitMove(again, { checkId: check.checkId, moveOutDate: '2026-11-20', moveInDate: '2026-11-26' }, { now: NOW });
+      return trx('customer_moves').where({ id: moveId }).first();
+    };
+
+    test('keeps the estimate for the same house and drops it for another house, telling the office', async () => {
+      const move = await insertMove();
+      const { estimate } = await create(move);
+      const same = await resubmit(move.id, '40 Sample Road, Venice FL 34285', '40 Sample Road');
+      expect(same.estimate_id).toBe(estimate.id);
+      expect(await Moves.moveForEstimate(estimate.id)).toMatchObject({ id: move.id, move_in_date: '2026-11-26' });
+
+      const other = await resubmit(move.id, '52 Other Lane, Venice FL 34285', '52 Other Lane');
+      expect(other.estimate_id).toBeNull();
+      expect(await Moves.moveForEstimate(estimate.id)).toBeNull();
+      const request = await trx('service_requests').where({ id: other.service_request_id }).first();
+      expect(request.description).toMatch(/differs from the one the new-home estimate was made for/);
+      expect(await Moves.newHomeAction(other)).toEqual({ action: 'start', estimateId: null, reason: null });
+    });
+
+    test('an out-of-area move steers no estimate', async () => {
+      const move = await insertMove();
+      const { estimate } = await create(move);
+      await trx('customer_moves').where({ id: move.id }).update({ address_verdict: 'out_of_area' });
+      expect(await Moves.moveForEstimate(estimate.id)).toBeNull();
     });
   });
 

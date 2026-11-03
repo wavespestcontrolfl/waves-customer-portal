@@ -18,9 +18,13 @@ jest.mock('../services/scheduling/find-time', () => ({
   })),
 }));
 jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: jest.fn(async () => null) }));
+// Moving PR B1: no move by default; one test sets a move-in date.
+jest.mock('../services/customer-moves', () => ({ moveForEstimate: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   zoneRouteDaysLive: jest.fn(() => false),
+  // Moving PR B1: the offer window reads a new-home estimate's move-in date.
+  movingEstimateLive: jest.fn(() => false),
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
   // The same-hour technician scope (GATE_MULTI_TECH_CONFIRM) reads the real call-time reader.
   multiTechConfirmLive: jest.requireActual('../config/feature-gates').multiTechConfirmLive,
@@ -119,6 +123,32 @@ describe('estimate slots — noon is a normal hour', () => {
     test('noon is offered', async () => {
       const result = await getAvailableSlots('est-lunch-1', opts);
       expect(allOffered(result).some(overlapsNoon)).toBe(true);
+    });
+
+    test('a new-home estimate offers no time before the move-in date, and a moved date misses the cache (moving PR B1)', async () => {
+      const { moveForEstimate } = require('../services/customer-moves');
+      const { findAvailableSlots } = require('../services/scheduling/find-time');
+      const original = findAvailableSlots.getMockImplementation();
+      // A route lane that honours the window it is asked for, as find-time does.
+      findAvailableSlots.mockImplementation(async (args) => {
+        const all = await original(args);
+        return { ...all, slots: all.slots.filter((slot) => slot.date >= args.dateFrom && slot.date <= args.dateTo) };
+      });
+      try {
+        moveForEstimate.mockResolvedValue({ id: 'move-1', move_in_date: '2027-05-21' });
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts))).toEqual([]);
+        moveForEstimate.mockResolvedValue({ id: 'move-1', move_in_date: '2027-05-20' });
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts)).length).toBeGreaterThan(0);
+        // The rolling window opens on the move-in date.
+        moveForEstimate.mockResolvedValue({ id: 'move-1', move_in_date: '2027-05-25' });
+        const rolling = allOffered(await getAvailableSlots('est-lunch-1', {}));
+        expect(rolling.length).toBeGreaterThan(0);
+        expect(rolling.every((slot) => slot.date >= '2027-05-25')).toBe(true);
+        expect(moveForEstimate).toHaveBeenCalledWith('est-lunch-1');
+      } finally {
+        findAvailableSlots.mockImplementation(original);
+        moveForEstimate.mockResolvedValue(null);
+      }
     });
 
     // Codex push-audit P1 on #4663: the cache key includes the

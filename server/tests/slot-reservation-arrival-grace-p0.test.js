@@ -144,10 +144,11 @@ describe('reserveSlot refuses a graced offer whose date is now today', () => {
   const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
   test('the past-date guard also rejects date === today when the offer carries grace', () => {
     expect(src).toMatch(/if \(date === todayEt && offerArrivalGrace > 0\) return 'graced offer is now same-day';/);
-    expect(src).toMatch(/const dateRefusal = slotDateRefusal\(date, todayEt, offerArrivalGrace\);/);
+    // Moving PR B1 added the move-in date as a fourth argument; the guard is the same call.
+    expect(src).toMatch(/const dateRefusal = slotDateRefusal\(date, todayEt, offerArrivalGrace, moveInDate\);/);
   });
   test('the refusal happens before any capacity verification runs', () => {
-    const guardAt = src.indexOf('const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace);');
+    const guardAt = src.indexOf('const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace, moveInDate);');
     const reserveVerifyAt = src.indexOf('arrivalGraceMinutes: offerArrivalGrace');
     expect(guardAt).toBeGreaterThan(-1);
     expect(reserveVerifyAt).toBeGreaterThan(guardAt);

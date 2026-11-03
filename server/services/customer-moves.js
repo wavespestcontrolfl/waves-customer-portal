@@ -453,8 +453,21 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
     const hasAddress = !!address.typed;
     const description = requestDescription({ ...address, moveOut, moveIn, services });
     const subject = requestSubject(address.normalized, hasAddress);
-    const request = await writeOfficeItem(trx, { move: locked, subject, description, now });
+    // Moving PR B1: a new-home estimate was priced for the address on file. A
+    // resubmitted address that is no longer that house (or not in area) drops
+    // the link, so the old estimate stops steering the move; the office makes a new one.
+    const dropsEstimate = !!locked.estimate_id && !(address.verdict === 'in_area'
+      && addressMatchesMove(addressLine(parseJson(locked.normalized_address)), { normalized_address: address.normalized }));
+    const request = await writeOfficeItem(trx, {
+      move: locked,
+      subject,
+      description: dropsEstimate
+        ? `${description}\nThe new address differs from the one the new-home estimate was made for. Make a new estimate from the Moving card.`
+        : description,
+      now,
+    });
     const [updated] = await trx('customer_moves').where({ id: locked.id }).update({
+      ...(dropsEstimate ? { estimate_id: null } : {}),
       typed_address: address.typed,
       normalized_address: address.normalized ? JSON.stringify(address.normalized) : null,
       address_verdict: address.typed ? address.verdict : null,
@@ -820,7 +833,7 @@ function withMoveSetupWaiver(base) {
 async function moveForEstimate(estimateId, conn = db) {
   if (!movingEstimateLive() || !estimateId) return null;
   const move = await conn('customer_moves')
-    .where({ estimate_id: estimateId, status: 'submitted' })
+    .where({ estimate_id: estimateId, status: 'submitted', address_verdict: 'in_area' })
     .first('id', 'customer_id', 'normalized_address', 'move_out_date', 'move_in_date', 'from_property_id');
   if (!move) return null;
   return {

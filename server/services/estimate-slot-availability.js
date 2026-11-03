@@ -2124,8 +2124,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // null = config unreadable this request: neither read nor write the cache.
   const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
   const routeCheckMode = routeCheckModeFor(userOpts);
+  // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
+  // visit before the move-in date, which the customer can still change.
+  const moveInDate = (await require('./customer-moves').moveForEstimate(estimateId))?.move_in_date || null;
   const cacheKey = [
     estimateId,
+    `move-in:${moveInDate || 'none'}`,
     `route-days:${routeDayPolicyKey}`,
     capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
     // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
@@ -2243,6 +2247,18 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   if (!(opts.dateFrom && opts.dateTo) && seasonalSelectionProfile(serviceProfile)) {
     dateFrom = nextSeasonStartFrom(dateFrom);
     dateTo = seasonalWindowEnd(dateFrom, Number(opts.windowDays) || DEFAULT_OPTS.windowDays);
+  }
+  // The rolling window of a new-home estimate opens on the move-in date and
+  // stops at the horizon reserveSlot accepts; an explicit window only loses
+  // the days before move-in (an empty window offers nothing).
+  if (moveInDate && dateFrom < moveInDate) {
+    if (!(opts.dateFrom && opts.dateTo)) {
+      const span = Math.max(1, Number(opts.windowDays) || DEFAULT_OPTS.windowDays);
+      const end = etDateString(addETDays(new Date(`${moveInDate}T12:00:00Z`), span));
+      const horizon = etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS));
+      dateTo = end < horizon ? end : horizon;
+    }
+    dateFrom = moveInDate;
   }
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   // Resolved once per (uncached) generation and threaded through every

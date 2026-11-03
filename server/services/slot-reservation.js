@@ -731,9 +731,12 @@ async function prepareReservationCommit(scheduledServiceId, options = {}) {
 // graced offer minted before ET midnight for "tomorrow" is now same-day,
 // and same-day picks never get grace (Codex r3 P2 on #5314), so the
 // customer must refresh into a grace-0 offer.
-function slotDateRefusal(date, todayEt, offerArrivalGrace) {
+function slotDateRefusal(date, todayEt, offerArrivalGrace, moveInDate = null) {
   if (date < todayEt) return 'slot date has already passed';
   if (date === todayEt && offerArrivalGrace > 0) return 'graced offer is now same-day';
+  // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate never books
+  // before the move-in date (the offer side filters the same days).
+  if (moveInDate && date < moveInDate) return 'slot is before the move-in date';
   return null;
 }
 
@@ -870,7 +873,8 @@ async function reserveSlot({
   // A graced offer minted before ET midnight for "tomorrow" is now same-day,
   // and same-day picks never get grace (Codex r3 P2 on #5314): refuse it so
   // the customer refreshes into a grace-0 offer.
-  const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace);
+  const moveInDate = (await require('./customer-moves').moveForEstimate(estimateId))?.move_in_date || null;
+  const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace, moveInDate);
   if (dateRefusal) {
     const err = new Error(dateRefusal);
     err.code = 'SLOT_UNAVAILABLE';
@@ -1841,6 +1845,16 @@ async function commitReservation({
     // graduated either. Same recoverable code the other slot-side rejects use.
     if (visitInsideNoticeWindow(row)) {
       const err = new Error('slot start is inside the booking notice window');
+      err.code = 'SLOT_UNAVAILABLE';
+      throw err;
+    }
+    // Moving PR B1: a new-home estimate's hold that the customer's move-in
+    // date has since moved past is not graduated (same recoverable code).
+    const holdMoveIn = row.source_estimate_id
+      ? (await require('./customer-moves').moveForEstimate(row.source_estimate_id, client))?.move_in_date
+      : null;
+    if (holdMoveIn && dateOnly(row.scheduled_date) < holdMoveIn) {
+      const err = new Error('slot is before the move-in date');
       err.code = 'SLOT_UNAVAILABLE';
       throw err;
     }
