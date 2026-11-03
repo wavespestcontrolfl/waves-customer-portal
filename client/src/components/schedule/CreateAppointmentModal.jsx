@@ -52,6 +52,7 @@ import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
 import { formatETTime } from '../../lib/timezone';
+import InPersonCardSheet from './InPersonCardSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -2234,10 +2235,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // failure keeps it hidden for the same reason.
   const [sendCardLink, setSendCardLink] = useState(false);
   const [cardLinkAvailable, setCardLinkAvailable] = useState(false);
+  // Book at the Table (GATE_IN_PERSON_CARD, owner 2026-11-02): the availability
+  // read also says `inPerson` while that gate is on. Then the checkbox below
+  // becomes a three-way "Card for Auto Pay" choice; `cardHere` is the
+  // "Customer saves it here, now" pick. "Text them the link" is exactly
+  // today's sendCardLink, so firstGroupSendFlags is untouched. Off or a failed
+  // read keeps today's checkbox.
+  const [inPersonAvailable, setInPersonAvailable] = useState(false);
+  const [cardHere, setCardHere] = useState(false);
+  // Set after a "here, now" booking saves: the Booked sheet replaces the form.
+  const [bookedSheet, setBookedSheet] = useState(null);
   useEffect(() => {
     let cancelled = false;
     adminFetch('/admin/schedule/card-request-availability')
-      .then(r => { if (!cancelled) setCardLinkAvailable(!!r?.enabled); })
+      .then(r => {
+        if (cancelled) return;
+        setCardLinkAvailable(!!r?.enabled);
+        setInPersonAvailable(!!r?.enabled && r?.inPerson === true);
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -4691,6 +4706,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // pending manager approval) books fine but couldn't be auto-accepted — tell
       // the operator so they can record the win from the Estimates page.
       showBookingWarnings(apptWarnings, 'Appointment saved.\n\n');
+      // "Customer saves it here, now": keep the modal open on the Booked sheet.
+      // The callers close on a non-background report, so report the save as
+      // background (their lists still refresh) and let the sheet's Done close.
+      if (inPersonAvailable && cardHere && results[0]?.id && submitIsCurrent()) {
+        createdGroupKeysRef.current = new Set();
+        committedGroupPricesRef.current = new Map();
+        committedLineIdsRef.current = new Set();
+        appointmentDiscountCommittedGroupKeyRef.current = null;
+        const bookedAppointment = { id: results[0].id, scheduledDate: apptDate };
+        onCreated?.(bookedAppointment, { background: true });
+        onChange?.(bookedAppointment, { background: true });
+        setBookedSheet({
+          visitId: results[0].id,
+          date: apptDate,
+          time: (HOURLY_TIME_OPTIONS.find((o) => o.value === windowStart) || {}).label || windowStart,
+          serviceName: groups[0].lines.map((line) => line.name).filter(Boolean).join(' + '),
+          estimateAccepted: results.some((r) => r?.estimateAccepted),
+          estimateRef: linkedEstimate?.estimateSlug || null,
+          confirmationText: !!sendSms,
+          firstName: selectedCustomer?.firstName || selectedCustomer?.first_name || '',
+        });
+        return true;
+      }
       setTimeout(() => {
         if (!submitIsCurrent()) {
           reportBackground();
@@ -5300,6 +5338,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       </select>
     </div>
   );
+
+  if (bookedSheet) {
+    return <InPersonCardSheet {...bookedSheet} adminFetch={adminFetch} onClose={onClose} />;
+  }
 
   return createPortal(
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -6862,13 +6904,37 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
               <span style={{ fontSize: 13, color: D.text }}>Send confirmation SMS</span>
             </label>
-            {cardLinkAvailable && (
+            {cardLinkAvailable && (inPersonAvailable ? (
+              <fieldset style={{ border: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <legend style={{ ...labelStyle, fontSize: 14, padding: 0, marginBottom: 2 }}>Card for Auto Pay</legend>
+                {[
+                  { value: 'here', label: 'Customer saves it here, now', hint: 'On this phone. Nothing charged today.' },
+                  { value: 'text', label: 'Text them the link', hint: 'Texts a secure link to save a card.' },
+                  { value: 'none', label: 'No card ask', hint: '' },
+                ].map((option) => (
+                  <label key={option.value} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', minHeight: 44, padding: '6px 0' }}>
+                    <input
+                      type="radio"
+                      name="new-appt-card-choice"
+                      value={option.value}
+                      checked={(cardHere ? 'here' : (sendCardLink ? 'text' : 'none')) === option.value}
+                      onChange={() => { setCardHere(option.value === 'here'); setSendCardLink(option.value === 'text'); }}
+                      style={{ width: 18, height: 18, marginTop: 2, accentColor: D.green }}
+                    />
+                    <span style={{ display: 'flex', flexDirection: 'column' }}>
+                      <span style={{ fontSize: 14, color: D.text }}>{option.label}</span>
+                      {option.hint && <span style={{ fontSize: 14, color: D.muted }}>{option.hint}</span>}
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            ) : (
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
                 <input type="checkbox" checked={sendCardLink} onChange={e => setSendCardLink(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
                 <span style={{ fontSize: 13, color: D.text }}>Text card-on-file link (Auto Pay setup)</span>
               </label>
-            )}
-            {cardLinkAvailable && sendCardLink && (
+            ))}
+            {cardLinkAvailable && !inPersonAvailable && sendCardLink && (
               <div style={{ fontSize: 12, color: D.muted, paddingLeft: 26 }}>
                 Texts a secure link to save a card — nothing charged today, Auto Pay enrolls on save.
                 Skipped automatically if a card is already on file or the visit bills a third-party payer.

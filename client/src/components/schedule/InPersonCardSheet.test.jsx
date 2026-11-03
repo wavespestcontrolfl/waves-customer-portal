@@ -1,0 +1,185 @@
+// @vitest-environment jsdom
+// Booked sheet for "Book at the Table" (GATE_IN_PERSON_CARD, owner 2026-11-02).
+import "@testing-library/jest-dom/vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import React from "react";
+
+vi.mock("qrcode", () => ({
+  default: { toDataURL: vi.fn(async () => "data:image/png;base64,QR") },
+}));
+import QRCode from "qrcode";
+import InPersonCardSheet, { POLL_INTERVAL_MS } from "./InPersonCardSheet";
+
+const SECURE = "https://portal.example.test/secure/tok123";
+const BASE = {
+  visitId: "visit-1",
+  date: "2026-11-03",
+  time: "9:00 AM",
+  serviceName: "Quarterly Pest Control Service",
+  estimateAccepted: true,
+  estimateRef: "EST-2026-0001",
+  confirmationText: true,
+  firstName: "Pat",
+};
+
+function makeFetch({ inPerson, card = { request: { status: "pending" }, autopayActive: false }, text } = {}) {
+  return vi.fn(async (path, options = {}) => {
+    if (path.endsWith("/card-request/in-person")) return inPerson;
+    if (path.endsWith("/card-request") && options.method === "POST") return text || { requested: true, action: "sent", reason: "sent" };
+    if (path.endsWith("/card-request")) return typeof card === "function" ? card() : card;
+    throw new Error(`unexpected ${path}`);
+  });
+}
+
+const LINK = { requested: true, action: "link_created", reason: "created", secureUrl: SECURE };
+
+function renderSheet(props = {}, fetcher = makeFetch({ inPerson: LINK })) {
+  const onClose = vi.fn();
+  const view = render(
+    <MemoryRouter>
+      <InPersonCardSheet {...BASE} adminFetch={fetcher} onClose={onClose} {...props} />
+    </MemoryRouter>,
+  );
+  return { fetcher, onClose, ...view };
+}
+
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); });
+
+describe("InPersonCardSheet", () => {
+  it("shows the booking rows exactly, then the card section and four actions", async () => {
+    const { fetcher } = renderSheet();
+    expect(screen.getByRole("heading", { name: "Booked" })).toBeInTheDocument();
+    expect(screen.getByText("Tue, Nov 3, 9:00 AM")).toBeInTheDocument();
+    expect(screen.getByText("Quarterly Pest Control Service")).toBeInTheDocument();
+    expect(screen.getByText("Estimate EST-2026-0001 marked accepted")).toBeInTheDocument();
+    expect(screen.getByText("Confirmation text going out")).toBeInTheDocument();
+    expect(await screen.findByText("Card for Auto Pay")).toBeInTheDocument();
+    expect(screen.getByText("Pat saves a card on your phone now. Nothing is charged today. Auto Pay charges after each completed service.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hand the phone to Pat" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show a QR code" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Text the link" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledWith("/admin/schedule/visit-1/card-request/in-person", { method: "POST" });
+  });
+
+  it("omits the estimate and confirmation rows when they do not apply", async () => {
+    renderSheet({ estimateAccepted: false, confirmationText: false });
+    await screen.findByText("Card for Auto Pay");
+    expect(screen.queryByText(/marked accepted/)).toBeNull();
+    expect(screen.queryByText("Confirmation text going out")).toBeNull();
+  });
+
+  it("Hand the phone navigates to the secure page path with ?handoff=1", async () => {
+    function Where() { const l = useLocation(); return <div data-testid="where">{l.pathname + l.search}</div>; }
+    render(
+      <MemoryRouter initialEntries={["/admin/estimates"]}>
+        <Routes><Route path="*" element={<Where />} /></Routes>
+        <InPersonCardSheet {...BASE} adminFetch={makeFetch({ inPerson: LINK })} onClose={vi.fn()} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Hand the phone to Pat" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/secure/tok123?handoff=1");
+  });
+
+  it("auto_secured: says Auto Pay is on and offers only Done", async () => {
+    const { onClose } = renderSheet({}, makeFetch({ inPerson: { requested: false, action: "auto_secured", reason: "saved_method_satisfied" } }));
+    expect(await screen.findByText("Auto Pay is already on for Pat.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Hand the phone to Pat" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("skipped payer_billed: plain third-party payer line, only Done", async () => {
+    renderSheet({}, makeFetch({ inPerson: { requested: false, action: "skipped", reason: "payer_billed" } }));
+    expect(await screen.findByText("This visit bills a third-party payer, so no card is asked for.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show a QR code" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+  });
+
+  it("a failed call keeps the booking and offers Try again", async () => {
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce(LINK);
+    renderSheet({}, fetcher);
+    expect(await screen.findByText("The card page did not load. The booking is saved.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("button", { name: "Hand the phone to Pat" })).toBeInTheDocument();
+  });
+
+  it("Text the link posts the existing card-request route and shows the result", async () => {
+    const fetcher = makeFetch({ inPerson: LINK, text: { requested: true, action: "sent", reason: "sent" } });
+    renderSheet({}, fetcher);
+    fireEvent.click(await screen.findByRole("button", { name: "Text the link" }));
+    expect(await screen.findByText("Secure card link texted")).toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledWith("/admin/schedule/visit-1/card-request", { method: "POST" });
+  });
+
+  it("Text the link on a customer with past visits explains why nothing was sent", async () => {
+    renderSheet({}, makeFetch({ inPerson: LINK, text: { requested: false, action: "skipped", reason: "existing_customer" } }));
+    fireEvent.click(await screen.findByRole("button", { name: "Text the link" }));
+    expect(await screen.findByText(/has past visits/)).toBeInTheDocument();
+  });
+
+  it("Not now closes", async () => {
+    const { onClose } = renderSheet();
+    fireEvent.click(await screen.findByRole("button", { name: "Not now" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  describe("QR code", () => {
+    beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: false }); });
+
+    async function openQr(fetcher) {
+      renderSheet({}, fetcher);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      fireEvent.click(screen.getByRole("button", { name: "Show a QR code" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    }
+    const pollCalls = (fetcher) => fetcher.mock.calls.filter(([p, o]) => p.endsWith("/card-request") && !o);
+
+    it("encodes the absolute secure URL, waits, and does not poll before it is shown", async () => {
+      const fetcher = makeFetch({ inPerson: LINK });
+      renderSheet({}, fetcher);
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3); });
+      expect(pollCalls(fetcher)).toHaveLength(0);
+      fireEvent.click(screen.getByRole("button", { name: "Show a QR code" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(QRCode.toDataURL).toHaveBeenCalledWith(SECURE, expect.any(Object));
+      expect(screen.getByText("Waiting for Pat's phone…")).toBeInTheDocument();
+      expect(screen.getByAltText("QR code for the card page")).toBeInTheDocument();
+    });
+
+    it("polls every 4 s while shown, stops when hidden", async () => {
+      const fetcher = makeFetch({ inPerson: LINK });
+      await openQr(fetcher);
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 2); });
+      expect(pollCalls(fetcher)).toHaveLength(2);
+      fireEvent.click(screen.getByRole("button", { name: "Hide the QR code" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3); });
+      expect(pollCalls(fetcher)).toHaveLength(2);
+    });
+
+    it("stops polling and shows Saved when the request completes", async () => {
+      let state = { request: { status: "pending" }, autopayActive: false };
+      const fetcher = makeFetch({ inPerson: LINK, card: () => state });
+      await openQr(fetcher);
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS); });
+      expect(screen.getByText("Waiting for Pat's phone…")).toBeInTheDocument();
+      state = { request: { status: "completed" }, autopayActive: false };
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS); });
+      expect(screen.getByText("Saved. Auto Pay is on.")).toBeInTheDocument();
+      const count = pollCalls(fetcher).length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 4); });
+      expect(pollCalls(fetcher)).toHaveLength(count);
+    });
+
+    it("autopayActive alone also counts as saved", async () => {
+      const fetcher = makeFetch({ inPerson: LINK, card: { request: { status: "pending" }, autopayActive: true } });
+      await openQr(fetcher);
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS); });
+      expect(screen.getByText("Saved. Auto Pay is on.")).toBeInTheDocument();
+    });
+  });
+});

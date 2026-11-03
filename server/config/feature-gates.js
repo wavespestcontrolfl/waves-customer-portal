@@ -195,6 +195,7 @@
  *   GATE_UNASSIGNED_VISIT_GUARD=true (owner 2026-10-25, second technician starts early 2027: an office visit must not silently land with no technician. On, the office create modal's "Auto" technician choice picks a real technician: the one technician assignable that day (active, field-dispatchable, not off that day or absent, not Off for the service category), or, when several qualify, the existing scheduling pick when that is active; otherwise the visit is saved unassigned and the response and modal say so (the old tech-matcher path never existed, so Auto always saved it unassigned). A daily 6:10 PM ET check also reports timed visits tomorrow through 3 days out that have no technician as one standing Schedule bell (rings when a new visit joins, clears at zero). Strict opt-in: exactly 'true', read at call time via unassignedVisitGuardLive(). Ships DARK; off = Auto behaves exactly as before and the check does nothing, no query. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
+ *   GATE_IN_PERSON_CARD=true (Book at the Table, owner 2026-11-02: when staff book a visit from an estimate at the customer's table, the booking window offers "Customer saves it here, now". After the booking saves, a Booked sheet lets staff hand the phone to the customer (the secure card page), show a QR code of it, text the link, or skip. POST /:id/card-request/in-person runs the normal card ask with the first-time-customers-only rule lifted for this trigger only; every other card rule stays. Card or wallet only, nothing is charged, no new texts, the booking stays if no card is saved. Read at call time via inPersonCardLive(); ships DARK; off = today's booking window, byte-identical, and the route answers 404)
  *   GATE_SMS_SPAM_TAG=true (owner 2026-11-02, "mark spam, no alerts, never remove customer texts": the Messages inbox "Mark spam" button TAGS the sender instead of blocking it. A tagged sender's later texts are still saved and shown, marked read with a Spam tag, and raise no bell, badge, lead, quote or auto-reply; a customer or an open lead on that number always wins. "Not spam" undoes it and brings the texts back as needing a reply. Calls are not blocked. Read at call time via smsSpamTagLive(); ships DARK; off = today's block button, byte-identical, and the spam-senders routes answer 404)
  *   GATE_SMS_LIKE=true (owner 2026-11-02, "SMS Like Button" option B: Messages and the customer thread show a like button under the customer's newest text when nothing came after it; a click texts a thumbs-up back through the composer's own send (every consent, opt-out and line check) and marks the text with who liked it and when; customer likes on our texts show as a badge on that text instead of their own bubble. It texts customers, so the owner flips it. Read at call time via smsLikeLive(); off = no button, no badges, POST /messages/:id/like answers 404)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
@@ -4706,6 +4707,8 @@ const gates = {
   // GATE_PORTAL_ASK_PUSH: read at CALL time via portalAskPushLive(); this entry is for logGateStatus, so the boot
   // log shows the flip.
   portalAskPush: process.env.GATE_PORTAL_ASK_PUSH === 'true',
+  // GATE_IN_PERSON_CARD: read at CALL time via inPersonCardLive(); this entry is for logGateStatus.
+  inPersonCard: process.env.GATE_IN_PERSON_CARD === 'true',
   // GATE_SMS_SPAM_TAG: read at CALL time via smsSpamTagLive(); this entry is for logGateStatus.
   smsSpamTag: process.env.GATE_SMS_SPAM_TAG === 'true',
 
@@ -7856,6 +7859,13 @@ function smsLikeLive() {
   return process.env.GATE_SMS_LIKE === 'true';
 }
 
+// GATE_IN_PERSON_CARD read at CALL time — strict `=== 'true'`, dark in every
+// environment. The canonical reader for the in-person card route and the
+// booking window's "Customer saves it here, now" choice.
+function inPersonCardLive() {
+  return process.env.GATE_IN_PERSON_CARD === 'true';
+}
+
 // GATE_SMS_SPAM_TAG read at CALL time (so a flip needs no redeploy); strict 'true', dark.
 function smsSpamTagLive() {
   return process.env.GATE_SMS_SPAM_TAG === 'true';
@@ -10320,3 +10330,5 @@ module.exports.mondayReviewBellLive = mondayReviewBellLive;
 module.exports.reserviceAsksLive = reserviceAsksLive;
 // GATE_SMS_SPAM_TAG reader, on its own line so gate PRs never conflict.
 module.exports.smsSpamTagLive = smsSpamTagLive;
+// GATE_IN_PERSON_CARD reader, on its own line so gate PRs never conflict.
+module.exports.inPersonCardLive = inPersonCardLive;
