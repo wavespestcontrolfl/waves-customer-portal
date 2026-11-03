@@ -1524,6 +1524,7 @@ module.exports = {
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,
+  seriesAgreedPropertyId,
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,
