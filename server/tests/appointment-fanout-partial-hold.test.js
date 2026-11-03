@@ -135,6 +135,34 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.not.objectContaining({ operatorInitiated: true }));
   });
 
+  // Owner 2026-11-02: a self-booking's confirmation answers the customer's own
+  // action, so it goes out at any hour, but only to the account holder who
+  // booked. Another appointment contact did not act: their copy keeps the
+  // window and rides the partial rail to the 8 AM open.
+  test('customer provenance covers the account holder only; another contact is held and queued for the window', async () => {
+    sendCustomerMessage.mockResolvedValueOnce(ACCEPTED).mockResolvedValueOnce(HELD);
+    const sent = await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async (c) => `Hi ${c.role}`, 'confirmation', 'appointment_confirmation',
+      { scheduled_service_id: 'ss-1' }, { customerInitiated: true },
+    );
+    expect(sent).toBe(true);
+    const [holderSend, spouseSend] = sendCustomerMessage.mock.calls.map(([input]) => input);
+    expect(holderSend).toEqual(expect.objectContaining({ to: PRIMARY.phone, customerInitiated: true }));
+    expect(spouseSend.to).toBe(SPOUSE.phone);
+    expect(spouseSend).not.toHaveProperty('customerInitiated');
+    expect(db._inserts).toHaveLength(1);
+    expect(db._inserts[0].to_phone).toBe(SPOUSE.phone);
+
+    // Default stays fenced: no caller inherits customer provenance.
+    sendCustomerMessage.mockClear();
+    sendCustomerMessage.mockResolvedValue(ACCEPTED);
+    await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, async () => 'Confirm', 'confirmation', 'appointment_confirmation',
+      { scheduled_service_id: 'ss-1' }, {},
+    );
+    for (const [input] of sendCustomerMessage.mock.calls) expect(input).not.toHaveProperty('customerInitiated');
+  });
+
   test('r25: a full hold queues NOTHING — the callers own re-fire, and no caller opts into a full-hold queue', async () => {
     // The r21 queueHeldContactsOnFullHold escape hatch was removed in r25:
     // its only prospective caller (no-show) is operator-initiated and

@@ -37,7 +37,9 @@
  *   - input `customerInitiated: true` — explicit customer-provenance for
  *     SHARED entry points serving both customer-initiated and
  *     machine-initiated sends (the Stripe webhook's payment-lifecycle
- *     notices; invoice payment receipts). Same trust model as
+ *     notices; invoice payment receipts; the estimate accept's pay-link
+ *     text; an online self-booking's confirmation; the welcome text a
+ *     fresh online accept queued — owner 2026-11-02). Same trust model as
  *     operatorInitiated / the allowlists: only a handler that verified
  *     the upstream action was the customer's may set it.
  *
