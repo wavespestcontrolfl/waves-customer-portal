@@ -54,6 +54,10 @@ const ADDRESS_MAX = 200;
 const DATE_PAST_DAYS = 60;
 const DATE_FUTURE_DAYS = 400;
 const LIVE_STATUSES = ['open', 'submitted'];
+// One advisory key per move, shared by Apply move (a session lock held for the
+// whole apply) and the customer's submit (a transaction lock), so a resubmit
+// waits for a running Apply instead of changing the move under it.
+const MOVE_FENCE_NS = 'customer-move-apply';
 const REQUEST_TERMINAL_STATUSES = ['resolved', 'closed', 'cancelled'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -447,6 +451,7 @@ function checkSubmitInput({ typed, moveOut }) {
 
 async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
   return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [MOVE_FENCE_NS, String(move.id)]);
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
     if (!locked || locked.status === 'closed') throw new MoveError('closed', 'This link is no longer open.', 404);
     // Read the checked address from the LOCKED row, never from the copy loaded
@@ -976,10 +981,9 @@ const APPLY_REFUSALS = {
   from_unknown: 'The house the customer is leaving is not saved as a property.',
   primary_changed: 'The customer\'s primary property is not the house they are leaving. Check the properties first.',
   apply_changed: 'The customer, the move or the plans changed since this preview. Read the new preview, then apply again.',
-  apply_in_progress: 'Apply move is already running for this move. Wait for it to finish, then refresh.',
+  apply_in_progress: 'This move is busy: Apply move or a customer update is running. Wait a moment, then refresh.',
   apply_lock_unavailable: 'Apply move could not start. Try again in a moment.',
 };
-const APPLY_LOCK_NS = 'customer-move-apply';
 const SETTLED_VISIT_STATUSES = ['cancelled', 'skipped'];
 
 function applyError(code, status = 409, message = null) {
@@ -1281,7 +1285,7 @@ async function acquireApplyLock(moveId) {
   let conn = null;
   try {
     conn = await db.client.acquireConnection();
-    const res = await conn.query('SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS locked', [APPLY_LOCK_NS, String(moveId)]);
+    const res = await conn.query('SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS locked', [MOVE_FENCE_NS, String(moveId)]);
     if (!(res && res.rows && res.rows[0] && res.rows[0].locked === true)) {
       const held = conn;
       conn = null;
@@ -1296,7 +1300,7 @@ async function acquireApplyLock(moveId) {
   }
   return async function release() {
     try {
-      await conn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [APPLY_LOCK_NS, String(moveId)]);
+      await conn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [MOVE_FENCE_NS, String(moveId)]);
     } catch (err) {
       // A session still holding the lock must not go back to the pool: knex
       // destroys a __knex__disposed connection, and ending it frees the lock.
@@ -1308,11 +1312,13 @@ async function acquireApplyLock(moveId) {
 }
 
 // The last step: the move closes as applied, under its row lock, only if it
-// still names the estimate the plan was read from.
+// is still the submission and the estimate the plan was read from.
 async function closeAppliedMove(plan, { actorId, summary, now }) {
+  const submittedAt = (row) => new Date(row.submitted_at).getTime();
   await db.transaction(async (trx) => {
     const locked = await trx('customer_moves').where({ id: plan.move.id }).forUpdate().first();
-    if (!locked || locked.status !== 'submitted' || String(locked.estimate_id || '') !== String(plan.estimate.id)) {
+    if (!locked || locked.status !== 'submitted' || !sameId(locked.estimate_id, plan.estimate.id)
+      || submittedAt(locked) !== submittedAt(plan.move)) {
       throw applyError('apply_changed');
     }
     await trx('customer_moves').where({ id: locked.id }).update({

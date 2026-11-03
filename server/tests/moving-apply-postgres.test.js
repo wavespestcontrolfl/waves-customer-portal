@@ -34,7 +34,7 @@ jest.mock('../services/recurring-series-cancel', () => {
 });
 
 const crypto = require('crypto');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-et');
 
 const NEW_HOUSE = { line1: '40 Sample Road', line2: null, city: 'Venice', state: 'FL', zip: '34285' };
 const NEW_ADDRESS = '40 Sample Road, Venice, FL 34285';
@@ -287,6 +287,34 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     expect(await statusOf(s.pestAfter2)).toBe('pending');
     expect((await trx('scheduled_services').where({ id: s.pestRoot }).first('recurring_ongoing')).recurring_ongoing).toBe(true);
     expect((await trx('customer_moves').where({ id: s.move.id }).first('status')).status).toBe('submitted');
+  });
+
+  test('a customer resubmit waits for a running Apply, and a submission changed during Apply is never closed', async () => {
+    const s = await seed();
+    // Apply holds the move's advisory key on its own session; the moving-page submit waits for it.
+    const other = await database.client.acquireConnection();
+    try {
+      await other.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2::text))', ['customer-move-apply', s.move.id]);
+      await trx.raw("SET LOCAL lock_timeout = '300ms'");
+      await expect(Moves.submitMove(s.move, { moveOutDate: day(22) })).rejects.toMatchObject({ code: '55P03' });
+    } finally {
+      await other.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', ['customer-move-apply', s.move.id]);
+      await database.client.releaseConnection(other);
+    }
+    await trx.raw("SET LOCAL lock_timeout = '0'");
+    expect(dateOnlyString((await trx('customer_moves').where({ id: s.move.id }).first('move_out_date')).move_out_date)).toBe(MOVE_OUT);
+
+    // A submission that still lands mid-Apply (simulated here) stops Apply at the close: the move stays open.
+    const preview = await Moves.applyMovePreview(customerId, s.move.id);
+    const actual = jest.requireActual('../services/recurring-series-cancel');
+    SeriesCancel.cancelSeriesRemainder.mockImplementationOnce(async (args) => {
+      await trx('customer_moves').where({ id: s.move.id }).update({ move_out_date: day(22), submitted_at: new Date(Date.now() + 5000) });
+      return actual.cancelSeriesRemainder(args);
+    });
+    const err = await Moves.applyMove(customerId, s.move.id, { version: preview.version, actorId: ADMIN.id }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'apply_changed', step: 'close' });
+    expect((await trx('customer_moves').where({ id: s.move.id }).first('status')).status).toBe('submitted');
+    expect((await trx('service_requests').where({ id: requestId }).first('status')).status).toBe('new');
   });
 
   test('refusals: gate off, estimate not accepted, no move-out date, prepay, paid visits, tenant, unresolved plan', async () => {
