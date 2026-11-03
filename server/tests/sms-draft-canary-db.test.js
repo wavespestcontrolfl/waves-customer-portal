@@ -115,7 +115,9 @@ maybeDescribe('sms-draft-canary durable alert (live Postgres)', () => {
     const [{ id: otherRoute }] = await legacy('smsDraftSaveSale (fixture/model) failed the canary: openai_401.');
     const [{ id: otherTitle }] = await legacy('smsDraftDefault (fixture/model) is answering again.', { title: 'SMS draft route recovered' });
     try {
-      dispatch.mockImplementation(async (route) => (route === require('../config/models').ROUTES.smsDraftDefault
+      // freshCanary() loads the canary in jest.isolateModules, so its ROUTES
+      // objects are not this file's: match the route by its lane id.
+      dispatch.mockImplementation(async (route, opts) => (opts?.laneId === 'sms_canary_default'
         ? { ok: true, text: 'ok', model: 'x' } : { ok: false, reason: 'openai_401' }));
       await freshCanary().runSmsDraftCanary();
 
