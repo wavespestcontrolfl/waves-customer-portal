@@ -185,7 +185,7 @@ describe('lookupPropertyFromCountyRecords provider ordering', () => {
     });
     expect(record).toBeNull();
     expect(fetchedUrls.length).toBeGreaterThan(0);
-    expect(fetchedUrls[0]).toContain('sc-pa.com');
+    expect(fetchedUrls[0]).toContain('sarasotapropertyappraiser.gov');
   });
 
   it('ignores partial-match geo for ordering', async () => {
