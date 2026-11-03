@@ -8,7 +8,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 const LeadScorer = require('../services/lead-scorer');
 const { resolveLocationFromCandidates, isOfficeCity, findGbpLocationByUtmContent } = require('../config/locations');
 const logger = require('../services/logger');
-const { sendLeadAutoReplyOnce } = require('../services/lead-auto-reply');
+const { sendLeadAutoReplyOnce, sendCurrentCustomerQuoteText } = require('../services/lead-auto-reply');
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
@@ -617,9 +617,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // audit trail. Existing customers must not continue into lead acquisition:
       // no new-lead notifications, lead auto-replies, lead intake state, draft
       // estimates, leads rows, or lead-agent processing. A row that is still a
-      // lead is the one exception under GATE_LEAD_REPEAT_FORM: it keeps an open
+      // lead is one exception under GATE_LEAD_REPEAT_FORM: it keeps an open
       // intake state (buildExistingCustomerLeadUpdates) and rings one Leads
-      // alert (ringRepeatFormAlert); still no text, lead row or draft here.
+      // alert (ringRepeatFormAlert); still no text, lead row or draft here. A
+      // current or past customer is the other, under
+      // GATE_CURRENT_CUSTOMER_QUOTE_TEXT: one CALL or TEXT text and one Leads
+      // alert (answerCustomerQuoteForm); still no lead row, intake or draft.
       //
       // The voicemail text-back prefill attach DOES still run here: the open
       // call-pipeline lead predates this customers row (voicemail recovery
@@ -655,8 +658,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       } catch (attachErr) {
         logger.warn(`[lead-webhook] existing-customer prefill attach failed: ${attachErr.message}`);
       }
-      // A double submit inside the 5-minute window rings nothing more.
-      if (!isDuplicateSubmission) await ringRepeatFormAlert(customer, attachedLead?.id || null);
+      // A double submit inside the 5-minute window rings nothing more, and
+      // sends nothing more.
+      if (!isDuplicateSubmission) {
+        await ringRepeatFormAlert(customer, attachedLead?.id || null);
+        await answerCustomerQuoteForm({ customer, phoneFormatted, location, leadSource, serviceInterest });
+      }
       return res.json({
         success: true,
         customerId: customer.id,
@@ -2104,6 +2111,66 @@ async function ringRepeatFormAlert(customer, attachedLeadId = null) {
   }
 }
 
+// A current or past customer who sends the quote form
+// (GATE_CURRENT_CUSTOMER_QUOTE_TEXT, owner 2026-11-02 "text and bell"): the
+// lead text's CALL or TEXT offer (services/lead-auto-reply.js, at most one a
+// day per phone) and one Leads alert. Before 2026-05-25 such a form took the
+// new-lead path, with its text and its bell; the existing-customer branch then
+// stopped both. Current and past are services/customer-stages.js's
+// CUSTOMER_STAGES and FORMER_CUSTOMER_STAGES. A lead row keeps its own rules
+// (ringRepeatFormAlert) and any other stage is unchanged. Never throws: the form is already saved, and the
+// text and the alert each run on their own.
+async function answerCustomerQuoteForm({ customer, phoneFormatted, location, leadSource, serviceInterest }) {
+  if (!isEnabled('currentCustomerQuoteText')) return;
+  const { CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
+  const current = CUSTOMER_STAGES.includes(customer?.pipeline_stage);
+  if (!current && !FORMER_CUSTOMER_STAGES.includes(customer?.pipeline_stage)) return;
+  try {
+    await sendCurrentCustomerQuoteText({ customer, phoneFormatted, location, leadSource });
+  } catch (e) {
+    logger.error(`[lead-webhook] current-customer quote text failed for customer ${customer.id}: ${e.code || e.name || 'error'}`);
+  }
+  await ringCustomerQuoteFormAlert(customer, { current, serviceInterest });
+}
+
+// One open row per customer, like the repeat-form alert: each form is a new
+// version, so an open row rings again and its time moves to that form. The
+// relevance sweep closes it once a person called, texted or emailed the
+// customer after the latest form (the customer_quote_form class).
+async function ringCustomerQuoteFormAlert(customer, { current, serviceInterest }) {
+  try {
+    const { raiseAdminAlert } = require('../services/admin-alert-compose');
+    const { fitAction, fullName, tidyName, whyWithQuote, redactedWords } = require('../services/admin-alert-names');
+    const lead = `${tidyName(customer.first_name) || 'The customer'}, a ${current ? 'current' : 'past'} customer, sent the quote form`;
+    await raiseAdminAlert('lead', {
+      area: 'Leads',
+      action: fitAction('Leads', fullName(customer) || 'a customer', [
+        (who) => `call ${who} about the quote form`,
+        (who) => `call ${who}`,
+      ]),
+      why: serviceInterest ? whyWithQuote({ lead: `${lead} for `, quote: redactedWords(serviceInterest), tail: '.' }) : `${lead}.`,
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+      subject: { type: 'customer', id: String(customer.id) },
+      doneWhen: 'customer_answered',
+      who: 'person',
+      contact: true,
+      // Call: the customer page's own Call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+      buttons: require('../services/alert-call-button').callButtons({ customerId: customer.id }),
+    }, {
+      bell: true,
+      dedupeKey: `customer-quote-form:${customer.id}`,
+      dedupeOpenOnly: true,
+      refreshOnDedupe: true,
+      bumpOnRefresh: true,
+      dedupeVersion: new Date().toISOString(),
+      metadata: { customerId: customer.id, source: 'customer_quote_form' },
+    });
+  } catch (e) {
+    logger.error(`[lead-webhook] customer quote-form alert failed for customer ${customer.id}: ${e.code || e.name || 'error'}`);
+  }
+}
+
 module.exports = router;
 module.exports.flushPendingLeadFallbacks = flushPendingLeadFallbacks;
 module.exports._test = {
@@ -2111,6 +2178,8 @@ module.exports._test = {
   commercialLeadFields,
   buildExistingCustomerLeadUpdates,
   ringRepeatFormAlert,
+  answerCustomerQuoteForm,
+  ringCustomerQuoteFormAlert,
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,
   buildLeadWebhookIntake,

@@ -41,7 +41,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('lead callback scheduler on PostgreSQL', () => {
   let database;
   const schema = `lead_cb_sched_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['customers', 'leads', 'call_log', 'lead_callback_requests'];
+  const tables = ['customers', 'leads', 'call_log', 'lead_callback_requests', 'current_customer_quote_texts'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -75,6 +75,53 @@ jest.setTimeout(30000);
     return { customer, row };
   }
   const rowNow = async (id) => database('lead_callback_requests').where({ id }).first();
+
+  // A current customer who booked the call answering our current-customer quote text
+  // (GATE_CURRENT_CUSTOMER_QUOTE_TEXT): the claim row stamped with a real sid an hour before the request.
+  async function bookedQuotedCustomer({ sid = 'SM_quote_sid', ...opts } = {}) {
+    const { customer, row } = await booked(opts);
+    await database('customers').where({ id: customer.id }).update({ pipeline_stage: 'active_customer' });
+    await database('current_customer_quote_texts').insert({
+      id: randomUUID(), phone_digits: customer.phone.slice(-10), customer_id: customer.id, twilio_sid: sid,
+      claimed_at: new Date(new Date(row.created_at).getTime() - 3600000),
+    });
+    return { customer: { ...customer, pipeline_stage: 'active_customer' }, row };
+  }
+
+  test('a current customer who booked answering our quote text gets the reminder and the ring', async () => {
+    const { customer, row } = await bookedQuotedCustomer();
+    await runLeadCallbackTick({ now: BEFORE });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect((await rowNow(row.id)).state).toBe('scheduled');
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBeNull();
+    expect((await rowNow(row.id)).state).toBe('done');
+  });
+
+  test('a quote text sent after the booking does not keep it for a lead who became a customer', async () => {
+    const { customer, row } = await booked();
+    await database('customers').where({ id: customer.id }).update({ pipeline_stage: 'active_customer' });
+    await database('current_customer_quote_texts').insert({
+      id: randomUUID(), phone_digits: '9415550100', customer_id: customer.id, twilio_sid: 'SM_later_sid',
+      claimed_at: new Date(new Date(row.created_at).getTime() + 60000),
+    });
+    await expect(_test.bookedRingBlocker(row.id)({ customer: { ...customer, pipeline_stage: 'active_customer' }, digits: '9415550100', now: SLOT }, database))
+      .resolves.toBe('existing_customer');
+    expect((await rowNow(row.id)).state).toBe('cancelled');
+  });
+
+  test('a current customer whose quote text has no real sid is not reminded', async () => {
+    const { row } = await bookedQuotedCustomer({ sid: null });
+    await runLeadCallbackTick({ now: BEFORE });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect((await rowNow(row.id)).state).toBe('cancelled');
+  });
+
+  test('switch off: a current customer who booked from our quote text is not rung', async () => {
+    const { customer, row } = await bookedQuotedCustomer();
+    isEnabled.mockImplementation((key) => key !== 'currentCustomerQuoteText');
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBe('existing_customer');
+    expect((await rowNow(row.id)).state).toBe('cancelled');
+  });
 
   test('15 minutes before: one owner bell and one lead reminder, never twice', async () => {
     const { row } = await booked();

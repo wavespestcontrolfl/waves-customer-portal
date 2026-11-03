@@ -127,23 +127,31 @@ async function hasPriorLeadAutoReply(phoneFormatted, dbc = db) {
  *    log — a suppressed greeting is recoverable, a duplicate is not.
  *
  * Never throws: claim settlement must not mask the original send error.
+ * claimSettlement is the verdict alone, shared with the current-customer
+ * quote text's own claim rows.
  */
+function claimSettlement(smsResult) {
+  const sid = smsResult && smsResult.sent ? String(smsResult.providerMessageId || '') : '';
+  if (REAL_TWILIO_SID_RE.test(sid)) return { confirm: sid };
+  const deterministicNoDelivery = !!smsResult && (
+    // The messaging wrapper's canonical verdict: a throw before dispatch
+    // carries deliveryOutcome 'not_sent' (provider never called).
+    classifyDeliveryCertainty(smsResult) === 'not_sent'
+    || smsResult.blocked === true
+    || smsResult.sent === true // sentinel sid: gate-blocked / template-disabled / owner-silence
+    || (smsResult.sent === false && smsResult.terminal === true)
+  );
+  return deterministicNoDelivery ? { release: true } : { keep: true };
+}
+
 async function resolveLeadAutoReplyClaim(phoneDigits, smsResult, dbc = db) {
   try {
-    const sid = smsResult && smsResult.sent ? String(smsResult.providerMessageId || '') : '';
-    if (REAL_TWILIO_SID_RE.test(sid)) {
-      await dbc('lead_auto_reply_sends').where({ phone_digits: phoneDigits }).update({ twilio_sid: sid });
+    const settle = claimSettlement(smsResult);
+    if (settle.confirm) {
+      await dbc('lead_auto_reply_sends').where({ phone_digits: phoneDigits }).update({ twilio_sid: settle.confirm });
       return;
     }
-    const deterministicNoDelivery = !!smsResult && (
-      // The messaging wrapper's canonical verdict: a throw before dispatch
-      // carries deliveryOutcome 'not_sent' (provider never called).
-      classifyDeliveryCertainty(smsResult) === 'not_sent'
-      || smsResult.blocked === true
-      || smsResult.sent === true // sentinel sid: gate-blocked / template-disabled / owner-silence
-      || (smsResult.sent === false && smsResult.terminal === true)
-    );
-    if (deterministicNoDelivery) {
+    if (settle.release) {
       await dbc('lead_auto_reply_sends').where({ phone_digits: phoneDigits }).whereNull('twilio_sid').del();
     } else {
       logger.warn(`[lead-auto-reply] auto-reply outcome ambiguous (retryable/unknown) — keeping claim, fail closed`);
@@ -257,16 +265,17 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
 // GSM-7 first; if the body still runs past one segment, the greeting falls
 // back to "there". Both renders pin the base row (noVariants): a weighted
 // variant re-rolled for the fallback could be a different, longer creative
-// (Codex #6336 P2).
-async function renderLeadAutoReply(firstName, customerId) {
+// (Codex #6336 P2). The current-customer quote text renders its own row the
+// same way (CURRENT_CUSTOMER_QUOTE_TEXT).
+async function renderLeadAutoReply(firstName, customerId, { templateKey = 'lead_auto_reply_biz', workflow = 'lead_webhook_auto_reply' } = {}) {
   const render = async (name) => {
     const body = await renderSmsTemplate(
-      'lead_auto_reply_biz',
+      templateKey,
       { first_name: name },
-      { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customerId },
+      { workflow, entity_type: 'customer', entity_id: customerId },
       { noVariants: true }
     );
-    if (!body) throw new Error('SMS template lead_auto_reply_biz is missing, inactive, or invalid');
+    if (!body) throw new Error(`SMS template ${templateKey} is missing, inactive, or invalid`);
     return body;
   };
   const body = await render(gsmSafeName(firstName));
@@ -349,6 +358,96 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
   await resolveLeadAutoReplyClaim(phoneDigits, smsResult);
 }
 
+// A current or past customer who sends the website quote form
+// (GATE_CURRENT_CUSTOMER_QUOTE_TEXT, owner 2026-11-02 "text and bell") gets the
+// lead text's CALL or TEXT offer from its own template: the same words without
+// "Reply STOP to opt out.", since the recipient is a customer
+// (docs/sms-stop-line-policy.md, test 2). Not the lead text's once-ever rule (a
+// customer may ask for another quote another day): at most one a day per phone.
+// current_customer_quote_texts keeps one row per attempt, a claim-before-send
+// record like lead_auto_reply_sends: under a per-phone advisory lock, a new row
+// is inserted only when no row for the phone is under a day old, and committed
+// before the Twilio call. The real SID confirms that row; a provable
+// no-delivery deletes it; an ambiguous outcome keeps it (fail closed: the phone
+// waits the day). A delivered row is the witness the CALL ring and the
+// call/text follow-ups read (lead-call-reply-ring.js customerBlocker), and a
+// later attempt never touches it.
+const CURRENT_CUSTOMER_QUOTE_TEXT = Object.freeze({ templateKey: 'current_customer_quote_text', workflow: 'current_customer_quote_text' });
+const CURRENT_CUSTOMER_QUOTE_TEXT_TABLE = 'current_customer_quote_texts';
+
+async function claimCurrentCustomerQuoteText(phoneDigits, customerId) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${CURRENT_CUSTOMER_QUOTE_TEXT_TABLE}:${phoneDigits}`]);
+    const recent = await trx(CURRENT_CUSTOMER_QUOTE_TEXT_TABLE)
+      .where({ phone_digits: phoneDigits })
+      .whereRaw("claimed_at > now() - interval '24 hours'")
+      .first('id');
+    if (recent) return null;
+    const [row] = await trx(CURRENT_CUSTOMER_QUOTE_TEXT_TABLE)
+      .insert({ phone_digits: phoneDigits, customer_id: customerId })
+      .returning(['id']);
+    return row.id;
+  });
+}
+
+// Settles this attempt's own row only. Never throws.
+async function settleCurrentCustomerQuoteText(claimId, smsResult) {
+  try {
+    const settle = claimSettlement(smsResult);
+    if (settle.confirm) {
+      await db(CURRENT_CUSTOMER_QUOTE_TEXT_TABLE).where({ id: claimId }).update({ twilio_sid: settle.confirm });
+    } else if (settle.release) {
+      await db(CURRENT_CUSTOMER_QUOTE_TEXT_TABLE).where({ id: claimId }).whereNull('twilio_sid').del();
+    } else {
+      logger.warn('[lead-auto-reply] current-customer quote text outcome ambiguous — keeping claim, fail closed');
+    }
+  } catch (settleErr) {
+    logger.warn(`[lead-auto-reply] current-customer quote text claim settlement failed (claim stays, fail closed): ${String(settleErr?.code || settleErr?.name || 'error')}`);
+  }
+}
+
+async function sendCurrentCustomerQuoteText({ customer, phoneFormatted, location, leadSource }) {
+  // Greeted by the first name on the customer row, never the typed one: the
+  // form is public, so a typed "name" (a link, an instruction) must never reach
+  // a customer's phone from our number. Rendered before the claim: a template
+  // failure claims nothing.
+  const body = await renderLeadAutoReply(customer.first_name, customer.id, CURRENT_CUSTOMER_QUOTE_TEXT);
+  const claimId = await claimCurrentCustomerQuoteText(String(phoneFormatted).slice(-10), customer.id);
+  if (!claimId) {
+    logger.info(`[lead-auto-reply] Current-customer quote text skipped for customer ${customer.id}: one went to this phone in the last day`);
+    return { sent: false, reason: 'sent_today' };
+  }
+  const smsResult = await sendCustomerMessage({
+    to: phoneFormatted,
+    body,
+    channel: 'sms',
+    // The lead text's audience and purpose: the same quote conversation (its
+    // CALL / TEXT follow-ups go out as audience 'lead' too), and a text that
+    // asks for a reply always stays SMS.
+    audience: 'lead',
+    purpose: 'conversational',
+    customerId: customer.id,
+    identityTrustLevel: 'phone_matches_customer',
+    entryPoint: 'current_customer_quote_text',
+    metadata: {
+      original_message_type: 'auto_reply',
+      customerLocationId: location.id,
+      lead_source: leadSource.source,
+      templateKey: CURRENT_CUSTOMER_QUOTE_TEXT.templateKey,
+    },
+  }).catch(async (err) => {
+    await settleCurrentCustomerQuoteText(claimId, err?.providerOutcome || null);
+    throw err;
+  });
+  if (!smsResult.sent) {
+    logger.warn(`[lead-auto-reply] Current-customer quote text blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+  }
+  // A customer-action entry point (validators/send-window.js): it goes at once,
+  // at any hour, so every result settles the claim here.
+  await settleCurrentCustomerQuoteText(claimId, smsResult);
+  return smsResult;
+}
+
 // First-touch test-and-set for the Lead Response Agent's personalized SMS
 // (owner ruling 2026-09-26): the agent's reply is the customer's first
 // automated text for a phone with no prior lead_webhook_auto_reply send iff
@@ -418,4 +517,6 @@ module.exports = {
   renderLeadAutoReply,
   claimLeadFirstTouch,
   isDeliveredSms,
+  sendCurrentCustomerQuoteText,
+  CURRENT_CUSTOMER_QUOTE_TEXT,
 };

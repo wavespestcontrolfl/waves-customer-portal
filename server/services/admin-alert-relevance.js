@@ -148,6 +148,7 @@ const SUGGESTION_KEY_PREFIX = 'call-last-name-suggestion:';
 // ringRepeatFormAlert). Repeated, not imported (a route module); a test pins
 // the two together.
 const REPEAT_FORM_PREFIX = 'lead-repeat-form:';
+const CUSTOMER_QUOTE_FORM_PREFIX = 'customer-quote-form:';
 // The dedupeKey prefix of a known sender's shared thread bell
 // (sms-reply-alert-delivery.js threadBellKey). Repeated, not imported (it pulls
 // in the webhook's delivery code); a test pins the two together.
@@ -304,7 +305,7 @@ function askedAtOf(row, meta = parseMeta(row.metadata)) {
 // The portal chat hand-off classes: the only customer-kind classes behind GATE_PORTAL_CHAT_ANSWERED_CLOSE.
 const PORTAL_CHAT_CLASSES = new Set(['portal_chat_add_service', 'portal_chat_answered']);
 const TEXT_NOTE_CLASS = 'text_note_checked';
-const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered']);
+const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'customer_quote_form']);
 // (portal_add_service_request has no contact witness; its estimate boundary is askedAtOf, in loadQuoteHandoffs.)
 
 // What a customer-contact bell is about, for the witnesses: the text, call or
@@ -987,6 +988,13 @@ function portalChatAnswered(s) {
   const reason = personContactReason(c);
   return reason ? { reason, mode } : null;
 }
+// A current or past customer's quote-form bell (lead-webhook.js ringCustomerQuoteFormAlert,
+// GATE_CURRENT_CUSTOMER_QUOTE_TEXT): closed once a person reached that customer after the latest form, by the shared
+// customer-kind witnesses (personContactReason). A booked visit or a quote alone never closes it: a customer's own plan
+// books visits by itself.
+function customerQuoteFormAnswered(s) {
+  return s.contact ? personContactReason(s.contact) : null;
+}
 // The same contact for a portal request bell, under GATE_PORTAL_ITEM_CLOSE (the class gate, so 'true' here).
 function portalItemAnswered(s) {
   const c = s.contact;
@@ -1105,6 +1113,12 @@ const CLASSES = [
     // retirement ends the episode and the lead's next form rings a fresh row.
     // Final, like the promise chaser's: a put-back would stand beside that row.
     key: 'lead_repeat_form', categories: ['lead'], prefix: REPEAT_FORM_PREFIX, rule: repeatFormSettled, rearm: false,
+  },
+  { // lead-webhook.js ringCustomerQuoteFormAlert (GATE_CURRENT_CUSTOMER_QUOTE_TEXT): a current or past customer sent
+    // the quote form. Open-only dedupe like the repeat form's, so a retirement ends the episode and the next form rings
+    // a fresh row; its boundary is the latest form (BELL_EVENT_CLASSES). Behind GATE_ALERT_CONTACT_CLOSE (`contactOnly`).
+    key: 'customer_quote_form', categories: ['lead'], prefix: CUSTOMER_QUOTE_FORM_PREFIX, contactOnly: true, contact: 'customer',
+    contactRule: customerQuoteFormAnswered, rearm: false,
   },
   // Customer-initiated contact bells (owner 2026-10-24), all behind
   // GATE_ALERT_CONTACT_CLOSE (`contactOnly`: not in the table at all while it is
