@@ -239,9 +239,15 @@ on the web view that asked; `requestId` comes back unchanged):
   phone back"). Success closes the screen and answers the admin page `ended`.
   Cancel or failure stays on the customer view. A phone with no passcode ends
   with `auth: 'unavailable'`. Hand back is ignored (the bar says "Finishing the card save…") while a terms or save request is pending or the card-save screen is open; a request that finishes after the hand-off ends opens nothing.
-- While it is open, a staff alert that arrives with the app open shows no
-  banner and plays no sound (it still goes to the list and the badge). The
-  flag is `handoffLockActive` in UserDefaults; sign-out clears it.
+- Opening it pauses the staff alerts (`StaffAlerts.pauseForHandoff`): the
+  alerts already in Notification Center are cleared and the install
+  unregisters from APNs, so none shows in the list, on the lock screen or with
+  the app in the background (a push sent meanwhile gets Unregistered and the
+  server deactivates the row). One that still arrives with the app open shows
+  only the badge. A successful Hand back registers again
+  (`resumeAfterHandoff`); the token event re-sends `native-subscribe`, which
+  turns the row active again. The flag is `handoffLockActive` in UserDefaults;
+  sign-out clears it without turning the alerts back on.
 - If the app restarts with the flag still on (it was closed during a hand-off),
   the customer view is gone. `RootView` shows a "Waves Admin is locked" screen
   INSTEAD of the portal: the portal web view is not created, so it shows

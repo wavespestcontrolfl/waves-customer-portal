@@ -81,6 +81,25 @@ final class StaffAlerts {
         setBadge(0)
     }
 
+    // Hand-off mode (HandoffLock.start): a customer holds the phone. The alerts
+    // already shown leave Notification Center and the install stops getting
+    // notifications, so none shows in the list, on the lock screen or with the
+    // app in the background. A push sent meanwhile gets APNs Unregistered and
+    // the server deactivates the row; the portal's alert list still has it.
+    func pauseForHandoff() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        UIApplication.shared.unregisterForRemoteNotifications()
+    }
+
+    // A successful hand-back: register again. The token event re-sends
+    // native-subscribe, which turns the row active again. After a relaunch
+    // nothing has registered yet (signedIn is false): the portal page asks for
+    // the token when it loads behind the unlocked lock screen.
+    func resumeAfterHandoff() {
+        guard signedIn else { return }
+        UIApplication.shared.registerForRemoteNotifications()
+    }
+
     // Only portal pages open here; any other link is ignored.
     func open(link: String) {
         guard let url = URL(string: link, relativeTo: Portal.origin)?.absoluteURL, Portal.isPortal(url) else { return }
@@ -96,6 +115,16 @@ final class StaffAlerts {
         pendingPage = nil
         openPage(url)
     }
+}
+
+extension HandoffLock {
+    // The app's lock: a hand-off pauses the staff alerts and a successful
+    // hand-back turns them on again. Built here so HandoffLock.swift compiles
+    // alone for its logic check (Tests/main.swift).
+    static let shared = HandoffLock(
+        pauseAlerts: { StaffAlerts.shared.pauseForHandoff() },
+        resumeAlerts: { StaffAlerts.shared.resumeAfterHandoff() }
+    )
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -119,7 +148,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        // Hand-off mode (a customer holds the phone): no banner, no sound.
+        // Hand-off mode (a customer holds the phone): the badge only, nothing
+        // in the list (one can still arrive before the pause takes effect).
         // presentation(handoffActive:) is a pure nonisolated helper; the flag
         // is read from the persisted value, so nothing here needs the main actor.
         HandoffLock.presentation(handoffActive: HandoffLock.persistedActive)
