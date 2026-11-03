@@ -262,6 +262,17 @@ describe('setup_intent.succeeded for a Tap to Pay card save', () => {
     expect(mockSavePaymentMethod).toHaveBeenCalledTimes(1);
   });
 
+  test('Auto Pay turned off after the tap: enrollment sees the tap moment, the webhook acks, no alert, the request stays pending', async () => {
+    const tappedAt = 1793664000;
+    mockRetrieveSetupIntent.mockImplementation(async () => tapIntent({ latest_attempt: { ...attempt(), created: tappedAt } }));
+    mockEnroll.mockResolvedValue({ enrolled: false, reason: 'opted_out_after_authorization' });
+    await expect(handle(tapIntent())).resolves.toBeUndefined();
+    expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(tappedAt * 1000) }));
+    expect(request().status).toBe('pending');
+    expect(require('../services/notification-service').notifyAdmin).not.toHaveBeenCalled();
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+  });
+
   test('a closed request acks without saving', async () => {
     request().status = 'satisfied';
     await expect(handle(tapIntent())).resolves.toBeUndefined();

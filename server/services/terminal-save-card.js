@@ -46,6 +46,7 @@ const SAVE_CARD_REFUSALS = {
   price_not_disclosed: 'Open the card page first so the customer sees the price.',
   setup_not_succeeded: 'The card save did not finish. Tap the card again.',
   no_generated_card: 'This card cannot be saved for later charges. Try another card.',
+  opted_out: 'Auto Pay was turned off after this card was tapped. The card is saved; Auto Pay stays off.',
 };
 
 function refusalBody(code) {
@@ -189,7 +190,12 @@ async function verifyTerminalSetupIntent(request, setupIntentId) {
   if (setupIntent.status !== 'succeeded') return { ok: false, code: 'setup_not_succeeded' };
   const generatedCard = generatedCardId(setupIntent);
   if (!generatedCard) return { ok: false, code: 'no_generated_card' };
-  return { ok: true, generatedCard, setupIntent };
+  // The tap's authorization moment (the attempt that confirmed it). Enrollment refuses
+  // when Auto Pay was turned off after it, so a late app retry or a webhook
+  // redelivery never turns Auto Pay back on.
+  const attemptCreated = Number(setupIntent.latest_attempt?.created);
+  const authorizedAt = Number.isFinite(attemptCreated) && attemptCreated > 0 ? new Date(attemptCreated * 1000) : null;
+  return { ok: true, generatedCard, setupIntent, authorizedAt };
 }
 
 /**
@@ -234,6 +240,7 @@ async function completeTerminalSetupForRequest({ requestId, setupIntentId, ip = 
     // no fee agreement.
     ...feeConsentFromIntent(verified.setupIntent, request),
     consentSource: TAP_CONSENT_SOURCE,
+    authorizedAt: verified.authorizedAt,
   });
   if (!finished.ok) return finished;
 

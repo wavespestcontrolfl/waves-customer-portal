@@ -1914,7 +1914,7 @@ async function secureVisitStillNeedsCard(request, { database = db } = {}) {
 // `consentSource`: the payment_method_consents.source the authorization row is
 // recorded under — 'appointment_card_request' for the /secure page, and
 // 'admin_tap_to_pay' when a technician's Tap to Pay save completes the request.
-async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null, consentSource = 'appointment_card_request', feeTermsAgreed = true }) {
+async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null, consentSource = 'appointment_card_request', feeTermsAgreed = true, authorizedAt = null }) {
   // Fee terms are stamped as agreed (fee_agreed_at / sticky_window_disclosed)
   // only when the capture verified the customer was shown them. Every existing
   // caller keeps the default (true); the Tap to Pay save passes the verified
@@ -2125,7 +2125,21 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       // customer-paid) — the in-lock re-check must use the same scope or
       // it refuses on the account payer and strands the request retryable.
       scheduledServiceId: request.scheduled_service_id || null,
+      // The authorization moment, when the caller knows it (Tap to Pay: the
+      // confirming attempt): a retry after the customer turned Auto Pay off
+      // must not turn it back on (enrollConsentedMethod refuses
+      // opted_out_after_authorization).
+      ...(authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime()) ? { authorizedAt } : {}),
     });
+    if (!enrollment.enrolled && enrollment.reason === 'opted_out_after_authorization') {
+      // PERMANENT: Auto Pay was turned off after this card was authorized. No
+      // retry can change that, so no office alert and no retry loop: the claim
+      // goes back to pending (the card stays saved, Auto Pay stays off) and a
+      // webhook redelivery acks on this code.
+      logger.info(`[appt-card-request] Auto Pay turned off after authorization for customer ${request.customer_id} — not enrolled; request ${request.id} stays pending`);
+      await revertClaim();
+      return { ok: false, code: 'opted_out' };
+    }
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       // A refused enrollment must NOT complete the request (Codex #2771
       // r9): completion billing auto-charges only an active Auto Pay

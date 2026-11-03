@@ -659,6 +659,25 @@ describe('POST /complete-setup', () => {
     }));
   });
 
+  test('passes the tap\'s authorization moment (the confirming attempt) to the completion tail', async () => {
+    // A late app retry or a webhook redelivery after the customer turned Auto Pay off
+    // must not turn it back on: enrollment compares against this moment.
+    mockRetrieveSetupIntent.mockResolvedValue(succeeded({
+      latest_attempt: { created: 1793664000, payment_method_details: { card_present: { generated_card: 'pm_generated1' } } },
+    }));
+    await withServer(async (base) => { await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth()); });
+    expect(mockFinish).toHaveBeenCalledWith(expect.objectContaining({ authorizedAt: new Date(1793664000 * 1000) }));
+  });
+
+  test('Auto Pay turned off after the tap is a clear, permanent 409 (opted_out)', async () => {
+    mockFinish.mockResolvedValue({ ok: false, code: 'opted_out' });
+    await withServer(async (base) => {
+      const res = await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth());
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ code: 'opted_out', error: 'Auto Pay was turned off after this card was tapped. The card is saved; Auto Pay stays off.' });
+    });
+  });
+
   test('passes verified fee consent and the sticky echo from the intent metadata', async () => {
     seed({ request: { no_show_fee_amount: '49.00' } });
     seedSaveCardRow({ used_at: new Date() });
