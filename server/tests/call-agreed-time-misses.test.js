@@ -27,8 +27,8 @@ const PROMPT = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-10-05', 
 
 describe('version stamp', () => {
   test('prompt v22 is a new cohort', () => {
-    expect(PROMPT_VERSION).toBe('v33');
-    expect(PROMPT_HASH).toMatch(/^v33-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v34');
+    expect(PROMPT_HASH).toMatch(/^v34-[a-f0-9]{12}$/);
   });
 });
 
