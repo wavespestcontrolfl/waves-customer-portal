@@ -22,12 +22,16 @@ const VISIT_BATCH = 25;
 // The service-location backstop's window; a later visit takes the pin once it is in range.
 const VISIT_WINDOW_DAYS = 30;
 const UNRESOLVED_CAP = 2000;
+// When a remembered row is asked again without an address edit: a county miss after 7 days (the needs_pin
+// retry's interval; the roll gains new lots), a pin a review withholds after 6 hours (staff can verify it).
+const COUNTY_MISS_RETRY_MS = 7 * 86400000;
+const WITHHELD_RETRY_MS = 6 * 3600000;
 const ADDRESS_COLUMNS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 const STAMP_COLUMNS = ['service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip'];
 
 // Properties the county could not place, or whose customer pin a review withholds, keyed property
-// id -> the address string that missed. An address edit changes the string and re-admits the row;
-// a restart clears the map.
+// id -> { key: the address string that missed, retryAt }. An address edit changes the string and
+// re-admits the row, so does reaching retryAt, and a restart clears the map.
 const unresolvedProperties = new Map();
 
 const addressKey = row => [row.address_line1, row.city, row.zip].map(part => String(part || '').trim().toLowerCase()).join('|');
@@ -35,14 +39,15 @@ const coordinate = value => (value == null ? null : Number(value));
 const hasCoordinates = row => ['latitude', 'longitude'].every(field => row[field] != null
   && Number.isFinite(Number(row[field])) && Number(row[field]) !== 0);
 
-async function pruneUnresolvedProperties(conn) {
+async function pruneUnresolvedProperties(conn, now) {
   while (unresolvedProperties.size > UNRESOLVED_CAP) unresolvedProperties.delete(unresolvedProperties.keys().next().value);
+  for (const [id, entry] of unresolvedProperties) if (entry.retryAt <= now.getTime()) unresolvedProperties.delete(id);
   if (!unresolvedProperties.size) return;
   const rows = await conn('customer_properties').whereIn('id', [...unresolvedProperties.keys()])
     .select('id', 'address_line1', 'city', 'zip');
   const byId = new Map(rows.map(row => [row.id, row]));
-  for (const [id, missed] of unresolvedProperties) {
-    if (!byId.has(id) || addressKey(byId.get(id)) !== missed) unresolvedProperties.delete(id);
+  for (const [id, entry] of unresolvedProperties) {
+    if (!byId.has(id) || addressKey(byId.get(id)) !== entry.key) unresolvedProperties.delete(id);
   }
 }
 
@@ -108,11 +113,11 @@ async function writePropertyPin(row, lot) {
   }
 }
 
-async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, conn = db } = {}) {
+async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, now = new Date(), conn = db } = {}) {
   const results = { checked: 0, pinned: 0, unresolved: 0 };
   if (!countyFallbackLive()) return results;
   const review = require('./customer-geocode-review');
-  await pruneUnresolvedProperties(conn);
+  await pruneUnresolvedProperties(conn, now);
   const rows = await candidatePropertiesQuery(conn, review).orderBy('p.id').limit(limit)
     .select('p.id', 'p.customer_id', 'p.is_primary', 'p.latitude', 'p.longitude', ...ADDRESS_COLUMNS.map(column => `p.${column}`),
       ...ADDRESS_COLUMNS.map(column => `c.${column} as c_${column}`), 'c.latitude as c_latitude', 'c.longitude as c_longitude');
@@ -130,7 +135,7 @@ async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, conn = db } = {
       }
       if (!lot) {
         results.unresolved += 1;
-        unresolvedProperties.set(row.id, addressKey(row));
+        unresolvedProperties.set(row.id, { key: addressKey(row), retryAt: now.getTime() + COUNTY_MISS_RETRY_MS });
         continue;
       }
     }
@@ -140,7 +145,7 @@ async function sweepUnpinnedProperties({ limit = PROPERTY_BATCH, conn = db } = {
       continue;
     }
     results.unresolved += 1;
-    if (outcome === 'withheld') unresolvedProperties.set(row.id, addressKey(row));
+    if (outcome === 'withheld') unresolvedProperties.set(row.id, { key: addressKey(row), retryAt: now.getTime() + WITHHELD_RETRY_MS });
   }
   return results;
 }

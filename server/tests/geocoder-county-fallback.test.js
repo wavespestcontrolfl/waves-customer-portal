@@ -125,13 +125,24 @@ describe('sweepUnpinnedProperties', () => {
     expect(propertyWrites()[0].ops.find(op => op[0] === 'update')[1]).toMatchObject({ latitude: 27.49, longitude: -82.57 });
   });
 
-  test('a customer pin the review withholds is never copied, and the row waits until its address changes', async () => {
+  test('a customer pin the review withholds is never copied, and the row is asked again after 6 hours', async () => {
     state.candidates = [property({ address_line1: '100 Main St', city: 'Bradenton', zip: '34205' })];
     state.review = { customer_id: 'c1', status: 'needs_pin', reason: 'partial_match',
       address_snapshot: ['100 Main St', null, 'Bradenton', 'FL', '34205'], updated_at: '2026-11-01T00:00:00Z' };
-    expect(await sweepUnpinnedProperties()).toEqual({ checked: 1, pinned: 0, unresolved: 1 });
+    expect(await sweepUnpinnedProperties({ now: NOW })).toEqual({ checked: 1, pinned: 0, unresolved: 1 });
     expect(propertyWrites()).toHaveLength(0);
-    expect(_unresolvedProperties.get('p1')).toBe('100 main st|bradenton|34205');
+    expect(_unresolvedProperties.get('p1')).toEqual({ key: '100 main st|bradenton|34205', retryAt: NOW.getTime() + 6 * 3600000 });
+
+    // Staff verify the pin without editing the address: still held back at 5 h, asked again at 6 h.
+    state.candidates = [];
+    state.prune = [{ id: 'p1', address_line1: '100 Main St', city: 'Bradenton', zip: '34205' }];
+    mockRecorded = [];
+    await sweepUnpinnedProperties({ now: new Date(NOW.getTime() + 5 * 3600000) });
+    expect(hasOp(opsOf('customer_properties as p')[0], 'whereNotIn', 'p.id', ['p1'])).toBe(true);
+    mockRecorded = [];
+    await sweepUnpinnedProperties({ now: new Date(NOW.getTime() + 6 * 3600000) });
+    expect(_unresolvedProperties.has('p1')).toBe(false);
+    expect(hasOp(opsOf('customer_properties as p')[0], 'whereNotIn', 'p.id', ['p1'])).toBe(false);
   });
 
   test('another address takes the county lot; the write only lands on the row and primary flag as read', async () => {
@@ -220,27 +231,32 @@ describe('sweepUnpinnedProperties', () => {
     expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
   });
 
-  test('a miss is remembered by address: skipped next run, readmitted after an address edit', async () => {
+  test('a miss is remembered by address: skipped next run, readmitted after an address edit or 7 days', async () => {
     state.candidates = [property()];
     countyLotPinForAddress.mockResolvedValue(null);
-    expect(await sweepUnpinnedProperties()).toEqual({ checked: 1, pinned: 0, unresolved: 1 });
-    expect(_unresolvedProperties.get('p1')).toBe('104 sample way|parrish|34219');
+    expect(await sweepUnpinnedProperties({ now: NOW })).toEqual({ checked: 1, pinned: 0, unresolved: 1 });
+    expect(_unresolvedProperties.get('p1')).toEqual({ key: '104 sample way|parrish|34219', retryAt: NOW.getTime() + 7 * 86400000 });
 
     mockRecorded = [];
     state.candidates = [];
     state.prune = [{ id: 'p1', address_line1: '104 Sample Way', city: 'Parrish', zip: '34219' }];
-    await sweepUnpinnedProperties();
+    await sweepUnpinnedProperties({ now: new Date(NOW.getTime() + 6 * 86400000) });
     expect(hasOp(opsOf('customer_properties as p')[0], 'whereNotIn', 'p.id', ['p1'])).toBe(true);
 
     mockRecorded = [];
+    await sweepUnpinnedProperties({ now: new Date(NOW.getTime() + 7 * 86400000) });
+    expect(_unresolvedProperties.has('p1')).toBe(false);
+
+    _unresolvedProperties.set('p1', { key: '104 sample way|parrish|34219', retryAt: Infinity });
+    mockRecorded = [];
     state.prune = [{ id: 'p1', address_line1: '106 Sample Way', city: 'Parrish', zip: '34219' }];
-    await sweepUnpinnedProperties();
+    await sweepUnpinnedProperties({ now: NOW });
     expect(_unresolvedProperties.has('p1')).toBe(false);
     expect(hasOp(opsOf('customer_properties as p')[0], 'whereNotIn', 'p.id', ['p1'])).toBe(false);
   });
 
   test('the exclusion map is capped by dropping the oldest entries', async () => {
-    for (let i = 0; i < 2005; i += 1) _unresolvedProperties.set(`x${i}`, 'a|b|c');
+    for (let i = 0; i < 2005; i += 1) _unresolvedProperties.set(`x${i}`, { key: 'a|b|c', retryAt: Infinity });
     state.prune = [...new Array(2000)].map((_, i) => ({ id: `x${i + 5}`, address_line1: 'a', city: 'b', zip: 'c' }));
     await sweepUnpinnedProperties();
     expect(_unresolvedProperties.size).toBe(2000);
