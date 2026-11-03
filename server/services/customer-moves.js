@@ -1615,27 +1615,33 @@ async function customerName(customerId) {
 }
 
 // One office item per move and kind. It rings: the bell policy drops a plain
-// service row, and each kind asks the office to act on one customer.
+// service row, and each kind asks the office to act on one customer. Raised
+// after the move row records what happened, so a failed write is logged and
+// never undoes or repeats the pause (the Moving card shows the state).
 async function raisePauseAlert(move, kind, { action, why, detail }) {
-  const name = await customerName(move.customer_id);
-  const notif = await raiseAdminAlert('service', {
-    area: 'Customers',
-    action: cutAtWord(action(name), MAX_HEADLINE_CHARS - 'Customers — '.length),
-    why: cutAtWord(why, MAX_WHY_CHARS),
-    severity: 'needs-you',
-    link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
-    subject: { type: 'customer', id: move.customer_id },
-    doneWhen: 'move_handled',
-    who: 'person',
-  }, {
-    detail,
-    icon: '🚚',
-    bell: true,
-    dedupeKey: `moving_pause_${kind}:${move.id}`,
-    metadata: { customerId: move.customer_id, moveId: move.id, kind: `moving_pause_${kind}` },
-  });
-  if (!notif || notif.suppressed) {
-    logger.warn(`[customer-moves] ${kind} item for move ${move.id} did not persist (${(notif && notif.reason) || 'no row'})`);
+  try {
+    const name = await customerName(move.customer_id);
+    const notif = await raiseAdminAlert('service', {
+      area: 'Customers',
+      action: cutAtWord(action(name), MAX_HEADLINE_CHARS - 'Customers — '.length),
+      why: cutAtWord(why, MAX_WHY_CHARS),
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
+      subject: { type: 'customer', id: move.customer_id },
+      doneWhen: 'move_handled',
+      who: 'person',
+    }, {
+      detail,
+      icon: '🚚',
+      bell: true,
+      dedupeKey: `moving_pause_${kind}:${move.id}`,
+      metadata: { customerId: move.customer_id, moveId: move.id, kind: `moving_pause_${kind}` },
+    });
+    if (!notif || notif.suppressed) {
+      logger.warn(`[customer-moves] ${kind} item for move ${move.id} did not persist (${(notif && notif.reason) || 'no row'})`);
+    }
+  } catch (err) {
+    logger.error(`[customer-moves] ${kind} item for move ${move.id} failed (${errCode(err)})`);
   }
 }
 

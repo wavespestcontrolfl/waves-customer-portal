@@ -347,12 +347,17 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
       actorId: null, waiveFee: true, source: 'moving-pause', allowEmpty: true, linkedChildren: [],
     })).rejects.toThrow('process stopped');
     expect(await statusOf(s.pestAfter1)).toBe('cancelled');
+    // The follow-through never ran: the tracker still shows the visit as booked.
+    expect((await trx('scheduled_services').where({ id: s.pestAfter1 }).first('track_state')).track_state).not.toBe('cancelled');
+    FollowThrough.runVisitCancellationFollowThrough.mockReset();
     FollowThrough.runVisitCancellationFollowThrough.mockImplementation((...args) => FT.runVisitCancellationFollowThrough(...args));
 
     expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
     const replay = FollowThrough.runVisitCancellationFollowThrough.mock.calls.map(([args]) => args)
       .find((args) => args.targetIds.includes(s.pestAfter1));
     expect(replay).toMatchObject({ waiveFee: true, source: 'moving-pause', linkedChildren: [] });
+    expect([...replay.targetIds].sort()).toEqual([s.pestAfter1, s.pestAfter2].sort());
+    expect(await trx('scheduled_services').whereIn('id', [s.pestAfter1, s.pestAfter2]).pluck('track_state')).toEqual(['cancelled', 'cancelled']);
     expect(await statusOf(s.lawnAfter)).toBe('cancelled');
     expect((await moveRow(s.move.id)).pause_state).toBe('paused');
   });
