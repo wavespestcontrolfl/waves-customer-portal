@@ -191,25 +191,20 @@ function explainerLive() {
 }
 
 // The bell list's persisted rows with what "What to do" needs, for the admin role while the gate is on: the customer
-// an alert names (`customer`), that the row can be explained (`explainable`), its saved summary when it was written
-// for the text shown (`explainer`), and, while GATE_ALERT_SEND_TO_CLAUDE is also on, that it can be sent to Claude
-// (`sendToClaude`, admin-alert-send-to-claude.js). The stored column itself never leaves the server. Never throws: a
-// failed name read serves the rows without names.
+// an alert names (`customer`), that the row can be explained (`explainable`) and its saved summary when it was written
+// for the text shown (`explainer`). The "Send to Claude" mark (`sendToClaude`) is not here: it needs no explainer gate,
+// so the list route adds it for every admin row (withSendToClaudeFields, admin-alert-send-to-claude.js). The stored
+// column itself never leaves the server. Never throws: a failed name read serves the rows without names.
 async function withExplainerFields(rows, { role } = {}) {
   const list = Array.isArray(rows) ? rows : [];
   const bare = list.map(({ explainer: _stored, ...row }) => row);
   if (!list.length || role !== 'admin' || !explainerLive()) return bare;
-  const { sendToClaudeLive, sendRefusal } = require('./admin-alert-send-to-claude');
-  const sendLive = sendToClaudeLive();
   let customers = new Map();
   try { customers = await customersForAlerts(db, list); } catch (err) { logger.warn(`[alert-explainer] names not read: ${NotificationService.safeErrorSummary(err)}`); }
   return bare.map((row, i) => {
     const customer = customers.get(String(row.id));
     const explainer = servedExplainer(list[i].explainer, row.version);
-    return {
-      ...row, explainable: true, ...(customer ? { customer } : {}), ...(explainer ? { explainer } : {}),
-      ...(sendLive && !sendRefusal(row) ? { sendToClaude: true } : {}),
-    };
+    return { ...row, explainable: true, ...(customer ? { customer } : {}), ...(explainer ? { explainer } : {}) };
   });
 }
 

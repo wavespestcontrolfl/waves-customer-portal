@@ -1602,6 +1602,7 @@ describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', 
     fixer: 'claude',
   };
   const VERSION = 'c'.repeat(32);
+  const AT = '2026-11-03T15:00:00.000Z';
   const rows = () => ([
     { id: 's1', category: 'system', title: 'Estimator data canary: county parser regression', body: 'The county parser failed.',
       explainable: true, sendToClaude: true, explainer: SUMMARY, version: VERSION,
@@ -1609,56 +1610,164 @@ describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', 
     { id: 's2', category: 'inbound_sms', title: 'Text from Diane Dizon', body: 'Can you come Tuesday?',
       explainable: true, explainer: { happened: 'Diane Dizon texted.', steps: ['Reply to Diane Dizon.'], fixer: 'you' }, version: 'd'.repeat(32),
       created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
+    // Not explainable (the paid What to do panel is off), but the server marked it sendable.
+    { id: 's3', category: 'system', title: 'Inventory sync is behind', body: 'The sync has not run today.', detail: 'Last run was yesterday.',
+      sendToClaude: true, version: 'e'.repeat(32), created_at: new Date().toISOString(), read_at: null, link: '/admin/inventory' },
+    { id: 's4', category: 'system', title: 'Backup check passed', body: 'All good.', version: 'f'.repeat(32),
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/system' },
   ]);
-  const setup = ({ send = () => jsonResponse({ sent: true, message: 'Sent to Claude. A terminal tab opens for it within about 10 minutes.' }) } = {}) => {
+  const setup = ({ send = () => jsonResponse({ sent: true, at: AT, message: 'Sent to Claude. A Claude tab opens on the Mac within about 10 minutes.' }), unsend = () => jsonResponse({ unsent: true }) } = {}) => {
     global.fetch = vi.fn(async (url) => {
-      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 4 });
+      if (String(url).includes('/unsend-from-claude')) return unsend();
       if (String(url).includes('/send-to-claude')) return send();
       return jsonResponse({ notifications: rows() });
     });
   };
   const open = () => fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
   const sendCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/send-to-claude'));
+  const unsendCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/unsend-from-claude'));
   const listCalls = () => global.fetch.mock.calls.filter(([url]) => /\/admin\/notifications\?/.test(String(url)));
-  const openPanels = async () => {
-    for (const button of await screen.findAllByRole('button', { name: 'What to do' })) fireEvent.click(button);
+  // The first Send to Claude button belongs to row s1 (list order); s3 is the second.
+  const openNote = async (index = 0) => {
+    const buttons = await screen.findAllByRole('button', { name: 'Send to Claude' });
+    fireEvent.click(buttons[index]);
   };
 
-  it('shows the button only on a row the server marked, and a tap sends the version and moves the row out', async () => {
+  it('shows the button on every row the server marked, with or without What to do, and never on the others', async () => {
     setup();
     render(<NotificationBell type="admin" />);
     open();
-    await openPanels();
-    // The customer's text has no button: the server never marks customer contact.
-    expect(screen.getAllByRole('button', { name: 'Send to Claude' })).toHaveLength(1);
-    fireEvent.click(screen.getByRole('button', { name: 'Send to Claude' }));
-    expect(await screen.findByText('Sent to Claude. A terminal tab opens for it within about 10 minutes.')).toBeInTheDocument();
+    expect(await screen.findAllByRole('button', { name: 'Send to Claude' })).toHaveLength(2);
+    // Under the row's text, not inside What to do: the panel is closed and the button is already there.
+    expect(screen.queryByText('Fix the county page reader.')).toBeNull();
+    // Opening What to do does not add a second button.
+    fireEvent.click(screen.getAllByRole('button', { name: 'What to do' })[0]);
+    expect(screen.getAllByRole('button', { name: 'Send to Claude' })).toHaveLength(2);
+  });
+
+  it('a tap opens a note panel; Cancel closes it and sends nothing', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openNote();
+    expect(screen.getByLabelText('Note for Claude (optional)')).toBeInTheDocument();
+    expect(screen.getByText('0/500')).toBeInTheDocument();
+    expect(screen.getByText('Moves it out of your bell. A Claude tab opens on the Mac within about 10 minutes.')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Note for Claude (optional)'), { target: { value: 'Seen twice today' } });
+    expect(screen.getByText('16/500')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('Note for Claude (optional)')).toBeNull();
+    expect(sendCalls()).toHaveLength(0);
+    // Escape closes the panel too, and only the panel.
+    await openNote();
+    fireEvent.keyDown(screen.getByLabelText('Note for Claude (optional)'), { key: 'Escape' });
+    expect(screen.queryByLabelText('Note for Claude (optional)')).toBeNull();
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it('Send posts the version and the note, moves the row out and says so', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openNote();
+    fireEvent.change(screen.getByLabelText('Note for Claude (optional)'), { target: { value: '  Seen twice today  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText(/Sent to Claude\./)).toBeInTheDocument();
     expect(sendCalls()).toHaveLength(1);
     expect(sendCalls()[0][0]).toContain('/admin/notifications/s1/send-to-claude');
-    expect(sendCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ version: VERSION }) }));
+    expect(sendCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ version: VERSION, note: 'Seen twice today' }) }));
     expect(screen.queryByText('Estimator data canary: county parser regression')).toBeNull();
     expect(screen.getByText('Text from Diane Dizon')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
+  });
+
+  it('a send with no note omits it, on a row without What to do', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openNote(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('button', { name: 'Undo' });
+    expect(sendCalls()[0][0]).toContain('/admin/notifications/s3/send-to-claude');
+    expect(sendCalls()[0][1].body).toBe(JSON.stringify({ version: 'e'.repeat(32) }));
+  });
+
+  it('Undo posts the send\'s time, reads the list again and says the row is back', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openNote();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    const undo = await screen.findByRole('button', { name: 'Undo' });
+    const before = listCalls().length;
+    fireEvent.click(undo);
+    expect(await screen.findByText('Back in your bell.')).toBeInTheDocument();
+    expect(unsendCalls()).toHaveLength(1);
+    expect(unsendCalls()[0][0]).toContain('/admin/notifications/s1/unsend-from-claude');
+    expect(unsendCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ at: AT }) }));
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+  });
+
+  it('Undo after Claude started says so; any other undo failure says the row stays with Claude', async () => {
+    setup({ unsend: () => ({ ok: false, status: 409, json: async () => ({ error: 'started' }) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openNote();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Claude already started on it.')).toBeInTheDocument();
+    cleanup();
+    setup({ unsend: () => ({ ok: false, status: 500, json: async () => ({}) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openNote();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText("Couldn't undo. It stays with Claude.")).toBeInTheDocument();
+  });
+
+  it('the Undo goes away after 10 seconds', async () => {
+    setup();
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      render(<NotificationBell type="admin" />);
+      open();
+      await openNote();
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await screen.findByRole('button', { name: 'Undo' });
+      const timer = spy.mock.calls.find(([, ms]) => ms === 10000);
+      expect(timer).toBeTruthy();
+      await act(async () => { timer[0](); });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+    expect(screen.getByText('Sent to Claude.')).toBeInTheDocument();
   });
 
   it('a row that changed re-reads the list with a note; it stays until the list says otherwise', async () => {
     setup({ send: () => ({ ok: false, status: 409, json: async () => ({ error: 'changed' }) }) });
     render(<NotificationBell type="admin" />);
     open();
-    await openPanels();
+    await openNote();
     const before = listCalls().length;
-    fireEvent.click(screen.getByRole('button', { name: 'Send to Claude' }));
-    expect(await screen.findByText('That alert changed — the list was refreshed.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('That alert changed \u2014 the list was refreshed.')).toBeInTheDocument();
     await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
   });
 
-  it('any other failure keeps the row and says so under the button', async () => {
+  it('any other failure keeps the row and the note and says so in the panel', async () => {
     setup({ send: () => ({ ok: false, status: 500, json: async () => ({}) }) });
     render(<NotificationBell type="admin" />);
     open();
-    await openPanels();
-    fireEvent.click(screen.getByRole('button', { name: 'Send to Claude' }));
+    await openNote();
+    fireEvent.change(screen.getByLabelText('Note for Claude (optional)'), { target: { value: 'keep me' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(await screen.findByText("Couldn't send it. Try again.")).toBeInTheDocument();
     expect(screen.getByText('Estimator data canary: county parser regression')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send to Claude' })).not.toBeDisabled();
+    expect(screen.getByLabelText('Note for Claude (optional)')).toHaveValue('keep me');
+    expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled();
   });
 });

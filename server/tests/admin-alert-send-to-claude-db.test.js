@@ -2,7 +2,8 @@
  * "Send to Claude" against live Postgres (GATE_ALERT_SEND_TO_CLAUDE): a send moves the row out of the bell into Claude's
  * queue only at the version the bell served, naming the customer from the record; a refresh of the same alert updates
  * its text but keeps it in Claude's queue while it is open; a refresh that rings after it was closed puts it back in the
- * bell without the stamp; and needs-me lists it with the customer's name and the sent mark. Everything is the real
+ * bell without the stamp; the admin's note is stored in the stamp; an undo puts the row back with its own who and severity
+ * unless a Mac tab already started on it, the send changed or the row is done; and needs-me lists it with the customer's name and the sent mark. Everything is the real
  * database. Rows are this run's own and are removed.
  */
 const SKIP = !process.env.DATABASE_URL;
@@ -12,6 +13,7 @@ maybeDescribe('send to Claude (live Postgres)', () => {
   let db;
   let NotificationService;
   let sendAdminAlertToClaude;
+  let unsendAdminAlertFromClaude;
   let listNeedsMe;
   const RUN = `send-to-claude-test-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = () => `+1941${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
@@ -21,7 +23,7 @@ maybeDescribe('send to Claude (live Postgres)', () => {
   beforeAll(async () => {
     db = require('../models/db');
     NotificationService = require('../services/notification-service');
-    ({ sendAdminAlertToClaude } = require('../services/admin-alert-send-to-claude'));
+    ({ sendAdminAlertToClaude, unsendAdminAlertFromClaude } = require('../services/admin-alert-send-to-claude'));
     ({ listNeedsMe } = require('../services/needs-me'));
   });
   afterAll(async () => {
@@ -132,5 +134,81 @@ maybeDescribe('send to Claude (live Postgres)', () => {
     // Not asked and the gate off: no names.
     const plain = (await listNeedsMe({ who: 'claude', role: 'admin' })).items.find((i) => i.id === alert.id);
     expect(plain).not.toHaveProperty('customer');
+  });
+
+  test('the admin\'s note is stored in the stamp, and a send with no note stores none', async () => {
+    const withNote = await raise(`accepted-schedule:${RUN}:note-a`, 'The plan calls for 4 visits; the schedule has 5.');
+    const out = await sendAdminAlertToClaude(withNote.id, { version: (await served(withNote.id)).version, by: 'admin-1', role: 'admin', note: 'Seen twice today' });
+    expect(out.status).toBe(200);
+    const stamp = meta(await db('notifications').where({ id: withNote.id }).first()).sentToClaude;
+    expect(stamp.note).toBe('Seen twice today');
+    expect(stamp.at).toBe(out.body.at);
+
+    const bare = await raise(`accepted-schedule:${RUN}:note-b`, 'The plan calls for 4 visits; the schedule has 5.');
+    await sendAdminAlertToClaude(bare.id, { version: (await served(bare.id)).version, by: 'admin-1', role: 'admin' });
+    expect(meta(await db('notifications').where({ id: bare.id }).first()).sentToClaude).not.toHaveProperty('note');
+  });
+
+  test('an undo puts the row back in the bell with its own who and severity and clears the stamp', async () => {
+    const alert = await raise(`accepted-schedule:${RUN}:undo-a`, 'The plan calls for 4 visits; the schedule has 5.', { severity: 'fyi' });
+    const before = meta(await db('notifications').where({ id: alert.id }).first());
+    const sent = await sendAdminAlertToClaude(alert.id, { version: (await served(alert.id)).version, by: 'admin-1', role: 'admin', note: 'Seen twice today' });
+    expect(await inBell(alert.id)).toBe(false);
+
+    expect(await unsendAdminAlertFromClaude(alert.id, { at: sent.body.at, by: 'admin-1', role: 'admin' })).toEqual({ status: 200, body: { unsent: true } });
+    const back = meta(await db('notifications').where({ id: alert.id }).first());
+    expect(back).not.toHaveProperty('sentToClaude');
+    expect(back).not.toHaveProperty('claudeQueue');
+    expect(back).not.toHaveProperty('feed');
+    expect(back).toEqual(expect.objectContaining({ who: before.who, severity: 'fyi', dedupeKey: before.dedupeKey, run: RUN }));
+    expect(back.unsentFromClaude).toEqual({ at: expect.any(String), by: 'admin' });
+    expect(await inBell(alert.id)).toBe(true);
+
+    // The same undo twice: the second finds nothing to undo.
+    expect(await unsendAdminAlertFromClaude(alert.id, { at: sent.body.at, by: 'admin-1', role: 'admin' }))
+      .toEqual({ status: 409, body: { error: 'changed' } });
+    // It can be sent again afterwards.
+    expect((await sendAdminAlertToClaude(alert.id, { version: (await served(alert.id)).version, by: 'admin-1', role: 'admin' })).status).toBe(200);
+  });
+
+  test('an undo drops who and severity the stamp could not keep (a value that is not a known one)', async () => {
+    const alert = await raise(`accepted-schedule:${RUN}:undo-bare`, 'The plan calls for 4 visits; the schedule has 5.');
+    await db('notifications').where({ id: alert.id }).update({
+      metadata: db.raw("jsonb_set(jsonb_set(metadata, '{who}', '\"nobody\"'), '{severity}', '\"loud\"')"),
+    });
+    const sent = await sendAdminAlertToClaude(alert.id, { version: (await served(alert.id)).version, by: 'admin-1', role: 'admin' });
+    expect(sent.status).toBe(200);
+    expect(meta(await db('notifications').where({ id: alert.id }).first()).sentToClaude.was).toEqual({ who: null, severity: null });
+    expect((await unsendAdminAlertFromClaude(alert.id, { at: sent.body.at, by: 'admin-1', role: 'admin' })).status).toBe(200);
+    const back = meta(await db('notifications').where({ id: alert.id }).first());
+    expect(back).not.toHaveProperty('who');
+    expect(back).not.toHaveProperty('severity');
+    expect(back).not.toHaveProperty('sentToClaude');
+    expect(back.dedupeKey).toBe(`accepted-schedule:${RUN}:undo-bare`);
+  });
+
+  test('an undo is refused once a Mac tab started on it, when the send differs, or when the row is done', async () => {
+    const started = await raise(`accepted-schedule:${RUN}:undo-b`, 'The plan calls for 4 visits; the schedule has 5.');
+    const sent = await sendAdminAlertToClaude(started.id, { version: (await served(started.id)).version, by: 'admin-1', role: 'admin' });
+    // A different send time is not this send.
+    expect(await unsendAdminAlertFromClaude(started.id, { at: '2020-01-01T00:00:00.000Z', by: 'admin-1', role: 'admin' }))
+      .toEqual({ status: 409, body: { error: 'changed' } });
+    // The Mac script stamps startedAt when a tab starts.
+    await db('notifications').where({ id: started.id }).update({
+      metadata: db.raw("jsonb_set(metadata, '{sentToClaude,startedAt}', to_jsonb(?::text))", ['2026-11-03T15:00:05.000Z']),
+    });
+    expect(await unsendAdminAlertFromClaude(started.id, { at: sent.body.at, by: 'admin-1', role: 'admin' }))
+      .toEqual({ status: 409, body: { error: 'started' } });
+    // The fenced write itself refuses too, not only the read before it.
+    expect(await NotificationService.markAdminUnsentFromClaude(started.id, sent.body.at, 'admin')).toBe(0);
+    expect(meta(await db('notifications').where({ id: started.id }).first()).claudeQueue).toBe('sent-to-claude');
+    expect(await inBell(started.id)).toBe(false);
+
+    const closed = await raise(`accepted-schedule:${RUN}:undo-c`, 'The plan calls for 4 visits; the schedule has 5.');
+    const sentClosed = await sendAdminAlertToClaude(closed.id, { version: (await served(closed.id)).version, by: 'admin-1', role: 'admin' });
+    await NotificationService.markAdminDone([closed.id], { by: 'claude', resolution: 'Fixed the schedule.', role: 'admin' });
+    expect(await unsendAdminAlertFromClaude(closed.id, { at: sentClosed.body.at, by: 'admin-1', role: 'admin' }))
+      .toEqual({ status: 409, body: { error: 'done' } });
+    expect(await NotificationService.markAdminUnsentFromClaude(closed.id, sentClosed.body.at, 'admin')).toBe(0);
   });
 });

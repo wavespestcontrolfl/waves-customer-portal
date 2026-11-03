@@ -12,7 +12,7 @@ function safeErrorSummary(err) {
 }
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
-const { stampClaudeQueue, rescueClaudeFault, keepSentToClaude } = require('./admin-alert-routing');
+const { stampClaudeQueue, rescueClaudeFault, keepSentToClaude, SENT_TO_CLAUDE_CLASS } = require('./admin-alert-routing');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
   'appointment_confirmation',
@@ -1035,6 +1035,36 @@ const NotificationService = {
       return excludeActivityOnlyFromBell(trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at'))
         .whereRaw(`${NOTIFICATION_VERSION_SQL} = ?`, [version])
         .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]) });
+    });
+  },
+
+  // The undo for a "Send to Claude" (admin-alert-send-to-claude.js): puts the row back in the bell with the who and
+  // severity it had before the send (the stamp's `was`; a null value drops the key), and notes the undo. Same dedupe lock
+  // as the send. The row is locked and the fence re-checked inside the transaction: open, still in Claude's queue, the
+  // send stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the rows written, 0 or 1.
+  async markAdminUnsentFromClaude(id, at, by) {
+    return db.transaction(async (trx) => {
+      const row = await trx('notifications').where({ id, recipient_type: 'admin' }).first(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+      if (!row) return 0;
+      if (row.dedupe_key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${row.dedupe_key}`]);
+      const fenced = () => trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
+        .whereRaw("metadata->>'claudeQueue' = ?", [SENT_TO_CLAUDE_CLASS])
+        .whereRaw("metadata->'sentToClaude'->>'at' = ?", [at])
+        .whereRaw("metadata->'sentToClaude'->>'startedAt' IS NULL");
+      const locked = await fenced().forUpdate().first(db.raw("metadata->'sentToClaude'->'was' AS was"));
+      if (!locked) return 0;
+      const was = locked.was && typeof locked.was === 'object' ? locked.was : {};
+      const restore = {
+        ...(typeof was.who === 'string' ? { who: was.who } : {}),
+        ...(typeof was.severity === 'string' ? { severity: was.severity } : {}),
+        unsentFromClaude: { at: new Date().toISOString(), by },
+      };
+      return fenced().update({
+        metadata: trx.raw(
+          "(COALESCE(metadata, '{}'::jsonb) - 'feed' - 'claudeQueue' - 'sentToClaude' - 'who' - 'severity') || ?::jsonb",
+          [JSON.stringify(restore)],
+        ),
+      });
     });
   },
 

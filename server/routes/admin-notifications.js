@@ -13,7 +13,9 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 const { withAlertButtons, runAlertButton } = require('../services/admin-alert-buttons');
 const { explainAdminAlert, explainerLive, withExplainerFields } = require('../services/admin-alert-explainer');
-const { sendAdminAlertToClaude, sendToClaudeLive } = require('../services/admin-alert-send-to-claude');
+const {
+  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendToClaudeLive,
+} = require('../services/admin-alert-send-to-claude');
 
 router.use(adminAuthenticate);
 
@@ -93,11 +95,13 @@ router.get('/', async (req, res, next) => {
     // An SMS review bell's source text rides as `source_text`, read now and never stored on the row. Added last:
     // the explainer reads the stored row by id, never this.
     const { withTextNoteSources } = require('../services/sms-operational-actions');
-    const rows = await withTextNoteSources(await withExplainerFields(served, { role: req.techRole }), { role: req.techRole });
+    const marked = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }), { role: req.techRole });
+    const rows = await withTextNoteSources(marked, { role: req.techRole });
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
-      // admin role while GATE_ALERT_EXPLAINER is on.
+      // admin role while GATE_ALERT_EXPLAINER is on. `sendToClaude` marks a row the "Send to Claude" button may move,
+      // for the admin role while GATE_ALERT_SEND_TO_CLAUDE is on (no explainer needed).
       notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
@@ -510,22 +514,44 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/notifications/:id/send-to-claude — the "Send to Claude" button in the bell's "What to do" panel
-// (GATE_ALERT_SEND_TO_CLAUDE with GATE_ALERT_EXPLAINER, admin only). `version` (required): the content version the bell
-// served for the row. Moves the row out of the bell into Claude's queue, where the Mac launcher opens a terminal tab for
-// it (services/admin-alert-send-to-claude.js). 422 for customer contact, a done row or a row already off the bell; 409
-// when the row changed since the bell read it. Sends nothing to anyone. Gate off: 404, the same as an unknown route.
+// POST /api/admin/notifications/:id/send-to-claude — the bell's "Send to Claude" button (GATE_ALERT_SEND_TO_CLAUDE, admin
+// only; no explainer gate, owner 2026-11-03). `version` (required): the content version the bell served for the row.
+// `note` (optional text, 500 characters): the admin's own words for the Claude tab. Moves the row out of the bell into
+// Claude's queue, where the Mac launcher opens a Claude tab for it (services/admin-alert-send-to-claude.js). The answer
+// carries `at`, the send's time, for the undo. 422 for customer contact, a row our code did not write, a done row or a
+// row already off the bell; 409 when the row changed since the bell read it. Sends nothing to anyone. Gate off: 404,
+// the same as an unknown route.
 router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
   try {
-    if (!explainerLive() || !sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
+    if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
     const version = req.body?.version;
     if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
       return res.status(400).json({ error: 'version is required' });
     }
+    const { note, error } = cleanNote(req.body?.note);
+    if (error) return res.status(400).json({ error });
     const { status, body } = await sendAdminAlertToClaude(id, {
-      version: version.toLowerCase(), by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
+      version: version.toLowerCase(), by: req.technicianId, role: req.techRole, technicianId: req.technicianId, note,
+    });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/unsend-from-claude — the 10-second Undo after a send (GATE_ALERT_SEND_TO_CLAUDE,
+// admin only). `at` (required): the time the send answered with. Puts the row back in the bell while it is open, still
+// carries that send and no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Sends nothing to
+// anyone. Gate off: 404, the same as an unknown route.
+router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
+  try {
+    if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    const at = req.body?.at;
+    if (typeof at !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(at)) return res.status(400).json({ error: 'at is required' });
+    const { status, body } = await unsendAdminAlertFromClaude(id, {
+      at, by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
     });
     res.status(status).json(body);
   } catch (err) { next(err); }

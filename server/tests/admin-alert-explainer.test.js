@@ -261,6 +261,17 @@ describe('withExplainerFields (the bell list)', () => {
     expect(second).not.toHaveProperty('customer');
   });
 
+  test('never marks a row sendToClaude, even with the send gate on: the list route does that for every admin row', async () => {
+    process.env.GATE_ALERT_EXPLAINER = 'true';
+    process.env.GATE_ALERT_SEND_TO_CLAUDE = 'true';
+    try {
+      const rows = await explainer.withExplainerFields(listed(), { role: 'admin' });
+      expect(rows.some((r) => 'sendToClaude' in r)).toBe(false);
+    } finally {
+      delete process.env.GATE_ALERT_SEND_TO_CLAUDE;
+    }
+  });
+
   test('a failed name read still serves the rows', async () => {
     process.env.GATE_ALERT_EXPLAINER = 'true';
     customersForAlerts.mockRejectedValue(new Error('db down'));
