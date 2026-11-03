@@ -252,6 +252,94 @@ describe('POST /admin/schedule/:id/card-request', () => {
   });
 });
 
+describe('Book at the Table (GATE_IN_PERSON_CARD)', () => {
+  const OLD = process.env.GATE_IN_PERSON_CARD;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockLaneReady.mockResolvedValue(true);
+    delete process.env.GATE_IN_PERSON_CARD;
+  });
+  afterAll(() => {
+    if (OLD === undefined) delete process.env.GATE_IN_PERSON_CARD; else process.env.GATE_IN_PERSON_CARD = OLD;
+  });
+
+  test('availability: gate on adds inPerson that follows lane readiness; enabled is unchanged', async () => {
+    stubTables({});
+    process.env.GATE_IN_PERSON_CARD = 'true';
+    await withServer(async (baseUrl) => {
+      let response = await fetch(`${baseUrl}/admin/schedule/card-request-availability`);
+      await expect(response.json()).resolves.toEqual({ enabled: true, inPerson: true });
+      mockLaneReady.mockResolvedValue(false);
+      response = await fetch(`${baseUrl}/admin/schedule/card-request-availability`);
+      await expect(response.json()).resolves.toEqual({ enabled: false, inPerson: false });
+    });
+  });
+
+  test('availability: gate off keeps the exact old body (no inPerson key)', async () => {
+    stubTables({});
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/card-request-availability`);
+      await expect(response.json()).resolves.toEqual({ enabled: true });
+    });
+  });
+
+  test('gate off → 404 {enabled:false}, funnel never invoked', async () => {
+    stubTables({ scheduled_services: { id: 'svc-1' } });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request/in-person`, { method: 'POST' });
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toEqual({ enabled: false });
+    });
+    expect(mockRequestCard).not.toHaveBeenCalled();
+  });
+
+  test('link_created → inline delivery with inPerson, secureUrl returned', async () => {
+    process.env.GATE_IN_PERSON_CARD = 'true';
+    stubTables({ scheduled_services: { id: 'svc-1' } });
+    mockRequestCard.mockResolvedValue({
+      requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.example.test/secure/abc', cancelFeeLine: 'fee',
+    });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request/in-person`, { method: 'POST' });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.example.test/secure/abc',
+      });
+    });
+    expect(mockRequestCard).toHaveBeenCalledWith({
+      scheduledServiceId: 'svc-1', trigger: 'admin', delivery: 'inline', inPerson: true,
+    });
+  });
+
+  test('auto_secured and skipped pass through with no secureUrl', async () => {
+    process.env.GATE_IN_PERSON_CARD = 'true';
+    stubTables({ scheduled_services: { id: 'svc-1' } });
+    mockRequestCard.mockResolvedValueOnce({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
+    mockRequestCard.mockResolvedValueOnce({ requested: false, action: 'skipped', reason: 'payer_billed' });
+    await withServer(async (baseUrl) => {
+      let response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request/in-person`, { method: 'POST' });
+      await expect(response.json()).resolves.toEqual({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
+      response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request/in-person`, { method: 'POST' });
+      await expect(response.json()).resolves.toEqual({ requested: false, action: 'skipped', reason: 'payer_billed' });
+    });
+  });
+
+  test('unknown visit → 404, funnel never invoked', async () => {
+    process.env.GATE_IN_PERSON_CARD = 'true';
+    stubTables({ scheduled_services: undefined });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/nope/card-request/in-person`, { method: 'POST' });
+      expect(response.status).toBe(404);
+    });
+    expect(mockRequestCard).not.toHaveBeenCalled();
+  });
+
+  test('the route is admin-only (requireAdmin on the registration)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(src).toContain("router.post('/:id/card-request/in-person', requireAdmin,");
+  });
+});
+
 describe('source guards — booking hook and client defaults', () => {
   const scheduleSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
   const createModalSrc = fs.readFileSync(

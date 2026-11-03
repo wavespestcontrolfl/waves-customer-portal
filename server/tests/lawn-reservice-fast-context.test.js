@@ -116,23 +116,11 @@ describe('buildLawnReserviceFastContext', () => {
     expect(ctx).toEqual({ ok: false, reason: 'not_lawn_re_service' });
   });
 
-  describe('GATE_FAST_COMPLETE_WRAP_UP', () => {
-    const saved = process.env.GATE_FAST_COMPLETE_WRAP_UP;
-    afterEach(() => { if (saved === undefined) delete process.env.GATE_FAST_COMPLETE_WRAP_UP; else process.env.GATE_FAST_COMPLETE_WRAP_UP = saved; });
-    const read = () => buildLawnReserviceFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog }));
-
-    test('gate off: the key is absent', async () => {
-      delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
-      const ctx = await read();
+  describe('Wrap-up', () => {
+    test('an eligible visit carries wrapUp: true', async () => {
+      const ctx = await buildLawnReserviceFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog }));
       expect(ctx.eligible).toBe(true);
-      expect('wrapUp' in ctx).toBe(false);
-    });
-
-    test('gate on (exactly true): wrapUp is true; any other value stays off', async () => {
-      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
-      expect((await read()).wrapUp).toBe(true);
-      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'on';
-      expect('wrapUp' in await read()).toBe(false);
+      expect(ctx.wrapUp).toBe(true);
     });
   });
 

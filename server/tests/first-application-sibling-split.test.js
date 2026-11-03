@@ -12,6 +12,7 @@ const {
   evaluateGroupDivergence,
   divergingSiblings,
   neverRanCoveredMembers,
+  taggedBilledMemberIds,
   buildDivergenceAlertCopy,
   divergenceStateFingerprint,
   resolveGoverningInvoice,
@@ -391,6 +392,112 @@ describe('evaluateGroupDivergence', () => {
       const cancelled = member('c', { status: 'cancelled' });
       const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'sent' });
       expect(verdict.reason).toBe('diverged');
+    });
+  });
+
+  // Office hand-split (prod 2026-10-31): the paid combined invoice no longer
+  // bills the never-ran member's base application, so there is nothing to
+  // refund or wait on. Fail-safe: only a readable invoice that carries a
+  // positive tagged base line for another covered member and none for the
+  // never-ran one excludes it; every other shape keeps alerting.
+  describe('governing invoice lines (hand-split false alarm)', () => {
+    const line = (id, amount = 115.2, over = {}) => ({
+      client_id: `scheduled_${id}_primary`, description: 'Service', quantity: 1, unit_price: amount, amount, ...over,
+    });
+    const legacy = { description: 'First service application', quantity: 1, unit_price: 115.2, amount: 115.2 };
+    const a = anchor({ status: 'confirmed' });
+    const mosquito = member('mosquito-1', { status: 'cancelled' });
+    const verdictFor = (invoiceStatus, governingLines, over = {}) => evaluateGroupDivergence({
+      anchor: over.anchor || a, members: over.members || [over.anchor || a, mosquito], invoiceStatus, governingLines,
+    });
+
+    test.each([['paid', 'paid_never_ran'], ['prepaid', 'paid_never_ran'], ['processing', 'payment_pending_never_ran']])(
+      '%s invoice that bills only the anchor tag → never-ran sibling excluded, clear',
+      (status) => {
+        expect(verdictFor(status, [line('anchor-1'), { _kind: 'discount', description: 'Loyalty credit', amount: -11.52 }]))
+          .toEqual({ action: 'clear', reason: 'invoice_settled' });
+      },
+    );
+
+    test('a tagged invoice that still bills the never-ran member → alert', () => {
+      const v = verdictFor('paid', [line('anchor-1'), line('mosquito-1', 60)]);
+      expect(v.reason).toBe('paid_never_ran');
+      expect(v.diverging.map((m) => m.id)).toEqual(['mosquito-1']);
+    });
+
+    test('untagged legacy lines → alert (no evidence of a split)', () => {
+      expect(verdictFor('paid', [legacy]).reason).toBe('paid_never_ran');
+    });
+
+    test('legacy untagged line plus a tag for the anchor only → the alert stands (the legacy line may bill the sibling)', () => {
+      expect(verdictFor('paid', [legacy, line('anchor-1')]).reason).toBe('paid_never_ran');
+    });
+
+    test.each([[null], [undefined], ['not an array'], [[]], [{}]])('unreadable / empty lines %j → alert', (lines) => {
+      expect(verdictFor('paid', lines).reason).toBe('paid_never_ran');
+    });
+
+    test('governingLines omitted entirely keeps today\'s alert', () => {
+      expect(evaluateGroupDivergence({ anchor: a, members: [a, mosquito], invoiceStatus: 'paid' }).reason).toBe('paid_never_ran');
+    });
+
+    test('tags for a visit outside the covered members prove nothing → alert', () => {
+      expect(verdictFor('paid', [line('some-other-visit')]).reason).toBe('paid_never_ran');
+    });
+
+    test('a zero / credited tagged line is not billing evidence either way', () => {
+      // Only a zeroed anchor tag: no positive tagged line at all → alert.
+      expect(verdictFor('paid', [line('anchor-1', 0)]).reason).toBe('paid_never_ran');
+      // Positive anchor tag + zeroed mosquito tag: mosquito is not billed → clear.
+      expect(verdictFor('paid', [line('anchor-1'), line('mosquito-1', 0)]).action).toBe('clear');
+    });
+
+    test('never-ran ANCHOR whose own tag is still present → alert', () => {
+      const cancelledAnchor = anchor({ status: 'cancelled' });
+      const sibling = member('mosquito-1', { status: 'confirmed' });
+      const v = verdictFor('paid', [line('anchor-1'), line('mosquito-1', 60)], { anchor: cancelledAnchor, members: [cancelledAnchor, sibling] });
+      expect(v.reason).toBe('paid_never_ran');
+      expect(v.diverging.map((m) => m.id)).toEqual(['anchor-1']);
+    });
+
+    test('never-ran anchor whose tag was removed while the sibling tag stays → clear', () => {
+      const cancelledAnchor = anchor({ status: 'cancelled' });
+      const sibling = member('mosquito-1', { status: 'confirmed' });
+      const v = verdictFor('paid', [line('mosquito-1', 60)], { anchor: cancelledAnchor, members: [cancelledAnchor, sibling] });
+      expect(v).toEqual({ action: 'clear', reason: 'invoice_settled' });
+    });
+
+    test('two never-ran members, invoice still bills one → alert names only that one', () => {
+      const m2 = member('mosquito-2', { status: 'no_show' });
+      const v = verdictFor('paid', [line('anchor-1'), line('mosquito-2', 40)], { members: [a, mosquito, m2] });
+      expect(v.diverging.map((m) => m.id)).toEqual(['mosquito-2']);
+    });
+
+    test('the still-open diverged verdict ignores governingLines (unchanged)', () => {
+      const v = verdictFor('sent', [line('anchor-1')]);
+      expect(v.reason).toBe('diverged');
+      expect(v.diverging.map((m) => m.id)).toEqual(['mosquito-1']);
+    });
+
+    test('taggedBilledMemberIds reads exact tags with positive amounts only', () => {
+      const ms = [a, mosquito];
+      expect([...taggedBilledMemberIds([line('anchor-1'), line('mosquito-1', 0)], ms)]).toEqual(['anchor-1']);
+      expect(taggedBilledMemberIds([{ client_id: 'scheduled_anchor-1_primary_extra', amount: 5 }], ms).size).toBe(0);
+      expect([...taggedBilledMemberIds([{ client_id: 'scheduled_anchor-1_primary', quantity: 2, unit_price: 5 }], ms)]).toEqual(['anchor-1']);
+    });
+
+    test('an untagged positive charge next to the tags proves nothing → the alert stands', () => {
+      // A hand-typed or hand-edited line could still carry the sibling's share.
+      const v = verdictFor('paid', [line('anchor-1'), { description: 'Mosquito Control', quantity: 1, unit_price: 85, amount: 85 }]);
+      expect(v.action).toBe('alert');
+      expect(v.reason).toBe('paid_never_ran');
+      expect(v.diverging.map((m) => m.id)).toEqual(['mosquito-1']);
+      expect(taggedBilledMemberIds([line('anchor-1'), { description: 'Setup fee', amount: 49 }], [a, mosquito]).size).toBe(0);
+    });
+
+    test('an add-on line tagged to a visit is not an untagged charge → hand-split still clears', () => {
+      expect(verdictFor('paid', [line('anchor-1'), { client_id: 'scheduled_anchor-1_addon_2', description: 'Add-on', amount: 20 }]))
+        .toEqual({ action: 'clear', reason: 'invoice_settled' });
     });
   });
 

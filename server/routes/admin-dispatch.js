@@ -4073,7 +4073,6 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
       includeCommonProducts: req.query.include === 'common_products',
     });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
-    // GATE_FAST_COMPLETE_WRAP_UP: the pest Fast Complete sheet shows its Wrap-up section. The key exists only while the gate is live.
     const gates = require('../config/feature-gates');
     // GATE_ONE_TAP_REPORT: the pest report sheet runs the one-tap flow. The key exists only while the gate is live, and
     // only for a visit of a recurring series or a re-service (the pest re-service, or a free callback booked under a
@@ -4083,7 +4082,8 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
     const stockAdvisory = isPestStockAdvisoryCompletion({ service_type: ctx.service?.serviceType });
     res.json({
       ...ctx,
-      ...(gates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
+      // The pest Fast Complete sheet shows its Wrap-up section (a sheet from before the section was permanent still reads this key).
+      wrapUp: true,
       ...(gates.oneTapReportLive()
         && (ctx.service?.isRecurring === true || ctx.service?.isCallback === true || ctx.service?.serviceKey === 'pest_re_service')
         ? { oneTap: true } : {}),

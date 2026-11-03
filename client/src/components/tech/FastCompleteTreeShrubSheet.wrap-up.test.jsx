@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Tree & Shrub Fast Complete with the Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP): gate off the
-// sheet is as it was (no section, no clock, no extra reads, the four customer-text flags); gate on
+// Tree & Shrub Fast Complete with the Wrap-up section: with no wrapUp key the
+// sheet is as it was (no section, no clock, no extra reads, the four customer-text flags); with the key
 // and untouched it posts the same four flags; each change rides the /complete body.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -83,7 +83,7 @@ const FOUR_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLin
 const WRAP_UP_KEYS = ['timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote', 'reviewDelayMinutes', 'reviewScheduledFor', 'wrapUpReviewAsk'];
 const opened = (request) => request.calls.map((c) => c.path);
 
-describe('gate off', () => {
+describe('no wrapUp key', () => {
   test('no Wrap-up, no clock, no extra reads, and the four flags exactly', async () => {
     const request = makeRequest({ wrapUp: false });
     await openSheet(request);
@@ -96,7 +96,7 @@ describe('gate off', () => {
   });
 });
 
-describe('gate on', () => {
+describe('wrapUp key in the context', () => {
   test('shows the clock and the section after the tips, and untouched posts the same four flags', async () => {
     const request = makeRequest();
     await openSheet(request);

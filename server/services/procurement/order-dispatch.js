@@ -94,6 +94,8 @@ const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, parsePackCount, countUnitsCompatible, convertToOz } = require('../product-costing');
 const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
+const { fitAction } = require('../admin-alert-names');
+const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
 
 const GATE = 'GATE_AUTO_ORDER';
 const RESTOCK_TAB = '/admin/inventory?tab=restock';
@@ -480,6 +482,33 @@ async function findDispatchable(conn = db) {
     .orderBy('prr.created_at');
 }
 
+// The headline, why and done-when for a persisted bell. The title and body are written into the ledger row
+// (evidence.bell) and re-rung from it, so they keep their text and ride in the alert's detail; the
+// headline and why are one short line each, chosen from the kind of bell the title and body name.
+function bellAlertParts({ title, body, productName }) {
+  const named = (templates) => fitAction('Inventory', productName, templates);
+  const text = String(title || '');
+  if (/^Auto-order dry run/.test(text)) {
+    return {
+      action: named([(n) => `check the ${n} auto-order dry run`, (n) => `check the ${n} dry run`]),
+      why: 'A dry run filled the cart and submitted nothing; turn the dry run off to order for real.',
+      doneWhen: 'auto_order_reviewed',
+    };
+  }
+  if (/^Auto-order (?:failed|needs review)/.test(text) && !String(body || '').includes('Do NOT re-order')) {
+    return {
+      action: named([(n) => `order ${n} by hand, the auto-order failed`, (n) => `order ${n} by hand`]),
+      why: 'The auto-order did not go through; order it manually, then mark the restock request ordered.',
+      doneWhen: 'restock_request_ordered',
+    };
+  }
+  return {
+    action: named([(n) => `reconcile the ${n} vendor order`, (n) => `reconcile the ${n} order`]),
+    why: 'The vendor may hold an order for this request, so do not re-order; check the account and reconcile by hand.',
+    doneWhen: 'order_reconciled',
+  };
+}
+
 /**
  * Ring the ledger row's bell and stamp evidence.bellAt on success. The
  * title/body were persisted as evidence.bell by the caller's transaction, so
@@ -487,17 +516,24 @@ async function findDispatchable(conn = db) {
  * next run. Returns true when the bell landed.
  */
 async function deliverBell(conn, { notify, ledgerId, requestId, productName, vendorName, title, body, v = null }) {
-  const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
   // notifyAdmin swallows its own insert/dedupe failures and returns null
   // (notification-service.js) — a resolved promise is not a landed bell,
   // only a truthy notification row is (Codex r2 P1).
   let landed = null;
   try {
-    landed = await notifyAdmin('system', title, body, {
-      bell: true,
+    landed = await raiserFor(notify)('system', {
+      area: 'Inventory',
+      ...bellAlertParts({ title, body, productName }),
+      severity: 'needs-you',
       link: RESTOCK_TAB,
+      subject: { type: 'check', id: `auto-order:${ledgerId}` },
+      who: 'person',
+    }, {
+      bell: true,
       dedupeKey: v ? `auto-order:${ledgerId}:${v}` : `auto-order:${ledgerId}`,
       refreshOnDedupe: true,
+      ringOnRefresh: ringOnRefreshAfterConversion({ category: 'system', title, body, link: RESTOCK_TAB }),
+      detail: `${title}\n${body}`,
       metadata: { vendorOrderId: ledgerId, restockRequestId: requestId, productName, vendorName },
     });
   } catch (err) {

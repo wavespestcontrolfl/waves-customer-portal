@@ -602,22 +602,30 @@ async function sendAliasDigest({ dbi, results }) {
       .map((f) => `${f.name} (${f.from} → ${f.to})`)
       .join(', ');
     const more = results.fixes.length > 5 ? ` and ${results.fixes.length - 5} more` : '';
-    await require('./notification-service').notifyAdmin(
-      'system',
-      `Inventory: ${results.applied} unit alias${results.applied === 1 ? '' : 'es'} auto-fixed`,
-      `${sample}${more}. Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row. ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`,
-      {
-        link: '/admin/inventory?tab=unit-review',
-        metadata: {
-          applied: results.applied,
-          parked: results.parked,
-          stale: results.stale,
-          errors: results.errors,
-          remainingForReview: remainingCount,
-          fixes: results.fixes,
-        },
+    const aliases = `${results.applied} unit alias${results.applied === 1 ? '' : 'es'}`;
+    // fyi with fyiRow: the row is written exactly as before (no bell tag, so the category policy still
+    // decides whether it rings), so converting it changes no ring.
+    await require('./admin-alert-compose').raiseAdminAlert('system', {
+      area: 'Inventory',
+      action: `${aliases} fixed on their own`,
+      why: `Spelling and plural renames only, no counts changed; ${remainingCount} product${remainingCount === 1 ? '' : 's'} still need${remainingCount === 1 ? 's' : ''} unit review.`,
+      severity: 'fyi',
+      link: '/admin/inventory?tab=unit-review',
+      subject: { type: 'check', id: 'inventory-unit-autofix' },
+      doneWhen: 'already_done',
+      who: 'person',
+    }, {
+      fyiRow: true,
+      detail: `${sample}${more}. Pure spelling/plural renames only — no quantities changed; each fix left a movement audit row.`,
+      metadata: {
+        applied: results.applied,
+        parked: results.parked,
+        stale: results.stale,
+        errors: results.errors,
+        remainingForReview: remainingCount,
+        fixes: results.fixes,
       },
-    );
+    });
   } catch (notifyErr) {
     logger.warn(`[inventory-unit-autofix] digest notify failed (non-blocking): ${notifyErr.message}`);
   }

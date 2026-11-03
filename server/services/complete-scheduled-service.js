@@ -3296,7 +3296,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // may be turned off. Read only below, through ReviewService.firstAskLockChoice.
       reviewOptOutReason,
       // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
-      // refused below once GATE_FAST_COMPLETE_WRAP_UP is off. Absent on the full form.
+      // honored below unless the fixed text was asked for and not honored. Absent on the full form.
       wrapUpReviewAsk,
       // The tech's answer to each thing the customer told us on a pest / lawn re-service (GATE_RESERVICE_ASKS,
       // services/reservice-answers.js). Read only below, once the gate, the visit and the outcome are known.
@@ -3966,11 +3966,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap
       ? false
       : sendCompletionSmsRequested;
-    // Whether a re-service completion may ask for a review: one decision, read live (so a gate turned off
-    // while a sheet is open stops the new asks too). See ReserviceFixedRecap.reviewAskAllowed.
+    // Whether a re-service completion may ask for a review: one decision. See ReserviceFixedRecap.reviewAskAllowed.
     const reviewAskAllowed = ReserviceFixedRecap.reviewAskAllowed({
-      marker: wrapUpReviewAsk === true,
-      wrapUpGate: require('../config/feature-gates').fastCompleteWrapUpLive(),
       fixedRequested: reserviceFixedRecapRequested,
       fixedHonored: reserviceFixedRecap,
     });
@@ -14025,12 +14022,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
       // The fixed re-service text is the ONE text: no review ask rides it or
-      // follows it (scope: "leave it off on re-services"). With
-      // GATE_FAST_COMPLETE_WRAP_UP on, a re-service asks for a review by default
-      // (owner 2026-10-10, "show on"): the sheet's Wrap-up sends requestReview and
+      // follows it (scope: "leave it off on re-services"). A re-service asks for
+      // a review by default (owner 2026-10-10, "show on"): the sheet's Wrap-up sends requestReview and
       // wrapUpReviewAsk, and a fixed-text ask goes as its OWN message through
-      // enrollPostService below (shouldBundleReview refuses fixed mode). Gate off,
-      // the marker is refused and every re-service path is as it was. Decided once,
+      // enrollPostService below (shouldBundleReview refuses fixed mode). Decided once,
       // above, by ReserviceFixedRecap.reviewAskAllowed.
       && reviewAskAllowed;
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is

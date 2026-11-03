@@ -393,7 +393,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
   };
 }
 
-// The short re-service form's Wrap-up (GATE_FAST_COMPLETE_WRAP_UP), as one seam: the gate, the spray
+// The short re-service form's Wrap-up, as one seam: the gate, the spray
 // evidence, the section's state and the submit-time check. `customerText()` is the body's customer-text
 // flags: without the section they are today's (the fixed text's flags, or all false while
 // GATE_FAST_COMPLETE_RECAP is off); with it the tech's choices stand in and the fixed-text mode stays,
@@ -450,7 +450,7 @@ function sheetVisitIdentity(visit, reportFlow, oneTap) {
 // visit with only bait or station rows does not): each row at the method it will be recorded with.
 const pestSprayEvidence = (active, draft) => rowsShowSpray(active, (row) => rowMethod(row, reportSprayMethod(draft?.facts)));
 
-// The Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP) is on when the server says so: the report flow
+// The Wrap-up section is on when the server says so: the report flow
 // (a re-service or callback too: owner 2026-10-10) and the short re-service form (see shortFormWrapUpGate).
 const wrapUpGateOf = (data) => data?.wrapUp === true;
 
@@ -1902,7 +1902,7 @@ function ReportFlowForm({
   useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
+  // The Wrap-up: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A re-service
   // (not in ctx.wrapUp) keeps its fixed text.
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });

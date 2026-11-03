@@ -83,8 +83,19 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
       expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "please confirm…" → "Thanks!" is a non-answer (hook P1)
       expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
     }
-    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works', 'Again', 'A lot', 'So much', 'For the update', 'again!']) {
+    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works', 'Again', 'A lot', 'So much', 'For the update', 'again!', 'Good', 'Good!', 'Not good', 'No good', 'Very good', 'Good grief']) {
       expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]); // real content stays loud regardless
+    }
+  });
+
+  test('"Ok good" closes like "Ok great"; a bare "good" needs a closer next to it', () => {
+    for (const t of ['Ok good', 'Okay good', 'Ok good.', 'ok good thanks', 'Good, thanks', 'Ok good 👍']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // after "is the gate open?" it is an answer
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]);
+    }
+    for (const t of ['Ok good, can you come Friday', 'Ok good see you at 9', 'Good, but the ants are back']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
     }
   });
 

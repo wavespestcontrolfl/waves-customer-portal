@@ -30,6 +30,13 @@ jest.mock('../services/admin-alert-episodes', () => ({
   closeAdminAlertKeys: jest.fn(async () => 1),
 }));
 
+jest.mock('../services/notification-service', () => ({
+  _private: {
+    doneColumns: jest.fn((args) => ({ done_by: args.by, resolution: args.resolution })),
+    openToCloser: jest.fn((query) => query),
+  },
+}));
+
 jest.mock('../services/twilio', () => ({
   sendSMS: jest.fn(async () => ({ sid: 'SM1' })),
 }));
@@ -38,6 +45,7 @@ const { dispatch } = require('../services/llm/call');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const episodes = require('../services/admin-alert-episodes');
 const TwilioService = require('../services/twilio');
+const db = require('../models/db');
 const MODELS = require('../config/models');
 const { runSmsDraftCanary, CANARY_ROUTES } = require('../services/sms-draft-canary');
 
@@ -169,4 +177,80 @@ test('a crashing probe never throws out of the canary', async () => {
   await expect(runSmsDraftCanary()).resolves.toEqual(
     expect.arrayContaining([expect.objectContaining({ ok: false })]),
   );
+});
+
+// The pre-#6658 canary wrote keyless "SMS draft route FAILING" rows that nothing
+// ever closed. Each pass closes this route's leftovers.
+describe('old keyless FAILING rows', () => {
+  beforeEach(() => { db.mockReset(); });
+
+  function legacyChain(closed = 3) {
+    const q = {};
+    q.where = jest.fn((arg) => { if (typeof arg === 'function') arg(q); return q; });
+    q.orWhere = jest.fn(() => q);
+    q.whereRaw = jest.fn(() => q);
+    q.update = jest.fn(async () => closed);
+    db.mockReturnValue(q);
+    return q;
+  }
+
+  test('a failing route closes its old rows as replaced', async () => {
+    const q = legacyChain();
+    dispatch.mockResolvedValue({ ok: false, reason: 'openai_401' });
+
+    await runSmsDraftCanary();
+
+    expect(q.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'system', title: 'SMS draft route FAILING' });
+    expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' IS NULL");
+    expect(q.where).toHaveBeenCalledWith('body', 'like', 'smsDraftDefault (%');
+    expect(q.update).toHaveBeenCalledTimes(CANARY_ROUTES.length);
+    expect(q.update.mock.calls[0][0]).toMatchObject({ done_by: 'sms-draft-canary', resolution: 'Replaced by a newer alert for the same route' });
+  });
+
+  test('a healthy route closes its old rows as recovered, with no text for them', async () => {
+    const q = legacyChain();
+    dispatch.mockResolvedValue({ ok: true, text: 'ok', model: 'x' });
+
+    await runSmsDraftCanary();
+
+    expect(q.update).toHaveBeenCalledTimes(CANARY_ROUTES.length);
+    expect(q.update.mock.calls[0][0].resolution).toMatch(/^Recovered/);
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('a failed keyed write leaves the old rows open', async () => {
+    const q = legacyChain();
+    dispatch.mockResolvedValue({ ok: false, reason: 'openai_401' });
+
+    raiseAdminAlert.mockResolvedValue(null);
+    await runSmsDraftCanary();
+    raiseAdminAlert.mockRejectedValue(new Error('db down'));
+    await runSmsDraftCanary();
+    raiseAdminAlert.mockResolvedValue({ suppressed: true });
+    await runSmsDraftCanary();
+
+    expect(q.update).not.toHaveBeenCalled();
+    // Adam still gets the text for the failed write
+    expect(TwilioService.sendSMS).toHaveBeenCalled();
+  });
+
+  test('a standing keyed row (deduped) is enough to retire the old rows', async () => {
+    const q = legacyChain();
+    dispatch.mockResolvedValue({ ok: false, reason: 'openai_401' });
+    raiseAdminAlert.mockResolvedValue({ id: 'n1', deduped: true });
+
+    await runSmsDraftCanary();
+
+    expect(q.update).toHaveBeenCalledTimes(CANARY_ROUTES.length);
+  });
+
+  test('a failed sweep never breaks the probe', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    dispatch.mockResolvedValue({ ok: false, reason: 'openai_401' });
+
+    const results = await runSmsDraftCanary();
+
+    expect(results.every((r) => r.ok === false && r.reason === 'openai_401')).toBe(true);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(CANARY_ROUTES.length);
+  });
 });

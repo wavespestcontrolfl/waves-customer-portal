@@ -589,7 +589,14 @@ async function markCardLinkSendOutcome(visitId, stamp) {
 // Same trust model as the send-window validator's marker: only a caller that
 // verified the upstream action was the customer's may set it — the call
 // pipeline passes it for inbound calls only, never for outbound dials.
-async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null, customerInitiated = false }) {
+//
+// inPerson — Book at the Table (owner 2026-11-02): staff booked the visit with
+// the customer in front of them and the customer saves the card on the spot.
+// ONLY the first-time-customers-only ask rule below is lifted, so a customer
+// with past visits and no card on file is offered the page. Every other rule
+// (gate, template, payer exemption, saved card, rodent / commercial, plan,
+// past and unpriced visits) is unchanged.
+async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null, customerInitiated = false, inPerson = false }) {
   // Owner ruling 2026-09-25 (callback_number_needed / disclaimed caller
   // ID): set below, inside the delivery==='none' branch, when the visit's
   // SMS leg is held for a disclaimed ANI AND an email invitation might
@@ -847,7 +854,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // it also collects the card; either way the $99 is disclosed and
     // frozen there instead of silently forgone. A failed probe keeps the
     // gate (never send an ask the rule may forbid).
-    if (existingCustomer) {
+    if (existingCustomer && !inPerson) {
       let rodentSetupOwed = rodentSetupNeedsDisclosure;
       if (!rodentSetupOwed) {
         try {

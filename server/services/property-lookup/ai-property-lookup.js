@@ -40,7 +40,9 @@ const MANATEE_PAO_BUILDINGS_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontie
 // decks. Same model family as land/buildings (live-probed 2026-06-12; other
 // guessed names 404 to the WP homepage, this one returns JSON).
 const MANATEE_PAO_FEATURES_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-features.php`;
-const SARASOTA_PAO_BASE = 'https://www.sc-pa.com';
+// sc-pa.com now 301s to this host (seen 2026-11-02). A 301 turns the search POST into a GET of the landing page,
+// so the address search must start on the new host.
+const SARASOTA_PAO_BASE = 'https://www.sarasotapropertyappraiser.gov';
 const SARASOTA_PAO_SEARCH_URL = `${SARASOTA_PAO_BASE}/propertysearch/Result`;
 const SARASOTA_PAO_DETAIL_URL = `${SARASOTA_PAO_BASE}/propertysearch/parcel/details`;
 const CHARLOTTE_PAO_BASE = 'https://www.ccappraiser.com';
@@ -5776,7 +5778,7 @@ function classifyPropertySource(url) {
 
   // County appraiser sites AND each county's own parcel GIS map service
   // (county-parcel-gis.js) — all county-grade authoritative rolls.
-  if (hostMatchesAny(host, ['manateepao.gov', 'sc-pa.com', 'ccappraiser.com', 'scgov.net', 'charlottecountyfl.gov', 'hcpafl.org'])) {
+  if (hostMatchesAny(host, ['manateepao.gov', 'sc-pa.com', 'sarasotapropertyappraiser.gov', 'ccappraiser.com', 'scgov.net', 'charlottecountyfl.gov', 'hcpafl.org'])) {
     if (/^\/(?:search\/?|propertysearch\/?)?$/.test(path) && !/^#\/parcel\/basic\/[^/]+/i.test(parsed.hash)) {
       return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
     }

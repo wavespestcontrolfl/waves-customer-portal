@@ -360,7 +360,7 @@ test('a placed order with no positive total anywhere parks post-submit as no_fin
   expect(amounts).toEqual([false, true]);
   expect(require('../models/db').raw.mock.calls.some((c) => /pg_advisory_xact_lock/.test(c[0]) && c[1] && c[1][0] === 'vendor-order-caps')).toBe(true);
   expect(parked.row.error).toMatch(/counted against the monthly cap at the per-order cap/);
-  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/Do NOT re-order/);
 });
 
 test('adapter refusal → needs_review with the refuse code', async () => {
@@ -391,8 +391,8 @@ test('an ambiguous submit whose claim was lost meanwhile (stale park + revoke) i
   expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
   expect(auditVendorOrder.mock.calls[0][0]).toMatchObject({ outcome: 'placed_after_stale_park', amount_cents: 10593 });
   expect(auditVendorOrder.mock.calls[0][0].reason).toMatch(/may exist \(ambiguous submit\)/);
-  expect(notify.mock.calls[0][1]).toMatch(/may have landed after revoke/);
-  expect(notify.mock.calls[0][2]).toMatch(/MAY have been placed/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/may have landed after revoke/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/MAY have been placed/);
 });
 
 test('an ambiguous submit with NO known total — no click figure, no quote, nothing reserved — parks at the per-order cap, never $0 (pre-push P1)', async () => {
@@ -529,7 +529,7 @@ test('vendor call outlives stale recovery: the parked row keeps needs_review, ga
   expect(auditVendorOrder).toHaveBeenCalledTimes(1);
   expect(auditVendorOrder.mock.calls[0][0].outcome).toBe('placed_after_stale_park');
   expect(notify).toHaveBeenCalledTimes(1); // the park's bell is superseded: the order exists
-  expect(notify.mock.calls[0][1]).toMatch(/landed after stale recovery/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/landed after stale recovery/);
 });
 
 test('vendor call outlives a stale park the operator already REVOKED and cancelled: marker replaced, request back to ordered, bell says so (pre-push P0)', async () => {
@@ -542,8 +542,8 @@ test('vendor call outlives a stale park the operator already REVOKED and cancell
   const reopen = mockState.updates.find((u) => u.table === 'product_restock_requests').row;
   expect(reopen).toMatchObject({ status: 'ordered', closed_at: null });
   expect(auditVendorOrder.mock.calls[0][0].reason).toMatch(/and revoked/);
-  expect(notify.mock.calls[0][1]).toMatch(/landed after revoke/);
-  expect(notify.mock.calls[0][2]).toMatch(/record the revoke again/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/landed after revoke/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/record the revoke again/);
 });
 
 test('request cancelled mid-flight: ledger placed, request back to ordered (receive / revoke can close it), one reconcile bell (Codex r23 P1)', async () => {
@@ -553,8 +553,8 @@ test('request cancelled mid-flight: ledger placed, request back to ordered (rece
   expect(ledgerStatus()).toBe('placed');
   expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
   expect(notify).toHaveBeenCalledTimes(1);
-  expect(notify.mock.calls[0][1]).toMatch(/cancelled request/);
-  expect(notify.mock.calls[0][2]).toMatch(/back to ordered/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/cancelled request/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/back to ordered/);
 });
 
 test('an adapter with no static quote (quotesAtPlace) gets the cap check as beforeSubmit and a dry run parks', async () => {
@@ -571,7 +571,7 @@ test('an adapter with no static quote (quotesAtPlace) gets the cap check as befo
   });
   const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place });
   expect(r).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
-  expect(notify.mock.calls[0][1]).toMatch(/dry run/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/dry run/);
   expect(JSON.parse(mockState.ledgerRows[0].request_payload)).toMatchObject({ vendorSku: 'S1-77', quantity: 256, unit: 'fl_oz', vendorQuantity: 2, packSize: '1 gal', orderedQuantity: 256 });
 });
 
@@ -594,7 +594,7 @@ test('an unreadable pack size parks no_pack_size — never a raw inventory amoun
   const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, place });
   expect(r).toMatchObject({ status: 'needs_review', reason: 'no_pack_size' });
   expect(place).not.toHaveBeenCalled();
-  expect(notify.mock.calls[0][2]).toMatch(/pack size/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/pack size/);
 });
 
 test('vendorOrderQuantity: packages by pack size in the same dimension; counts for a count vendor', () => {
@@ -709,7 +709,7 @@ test('no identical prior vendor order → needs_review no_binding_total, nothing
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'no_binding_total' });
   expect(a.place).not.toHaveBeenCalled();
-  expect(notify.mock.calls[0][2]).toMatch(/identical order by hand/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/identical order by hand/);
 });
 
 test('a binding-total lookup error is a definite pre-submit failure', async () => {
@@ -790,8 +790,8 @@ test('vendor total over cap after placement → needs_review, request ordered, b
   expect(ledger).toMatchObject({ status: 'needs_review', external_order_number: 'SM-2', amount_cents: 60000 });
   expect(ledger.placed_at).toBeInstanceOf(Date);
   expect(notify).toHaveBeenCalledTimes(1);
-  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
-  expect(notify.mock.calls[0][2]).not.toMatch(/order manually/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/Do NOT re-order/);
+  expect(notify.mock.calls[0][3].detail).not.toMatch(/order manually/);
 });
 
 test('a higher final total whose post-placement re-check finds the claim lost lands as a late placement UNDER the cap lock, at the actual charge (Codex r23 P1)', async () => {
@@ -843,8 +843,8 @@ test('an order that lands after an OLDER pod received the request by hand parks 
   expect(JSON.parse(ledger.evidence).landedAfterReceive).toEqual(expect.any(String)); // the marker every live-order guard reads
   expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0); // received stays received: its stock was counted
   expect(notify).toHaveBeenCalledTimes(1);
-  expect(notify.mock.calls[0][2]).toMatch(/landed after the restock request was received by hand/);
-  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/landed after the restock request was received by hand/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/Do NOT re-order/);
 });
 
 test('an order that lands after stale recovery parked the row AND an older pod received the request attaches as a late placement carrying landedAfterReceive — never already_settled (hook r27 P0)', async () => {
@@ -859,7 +859,7 @@ test('an order that lands after stale recovery parked the row AND an older pod r
   expect(attached).toBeDefined(); // the confirmed number + amount reach the parked row
   expect(dbFn.raw.mock.calls.some((c) => /revokedAt/.test(c[0]) && c[1] && String(c[1][0]).includes('"landedAfterReceive"'))).toBe(true); // the marker keeps the guards closed
   expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0); // received stays received
-  expect(notify.mock.calls[0][2]).toMatch(/receive the request once more/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/receive the request once more/);
 });
 
 test('a persist_after_placement park records the POSITIVE figure — the beforeSubmit reservation over a zero vendor total — never $0 over the reservation (Codex r31 P1)', async () => {
@@ -893,21 +893,21 @@ test('a DB failure after the vendor call parks as persist_after_placement, never
     const ledger = lastLedgerPatch();
     expect(ledger.external_order_number).toBe('SM-1');
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify.mock.calls[0][2]).toMatch(/SM-1/);
-    expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
+    expect(notify.mock.calls[0][3].detail).toMatch(/SM-1/);
+    expect(notify.mock.calls[0][3].detail).toMatch(/Do NOT re-order/);
   } finally { dbFn.transaction = realTx; }
 });
 
 test('ambiguous post-submit bell also says do NOT re-order', async () => {
   const err = new Error('504 after POST'); err.ambiguous = true;
   await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }));
-  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/Do NOT re-order/);
 });
 
 test('a definite pre-submit failure still parks as failed with the manual-order instruction', async () => {
   await run(mockAdapter({ place: jest.fn(async () => { throw new Error('DNS down'); }) }));
   expect(ledgerStatus()).toBe('failed');
-  expect(notify.mock.calls[0][2]).toMatch(/order manually/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/order manually/);
 });
 
 test('placed_at marks a dispatched vendor call: set on post-submit parks, never on pre-submit parks', async () => {
@@ -942,8 +942,8 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'no_vendor_confirmed_total' });
   expect(a.place).not.toHaveBeenCalled();
-  expect(notify.mock.calls[0][2]).toMatch(/\$314\.00/);
-  expect(notify.mock.calls[0][2]).toMatch(/item 4242 × 500/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/\$314\.00/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/item 4242 × 500/);
   const ledger = lastLedgerPatch();
   expect(ledger.placed_at).toBeUndefined();
 });
@@ -972,7 +972,10 @@ test('a bell that fails to send is persisted with the park, reported, and re-run
   mockState.request = { ...baseRequest(), status: 'ordered' };
   const run2 = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
   expect(run2.bells).toEqual({ rung: ['ledger-1'], pending: [] });
-  expect(notify).toHaveBeenLastCalledWith('system', evidence.bell.title, evidence.bell.body, expect.objectContaining({ dedupeKey: `auto-order:ledger-1:${evidence.bell.v}` }));
+  // The persisted title and body ride in detail; the headline and why are composed from them (alert step E2).
+  expect(notify).toHaveBeenLastCalledWith('system', 'Inventory — reconcile the Yard sign sticker vendor order', expect.any(String), expect.objectContaining({
+    dedupeKey: `auto-order:ledger-1:${evidence.bell.v}`, detail: `${evidence.bell.title}\n${evidence.bell.body}`, refreshOnDedupe: true,
+  }));
   expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence)).toBe(true);
 });
 
@@ -1203,7 +1206,7 @@ test('a placing row older than 30 minutes is parked needs_review with a do-not-r
   expect(row).toMatchObject({ status: 'needs_review' });
   expect(row.placed_at).toBeInstanceOf(Date);
   expect(row.error).toMatch(/stale_placing/);
-  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/Do NOT re-order/);
   expect(a.place).not.toHaveBeenCalled();
 });
 
