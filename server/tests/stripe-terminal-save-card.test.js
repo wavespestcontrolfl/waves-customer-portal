@@ -140,7 +140,7 @@ async function post(base, path, body, headers = {}) {
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body || {}),
   });
-  return { status: res.status, body: await res.json().catch(() => ({})) };
+  return { status: res.status, headers: res.headers, body: await res.json().catch(() => ({})) };
 }
 
 const ADMIN = { 'x-test-role': 'admin' };
@@ -425,6 +425,31 @@ describe('POST /validate-save-card-handoff', () => {
       const res = await post(base, '/validate-save-card-handoff', { token: signHandoff() });
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('staff_session_revoked');
+    });
+  });
+});
+
+describe('privacy headers', () => {
+  const expectNoStore = (res) => {
+    expect(res.headers.get('cache-control')).toContain('no-store');
+    expect(res.headers.get('x-robots-tag')).toContain('noindex');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+  };
+
+  test('the mint, validate and complete-setup answers are never cached, on success and on refusal', async () => {
+    seedSaveCardRow();
+    const terminalAuth = { authorization: `Bearer ${jwt.sign({
+      technicianId: 'tech-1', role: 'admin', scope: 'terminal', type: 'access', tokenVersion: 3, save_card: true, jti: 'jti-save-1',
+    }, STAFF_SECRET, { expiresIn: '15m' })}` };
+    await withServer(async (base) => {
+      expectNoStore(await post(base, '/save-card-handoff', mintBody(), ADMIN));
+      const ok = await post(base, '/validate-save-card-handoff', { token: signHandoff() });
+      expect(ok.status).toBe(200);
+      expectNoStore(ok);
+      expectNoStore(await post(base, '/validate-save-card-handoff', { token: signHandoff() }));
+      expectNoStore(await post(base, '/validate-save-card-handoff', {}));
+      const complete = await post(base, '/complete-setup', { setup_intent_id: 'seti_other' }, terminalAuth);
+      expectNoStore(complete);
     });
   });
 });

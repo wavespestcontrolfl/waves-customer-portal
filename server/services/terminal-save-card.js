@@ -136,22 +136,23 @@ async function verifyTerminalSetupIntent(request, setupIntentId) {
 }
 
 /**
- * Verify the succeeded SetupIntent and finish the capture. `handoff` is the
- * validated terminal_handoff_tokens row (kind save_card). Returns
- * { ok: true, card } or { ok: false, code, status? } where a code is one of
- * SAVE_CARD_REFUSALS' keys, `not_found`, `verification_failed`, or
- * `consent_version_stale`.
+ * Verify the succeeded SetupIntent and finish the capture, for one request.
+ * The ONE copy of the checks: /complete-setup (the app) and the
+ * setup_intent.succeeded webhook (recovery when the app disconnected or its
+ * token expired) both run it, and whichever finishes first wins - the other
+ * answers from the completed row. Returns { ok: true, card } or
+ * { ok: false, code, status? } where a code is one of SAVE_CARD_REFUSALS' keys,
+ * `not_found`, `verification_failed`, or `consent_version_stale`.
  */
-async function completeTerminalSetup({ handoff, setupIntentId, ip = null, userAgent = null }) {
-  const request = await db('appointment_card_requests')
-    .where({ id: handoff.appointment_card_request_id }).first();
+async function completeTerminalSetupForRequest({ requestId, setupIntentId, disclosureVersion = null, ip = null, userAgent = null }) {
+  const request = await db('appointment_card_requests').where({ id: requestId }).first();
   if (!request) return { ok: false, code: 'not_found' };
 
   // Retry after a finished save: the request already completed with THIS
   // SetupIntent, so answer with the saved card without touching Stripe.
   if (request.status === 'completed' && request.stripe_setup_intent_id === setupIntentId
     && request.stripe_payment_method_id) {
-    return { ok: true, card: await savedCardSummary(request.stripe_payment_method_id) };
+    return { ok: true, card: await savedCardSummary(request.stripe_payment_method_id), alreadyCompleted: true };
   }
   if (request.status !== 'pending' && request.status !== 'completing') {
     return { ok: false, code: 'request_not_pending' };
@@ -170,7 +171,7 @@ async function completeTerminalSetup({ handoff, setupIntentId, ip = null, userAg
     userAgent,
     // The sticky cancel-window echo the /secure page rendered, stored at mint
     // (null when the tap did not start from that page).
-    disclosureVersion: handoff.disclosure_version || null,
+    disclosureVersion: disclosureVersion || null,
     consentSource: TAP_CONSENT_SOURCE,
   });
   if (!finished.ok) return finished;
@@ -178,6 +179,66 @@ async function completeTerminalSetup({ handoff, setupIntentId, ip = null, userAg
   const done = await db('appointment_card_requests').where({ id: request.id })
     .first('stripe_payment_method_id');
   return { ok: true, card: await savedCardSummary(done?.stripe_payment_method_id || generatedCard) };
+}
+
+// /complete-setup: `handoff` is the validated terminal_handoff_tokens row.
+function completeTerminalSetup({ handoff, setupIntentId, ip = null, userAgent = null }) {
+  return completeTerminalSetupForRequest({
+    requestId: handoff.appointment_card_request_id,
+    setupIntentId,
+    disclosureVersion: handoff.disclosure_version,
+    ip,
+    userAgent,
+  });
+}
+
+// Codes that mean "try again": the webhook throws on them so Stripe redelivers.
+const WEBHOOK_RETRY_CODES = new Set(['completion_failed', 'completion_in_progress', 'verification_failed']);
+
+/**
+ * setup_intent.succeeded recovery for a Tap to Pay card save. The app normally
+ * finishes through /complete-setup; this runs when it disconnected after Stripe
+ * succeeded or its 15-minute token expired. Same verify + shared completion
+ * tail. Returns { ok, retry, code }: `retry` means throw so Stripe redelivers.
+ * An empty generated_card is permanent: the request stays pending and ONE
+ * deduped bell asks the office to collect the card another way.
+ */
+async function completeTerminalSetupFromWebhook(setupIntent) {
+  const requestId = setupIntent?.metadata?.appointment_card_request_id;
+  if (!requestId || !setupIntent.id) return { ok: false, retry: false, code: 'no_request_id' };
+  const handoff = await db('terminal_handoff_tokens')
+    .where({ stripe_setup_intent_id: setupIntent.id, kind: 'save_card' }).first('disclosure_version');
+  const result = await completeTerminalSetupForRequest({
+    requestId,
+    setupIntentId: setupIntent.id,
+    disclosureVersion: handoff?.disclosure_version || null,
+  });
+  if (result.ok) return { ok: true, retry: false, alreadyCompleted: result.alreadyCompleted === true };
+  if (result.code === 'no_generated_card') await alertNoGeneratedCard(requestId, setupIntent.id);
+  return { ok: false, retry: WEBHOOK_RETRY_CODES.has(result.code), code: result.code };
+}
+
+async function alertNoGeneratedCard(requestId, setupIntentId) {
+  try {
+    const request = await db('appointment_card_requests').where({ id: requestId })
+      .first('customer_id', 'scheduled_service_id');
+    if (!request?.customer_id) return;
+    await require('./admin-alert-compose').raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: 'collect a card another way',
+      why: 'A tapped card could not be saved for later charges, so no Auto Pay card is on file.',
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${request.customer_id}`,
+      subject: { type: 'customer', id: String(request.customer_id) },
+      doneWhen: 'card_saved',
+      who: 'person',
+    }, {
+      metadata: { customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, setupIntentId },
+      dedupeKey: `tap_card_not_saveable:${setupIntentId}`,
+    });
+  } catch (err) {
+    logger.warn(`[terminal-save-card] no-generated-card bell failed for ${setupIntentId}: ${err.message}`);
+  }
 }
 
 module.exports = {
@@ -188,5 +249,7 @@ module.exports = {
   resolveSaveCardRequest,
   saveCardEligibility,
   completeTerminalSetup,
+  completeTerminalSetupForRequest,
+  completeTerminalSetupFromWebhook,
   generatedCardId,
 };

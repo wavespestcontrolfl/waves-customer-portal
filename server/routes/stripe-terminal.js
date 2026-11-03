@@ -14,6 +14,7 @@ const {
   staffTokenVersionMatches,
 } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
 const { sessionMfaBlock } = require('../services/staff-mfa');
 const {
   buildSurchargeAmountDetails,
@@ -929,7 +930,7 @@ async function resolveSaveCardMintTarget(secureToken) {
 // disclosure_version (optional): the sticky cancel-window echo the /secure page
 // rendered ('sticky_v1'); any other value is stored as NULL.
 // Returns: { token, deep_link, jti, expires_at }
-router.post('/save-card-handoff', tapSaveCardGate, adminAuthenticate, requireAdmin, async (req, res) => {
+router.post('/save-card-handoff', tapSaveCardGate, noStore, adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const secret = getHandoffSecret();
     if (!secret) {
@@ -1151,7 +1152,7 @@ function signSaveCardTerminalToken(tech, row) {
 // Errors: 401 signature_invalid, staff_session_revoked | 400 wrong_token_kind |
 //   410 expired, replay | 409 technician_not_active, request_changed,
 //   setup_intent_not_usable | 503 setup_intent_unavailable
-router.post('/validate-save-card-handoff', async (req, res) => {
+router.post('/validate-save-card-handoff', noStore, async (req, res) => {
   const ip = ipFromReq(req);
   const ua = uaFromReq(req);
   const audit = (fields) => auditTerminalHandoffValidate({
@@ -1236,7 +1237,7 @@ function completeSetupRefusal(result) {
 // POST /api/stripe/terminal/complete-setup
 // Terminal-authenticated with the save_card token. Body: { setup_intent_id }
 // Returns: { ok: true, card: { brand, last4, funding } }. Safe to retry.
-router.post('/complete-setup', terminalAuthenticateSaveCard, async (req, res) => {
+router.post('/complete-setup', noStore, terminalAuthenticateSaveCard, async (req, res) => {
   try {
     const setupIntentId = typeof req.body?.setup_intent_id === 'string' ? req.body.setup_intent_id.trim() : '';
     if (!setupIntentId) return res.status(400).json({ error: 'setup_intent_id required' });

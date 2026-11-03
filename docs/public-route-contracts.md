@@ -6336,6 +6336,23 @@ CHARGE FENCE: `terminalAuthenticate` refuses any `save_card: true` token with
 403 `save_card_token` on `/payment-intent` and `/apply-surcharge` (and a
 save_card handoff row is refused by jti there too), `/connection-token` takes
 both kinds, and `/complete-setup` takes only a save_card token. The 5-minute sweeper of orphaned validated rows targets `kind = 'collect'` only.
+PRIVACY HEADERS: the reply carries a customer name, the SetupIntent client
+secret and a terminal bearer token, so `/validate-save-card-handoff` (and
+`/save-card-handoff` and `/complete-setup`, which return the handoff token and
+the saved card's brand, last four and funding) answer with the shared `noStore`
+middleware (`Cache-Control: no-store, no-cache, must-revalidate`, `Pragma:
+no-cache`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`)
+on every outcome, success and refusal. WEBHOOK RECOVERY: a `setup_intent.succeeded`
+event whose SetupIntent metadata has `source: 'admin_tap_to_pay'` and an
+`appointment_card_request_id` (no `purpose`) runs the SAME verify and completion
+tail as `/complete-setup` (`completeTerminalSetupForRequest`), so a save the app
+never finished (disconnect, or the 15-minute terminal token expired) still saves
+the generated card and enrolls Auto Pay. Whichever of the webhook and
+`/complete-setup` finishes first wins; the other finds the completed row. A
+transient state (`verification_failed`, `completion_failed`,
+`completion_in_progress`) throws so Stripe redelivers; an empty `generated_card`
+leaves the request pending, acks, and raises one deduped Billing bell
+(`tap_card_not_saveable:<setup_intent_id>`).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).
