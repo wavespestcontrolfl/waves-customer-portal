@@ -1250,7 +1250,16 @@ function initScheduledJobs() {
         } catch (err) {
           logger.error(`[geocoder] service-location backstop failed (${err.code || 'service_sweep_error'}): ${err.message}`);
         }
-        await sweepUngeocodedCustomers();
+        // County-roll pins (GATE_GEOCODE_COUNTY_FALLBACK, dark): runs after the existing sweeps, and a
+        // customer sweep failure must not suppress it. It never throws; gate off it does nothing.
+        let customerSweepError = null;
+        try {
+          await sweepUngeocodedCustomers();
+        } catch (err) {
+          customerSweepError = err;
+        }
+        await require('./geocoder-county-fallback').sweepCountyFallback();
+        if (customerSweepError) throw customerSweepError;
       });
     } catch (err) {
       logger.error(`[geocoder] backstop sweep failed: ${err.message}`);

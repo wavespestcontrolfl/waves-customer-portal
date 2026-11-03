@@ -62,10 +62,13 @@ function candidatesQuery(conn, now) {
     )`);
 }
 
-async function persistServicePin(conn, snapshot, location) {
+// `source` names a non-geocode pin in the audit row (the county pass: 'property_pin'). `recheck(trx)`
+// re-reads under the day lock whatever the caller's pin came from; a false answer writes nothing.
+async function persistServicePin(conn, snapshot, location, { source, recheck } = {}) {
   return conn.transaction(async trx => {
     await lockTechDays(trx, [{ techId: snapshot.technician_id, date: toDateStr(snapshot.scheduled_date) }]);
     if (!enabled()) return false;
+    if (recheck && !await recheck(trx)) return false;
     // Staff can revoke a still-null pin while the provider call is in flight.
     // Recheck under the same day lock as that action, even if the service row
     // itself is unchanged. A verified address uses the staff-selected point.
@@ -83,7 +86,7 @@ async function persistServicePin(conn, snapshot, location) {
     if (!count) return false;
     await recordAuditEvent({ actor_type: 'system', action: 'service_coordinates_recovered',
       resource_type: 'scheduled_service', resource_id: snapshot.id, critical: true, trx,
-      metadata: { source: reviewed ? 'staff_verified_pin' : 'verified_service_address_geocode', property_id: snapshot.property_id,
+      metadata: { source: reviewed ? 'staff_verified_pin' : (source || 'verified_service_address_geocode'), property_id: snapshot.property_id,
         scheduled_date: toDateStr(snapshot.scheduled_date) } });
     if (!enabled()) throw Object.assign(new Error('Coordinate recovery disabled'), { code: 'COORDINATE_RECOVERY_DISABLED' });
     return true;
@@ -161,4 +164,5 @@ async function sweepUngeocodedServices({ limit = 25, now = new Date(), dryRun = 
   return result;
 }
 
-module.exports = { sweepUngeocodedServices };
+// persistServicePin + SNAPSHOT_COLUMNS: the county pass's visit pins (geocoder-county-fallback.js) reuse this write.
+module.exports = { sweepUngeocodedServices, persistServicePin, SNAPSHOT_COLUMNS };
