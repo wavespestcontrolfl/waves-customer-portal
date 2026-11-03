@@ -334,7 +334,7 @@ const findingsTypeUndecidable = (data) => !('findingsType' in data)
 const optionalContextFields = (data) => ({
   findingsType: data.findingsType ?? null,
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
-  // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+  // The Wrap-up section is on when the server says so.
   wrapUp: data?.wrapUp === true,
   // GATE_ESTIMATE_LAWN_LIMITS: carpetgrass is on the turf profile; a Celsius WG row shows this line. An older server sends none.
   carpetgrassCelsiusWarning: carpetgrassWarningOf(data),
@@ -1335,7 +1335,7 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
     // The blog post for the customer: its id; the server checks it is live and
     // freezes its title and link on the report.
     ...(form.blogPost ? { blogPostId: form.blogPost.id } : {}),
-    // The Wrap-up section's choices (GATE_FAST_COMPLETE_WRAP_UP); without it the four flags the sheet always posted.
+    // The Wrap-up section's choices; without it the four flags the sheet always posted.
     ...customerText,
   };
 }
@@ -1728,7 +1728,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   dosesRef.current = Object.fromEntries(rows.filter((row) => row.placeRule).map((row) => [String(row.productId).toLowerCase(), JSON.stringify([row.totalAmount, row.amountUnit, row.spotArea ?? null, row.derivedRate?.rate ?? null])]));
   const doseKey = JSON.stringify(dosesRef.current);
   useEffect(() => { pruneRefused(JSON.parse(doseKey)); }, [doseKey, pruneRefused]);
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section.
+  // The Wrap-up: the full form's bottom section.
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: rowsShowSpray(rows, (row) => row.method), onChecking: onWrapChecking });
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or

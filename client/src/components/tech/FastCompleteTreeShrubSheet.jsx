@@ -403,7 +403,7 @@ function contextFrom(data, service) {
     watchList: watchListFrom(data),
     pestCheck: objectOrNull(data?.pestCheck),
     neonicCap: objectOrNull(data?.neonicCap),
-    // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+    // The Wrap-up section is on when the server says so.
     wrapUp: data?.wrapUp === true,
     // Owner 2026-10-20: /complete takes this visit's stock below zero instead of refusing,
     // so no product at 0 in stock holds the sheet. The server says so with `stockAdvisory: true`.
@@ -610,7 +610,7 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
     techTips: techTipsOf(form, tipsAvailable),
     // Same as the full form (owner ruling): the completion text, the review
     // ask and the pay link go out the way they do from there. The Wrap-up
-    // section's choices (GATE_FAST_COMPLETE_WRAP_UP) stand in for these four.
+    // section's choices stand in for these four.
     ...customerText,
   };
 }
@@ -748,7 +748,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     }
     setCheckingStock(false);
   };
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section (the clock above the note, the options below the tips).
+  // The Wrap-up: the full form's bottom section (the clock above the note, the options below the tips).
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: rowsShowSpray(rows.filter((row) => row.active), (row) => row.method), onChecking: onWrapChecking });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
