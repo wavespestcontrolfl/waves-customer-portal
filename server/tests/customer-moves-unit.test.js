@@ -142,6 +142,30 @@ describe('the receipt sentences', () => {
     ]);
   });
 
+  // Moving PR 2b (GATE_MOVING_PAUSE, owner Q4): the no-address receipt names the pause,
+  // which needs a move-out date to start from.
+  test('dates only, with the move pause on: the receipt names the pause and its 60 days', () => {
+    const saved = { flow: process.env.GATE_MOVING_FLOW, pause: process.env.GATE_MOVING_PAUSE };
+    process.env.GATE_MOVING_FLOW = 'true';
+    process.env.GATE_MOVING_PAUSE = 'true';
+    try {
+      expect(Moves.receiptFor(view({ addressOnFile: false, verdict: null, moveOutDate: '2026-11-20' }))).toEqual([
+        'Thanks, Chris. We have your move dates. We pause your visits after Nov 20, 2026 until we have your new address, for up to 60 days. When you know it, open this same link and add it.',
+      ]);
+      expect(Moves.receiptFor(view({ addressOnFile: false, verdict: null, moveOutDate: null }))).toEqual([
+        'Thanks, Chris. We have your move dates. When you know your new address, open this same link and add it.',
+      ]);
+      process.env.GATE_MOVING_PAUSE = 'false';
+      expect(Moves.receiptFor(view({ addressOnFile: false, verdict: null, moveOutDate: '2026-11-20' }))).toEqual([
+        'Thanks, Chris. We have your move dates. When you know your new address, open this same link and add it.',
+      ]);
+    } finally {
+      for (const [key, value] of [['GATE_MOVING_FLOW', saved.flow], ['GATE_MOVING_PAUSE', saved.pause]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+
   test('no receipt sentence carries a dollar sign', () => {
     for (const v of [view(), view({ verdict: 'out_of_area' }), view({ addressOnFile: false }), view({ verdict: 'unverified' })]) {
       expect(Moves.receiptFor(v).join(' ')).not.toMatch(/\$/);

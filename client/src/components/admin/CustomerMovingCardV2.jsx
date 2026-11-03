@@ -51,6 +51,9 @@ export function moveStatusText(move) {
   if (move.status === "closed" && move.closed_reason === "applied") {
     return `Move applied${move.applied_at ? ` ${shortDate(move.applied_at)}` : ""}`;
   }
+  if (move.status === "closed" && move.closed_reason === "pause_expired") {
+    return `Pause ended${move.closed_at ? ` ${shortDate(move.closed_at)}` : ""}: no new address in 60 days`;
+  }
   if (move.status === "submitted") {
     const normalized = parseAddress(move.normalized_address);
     const where = move.typed_address
@@ -65,6 +68,25 @@ export function moveStatusText(move) {
   }
   // A copied link may have gone out some other way: never claim "not sent".
   return "Link made";
+}
+
+// The move pause (GATE_MOVING_PAUSE, owner Q4) for a submitted move: the
+// reminder text and the pause, or null when neither has happened.
+export function movePauseText(move) {
+  if (!move || move.status !== "submitted") return null;
+  const parts = [];
+  if (move.pause_reminder_at) {
+    const day = shortDate(move.pause_reminder_at);
+    if (move.pause_reminder_sent === true) parts.push(`Reminder text sent ${day}`);
+    else if (move.pause_reminder_sent === false) parts.push(`Reminder text not sent (${day})`);
+    else parts.push(`Reminder text tried ${day}, result unknown`);
+  }
+  if (move.pause_state === "paused") {
+    parts.push(`Visits paused after ${dayOnly(move.move_out_date)}, held until ${dayOnly(move.pause_ends_on)}`);
+  } else if (move.pause_state === "office") {
+    parts.push(`Pause left to the office: ${move.pause_note || "pause the visits by hand"}`);
+  }
+  return parts.length ? parts.join(". ") : null;
 }
 
 // "Text moving link": the customer's SMS thread when one exists, else a new
@@ -310,6 +332,7 @@ export default function CustomerMovingCardV2({ customerId }) {
       <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary mb-1.5">Moving</div>
       <div className="border-hairline border-zinc-200 rounded-sm px-3 py-2 text-13">
         <div className="text-zinc-900" data-testid="moving-status">{moveStatusText(moves[0])}</div>
+        {movePauseText(moves[0]) && <div className="text-14 text-ink-secondary mt-1" data-testid="moving-pause">{movePauseText(moves[0])}</div>}
         <div className="flex flex-wrap gap-1.5 mt-2">
           <Button variant="secondary" size="sm" onClick={emailLink} disabled={!!busy}>
             {busy === "email" ? "Sending" : "Email moving link"}

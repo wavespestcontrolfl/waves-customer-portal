@@ -24,7 +24,7 @@ vi.mock('../../lib/adminFetch', () => ({
 }));
 
 import { adminFetch } from '../../lib/adminFetch';
-import CustomerMovingCardV2, { applyPreviewLines, moveStatusText, textHref } from './CustomerMovingCardV2';
+import CustomerMovingCardV2, { applyPreviewLines, movePauseText, moveStatusText, textHref } from './CustomerMovingCardV2';
 
 const CUSTOMER = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
@@ -54,6 +54,27 @@ describe('moveStatusText', () => {
     expect(moveStatusText({ status: 'submitted', submitted_at: '2026-11-03T15:00:00Z', typed_address: null, move_out_date: '2026-11-15' }))
       .toBe('Submitted Nov 3: new address not known yet, move-out Nov 15, move-in not known yet');
     expect(moveStatusText({ status: 'closed', closed_reason: 'applied', applied_at: '2026-11-21T15:00:00Z' })).toBe('Move applied Nov 21');
+    expect(moveStatusText({ status: 'closed', closed_reason: 'pause_expired', closed_at: '2027-01-15T15:20:00Z' }))
+      .toBe('Pause ended Jan 15: no new address in 60 days');
+  });
+});
+
+// Moving PR 2b (GATE_MOVING_PAUSE): the reminder text and the pause, under the status line.
+describe('movePauseText', () => {
+  const submitted = { status: 'submitted', move_out_date: '2026-11-15' };
+  it('names the reminder outcome and the pause in plain words', () => {
+    expect(movePauseText(undefined)).toBeNull();
+    expect(movePauseText(submitted)).toBeNull();
+    expect(movePauseText({ ...submitted, pause_reminder_at: '2026-11-08T15:20:00Z', pause_reminder_sent: true })).toBe('Reminder text sent Nov 8');
+    expect(movePauseText({ ...submitted, pause_reminder_at: '2026-11-08T15:20:00Z', pause_reminder_sent: false })).toBe('Reminder text not sent (Nov 8)');
+    expect(movePauseText({ ...submitted, pause_reminder_at: '2026-11-08T15:20:00Z', pause_reminder_sent: null })).toBe('Reminder text tried Nov 8, result unknown');
+    expect(movePauseText({
+      ...submitted, pause_reminder_at: '2026-11-08T15:20:00Z', pause_reminder_sent: true, pause_state: 'paused', pause_ends_on: '2027-01-14',
+    })).toBe('Reminder text sent Nov 8. Visits paused after Nov 15, held until Jan 14');
+    expect(movePauseText({ ...submitted, pause_state: 'office', pause_note: 'They prepay for the year, so the automatic pause skipped them. Pause their visits by hand.' }))
+      .toBe('Pause left to the office: They prepay for the year, so the automatic pause skipped them. Pause their visits by hand.');
+    // A closed move has its own status line.
+    expect(movePauseText({ status: 'closed', closed_reason: 'pause_expired', pause_state: 'paused' })).toBeNull();
   });
 });
 
@@ -112,6 +133,20 @@ describe('CustomerMovingCardV2', () => {
     const { container } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(1));
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('shows the pause line under the status only when there is one', async () => {
+    state.list = {
+      enabled: true,
+      moves: [{ id: 'm1', status: 'submitted', submitted_at: '2026-11-03T15:00:00Z', typed_address: null, move_out_date: '2026-11-15', pause_state: 'paused', pause_ends_on: '2027-01-14' }],
+    };
+    render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    expect(await screen.findByTestId('moving-pause')).toHaveTextContent('Visits paused after Nov 15, held until Jan 14');
+    cleanup();
+    state.list = { enabled: true, moves: [{ id: 'm1', status: 'submitted', submitted_at: '2026-11-03T15:00:00Z', typed_address: null, move_out_date: '2026-11-15' }] };
+    render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    await screen.findByTestId('moving-status');
+    expect(screen.queryByTestId('moving-pause')).toBeNull();
   });
 
   it('loads with one read and sends nothing until a click', async () => {
