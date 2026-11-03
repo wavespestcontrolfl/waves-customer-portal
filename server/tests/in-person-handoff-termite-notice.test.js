@@ -45,6 +45,7 @@ beforeEach(() => {
     const q = {};
     q.where = () => q;
     q.whereIn = () => q;
+    q.whereNull = () => q;
     q.first = async () => rows[table];
     q.update = async () => 1;
     return q;

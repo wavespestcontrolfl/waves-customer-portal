@@ -26033,13 +26033,18 @@ router.post('/:id/card-request/in-person', requireAdmin, async (req, res, next) 
       delivery: 'inline',
       inPerson: true,
     });
-    // The customer is at the table: if the estimate staff just accepted still needs its
-    // acceptance terms, mark this visit's pending request so the secure page asks for
-    // them and the card save / prepay choice wait for them. Idempotent; a read error
-    // fails the call (the sheet offers Try again) rather than leave the gate off.
-    await require('../services/in-person-handoff').markTermsRequired(visit.id);
     const body = { requested: result.requested, action: result.action, reason: result.reason };
-    if (result.action === 'link_created' && result.secureUrl) body.secureUrl = result.secureUrl;
+    if (result.action === 'link_created' && result.secureUrl) {
+      // The customer is at the table: if the estimate staff just accepted still needs
+      // its acceptance terms, mark this visit's pending request so the secure page asks
+      // for them and the card save / prepay choice wait for them. A read error fails the
+      // call (the sheet offers Try again) rather than leave the gate off. A refused mark
+      // (the customer already saved a card or chose prepay on their own phone through an
+      // earlier link) hands out no page: the terms could not be held for it.
+      const mark = await require('../services/in-person-handoff').markTermsRequired(visit.id);
+      if (mark.refused) return res.json({ requested: false, action: 'skipped', reason: 'customer_already_chose' });
+      body.secureUrl = result.secureUrl;
+    }
     res.json(body);
   } catch (err) { next(err); }
 });

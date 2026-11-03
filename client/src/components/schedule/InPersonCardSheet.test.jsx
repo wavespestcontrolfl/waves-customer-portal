@@ -160,6 +160,13 @@ describe("InPersonCardSheet", () => {
     expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
   });
 
+  it("skipped customer_already_chose: says the terms were not asked for here, no QR, only Done", async () => {
+    renderSheet({}, makeFetch({ inPerson: { requested: false, action: "skipped", reason: "customer_already_chose" } }));
+    expect(await screen.findByText(/already chose how to pay on their own phone, so the estimate terms were not asked for here\./)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show a QR code" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+  });
+
   it("a failed call keeps the booking and offers Try again", async () => {
     const fetcher = vi.fn()
       .mockRejectedValueOnce(new Error("boom"))

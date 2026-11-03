@@ -54,6 +54,9 @@ export function describeInPersonOutcome(result, firstName) {
     return { tone: 'muted', text: 'This visit bills a third-party payer, so no card is asked for.' };
   }
   if (reason === 'request_exists') return { tone: 'muted', text: 'A card request already exists for this visit.' };
+  if (reason === 'customer_already_chose') {
+    return { tone: 'muted', text: `${who} already chose how to pay on their own phone, so the estimate terms were not asked for here.` };
+  }
   if (reason === 'gate_off' || reason === 'template_inactive') {
     return { tone: 'muted', text: 'The card page is not available right now.' };
   }

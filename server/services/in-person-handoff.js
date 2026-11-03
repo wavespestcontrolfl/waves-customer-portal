@@ -104,17 +104,23 @@ async function noticeAppliesFor(estimate) {
 
 // Mark the visit's pending card request as needing the estimate terms, when its
 // estimate still needs them (accepted by staff, no recorded terms version, the terms
-// apply) or the Florida notice. Idempotent. Throws on a read error, so the in-person
-// route fails and the sheet can retry: an unmarked request would skip the gate.
+// apply) or the Florida notice. Throws on a read error, so the in-person route fails and
+// the sheet can retry: an unmarked request would skip the gate.
+// One compare-and-set on the row, idempotent: { marked: true } once the pending request
+// carries the flag. The card save and the prepay mint carry the flag in their own claims,
+// so whichever commits first wins. { marked: false, refused: true } = the terms are
+// needed but the request can no longer be held: the customer already saved a card (or
+// is saving one) or chose prepay on their own phone through an earlier link.
 async function markTermsRequired(visitId) {
   if (!featureGates.inPersonCardLive()) return { marked: false };
   const { estimate } = await linkedEstimateFor(visitId);
   const needed = (await termsContextFor(estimate)) || (await noticeAppliesFor(estimate));
   if (!needed) return { marked: false };
   const updated = await db('appointment_card_requests')
-    .where({ scheduled_service_id: visitId, kind: 'visit', status: 'pending', in_person_terms_required: false })
+    .where({ scheduled_service_id: visitId, kind: 'visit', status: 'pending' })
+    .whereNull('prepay_invoice_id')
     .update({ in_person_terms_required: true, updated_at: new Date() });
-  return { marked: updated > 0 };
+  return updated > 0 ? { marked: true } : { marked: false, refused: true };
 }
 
 // Page states that can still save a card or pay: the terms ride on both.
@@ -183,10 +189,9 @@ async function recordCardPageTerms({ request, termsVersion, termsScope, consumer
     // The request and its visit, re-checked under lock: a page left open after the
     // request completed, or after the visit closed (past, cancelled, unpriced, covered
     // by a payer), records nothing. Same visit check the card save runs.
+    // (The marker itself only ever goes false → true, so it needs no re-check.)
     const lockedRequest = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first();
-    if (!lockedRequest || lockedRequest.status !== 'pending' || !lockedRequest.in_person_terms_required) {
-      return refusal(409, 'request_closed', REQUEST_CLOSED_MESSAGE);
-    }
+    if (lockedRequest?.status !== 'pending') return refusal(409, 'request_closed', REQUEST_CLOSED_MESSAGE);
     const stillNeeded = await require('./appointment-card-request').secureVisitStillNeedsCard(lockedRequest, { database: trx });
     if (!stillNeeded.ok) {
       return stillNeeded.code === 'no_longer_needed'
@@ -201,13 +206,13 @@ async function recordCardPageTerms({ request, termsVersion, termsScope, consumer
     }
     await trx('estimate_acceptances').insert({
       estimate_id: locked.id,
-      customer_id: locked.customer_id || null,
+      customer_id: locked.customer_id,
       method: ACCEPTANCE_METHOD,
       terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
       terms_text: acceptanceTerms.acceptanceTermsSnapshot(context.scope),
       accepted_at: acceptedAt,
-      ip: String(ip || '').slice(0, 64) || null,
-      user_agent: String(userAgent || '').slice(0, 1000) || null,
+      ip: ip ? String(ip).slice(0, 64) : null,
+      user_agent: userAgent ? String(userAgent).slice(0, 1000) : null,
     });
     await trx('estimates').where({ id: locked.id }).update({ terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
     // The 'plan' drawer the customer read carried the annual rate review line, so the
@@ -225,7 +230,7 @@ async function recordCardPageTerms({ request, termsVersion, termsScope, consumer
     }
     await recordAuditEvent({
       actor_type: 'customer',
-      actor_id: request.customer_id || null,
+      actor_id: request.customer_id,
       action: 'estimate.acceptance_terms.card_page',
       resource_type: 'estimate',
       resource_id: locked.id,
@@ -234,7 +239,8 @@ async function recordCardPageTerms({ request, termsVersion, termsScope, consumer
         request_id: request.id,
         terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
         scope: context.scope,
-        consumer_notice_shown: context.noticeApplies && consumerNoticeShown === true,
+        // A notice that applies was shown (else refused above).
+        consumer_notice_shown: context.noticeApplies,
       },
       ip_address: ip,
       user_agent: userAgent,

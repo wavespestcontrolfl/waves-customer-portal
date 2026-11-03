@@ -48,6 +48,7 @@ function makeBuilder(table) {
     return q;
   };
   q.forUpdate = () => q;
+  q.whereNull = (col) => { (q.nulls = q.nulls || []).push(col); return q; };
   q.first = jest.fn(async () => (table === 'estimates' && q.locked ? lockedEstimate : rows[table]));
   q.insert = jest.fn(async (data) => { writes.push({ table, op: 'insert', data }); return [{ id: 'acc-1' }]; });
   q.update = jest.fn(async (data) => { writes.push({ table, op: 'update', data }); return 1; });
@@ -327,6 +328,35 @@ describe('markTermsRequired (the in-person route)', () => {
   test('flags the visit\'s pending visit-kind request when its estimate still needs the terms', async () => {
     expect(await markTermsRequired('visit-1')).toEqual({ marked: true });
     expect(marked()[0].data).toMatchObject({ in_person_terms_required: true });
+  });
+
+  test('one compare-and-set: pending, visit-kind, no prepay invoice; a miss is refused, not silent', async () => {
+    const seen = [];
+    db.mockImplementation((table) => {
+      const q = makeBuilder(table);
+      if (table === 'appointment_card_requests') {
+        const where = q.where;
+        q.where = (arg) => { seen.push(arg); return where(arg); };
+        q.update = jest.fn(async () => 0); // already saved, being saved, or prepay chosen
+      }
+      return q;
+    });
+    expect(await markTermsRequired('visit-1')).toEqual({ marked: false, refused: true });
+    expect(seen).toContainEqual({ scheduled_service_id: 'visit-1', kind: 'visit', status: 'pending' });
+  });
+
+  test('the compare-and-set skips a request with a prepay invoice already chosen', async () => {
+    let nulls = null;
+    db.mockImplementation((table) => {
+      const q = makeBuilder(table);
+      if (table === 'appointment_card_requests') {
+        const update = q.update;
+        q.update = async (data) => { nulls = q.nulls; return update(data); };
+      }
+      return q;
+    });
+    await markTermsRequired('visit-1');
+    expect(nulls).toEqual(['prepay_invoice_id']);
   });
 
   test('flags a termite estimate for the separate-signature notice', async () => {
