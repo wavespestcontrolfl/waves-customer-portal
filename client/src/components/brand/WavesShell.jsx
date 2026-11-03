@@ -18,12 +18,17 @@ import { WavesShellContext } from './WavesShellContext';
 // topBar="solid"     → surface-on-page top bar (default).
 // topBar="transparent" → transparent top bar for /login video hero; phone
 //                        reverses to white.
+// locked             → hand-off mode (Book at the Table): the owner has handed
+//                      his phone to a customer, so nothing in the chrome may
+//                      leave the page. The header keeps only the logo, and the
+//                      footer drops the brand block and shows its lines as text.
 export default function WavesShell({
   children,
   variant = 'customer',
   topBar = 'solid',
   showFooter = true,
   footerTone,
+  locked = false,
 }) {
   const [footerNoGuarantee, setFooterNoGuarantee] = React.useState(false);
   const isTransparent = topBar === 'transparent';
@@ -85,14 +90,16 @@ export default function WavesShell({
                 filter: isTransparent ? 'brightness(0) invert(1)' : 'none',
               }}
             />
-            <HeaderStoreLinks tone={phoneTone} />
+            {locked ? null : <HeaderStoreLinks tone={phoneTone} />}
             {/* marginLeft:auto keeps the phone CTA on the right even when
                 HeaderStoreLinks renders null inside the native app (the
                 logo is absolutely positioned, so space-between alone would
                 pull the lone in-flow child to the left edge). */}
-            <span style={{ marginLeft: 'auto' }}>
-              <HelpPhoneLink tone={phoneTone} />
-            </span>
+            {locked ? null : (
+              <span style={{ marginLeft: 'auto' }}>
+                <HelpPhoneLink tone={phoneTone} />
+              </span>
+            )}
           </nav>
         </header>
         {/* The ONE main landmark for every shell-wrapped page, in every
@@ -121,8 +128,8 @@ export default function WavesShell({
             paddingRight: 'env(safe-area-inset-right, 0px)',
             boxSizing: 'border-box',
           }}>
-            {variant === 'customer' ? <BrandFooter /> : null}
-            <TrustFooter tone={resolvedFooterTone} variant={variant} noGuarantee={footerNoGuarantee} />
+            {variant === 'customer' && !locked ? <BrandFooter /> : null}
+            <TrustFooter tone={resolvedFooterTone} variant={variant} noGuarantee={footerNoGuarantee} plain={locked} />
           </footer>
         )}
       </div>

@@ -34,6 +34,7 @@ const { settleRainUnknownAlerts } = require('../services/irrigation-rain-unknown
 const { isEnabled, gateEnvValue, autoDispatchMowingDaysMode } = require('../config/feature-gates');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { fetchServiceWeekWeather } = require('../services/service-report/application-conditions');
+const { createOpenMeteoRetry, RETRY_TIMEOUT_MS } = require('../services/open-meteo-retry');
 const {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
@@ -364,6 +365,38 @@ describe('fetchUpcomingWeekForecast', () => {
     global.fetch = jest.fn(async () => ({ ok: false }));
     await expect(fetchUpcomingWeekForecast({ latitude: 28.04, longitude: -81.04 })).resolves.toBe(null);
   });
+
+  // 11-02/11-03: the forecast request hit its 3.5 s limit and the email lost its forecast line.
+  test('with the sweep budget a timed-out forecast gets one second try, and that try may run 10 s', async () => {
+    jest.useFakeTimers();
+    try {
+      const openMeteoRetry = createOpenMeteoRetry({ sleep: async () => {} });
+      const answer = okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2], 'inch');
+      global.fetch = jest.fn()
+        // First try: no answer until its own deadline aborts it.
+        .mockImplementationOnce((url, { signal }) => new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('This operation was aborted')));
+        }))
+        // Second try: answers after 9 s, past the first limit but inside the second.
+        .mockImplementationOnce(() => new Promise((resolve) => { setTimeout(() => resolve(answer), 9000); }));
+      const pending = fetchUpcomingWeekForecast({ latitude: 28.09, longitude: -81.09, openMeteoRetry });
+      await jest.advanceTimersByTimeAsync(3500);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      await jest.advanceTimersByTimeAsync(9000);
+      await expect(pending).resolves.toMatchObject({ rainInches: 1.2, et0Inches: 1.4 });
+      expect(RETRY_TIMEOUT_MS).toBeGreaterThan(9000);
+      expect(openMeteoRetry.stats).toMatchObject({ used: 1, recovered: 1 });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('without the budget (public watering page) a failed forecast stays one request', async () => {
+    global.fetch = jest.fn().mockRejectedValueOnce(new Error('This operation was aborted'))
+      .mockResolvedValueOnce(okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05]));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.10, longitude: -81.10 })).resolves.toBe(null);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('runWeeklyIrrigationEmailSweep', () => {
@@ -542,6 +575,25 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(call.templateKey).toBe(TEMPLATE_ON_TRACK);
     expect(call.categories).toContain('deficit_rain_forecast');
     expect(summary.sent).toBe(1);
+  });
+
+  test('one Open-Meteo budget serves both weather calls of the run; a timed-out forecast is tried again', async () => {
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
+    // Own coordinates: the forecast cache holds the earlier tests' answers for CANDIDATE.
+    db.mockImplementation((table) => makeBuilder(
+      String(table).startsWith('customers') ? { rows: [{ ...CANDIDATE, latitude: 27.47, longitude: -82.47 }] } : {},
+    ));
+    fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0, et0Inches: 1.6, dailyRain: [] });
+    const openMeteoRetry = createOpenMeteoRetry({ sleep: async () => {} });
+    global.fetch = jest.fn().mockRejectedValueOnce(new Error('This operation was aborted'))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ daily: { precipitation_sum: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2] } }) });
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW, openMeteoRetry });
+    expect(fetchServiceWeekWeather).toHaveBeenCalledWith(expect.objectContaining({ openMeteoRetry }));
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    // The second try's forecast covers the deficit: the on-track email goes, not add-water.
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].templateKey).toBe(TEMPLATE_ON_TRACK);
+    expect(summary.sent).toBe(1);
+    expect(openMeteoRetry.stats).toMatchObject({ used: 1, recovered: 1 });
   });
 
   test('incomplete rainfall window → nothing sends, rain_unknown counted, no forecast call is spent', async () => {

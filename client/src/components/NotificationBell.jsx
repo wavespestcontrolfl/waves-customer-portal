@@ -169,6 +169,40 @@ function DoneButton({ onDone, color, tall }) {
 // Reopen and row-button paths.
 const CHANGED_NOTE = 'That alert changed \u2014 the list was refreshed.';
 
+// The Waves Admin push's Call (server alert-call-button.js pushCallAction), as "<row id>.<version>". While a staff
+// page is open, the app sends it as a cancelable 'wavesadmin:alertcall' window event (detail = { value }); the bell
+// cancels it, so the app does not load a page. Otherwise the app loads ?alertCall=<value>, and the first bell on the
+// page takes it out of the address before anything runs, so a second bell, a reload or Back never calls again.
+const ALERT_CALL_EVENT = 'wavesadmin:alertcall';
+// The Call's answer outlives the bell that asked: the layout and the routes mount the bell again on their own (the
+// session check ending, a route change), so the answer waits here, for two minutes at most, until a bell on screen
+// shows it, and that bell's own panel opens with it.
+const ALERT_CALL_ANSWER_EVENT = 'waves:alertcall-answer';
+const ALERT_CALL_ANSWER_MS = 2 * 60 * 1000;
+let alertCallAnswer = null;
+function settleAlertCall(note) {
+  alertCallAnswer = { note, at: Date.now() };
+  window.dispatchEvent(new Event(ALERT_CALL_ANSWER_EVENT));
+}
+function takeAlertCallAnswer() {
+  const answer = alertCallAnswer;
+  alertCallAnswer = null;
+  return answer && Date.now() - answer.at <= ALERT_CALL_ANSWER_MS ? answer.note : null;
+}
+const ALERT_CALL_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9a-f]{32})$/i;
+const CALL_FAILED_NOTE = 'Couldn\u2019t start that call. Open the alert to call.';
+function takeAlertCall() {
+  let params;
+  try { params = new URLSearchParams(window.location.search); } catch { return null; }
+  const value = params.get('alertCall');
+  if (value === null) return null;
+  params.delete('alertCall');
+  const rest = params.toString();
+  window.history.replaceState(window.history.state, '', `${window.location.pathname}${rest ? `?${rest}` : ''}${window.location.hash}`);
+  const match = ALERT_CALL_RE.exec(value);
+  return match ? { id: match[1], version: match[2] } : null;
+}
+
 // Buttons the server set on an open persisted admin row (`actions`: an array of
 // { id, label, prompt? }). Never on a `live:` row or a customer bell.
 function actionsFor(n, type) {
@@ -394,7 +428,8 @@ function MoreText({ n, type, color, marginTop, onExplain, onSend }) {
   return fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null;
 }
 
-export default function NotificationBell({ type = 'admin', customerId }) {
+// sessionReady (admin layout): false while the staff session is still being verified.
+export default function NotificationBell({ type = 'admin', customerId, sessionReady = true }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
   // For customer: polls /api/notifications/unread-count
@@ -826,6 +861,50 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     if (typeof d?.message === 'string' && d.message) setActionNote(d.message);
     return 'done';
   };
+
+  // The push's Call, inside the Waves Admin app only: the same POST as the row's Call button, on the row and version
+  // the push showed. The panel opens on the Account tab (the phone panel shows the answer and the alerts only there)
+  // with the server's answer and the list read again. Only once the staff session is verified (the call needs it),
+  // and the answer goes to whichever bell is on screen when it lands.
+  useEffect(() => {
+    if (type !== 'admin' || !sessionReady || !isWavesAdminApp()) return undefined;
+    const showAnswer = () => {
+      const note = takeAlertCallAnswer();
+      if (!note) return;
+      setTab('account');
+      setOpen(true);
+      setActionNote(note);
+      loadNotifications();
+    };
+    const runCall = ({ id, version }) => {
+      setTab('account');
+      setOpen(true);
+      loadNotifications();
+      requestJson(`${basePath}/${encodeURIComponent(id)}/actions/call`, { method: 'POST', body: JSON.stringify({ version }) })
+        .then((d) => d?.success === false ? CALL_FAILED_NOTE : (typeof d?.message === 'string' && d.message ? d.message : CALL_FAILED_NOTE))
+        .catch((err) => {
+          if (err?.status !== 409) return CALL_FAILED_NOTE;
+          if (err.data?.error === 'changed') return CHANGED_NOTE;
+          return typeof err.data?.message === 'string' && err.data.message ? err.data.message : 'That alert was already handled.';
+        })
+        .then(settleAlertCall);
+    };
+    window.addEventListener(ALERT_CALL_ANSWER_EVENT, showAnswer);
+    showAnswer();
+    const fromAddress = takeAlertCall();
+    if (fromAddress) runCall(fromAddress);
+    const onAppCall = (event) => {
+      const match = event.defaultPrevented ? null : ALERT_CALL_RE.exec(String(event.detail?.value || ''));
+      if (!match) return;
+      event.preventDefault();
+      runCall({ id: match[1], version: match[2] });
+    };
+    window.addEventListener(ALERT_CALL_EVENT, onAppCall);
+    return () => {
+      window.removeEventListener(ALERT_CALL_EVENT, onAppCall);
+      window.removeEventListener(ALERT_CALL_ANSWER_EVENT, showAnswer);
+    };
+  }, [sessionReady]);
 
   const doneSeqRef = useRef(0);
   // more: append the page after the last one read (keyset cursor), so every

@@ -16,6 +16,10 @@
 // A row may carry one close-only button after Call (Called back on a missed call, Handled on a text thread), so it
 // keeps the close button it had before this kind. Each button follows its own gate: Call GATE_ALERT_CALL_BUTTON,
 // the close button GATE_ALERT_CLOSE_BUTTONS (and its tap is the close_note step itself).
+//
+// The Waves Admin iPhone push carries the same Call (owner 2026-11-02, "A Call button on the phone push
+// notification itself"): pushCallAction names the row and its version, the app shows Call on the notification, and
+// its tap opens the portal, which runs this row's Call through the bell (NotificationBell.jsx, alertCall).
 
 const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -23,24 +27,14 @@ const { normalizePhone, isValidNanpNumber } = require('../utils/phone');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
+const SMS_SID_RE = /^(?:SM|MM)[0-9a-f]{32}$/i;
 const CALL_PROMPT = 'Waves rings your phone first, then you press 1 to connect.';
 const OFF_MESSAGE = 'These buttons are turned off. Open the alert to act on it.';
+// The notification category the Waves Admin app registers with a Call action (ios/WavesPay StaffAlerts.swift).
+const PUSH_CATEGORY = 'WAVES_CALL';
 
 const gates = () => require('../config/feature-gates');
 const alertButtons = () => require('./admin-alert-buttons');
-
-// The buttons for a row about one caller, or null when the row names no record to call. One record, in this order:
-// `callLogId` (the call the row is about), `callSid` (the same, by its Twilio id, for a row raised during the call),
-// `customerId` (a customer or a lead). `close` ('called_back' | 'handled') adds that close-only button after Call.
-function callButtons({ callLogId, callSid, customerId, close } = {}) {
-  let args = null;
-  if (UUID_RE.test(String(callLogId || ''))) args = { callLogId: String(callLogId) };
-  else if (CALL_SID_RE.test(String(callSid || ''))) args = { callSid: String(callSid) };
-  else if (UUID_RE.test(String(customerId || ''))) args = { customerId: String(customerId) };
-  const closeButton = close ? alertButtons().closeNoteButtons(close).items[0] : null;
-  if (!args) return closeButton ? { kind: 'close_note', items: [closeButton] } : null;
-  return { kind: 'call_back', items: [{ id: 'call', label: 'Call', prompt: CALL_PROMPT, args }, ...(closeButton ? [closeButton] : [])] };
-}
 
 // A number the Call Log would dial: a real US or Canada line that is not one of Waves' own, in E.164.
 function callableNumber(value) {
@@ -49,14 +43,12 @@ function callableNumber(value) {
   return TWILIO_NUMBERS.findByNumber(phone) ? null : phone;
 }
 
-const liveCustomer = (id) => db('customers').where({ id }).whereNull('deleted_at').first('id', 'phone');
-
 // The Call Log's "Call back" body for a call as it stands now: the caller's number (the number called, for an
 // outbound call), else the linked customer's, naming the customer only when it dials their own number.
 async function callLogBody(where) {
   const call = await db('call_log').where(where).first('id', 'direction', 'from_phone', 'to_phone', 'customer_id');
   if (!call) return null;
-  const customer = call.customer_id ? await liveCustomer(call.customer_id) : null;
+  const customer = call.customer_id ? await db('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('id', 'phone') : null;
   const dialed = String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
   const to = callableNumber(dialed) || callableNumber(customer?.phone);
   if (!to) return null;
@@ -64,15 +56,49 @@ async function callLogBody(where) {
   return { to, ...(ownNumber ? { customerId: customer.id } : {}), source: 'call-log-callback', relatedCallId: call.id };
 }
 
+// The body a page's Call button posts for a number and the customer it is hinted to; null with no number to dial.
+const hintedBody = (phone, customerId) => {
+  const to = callableNumber(phone);
+  return to ? { to, ...(customerId ? { customerIdHint: customerId } : {}) } : null;
+};
+
+// The records a row can name, in the order a row names one, each with the body its linked page's Call button
+// posts, read as the record stands now: a call (the Call Log's "Call back"; by its Twilio id for a row raised during
+// the call), a lead (the Leads page's Call Now: the lead's number, its customer as the hint), a customer (their
+// page's Call) and an unknown sender's text (the Communications thread's Call back).
+const RECORDS = [
+  ['callLogId', UUID_RE, (id) => callLogBody({ id })],
+  ['callSid', CALL_SID_RE, (sid) => callLogBody({ twilio_call_sid: sid })],
+  ['leadId', UUID_RE, async (id) => {
+    const lead = await db('leads').where({ id }).whereNull('deleted_at').first('phone', 'customer_id');
+    return lead ? hintedBody(lead.phone, lead.customer_id) : null;
+  }],
+  ['customerId', UUID_RE, async (id) => {
+    const customer = await db('customers').where({ id }).whereNull('deleted_at').first('id', 'phone');
+    return customer ? hintedBody(customer.phone, customer.id) : null;
+  }],
+  ['smsSid', SMS_SID_RE, async (sid) => {
+    const text = await db('sms_log').where({ twilio_sid: sid, direction: 'inbound' }).first('from_phone', 'customer_id');
+    return text ? hintedBody(text.from_phone, text.customer_id) : null;
+  }],
+];
+const namedRecord = (ids) => RECORDS.find(([key, re]) => re.test(String(ids?.[key] || '')));
+
+// The buttons for a row about one caller, or null when the row names no record to call. The first record in
+// RECORDS order the row knows is named. `close` ('called_back' | 'handled') adds that close-only button after Call.
+function callButtons({ close, ...ids } = {}) {
+  const record = namedRecord(ids);
+  const closeButton = close ? alertButtons().closeNoteButtons(close).items[0] : null;
+  if (!record) return closeButton ? { kind: 'close_note', items: [closeButton] } : null;
+  const args = { [record[0]]: String(ids[record[0]]) };
+  return { kind: 'call_back', items: [{ id: 'call', label: 'Call', prompt: CALL_PROMPT, args }, ...(closeButton ? [closeButton] : [])] };
+}
+
 // The body the linked page's Call button posts, from the record as it stands now; null when there is no number to
-// call. A call: the Call Log's "Call back". A customer or a lead: the Call on their page.
-async function callBody({ callLogId, callSid, customerId } = {}) {
-  if (UUID_RE.test(String(callLogId || ''))) return callLogBody({ id: callLogId });
-  if (CALL_SID_RE.test(String(callSid || ''))) return callLogBody({ twilio_call_sid: callSid });
-  if (!UUID_RE.test(String(customerId || ''))) return null;
-  const customer = await liveCustomer(customerId);
-  const to = callableNumber(customer?.phone);
-  return to ? { to, customerIdHint: customer.id } : null;
+// call.
+async function callBody(args = {}) {
+  const record = namedRecord(args);
+  return record ? record[2](args[record[0]]) : null;
 }
 
 // What the call step answered, as a tap's result. 200 + success: the owner's phone is ringing. 409: the step's own
@@ -115,4 +141,19 @@ const buttonHandler = {
   },
 };
 
-module.exports = { callButtons, buttonHandler, _private: { callBody, callOutcome, callableNumber, CALL_PROMPT } };
+// The Call action on the Waves Admin push for a bell row this emission wrote: its id and the version the bell
+// serves now, so the app's Call runs that row's button on the row the push showed. Null when the gate is off, the
+// row is done or gone, or it carries no Call button. The app shows the action for PUSH_CATEGORY only.
+async function pushCallAction(rowId) {
+  if (!UUID_RE.test(String(rowId || '')) || !gates().alertCallButtonLive()) return null;
+  const { NOTIFICATION_VERSION_SQL } = require('./notification-service')._private;
+  const row = await db('notifications').where({ id: rowId, recipient_type: 'admin' }).whereNull('done_at')
+    .first('metadata', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`));
+  let meta = row?.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  const items = meta?.buttons?.kind === 'call_back' && Array.isArray(meta.buttons.items) ? meta.buttons.items : [];
+  if (!row?.version || !items.some((item) => item?.id === 'call')) return null;
+  return { callAction: `${rowId}.${row.version}`, apnsCategory: PUSH_CATEGORY };
+}
+
+module.exports = { callButtons, buttonHandler, pushCallAction, PUSH_CATEGORY, _private: { callBody, callOutcome, callableNumber, CALL_PROMPT } };

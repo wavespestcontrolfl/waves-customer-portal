@@ -42,6 +42,14 @@ const mockDb = jest.fn((table) => {
       return [];
     }),
     first: jest.fn(async () => {
+      // Serviced history only counts when dated before the new-customer
+      // window (`<column> < cutoff`). The date columns are NOT NULL, so a
+      // fixture without one never matches, like SQL.
+      const datedBefore = (row, column) => {
+        const filter = wheres.find((w) => Array.isArray(w) && w[0] === column && w[1] === '<');
+        if (!row || !filter) return row;
+        return row[column] != null && String(row[column]) < String(filter[2]) ? row : null;
+      };
       if (table === 'scheduled_services') {
         // By-id lookups (triggering-row created_at fetch, delivery-time
         // appointment check) return the explicit row; candidacy queries are
@@ -59,14 +67,14 @@ const mockDb = jest.fn((table) => {
           return inScope(mockPriorRecurringSeries);
         }
         if (wheres.some((w) => w && typeof w === 'object' && w.whereIn === 'status')) {
-          return inScope(mockPriorServicedVisit);
+          return inScope(datedBefore(mockPriorServicedVisit, 'scheduled_date'));
         }
         return mockScheduledServiceRow !== null
           ? mockScheduledServiceRow
           : mockPriorRecurringSeries;
       }
       if (table === 'service_records') {
-        return mockPriorServiceRecord;
+        return datedBefore(mockPriorServiceRecord, 'service_date');
       }
       if (table === 'sms_sequences') {
         return mockSequenceExists ? { id: 'seq-1' } : null;
@@ -155,6 +163,10 @@ jest.mock('../services/email-template-library', () => ({
   redactEmailAddresses: (s) => String(s || ''),
 }));
 
+const { etDateString, addETDays } = require('../utils/datetime-et');
+// The ET calendar date n days back, as the gate's history window reads it.
+const etDaysAgo = (n) => etDateString(addETDays(new Date(), -n));
+
 describe('new recurring welcome SMS', () => {
   let service;
 
@@ -180,10 +192,10 @@ describe('new recurring welcome SMS', () => {
     service = require('../services/new-recurring-welcome-sms');
   });
 
-  test('treats prior service history as not a new recurring signup', async () => {
+  test('treats older service history or an earlier plan as not a new recurring signup', async () => {
     await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(true);
 
-    mockPriorServiceRecord = { id: 'record-1' };
+    mockPriorServiceRecord = { id: 'record-1', service_date: etDaysAgo(service.NEW_CUSTOMER_HISTORY_DAYS + 1) };
     await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(false);
 
     mockPriorServiceRecord = null;
@@ -194,8 +206,45 @@ describe('new recurring welcome SMS', () => {
   test('completed/on_site scheduled_services history disqualifies even with empty service_records', async () => {
     // Imported/legacy customers: visits live only in scheduled_services —
     // service_records has nothing for them (2026-07-16 misfire shape).
-    mockPriorServicedVisit = { id: 'visit-1', created_at: new Date('2026-04-07T04:00:00Z') };
+    mockPriorServicedVisit = { id: 'visit-1', created_at: new Date('2026-04-07T04:00:00Z'), scheduled_date: '2026-04-07' };
     await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(false);
+  });
+
+  test('a first visit inside the new-customer window still gets the welcome (owner 2026-11-02)', async () => {
+    // Accepted while the tech was on site: today's visit is on_site.
+    mockPriorServicedVisit = { id: 'visit-today', scheduled_date: etDaysAgo(0) };
+    await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(true);
+
+    // Signed up 8 days after the first visit, which already has its record.
+    mockPriorServicedVisit = { id: 'visit-8d', scheduled_date: etDaysAgo(8) };
+    mockPriorServiceRecord = { id: 'record-8d', service_date: etDaysAgo(8) };
+    await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(true);
+
+    // The window's last day still counts as new; the day before it does not.
+    mockPriorServiceRecord = null;
+    mockPriorServicedVisit = { id: 'visit-edge', scheduled_date: etDaysAgo(service.NEW_CUSTOMER_HISTORY_DAYS) };
+    await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(true);
+    mockPriorServicedVisit = { id: 'visit-older', scheduled_date: etDaysAgo(service.NEW_CUSTOMER_HISTORY_DAYS + 1) };
+    await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(false);
+
+    // A recent visit never outweighs an earlier recurring plan.
+    mockPriorServicedVisit = { id: 'visit-today', scheduled_date: etDaysAgo(0) };
+    mockPriorRecurringSeries = { id: 'series-1' };
+    await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(false);
+  });
+
+  test('the new-customer window counts Eastern calendar days, not UTC', async () => {
+    // 10:30 PM ET on Nov 3 is already Nov 4 in UTC. The window reaches back
+    // to Aug 5 (ET); a UTC cutoff would wrongly drop an Aug 5 visit.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(new Date('2026-11-04T03:30:00.000Z'));
+    try {
+      mockPriorServicedVisit = { id: 'visit-aug-5', scheduled_date: '2026-08-05' };
+      await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(true);
+      mockPriorServicedVisit = { id: 'visit-aug-4', scheduled_date: '2026-08-04' };
+      await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('excludeServiceId scopes prior history to rows created before the booking batch', async () => {

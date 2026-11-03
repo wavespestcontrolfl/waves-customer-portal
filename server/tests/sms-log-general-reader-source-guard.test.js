@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/alert-call-button.js',
+    snippet: "const text = await db('sms_log').where({ twilio_sid: sid, direction: 'inbound' }).first('from_phone', 'customer_id');",
+    reason: 'The bell Call on a new-lead alert for an unknown sender\'s text: one inbound row keyed by its twilio_sid, reading only the sender\'s number and customer; a send reservation is an outbound placeholder with no sid, so it can never match.',
+  },
+  {
     file: 'services/sms-spam-tag.js',
     snippet: "return conn('sms_log')",
     reason: 'legacyRows: scoped to direction inbound (a send reservation is an outbound placeholder, so it can never match) and used only to stamp or clear a spam verdict on one sender\'s texts; it presents rows to nobody.',

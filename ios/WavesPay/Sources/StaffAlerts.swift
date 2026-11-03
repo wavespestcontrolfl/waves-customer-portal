@@ -1,6 +1,20 @@
 import UIKit
 import UserNotifications
 
+// The bell's Call on an alert notification (server alert-call-button.js): the server sends this category with a
+// callAction "<alert id>.<version>" for an alert that has a Call button. The action hands it to the portal, whose
+// bell runs that alert's Call (NotificationBell.jsx): the owner's phone rings, press 1 connects.
+private let alertCallCategory = "WAVES_CALL"
+private let alertCallAction = "CALL"
+
+// The push's callAction when it is "<alert id>.<version>", else nil.
+func alertCallValue(_ value: Any?) -> String? {
+    guard let value = value as? String,
+          value.range(of: "^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\\.[0-9a-fA-F]{32}$", options: .regularExpression) != nil
+    else { return nil }
+    return value
+}
+
 // Staff alerts as iPhone notifications. The home-screen web app got them by
 // web push, which a WKWebView cannot run. A signed-in staff page asks for the
 // APNs device token over the bridge (PortalCoordinator) and registers it under
@@ -108,6 +122,22 @@ final class StaffAlerts {
         UIApplication.shared.registerForRemoteNotifications()
     }
 
+    // Set by PortalCoordinator: runs the push's Call on the open page, else loads its link.
+    var runCall: ((String, URL) -> Void)?
+
+    // The push's Call. The open staff page runs it itself; before the portal is ready, its link waits like a
+    // tapped alert's, and the page runs it when it loads (?alertCall=). The dashboard, not /admin: /admin
+    // redirects there and drops the query.
+    func call(value: String) {
+        guard let url = URL(string: "/admin/dashboard?alertCall=\(value)", relativeTo: Portal.origin)?.absoluteURL else { return }
+        if let runCall {
+            runCall(value, url)
+        } else {
+            pendingPage = url
+            flushPendingPage()
+        }
+    }
+
     // Only portal pages open here; any other link is ignored.
     func open(link: String) {
         guard let url = URL(string: link, relativeTo: Portal.origin)?.absoluteURL, Portal.isPortal(url) else { return }
@@ -141,6 +171,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Call shows when the alert is pressed or pulled down; .foreground opens the app (unlocked) to run it.
+        let call = UNNotificationAction(identifier: alertCallAction, title: "Call", options: [.foreground])
+        UNUserNotificationCenter.current().setNotificationCategories([
+            UNNotificationCategory(identifier: alertCallCategory, actions: [call], intentIdentifiers: [], options: []),
+        ])
         return true
     }
 
@@ -164,7 +199,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard let link = response.notification.request.content.userInfo["url"] as? String else { return }
+        let info = response.notification.request.content.userInfo
+        // Call: the portal runs the alert's own Call. Any other tap opens the alert's page.
+        if response.actionIdentifier == alertCallAction, let value = alertCallValue(info["callAction"]) {
+            await MainActor.run { StaffAlerts.shared.call(value: value) }
+            return
+        }
+        guard let link = info["url"] as? String else { return }
         await MainActor.run { StaffAlerts.shared.open(link: link) }
     }
 }

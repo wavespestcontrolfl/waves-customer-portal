@@ -13,26 +13,32 @@ jest.mock('../services/admin-alert-buttons', () => ({
   _private: { closeNoteHandler: { run: jest.fn() } },
 }));
 
-// Rows by table, matched on the where() the module asks for.
-const mockTables = { call_log: [], customers: [] };
+jest.mock('../services/notification-service', () => ({ _private: { NOTIFICATION_VERSION_SQL: 'md5(content)' } }));
+
+// Rows by table, matched on the where() and whereNull() the module asks for.
+const mockTables = { call_log: [], customers: [], leads: [], sms_log: [], notifications: [] };
 const mockQueries = [];
-jest.mock('../models/db', () => jest.fn((table) => {
-  const query = { table, where: null, notDeleted: false };
-  mockQueries.push(query);
-  const q = {
-    where: jest.fn((cond) => { query.where = cond; return q; }),
-    whereNull: jest.fn((column) => { if (column === 'deleted_at') query.notDeleted = true; return q; }),
-    first: jest.fn(async () => (mockTables[table] || []).find((row) => Object.entries(query.where || {})
-      .every(([k, v]) => row[k] === v) && (!query.notDeleted || row.deleted_at == null))),
-  };
-  return q;
-}));
+jest.mock('../models/db', () => {
+  const db = jest.fn((table) => {
+    const query = { table, where: null, nulls: [] };
+    mockQueries.push(query);
+    const q = {
+      where: jest.fn((cond) => { query.where = cond; return q; }),
+      whereNull: jest.fn((column) => { query.nulls.push(column); return q; }),
+      first: jest.fn(async () => (mockTables[table] || []).find((row) => Object.entries(query.where || {})
+        .every(([k, v]) => row[k] === v) && query.nulls.every((column) => row[column] == null))),
+    };
+    return q;
+  });
+  db.raw = jest.fn((sql) => ({ __raw: sql }));
+  return db;
+});
 
 const gates = require('../config/feature-gates');
 const { placeCallFromAlert } = require('../routes/admin-communications');
 const { _private: { closeNoteHandler } } = require('../services/admin-alert-buttons');
 const { buttonViolations } = jest.requireActual('../services/admin-alert-compose');
-const { callButtons, buttonHandler, _private: { CALL_PROMPT } } = require('../services/alert-call-button');
+const { callButtons, buttonHandler, pushCallAction, _private: { CALL_PROMPT } } = require('../services/alert-call-button');
 
 const CALL_ID = '00000000-0000-4000-8000-0000000000d1';
 const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
@@ -40,6 +46,10 @@ const CALL_SID = `CA${'0123456789abcdef'.repeat(2)}`;
 const CALLER = '+19415550188';
 const OTHER = '+19415550142';
 const MAIN_LINE = '+19412975749';
+const LEAD_ID = '00000000-0000-4000-8000-0000000000e1';
+const SMS_SID = `SM${'fedcba9876543210'.repeat(2)}`;
+const ROW_ID = '00000000-0000-4000-8000-0000000000f1';
+const ROW_VERSION = 'b'.repeat(32);
 const call = (args) => ({ id: 'call', label: 'Call', prompt: CALL_PROMPT, args });
 const tap = (args, id = 'call') => buttonHandler.run({ row: { id: 'n1' }, item: { id, ...(args ? { args } : {}) }, technicianId: 't-admin', claimedVersion: 'v' });
 
@@ -48,6 +58,9 @@ beforeEach(() => {
   mockQueries.length = 0;
   mockTables.call_log = [{ id: CALL_ID, twilio_call_sid: CALL_SID, direction: 'inbound', from_phone: CALLER, to_phone: MAIN_LINE, customer_id: CUSTOMER_ID }];
   mockTables.customers = [{ id: CUSTOMER_ID, phone: '(941) 555-0188', deleted_at: null }];
+  mockTables.leads = [{ id: LEAD_ID, phone: OTHER, customer_id: CUSTOMER_ID, deleted_at: null }];
+  mockTables.sms_log = [{ twilio_sid: SMS_SID, direction: 'inbound', from_phone: OTHER, customer_id: null }];
+  mockTables.notifications = [];
   gates.alertCallButtonLive.mockReturnValue(true);
   gates.alertCloseButtonsLive.mockReturnValue(true);
   placeCallFromAlert.mockResolvedValue({ status: 200, json: { success: true, callSid: 'CAx', callLogId: 'cl-new' } });
@@ -58,6 +71,13 @@ describe('callButtons: what an emitter stores on the row', () => {
     expect(callButtons({ callLogId: CALL_ID, callSid: CALL_SID, customerId: CUSTOMER_ID })).toEqual({ kind: 'call_back', items: [call({ callLogId: CALL_ID })] });
     expect(callButtons({ callSid: CALL_SID, customerId: CUSTOMER_ID })).toEqual({ kind: 'call_back', items: [call({ callSid: CALL_SID })] });
     expect(callButtons({ callSid: 'CA-not-a-sid', customerId: CUSTOMER_ID })).toEqual({ kind: 'call_back', items: [call({ customerId: CUSTOMER_ID })] });
+  });
+
+  test('a new-lead alert names its lead, else the customer, else an unknown sender\'s text', () => {
+    expect(callButtons({ leadId: LEAD_ID, customerId: CUSTOMER_ID, smsSid: SMS_SID })).toEqual({ kind: 'call_back', items: [call({ leadId: LEAD_ID })] });
+    expect(callButtons({ leadId: null, customerId: CUSTOMER_ID, smsSid: SMS_SID })).toEqual({ kind: 'call_back', items: [call({ customerId: CUSTOMER_ID })] });
+    expect(callButtons({ smsSid: SMS_SID })).toEqual({ kind: 'call_back', items: [call({ smsSid: SMS_SID })] });
+    expect(callButtons({ smsSid: 'SM-not-a-sid' })).toBeNull();
   });
 
   test('a close button rides after Call; with no record the row keeps only its close button, or none', () => {
@@ -133,6 +153,28 @@ describe('a Call tap: the linked page\'s own Call step, the row left open', () =
     expect(placeCallFromAlert).toHaveBeenCalledWith({ body: { to: CALLER, customerIdHint: CUSTOMER_ID }, technicianId: 't-admin' });
   });
 
+  test('a lead: the Leads page\'s Call Now body, the lead\'s own number with its customer as the hint', async () => {
+    await tap({ leadId: LEAD_ID });
+    expect(placeCallFromAlert).toHaveBeenCalledWith({ body: { to: OTHER, customerIdHint: CUSTOMER_ID }, technicianId: 't-admin' });
+    placeCallFromAlert.mockClear();
+    mockTables.leads[0].customer_id = null;
+    await tap({ leadId: LEAD_ID });
+    expect(placeCallFromAlert.mock.calls[0][0].body).toEqual({ to: OTHER });
+    placeCallFromAlert.mockClear();
+    mockTables.leads[0].deleted_at = new Date();
+    expect(await tap({ leadId: LEAD_ID })).toMatchObject({ ok: false, code: 'no_number' });
+    expect(placeCallFromAlert).not.toHaveBeenCalled();
+  });
+
+  test('an unknown sender\'s text: the thread\'s Call back body, the sender\'s number; never an outbound text', async () => {
+    await tap({ smsSid: SMS_SID });
+    expect(placeCallFromAlert).toHaveBeenCalledWith({ body: { to: OTHER }, technicianId: 't-admin' });
+    placeCallFromAlert.mockClear();
+    mockTables.sms_log[0].direction = 'outbound';
+    expect(await tap({ smsSid: SMS_SID })).toMatchObject({ ok: false, code: 'no_number' });
+    expect(placeCallFromAlert).not.toHaveBeenCalled();
+  });
+
   test('nothing to dial refuses before the call step: no call, a deleted customer, no usable number', async () => {
     const refused = { ok: false, code: 'no_number', message: 'No number to call. Open the alert to act on it.' };
     expect(await tap({ callLogId: '00000000-0000-4000-8000-0000000000ff' })).toEqual(refused);
@@ -181,5 +223,33 @@ describe('a close button on a Call row: the close_note step itself, under its ow
     gates.alertCloseButtonsLive.mockReturnValue(false);
     expect(await tap(null, 'handled')).toEqual({ ok: false, code: 'off', message: 'These buttons are turned off. Open the alert to act on it.' });
     expect(closeNoteHandler.run).not.toHaveBeenCalled();
+  });
+});
+
+describe('pushCallAction: the Call on the Waves Admin push', () => {
+  const CALL_ROW = (over = {}) => ({ id: ROW_ID, recipient_type: 'admin', done_at: null, version: ROW_VERSION,
+    metadata: { buttons: { kind: 'call_back', items: [call({ callLogId: CALL_ID }), { id: 'called_back', label: 'Called back' }] } }, ...over });
+
+  test('an open row with a Call button names itself and the version the bell serves', async () => {
+    mockTables.notifications = [CALL_ROW()];
+    expect(await pushCallAction(ROW_ID)).toEqual({ callAction: `${ROW_ID}.${ROW_VERSION}`, apnsCategory: 'WAVES_CALL' });
+    // A metadata column read as text is parsed the same way.
+    mockTables.notifications = [CALL_ROW({ metadata: JSON.stringify(CALL_ROW().metadata) })];
+    expect(await pushCallAction(ROW_ID)).toEqual({ callAction: `${ROW_ID}.${ROW_VERSION}`, apnsCategory: 'WAVES_CALL' });
+  });
+
+  test('no Call on the push: gate off, a done or missing row, a row without Call, a bad id', async () => {
+    mockTables.notifications = [CALL_ROW()];
+    gates.alertCallButtonLive.mockReturnValue(false);
+    expect(await pushCallAction(ROW_ID)).toBeNull();
+    gates.alertCallButtonLive.mockReturnValue(true);
+    mockTables.notifications = [CALL_ROW({ done_at: new Date() })];
+    expect(await pushCallAction(ROW_ID)).toBeNull();
+    mockTables.notifications = [];
+    expect(await pushCallAction(ROW_ID)).toBeNull();
+    mockTables.notifications = [CALL_ROW({ metadata: { buttons: { kind: 'close_note', items: [{ id: 'called_back', label: 'Called back' }] } } })];
+    expect(await pushCallAction(ROW_ID)).toBeNull();
+    expect(await pushCallAction('not-a-uuid')).toBeNull();
+    expect(await pushCallAction(null)).toBeNull();
   });
 });

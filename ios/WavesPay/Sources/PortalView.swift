@@ -216,6 +216,7 @@ struct PortalView: UIViewRepresentable {
         // A tapped alert opens its page; one that launched the app was held
         // until now and replaces the start page.
         StaffAlerts.shared.openPage = { [weak coordinator] url in coordinator?.openAlertPage(url) }
+        StaffAlerts.shared.runCall = { [weak coordinator] value, url in coordinator?.runAlertCall(value, link: url) }
         return webView
     }
 
@@ -371,6 +372,25 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         ) { [weak self] result in
             if case .success(let notTaken as Bool) = result, !notTaken { return }
             self?.webView?.load(URLRequest(url: url))
+        }
+    }
+
+    // The push's Call: a signed-in staff page runs the alert's Call itself (NotificationBell.jsx takes the
+    // cancelable 'wavesadmin:alertcall' event), so the open page and its unsaved changes stay. When no page takes
+    // it, the web view loads the link, and the page runs it on load.
+    func runAlertCall(_ value: String, link: URL) {
+        guard let page = webView, let current = page.url, Portal.isPortal(current) else {
+            webView?.load(URLRequest(url: link))
+            return
+        }
+        page.callAsyncJavaScript(
+            "return window.dispatchEvent(new CustomEvent(name, { detail, cancelable: true }));",
+            arguments: ["name": "wavesadmin:alertcall", "detail": ["value": value]],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            if case .success(let notTaken as Bool) = result, !notTaken { return }
+            self?.webView?.load(URLRequest(url: link))
         }
     }
 

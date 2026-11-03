@@ -943,6 +943,40 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const c of all) expect(await state(c)).toBeNull();
     }, 30000);
 
+    test('current-customer quote-form bells (GATE_CURRENT_CUSTOMER_QUOTE_TEXT): a person\'s text or call back to that customer after the latest form closes it; contact before that form, no contact and the contact gate off do not', async () => {
+      const now = new Date();
+      const formAt = mins(now, -300);
+      const reFormAt = mins(now, -120);
+      let phoneN = 8701;
+      const quoteForm = async (over = {}) => {
+        const phone = `+1555555${phoneN += 1}`;
+        const customer = await customerWith(phone, { pipeline_stage: 'active_customer' });
+        const row = await bell({ category: 'lead', link: `/admin/customers?customerId=${customer.id}`, created_at: formAt,
+          metadata: { dedupeKey: `customer-quote-form:${customer.id}`, doneWhen: 'customer_answered', customerId: customer.id, source: 'customer_quote_form', ...over } });
+        return { customer, phone, row };
+      };
+      const texted = await quoteForm();
+      const called = await quoteForm();
+      const textedBefore = await quoteForm();
+      const reFormed = await quoteForm({ rungAt: reFormAt.toISOString() });
+      const untouched = await quoteForm();
+      await staffText(texted.customer, texted.phone, mins(formAt, 20));
+      await staffCall(called.customer, called.phone, mins(formAt, 20));
+      await staffText(textedBefore.customer, textedBefore.phone, mins(formAt, -20));
+      await staffText(reFormed.customer, reFormed.phone, mins(formAt, 20)); // before the customer's latest form
+      const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      const all = [texted, called, textedBefore, reFormed, untouched];
+
+      await sweep();
+      for (const c of all) expect(await state(c)).toBeNull();
+
+      gate('true');
+      await sweep();
+      expect(await state(texted)).toEqual(['relevance', 'Answered by text']);
+      expect(await state(called)).toEqual(['relevance', 'A person called back']);
+      for (const open of [textedBefore, reFormed, untouched]) expect(await state(open)).toBeNull();
+    }, 30000);
+
     test('text-note bells (owner 2026-11-02, GATE_ALERT_CONTACT_CLOSE alone): a person\'s text that reached the customer AND a visit of theirs completed after the bell close it, on any ET day; either alone, contact or a visit from before the bell, a visit that never ran, another customer\'s visit on the same phone and the older failure bell do not', async () => {
       const now = new Date();
       const bellAt = mins(now, -60 * 24 * 10);

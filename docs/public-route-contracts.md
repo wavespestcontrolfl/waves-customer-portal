@@ -4095,9 +4095,9 @@ Shared-phone text link (always on; owner 2026-10-10 "link text", gate removed 20
 
 Lead CALL / TEXT preference (owner 2026-10-14; always on): on `POST /api/webhooks/twilio/sms`, a sender in lead intake (`lead_intake_status` set, not `estimate_drafted`, re-read under a row lock) whose whole text is a bare CALL or TEXT (`parseCallTextReply`) gets one note on their newest lead (`lead_activities`). The text is not consumed: it takes the ordinary inbox path and the `sms_reply` bell title for that text leads with "Wants a call:" or "Prefers text:". Stores no preference, sends nothing and leaves `lead_intake_status` alone. `classifyServiceIntent` returns no service for a bare CALL / TEXT reply (no paid model call).
 
-`GATE_LEAD_CALL_REPLY_RING` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, a known sender whose whole text is a bare CALL (`parseCallTextReply`) and that the intake machine did not consume is checked by `ringForCallReply` (`server/services/lead-call-reply-ring.js`). It places ONE outbound call, never a text: between 8 AM and 8 PM ET, for a `+1` ten-digit sender, when this phone got a "Reply CALL" text from us in the last 7 days (real Twilio sid, not failed / undelivered / canceled), the customer row is not `active_customer` / `won` / `at_risk`, no ring went to the phone in 24 h and no outbound call in 10 min (all read under a per-phone advisory lock), Twilio rings Adam's cell (not the sender) for 20 s from the lead-alert line through the shared press-1 bridge (`placeBridgeCall`, `call_log.source` `lead-call-reply-ring`, `metadata.type` `lead_call_reply_ring`). The sender's phone rings only after Adam presses 1. `lead_intake_status` is not read or changed, and the inbound text still takes its ordinary path and bell. On `POST /api/webhooks/twilio/call-status`, a terminal status on such a row without `bridged_at` raises one `lead` needs-you bell (claimed by `metadata.missed_bell_at`, released if the bell never lands) in place of the generic Twilio failure bell. A connected ring counts as a staff call back (`STAFF_CALL_SOURCES`). Gate off = no call, no bell, and every response byte-identical.
+`GATE_LEAD_CALL_REPLY_RING` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, a known sender whose whole text is a bare CALL (`parseCallTextReply`) and that the intake machine did not consume is checked by `ringForCallReply` (`server/services/lead-call-reply-ring.js`). It places ONE outbound call, never a text: between 8 AM and 8 PM ET, for a `+1` ten-digit sender, when this phone got a "Reply CALL" text from us in the last 7 days (real Twilio sid, not failed / undelivered / canceled), the customer row is not `active_customer` / `won` / `at_risk` (unless, under `GATE_CURRENT_CUSTOMER_QUOTE_TEXT`, our current-customer quote text reached that customer on that phone in the 7 days before the reply: a `current_customer_quote_texts` row with a real sid), no ring went to the phone in 24 h and no outbound call in 10 min (all read under a per-phone advisory lock), Twilio rings Adam's cell (not the sender) for 20 s from the lead-alert line through the shared press-1 bridge (`placeBridgeCall`, `call_log.source` `lead-call-reply-ring`, `metadata.type` `lead_call_reply_ring`). The sender's phone rings only after Adam presses 1. `lead_intake_status` is not read or changed, and the inbound text still takes its ordinary path and bell. On `POST /api/webhooks/twilio/call-status`, a terminal status on such a row without `bridged_at` raises one `lead` needs-you bell (claimed by `metadata.missed_bell_at`, released if the bell never lands) in place of the generic Twilio failure bell. A connected ring counts as a staff call back (`STAFF_CALL_SOURCES`). Gate off = no call, no bell, and every response byte-identical.
 
-`GATE_LEAD_CALL_TEXT_FOLLOWUP` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, the same unconsumed text goes to `handleLeadReply` (`server/services/lead-call-text-followup.js`). For a `+1` lead sender who got our "Reply CALL" text in 7 days (not `active_customer` / `won` / `at_risk`), it can send ONE text per event through `sendCustomerMessage` (audience `lead`, entry point `lead_call_text_followup`, a customer action in the send window): the service question for a bare TEXT, the time question for a bare CALL from 8 PM to 8 AM ET, and the booked-time confirmation for a clear time answer to that question. It writes `lead_callback_requests` (one open row per phone, one `scheduled` row per 15-minute slot) and may set a NULL or `awaiting_address` `lead_intake_status` to `awaiting_service`; otherwise it raises one `lead` needs-you bell and sends nothing. The inbound text still takes its ordinary path and bell. Gate off = no text, no row, no bell, and every response byte-identical.
+`GATE_LEAD_CALL_TEXT_FOLLOWUP` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, the same unconsumed text goes to `handleLeadReply` (`server/services/lead-call-text-followup.js`). For a `+1` lead sender who got our "Reply CALL" text in 7 days (not `active_customer` / `won` / `at_risk`, unless our current-customer quote text reached them, the ring's own rule above; the same rule keeps a booked call, its reminder and a time answer for them), it can send ONE text per event through `sendCustomerMessage` (audience `lead`, entry point `lead_call_text_followup`, a customer action in the send window): the service question for a bare TEXT, the time question for a bare CALL from 8 PM to 8 AM ET, and the booked-time confirmation for a clear time answer to that question. It writes `lead_callback_requests` (one open row per phone, one `scheduled` row per 15-minute slot) and may set a NULL or `awaiting_address` `lead_intake_status` to `awaiting_service` (never for a current or past customer, by stage); otherwise it raises one `lead` needs-you bell and sends nothing. The inbound text still takes its ordinary path and bell. Gate off = no text, no row, no bell, and every response byte-identical.
 
 `GATE_TECH_STAFF_GUARDS` (dark; census M12, owner 2026-10-25): on `POST /api/webhooks/twilio/sms`, a sender whose number (last 10 digits) is the phone of an ACTIVE technician (`server/services/staff-sender-phones.js`, cached 60 s) is a staff sender. A number that is also on a live customer record (primary, secondary or service-contact slot) is NOT a staff sender (the customer wins), and neither is a Waves-owned line. A staff text keeps the ordinary inbox path byte-for-byte: the unified inbox row (unread), the `sms_log` row, the activity row and the owner's unknown-sender text forward (for a domain or van-wrap tracking number too, with the repeat-sender limit). It skips only the customer and lead side: the solicitation screen (a staff text is never silenced as spam), the outbound-history read, the estimator clarify / draft, the estimate-conversion agent, the scheduling shadow, and the tracking-line new-lead / van "Unknown prospect" bells. Unchanged for a staff sender: STOP / START / HELP and natural-language opt-outs, a text to a technician line, and the TwiML response. The post-call pipeline treats the same phones like env staff phones (no customer or lead keyed on them) and the missed-call text-back skips them (`skipped:internal_number`); the live voice webhook is unchanged. Gate off = no staff lookup at all and every response and side effect byte-identical.
 
@@ -4257,8 +4257,24 @@ row is still a lead (`pipeline_stage` new_lead, contacted, estimate_sent,
 estimate_viewed, follow_up or lost), an open `lead_intake_status`
 (`awaiting_service`, `awaiting_address`) is kept instead of cleared, and
 one Leads admin alert rings (`ringRepeatFormAlert`; none inside the
-5-minute duplicate window). Any other row is unchanged, nothing is sent to
-the submitter, and gate off = as before. An enforced Turnstile failure answers 403
+5-minute duplicate window). Any other row is unchanged by that gate, nothing is
+sent to the submitter, and gate off = as before. Current or past customer
+(`GATE_CURRENT_CUSTOMER_QUOTE_TEXT`, dark; owner 2026-11-02 "text and bell"): a
+row in `active_customer`, `won`, `at_risk`, `churned`, `past_customer` or
+`dormant` (`server/services/customer-stages.js`) still takes the
+existing-customer branch (its note; no leads row, intake state, draft
+or new-lead bell) and the response is unchanged. Outside the 5-minute duplicate
+window, the submitted phone (the one the row matched) gets ONE text, the lead
+text's CALL or TEXT offer without the STOP line, greeted by the first name on
+the matched customer row (the submitted name is never sent back to the phone;
+`sendCurrentCustomerQuoteText`,
+template `current_customer_quote_text`, entry point
+`current_customer_quote_text`, at most one a day per phone through the
+`current_customer_quote_texts` claim rows, one per attempt), and one Leads admin
+alert rings
+(`ringCustomerQuoteFormAlert`, dedupe `customer-quote-form:<customerId>`). Each
+runs on its own; a failure in either never changes the response. No call is
+placed, no other text is sent, and gate off = as before. An enforced Turnstile failure answers 403
 `{ error: 'Verification failed. Please try again.' }` with no write, with
 ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
 on, `false` = no exception): when the verdict is `missing_token` AND
@@ -7821,6 +7837,49 @@ request's own capture family, and a broken/canceled chain walks the
 generation salt as before. Treat the token, the verification
 gates, the selection/mint transaction, the replacement lock, and the
 claim mechanics as security-critical.
+**Estimate terms at the table (Book at the Table, `GATE_IN_PERSON_CARD`, owner
+2026-11-02):** when staff open the in-person card step for a visit whose estimate
+they accepted but that records no acceptance terms, the visit's pending request is
+marked `appointment_card_requests.in_person_terms_required` (additive boolean, default
+false; texted requests are never marked). For a marked request that is `ready` or
+`prepay_selected`, while the gate is live, the GET payload gains, on ANY device (the customer's own phone or
+the owner's in hand-off mode; no query param, no sign-in), `terms: { estimateRef,
+version, scope, lines }` (`scope` = `'plan' | 'base'`; `lines` = the current terms for
+the estimate's scope, verbatim) until they are recorded, and `consumerNotice: { text }`
+when the accepted estimate needs the Florida consumer notice (`GATE_ESTIMATE_CONSUMER_NOTICE`
+live, a termite/WDO line, no signed notice on file; informational, the form is signed
+separately, no tick; independent of `terms`, which exclude termite/WDO estimates).
+While `terms` rides a `prepay_selected` payload, its `payUrl` is `null` (the customer may
+have chosen prepay before the request was marked; the pay link returns once the terms are
+recorded). No internal ids ride either key. Unmarked requests, a dark gate or nothing to show leave the
+payload byte-identical to before. `POST /api/public/secure-card/:token/accept-terms`
+`{ terms_version, terms_scope, consumer_notice_shown }` (same token contract, same
+privacy headers on every outcome: `Cache-Control: private, no-store`,
+`Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`; while the gate is dark it is
+a uniform 404 answered in `server/index.js` BEFORE the global limiter and body parsers)
+answers `200 { success: true, recorded }` and stamps the fields an online accept stamps
+(`estimate_acceptances` row with `method = 'card_page_terms'`, the request ip and
+agent, `estimates.terms_version`, `customers.accepted_terms_version` never lowered, the
+rate-review stamp for plan scope) with none of the accept's side effects; it is idempotent
+(`recorded: false` when terms already exist), audited, and takes the estimate row lock. The
+attested version and scope are compared with the estimate's own under that lock:
+`409 { error: 'The terms changed. Reload this page to see them.', code: 'terms_changed' |
+'TERMS_VERSION_STALE' }`, nothing written; `409 consumer_notice_required` when the notice
+applies and was not shown; `409 request_closed` when the request (re-read under its row
+lock) is no longer pending or the visit no longer needs a card (the card save's own check:
+past, cancelled, unpriced, payer-covered); `503 try_again` when that check cannot run; an
+unknown token, an unmarked request, a standalone Auto Pay link or a dark gate are the same
+`404 { error: 'Not found' }`. ENFORCEMENT: while a marked request's terms are not recorded,
+`/select-plan` with `prepay_annual` and `/complete` (and the Stripe `setup_intent.succeeded`
+backstop, which leaves the row pending) refuse with `409 { error: 'Please accept the
+estimate terms first.', code: 'terms_required' }` before any invoice is minted or card saved;
+`per_application` selection is not held. Both claims' compare-and-set also carry the marker
+the check judged, so a mark that lands mid-request fails the claim (`/complete`: 409
+`terms_required`; `/select-plan`: 409 `selection_conflict`, the page re-reads). The acceptance copy-email sweep mails the copy
+like an online accept. Hand-off mode itself (inside the Waves Admin app's isolated customer
+web view: URL `handoff=1` AND the `wavesCustomer` message handler) only changes the page: it
+hides every contact and outside link, never offers Apple Pay / Google Pay, and shows a QR
+code instead of the pay page for "Prepay the year". No new request is made in normal mode.
 **One-time visits only (owner ruling 2026-10-29):** the late-cancel /
 no-show fee never applies to a recurring-lineage visit
 (`isRecurringLineageVisit`: `is_recurring`, `recurring_parent_id` or

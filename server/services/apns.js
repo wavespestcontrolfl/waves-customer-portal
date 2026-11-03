@@ -95,12 +95,15 @@ function apnsCollapseId(tag) {
 }
 
 function buildApnsPayload(notification = {}) {
-  const { title, body, badge, sound, url, aps: _ignore, ...rest } = notification;
+  const { title, body, badge, sound, url, aps: _ignore, apnsCategory, ...rest } = notification;
   const aps = {
     alert: { title: title || 'Waves', body: body || '' },
     sound: sound || 'default',
   };
   if (typeof badge === 'number') aps.badge = badge;
+  // The notification category an app registered with action buttons (Waves Admin: WAVES_CALL, the bell's Call;
+  // alert-call-button.js). An app that registered none shows the notification as before.
+  if (typeof apnsCategory === 'string' && apnsCategory) aps.category = apnsCategory;
   const payload = { aps };
   if (url) payload.url = url;
   for (const [k, v] of Object.entries(rest)) payload[k] = v;

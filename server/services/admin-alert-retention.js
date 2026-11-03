@@ -101,6 +101,8 @@ const RESOLUTIONS = {
 const RERING = [
   { emitter: 'lead-repeat-form', files: ['routes/lead-webhook.js'], prefixes: ['lead-repeat-form:'], kind: 'event',
     decision: 'expire: only a new quote form from the same customer raises it again' },
+  { emitter: 'customer-quote-form', files: ['routes/lead-webhook.js'], prefixes: ['customer-quote-form:'], kind: 'event',
+    decision: 'expire: only a new quote form from the same customer raises it again' },
   { emitter: 'stock-shortfall', files: ['services/complete-scheduled-service.js', 'services/inventory-operations.js'], prefixes: ['stock-shortfall:'], kind: 'event',
     decision: 'expire: only another visit that overdraws the same product raises it again' },
   { emitter: 'ib-model-failure', files: ['services/intelligence-bar/model-failure.js'], prefixes: ['ib:model-failure:'], kind: 'event',

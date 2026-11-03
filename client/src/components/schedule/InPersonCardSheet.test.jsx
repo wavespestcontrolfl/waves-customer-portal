@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Booked sheet for "Book at the Table" (GATE_IN_PERSON_CARD, owner 2026-11-02).
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import React from "react";
 
@@ -10,6 +10,7 @@ vi.mock("qrcode", () => ({
 }));
 import QRCode from "qrcode";
 import InPersonCardSheet, { POLL_INTERVAL_MS } from "./InPersonCardSheet";
+import { CAPABILITIES_TIMEOUT_MS } from "../../lib/wavesAdminHandoff";
 
 const SECURE = "https://portal.example.test/secure/tok123";
 const BASE = {
@@ -36,16 +37,37 @@ const LINK = { requested: true, action: "link_created", reason: "created", secur
 
 function renderSheet(props = {}, fetcher = makeFetch({ inPerson: LINK })) {
   const onClose = vi.fn();
-  const view = render(
-    <InPersonCardSheet {...BASE} adminFetch={fetcher} onClose={onClose} {...props} />,
-  );
+  const view = render(<InPersonCardSheet {...BASE} adminFetch={fetcher} onClose={onClose} {...props} />);
   return { fetcher, onClose, ...view };
 }
 
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); delete window.webkit; });
+
+// The Waves Admin app's side of the bridge: answers capabilities, records every
+// message, and lets a test answer the hand-off itself.
+function installAdminApp({ capabilities = ["handoffOpen"] } = {}) {
+  const messages = [];
+  window.webkit = {
+    messageHandlers: {
+      wavesAdmin: {
+        postMessage: vi.fn((message) => {
+          messages.push(message);
+          if (message.type === "capabilities" && capabilities) {
+            queueMicrotask(() => window.dispatchEvent(new CustomEvent("wavesadmin:capabilities", { detail: { requestId: message.requestId, capabilities } })));
+          }
+        }),
+      },
+    },
+  };
+  const answer = (status, extra = {}) => {
+    const open = messages.find((m) => m.type === "handoffOpen");
+    window.dispatchEvent(new CustomEvent("wavesadmin:handoff", { detail: { requestId: open.requestId, status, ...extra } }));
+  };
+  return { messages, answer };
+}
 
 describe("InPersonCardSheet", () => {
-  it("shows the booking rows exactly, then the card section and four actions", async () => {
+  it("shows the booking rows exactly, then the card section and its actions", async () => {
     const { fetcher } = renderSheet();
     expect(screen.getByRole("heading", { name: "Booked" })).toBeInTheDocument();
     expect(screen.getByText("Tue, Nov 3, 9:00 AM")).toBeInTheDocument();
@@ -68,15 +90,59 @@ describe("InPersonCardSheet", () => {
     expect(screen.queryByText("Confirmation text going out")).toBeNull();
   });
 
-  it("has no hand-off button and never navigates the admin tab", async () => {
-    const assign = vi.fn();
-    vi.stubGlobal("location", { ...window.location, assign, origin: window.location.origin });
-    renderSheet();
-    await screen.findByText("Card for Auto Pay");
-    expect(screen.queryByRole("button", { name: /Hand the phone/ })).toBeNull();
-    for (const button of screen.getAllByRole("button")) fireEvent.click(button);
-    expect(assign).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
+  describe("Hand the phone (Waves Admin app)", () => {
+    it("is hidden outside the app and when the app does not list handoffOpen", async () => {
+      renderSheet();
+      await screen.findByText("Card for Auto Pay");
+      expect(screen.queryByRole("button", { name: "Hand the phone to Pat" })).toBeNull();
+      cleanup();
+      installAdminApp({ capabilities: ["saveCard"] });
+      renderSheet();
+      await screen.findByText("Card for Auto Pay");
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.queryByRole("button", { name: "Hand the phone to Pat" })).toBeNull();
+    });
+
+    it("is hidden when an older app never answers the capabilities ask", async () => {
+      vi.useFakeTimers();
+      installAdminApp({ capabilities: null });
+      renderSheet();
+      await act(async () => { await vi.advanceTimersByTimeAsync(CAPABILITIES_TIMEOUT_MS + 50); });
+      expect(screen.getByText("Card for Auto Pay")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Hand the phone to Pat" })).toBeNull();
+    });
+
+    it("asks the app to open the hand-off, never navigates, then reads the card state", async () => {
+      const app = installAdminApp();
+      const fetcher = makeFetch({ inPerson: LINK, card: { request: { status: "completed" }, autopayActive: false } });
+      const before = window.location.href;
+      renderSheet({}, fetcher);
+      fireEvent.click(await screen.findByRole("button", { name: "Hand the phone to Pat" }));
+      expect(app.messages.find((m) => m.type === "handoffOpen")).toMatchObject({
+        url: "https://portal.example.test/secure/tok123?handoff=1",
+        firstName: "Pat",
+      });
+      expect(screen.getByRole("button", { name: "With Pat…" })).toBeDisabled();
+      await act(async () => { app.answer("ended"); });
+      expect(await screen.findByText("Saved. Auto Pay is on.")).toBeInTheDocument();
+      expect(fetcher).toHaveBeenCalledWith("/admin/schedule/visit-1/card-request");
+      expect(window.location.href).toBe(before);
+      expect(screen.getByRole("button", { name: "Hand the phone to Pat" })).toBeEnabled();
+    });
+
+    it("says plainly when the card was not saved, and when the hand-off failed", async () => {
+      const app = installAdminApp();
+      renderSheet();
+      fireEvent.click(await screen.findByRole("button", { name: "Hand the phone to Pat" }));
+      await act(async () => { app.answer("ended"); });
+      expect(await screen.findByText(/Not saved yet/)).toBeInTheDocument();
+      cleanup();
+      const failing = installAdminApp();
+      renderSheet();
+      fireEvent.click(await screen.findByRole("button", { name: "Hand the phone to Pat" }));
+      await act(async () => { failing.answer("failed", { message: "Face ID is not set up." }); });
+      expect(await screen.findByText("Face ID is not set up.")).toBeInTheDocument();
+    });
   });
 
   it("auto_secured: says Auto Pay is on and offers only Done", async () => {
@@ -90,6 +156,13 @@ describe("InPersonCardSheet", () => {
   it("skipped payer_billed: plain third-party payer line, only Done", async () => {
     renderSheet({}, makeFetch({ inPerson: { requested: false, action: "skipped", reason: "payer_billed" } }));
     expect(await screen.findByText("This visit bills a third-party payer, so no card is asked for.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show a QR code" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+  });
+
+  it("skipped customer_already_chose: says the terms were not asked for here, no QR, only Done", async () => {
+    renderSheet({}, makeFetch({ inPerson: { requested: false, action: "skipped", reason: "customer_already_chose" } }));
+    expect(await screen.findByText(/already chose how to pay on their own phone, so the estimate terms were not asked for here\./)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show a QR code" })).toBeNull();
     expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
   });

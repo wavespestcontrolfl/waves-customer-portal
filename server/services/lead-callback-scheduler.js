@@ -20,7 +20,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { inRingHours } = require('./lead-call-reply-ring');
+const { inRingHours, customerBlocker } = require('./lead-call-reply-ring');
 const { etParts, etDateString, formatETTime } = require('../utils/datetime-et');
 
 const REMINDER_LEAD_MS = 15 * 60 * 1000;
@@ -71,8 +71,9 @@ async function sendReminders(now) {
     // The lead is read before the claim: a failed read leaves the row as it was.
     const customer = await loadCustomer(row.customer_id);
     if (!customer) continue;
-    // A lead who became a customer since booking gets no promise of a call.
-    if (shared().REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) {
+    // A lead who became a customer since booking gets no promise of a call;
+    // a customer who booked it answering our current-customer quote text does.
+    if (await customerBlocker({ customer, digits: phoneDigits(row.phone), asOf: row.created_at })) {
       await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).update({ state: 'cancelled', updated_at: now });
       continue;
     }
@@ -140,9 +141,9 @@ async function ringIsLive(now) {
 // done (the ring already started). Never a cancelled call that rings.
 function bookedRingBlocker(requestId) {
   return async ({ customer, digits, now }, conn) => {
-    const request = await conn('lead_callback_requests').where({ id: requestId }).forUpdate().first('state');
+    const request = await conn('lead_callback_requests').where({ id: requestId }).forUpdate().first('state', 'created_at');
     if (request?.state !== 'scheduled') return 'request_changed';
-    if (shared().REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) {
+    if (await customerBlocker({ customer, digits, asOf: request.created_at }, conn)) {
       await conn('lead_callback_requests').where({ id: requestId }).update({ state: 'cancelled', updated_at: now });
       return 'existing_customer';
     }
