@@ -3159,7 +3159,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
                   if (confirmingVisit) return;
                   setConfirmingVisit(true);
                   try {
-                    await api.confirmAppointment(nextService.id);
+                    await api.confirmAppointment(nextService.id, { date: nextService.date, windowStart: nextService.windowStart });
                     await nextRead.refresh();
                   } catch (err) {
                     console.error(err);
@@ -5237,11 +5237,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     }
   };
 
-  const handleConfirm = async (id) => {
+  const handleConfirm = async (id, shown) => {
     if (confirmingIds[id]) return;
     setConfirmingIds(prev => ({ ...prev, [id]: true }));
     try {
-      await api.confirmAppointment(id);
+      await api.confirmAppointment(id, shown);
       const ts = new Date();
       setConfirmTimestamps(prev => ({ ...prev, [id]: ts }));
       await scheduleRead.refresh();
@@ -5413,7 +5413,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     if (s.customerPickBy) return null;
     const busy = !!confirmingIds[s.id];
     return (
-      <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{
+      <button type="button" onClick={() => handleConfirm(s.id, { date: s.date, windowStart: s.windowStart })} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{
         ...primaryButton, padding: compact ? '9px 14px' : '10px 14px', flex: compact ? undefined : 1,
         fontSize: 14,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',

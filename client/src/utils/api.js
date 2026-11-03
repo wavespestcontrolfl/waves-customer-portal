@@ -489,8 +489,10 @@ export class ApiClient {
     return this.request('/schedule/properties-next');
   }
 
-  confirmAppointment(id) {
-    return this.request(`/schedule/${id}/confirm`, { method: 'POST' });
+  // `shown` = the { date, windowStart } the card displayed, echoed as the
+  // schedule payload sent them: the server confirms only that slot.
+  confirmAppointment(id, shown) {
+    return this.request(`/schedule/${id}/confirm`, { method: 'POST', body: JSON.stringify(shown || {}) });
   }
 
   // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): posts the SAME
