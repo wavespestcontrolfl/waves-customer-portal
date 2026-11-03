@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.29.0');
+    expect(SCHEMA_VERSION).toBe('1.30.0');
   });
 
   describe('model-output schema', () => {
@@ -255,6 +255,38 @@ describe('schema validation', () => {
         expect(field.enum).toEqual(['annual_prepay', 'per_application', null]);
         expect(schema.properties.service_request.required).not.toContain('billing_choice');
         expect(field.description).toContain('/service_request/billing_choice');
+      }
+    });
+
+    test('1.30.0: the three household safety notes validate in both schemas as optional nullable strings, older payloads without them still do, non-strings are refused', () => {
+      const KEYS = ['household_children_or_elderly', 'no_spray_areas', 'chemical_sensitivity_note'];
+      expect(validateModelOutput(validModelOutput()).valid).toBe(true); // absent: unchanged
+      for (const key of KEYS) {
+        for (const value of ['short note', null]) {
+          const out = validModelOutput();
+          out.property[key] = value;
+          expect(validateModelOutput(out).valid).toBe(true);
+          const persisted = validPersisted();
+          persisted.meta.schema_version = '1.30.0';
+          persisted.property[key] = value;
+          expect(validatePersisted(persisted).valid).toBe(true);
+        }
+        for (const bad of [true, 12, ['a'], { a: 1 }]) {
+          const out = validModelOutput();
+          out.property[key] = bad;
+          expect(validateModelOutput(out).valid).toBe(false);
+          const persisted = validPersisted();
+          persisted.property[key] = bad;
+          expect(validatePersisted(persisted).valid).toBe(false);
+        }
+      }
+      for (const schema of [require('../schemas/call-extraction.model-output.schema.json'), require('../schemas/call-extraction.persisted.schema.json')]) {
+        for (const key of KEYS) {
+          const field = schema.properties.property.properties[key];
+          expect(field.type).toEqual(['string', 'null']);
+          expect(schema.properties.property.required).not.toContain(key);
+          expect(field.description).toContain(`/property/${key}`);
+        }
       }
     });
 

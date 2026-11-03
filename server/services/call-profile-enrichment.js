@@ -8,6 +8,9 @@
  *  - property_preferences upsert is admin-edit-preserving: only NULL/empty
  *    columns are filled; free-text columns APPEND with a dated provenance tag
  *    rather than overwrite. An admin's manual value always survives.
+ *  - Household safety facts the caller stated (children or elderly at the home, areas not to
+ *    spray, a chemical sensitivity) append to special_instructions and the chemical-sensitivity
+ *    columns, which the technician's visit brief shows; staff text is never overwritten.
  *  - Internal color (DIY history, competitor context, health/safety context,
  *    referral source) APPENDS to customers.internal_notes with provenance.
  *  - Every write is best-effort: an enrichment failure never fails the call.
@@ -87,6 +90,49 @@ function providerAlreadyNoted(existing, callDate, name) {
   });
 }
 
+// Household safety facts the CALLER stated (extraction schema 1.30.0, prompt v34): children or
+// elderly people at the home, areas not to spray, a chemical sensitivity. They reach the visit
+// brief through fields it already shows: special_instructions (children/elderly and no-spray
+// areas, each under a fixed label) and chemical_sensitivities + chemical_sensitivity_details.
+// Same write rules as pets: append with provenance, never overwrite or remove staff text, and
+// a repeat of a line already on file adds nothing. The model's note is capped and flattened to
+// one line here; a non-string or empty value is no fact.
+const SAFETY_NOTE_MAX = 200;
+const HOUSEHOLD_LABEL = 'Kids/elderly at home: ';
+const NO_SPRAY_LABEL = 'Do not spray: ';
+const SENSITIVITY_LABEL = 'Caller reports: ';
+function shortNote(value) {
+  if (typeof value !== 'string') return null;
+  return value.replace(/\s+/g, ' ').trim().slice(0, SAFETY_NOTE_MAX).trim() || null;
+}
+function safetyFactsFrom(prop) {
+  const facts = {
+    household: shortNote(prop.household_children_or_elderly),
+    noSpray: shortNote(prop.no_spray_areas),
+    sensitivity: shortNote(prop.chemical_sensitivity_note),
+  };
+  return Object.values(facts).some(Boolean) ? facts : null;
+}
+// The property_preferences columns to write for these facts, given the row now on file ({} for a
+// new row); no facts, no columns. The sensitivity flag is raised only when this call adds a new line, so a flag staff
+// cleared is not raised again by a reprocess of the same call.
+function safetyUpdates(existing, facts, callDate) {
+  const updates = {};
+  if (!facts) return updates;
+  let instructions = existing.special_instructions;
+  if (facts.household) instructions = appendWithProvenance(instructions, `${HOUSEHOLD_LABEL}${facts.household}`, callDate);
+  if (facts.noSpray) instructions = appendWithProvenance(instructions, `${NO_SPRAY_LABEL}${facts.noSpray}`, callDate);
+  if (instructions !== existing.special_instructions) updates.special_instructions = instructions;
+  if (facts.sensitivity) {
+    const details = appendWithProvenance(existing.chemical_sensitivity_details, `${SENSITIVITY_LABEL}${facts.sensitivity}`, callDate);
+    if (details !== existing.chemical_sensitivity_details) {
+      updates.chemical_sensitivity_details = details;
+      updates.chemical_sensitivities = true;
+    }
+  }
+  return updates;
+}
+
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI: the call's far-end number (caller ID on an
 // inbound call) must be the customer's PRIMARY phone before the call may write
 // gate / garage / lockbox codes or access notes. The customer id can come from a
@@ -116,6 +162,7 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   const prop = extraction.property || {};
   let accessNotes = prop.access_notes || null;
   const pets = prop.pets_on_property || null;
+  const safety = safetyFactsFrom(prop);
 
   try {
     if (accessNotes && callEnrichCodesRequireAniLive()) {
@@ -128,7 +175,7 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
         accessNotes = null;
       }
     }
-    if (accessNotes || pets) {
+    if (accessNotes || pets || safety) {
       // Same customer preference lock every preference writer holds (portal
       // saves, merges, SMS capture): the row read below is then current, not
       // a snapshot a concurrent writer can invalidate before this update.
@@ -142,6 +189,7 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
             ...Object.fromEntries(Object.entries(codes).filter(([, v]) => v)),
             ...(petDetailsFrom(pets) ? { pet_details: petDetailsFrom(pets) } : {}),
             ...(accessNotes ? { access_notes: appendWithProvenance(null, String(accessNotes).slice(0, 800), callCreatedAt) } : {}),
+            ...safetyUpdates({}, safety, callCreatedAt),
           });
           applied.push('property_preferences_created');
           return;
@@ -165,6 +213,7 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
           const appended = appendWithProvenance(existing.access_notes, String(accessNotes).slice(0, 800), callCreatedAt);
           if (appended !== existing.access_notes) updates.access_notes = appended;
         }
+        Object.assign(updates, safetyUpdates(existing, safety, callCreatedAt));
         if (Object.keys(updates).length) {
           await trx('property_preferences').where({ customer_id: customerId }).update({ ...updates, updated_at: new Date() });
           applied.push(...Object.keys(updates));
@@ -207,4 +256,4 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   return { applied };
 }
 
-module.exports = { enrichFromCall, appendWithProvenance, _test: { extractCodes, appendWithProvenance, providerAlreadyNoted, callDayTag } };
+module.exports = { enrichFromCall, appendWithProvenance, _test: { extractCodes, safetyFactsFrom, safetyUpdates, appendWithProvenance, providerAlreadyNoted, callDayTag } };
