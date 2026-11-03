@@ -78,14 +78,21 @@ async function recordAuditEvent({
  * mint event from the jti row (durable) + the eventual PI (Stripe), so a
  * failed audit write should not fail the user-facing request.
  */
-async function auditTerminalHandoffMint({ tech_user_id, invoice_id, amount_cents, jti, ip_address, user_agent }) {
+async function auditTerminalHandoffMint({
+  tech_user_id, invoice_id, amount_cents, jti, ip_address, user_agent,
+  kind = 'collect', card_request_id = null,
+}) {
+  // A save_card mint (Tap to Pay card save, no charge) is bound to the card
+  // request, not an invoice; its metadata carries the kind so the funnel
+  // can tell the two apart.
+  const saveCard = kind === 'save_card';
   return recordAuditEvent({
     actor_type: 'technician',
     actor_id: tech_user_id,
     action: 'terminal.handoff.mint',
-    resource_type: 'invoice',
-    resource_id: invoice_id,
-    metadata: { amount_cents, jti },
+    resource_type: saveCard ? 'appointment_card_request' : 'invoice',
+    resource_id: saveCard ? card_request_id : invoice_id,
+    metadata: saveCard ? { kind, amount_cents: 0, jti } : { amount_cents, jti },
     ip_address,
     user_agent,
   });
@@ -136,14 +143,18 @@ async function auditTerminalHandoffRateLimited({ tech_user_id, invoice_id, recen
  * Mint-to-validate-success ratio and the failure-mode distribution are
  * the signals the Tool Health Dashboard will key off once it exists.
  */
-async function auditTerminalHandoffValidate({ tech_user_id, invoice_id, jti, outcome, ip_address, user_agent }) {
+async function auditTerminalHandoffValidate({
+  tech_user_id, invoice_id, jti, outcome, ip_address, user_agent,
+  kind = 'collect', card_request_id = null,
+}) {
+  const saveCard = kind === 'save_card';
   return recordAuditEvent({
     actor_type: 'technician',
     actor_id: tech_user_id || null,
     action: 'terminal.handoff.validate',
-    resource_type: 'invoice',
-    resource_id: invoice_id || null,
-    metadata: { jti: jti || null, outcome },
+    resource_type: saveCard ? 'appointment_card_request' : 'invoice',
+    resource_id: (saveCard ? card_request_id : invoice_id) || null,
+    metadata: saveCard ? { kind, jti: jti || null, outcome } : { jti: jti || null, outcome },
     ip_address,
     user_agent,
   });

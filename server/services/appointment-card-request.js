@@ -1911,7 +1911,10 @@ async function secureVisitStillNeedsCard(request, { database = db } = {}) {
   return { ok: true };
 }
 
-async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
+// `consentSource`: the payment_method_consents.source the authorization row is
+// recorded under — 'appointment_card_request' for the /secure page, and
+// 'admin_tap_to_pay' when a technician's Tap to Pay save completes the request.
+async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null, consentSource = 'appointment_card_request' }) {
   const stillNeeded = await secureVisitStillNeedsCard(request);
   if (!stillNeeded.ok) return stillNeeded;
 
@@ -2096,7 +2099,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
         customerId: request.customer_id,
         paymentMethodId: saved?.id || null,
         stripePaymentMethodId,
-        source: 'appointment_card_request',
+        source: consentSource,
         methodType: saved?.method_type || 'card',
         ip,
         userAgent,
@@ -4049,6 +4052,9 @@ module.exports = {
   claimCardLinkSend,
   markCardLinkSendOutcome,
   startInvitationEmailLeg,
+  // Shared with the Tap to Pay card save (services/terminal-save-card.js).
+  secureVisitStillNeedsCard,
+  finishVerifiedSecureCapture,
   _test: {
     dateLineFor,
     resolveExemption,

@@ -196,6 +196,7 @@
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SMS_SPAM_TAG=true (owner 2026-11-02, "mark spam, no alerts, never remove customer texts": the Messages inbox "Mark spam" button TAGS the sender instead of blocking it. A tagged sender's later texts are still saved and shown, marked read with a Spam tag, and raise no bell, badge, lead, quote or auto-reply; a customer or an open lead on that number always wins. "Not spam" undoes it and brings the texts back as needing a reply. Calls are not blocked. Read at call time via smsSpamTagLive(); ships DARK; off = today's block button, byte-identical, and the spam-senders routes answer 404)
+ *   GATE_TAP_SAVE_CARD=true (owner ruling 2026-11-02, "Book at the Table", PR 2: a technician saves a customer's card for Auto Pay with Tap to Pay on iPhone and NO charge. On, an admin can POST /api/stripe/terminal/save-card-handoff with a texted secure-card token, the consent version the app showed and agreed=true; that creates a card_present SetupIntent for the request's Stripe customer, mints the 60-second wavespay://save-card handoff, and /validate-save-card-handoff and /complete-setup finish it through the same completion tail as the /secure page (card saved, consent recorded under admin_tap_to_pay, Auto Pay enrolled). A save-card terminal token can never reach /payment-intent or /apply-surcharge. Read via isEnabled('tapSaveCard') at boot, strict 'true', dark by default; off = the mint route answers 404 and nothing changes today. Costs no card charge and no extra service.)
  *   GATE_SMS_LIKE=true (owner 2026-11-02, "SMS Like Button" option B: Messages and the customer thread show a like button under the customer's newest text when nothing came after it; a click texts a thumbs-up back through the composer's own send (every consent, opt-out and line check) and marks the text with who liked it and when; customer likes on our texts show as a badge on that text instead of their own bubble. It texts customers, so the owner flips it. Read at call time via smsLikeLive(); off = no button, no badges, POST /messages/:id/like answers 404)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
@@ -4708,6 +4709,8 @@ const gates = {
   portalAskPush: process.env.GATE_PORTAL_ASK_PUSH === 'true',
   // GATE_SMS_SPAM_TAG: read at CALL time via smsSpamTagLive(); this entry is for logGateStatus.
   smsSpamTag: process.env.GATE_SMS_SPAM_TAG === 'true',
+  // GATE_TAP_SAVE_CARD: dark by default (owner ruling 2026-11-02). Gates POST /api/stripe/terminal/save-card-handoff only; a minted token finishes even if the gate is turned off mid-flow.
+  tapSaveCard: process.env.GATE_TAP_SAVE_CARD === 'true',
 
   // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
   // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because

@@ -9349,6 +9349,10 @@ function initScheduledJobs() {
     const started = Date.now();
     try {
       const deleted = await db('terminal_handoff_tokens')
+        // Payment handoffs only: a save_card row never gets a PaymentIntent,
+        // so it would read as orphaned 15 minutes after validate. The daily
+        // cleanup above removes it once it has expired.
+        .where({ kind: 'collect' })
         .whereNotNull('used_at')
         .whereNull('stripe_payment_intent_id')
         .where('used_at', '<', db.raw("NOW() - INTERVAL '15 minutes'"))
