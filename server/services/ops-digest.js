@@ -520,6 +520,9 @@ function inAppEnabled() {
  * @param {string} [p.dedupeKey]      one standing row per key (notifyAdmin dedupe)
  * @param {number} [p.dedupeWindowMs] rolling window for that dedupe
  * @param {boolean} [p.refreshOnDedupe] rewrite the standing row (and re-bell it) when the content changed
+ * @param {boolean} [p.supersedePrior] after this send's row lands, close every older OPEN row of the same key
+ *                                    (see supersedeOlderDigests): a daily digest that writes one row per send
+ *                                    keeps one open row, not one per morning
  * @param {boolean} [p.fallOff]       the sender retires this key on its clean run (ops-digest-fall-off.js);
  *                                    stamps metadata.fallOff so the Activity feed pins the row until resolved
  * @param {object} [p.trx]            caller transaction for atomic companion/digest persistence
@@ -530,7 +533,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, ringOnFirstIdentity = false, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, ringOnFirstIdentity = false, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, supersedePrior, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -623,7 +626,66 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
     return { ...emailOutcome(result), fallback: true };
   }
   logger.info(`[ops-digest] ${key}: recorded in-app (${row.id || 'suppressed'}) — email skipped`);
+  await supersedeOlderDigests({ key, row, conn: trx, enabled: supersedePrior });
   return { ok: true, channel: 'in_app', id: row.id || null };
+}
+
+const SUPERSEDED_RESOLUTION = 'Replaced by a newer digest from the same check';
+
+// One open row per digest key (owner ask 2026-11-02: 29 "callbacks waiting"
+// and 12 "drafts awaiting review" rows sat open for a month, because each
+// send wrote a fresh row and only a CLEAN run retired them). Called by a
+// sender that opts in with `supersedePrior`, right after its row landed.
+// The newest row that is on the bell stands; every other OPEN row of the
+// same opsKey (and no source: the in-process seam's own rows) closes done
+// with a "Replaced by" line and the producer's key as done_by, the way the
+// follow-up pager and the procurement bells close their older copy. That also
+// clears a backlog the first time it runs. A row a person already closed is
+// left alone.
+// A quiet row (the ring-only-on-change test found nothing new) never takes
+// the slot from a standing bell row: the owner was already told, so the
+// standing row stays and the quiet one closes. Only a ring-gate quiet
+// (metadata.quiet) counts, so an engineering/fyi digest still stands.
+// Never throws: the new row is already written, and the next send retries.
+// `enabled` is the sender's `supersedePrior` flag, checked here so the caller
+// (deliverOpsDigest, at the complexity limit) carries no branch for it.
+async function supersedeOlderDigests({ key, row, conn = null, enabled }) {
+  if (!enabled || !row?.id || row.suppressed) return 0;
+  try {
+    const db = conn || require('../models/db');
+    const ns = notificationService();
+    const openRows = () => db('notifications')
+      .where({ recipient_type: 'admin', category: CATEGORY })
+      .whereRaw("metadata->>'opsKey' = ?", [key])
+      .whereRaw("metadata->>'source' IS NULL")
+      .whereNull('done_at');
+    let keepId = row.id;
+    if (parseMeta(row.metadata).quiet === true) {
+      const standing = await openRows()
+        .whereRaw("COALESCE(metadata->>'quiet', '') <> 'true'")
+        .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
+        .where('id', '<>', row.id)
+        .orderBy('created_at', 'desc')
+        .first('id');
+      if (standing) keepId = standing.id;
+    }
+    const at = new Date();
+    let q = openRows().where('id', '<>', keepId);
+    if (row.created_at) q = q.where('created_at', '<=', row.created_at);
+    const closed = await q.update({
+      ...ns._private.doneColumns({ by: key, resolution: SUPERSEDED_RESOLUTION, at, keepExisting: true, conn: db }),
+      // Same stamp a clean-run retire writes, minus the dedupeKey, so the
+      // Activity feed stops pinning a closed fall-off row.
+      metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({
+        resolved: true, resolvedAt: at.toISOString(), resolvedBy: key, supersededBy: String(keepId),
+      })]),
+    });
+    if (Number(closed) > 0) logger.info(`[ops-digest] ${key}: closed ${closed} older open row(s) (replaced by ${keepId})`);
+    return Number(closed) || 0;
+  } catch (err) {
+    logger.warn(`[ops-digest] ${key}: superseding older rows failed: ${err.message}`);
+    return 0;
+  }
 }
 
 /**
@@ -736,7 +798,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
 }
 
 module.exports = {
-  MAX_ITEM_KEYS, deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
+  MAX_ITEM_KEYS, deliverOpsDigest, resolveOpsDigest, supersedeOlderDigests, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
   normalizeItemKeys, hasNewItemKeys, fullSetItemKeys, itemSetHashFor, itemKeysMetaFor,

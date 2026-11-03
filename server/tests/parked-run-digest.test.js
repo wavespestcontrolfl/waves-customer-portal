@@ -21,10 +21,15 @@ jest.mock('../models/db', () => {
   const qb = () => { throw new Error('db must not be touched when loaders are injected'); };
   return qb;
 });
+jest.mock('../services/ops-digest', () => {
+  const actual = jest.requireActual('../services/ops-digest');
+  return { ...actual, deliverOpsDigest: jest.fn(actual.deliverOpsDigest) };
+});
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
 
 const email = require('../services/email');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
+const { deliverOpsDigest } = require('../services/ops-digest');
 const { isEnabled } = require('../config/feature-gates');
 const {
   runParkedRunDigest,
@@ -248,6 +253,12 @@ describe('Codex r3: low-confidence redactions are withheld, never emailed raw', 
 });
 
 describe('runParkedRunDigest cadence + watermark', () => {
+  test('each send asks the bell seam to close the older open digest', async () => {
+    isEnabled.mockReturnValue(true);
+    await runParkedRunDigest(deps({ active: [item()] }));
+    expect(deliverOpsDigest).toHaveBeenCalledWith(expect.objectContaining({ key: 'parked-run-digest', supersedePrior: true, fallOff: true }));
+  });
+
   test('gate off → no-op: nothing loaded, nothing sent', async () => {
     isEnabled.mockReturnValue(false);
     const d = deps({ active: [item()] });
