@@ -6917,7 +6917,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <fieldset style={{ border: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
                 <legend style={{ ...labelStyle, fontSize: 14, padding: 0, marginBottom: 2 }}>Card for Auto Pay</legend>
                 {[
-                  { value: 'here', label: 'Customer saves it here, now', hint: 'On this phone. Nothing charged today.' },
+                  { value: 'here', label: 'Customer saves it here, now', hint: 'At the table, by QR code. Nothing charged today.' },
                   { value: 'text', label: 'Text them the link', hint: 'Texts a secure link to save a card.' },
                   { value: 'none', label: 'No card ask', hint: '' },
                 ].map((option) => (

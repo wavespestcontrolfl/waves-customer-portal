@@ -75,7 +75,8 @@ describe("InPersonCardSheet", () => {
     expect(screen.getByText("Estimate EST-2026-0001 marked accepted")).toBeInTheDocument();
     expect(screen.getByText("Confirmation text going out")).toBeInTheDocument();
     expect(await screen.findByText("Card for Auto Pay")).toBeInTheDocument();
-    expect(screen.getByText("Pat saves a card on your phone now. Nothing is charged today. Auto Pay charges after each completed service.")).toBeInTheDocument();
+    expect(screen.getByText("Pat can save a card now on their own phone: show the QR code, or text the link. Nothing is charged today. Auto Pay charges after each completed service.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Hand the phone/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Show a QR code" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Text the link" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument();
@@ -181,6 +182,17 @@ describe("InPersonCardSheet", () => {
       await screen.findByText("Auto Pay is already on for Pat.");
       expect(window.wavesAdminInPersonTerms).toBeUndefined();
     });
+  });
+
+  it("has no hand-off button and never navigates the admin tab", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign, origin: window.location.origin });
+    renderSheet();
+    await screen.findByText("Card for Auto Pay");
+    expect(screen.queryByRole("button", { name: /Hand the phone/ })).toBeNull();
+    for (const button of screen.getAllByRole("button")) fireEvent.click(button);
+    expect(assign).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it("auto_secured: says Auto Pay is on and offers only Done", async () => {

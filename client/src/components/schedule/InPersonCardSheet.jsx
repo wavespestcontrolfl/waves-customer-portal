@@ -69,7 +69,7 @@ export function describeInPersonOutcome(result, firstName) {
 // only rule, so a customer with past visits is not texted: say so plainly.
 export function describeTextOutcome(result) {
   if (String(result?.reason || '') === 'existing_customer') {
-    return { tone: 'muted', text: 'Not texted: this customer has past visits, and the text rule skips them. Use the phone or the QR code.' };
+    return { tone: 'muted', text: 'Not texted: this customer has past visits, and the text rule skips them. Use the QR code.' };
   }
   return describeCardRequestResult(result);
 }
@@ -217,7 +217,10 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
     <div>
       <div style={sectionLabel}>Card for Auto Pay</div>
       <p style={{ fontSize: 14, margin: '0 0 12px' }}>
-        {first} saves a card on your phone now. Nothing is charged today. Auto Pay charges after each completed service.
+        {handoff.canHandoff
+          ? `${first} can save a card now: hand them your phone, show the QR code for their own phone, or text the link.`
+          : `${first} can save a card now on their own phone: show the QR code, or text the link.`}
+        {' '}Nothing is charged today. Auto Pay charges after each completed service.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {handoff.canHandoff && (

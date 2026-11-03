@@ -387,9 +387,6 @@ async function runAcceptanceCopySweep() {
   const now = Date.now();
   const rows = await db('estimate_acceptances')
     .whereNull('copy_emailed_at')
-    // Hand-off terms (Book at the Table) are recorded on the owner's phone with the
-    // customer at the table; the sweep never mails a copy for them.
-    .where('method', '<>', 'in_person_handoff')
     .where('accepted_at', '<=', new Date(now - ACCEPTANCE_COPY_SETTLE_MINUTES * 60000))
     .orderBy('accepted_at', 'asc')
     .select('id', 'estimate_id', 'customer_id', 'accepted_at', 'copy_escalated_at');
