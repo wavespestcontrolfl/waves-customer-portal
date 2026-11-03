@@ -24,6 +24,10 @@
  * emitter owns clearing") with a "recovered" resolution and no new bell; a later
  * failure is a fresh row and rings again.
  *
+ * Rows the pre-#6658 canary wrote (no dedupe key) are closed by closeLegacyFailing
+ * on the next pass: "Replaced by a newer alert" while the route fails, "Recovered"
+ * once it answers.
+ *
  * Canary requests are provider-billed but tiny (a one-word reply, 4x/day).
  */
 const logger = require('./logger');
@@ -47,7 +51,8 @@ const ROUTE_LABELS = {
 const alertKey = (key) => `sms-draft-canary:${key}`;
 
 // Raise (or quietly refresh) the one open FAILING bell for this route.
-// Returns true when this call made a fresh bell (a new episode).
+// Returns { fresh, stored }: fresh = this call made a new bell (a new episode);
+// stored = a keyed row is confirmed open (created now, or the standing one).
 async function raiseFailing({ key, label, reason }) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const dedupeKey = alertKey(key);
@@ -71,8 +76,12 @@ async function raiseFailing({ key, label, reason }) {
     ringOnRefresh: () => false,
     metadata: { source: 'sms-draft-canary', route: key, reason, model: label },
   });
-  // null = the write failed: treat as a fresh episode so Adam still gets the text.
-  return !result || (!result.suppressed && !result.deduped);
+  // null = the write failed: treat as a fresh episode so Adam still gets the text,
+  // but nothing is stored, so the old rows must stay open.
+  return {
+    fresh: !result || (!result.suppressed && !result.deduped),
+    stored: Boolean(result && !result.suppressed),
+  };
 }
 
 // The route answers: close its open bell, if any. Returns rows closed.
@@ -85,6 +94,29 @@ async function closeFailing(key, now = new Date()) {
   return Number(await episodes.closeAdminAlertKeys(db, [dedupeKey], 'route_answering', {
     now, resolution: `Recovered at ${at}: the route answers again`,
   })) || 0;
+}
+
+// Rows the pre-#6658 canary wrote: title "SMS draft route FAILING", no dedupe
+// key, one per alert (10 of them rang on the 10-22 key rotation). Nothing
+// keyed them, so neither the new raise nor the recovery ever reached them and
+// they sat open. Each pass closes this route's leftovers, so the first run
+// after deploy clears the pile. The body opens with the route key, and the
+// brevity guard keeps the cut text in `detail`, so either column matches.
+// Returns rows closed; never throws (a failed sweep retries on the next pass).
+async function closeLegacyFailing(key, resolution, now = new Date()) {
+  try {
+    const db = require('../models/db');
+    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    const lead = `${key} (%`;
+    return Number(await openToCloser(db('notifications')
+      .where({ recipient_type: 'admin', category: 'system', title: 'SMS draft route FAILING' })
+      .whereRaw("metadata->>'dedupeKey' IS NULL")
+      .where((q) => q.where('body', 'like', lead).orWhere('detail', 'like', lead)), 'sms-draft-canary')
+      .update(doneColumns({ by: 'sms-draft-canary', resolution, at: now, keepExisting: true, conn: db }))) || 0;
+  } catch (err) {
+    logger.warn(`[sms-draft-canary] ${key} old-alert sweep failed: ${err.message}`);
+    return 0;
+  }
 }
 
 async function smsAdam(title, body) {
@@ -124,6 +156,8 @@ async function probeRoute({ key, route, laneId }) {
     } catch (err) {
       logger.error(`[sms-draft-canary] ${key} recovery close failed: ${err.message}`);
     }
+    // Old-style rows (no key) have no recovery text of their own to ring.
+    await closeLegacyFailing(key, 'Recovered: the route answers again');
     if (closed) {
       logger.info(`[sms-draft-canary] ${key} (${label}) recovered`);
       await smsAdam('SMS draft route recovered', `${key} (${label}) is answering again — drafts are back on the routed model.`);
@@ -134,11 +168,15 @@ async function probeRoute({ key, route, laneId }) {
   const reason = result.ok ? 'empty_response' : (result.reason || 'error');
   logger.error(`[sms-draft-canary] ${key} (${label}) FAILED: ${reason}`);
   let fresh = true;
+  let stored = false;
   try {
-    fresh = await raiseFailing({ key, label, reason });
+    ({ fresh, stored } = await raiseFailing({ key, label, reason }));
   } catch (err) {
     logger.error(`[sms-draft-canary] admin notification failed: ${err.message}`);
   }
+  // Old keyless rows are the only persistent alert if the keyed write failed:
+  // retire them only once the keyed row is confirmed open.
+  if (stored) await closeLegacyFailing(key, 'Replaced by a newer alert for the same route');
   if (fresh) {
     await smsAdam(
       'SMS draft route FAILING',
@@ -168,5 +206,5 @@ async function runSmsDraftCanary() {
 module.exports = {
   runSmsDraftCanary,
   CANARY_ROUTES,
-  _test: { probeRoute, alertKey },
+  _test: { probeRoute, alertKey, closeLegacyFailing },
 };
