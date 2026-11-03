@@ -1,5 +1,6 @@
 const { openMeteoForecastUrl, openMeteoArchiveAvailable, openMeteoCoversDate } = require('../open-meteo-endpoint');
 const logger = require('../logger');
+const { withOpenMeteoRetry, retryableStatus } = require('../open-meteo-retry');
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
 function finiteNumber(value) {
@@ -805,7 +806,7 @@ function mergeMrmsIntoWeek({ om, mrms, todayYmd } = {}) {
   };
 }
 
-async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}) {
+async function fetchServiceWeekWeather({ latitude, longitude, serviceDate, openMeteoRetry } = {}) {
   const empty = { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null };
   const lat = toCoordinate(latitude);
   const lon = toCoordinate(longitude);
@@ -862,7 +863,7 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   // MRMS rain without ET₀ (Codex #6052 r1).
   const omCovers = openMeteoCoversDate(range.start, etTodayYmd());
   const [om, mrms] = await Promise.all([
-    omCovers ? fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) : empty,
+    omCovers ? fetchOpenMeteoServiceWeek({ lat, lon, range, empty, openMeteoRetry }) : empty,
     mrmsPromise,
   ]);
   let value = om;
@@ -938,7 +939,7 @@ function openMeteoWeekUrl(base, grid, range) {
   return url;
 }
 
-async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
+async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty, openMeteoRetry }) {
   // Sample the whole city (property cell + neighbour ring) in ONE multi-location call
   // so a single spiked grid cell can be caught against the city median (see notes above).
   const grid = citySampleGrid(lat, lon);
@@ -964,7 +965,7 @@ async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
   for (let i = 0; i < attempts.length; i += 1) {
     const { endpoint, url } = attempts[i];
     const isLast = i === attempts.length - 1;
-    const result = await fetchOpenMeteoWeekFrom({ url, range, empty, endpoint });
+    const result = await fetchOpenMeteoWeekFrom({ url, range, empty, endpoint, openMeteoRetry });
     // An untrusted window from the archive is a reason to try the forecast
     // endpoint, not a reason to give up — `empty` is only final on the last one.
     if (result !== empty || isLast) return result;
@@ -973,12 +974,27 @@ async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
   return empty;
 }
 
-async function fetchOpenMeteoWeekFrom({ url, range, empty, endpoint }) {
+const SERVICE_WEEK_TIMEOUT_MS = 3500;
+
+// Only the Monday watering sweep passes `openMeteoRetry` (a timed-out or
+// refused request then gets one more try, open-meteo-retry.js); the service
+// report and the public watering page keep their single request.
+async function fetchOpenMeteoWeekFrom({ url, range, empty, endpoint, openMeteoRetry }) {
+  return withOpenMeteoRetry(
+    (timeoutMs) => fetchOpenMeteoWeekAttempt({ url, range, empty, endpoint, timeoutMs }),
+    { firstTimeoutMs: SERVICE_WEEK_TIMEOUT_MS, retry: openMeteoRetry, label: `service-week ${endpoint}` },
+  );
+}
+
+// One request. `retryable` marks a miss a second try can fix (a thrown
+// request: timeout, network error, cut-off body; or 429 / 5xx); an untrusted
+// window is final.
+async function fetchOpenMeteoWeekAttempt({ url, range, empty, endpoint, timeoutMs }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3500);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) return empty;
+    if (!response.ok) return { value: empty, ok: false, retryable: retryableStatus(response.status) };
     const payload = await response.json();
     // A multi-location request returns an array in input order (property cell first);
     // a single-location fall-through returns a bare object.
@@ -1012,7 +1028,7 @@ async function fetchOpenMeteoWeekFrom({ url, range, empty, endpoint }) {
     const cells = results.map(cellFrom);
     const property = cells[0];
     // No trustworthy property window → degrade exactly as before (no chart, rain_unknown).
-    if (!property) return empty;
+    if (!property) return { value: empty, ok: false, retryable: false };
 
     const cellSeriesList = cells.filter(Boolean).map((c) => c.precip);
     const { series, source, suspect } = resolveWeekRain(property.precip, cellSeriesList);
@@ -1039,10 +1055,10 @@ async function fetchOpenMeteoWeekFrom({ url, range, empty, endpoint }) {
     };
     // Caching moved to fetchServiceWeekWeather — the cache key carries the
     // engine mode, which this extracted fetcher doesn't know about.
-    return value;
+    return { value, ok: true, retryable: false };
   } catch (err) {
     logger.warn(`[application-conditions] service-week weather fetch failed (${endpoint}): ${err.message}`);
-    return empty;
+    return { value: empty, ok: false, retryable: true };
   } finally {
     clearTimeout(timeout);
   }

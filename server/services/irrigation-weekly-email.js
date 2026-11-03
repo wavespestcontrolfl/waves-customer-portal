@@ -30,6 +30,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const db = require('../models/db');
 const logger = require('./logger');
 const { openMeteoForecastUrl } = require('./open-meteo-endpoint');
+const { createOpenMeteoRetry, withOpenMeteoRetry, retryableStatus } = require('./open-meteo-retry');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
 const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaimWithRetry, loadPriorWeekPlan, loadCurrentWeekPlan, planBindsToService, samePolicy } = require('./irrigation-week-plan');
@@ -414,6 +415,7 @@ function monthFromYmd(ymd) {
  */
 const _forecastCache = new Map();
 const FORECAST_TTL_MS = 6 * 60 * 60 * 1000; // 6h — one cron sweep reuses freely
+const FORECAST_TIMEOUT_MS = 3500;
 
 /**
  * Forecast for the PLAN WEEK: from today (ET) through `horizonEnd` (the
@@ -422,7 +424,7 @@ const FORECAST_TTL_MS = 6 * 60 * 60 * 1000; // 6h — one cron sweep reuses free
  * days and not from the following week's rain/ET₀ (GH codex r4 on #3565).
  * Without a horizon the window is seven days from today.
  */
-async function fetchUpcomingWeekForecast({ latitude, longitude, horizonEnd = null, now = new Date() } = {}) {
+async function fetchUpcomingWeekForecast({ latitude, longitude, horizonEnd = null, now = new Date(), openMeteoRetry } = {}) {
   const lat = numberOrNull(latitude);
   const lon = numberOrNull(longitude);
   if (lat == null || lon == null) return null;
@@ -447,21 +449,36 @@ async function fetchUpcomingWeekForecast({ latitude, longitude, horizonEnd = nul
   url.searchParams.set('precipitation_unit', 'inch');
   url.searchParams.set('timezone', 'America/New_York');
 
+  // The Monday sweep passes its Open-Meteo budget: a timed-out or refused
+  // request gets one more try (open-meteo-retry.js). Other callers try once.
+  const value = await withOpenMeteoRetry(
+    (timeoutMs) => upcomingForecastAttempt({ url, expectedDays, startDate, endDate, timeoutMs }),
+    { firstTimeoutMs: FORECAST_TIMEOUT_MS, retry: openMeteoRetry, label: 'forecast' },
+  );
+  if (value) _forecastCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+// One forecast request. `retryable` marks a miss a second try can fix (a
+// thrown request: timeout, network error, cut-off body; or 429 / 5xx); an
+// unusable window is final.
+async function upcomingForecastAttempt({ url, expectedDays, startDate, endDate, timeoutMs }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3500);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const miss = (retryable) => ({ value: null, ok: false, retryable });
   try {
     const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) return null;
+    if (!response.ok) return miss(retryableStatus(response.status));
     const payload = await response.json();
     const days = payload?.daily?.precipitation_sum;
     // The full window or nothing — a short array (Open-Meteo can 200 with a
     // partial series) would understate the week and read as "little rain".
-    if (!Array.isArray(days) || days.length !== expectedDays) return null;
+    if (!Array.isArray(days) || days.length !== expectedDays) return miss(false);
     // Every day must be numeric — a partial window would understate the week.
     let total = 0;
     for (const value of days) {
       const n = numberOrNull(value);
-      if (n == null) return null;
+      if (n == null) return miss(false);
       total += n;
     }
     const rainInches = Math.round(total * 100) / 100;
@@ -474,12 +491,10 @@ async function fetchUpcomingWeekForecast({ latitude, longitude, horizonEnd = nul
     if (Array.isArray(et0Days) && et0Days.length === expectedDays) {
       et0Inches = et0SumToInches(sumPrecipInches(et0Days), payload?.daily_units?.et0_fao_evapotranspiration);
     }
-    const value = { rainInches, et0Inches, startDate, endDate, days: expectedDays };
-    _forecastCache.set(key, { at: Date.now(), value });
-    return value;
+    return { value: { rainInches, et0Inches, startDate, endDate, days: expectedDays }, ok: true, retryable: false };
   } catch (err) {
     logger.warn(`[irrigation-weekly-email] forecast fetch failed: ${err.message}`);
-    return null;
+    return miss(true);
   } finally {
     clearTimeout(timeout);
   }
@@ -1528,6 +1543,8 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  */
 async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN, inProgressRetryMs = IN_PROGRESS_RETRY_MS,
   customerIds = null,
+  // One Open-Meteo second-try budget for the whole run (open-meteo-retry.js).
+  openMeteoRetry = createOpenMeteoRetry(),
 } = {}) {
   const startedAt = now || new Date();
   // The wall clock is re-read PER CUSTOMER (and again at each queue
@@ -1947,7 +1964,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       const frozen = saved?.decisionInputs;
       const weekWeather = frozen
         ? { rainInches: frozen.rainfallInches7d, et0Inches: frozen.et0Inches, rainSource: frozen.rainSource }
-        : await fetchServiceWeekWeather({ latitude: customer.latitude, longitude: customer.longitude, serviceDate: weekEnding });
+        : await fetchServiceWeekWeather({ latitude: customer.latitude, longitude: customer.longitude, serviceDate: weekEnding, openMeteoRetry });
       const priorWeek = frozen ? { events: frozen.priorWeekEvents, prescribedInches: frozen.priorWeekPrescribedInches }
         : weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
       const decisionInputs = weeklyInputsForCustomer(customer, {
@@ -1980,6 +1997,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         // forecast_line says "over the next 7 days".
         horizonEnd: weekPlanEnabled ? planWeekEnd : null,
         now: planAsOf,
+        openMeteoRetry,
       });
       const forecastRainInches = upcoming ? upcoming.rainInches : null;
       const forecastEt0Inches = upcoming ? upcoming.et0Inches : null;
