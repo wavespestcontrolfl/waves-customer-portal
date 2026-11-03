@@ -43,6 +43,7 @@ const SAVE_CARD_REFUSALS = {
   intent_mismatch: 'This card save does not match the request. Start again.',
   pm_ownership_mismatch: 'This card belongs to a different customer.',
   consent_echo_failed: 'We could not finish saving the card. Try again.',
+  price_not_disclosed: 'Open the card page first so the customer sees the price.',
   setup_not_succeeded: 'The card save did not finish. Tap the card again.',
   no_generated_card: 'This card cannot be saved for later charges. Try another card.',
 };
@@ -84,7 +85,26 @@ async function saveCardEligibility(request) {
   if (planCtx?.mode === 'recurring' && request.selected_plan !== 'per_application') {
     return { ok: false, code: 'plan_required' };
   }
-  return { ok: true };
+  return disclosedCapEligibility(request);
+}
+
+/**
+ * The completion-charge rail (completion-charge-verdict.js and
+ * chargeAppointmentCardForRecapCompletion) caps a one-time visit's automatic
+ * collection at the amount FROZEN when the /secure page showed the price
+ * (accepted_amount > 0) and refuses without it; the live price is never
+ * substituted. A tap alone shows the customer no price, so a one-time visit
+ * whose link was never opened has no cap, and completing it would enroll Auto
+ * Pay for a visit that still needs manual collection. Refuse until the page
+ * has rendered. Recurring visits bill on the per-application lane and need no
+ * cap. Checked at mint, validate and completion, whatever the rail's gate says,
+ * because the missing cap cannot be repaired after completion.
+ */
+async function disclosedCapEligibility(request) {
+  const visit = await db('scheduled_services').where({ id: request.scheduled_service_id }).first('is_recurring');
+  if (visit?.is_recurring === true) return { ok: true };
+  if (request.accepted_amount != null && Number(request.accepted_amount) > 0) return { ok: true };
+  return { ok: false, code: 'price_not_disclosed' };
 }
 
 // Money as whole cents, the way the fee columns compare (numeric(10,2)).
@@ -195,6 +215,8 @@ async function completeTerminalSetupForRequest({ requestId, setupIntentId, ip = 
     return { ok: false, code: 'request_not_pending' };
   }
 
+  const capped = await disclosedCapEligibility(request);
+  if (!capped.ok) return capped;
   const verified = await verifyTerminalSetupIntent(request, setupIntentId);
   if (!verified.ok) return verified;
   const generatedCard = verified.generatedCard;
@@ -249,11 +271,24 @@ async function completeTerminalSetupFromWebhook(setupIntent) {
     setupIntentId: setupIntent.id,
   });
   if (result.ok) return { ok: true, retry: false, alreadyCompleted: result.alreadyCompleted === true };
-  if (result.code === 'no_generated_card') await alertNoGeneratedCard(requestId, setupIntent.id);
+  if (TAP_REVIEW_ALERTS[result.code]) await alertTapNeedsReview(requestId, setupIntent.id, result.code);
   return { ok: false, retry: WEBHOOK_RETRY_CODES.has(result.code), code: result.code };
 }
 
-async function alertNoGeneratedCard(requestId, setupIntentId) {
+// Permanent webhook refusals that leave a tapped card unsaved: one deduped bell
+// per intent asks the office to finish it another way.
+const TAP_REVIEW_ALERTS = {
+  no_generated_card: {
+    why: 'A tapped card could not be saved for later charges, so no Auto Pay card is on file.',
+    dedupe: 'tap_card_not_saveable',
+  },
+  price_not_disclosed: {
+    why: 'A card was tapped before the customer saw the price, so it was not saved.',
+    dedupe: 'tap_card_price_not_disclosed',
+  },
+};
+
+async function alertTapNeedsReview(requestId, setupIntentId, code) {
   try {
     const request = await db('appointment_card_requests').where({ id: requestId })
       .first('customer_id', 'scheduled_service_id');
@@ -261,18 +296,18 @@ async function alertNoGeneratedCard(requestId, setupIntentId) {
     await require('./admin-alert-compose').raiseAdminAlert('billing', {
       area: 'Billing',
       action: 'collect a card another way',
-      why: 'A tapped card could not be saved for later charges, so no Auto Pay card is on file.',
+      why: TAP_REVIEW_ALERTS[code].why,
       severity: 'needs-you',
       link: `/admin/customers?customerId=${request.customer_id}`,
       subject: { type: 'customer', id: String(request.customer_id) },
       doneWhen: 'card_saved',
       who: 'person',
     }, {
-      metadata: { customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, setupIntentId },
-      dedupeKey: `tap_card_not_saveable:${setupIntentId}`,
+      metadata: { customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, setupIntentId, code },
+      dedupeKey: `${TAP_REVIEW_ALERTS[code].dedupe}:${setupIntentId}`,
     });
   } catch (err) {
-    logger.warn(`[terminal-save-card] no-generated-card bell failed for ${setupIntentId}: ${err.message}`);
+    logger.warn(`[terminal-save-card] ${code} bell failed for ${setupIntentId}: ${err.message}`);
   }
 }
 

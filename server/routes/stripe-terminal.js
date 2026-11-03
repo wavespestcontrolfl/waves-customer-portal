@@ -831,7 +831,7 @@ router.post('/validate-handoff', async (req, res) => {
 
 // The 404-when-off gate sits BEFORE auth so a dark gate is unobservable.
 function tapSaveCardGate(req, res, next) {
-  if (!isEnabled('tapSaveCard')) return res.status(404).json({ error: 'Not found' });
+  if (!isEnabled('tapSaveCard')) return res.status(404).json(require('../middleware/errors').notFoundBody(req));
   return next();
 }
 

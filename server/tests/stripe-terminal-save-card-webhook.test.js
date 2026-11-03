@@ -115,10 +115,10 @@ beforeEach(() => {
   mockState.tables = {
     appointment_card_requests: [{
       id: 'req-1', status: 'pending', kind: 'visit', customer_id: 'cust-1', scheduled_service_id: 'visit-1',
-      selected_plan: null, no_show_fee_amount: null,
+      selected_plan: null, no_show_fee_amount: null, accepted_amount: '135.00',
     }],
     customers: [{ id: 'cust-1', stripe_customer_id: 'cus_test1' }],
-    scheduled_services: [{ id: 'visit-1', status: 'confirmed', scheduled_date: '2099-07-20', estimated_price: '135.00' }],
+    scheduled_services: [{ id: 'visit-1', status: 'confirmed', scheduled_date: '2099-07-20', estimated_price: '135.00', is_recurring: false }],
     payment_methods: [],
     terminal_handoff_tokens: [{
       jti: 'jti-1', kind: 'save_card', stripe_setup_intent_id: 'seti_1', appointment_card_request_id: 'req-1',
@@ -229,6 +229,19 @@ describe('setup_intent.succeeded for a Tap to Pay card save', () => {
       'billing',
       expect.objectContaining({ severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' } }),
       expect.objectContaining({ dedupeKey: 'tap_card_not_saveable:seti_1' }),
+    );
+  });
+
+  test('a tap whose price was never disclosed is not completed; the request stays pending and one bell is raised', async () => {
+    request().accepted_amount = null;
+    await expect(handle(tapIntent())).resolves.toBeUndefined();
+    expect(request().status).toBe('pending');
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockRaiseAdminAlert).toHaveBeenCalledWith(
+      'billing',
+      expect.objectContaining({ subject: { type: 'customer', id: 'cust-1' } }),
+      expect.objectContaining({ dedupeKey: 'tap_card_price_not_disclosed:seti_1' }),
     );
   });
 

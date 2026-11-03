@@ -151,10 +151,10 @@ function seed(overrides = {}) {
   mockState.tables = {
     appointment_card_requests: [{
       id: 'req-1', token: SECURE_TOKEN, status: 'pending', kind: 'visit', customer_id: 'cust-1',
-      scheduled_service_id: 'visit-1', selected_plan: null, ...overrides.request,
+      scheduled_service_id: 'visit-1', selected_plan: null, accepted_amount: '135.00', ...overrides.request,
     }],
     customers: [{ id: 'cust-1', first_name: 'Test', last_name: 'Customer', stripe_customer_id: 'cus_test1' }],
-    scheduled_services: [{ id: 'visit-1', service_type: 'Quarterly Pest Control Service' }],
+    scheduled_services: [{ id: 'visit-1', service_type: 'Quarterly Pest Control Service', is_recurring: false, ...overrides.visit }],
     technicians: [{ id: 'tech-1', name: 'Tech One', role: 'admin', active: true, auth_token_version: 3 }],
     payment_methods: [],
     terminal_handoff_tokens: [],
@@ -247,6 +247,27 @@ describe('POST /save-card-handoff', () => {
       const res = await post(base, '/save-card-handoff', mintBody(), ADMIN);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('no_longer_needed');
+    });
+  });
+
+  test.each([
+    ['never stamped', null],
+    ['the no-price sentinel', '0'],
+  ])('refuses a one-time visit whose price was never disclosed (%s)', async (_label, accepted) => {
+    seed({ request: { accepted_amount: accepted } });
+    await withServer(async (base) => {
+      const res = await post(base, '/save-card-handoff', mintBody(), ADMIN);
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ code: 'price_not_disclosed', error: 'Open the card page first so the customer sees the price.' });
+    });
+    expect(mockStripe.setupIntents.create).not.toHaveBeenCalled();
+    expect(mockState.tables.terminal_handoff_tokens).toHaveLength(0);
+  });
+
+  test('a recurring visit needs no frozen cap', async () => {
+    seed({ request: { accepted_amount: null }, visit: { is_recurring: true } });
+    await withServer(async (base) => {
+      expect((await post(base, '/save-card-handoff', mintBody(), ADMIN)).status).toBe(200);
     });
   });
 
@@ -476,27 +497,47 @@ describe('privacy headers ahead of the limiter, parsers and dark gate', () => {
   const { noStore } = require('../middleware/no-store');
   const PATHS = ['/save-card-handoff', '/validate-save-card-handoff', '/complete-setup'];
 
-  test('server/index.js mounts noStore for exactly the three paths before the limiter and every body parser', () => {
+  test('server/index.js mounts noStore for exactly the three paths, then the mint-only dark guard, before the limiter and every body parser', () => {
     const src = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
     const mount = src.indexOf("'/api/stripe/terminal/save-card-handoff',");
     expect(mount).toBeGreaterThan(0);
     const block = src.slice(mount - 40, src.indexOf('.noStore);', mount) + 10);
     PATHS.forEach((p) => expect(block).toContain(`'/api/stripe/terminal${p}'`));
     expect(block).toContain("require('./middleware/no-store').noStore");
-    expect(mount).toBeLessThan(src.indexOf("app.use('/api/', limiter);"));
-    expect(mount).toBeLessThan(src.indexOf('app.use(express.json('));
-    expect(mount).toBeLessThan(src.indexOf("app.use('/api/stripe/terminal', require('./routes/stripe-terminal'));"));
+    const guard = src.indexOf("app.use('/api/stripe/terminal/save-card-handoff', (req, res, next) => {");
+    expect(guard).toBeGreaterThan(mount);
+    const guardBody = src.slice(guard, guard + 400);
+    expect(guardBody).toContain("isEnabled('tapSaveCard')");
+    expect(guardBody).toContain('notFoundBody(req)');
+    // Only the mint is gated: validation and completion stay open.
+    expect(src).not.toContain("app.use('/api/stripe/terminal/validate-save-card-handoff', (req");
+    expect(src).not.toContain("app.use('/api/stripe/terminal/complete-setup', (req");
+    const limiter = src.indexOf("app.use('/api/', limiter);");
+    const parser = src.indexOf('app.use(express.json(');
+    const mountedRouter = src.indexOf("app.use('/api/stripe/terminal', require('./routes/stripe-terminal'));");
+    [mount, guard].forEach((at) => {
+      expect(at).toBeLessThan(limiter);
+      expect(at).toBeLessThan(parser);
+      expect(at).toBeLessThan(mountedRouter);
+    });
   });
 
-  test('mounted that way, the dark 404, a malformed-JSON 400 and a limiter 429 all carry the headers', async () => {
+  test('mounted that way, the dark mint 404s even with malformed JSON and an exhausted limiter; the rest answer 400/429 with headers', async () => {
     const app = express();
     app.use(PATHS.map((p) => `/api/stripe/terminal${p}`), noStore);
-    app.use('/api/', rateLimit({ windowMs: 60000, max: 2, standardHeaders: true, legacyHeaders: false }));
+    app.use('/api/stripe/terminal/save-card-handoff', (req, res, next) => {
+      if (!require('../config/feature-gates').isEnabled('tapSaveCard')) {
+        return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+      }
+      return next();
+    });
+    app.use('/api/', rateLimit({ windowMs: 60000, max: 1, standardHeaders: true, legacyHeaders: false }));
     app.use(express.json());
     app.use('/api/stripe/terminal', router);
     app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: 'bad' }));
     const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
     const base = `http://127.0.0.1:${server.address().port}/api/stripe/terminal`;
+    const send = (p, body) => fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
     const noStoreHeaders = (res) => {
       expect(res.headers.get('cache-control')).toContain('no-store');
       expect(res.headers.get('x-robots-tag')).toContain('noindex');
@@ -504,15 +545,24 @@ describe('privacy headers ahead of the limiter, parsers and dark gate', () => {
     };
     try {
       mockState.gateOn = false;
-      const dark = await fetch(`${base}/save-card-handoff`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-      expect(dark.status).toBe(404);
-      noStoreHeaders(dark);
-      const malformed = await fetch(`${base}/validate-save-card-handoff`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{nope' });
+      // Malformed JSON on the dark mint: the guard answers before the parser.
+      const darkMalformed = await send('/save-card-handoff', '{nope');
+      expect(darkMalformed.status).toBe(404);
+      noStoreHeaders(darkMalformed);
+      // A parser 400 on an open path still carries the headers.
+      const malformed = await send('/validate-save-card-handoff', '{nope');
       expect(malformed.status).toBe(400);
       noStoreHeaders(malformed);
-      const limited = await fetch(`${base}/complete-setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      // The budget (1) is spent: other paths now get the limiter's 429 ...
+      const limited = await send('/complete-setup', '{}');
       expect(limited.status).toBe(429);
       noStoreHeaders(limited);
+      // ... but the dark mint still answers its 404, not 429.
+      for (let i = 0; i < 3; i += 1) {
+        const dark = await send('/save-card-handoff', '{}');
+        expect(dark.status).toBe(404);
+        noStoreHeaders(dark);
+      }
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -627,6 +677,17 @@ describe('POST /complete-setup', () => {
     }));
     await withServer(async (base) => { await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth()); });
     expect(mockFinish).toHaveBeenCalledWith(expect.objectContaining({ feeTermsAgreed: false, disclosureVersion: null }));
+  });
+
+  test('completion re-checks the disclosed cap and refuses rather than completing without it', async () => {
+    mockState.tables.appointment_card_requests[0].accepted_amount = null;
+    await withServer(async (base) => {
+      const res = await post(base, '/complete-setup', { setup_intent_id: 'seti_1' }, auth());
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('price_not_disclosed');
+    });
+    expect(mockFinish).not.toHaveBeenCalled();
+    expect(mockRetrieveSetupIntent).not.toHaveBeenCalled();
   });
 
   test('a retry after the save finished answers the same without saving again', async () => {

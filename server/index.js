@@ -567,6 +567,17 @@ app.use([
   '/api/stripe/terminal/validate-save-card-handoff',
   '/api/stripe/terminal/complete-setup',
 ], require('./middleware/no-store').noStore);
+// The mint alone is dark behind GATE_TAP_SAVE_CARD: the generic unknown-route
+// 404 lands here, after the privacy headers and BEFORE the global limiter (429)
+// and the body parsers (400/413), so a probe never sees a revealing status.
+// Validation and completion stay open for handoffs already issued. The route
+// re-runs the same gate.
+app.use('/api/stripe/terminal/save-card-handoff', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('tapSaveCard')) {
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
+  }
+  return next();
+});
 
 // Estimate map-image proxy: privacy headers + the dark overlay 404 must land
 // BEFORE the global limiter, or an over-budget IP gets a 429 (and no
