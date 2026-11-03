@@ -1510,6 +1510,27 @@ describe('NotificationBell push Call (Waves Admin app)', () => {
     expect(posts()).toHaveLength(1);
   });
 
+  it('on the phone the answer opens on the Account tab, even when What\'s new was the last tab', async () => {
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      window.history.replaceState(null, '', '/admin');
+      setup(() => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }));
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      fireEvent.click(await screen.findByRole('button', { name: "What's new" }));
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+      act(() => {
+        window.dispatchEvent(new CustomEvent('wavesadmin:alertcall', { detail: { value: `${ROW}.${VERSION}` }, cancelable: true }));
+      });
+      expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
+      expect(screen.queryByText('Nothing new right now')).toBeNull();
+      expect(posts()).toHaveLength(1);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+    }
+  });
+
   it('waits for the verified staff session: nothing is taken while it is checked, then the Call runs once', async () => {
     setup(() => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }));
     const { rerender } = render(<NotificationBell type="admin" sessionReady={false} />);

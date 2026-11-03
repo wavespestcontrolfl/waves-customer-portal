@@ -863,18 +863,21 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   };
 
   // The push's Call, inside the Waves Admin app only: the same POST as the row's Call button, on the row and version
-  // the push showed. The panel opens with the server's answer and the list read again. Only once the staff session
-  // is verified (the call needs it), and the answer goes to whichever bell is on screen when it lands.
+  // the push showed. The panel opens on the Account tab (the phone panel shows the answer and the alerts only there)
+  // with the server's answer and the list read again. Only once the staff session is verified (the call needs it),
+  // and the answer goes to whichever bell is on screen when it lands.
   useEffect(() => {
     if (type !== 'admin' || !sessionReady || !isWavesAdminApp()) return undefined;
     const showAnswer = () => {
       const note = takeAlertCallAnswer();
       if (!note) return;
+      setTab('account');
       setOpen(true);
       setActionNote(note);
       loadNotifications();
     };
     const runCall = ({ id, version }) => {
+      setTab('account');
       setOpen(true);
       loadNotifications();
       requestJson(`${basePath}/${encodeURIComponent(id)}/actions/call`, { method: 'POST', body: JSON.stringify({ version }) })
