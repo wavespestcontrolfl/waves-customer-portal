@@ -14,6 +14,7 @@ const {
   staffTokenVersionMatches,
 } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
 const { sessionMfaBlock } = require('../services/staff-mfa');
 const {
   buildSurchargeAmountDetails,
@@ -52,7 +53,20 @@ function terminalHandoffNeedsReissue(handoff) {
 // Accepts both regular admin JWTs and terminal-scoped JWTs (minted by
 // /validate-handoff). Regular adminAuthenticate rejects scope:'terminal'
 // so these tokens can't escalate to other admin routes.
-async function terminalAuthenticate(req, res, next) {
+//
+// Token kinds. A terminal token minted by /validate-save-card-handoff carries
+// `save_card: true`: it may open a Terminal connection and complete the card
+// save, and it can NEVER move money. The default guard below therefore refuses
+// it (403 save_card_token); only the connection-token and complete-setup
+// routes opt in. A future route that uses terminalAuthenticate is a payment
+// route unless it says otherwise.
+function terminalAuthenticateFor(allow) {
+  return async function authenticate(req, res, next) {
+    return authenticateTerminalToken(req, res, next, allow);
+  };
+}
+
+async function authenticateTerminalToken(req, res, next, allow) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Authentication required' });
@@ -63,6 +77,13 @@ async function terminalAuthenticate(req, res, next) {
     if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid token' });
     if (decoded.scope && decoded.scope !== 'terminal') {
       return res.status(401).json({ error: 'Invalid token scope' });
+    }
+    const isSaveCardToken = decoded.save_card === true;
+    if (isSaveCardToken && allow === 'collect') {
+      return res.status(403).json({ error: 'This token can only save a card, not take a payment', code: 'save_card_token' });
+    }
+    if (!isSaveCardToken && allow === 'save_card') {
+      return res.status(403).json({ error: 'A card-save token is required', code: 'save_card_token_required' });
     }
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
     if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
@@ -80,12 +101,20 @@ async function terminalAuthenticate(req, res, next) {
     req.technician = tech;
     req.technicianId = tech.id;
     req.techRole = tech.role;
+    req.terminalClaims = decoded;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
+
+// Payment routes: /payment-intent, /apply-surcharge.
+const terminalAuthenticate = terminalAuthenticateFor('collect');
+// /connection-token: both kinds (the reader connects the same way).
+const terminalAuthenticateAnyKind = terminalAuthenticateFor('any');
+// /complete-setup: the card-save token only.
+const terminalAuthenticateSaveCard = terminalAuthenticateFor('save_card');
 
 const {
   auditTerminalHandoffMint,
@@ -102,6 +131,8 @@ const TERMINAL_LOCATION_ID = process.env.STRIPE_TERMINAL_LOCATION_ID || null;
 const HANDOFF_TTL_SECONDS = 60;
 const HANDOFF_ISS = 'waves-portal';
 const HANDOFF_AUD = 'waves-pay-ios';
+// terminal_handoff_tokens.kind of a Tap to Pay card save (no charge).
+const SAVE_CARD_KIND = 'save_card';
 
 // What the customer pays for, as the Waves Admin amount and Paid screens list
 // it: the invoice number, its service lines and the totals rows the invoice
@@ -545,6 +576,21 @@ router.post('/validate-handoff', async (req, res) => {
       return res.status(401).json({ error: 'Invalid token', code: 'signature_invalid' });
     }
 
+    // A card-save token belongs to /validate-save-card-handoff. Refused BEFORE
+    // the burn so a mis-routed token is not spent (the tech retries the right
+    // route with the same token).
+    if (claims.kind === SAVE_CARD_KIND) {
+      auditTerminalHandoffValidate({
+        tech_user_id: claims.tech_user_id || null,
+        invoice_id: null,
+        jti: claims.jti,
+        outcome: 'wrong_kind',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(400).json({ error: 'This is a card-save token', code: 'wrong_token_kind' });
+    }
+
     // Atomic burn. UPDATE ... WHERE used_at IS NULL holds a row lock under
     // any isolation level, so two concurrent validates for the same jti
     // cannot both succeed — one wins, the other sees zero rows affected.
@@ -557,7 +603,7 @@ router.post('/validate-handoff', async (req, res) => {
     // cross-environment replay, or a bug — reject rather than trust either
     // source. Costs one extra comparison per validate.
     const burned = await db('terminal_handoff_tokens')
-      .where({ jti: claims.jti })
+      .where({ jti: claims.jti, kind: 'collect' })
       .whereNull('used_at')
       .where('expires_at', '>', db.fn.now())
       .update({ used_at: db.fn.now() })
@@ -572,6 +618,9 @@ router.post('/validate-handoff', async (req, res) => {
       //                                      (impossible unless secret leaked;
       //                                      treat as signature_invalid 401)
       const existing = await db('terminal_handoff_tokens').where({ jti: claims.jti }).first();
+      if (existing && existing.kind !== 'collect') {
+        return res.status(400).json({ error: 'This is a card-save token', code: 'wrong_token_kind' });
+      }
       let outcome = 'signature_invalid';
       let status = 401;
       let errMsg = 'Invalid token';
@@ -766,10 +815,469 @@ router.post('/validate-handoff', async (req, res) => {
   }
 });
 
+// ===========================================================================
+// Tap to Pay card save (no charge) — "Book at the Table", PR 2.
+//
+//   POST /save-card-handoff           admin mints the 60 s deep link
+//   POST /validate-save-card-handoff  the iPhone app burns it, gets the
+//                                     SetupIntent and a card-save-only token
+//   POST /complete-setup              the app reports the tap; the server
+//                                     verifies Stripe and saves the card
+//
+// The shape mirrors the payment handoff (same secret, iss, aud, TTL, jti
+// table, rate limit), but nothing here can move money: the terminal token
+// carries save_card:true and terminalAuthenticate refuses it everywhere else.
+// ===========================================================================
+
+// The 404-when-off gate sits BEFORE auth so a dark gate is unobservable.
+function tapSaveCardGate(req, res, next) {
+  if (!isEnabled('tapSaveCard')) return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+  return next();
+}
+
+function saveCardMintRefusal(body) {
+  if (body?.agreed !== true) {
+    return { status: 400, body: { error: 'The customer must agree before the card is saved', code: 'consent_required' } };
+  }
+  const { renderedConsentVersionIsCurrent, consentVersionStaleResponse } = require('../services/payment-method-consent-text');
+  if (!renderedConsentVersionIsCurrent(body.consent_text_version)) {
+    return { status: 409, body: consentVersionStaleResponse() };
+  }
+  if (typeof body.secure_token !== 'string' || !body.secure_token) {
+    return { status: 400, body: { error: 'secure_token required' } };
+  }
+  return null;
+}
+
+// Rate limit + jti reservation + SetupIntent + row, in the same advisory-locked
+// transaction shape as /handoff (shared HANDOFF_MINTS_PER_HOUR budget). The
+// SetupIntent is created INSIDE the transaction, after the limit check, so a
+// limited mint creates nothing at Stripe; a Stripe failure rolls the whole
+// mint back (no row, no token). The idempotency key is the jti, so a retried
+// create replays the same intent.
+async function mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, feeMetadata = {} }) {
+  const out = { rateLimited: false, count: 0, retryAfter: 3600, jti: null, expiresAt: null, setupIntentId: null };
+  await db.transaction(async (trx) => {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['terminal.handoff.mint', String(req.technicianId)],
+    );
+    const [row] = await trx('terminal_handoff_tokens')
+      .where('tech_user_id', req.technicianId)
+      .where('created_at', '>', trx.raw("NOW() - INTERVAL '1 hour'"))
+      .select(trx.raw('COUNT(*)::int AS count'), trx.raw('MIN(created_at) AS oldest'));
+    const recent = Number(row?.count || 0);
+    if (recent >= HANDOFF_MINTS_PER_HOUR) {
+      const oldestMs = row?.oldest ? new Date(row.oldest).getTime() : Date.now();
+      out.rateLimited = true;
+      out.count = recent;
+      out.retryAfter = Math.max(1, Math.ceil((oldestMs + 60 * 60 * 1000 - Date.now()) / 1000));
+      return;
+    }
+    const jti = crypto.randomBytes(16).toString('hex');
+    const expiresAt = new Date(Date.now() + HANDOFF_TTL_SECONDS * 1000);
+    const setupIntent = await getStripe().setupIntents.create({
+      payment_method_types: ['card_present'],
+      customer: stripeCustomerId,
+      usage: 'off_session',
+      description: 'Waves appointment — card on file (Tap to Pay)',
+      metadata: {
+        appointment_card_request_id: String(request.id),
+        scheduled_service_id: String(request.scheduled_service_id),
+        source: 'admin_tap_to_pay',
+        // The deferred-capture rule (finishVerifiedSecureCapture) records a
+        // consent only under a current stamp.
+        consent_text_version: consentTextVersion,
+        ...feeMetadata,
+      },
+    }, { idempotencyKey: `tap_save_card_${jti}` });
+    await trx('terminal_handoff_tokens').insert({
+      jti,
+      tech_user_id: req.technicianId,
+      kind: SAVE_CARD_KIND,
+      invoice_id: null,
+      amount_cents: 0,
+      appointment_card_request_id: request.id,
+      stripe_setup_intent_id: setupIntent.id,
+      consent_text_version: consentTextVersion,
+      expires_at: expiresAt,
+      staff_mfa: req.staffToken.mfa === true,
+    });
+    out.jti = jti;
+    out.expiresAt = expiresAt;
+    out.setupIntentId = setupIntent.id;
+  });
+  return out;
+}
+
+// Resolves the request behind the secure token and judges it. Returns
+// { request, stripeCustomerId } or { refusal: { status, body } }.
+async function resolveSaveCardMintTarget(secureToken) {
+  const { resolveSaveCardRequest, saveCardEligibility, refusalBody } = require('../services/terminal-save-card');
+  const resolved = await resolveSaveCardRequest(secureToken);
+  if (!resolved.ok) return { refusal: { status: 404, body: { error: 'Not found' } } };
+  const eligibility = await saveCardEligibility(resolved.request);
+  if (!eligibility.ok) {
+    return { refusal: { status: eligibility.code === 'completion_failed' ? 503 : 409, body: refusalBody(eligibility.code) } };
+  }
+  const stripeCustomerId = await require('../services/stripe').ensureStripeCustomer(resolved.request.customer_id);
+  return { request: resolved.request, stripeCustomerId };
+}
+
+// POST /api/stripe/terminal/save-card-handoff
+// Admin-only (same session/MFA rules as /handoff). Body:
+//   { secure_token, consent_text_version, agreed, disclosure_version?,
+//     fee_disclosed_amount? }
+// fee_disclosed_amount (optional number): the cancellation fee the /secure page
+// showed the customer. Fee consent is verified only when the request row has
+// no_show_fee_amount > 0 and this equals it exactly; otherwise the capture saves
+// the card and enrolls Auto Pay but stamps no fee agreement.
+// disclosure_version (optional): the sticky cancel-window echo ('sticky_v1');
+// any other value is ignored. Both are written into the SetupIntent metadata
+// (fee_terms_agreed, fee_terms_amount_cents, disclosure_version), which is the
+// only place completion (the app or the webhook) reads them from.
+// Returns: { token, deep_link, jti, expires_at }
+router.post('/save-card-handoff', tapSaveCardGate, noStore, adminAuthenticate, requireAdmin, async (req, res) => {
+  try {
+    const secret = getHandoffSecret();
+    if (!secret) {
+      logger.error('[stripe-terminal] save-card handoff mint refused — TERMINAL_HANDOFF_SECRET unset or too short');
+      return res.status(500).json({ error: 'Handoff signing not configured' });
+    }
+    const bodyRefusal = saveCardMintRefusal(req.body);
+    if (bodyRefusal) return res.status(bodyRefusal.status).json(bodyRefusal.body);
+
+    const target = await resolveSaveCardMintTarget(req.body.secure_token);
+    if (target.refusal) return res.status(target.refusal.status).json(target.refusal.body);
+    const { request, stripeCustomerId } = target;
+    const consentTextVersion = String(req.body.consent_text_version).trim();
+
+    // Fee consent is verified here and written into the SetupIntent metadata
+    // (the one source completion reads). Only the sticky echo the /secure
+    // complete route honors is kept.
+    const { STICKY_DISCLOSURE_VERSION } = require('../services/appointment-card-request');
+    const disclosureVersion = req.body.disclosure_version === STICKY_DISCLOSURE_VERSION ? STICKY_DISCLOSURE_VERSION : null;
+    const feeMetadata = require('../services/terminal-save-card').feeMetadata(request, {
+      feeDisclosedAmount: req.body.fee_disclosed_amount,
+      disclosureVersion,
+    });
+    const minted = await mintSaveCardRow(req, { request, stripeCustomerId, consentTextVersion, feeMetadata });
+    if (minted.rateLimited) {
+      auditTerminalHandoffRateLimited({
+        tech_user_id: req.technicianId,
+        invoice_id: null,
+        recent_count: minted.count,
+        retry_after_seconds: minted.retryAfter,
+        ip_address: ipFromReq(req),
+        user_agent: uaFromReq(req),
+      });
+      res.setHeader('Retry-After', String(minted.retryAfter));
+      return res.status(429).json({
+        error: 'Too many handoff mints. Try again in an hour.',
+        retry_after_seconds: minted.retryAfter,
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        tech_user_id: req.technicianId,
+        staff_token_version: req.staffToken.tokenVersion,
+        staff_mfa: req.staffToken.mfa === true,
+        jti: minted.jti,
+        kind: SAVE_CARD_KIND,
+        card_request_id: String(request.id),
+      },
+      secret,
+      { algorithm: 'HS256', issuer: HANDOFF_ISS, audience: HANDOFF_AUD, expiresIn: HANDOFF_TTL_SECONDS },
+    );
+    auditTerminalHandoffMint({
+      tech_user_id: req.technicianId,
+      amount_cents: 0,
+      jti: minted.jti,
+      kind: SAVE_CARD_KIND,
+      card_request_id: request.id,
+      ip_address: ipFromReq(req),
+      user_agent: uaFromReq(req),
+    });
+    return res.json({
+      token,
+      deep_link: `wavespay://save-card?t=${encodeURIComponent(token)}`,
+      jti: minted.jti,
+      expires_at: minted.expiresAt.toISOString(),
+    });
+  } catch (err) {
+    logger.error(`[stripe-terminal] save-card handoff mint failed: ${err.message}`);
+    return res.status(500).json({ error: 'Handoff mint failed' });
+  }
+});
+
+// Atomic burn of a save_card jti (same contract as /validate-handoff's burn).
+function burnSaveCardJti(jti) {
+  return db('terminal_handoff_tokens')
+    .where({ jti, kind: SAVE_CARD_KIND })
+    .whereNull('used_at')
+    .where('expires_at', '>', db.fn.now())
+    .update({ used_at: db.fn.now() })
+    .returning(['jti', 'tech_user_id', 'staff_mfa', 'appointment_card_request_id', 'stripe_setup_intent_id']);
+}
+
+// Why a burn hit nothing: replay / expired / unknown jti / a payment token.
+async function saveCardBurnMiss(jti) {
+  const existing = await db('terminal_handoff_tokens').where({ jti }).first();
+  if (existing && existing.kind !== SAVE_CARD_KIND) {
+    return { outcome: 'wrong_kind', status: 400, error: 'This is a payment token', code: 'wrong_token_kind' };
+  }
+  if (existing?.used_at) return { outcome: 'replay', status: 410, error: 'Token already used', code: 'replay' };
+  if (existing) return { outcome: 'expired', status: 410, error: 'Token expired', code: 'expired' };
+  return { outcome: 'signature_invalid', status: 401, error: 'Invalid token', code: 'signature_invalid' };
+}
+
+// The live SetupIntent the app confirms with the reader. Returns
+// { setupIntent } or { refusal }.
+async function loadSaveCardSetupIntent(row) {
+  let setupIntent;
+  try {
+    setupIntent = await getStripe().setupIntents.retrieve(row.stripe_setup_intent_id);
+  } catch (err) {
+    logger.warn(`[stripe-terminal] save-card SetupIntent read failed for ${row.stripe_setup_intent_id}: ${err.message}`);
+    return { refusal: { status: 503, body: { error: 'Could not reach the card service. Start a new handoff.', code: 'setup_intent_unavailable' } } };
+  }
+  if (!setupIntent
+    || String(setupIntent.metadata?.appointment_card_request_id) !== String(row.appointment_card_request_id)
+    || setupIntent.status !== 'requires_payment_method'
+    || !setupIntent.client_secret) {
+    return { refusal: { status: 409, body: { error: 'This card save cannot be started. Start a new handoff.', code: 'setup_intent_not_usable' } } };
+  }
+  return { setupIntent };
+}
+
+// Each step below returns { refusal: { status, body } } or its result; the
+// route stops at the first refusal. `audit` writes the validate audit row.
+function verifySaveCardJwt(token, secret, audit) {
+  let claims;
+  try {
+    claims = jwt.verify(token, secret, { audience: HANDOFF_AUD, issuer: HANDOFF_ISS, algorithms: ['HS256'] });
+  } catch (err) {
+    const forensic = jwt.decode(token) || {};
+    const expired = err.name === 'TokenExpiredError';
+    audit({
+      tech_user_id: forensic.tech_user_id || null,
+      card_request_id: forensic.card_request_id || null,
+      jti: forensic.jti || null,
+      outcome: expired ? 'expired' : 'signature_invalid',
+    });
+    return expired
+      ? { refusal: { status: 410, body: { error: 'Token expired', code: 'expired' } } }
+      : { refusal: { status: 401, body: { error: 'Invalid token', code: 'signature_invalid' } } };
+  }
+  if (claims.kind !== SAVE_CARD_KIND) {
+    audit({ tech_user_id: claims.tech_user_id || null, jti: claims.jti, outcome: 'wrong_kind' });
+    return { refusal: { status: 400, body: { error: 'This is a payment token', code: 'wrong_token_kind' } } };
+  }
+  return { claims };
+}
+
+// Burns the jti and binds the DB row to the signed claims. The row, not the
+// claim, is the authority from here on.
+async function burnSaveCardHandoff(claims, audit) {
+  const burned = await burnSaveCardJti(claims.jti);
+  if (burned.length === 0) {
+    const miss = await saveCardBurnMiss(claims.jti);
+    audit({
+      tech_user_id: claims.tech_user_id || null,
+      card_request_id: claims.card_request_id || null,
+      jti: claims.jti,
+      outcome: miss.outcome,
+    });
+    return { refusal: { status: miss.status, body: { error: miss.error, code: miss.code } } };
+  }
+  const row = burned[0];
+  const rowMatchesClaims = String(row.tech_user_id) === String(claims.tech_user_id)
+    && (row.staff_mfa === true) === (claims.staff_mfa === true)
+    && String(row.appointment_card_request_id) === String(claims.card_request_id);
+  if (!rowMatchesClaims) {
+    logger.error(`[stripe-terminal] validate-save-card-handoff claim/db mismatch jti=${claims.jti}`);
+    audit({ tech_user_id: row.tech_user_id || null, card_request_id: row.appointment_card_request_id, jti: claims.jti, outcome: 'signature_invalid' });
+    return { refusal: { status: 401, body: { error: 'Invalid token', code: 'signature_invalid' } } };
+  }
+  return { row };
+}
+
+// Staff re-checks: still active, same token version, two-step proof.
+async function checkSaveCardStaff(row, claims, audit) {
+  const base = { tech_user_id: row.tech_user_id || null, card_request_id: row.appointment_card_request_id, jti: claims.jti };
+  const tech = await db('technicians').where({ id: row.tech_user_id }).first();
+  if (!tech || !tech.active) {
+    audit({ ...base, outcome: 'tech_inactive' });
+    return { refusal: { status: 409, body: { error: 'Technician not active', code: 'technician_not_active' } } };
+  }
+  if (!handoffStaffSessionMatches(claims, tech) || sessionMfaBlock({ mfa: row.staff_mfa === true }, tech)) {
+    audit({ ...base, outcome: 'session_revoked' });
+    return { refusal: { status: 401, body: { error: 'Staff session has been revoked', code: 'staff_session_revoked' } } };
+  }
+  return { tech };
+}
+
+// The request must still be completable, and its SetupIntent still unused.
+async function checkSaveCardRequest(row, claims, audit) {
+  const base = { tech_user_id: row.tech_user_id, card_request_id: row.appointment_card_request_id, jti: claims.jti };
+  const request = await db('appointment_card_requests').where({ id: row.appointment_card_request_id }).first();
+  const eligibility = request
+    ? await require('../services/terminal-save-card').saveCardEligibility(request)
+    : { ok: false };
+  if (!eligibility.ok) {
+    audit({ ...base, outcome: 'request_changed' });
+    return { refusal: { status: 409, body: { error: 'This card request changed since the handoff', code: 'request_changed' } } };
+  }
+  const loaded = await loadSaveCardSetupIntent(row);
+  if (loaded.refusal) {
+    audit({ ...base, outcome: 'setup_intent_unusable' });
+    return loaded;
+  }
+  return { request, setupIntent: loaded.setupIntent };
+}
+
+// Terminal-scoped JWT, minted exactly like /validate-handoff's, plus the
+// save_card marker (the fence reads it) and the jti /complete-setup reads.
+function signSaveCardTerminalToken(tech, row) {
+  return jwt.sign(
+    {
+      technicianId: tech.id,
+      role: tech.role,
+      name: tech.name,
+      scope: 'terminal',
+      type: 'access',
+      tokenVersion: Number(tech.auth_token_version),
+      ...(row.staff_mfa === true ? { mfa: true } : {}),
+      save_card: true,
+      jti: row.jti,
+    },
+    config.jwt.secret,
+    { expiresIn: '15m' },
+  );
+}
+
+// POST /api/stripe/terminal/validate-save-card-handoff
+// PUBLIC like /validate-handoff: the signed token IS the auth.
+// Body: { token }
+// Returns (200): { kind: 'save_card', auth_token, setup_intent_client_secret,
+//   setup_intent_id, customer_name, service_name, card_request_id }
+// Errors: 401 signature_invalid, staff_session_revoked | 400 wrong_token_kind |
+//   410 expired, replay | 409 technician_not_active, request_changed,
+//   setup_intent_not_usable | 503 setup_intent_unavailable
+router.post('/validate-save-card-handoff', noStore, async (req, res) => {
+  const ip = ipFromReq(req);
+  const ua = uaFromReq(req);
+  const audit = (fields) => auditTerminalHandoffValidate({
+    kind: SAVE_CARD_KIND, ip_address: ip, user_agent: ua, ...fields,
+  });
+  const refuse = (step) => res.status(step.refusal.status).json(step.refusal.body);
+  try {
+    const secret = getHandoffSecret();
+    if (!secret) {
+      logger.error('[stripe-terminal] validate-save-card-handoff refused — TERMINAL_HANDOFF_SECRET unset or too short');
+      return res.status(500).json({ error: 'Handoff signing not configured' });
+    }
+    const { token } = req.body || {};
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    const verified = verifySaveCardJwt(token, secret, audit);
+    if (verified.refusal) return refuse(verified);
+    // The jti is burned from here on. Any refusal leaves a spent token and an
+    // audit row by design; the technician mints a fresh handoff.
+    const burned = await burnSaveCardHandoff(verified.claims, audit);
+    if (burned.refusal) return refuse(burned);
+    const { row } = burned;
+    const staff = await checkSaveCardStaff(row, verified.claims, audit);
+    if (staff.refusal) return refuse(staff);
+    const target = await checkSaveCardRequest(row, verified.claims, audit);
+    if (target.refusal) return refuse(target);
+
+    const { request, setupIntent } = target;
+    const customer = await db('customers').where({ id: request.customer_id }).first();
+    const visit = await db('scheduled_services').where({ id: request.scheduled_service_id }).first('service_type');
+    audit({ tech_user_id: row.tech_user_id, card_request_id: row.appointment_card_request_id, jti: row.jti, outcome: 'success' });
+    return res.json({
+      kind: SAVE_CARD_KIND,
+      auth_token: signSaveCardTerminalToken(staff.tech, row),
+      setup_intent_client_secret: setupIntent.client_secret,
+      setup_intent_id: setupIntent.id,
+      customer_name: customer
+        ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null
+        : null,
+      service_name: visit?.service_type || null,
+      card_request_id: String(request.id),
+    });
+  } catch (err) {
+    logger.error(`[stripe-terminal] validate-save-card-handoff failed: ${err.message}`);
+    return res.status(500).json({ error: 'Validation failed' });
+  }
+});
+
+// Which handoff row a /complete-setup call may act on, or a refusal.
+async function loadCompleteSetupHandoff(req, setupIntentId) {
+  const jti = req.terminalClaims?.jti;
+  const handoff = jti ? await db('terminal_handoff_tokens').where({ jti }).first() : null;
+  if (!handoff) return { refusal: { status: 404, body: { error: 'Handoff not found', code: 'handoff_unknown' } } };
+  if (handoff.kind !== SAVE_CARD_KIND) {
+    return { refusal: { status: 403, body: { error: 'A card-save token is required', code: 'save_card_token_required' } } };
+  }
+  if (!handoff.used_at) {
+    return { refusal: { status: 409, body: { error: 'Handoff not validated', code: 'handoff_not_validated' } } };
+  }
+  if (String(handoff.tech_user_id) !== String(req.technicianId)) {
+    return { refusal: { status: 403, body: { error: 'Handoff belongs to a different technician', code: 'tech_mismatch' } } };
+  }
+  if (handoff.stripe_setup_intent_id !== setupIntentId) {
+    return { refusal: { status: 409, body: { error: 'This is not the card save that was started', code: 'setup_intent_mismatch' } } };
+  }
+  return { handoff };
+}
+
+function completeSetupRefusal(result) {
+  const { refusalBody } = require('../services/terminal-save-card');
+  if (result.code === 'not_found') return { status: 404, body: { error: 'Not found' } };
+  if (result.code === 'verification_failed') {
+    return { status: 503, body: { error: 'Could not verify the card save. Try again.', code: 'verification_failed' } };
+  }
+  if (result.code === 'consent_version_stale') {
+    const { consentVersionStaleResponse } = require('../services/payment-method-consent-text');
+    return { status: 409, body: consentVersionStaleResponse() };
+  }
+  return { status: 409, body: refusalBody(result.code) };
+}
+
+// POST /api/stripe/terminal/complete-setup
+// Terminal-authenticated with the save_card token. Body: { setup_intent_id }
+// Returns: { ok: true, card: { brand, last4, funding } }. Safe to retry.
+router.post('/complete-setup', noStore, terminalAuthenticateSaveCard, async (req, res) => {
+  try {
+    const setupIntentId = typeof req.body?.setup_intent_id === 'string' ? req.body.setup_intent_id.trim() : '';
+    if (!setupIntentId) return res.status(400).json({ error: 'setup_intent_id required' });
+    const loaded = await loadCompleteSetupHandoff(req, setupIntentId);
+    if (loaded.refusal) return res.status(loaded.refusal.status).json(loaded.refusal.body);
+
+    const result = await require('../services/terminal-save-card').completeTerminalSetup({
+      handoff: loaded.handoff,
+      setupIntentId,
+      ip: ipFromReq(req) || null,
+      userAgent: uaFromReq(req) || null,
+    });
+    if (!result.ok) {
+      const refusal = completeSetupRefusal(result);
+      return res.status(refusal.status).json(refusal.body);
+    }
+    return res.json({ ok: true, card: result.card });
+  } catch (err) {
+    logger.error(`[stripe-terminal] complete-setup failed: ${err.message}`);
+    return res.status(500).json({ error: 'Could not save the card' });
+  }
+});
+
 // POST /api/stripe/terminal/connection-token
 // Issues a short-lived connection token to the iOS Terminal SDK.
 // Auth: admin OR tech JWT (both roles can collect in person).
-router.post('/connection-token', terminalAuthenticate, async (req, res) => {
+router.post('/connection-token', terminalAuthenticateAnyKind, async (req, res) => {
   try {
     const stripe = getStripe();
     const opts = TERMINAL_LOCATION_ID ? { location: TERMINAL_LOCATION_ID } : {};
@@ -831,6 +1339,11 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     const handoff = await db('terminal_handoff_tokens').where({ jti }).first();
     if (!handoff) {
       return res.status(404).json({ error: 'Handoff not found', code: 'handoff_unknown' });
+    }
+    // Second fence behind the token check: a save_card handoff row is never a
+    // payment, whatever token presents its jti.
+    if (handoff.kind === SAVE_CARD_KIND) {
+      return res.status(403).json({ error: 'This handoff can only save a card', code: 'save_card_token' });
     }
     if (terminalHandoffNeedsReissue(handoff)) {
       return res.status(409).json({
@@ -1145,6 +1658,11 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
     if (!handoff) {
       return res.status(404).json({ error: 'Handoff not found', code: 'handoff_unknown' });
     }
+    // Second fence behind the token check: a save_card handoff row is never a
+    // payment, whatever token presents its jti.
+    if (handoff.kind === SAVE_CARD_KIND) {
+      return res.status(403).json({ error: 'This handoff can only save a card', code: 'save_card_token' });
+    }
     if (!handoff.used_at) {
       return res.status(409).json({ error: 'Handoff not validated', code: 'handoff_not_validated' });
     }
@@ -1321,6 +1839,8 @@ module.exports = router;
 module.exports._test = {
   handoffStaffSessionMatches,
   terminalAuthenticate,
+  terminalAuthenticateAnyKind,
+  terminalAuthenticateSaveCard,
   technicianMayCollectInvoice,
   technicianMayCollectInvoiceLocked,
   terminalChargeFenceResponse,
