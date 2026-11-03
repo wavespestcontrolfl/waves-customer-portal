@@ -71,7 +71,7 @@ final class HandoffLock {
     }
 
     // What a foreground alert shows. Hand-off mode: list and badge only.
-    static func presentation(handoffActive: Bool) -> UNNotificationPresentationOptions {
+    nonisolated static func presentation(handoffActive: Bool) -> UNNotificationPresentationOptions {
         handoffActive ? [.list, .badge] : [.banner, .list, .sound, .badge]
     }
 

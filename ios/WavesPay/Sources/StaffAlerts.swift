@@ -120,7 +120,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
         // Hand-off mode (a customer holds the phone): no banner, no sound.
-        HandoffLock.presentation(handoffActive: await MainActor.run { HandoffLock.shared.isActive })
+        // presentation(handoffActive:) is a pure nonisolated helper; the flag
+        // is read from the persisted value, so nothing here needs the main actor.
+        HandoffLock.presentation(handoffActive: HandoffLock.persistedActive)
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
