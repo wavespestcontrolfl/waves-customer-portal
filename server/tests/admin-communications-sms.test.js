@@ -4542,7 +4542,8 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
   test('gate on: the log carries the office like and customer likes, without the claim token', async () => {
     db.mockReturnValue(makeQueryBuilder([
       smsMessageRow({ id: 'in-1', body: 'Thanks!', metadata: { office_like: { ...claim, status: 'sent' } } }),
-      smsMessageRow({ id: 'in-2', body: 'Liked \u201cSee you Tuesday\u201d' }),
+      smsMessageRow({ id: 'in-2', body: 'Liked \u201cSee you Tuesday\u201d', message_type: 'sms_reaction' }),
+      smsMessageRow({ id: 'in-3', body: 'Liked \u201cDo you want the Tuesday slot?\u201d' }),
     ]));
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/communications/log`, { headers: { Authorization: 'Bearer admin' } });
@@ -4552,6 +4553,8 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
       expect(body.messages[0].officeLike).toEqual({ status: 'sent', by: 'Adam', at: claim.at });
       expect(JSON.stringify(body)).not.toContain('tok-1');
       expect(body.messages[1].customerReaction).toEqual({ emoji: '\u{1F44D}', removed: false, target: 'See you Tuesday' });
+      // A like that raised an alert (stored as an ordinary inbound text) is not folded away.
+      expect(body.messages[2].customerReaction).toBeNull();
     });
   });
 });

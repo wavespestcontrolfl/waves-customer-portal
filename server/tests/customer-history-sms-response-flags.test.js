@@ -40,8 +40,14 @@ test('GATE_SMS_LIKE on: an SMS carries the office like and a customer like, neve
   expect(liked.officeLike).toEqual({ status: 'sent', by: 'Adam', at: '2026-11-02T16:16:00.000Z' });
   expect(JSON.stringify(liked)).not.toContain('secret-token');
 
-  const reaction = mapCommsMessage(row({ id: 'message-reaction', body: 'Loved \u201cSee you Tuesday\u201d', metadata: {} }), { phone: '+19415550100' }, null, true);
+  const reaction = mapCommsMessage(row({ id: 'message-reaction', body: 'Loved \u201cSee you Tuesday\u201d', message_type: 'sms_reaction', metadata: {} }), { phone: '+19415550100' }, null, true);
   expect(reaction).toMatchObject({ officeLike: null, customerReaction: { emoji: '\u2764\uFE0F', removed: false, target: 'See you Tuesday' } });
+
+  // A like that raised an alert (an ordinary inbound text) or a row with no type stays a bubble.
+  const loud = mapCommsMessage(row({ id: 'message-loud', body: 'Liked \u201cCan we move Tuesday?\u201d', message_type: 'inbound', metadata: {} }), { phone: '+19415550100' }, null, true);
+  expect(loud.customerReaction).toBeNull();
+  const untyped = mapCommsMessage(row({ id: 'message-untyped', body: 'Loved \u201cSee you Tuesday\u201d', metadata: {} }), { phone: '+19415550100' }, null, true);
+  expect(untyped.customerReaction).toBeNull();
 
   const call = mapCommsMessage(row({ id: 'call-1', channel: 'voice', body: 'Liked \u201cx\u201d', metadata: {} }), { phone: '+19415550100' }, null, true);
   expect(call).not.toHaveProperty('customerReaction');

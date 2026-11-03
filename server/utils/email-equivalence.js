@@ -169,4 +169,23 @@ function bounceMailbox(mailedEmail) {
   return googleMailboxIdentity(mailed);
 }
 
-module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, subscriberRowsForBounce, bounceMailbox, GOOGLE_DOT_INSENSITIVE_DOMAINS };
+/**
+ * A bounce follow-up (the Triage bounce card, the "bounce needs a fix" alert)
+ * asks for a working address after an address hard-bounced. It is answered
+ * once `replacement` (the record's address in the field that bounced) is a
+ * valid address and no address on the record (`onFile`: every mail field)
+ * is a bounced one, or the same Gmail inbox under another spelling
+ * (bounceMailbox, the suppression's own widening). An emptied field answers
+ * nothing: nobody has a working address yet.
+ */
+function bouncedEmailReplaced({ replacement, onFile = [], bounced = [] } = {}) {
+  const { cleanValidEmailOrNull } = require('./intake-normalize');
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+  const bad = new Set((Array.isArray(bounced) ? bounced : []).map(norm).filter(Boolean));
+  if (!cleanValidEmailOrNull(replacement) || !bad.size) return false;
+  const badMailboxes = new Set([...bad].map(bounceMailbox).filter(Boolean));
+  const isBad = (value) => bad.has(value) || badMailboxes.has(bounceMailbox(value));
+  return ![replacement, ...(Array.isArray(onFile) ? onFile : [])].map(norm).filter(Boolean).some(isBad);
+}
+
+module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, subscriberRowsForBounce, bounceMailbox, bouncedEmailReplaced, GOOGLE_DOT_INSENSITIVE_DOMAINS };

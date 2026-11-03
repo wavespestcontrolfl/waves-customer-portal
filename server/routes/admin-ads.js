@@ -48,6 +48,13 @@ function toFiniteNumber(v) {
 // setMode). Matches ad_campaigns.platform's documented set.
 const CAMPAIGN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
 const CAMPAIGN_STATUSES = ['active', 'paused', 'removed'];
+// Platforms whose campaign status the daily sync owns, with the generic PUT's
+// refusal. Google changes go through /pause + /enable, which sync Google Ads;
+// Meta is synced read-only (meta-ads.js), so its status changes in Meta Ads Manager.
+const SYNCED_STATUS_REFUSALS = new Map([
+  ['google_ads', "Use /pause or /enable to change a Google campaign's status — they sync Google Ads."],
+  ['facebook', "A Meta campaign's status comes from Meta Ads Manager. Change it there; the daily Meta sync brings it in."],
+]);
 // Campaign metadata keys only the hold routes write: the owner's hold and its
 // release record. Generic campaign writes refuse them and keep the stored ones.
 const HOLD_METADATA_KEYS = ['budget_hold', 'budget_hold_cleared'];
@@ -76,7 +83,8 @@ function sanitizeCampaignWrite(body, isUpdate) {
   // status is settable on create (honored rather than defaulted to active) and
   // on update (the only route to pause/remove a manual or google_lsa campaign —
   // /pause + /enable reject non-google_ads; the route additionally steers a
-  // Google campaign's status change to those synced endpoints).
+  // Google campaign's status change to those synced endpoints and refuses one
+  // on a synced Meta campaign).
   const allow = isUpdate
     ? ['status', ...CAMPAIGN_META_FIELDS]
     : [...CAMPAIGN_CREATE_ONLY_FIELDS, 'status', ...CAMPAIGN_META_FIELDS];
@@ -222,15 +230,16 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
   try {
     const clean = sanitizeCampaignWrite(req.body, true);
     if (!clean.ok) return res.status(400).json({ error: clean.error });
-    // A Google campaign's status must change through /pause + /enable so it syncs
-    // to Google Ads; a direct local flip here would drift from live spend.
+    // A synced platform owns its campaign's status (SYNCED_STATUS_REFUSALS); a
+    // direct local flip here would drift from the platform until the next sync.
     // Manual / google_lsa campaigns have no synced status route, so PUT is the
     // way to retire them.
     if (clean.value.status !== undefined) {
       const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Campaign not found' });
-      if (existing.platform === 'google_ads' && clean.value.status !== existing.status) {
-        return res.status(400).json({ error: "Use /pause or /enable to change a Google campaign's status — they sync Google Ads." });
+      const refusal = SYNCED_STATUS_REFUSALS.get(existing.platform);
+      if (refusal && clean.value.status !== existing.status) {
+        return res.status(400).json({ error: refusal });
       }
     }
     let campaign;
@@ -553,50 +562,90 @@ router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/ads/sync — trigger full Google Ads sync
+// Manual syncs. Every step runs with throwOnError, so a failed API call or a
+// rolled-back snapshot (e.g. search-term rows for a campaign missing locally)
+// is reported, not counted as an empty success. The other steps still run, as
+// in the daily crons. Any failed step answers 502 and names the step; a lock
+// another sync holds answers 409.
+// throwOnSkip: a held Meta step lock throws SYNC_RUNNING instead of returning [].
+const META_SYNC_STEPS = [
+  { key: 'campaigns', label: 'Campaigns', run: (m) => m.syncCampaigns({ throwOnError: true, throwOnSkip: true }) },
+  { key: 'performanceRows', label: 'Performance', run: (m) => m.syncDailyPerformance(7, { throwOnError: true, throwOnSkip: true }) },
+];
+
+// rethrow(err) true = stop and let the route answer it (a busy lock).
+async function runSyncSteps(steps, target, { rethrow = () => false } = {}) {
+  const synced = {};
+  const failed = [];
+  for (const step of steps) {
+    try {
+      const rows = await step.run(target);
+      synced[step.key] = Array.isArray(rows) ? rows.length : 0;
+    } catch (err) {
+      if (rethrow(err)) throw err;
+      synced[step.key] = 0;
+      failed.push({ key: step.key, label: step.label, message: err?.message || 'unknown error' });
+    }
+  }
+  return { synced, failed };
+}
+
+function sendSyncResult(res, { synced, failed }) {
+  if (!failed.length) return res.json({ success: true, synced });
+  return res.status(502).json({
+    success: false,
+    synced,
+    failed: failed.map((f) => f.key),
+    error: failed.map((f) => `${f.label} not synced: ${f.message}`).join(' '),
+  });
+}
+
+const syncBusyError = (platform) => `${platform} sync is already running (the daily job or another manual sync), or the server is busy. Try again in a minute.`;
+
+// POST /api/admin/ads/sync — run the Google Ads daily sync now.
+// The same job as the 6 AM cron (ads/google-ads-daily-sync.js: campaigns,
+// performance, search terms, the owner's negative word list) under the cron's
+// lock and job_health row ('google-ads-sync'): the two never overlap, and a
+// cron tick that finds this run holding the lock is covered by it. try-lock: a
+// held lock answers 409 with nothing synced.
 router.post('/sync', requireAdmin, async (req, res, next) => {
   try {
     if (!getGoogleAds().isConfigured()) {
       return res.status(400).json({ error: 'Google Ads API not configured. Set GOOGLE_ADS_* environment variables.' });
     }
-
-    const campaigns = await getGoogleAds().syncCampaigns();
-    const performance = await getGoogleAds().syncDailyPerformance(7);
-    // Search terms throw here so a rolled-back snapshot (e.g. rows for a
-    // campaign missing locally) is reported, not counted as a success.
-    let searchTerms = [];
-    let searchTermsError = null;
+    const { runExclusive } = require('../utils/cron-lock');
+    const { runGoogleAdsDailySync } = require('../services/ads/google-ads-daily-sync');
+    let result;
     try {
-      searchTerms = await getGoogleAds().syncSearchTerms(30, { throwOnError: true });
+      result = await runExclusive('google-ads-sync', () => runGoogleAdsDailySync());
     } catch (err) {
-      searchTermsError = err.message;
+      if (err?.syncResult) return sendSyncResult(res, err.syncResult);
+      throw err;
     }
-
-    res.status(searchTermsError ? 502 : 200).json({
-      success: !searchTermsError,
-      synced: {
-        campaigns: campaigns.length,
-        performanceRows: performance.length,
-        searchTerms: searchTerms.length,
-      },
-      ...(searchTermsError ? { error: `Search terms not synced: ${searchTermsError}` } : {}),
-    });
+    if (result?.skipped) return res.status(409).json({ success: false, error: syncBusyError('Google Ads') });
+    return sendSyncResult(res, result);
   } catch (err) { next(err); }
 });
 
 // POST /api/admin/ads/sync/meta — pull Meta (Facebook/Instagram) campaigns +
 // daily insights into ad_campaigns/ad_performance_daily (platform='facebook').
+// Each Meta step takes its own cron lock inside meta-ads.js (meta-ads-campaigns,
+// meta-ads-performance); a held lock answers 409 instead of an empty success.
 router.post('/sync/meta', requireAdmin, async (req, res, next) => {
   try {
-    if (!getMetaAds().isConfigured()) {
+    const meta = getMetaAds();
+    if (!meta.isConfigured()) {
       return res.status(400).json({ error: 'Meta Ads API not configured. Set META_ADS_ACCESS_TOKEN + META_ADS_ACCOUNT_ID.' });
     }
-    const campaigns = await getMetaAds().syncCampaigns();
-    const performance = await getMetaAds().syncDailyPerformance(7);
-    res.json({
-      success: true,
-      synced: { campaigns: campaigns.length, performanceRows: performance.length },
-    });
+    const isBusy = (err) => Boolean(meta.SYNC_RUNNING) && err?.code === meta.SYNC_RUNNING;
+    let result;
+    try {
+      result = await runSyncSteps(META_SYNC_STEPS, meta, { rethrow: isBusy });
+    } catch (err) {
+      if (isBusy(err)) return res.status(409).json({ success: false, error: syncBusyError('Meta Ads') });
+      throw err;
+    }
+    return sendSyncResult(res, result);
   } catch (err) { next(err); }
 });
 

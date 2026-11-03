@@ -62,6 +62,8 @@ targets:
         NSLocationWhenInUseUsageDescription: "Waves Admin uses your location for Tap to Pay on iPhone, which needs it to approve card payments, and for field tools."
         # The staff pages upload photos and videos with the camera and library.
         NSCameraUsageDescription: "Take photos and videos for service reports."
+        # Hand-off lock: Face ID (or the passcode) takes the phone back.
+        NSFaceIDUsageDescription: "Waves Admin uses Face ID to unlock the admin screens when a customer hands the phone back."
         NSMicrophoneUsageDescription: "Record sound with service report videos."
         NSPhotoLibraryUsageDescription: "Attach photos and videos to service reports."
         # Stripe Terminal iOS 5.x validateInfoPlistForDiscoveryConfiguration

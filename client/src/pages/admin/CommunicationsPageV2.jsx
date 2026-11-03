@@ -837,7 +837,7 @@ function ConversationViewV2({
                 <MessageMediaV2 media={m.media} inverted={isOut} />{" "}
                 <div
                   className={cn(
-                    "flex items-center gap-1.5 mt-1",
+                    "flex flex-wrap items-center gap-1.5 mt-1",
                     isOut ? "justify-end" : "justify-start",
                   )}
                 >

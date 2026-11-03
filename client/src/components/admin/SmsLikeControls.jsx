@@ -5,7 +5,7 @@ import { formatETTime } from "../../lib/timezone";
 import { sendOfficeLike } from "../../lib/smsLikes";
 
 // GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button"): the like button under a
-// customer's newest text, the badge that shows who liked it, and the badges for
+// customer's newest text, the badge that shows who liked it, and the lines for
 // customer likes on our texts. Used by Messages and the Customer 360 thread.
 
 // A click texts a thumbs-up to the customer (the server's like route), so the
@@ -52,24 +52,34 @@ export function OfficeLikeBadge({ like }) {
   );
 }
 
-// The like badges a bubble shows: who liked a customer's text, or the
+// The like marks a bubble shows: who liked a customer's text, or the
 // customer's likes on ours (badges: the map from smsLikeThread, keyed by id).
 export function SmsLikeBadges({ message, badges }) {
   if (message?.direction === "inbound") return <OfficeLikeBadge like={message.officeLike} />;
-  return <CustomerReactionBadges badges={badges?.get(message?.id)} />;
+  return <CustomerReactionLines badges={badges?.get(message?.id)} />;
 }
 
-// The customer's likes on one of our texts (collapseCustomerReactions). The
-// emoji is the customer's own, from the message data.
-export function CustomerReactionBadges({ badges }) {
+// "Liked" for a thumbs-up, "Loved" for a heart, "Reacted" for any other emoji.
+export function reactionVerb(emoji) {
+  const bare = String(emoji || "").replace(/\ufe0f/g, "");
+  if (bare === "\u{1F44D}") return "Liked";
+  if (bare === "\u2764") return "Loved";
+  return "Reacted";
+}
+
+// The customer's likes on one of our texts (collapseCustomerReactions), one
+// short line each, e.g. "❤️ Loved · 4:33 PM". The emoji is the customer's
+// own, from the message data. Only quiet likes arrive here as lines; a like
+// that raised an alert stays a bubble.
+export function CustomerReactionLines({ badges }) {
   if (!badges?.length) return null;
   return (
-    <span className="inline-flex flex-wrap gap-1">
+    <>
       {badges.map((b) => (
-        <Badge key={b.id} tone="neutral" title="The customer reacted to this text">
-          {b.emoji}
-        </Badge>
+        <span key={b.id} className="block w-full basis-full text-ui-body text-white/70" title="The customer reacted to this text">
+          {[`${b.emoji} ${reactionVerb(b.emoji)}`, b.createdAt ? formatETTime(b.createdAt) : null].filter(Boolean).join(" · ")}
+        </span>
       ))}
-    </span>
+    </>
   );
 }

@@ -221,3 +221,37 @@ test('newsletter anti-join also excludes unscoped and marketing_newsletter rows'
   expect(fn).toContain(".orWhere('es.group_key', 'marketing_newsletter')");
 });
 
+
+// Owner 2026-11-03: a hand-fixed email left the Triage bounce card and the "bounce needs a
+// fix" alert open with a stale guess. Both now close on this one rule.
+describe('bouncedEmailReplaced — the bounce follow-ups close on one rule', () => {
+  const { bouncedEmailReplaced } = require('../utils/email-equivalence');
+  const BOUNCED = 'm.sample@example.net';
+
+  test('a different valid address in the field that bounced answers it', () => {
+    expect(bouncedEmailReplaced({ replacement: 'msample@example.net', bounced: [BOUNCED] })).toBe(true);
+    expect(bouncedEmailReplaced({ replacement: ' MSample@Example.net ', onFile: [null, ''], bounced: [BOUNCED] })).toBe(true);
+  });
+
+  test('the bounced address still on file anywhere keeps it open, in any case or spacing', () => {
+    expect(bouncedEmailReplaced({ replacement: 'M.Sample@example.net', bounced: [BOUNCED] })).toBe(false);
+    expect(bouncedEmailReplaced({ replacement: 'msample@example.net', onFile: [' m.sample@EXAMPLE.net'], bounced: [BOUNCED] })).toBe(false);
+    // Every bounced address on a card counts, the annotated ones too.
+    expect(bouncedEmailReplaced({ replacement: 'other@example.net', bounced: [BOUNCED, 'other@example.net'] })).toBe(false);
+  });
+
+  test('a Gmail dot or +tag spelling of the bounced inbox is the same inbox; other domains keep dots', () => {
+    expect(bouncedEmailReplaced({ replacement: 'msample@gmail.com', bounced: ['m.sample@gmail.com'] })).toBe(false);
+    expect(bouncedEmailReplaced({ replacement: 'm.sample+home@googlemail.com', bounced: ['msample@gmail.com'] })).toBe(false);
+    expect(bouncedEmailReplaced({ replacement: 'msample2@gmail.com', bounced: ['m.sample@gmail.com'] })).toBe(true);
+  });
+
+  test('an emptied or invalid field, or no bounced address, answers nothing', () => {
+    for (const replacement of [null, '', '   ', 'not-an-email', 'name@host']) {
+      expect(bouncedEmailReplaced({ replacement, bounced: [BOUNCED] })).toBe(false);
+    }
+    expect(bouncedEmailReplaced({ replacement: 'msample@example.net', bounced: [] })).toBe(false);
+    expect(bouncedEmailReplaced({ replacement: 'msample@example.net', bounced: [null, ' '] })).toBe(false);
+    expect(bouncedEmailReplaced()).toBe(false);
+  });
+});

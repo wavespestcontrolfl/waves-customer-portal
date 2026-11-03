@@ -224,6 +224,27 @@ describe('sync failure propagation (scheduler opt-in)', () => {
     ]);
   });
 
+  test('throwOnSkip: a held lock throws SYNC_RUNNING; default and scheduler callers still get []', async () => {
+    mockRunExclusive.mockImplementation(async () => ({ skipped: true, reason: 'lease_held' }));
+    try {
+      await expect(MetaAds.syncCampaigns()).resolves.toEqual([]);
+      await expect(MetaAds.syncCampaigns({ throwOnError: true })).resolves.toEqual([]);
+      await expect(MetaAds.syncCampaigns({ throwOnError: true, throwOnSkip: true }))
+        .rejects.toMatchObject({ code: MetaAds.SYNC_RUNNING, reason: 'lease_held' });
+      await expect(MetaAds.syncDailyPerformance(7, { throwOnError: true })).resolves.toEqual([]);
+      await expect(MetaAds.syncDailyPerformance(7, { throwOnError: true, throwOnSkip: true }))
+        .rejects.toMatchObject({ code: MetaAds.SYNC_RUNNING, message: expect.stringContaining('meta-ads-performance') });
+    } finally {
+      mockRunExclusive.mockImplementation((_n, fn) => fn());
+    }
+  });
+
+  test('throwOnSkip leaves a run that happened alone', async () => {
+    mockRunExclusive.mockImplementationOnce(async () => [{ id: 'row-1' }]);
+    await expect(MetaAds.syncDailyPerformance(7, { throwOnError: true, throwOnSkip: true })).resolves.toEqual([{ id: 'row-1' }]);
+    expect(mockRunExclusive).toHaveBeenCalledWith('meta-ads-performance', expect.any(Function));
+  });
+
   test('not configured stays a silent no-op even with throwOnError', async () => {
     delete process.env.META_ADS_ACCESS_TOKEN;
     global.fetch = jest.fn();

@@ -57,6 +57,13 @@ describe("collapseCustomerReactions", () => {
     expect(badges.size).toBe(0);
   });
 
+  it("keeps a loud like (the server sent no customerReaction) as a normal bubble", () => {
+    const loud = text("loud", "inbound", 'Liked "See you Tuesday"', 3, { likeable: false, customerReaction: null });
+    const { visible, badges } = collapseCustomerReactions([text("out", "outbound", "See you Tuesday", 2), loud]);
+    expect(visible.map((m) => m.id)).toEqual(["out", "loud"]);
+    expect(badges.size).toBe(0);
+  });
+
   it("attaches to the newest earlier copy of a repeated text", () => {
     const { badges } = collapseCustomerReactions([
       text("old", "outbound", "On the way", 1),

@@ -47,6 +47,8 @@ const mockDb = jest.fn(() => {
   return builder;
 });
 jest.mock('../models/db', () => mockDb);
+// POST /sync holds the 6 AM cron's lock; the stub db has no pool, so run the body directly.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
 const express = require('express');
 const adsRouter = require('../routes/admin-ads');

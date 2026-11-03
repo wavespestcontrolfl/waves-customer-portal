@@ -112,6 +112,45 @@ final class TerminalManager: NSObject {
         return confirmed
     }
 
+    // Saves a card with no charge: connects the reader if needed, retrieves
+    // the SetupIntent by its client secret, collects the card (Apple's tap
+    // sheet) and confirms it. Never touches a PaymentIntent or an amount.
+    //
+    // allowRedisplay is `.limited`: Waves only charges a saved card off-session
+    // for the plan or service it was saved for, and never shows it again in a
+    // checkout. `onCardRead` runs once the card is read and Apple's sheet closes.
+    func saveCard(clientSecret: String, onCardRead: () -> Void) async throws -> SetupIntent {
+        try await ensureConnected()
+        let intent: SetupIntent = try await withCheckedThrowingContinuation { cont in
+            Terminal.shared.retrieveSetupIntent(clientSecret: clientSecret) { intent, error in
+                if let error { cont.resume(throwing: error) }
+                else if let intent { cont.resume(returning: intent) }
+                else { cont.resume(throwing: NSError(domain: "wavespay", code: -1)) }
+            }
+        }
+        let collected: SetupIntent = try await withCheckedThrowingContinuation { cont in
+            Terminal.shared.collectSetupIntentPaymentMethod(intent, allowRedisplay: .limited) { intent, error in
+                if let error { cont.resume(throwing: error) }
+                else if let intent { cont.resume(returning: intent) }
+                else { cont.resume(throwing: NSError(domain: "wavespay", code: -1)) }
+            }
+        }
+        onCardRead()
+        return try await withCheckedThrowingContinuation { cont in
+            Terminal.shared.confirmSetupIntent(collected) { intent, error in
+                if let error { cont.resume(throwing: error) }
+                else if let intent { cont.resume(returning: intent) }
+                else { cont.resume(throwing: NSError(domain: "wavespay", code: -1)) }
+            }
+        }
+    }
+
+    // True when the customer closed Apple's tap sheet.
+    static func isCustomerCancel(_ error: Error) -> Bool {
+        let ns = error as NSError
+        return ns.domain == ErrorDomain && ns.code == ErrorCode.canceled.rawValue
+    }
+
     // MARK: - Private
 
     private func ensureConnected() async throws {

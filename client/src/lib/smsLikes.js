@@ -1,7 +1,7 @@
 import { adminFetch } from "../utils/admin-fetch";
 
 // GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button"): the office's like on a
-// customer text, and customer likes shown as badges on our texts. The server
+// customer text, and customer likes shown as short lines on our texts. The server
 // sends `smsLike` and the per-message like fields (officeLike,
 // customerReaction, likeable) only while the gate is on.
 
@@ -12,7 +12,7 @@ export function sendOfficeLike(messageId) {
 }
 
 // A thread (oldest to newest) as the inbox shows it: with the gate on,
-// customer likes folded into badges and the one text that gets the button;
+// customer likes folded into lines and the one text that gets the button;
 // off, unchanged.
 export function smsLikeThread(messages, on) {
   if (!on) return { visible: messages, badges: null, likeMessageId: null };
@@ -29,7 +29,9 @@ export function likeableMessageId(messages) {
   return newest.id;
 }
 
-// Customer likes become badges on our text they quote. Messages run oldest to
+// Quiet customer likes become lines on our text they quote (the server sends
+// customerReaction only for a quiet one; a like that raised an alert has none
+// and stays a bubble). Messages run oldest to
 // newest. A like attaches to the newest earlier text of ours, between the same
 // customer number and the same line of ours, whose body is exactly the quoted
 // text; a removal takes back that text's matching badge.
