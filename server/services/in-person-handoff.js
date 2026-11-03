@@ -118,7 +118,9 @@ async function buildHandoffBlock(req, { token, data }) {
 // (or an estimate that already carries a terms version) changes nothing.
 async function recordInPersonTerms({ visitId, technician, termsVersion, termsScope, consumerNoticeShown, ip = null, userAgent = null }) {
   if (termsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
-    return refusal(409, 'TERMS_VERSION_STALE', 'The terms were updated. Reload the page and read them again.');
+    // Same words as a scope change: the app relays only the message, and the
+    // page offers Reload on exactly that text.
+    return refusal(409, 'TERMS_VERSION_STALE', TERMS_CHANGED_MESSAGE);
   }
   // The scope the page showed ('plan' carries the annual rate review sentence, 'base'
   // does not); both share one version, so it is attested beside it, as the online

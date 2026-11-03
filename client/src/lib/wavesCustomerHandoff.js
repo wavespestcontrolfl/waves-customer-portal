@@ -44,6 +44,10 @@ function newRequestId() {
  * Ask the app to record the customer's acceptance of the estimate terms.
  * Resolves { ok: true } on 'ok', else { ok: false, message }. Never rejects.
  */
+// A scope change and a new terms version both need a reload before the
+// customer can accept: the page must show the terms they will be held to.
+const TERMS_RELOAD_CODES = new Set(['terms_changed', 'TERMS_VERSION_STALE']);
+
 export function requestTermsAcceptance({ termsVersion, termsScope, consumerNoticeShown }) {
   const requestId = newRequestId();
   return new Promise((resolve) => {
@@ -58,7 +62,7 @@ export function requestTermsAcceptance({ termsVersion, termsScope, consumerNotic
       if (detail.requestId !== requestId) return;
       finish(detail.status === 'ok'
         ? { ok: true }
-        : { ok: false, message: detail.message || NO_ANSWER, changed: detail.code === 'terms_changed' || detail.message === TERMS_CHANGED_MESSAGE });
+        : { ok: false, message: detail.message || NO_ANSWER, changed: TERMS_RELOAD_CODES.has(detail.code) || detail.message === TERMS_CHANGED_MESSAGE });
     }
     window.addEventListener(TERMS_EVENT, onAnswer);
     timer = setTimeout(() => finish({ ok: false, message: NO_ANSWER }), TERMS_TIMEOUT_MS);

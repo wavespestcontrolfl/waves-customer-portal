@@ -219,7 +219,7 @@ describe('recordInPersonTerms', () => {
 
   test('a version other than the current one is refused before anything is read', async () => {
     const result = await recordInPersonTerms(args({ termsVersion: 'v2026-01' }));
-    expect(result).toMatchObject({ ok: false, status: 409, code: 'TERMS_VERSION_STALE' });
+    expect(result).toMatchObject({ ok: false, status: 409, code: 'TERMS_VERSION_STALE', error: 'The terms changed. Reload this page to see them.' });
     expect(db).not.toHaveBeenCalled();
   });
 

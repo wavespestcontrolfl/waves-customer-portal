@@ -240,6 +240,20 @@ describe('SecureAppointmentPage hand-off mode', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
   });
 
+  it('a stale terms version also offers Reload and stops Save', async () => {
+    installBridge({ termsAnswer: { status: 'failed', message: 'The terms were updated.', code: 'TERMS_VERSION_STALE' } });
+    const fetchMock = installFetch({ ...READY, handoff: { terms: TERMS } });
+    render(<SecureAppointmentPage />);
+    fireEvent.click(await screen.findByLabelText(/I authorize Waves to charge this card/));
+    fireEvent.click(screen.getByLabelText('I accept estimate EST-2026-0001 and its terms.'));
+    const save = screen.getByRole('button', { name: 'Save card & secure my visit' });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
+    expect(await screen.findByRole('button', { name: 'Reload' })).toBeInTheDocument();
+    await waitFor(() => expect(save).toBeDisabled());
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/complete'))).toBe(false);
+  });
+
   it('shows no terms box when the server sends none', async () => {
     installFetch(READY);
     render(<SecureAppointmentPage />);
