@@ -143,12 +143,30 @@ describe('enforcement answers', () => {
 describe('dark gate (server/index.js)', () => {
   test('accept-terms is answered 404 while the gate is dark, ahead of the global limiter and the body parsers', () => {
     const source = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
-    const guard = source.indexOf("/accept-terms\\/?$/.test(req.path)");
+    const guard = source.indexOf("/accept-terms\\/?$/i.test(req.path)");
     expect(guard).toBeGreaterThan(-1);
     expect(source.slice(guard, guard + 200)).toContain("inPersonCardLive()");
     expect(guard).toBeLessThan(source.indexOf("app.use('/api/', limiter);"));
     expect(guard).toBeLessThan(source.indexOf("app.use(express.json({ limit: '1mb'"));
     // The privacy headers are set by the mount just above it.
     expect(source.lastIndexOf("res.set('Cache-Control', 'private, no-store');", guard)).toBeGreaterThan(-1);
+  });
+
+  test('the guard matches every path Express routes to accept-terms (routing is case-insensitive)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+    const literal = source.match(/\/\^\\\/\[\^\/\]\+\\\/accept-terms\\\/\?\$\/i/);
+    expect(literal).not.toBeNull();
+    const re = new RegExp(literal[0].slice(1, -2), 'i');
+    const express = require('express');
+    const routed = [];
+    const app = express.Router();
+    app.post('/:token/accept-terms', (req) => routed.push(req.path));
+    for (const p of [`/${TOKEN}/accept-terms`, `/${TOKEN}/ACCEPT-TERMS`, `/${TOKEN}/Accept-Terms/`]) {
+      expect(re.test(p)).toBe(true);
+      app.handle({ method: 'POST', url: p, headers: {} }, {}, () => {});
+    }
+    // Express routes all three to the handler, and the guard catches all three.
+    expect(routed).toHaveLength(3);
+    for (const p of [`/${TOKEN}/accept-terms-x`, `/${TOKEN}/complete`, '/accept-terms']) expect(re.test(p)).toBe(false);
   });
 });

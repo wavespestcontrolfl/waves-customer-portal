@@ -469,9 +469,10 @@ app.use('/api/public/secure-card', (req, res, next) => {
 });
 // Book at the Table (GATE_IN_PERSON_CARD): while dark, POST /:token/accept-terms is a
 // uniform 404 before the global limiter and the body parsers, never a 429/413/400
-// (privacy headers are already set above). Call-time gate read.
+// (privacy headers are already set above). Call-time gate read. Case-insensitive, as
+// Express routing is: /ACCEPT-TERMS reaches the same route.
 app.use('/api/public/secure-card', (req, res, next) => {
-  if (req.method === 'POST' && /^\/[^/]+\/accept-terms\/?$/.test(req.path)
+  if (req.method === 'POST' && /^\/[^/]+\/accept-terms\/?$/i.test(req.path)
     && !require('./config/feature-gates').inPersonCardLive()) {
     return res.status(404).json({ error: 'Not found' });
   }
