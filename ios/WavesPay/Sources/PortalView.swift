@@ -241,6 +241,8 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     private var downloads: [ObjectIdentifier: URL] = [:]
     private var flowWatch: AnyCancellable?
     private let googleSignIn = GoogleSignInSession()
+    // Save-card mode and the hand-off lock (NativeBridge.swift).
+    private lazy var bridge = NativeBridge(paymentIsOpen: { [weak self] in self?.app.flow.isActive ?? false })
 
     init(app: AppState) {
         self.app = app
@@ -268,6 +270,7 @@ final class PortalCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         case "googleSignIn": startGoogleSignIn(body, from: sender)
         case "badge": StaffAlerts.shared.setBadge((body["count"] as? Int) ?? 0)
         case "signOut": StaffAlerts.shared.signOut()
+        case let type? where NativeBridge.messageTypes.contains(type): bridge.handle(body, from: sender)
         default: break
         }
     }

@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0F177742641723078AB6BCA4 /* WavesPayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAA9FEDF1B265FBD0000DBBE /* WavesPayApp.swift */; };
 		2FC5085502A029C40825F4AC /* StripeTerminal in Frameworks */ = {isa = PBXBuildFile; productRef = 8053A732CDA3023149165611 /* StripeTerminal */; };
+		3FAEE8D79C0CDE65D23C63FF /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B9C8A65672429056EA1F15D /* NativeBridge.swift */; };
 		5B4CE5DF257AE388559CE024 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F66184170B2FD174561E1F62 /* RootView.swift */; };
 		693F6579FC4F8E662993A132 /* HowToTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72AB2068EA75B9DD83360CE /* HowToTap.swift */; };
 		71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1C0BACE518171B312F5B32 /* CollectView.swift */; };
@@ -17,16 +18,21 @@
 		A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5879EC992F1DFD981D2C3E75 /* Brand.swift */; };
 		ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8F12848DEA3C5874AD613B3 /* PortalView.swift */; };
 		AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F257791252A99A45F5501281 /* TerminalManager.swift */; };
+		D309C1083AEC9EA81C1B28B4 /* HandoffLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 426214503520A893CF644F6B /* HandoffLock.swift */; };
 		D99E615FC3F554C7F4A69C6B /* StaffAlerts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B697676CF8667C3A3F9C626B /* StaffAlerts.swift */; };
+		D9FB03251C3C9A3B41F3A971 /* SaveCardFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 351DD25470E3B279414584FC /* SaveCardFlow.swift */; };
 		E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F12D9BA969C35A97B98616 /* Keychain.swift */; };
 		F8EAA6884B0B6828AE6CF933 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5B9CD87D59328DCBC2F6C369 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		351DD25470E3B279414584FC /* SaveCardFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveCardFlow.swift; sourceTree = "<group>"; };
 		382A9E95DB30F9858AEDB35D /* API.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = API.swift; sourceTree = "<group>"; };
+		426214503520A893CF644F6B /* HandoffLock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandoffLock.swift; sourceTree = "<group>"; };
 		5879EC992F1DFD981D2C3E75 /* Brand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Brand.swift; sourceTree = "<group>"; };
 		5B9CD87D59328DCBC2F6C369 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		78F12D9BA969C35A97B98616 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		7B9C8A65672429056EA1F15D /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
 		7D1C0BACE518171B312F5B32 /* CollectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectView.swift; sourceTree = "<group>"; };
 		95C2F50AD33493B67A02D814 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		B697676CF8667C3A3F9C626B /* StaffAlerts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaffAlerts.swift; sourceTree = "<group>"; };
@@ -65,10 +71,13 @@
 				95C2F50AD33493B67A02D814 /* AppState.swift */,
 				5879EC992F1DFD981D2C3E75 /* Brand.swift */,
 				7D1C0BACE518171B312F5B32 /* CollectView.swift */,
+				426214503520A893CF644F6B /* HandoffLock.swift */,
 				F72AB2068EA75B9DD83360CE /* HowToTap.swift */,
 				78F12D9BA969C35A97B98616 /* Keychain.swift */,
+				7B9C8A65672429056EA1F15D /* NativeBridge.swift */,
 				C8F12848DEA3C5874AD613B3 /* PortalView.swift */,
 				F66184170B2FD174561E1F62 /* RootView.swift */,
+				351DD25470E3B279414584FC /* SaveCardFlow.swift */,
 				B697676CF8667C3A3F9C626B /* StaffAlerts.swift */,
 				F257791252A99A45F5501281 /* TerminalManager.swift */,
 				CAA9FEDF1B265FBD0000DBBE /* WavesPayApp.swift */,
@@ -173,10 +182,13 @@
 				86A9F2A9DFE673C345410D1D /* AppState.swift in Sources */,
 				A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */,
 				71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */,
+				D309C1083AEC9EA81C1B28B4 /* HandoffLock.swift in Sources */,
 				693F6579FC4F8E662993A132 /* HowToTap.swift in Sources */,
 				E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */,
+				3FAEE8D79C0CDE65D23C63FF /* NativeBridge.swift in Sources */,
 				ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */,
 				5B4CE5DF257AE388559CE024 /* RootView.swift in Sources */,
+				D9FB03251C3C9A3B41F3A971 /* SaveCardFlow.swift in Sources */,
 				D99E615FC3F554C7F4A69C6B /* StaffAlerts.swift in Sources */,
 				AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */,
 				0F177742641723078AB6BCA4 /* WavesPayApp.swift in Sources */,
@@ -259,7 +271,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 11;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -267,7 +279,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.7;
+				MARKETING_VERSION = 1.9;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;
@@ -341,7 +353,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 11;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -349,7 +361,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.7;
+				MARKETING_VERSION = 1.9;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;

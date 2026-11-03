@@ -17,7 +17,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.7</string>
+	<string>1.9</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -30,13 +30,15 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>8</string>
+	<string>11</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Bluetooth is not used by Waves Admin, but the Stripe Terminal SDK requires this key.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Take photos and videos for service reports.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Waves Admin uses Face ID to unlock the admin screens when a customer hands the phone back.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Waves Admin uses your location for Tap to Pay on iPhone, which needs it to approve card payments, and for field tools.</string>
 	<key>NSMicrophoneUsageDescription</key>

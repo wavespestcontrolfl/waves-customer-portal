@@ -40,8 +40,8 @@ targets:
       path: Resources/Info.plist
       properties:
         CFBundleDisplayName: Waves Admin
-        CFBundleShortVersionString: "1.7"
-        CFBundleVersion: "8"
+        CFBundleShortVersionString: "1.9"
+        CFBundleVersion: "11"
         LSRequiresIPhoneOS: true
         UILaunchScreen:
           UIColorName: ""
@@ -58,6 +58,8 @@ targets:
         NSLocationWhenInUseUsageDescription: "Waves Admin uses your location for Tap to Pay on iPhone, which needs it to approve card payments, and for field tools."
         # The staff pages upload photos and videos with the camera and library.
         NSCameraUsageDescription: "Take photos and videos for service reports."
+        # Hand-off lock: Face ID (or the passcode) takes the phone back.
+        NSFaceIDUsageDescription: "Waves Admin uses Face ID to unlock the admin screens when a customer hands the phone back."
         NSMicrophoneUsageDescription: "Record sound with service report videos."
         NSPhotoLibraryUsageDescription: "Attach photos and videos to service reports."
         # Stripe Terminal iOS 5.x validateInfoPlistForDiscoveryConfiguration
@@ -79,8 +81,8 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Resources/WavesPay.entitlements
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
-        CURRENT_PROJECT_VERSION: 8
-        MARKETING_VERSION: "1.7"
+        CURRENT_PROJECT_VERSION: 11
+        MARKETING_VERSION: "1.9"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
     dependencies:

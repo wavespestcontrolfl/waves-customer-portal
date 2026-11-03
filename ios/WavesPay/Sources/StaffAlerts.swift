@@ -75,6 +75,7 @@ final class StaffAlerts {
     // and the server deactivates the row); the next sign-in registers again.
     func signOut() {
         signedIn = false
+        HandoffLock.shared.clear()
         UIApplication.shared.unregisterForRemoteNotifications()
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         setBadge(0)
@@ -118,7 +119,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound, .badge]
+        // Hand-off mode (a customer holds the phone): no banner, no sound.
+        HandoffLock.presentation(handoffActive: await MainActor.run { HandoffLock.shared.isActive })
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {

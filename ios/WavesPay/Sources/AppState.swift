@@ -65,6 +65,9 @@ final class AppState: ObservableObject {
         // wavespay://google-signin only ends a Google sign-in, which the sign-in
         // sheet reads itself; it never starts a payment.
         if url.host == GoogleSignInSession.callbackHost { return }
+        // wavespay://save-card only starts from the page's bridge message; a
+        // link from outside the app never saves a card.
+        if url.host == "save-card" { NativeBridge.showOpenFromAppNotice(); return }
         guard Self.handoffToken(from: url) != nil else { return }
         startCollect(from: url, requestId: nil)
     }
