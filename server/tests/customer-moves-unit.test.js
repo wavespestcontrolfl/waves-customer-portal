@@ -142,6 +142,23 @@ describe('the receipt sentences', () => {
     ]);
   });
 
+  // Moving PR 2b (GATE_MOVING_PAUSE, owner Q4): the no-address receipt follows the pause lane
+  // (customer-moves pauseLane), so it never promises a pause the job will not run.
+  test('dates only: the pause lane picks the sentence, and each needs a move-out date', () => {
+    const noAddress = view({ addressOnFile: false, verdict: null, moveOutDate: '2026-11-20' });
+    expect(Moves.receiptFor(noAddress, 'auto')).toEqual([
+      'Thanks, Chris. We have your move dates. We pause your visits after Nov 20, 2026 until we have your new address, for up to 60 days. When you know it, open this same link and add it.',
+    ]);
+    expect(Moves.receiptFor(noAddress, 'office')).toEqual([
+      'Thanks, Chris. We have your move dates. We will contact you about the visits booked after Nov 20, 2026. When you know your new address, open this same link and add it.',
+    ]);
+    const plain = ['Thanks, Chris. We have your move dates. When you know your new address, open this same link and add it.'];
+    expect(Moves.receiptFor(noAddress, null)).toEqual(plain);
+    expect(Moves.receiptFor({ ...noAddress, moveOutDate: null }, 'auto')).toEqual(plain);
+    // An address on file never reads a pause sentence.
+    expect(Moves.receiptFor(view({ moveOutDate: '2026-11-20' }), 'auto')[0]).not.toMatch(/pause/);
+  });
+
   test('no receipt sentence carries a dollar sign', () => {
     for (const v of [view(), view({ verdict: 'out_of_area' }), view({ addressOnFile: false }), view({ verdict: 'unverified' })]) {
       expect(Moves.receiptFor(v).join(' ')).not.toMatch(/\$/);
