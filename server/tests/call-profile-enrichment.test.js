@@ -301,14 +301,17 @@ describe('household safety facts', () => {
   const { safetyFactsFrom, safetyUpdates } = _test;
   const DAY = '2026-11-02T15:00:00Z';
 
-  function setupRow(row) {
+  function setupRow(row, { phone = null } = {}) {
     isEnabled.mockReturnValue(true);
     const writes = [];
     db.mockImplementation((table) => {
       const builder = {
         where: () => builder,
         forUpdate: () => builder,
-        first: async () => (table === 'property_preferences' ? row : null),
+        first: async () => {
+          if (table === 'property_preferences') return row;
+          return table === 'customers' && phone ? { phone } : null;
+        },
         update: async (u) => { writes.push({ table, op: 'update', u }); return 1; },
         insert: async (u) => { writes.push({ table, op: 'insert', u }); },
       };
@@ -390,7 +393,37 @@ describe('household safety facts', () => {
     expect(u).not.toHaveProperty('chemical_sensitivities');
   });
 
-  test('safety facts are written even when the caller ID gate withholds access notes', async () => {
+  test('with the caller ID gate on, a caller whose number is not on file files no safety facts (Codex security #7529)', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setupRow(null, { phone: '+19415550100' });
+    try {
+      await enrichFromCall({
+        customerId: 'c1',
+        callCreatedAt: DAY,
+        callerPhone: '+19415559999',
+        extraction: { property: { access_notes: 'gate code is 4545', no_spray_areas: 'herb garden', chemical_sensitivity_note: 'asthma, reacts to sprays', household_children_or_elderly: 'two toddlers' } },
+      });
+    } finally { callEnrichCodesRequireAniLive.mockReturnValue(false); }
+    expect(writes).toEqual([]);
+  });
+
+  test('with the caller ID gate on, the primary phone calling files the safety facts', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setupRow(null, { phone: '+19415550100' });
+    try {
+      await enrichFromCall({
+        customerId: 'c1',
+        callCreatedAt: DAY,
+        callerPhone: '(941) 555-0100',
+        extraction: { property: { no_spray_areas: 'herb garden', chemical_sensitivity_note: 'asthma, reacts to sprays' } },
+      });
+    } finally { callEnrichCodesRequireAniLive.mockReturnValue(false); }
+    const row = writes.find((w) => w.op === 'insert').u;
+    expect(row.special_instructions).toContain('Do not spray: herb garden');
+    expect(row.chemical_sensitivities).toBe(true);
+  });
+
+  test('a pet fact still files when the caller ID gate withholds the safety facts', async () => {
     callEnrichCodesRequireAniLive.mockReturnValue(true);
     const writes = setupRow(null);
     try {
@@ -398,11 +431,11 @@ describe('household safety facts', () => {
         customerId: 'c1',
         callCreatedAt: DAY,
         callerPhone: '+19415559999',
-        extraction: { property: { access_notes: 'gate code is 4545', no_spray_areas: 'herb garden' } },
+        extraction: { property: { no_spray_areas: 'herb garden', pets_on_property: { details: 'one cat' } } },
       });
     } finally { callEnrichCodesRequireAniLive.mockReturnValue(false); }
     const row = writes.find((w) => w.op === 'insert').u;
-    expect(row.special_instructions).toContain('Do not spray: herb garden');
-    expect(row.access_notes).toBeUndefined();
+    expect(row.pet_details).toContain('one cat');
+    expect(row).not.toHaveProperty('special_instructions');
   });
 });

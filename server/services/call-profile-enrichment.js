@@ -149,6 +149,20 @@ async function callerPhoneOnFile(customerId, callerPhone) {
   return !!cust && last10(cust.phone) === key;
 }
 
+// Codes, access notes and the household safety facts (kids/elderly, do-not-
+// spray areas, chemical sensitivity) reach the technician's job card with no
+// office accept, so with GATE_CALL_ENRICH_CODES_REQUIRE_ANI on they are kept
+// only when the caller's own number is on the account: a caller who only SPOKE
+// a customer's number must not file a false "do not spray" or sensitivity note
+// on that account (Codex security #7529). Otherwise both come back null (pets
+// and internal color are unchanged); the office still hears the call.
+async function callerVerifiedFacts(customerId, callerPhone, { accessNotes, safety }) {
+  if (!(accessNotes || safety) || !callEnrichCodesRequireAniLive()) return { accessNotes, safety };
+  if (await callerPhoneOnFile(customerId, callerPhone)) return { accessNotes, safety };
+  logger.warn(`[profile-enrichment] customer ${customerId}: caller ID is not the primary phone — access codes, access notes and safety facts not written`);
+  return { accessNotes: null, safety: null };
+}
+
 /**
  * Enrich a customer's profile from a processed call's extraction.
  * `callerPhone` is the call's caller ID (ANI); it matters only with
@@ -160,21 +174,12 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   if (!customerId || !extraction) return { applied: [] };
   const applied = [];
   const prop = extraction.property || {};
-  let accessNotes = prop.access_notes || null;
   const pets = prop.pets_on_property || null;
-  const safety = safetyFactsFrom(prop);
 
   try {
-    if (accessNotes && callEnrichCodesRequireAniLive()) {
-      // Codes and access notes reach the technician's job card with no office
-      // accept, so they are written only when the caller's own number is on the
-      // account. Otherwise skip them (pets and internal color are unchanged);
-      // the office still hears the call, and the SMS path files codes for accept.
-      if (!(await callerPhoneOnFile(customerId, callerPhone))) {
-        logger.warn(`[profile-enrichment] customer ${customerId}: caller ID is not the primary phone — access codes and notes not written`);
-        accessNotes = null;
-      }
-    }
+    const { accessNotes, safety } = await callerVerifiedFacts(customerId, callerPhone, {
+      accessNotes: prop.access_notes || null, safety: safetyFactsFrom(prop),
+    });
     if (accessNotes || pets || safety) {
       // Same customer preference lock every preference writer holds (portal
       // saves, merges, SMS capture): the row read below is then current, not
