@@ -47,6 +47,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
+const { raiserFor } = require('../admin-alert-injected');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { formatETDate, etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -228,11 +229,22 @@ async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promis
   const due = promised ? ` (due ${formatETDate(promised)})` : '';
   const body = `Amazon shipped ${what} on ${formatETDate(new Date(email.received_at))}${due} but never sent a delivery confirmation, `
     + "so it wasn't added. If it arrived, log it by hand.";
-  await notifyAdmin('inventory', 'Amazon delivery not confirmed', body, {
+  // Raised through raiseAdminAlert (alert step E2): same category, bell tag, dedupe key and link as before.
+  // `notifyAdmin` is the injected old-shape notifier (tests); none means the real one.
+  await raiserFor(notifyAdmin)('inventory', {
+    area: 'Inventory',
+    action: 'check an Amazon delivery that never confirmed',
+    why: 'Amazon sent no delivery confirmation, so the stock was not added; if it arrived, log it by hand.',
+    severity: 'needs-you',
     link: '/admin/inventory?tab=products',
+    subject: { type: 'check', id: `purchase-receipt-undelivered:${parsed.shipmentId}` },
+    doneWhen: 'delivery_logged_by_hand',
+    who: 'person',
+  }, {
     bell: true,
     dedupeKey: `purchase-receipt-undelivered:${parsed.shipmentId}`,
     trx,
+    detail: body,
     metadata: { emailId: email.id, shipmentId: parsed.shipmentId, productIds: stocked.map(({ product }) => product.id) },
   });
 }

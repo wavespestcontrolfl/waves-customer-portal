@@ -28,6 +28,7 @@ const { savepointRead } = require('../../utils/savepoint-read');
 const { gateEnvValue, gateEnvTimestamp, productIntakeGuardLive } = require('../../config/feature-gates');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
+const { raiserFor } = require('../admin-alert-injected');
 const { normalizeForMatch, containsWholeWords, variantWordsMissingFromName } = require('./product-matcher');
 const { isPesticideCategory } = require('../epa-reg-number');
 const { findEpaRegistrationByName } = require('../epa-product-label');
@@ -1207,9 +1208,54 @@ function sizesAgreeAcrossUnits(qtyA, unitA, qtyB, unitB) {
   return converted != null && sizesAgree(converted, qtyB);
 }
 
-async function ringBell(notifyAdmin, { lineId, emailId, status, title, body, link, trx }) {
-  await notifyAdmin('inventory', title, body, {
-    link: link || INVENTORY_LINK, bell: true, dedupeKey: `purchase-receipt:${lineId}`, trx, metadata: { emailId, status },
+// What a person does for each line the agent hands over (the receipt lane's held statuses
+// come from sweep.js: HELD_WHY / heldAction). `why` is one sentence; the full text rides in detail.
+const AGENT_BELL_PARTS = {
+  agent_equipment: {
+    action: 'check a purchase that looks like equipment',
+    why: 'It looks like equipment, not stock; add it to the equipment list if you are keeping it.',
+    doneWhen: 'equipment_reviewed',
+  },
+  agent_unsure: {
+    action: 'log a purchase the agent could not add',
+    why: 'The agent could not place this purchase, so log it by hand if it is stock.',
+    doneWhen: 'line_logged_by_hand',
+  },
+  possible_duplicate: {
+    action: 'check the count for a possible duplicate',
+    why: 'A manual restock or count was logged around then, so check the count.',
+    doneWhen: 'count_checked',
+  },
+};
+
+// A logged line is information only, unless a live restock request may cover it: then a person
+// must cancel that request or the stock is added twice. `by` names who logged it.
+function loggedBellParts(openRequest, by) {
+  return openRequest
+    ? { action: 'check the restock request for a logged purchase', why: `The ${by} added stock; an open restock request may cover it.`, severity: 'needs-you', doneWhen: 'restock_request_closed' }
+    : { action: `${by} logged a purchase`, why: `The ${by} added stock for a purchase and nothing else is needed.`, severity: 'fyi', doneWhen: 'already_done' };
+}
+
+// Raised through raiseAdminAlert (alert step E2): the same category, bell tag, dedupe key and link as
+// before. An FYI (a logged line with no open request) keeps its row through fyiRow. `notifyAdmin` is the
+// injected old-shape notifier (tests); none means the real one.
+async function ringBell(notifyAdmin, { lineId, emailId, status, action, why, doneWhen, severity = 'needs-you', body, link, trx }) {
+  await raiserFor(notifyAdmin)('inventory', {
+    area: 'Inventory',
+    action,
+    why,
+    severity,
+    link: link || INVENTORY_LINK,
+    subject: { type: 'check', id: `purchase-receipt:${lineId}` },
+    doneWhen,
+    who: 'person',
+  }, {
+    bell: true,
+    fyiRow: severity === 'fyi',
+    dedupeKey: `purchase-receipt:${lineId}`,
+    trx,
+    detail: body,
+    metadata: { emailId, status },
   });
 }
 
@@ -1270,13 +1316,13 @@ async function settleTerminalKind(trx, { lineId, line, email, decision }, notify
   if (decision.status === 'agent_equipment') {
     const linked = await equipmentBell(trx, { lineId, line });
     await ringBell(notifyAdmin, {
-      lineId, emailId: email.id, status: decision.status, title: 'Inventory agent: equipment, not stock',
+      lineId, emailId: email.id, status: decision.status, ...AGENT_BELL_PARTS.agent_equipment,
       body: linked?.body || `"${line.raw_title}" wasn't added: looks like equipment, not stock — add it to the equipment list if you're keeping it.`,
       link: linked?.link || null, trx,
     });
   } else if (decision.status === 'agent_unsure') {
     await ringBell(notifyAdmin, {
-      lineId, emailId: email.id, status: decision.status, title: 'Inventory agent: not added',
+      lineId, emailId: email.id, status: decision.status, ...AGENT_BELL_PARTS.agent_unsure,
       body: `"${line.raw_title}" wasn't added: ${decision.reason}. Log it by hand if it's stock.${closestGuessText(decision.suggestion) || ''}`, trx,
     });
   }
@@ -1546,7 +1592,7 @@ async function findIdentityOrDuplicateHold(trx, { line, email, decision, product
   }
   if (await findPossibleDuplicateMovement(trx, productId, email.received_at)) {
     return {
-      status: 'possible_duplicate', title: 'Inventory agent: possible duplicate',
+      status: 'possible_duplicate',
       body: 'A manual restock or count was logged around the same time, so check the count.',
     };
   }
@@ -1580,7 +1626,7 @@ async function recordHold(trx, { line, lineId, email, decision, hold }, notifyAd
       : {}),
   });
   await ringBell(notifyAdmin, {
-    lineId, emailId: email.id, status: hold.status, title: hold.title || 'Inventory agent: not added',
+    lineId, emailId: email.id, status: hold.status, ...(AGENT_BELL_PARTS[hold.status] || AGENT_BELL_PARTS.agent_unsure),
     body: `"${line.raw_title}" wasn't added${hold.status === 'possible_duplicate' ? '.' : ':'} ${hold.body}`, trx,
   });
   return { applied: true, status: hold.status };
@@ -1629,7 +1675,7 @@ async function commitStockMovement(trx, { line, lineId, vendor, email, decision,
     .where({ product_id: productId }).whereIn('status', LIVE_RESTOCK_STATUSES).first('id');
   const { openRestockRequestNote } = require('./sweep');
   await ringBell(notifyAdmin, {
-    lineId, emailId: email.id, status: 'logged', title: 'Inventory agent logged a purchase',
+    lineId, emailId: email.id, status: 'logged', ...loggedBellParts(Boolean(liveRequest), 'agent'),
     body: `${result.product.name} +${decision.amount} ${displayUnit(decision.unit)}`
       + `${catalogChangeNote ? ` — ${catalogChangeNote}` : ''} (line ${String(lineId).slice(0, 8)}).`
       + `${liveRequest ? ` ${openRestockRequestNote(result.product.name)}` : ''}`,
@@ -1873,7 +1919,7 @@ async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown
       agent_decision: { kind: 'unsure', reason: reasonText }, agent_decided_at: new Date(),
     });
     await ringBell(notifyAdmin, {
-      lineId, emailId: line.email_id, status: 'agent_unsure', title: 'Inventory agent: not added',
+      lineId, emailId: line.email_id, status: 'agent_unsure', ...AGENT_BELL_PARTS.agent_unsure,
       body: `"${line.raw_title}" wasn't added: the agent couldn't resolve it after ${attempts} tries (${reasonText}). Log it by hand if it's stock.`, trx,
     });
     return { status: 'agent_unsure' };
@@ -1898,11 +1944,13 @@ async function postThroughRules(trx, { locked, email, notifyAdmin }) {
   await trx('purchase_receipt_lines').where({ id: locked.id }).update({
     agent_decision: { ...decisionRecord(decision), handoffFrom: locked.agent_decision?.handoffFrom || null }, agent_decided_at: new Date(),
   });
-  const { HELD_REASONS, openRestockRequestNote } = require('./sweep');
+  const { HELD_REASONS, HELD_WHY, heldAction, heldDoneWhen, openRestockRequestNote } = require('./sweep');
   const logged = outcome.status === 'logged';
   await ringBell(notifyAdmin, {
     lineId: locked.id, emailId: email.id, status: outcome.status,
-    title: logged ? 'Purchase logged' : 'Purchase not added',
+    ...(logged
+      ? loggedBellParts(Boolean(outcome.hasOpenRestockRequest), 'receipt rules')
+      : { action: heldAction(outcome.status, 'purchase'), why: HELD_WHY[outcome.status], doneWhen: heldDoneWhen(outcome.status) }),
     body: logged
       ? `${outcome.product.name} +${outcome.receivedQty} ${displayUnit(outcome.receivedUnit)} by the receipt rules (line ${String(locked.id).slice(0, 8)}).`
         + `${outcome.hasOpenRestockRequest ? ` ${openRestockRequestNote(outcome.product.name)}` : ''}`
@@ -2070,7 +2118,7 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
   // physical count) closes without stock (see processOneLine).
   const since = gateEnvTimestamp(SINCE_ENV);
   if (!since) return { skipped: 'no_since' };
-  const notify = notifyAdmin || ((...args) => require('../notification-service').notifyAdmin(...args));
+  const notify = notifyAdmin;
   const dispatch = llm || dispatchWithFallback;
 
   const lines = await conn('purchase_receipt_lines').where({ status: 'agent_pending' }).orderBy('created_at', 'asc').limit(limit);
@@ -2141,8 +2189,8 @@ async function drainAgentQueue({ conn = db, notifyAdmin, limit = DRAIN_BATCH_LIM
   // staff to log it by hand.
   const since = gateEnvTimestamp(SINCE_ENV);
   if (!since) return { skipped: 'no_since' };
-  const { HELD_REASONS } = require('./sweep');
-  const notify = notifyAdmin || ((...args) => require('../notification-service').notifyAdmin(...args));
+  const { HELD_REASONS, HELD_WHY, heldAction, heldDoneWhen } = require('./sweep');
+  const notify = notifyAdmin;
   const lines = await conn('purchase_receipt_lines').where({ status: 'agent_pending' }).orderBy('created_at', 'asc').limit(limit);
   const totals = { drained: 0, errors: 0 };
   for (const line of lines) {
@@ -2171,7 +2219,8 @@ async function drainAgentQueue({ conn = db, notifyAdmin, limit = DRAIN_BATCH_LIM
         await trx('purchase_receipt_lines').where({ id: locked.id }).update({ status: restoredStatus });
         if (HELD_REASONS[restoredStatus]) {
           await ringBell(notify, {
-            lineId: locked.id, emailId: locked.email_id, status: restoredStatus, title: 'Inventory agent: not added',
+            lineId: locked.id, emailId: locked.email_id, status: restoredStatus,
+            action: heldAction(restoredStatus, 'purchase'), why: HELD_WHY[restoredStatus], doneWhen: heldDoneWhen(restoredStatus),
             body: `"${locked.raw_title}" wasn't added: ${HELD_REASONS[restoredStatus]}`, trx,
           });
         }
