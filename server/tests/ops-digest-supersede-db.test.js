@@ -78,16 +78,34 @@ maybeDescribe('ops digest supersede (live Postgres)', () => {
     expect((await state()).filter((r) => r.open).map((r) => r.id)).toEqual([standing.id]);
   });
 
-  test('leaves other keys, ops-crons rows and rows a person closed alone', async () => {
+  test('leaves other keys, ops-crons rows and rows a system closer already closed alone', async () => {
     const other = await add(48, { opsKey: `${key}-other` });
     const cron = await add(48, { source: 'ops-crons' });
-    const personDone = await add(48, {}, { done_at: new Date(), done_by: '42', resolution: 'Handled' });
+    const systemDone = await add(48, {}, { done_at: new Date(), done_by: 'relevance', resolution: 'Cleared earlier' });
     const fresh = await add(0);
     await digest.supersedeOlderDigests({ key, row: fresh, conn: trx, enabled: true });
-    const after = await trx('notifications').whereIn('id', [other.id, cron.id, personDone.id]).select('id', 'done_at', 'done_by', 'resolution');
+    const after = await trx('notifications').whereIn('id', [other.id, cron.id, systemDone.id]).select('id', 'done_at', 'done_by', 'resolution');
     const byId = new Map(after.map((r) => [r.id, r]));
     expect(byId.get(other.id).done_at).toBeNull();
     expect(byId.get(cron.id).done_at).toBeNull();
-    expect(byId.get(personDone.id)).toMatchObject({ done_by: '42', resolution: 'Handled' });
+    expect(byId.get(systemDone.id)).toMatchObject({ done_by: 'relevance', resolution: 'Cleared earlier' });
+  });
+
+  test('an older row a person closed is taken over: stays Done, keeps their resolution, and a stale Reopen is refused', async () => {
+    const NotificationService = require('../services/notification-service');
+    const doneAt = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const personDone = await add(48, {}, { done_at: doneAt, done_by: '42', resolution: 'Handled' });
+    const fresh = await add(0);
+    expect(await digest.supersedeOlderDigests({ key, row: fresh, conn: trx, enabled: true })).toBe(1);
+
+    const [row] = await trx('notifications').where({ id: personDone.id });
+    expect(row.done_at.getTime()).toBe(doneAt.getTime());
+    expect(row.resolution).toBe('Handled');
+    expect(row.done_by).toBe(key);
+    expect(row.metadata).toMatchObject({ resolved: true, supersededBy: String(fresh.id) });
+    await expect(NotificationService.reopenAdminDone(personDone.id, { expectedDoneAt: doneAt.toISOString() }, trx)).resolves.toBe('not_reopenable');
+    expect((await trx('notifications').where({ id: personDone.id }).first('done_at')).done_at).not.toBeNull();
+    // a second run writes nothing more
+    expect(await digest.supersedeOlderDigests({ key, row: fresh, conn: trx, enabled: true })).toBe(0);
   });
 });

@@ -641,7 +641,8 @@ const SUPERSEDED_RESOLUTION = 'Replaced by a newer digest from the same check';
 // with a "Replaced by" line and the producer's key as done_by, the way the
 // follow-up pager and the procurement bells close their older copy. That also
 // clears a backlog the first time it runs. A row a person already closed is
-// left alone.
+// taken over by the system closer (kept Done, person's resolution kept, no
+// Reopen), a row a system closer closed is left alone.
 // A quiet row (the ring-only-on-change test found nothing new) never takes
 // the slot from a standing bell row: the owner was already told, so the
 // standing row stays and the quiet one closes. Only a ring-gate quiet
@@ -654,11 +655,12 @@ async function supersedeOlderDigests({ key, row, conn = null, enabled }) {
   try {
     const db = conn || require('../models/db');
     const ns = notificationService();
-    const openRows = () => db('notifications')
+    const keyRows = () => db('notifications')
       .where({ recipient_type: 'admin', category: CATEGORY })
       .whereRaw("metadata->>'opsKey' = ?", [key])
-      .whereRaw("metadata->>'source' IS NULL")
-      .whereNull('done_at');
+      .whereRaw("metadata->>'source' IS NULL");
+    // The standing bell is picked from rows nobody has closed.
+    const openRows = () => keyRows().whereNull('done_at');
     let keepId = row.id;
     if (parseMeta(row.metadata).quiet === true) {
       const standing = await openRows()
@@ -670,7 +672,13 @@ async function supersedeOlderDigests({ key, row, conn = null, enabled }) {
       if (standing) keepId = standing.id;
     }
     const at = new Date();
-    let q = openRows().where('id', '<>', keepId);
+    // The retirement uses the system closer's selection (openToCloser): an older
+    // row a PERSON already marked Done is taken over too, so its done_by stops
+    // being a person's and a stale Reopen can no longer bring the obsolete digest
+    // back beside the replacement. The person's done_at, resolution and read
+    // stand (doneColumns keepExisting). A row a system closer already closed is
+    // left alone, so a re-run writes nothing.
+    let q = ns._private.openToCloser(keyRows(), key).where('id', '<>', keepId);
     // Compared in the database: created_at defaults to now() with microseconds,
     // while a JS Date from the insert result carries only milliseconds, which
     // would put the new row itself just past its own cutoff.

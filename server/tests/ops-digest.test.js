@@ -5,7 +5,7 @@
 const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...args) => mockNotifyAdmin(...args),
-  _private: { doneColumns: (a) => ({ done_by: a.by, resolution: a.resolution }) },
+  _private: { doneColumns: (a) => ({ done_by: a.by, resolution: a.resolution }), openToCloser: (query) => query },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
