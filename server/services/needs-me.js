@@ -8,9 +8,11 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { computeDashboardAlerts } = require('./dashboard-alerts');
 const { refsFromRow } = require('./admin-alert-relevance');
+const { customersForAlerts } = require('./admin-alert-customer');
 const { AREAS, SEVERITIES, WHO, SUBJECT_TYPES, cutAtWord, firstSentence } = require('./admin-alert-compose');
 const { legacyKindFromTitle } = require('./agent-activity');
 const { TRIGGER_REGISTRY } = require('./notification-triggers');
+const { SENT_TO_CLAUDE_CLASS } = require('./admin-alert-routing');
 
 const DEFAULT_LIMIT = 200;
 const ROW_CAP = 500; // most items one response returns
@@ -123,8 +125,25 @@ function inferredArea(row) {
   return areaFrom(AREA_BY_CATEGORY, row.category);
 }
 
-function mapAlertRow(row) {
-  const meta = parseMeta(row.metadata);
+// A row the owner sent from the bell ("Send to Claude") is marked `sent`: the Mac launcher gives it its own terminal tab.
+const sentMark = (meta) => (meta.claudeQueue === SENT_TO_CLAUDE_CLASS ? { sent: true } : {});
+
+// A sent row is shown by trusted facts only (Codex security reviews on #7498): its own text can carry words a customer,
+// a vendor or a model wrote, and Claude's queue never shows them. Its terminal tab reads the alert itself, as data. Only
+// the fields this read carries are replaced (the first pass reads no body or detail).
+function sentAlertView(row, meta) {
+  if (meta.claudeQueue !== SENT_TO_CLAUDE_CLASS) return row;
+  const stamped = meta.sentToClaude?.kind;
+  const kind = typeof stamped === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(stamped) ? stamped : row.category;
+  const shown = { ...row, title: `Sent to Claude from the bell (${kind})` };
+  if ('body' in row) shown.body = null;
+  if ('detail' in row) shown.detail = null;
+  return shown;
+}
+
+function mapAlertRow(stored) {
+  const meta = parseMeta(stored.metadata);
+  const row = sentAlertView(stored, meta);
   // Composed only with ALL its parts, a valid allowlisted subject included:
   // raiseAdminAlert keeps the other fields when it drops an invalid subject,
   // and such a row is still partly inferred (derived).
@@ -163,6 +182,7 @@ function mapAlertRow(row) {
     who: has.who ? meta.who : (row.category === 'ops_digest' && meta.audience === 'engineering' ? 'claude' : 'person'),
     derived: !Object.values(has).every(Boolean),
     activityOnly: meta.feed === 'activity',
+    ...sentMark(meta),
     createdAt: row.created_at,
     readAt: row.read_at || null,
     metadata: { dedupeKey: meta.dedupeKey || null, triggerKey: meta.triggerKey || null },
@@ -239,6 +259,24 @@ async function withText(page, rowsById) {
   });
 }
 
+// The returned page's alert items with the id of the customer each is about (`customer: { id }`), read from the record
+// behind the alert (admin-alert-customer.js): a customer id the row names, else the one behind its visit, estimate,
+// invoice, lead or call. Only the id (Codex security review on #7498): a customer sets their own name, so a name never
+// goes into Claude's context from here. A session that reports on an alert reads the name from the record, as data (owner
+// 2026-11-02: "if it's in the terminal, I still want to be able to say what customer is this"). Only while
+// GATE_ALERT_SEND_TO_CLAUDE is on, or when the caller asks (`customers: true`: ops/agents/needs-me.js, which runs with the
+// database's settings only and so never sees the portal's gates); otherwise the items are as before.
+async function withCustomers(page, rowsById, asked) {
+  if (asked !== true && !require('./admin-alert-send-to-claude').sendToClaudeLive()) return page;
+  const rows = page.filter((item) => item.kind === 'alert').map((item) => rowsById.get(String(item.id))).filter(Boolean);
+  if (!rows.length) return page;
+  const customers = await customersForAlerts(db, rows);
+  return page.map((item) => {
+    const id = item.kind === 'alert' ? customers.get(String(item.id))?.id : null;
+    return id ? { ...item, customer: { id } } : item;
+  });
+}
+
 // Exact: `claude` is what Claude may fix alone. `either` (Claude drafts, a person approves)
 // is its own filter and never rides along with `claude`.
 const whoMatches = (filter, who) => !filter || filter === who;
@@ -266,7 +304,7 @@ function decodeCursor(raw) {
   } catch { return null; }
 }
 
-async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
+async function listNeedsMe({ who, area, limit, role, after = null, customers = false } = {}) {
   const generatedAt = new Date();
   const rowsById = new Map();
   const warnings = [];
@@ -308,6 +346,11 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
     // The list still answers; its alerts just lack their why/detail text.
     logger.error(`[needs-me] text for the page failed: ${err.message}`);
     warnings.push({ source: 'notifications', error: 'text_unavailable' });
+  }
+  try { page = await withCustomers(page, rowsById, customers); } catch (err) {
+    // The list still answers; its alerts just lack the customer id.
+    logger.error(`[needs-me] customer ids for the page failed: ${err.message}`);
+    warnings.push({ source: 'notifications', error: 'customers_unavailable' });
   }
   return {
     generatedAt: generatedAt.toISOString(),

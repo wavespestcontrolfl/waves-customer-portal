@@ -178,7 +178,7 @@
 .tech-visit-checkbox:checked { background: var(--tech-accent); border-color: var(--tech-accent); }
 .tech-visit-checkbox:focus { --tw-ring-color: var(--tech-accent); }
 .tech-visit-feedback { color: var(--tech-muted); margin: 8px 0 16px; }
-/* Fast Complete Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the full form's Options and Next scheduled visit. */
+/* Fast Complete Wrap-up: the full form's Options and Next scheduled visit. */
 .tech-wrapup .tech-visit-choice { align-items: center; }
 .tech-wrapup-indent { margin-left: 30px; }
 .tech-wrapup-block { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; padding: 12px; border: 0.5px solid var(--tech-border); border-radius: 6px; background: var(--tech-card); }

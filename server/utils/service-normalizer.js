@@ -267,7 +267,26 @@ function serviceColor(category) {
 // ─── NEW CUSTOMER DETECTION ─────────────────────────────────────
 
 /**
- * Determine if a customer is actually new (no completed service records).
+ * Whether the customer has a completed visit on the schedule. A visit can be
+ * completed with no service record behind it (owner 2026-11-02: an annual
+ * prepay customer's done quarterly visit had none, so her next visit read
+ * "New customer — first visit").
+ *
+ * @param {Object} db - Knex database instance
+ * @param {string} customerId - Customer UUID
+ * @returns {boolean} true if any scheduled visit is completed
+ */
+async function hasCompletedVisit(db, customerId) {
+  if (!customerId) return false;
+  const row = await db('scheduled_services')
+    .where({ customer_id: customerId, status: 'completed' })
+    .first('id');
+  return !!row;
+}
+
+/**
+ * Determine if a customer is actually new: no completed service record and
+ * no completed visit on the schedule.
  *
  * @param {Object} db - Knex database instance
  * @param {string} customerId - Customer UUID
@@ -279,7 +298,8 @@ async function isNewCustomer(db, customerId) {
     .where({ customer_id: customerId, status: 'completed' })
     .count('id as cnt')
     .first();
-  return parseInt(result?.cnt || 0) === 0;
+  if (parseInt(result?.cnt || 0) > 0) return false;
+  return !(await hasCompletedVisit(db, customerId));
 }
 
 
@@ -317,6 +337,7 @@ module.exports = {
   serviceIcon,
   serviceColor,
   isNewCustomer,
+  hasCompletedVisit,
   safeDate,
   safeDateLabel,
   SERVICE_TYPE_MAP,

@@ -381,7 +381,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
 // TechHomePage routes the sheet with).
 function lawnReserviceSheetService(row) {
   return {
-    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    // What the Wrap-up reads: billing facts, the customer, the check-in time.
     ...wrapUpSheetFields(row),
     // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
     ...accessSheetFields(row),
@@ -397,6 +397,8 @@ function lawnReserviceSheetService(row) {
     // Already invoiced from the payment flow: the sheet posts the full form's
     // invoiceAlreadySent (lib/completion-invoice-fields.js).
     completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
+    // GATE_RESERVICE_ASKS rides the same row: only an exact true shows "They told us" on the sheet.
+    reserviceAsksEnabled: row.reserviceAsksEnabled === true,
   };
 }
 
@@ -1015,7 +1017,7 @@ export default function DispatchPageV2({
   // `a || b` over a row's snake_case and camelCase spellings, as the sheets were always given them.
   const pickOf = (row, ...keys) => keys.reduce((found, key) => found || row[key], undefined);
   const lawnSheetService = (row) => ({
-    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads to know whether the visit invoices and who pays.
+    // What the Wrap-up reads to know whether the visit invoices and who pays.
     ...completionBillingFacts(row),
     // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
     ...accessSheetFields(row),
@@ -1050,7 +1052,7 @@ export default function DispatchPageV2({
     completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
   });
   const pestSheetService = (row) => ({
-    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    // What the Wrap-up reads: billing facts, the customer, the check-in time.
     ...wrapUpSheetFields(row),
     // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
     ...accessSheetFields(row),
@@ -1078,6 +1080,8 @@ export default function DispatchPageV2({
     // to the full form (Codex P2 on #6140).
     ...reportFlowFields(row, { stationMapOff, stationSheetOn }),
     noteBoxPhotosEnabled: row.noteBoxPhotosEnabled === true,
+    // GATE_RESERVICE_ASKS rides the same row: only an exact true shows "They told us" on the sheet.
+    reserviceAsksEnabled: row.reserviceAsksEnabled === true,
     technicianName: pickOf(row, 'technicianName', 'technician_name') || null,
     lat: row.lat ?? null,
     lng: row.lng ?? null,
@@ -2130,7 +2134,7 @@ export default function DispatchPageV2({
             serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
             address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || "",
             timeLabel: serviceWindowLabel(treeShrubFastService) || "",
-            // The Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the customer for the next visit, the Time on-site clock, and the billing keys.
+            // The Wrap-up: the customer for the next visit, the Time on-site clock, and the billing keys.
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),

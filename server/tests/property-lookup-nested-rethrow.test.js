@@ -53,7 +53,7 @@ const SARASOTA_SEARCH = {
   parcelId: '0069140016',
   situsAddress: '4740 MEADOWVIEW CIR',
   city: 'SARASOTA',
-  detailUrl: 'https://www.sc-pa.com/propertysearch/parcel/details/0069140016',
+  detailUrl: 'https://www.sarasotapropertyappraiser.gov/propertysearch/parcel/details/0069140016',
   html: SARASOTA_DETAIL_HTML,
 };
 const CHARLOTTE_SEARCH = { parcelId: '402217351013', situsAddress: '2965 ROCK CREEK DR', city: 'PORT CHARLOTTE', zipCode: '33948' };

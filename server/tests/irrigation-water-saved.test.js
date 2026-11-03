@@ -44,6 +44,19 @@ describe('waterSavedForDecision — the gallons block', () => {
     expect(WATER_SAVED_CONSTANTS).toMatchObject({ DEFAULT_RUN_MINUTES: 20, DEFAULT_RUNS_PER_WEEK: 2, DEFAULT_DEPTH_PER_RUN_INCHES: 0.5, GALLONS_PER_INCH_PER_1000_SQFT: 623 });
   });
 
+  test('a watering order that allows fewer days caps the owner default, never the customer\'s own schedule (owner 2026-11-02)', () => {
+    // One day a week (the SWFWMD order): the typical customer runs once, so a hold never claims two skipped runs.
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates: OWNER_HEAD_RATE_IN_PER_HR, restriction: ONE_DAY }))
+      .toEqual({ v: 1, basis: 'default', lawnSqft: 5000, depthInches: 0.5, runsPerWeek: 1, gallonsPerRun: 1550, gallonsPerWeek: 1550 });
+    // A looser order, no order, or one with no positive day count leaves the default's two runs.
+    for (const restriction of [TWO_DAY, { ...ONE_DAY, maxDaysPerWeek: 3 }, null, undefined, { ...ONE_DAY, maxDaysPerWeek: 0 }, { label: 'no limit' }]) {
+      expect(waterSavedForDecision({ lawnSqft: 5000, rates: OWNER_HEAD_RATE_IN_PER_HR, restriction })).toMatchObject({ runsPerWeek: 2, gallonsPerWeek: 3100 });
+    }
+    // Two days on file are what the customer runs, order or not.
+    expect(waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon', 'Thu'], systemType: ['spray'], rates: HEAD_PRECIP_RATE_IN_PER_HR, restriction: ONE_DAY }))
+      .toMatchObject({ basis: 'schedule', runsPerWeek: 2, gallonsPerWeek: 3100 });
+  });
+
   test('a schedule on file outranks the default: zone minutes × the decision\'s head rate table, per run', () => {
     // 20 min on spray: 0.5" per run on the package table (1.5 in/hr), 0.33" on the owner table (1.0 in/hr).
     const pkg = waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon', 'Thu'], systemType: ['spray'], rates: HEAD_PRECIP_RATE_IN_PER_HR });
@@ -287,6 +300,16 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     expect(on.decisionInputs.waterSaved).toMatchObject({ basis: 'default', lawnSqft: 5000, gallonsPerRun: 1550, gallonsPerWeek: 3100 });
     expect(on.payload.plan_note).toContain("Each 20-minute run you skip is about 1,550 gallons on your lawn, so skipping both of this week's runs saves about 3,100 gallons.");
     expect(on.payload.plan_note.endsWith("we'll use those instead.")).toBe(true);
+  });
+
+  test('a hold beside a one-day watering order counts one default run, so the note never says "both" (owner 2026-11-02)', () => {
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2099-12-31', label: 'Synthetic test policy', hoursNote: 'on your assigned day', coverage: 'all' });
+    gateOn();
+    const d = decideFor(customer);
+    expect(d.weekPlan.action).toBe('hold');
+    expect(d.decisionInputs.waterSaved).toMatchObject({ basis: 'default', runsPerWeek: 1, gallonsPerRun: 1550, gallonsPerWeek: 1550 });
+    expect(d.payload.plan_note).toContain('Each 20-minute run you skip is about 1,550 gallons on your lawn. That assumes a typical half-inch run');
+    expect(d.payload.plan_note).not.toMatch(/both of this week's runs/);
   });
 
   test('setup-schedule email (system on file, no schedule): the owner default prints in the ask, so the line reaches the customers it was meant for (codex #6498 r1 P1)', () => {

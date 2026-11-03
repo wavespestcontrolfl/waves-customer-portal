@@ -396,6 +396,21 @@ function smsMessageMatchesLine(message, lineNumber) {
   return phoneKey(messageLine) === lineKey;
 }
 
+// One log response from several refreshed pages. It keeps the page-level
+// flags the inbox reads (GATE_SMS_LIKE's smsLike, GATE_SMS_SPAM_TAG's
+// smsSpamTag): a rebuilt response without smsSpamTag would turn Mark spam
+// back into the block while the gate is on.
+export function mergeRefreshedLogPages(pages, loadedPageCount) {
+  return {
+    messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
+    hasMore: !!pages.at(-1)?.hasMore,
+    page: pages.at(-1)?.page || loadedPageCount,
+    // GATE_SMS_LIKE: every page answers it; the combined result keeps it.
+    smsLike: pages.every((pageData) => pageData.smsLike === true),
+    ...(pages.some((pageData) => pageData?.smsSpamTag === true) ? { smsSpamTag: true } : {}),
+  };
+}
+
 function mergeSmsMessages(existing, incoming) {
   return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
@@ -652,6 +667,33 @@ function SmsLogItemV2({ msg: m, onReply }) {
   );
 }
 
+// GATE_SMS_SPAM_TAG: a thread whose inbound texts carry an enforced spam
+// verdict (tagged here, or silenced by the auto screen) offers "Not spam"
+// instead of "Mark spam"; the tag keeps the texts and only silences alerts.
+// A tagged sender counts even when no text carries a verdict (a photo-only
+// thread: photos are never stamped), so the tag can always be undone.
+function spamTagState(thread, { spamTagOn, canAct }) {
+  const spamTagged = spamTagOn && Array.isArray(thread.messages)
+    && thread.messages.some((m) => m.senderSpamTagged === true
+      || (m.direction === "inbound" && m.spamEnforced === true));
+  // Not spam is offered even once the number belongs to a customer (Codex P2 on
+  // #7457): the webhook stops silencing a customer's new texts, but texts
+  // silenced before the link stay silenced until someone undoes them. Only
+  // Mark spam is limited to threads with no customer.
+  return { spamTagged, canNotSpam: spamTagged && canAct };
+}
+
+// GATE_SMS_SPAM_TAG: the label on a received text the spam check or a tag
+// silenced (display only; any enforced verdict sets it).
+function SpamLabel({ message }) {
+  if (message.direction === "outbound" || message.spamEnforced !== true) return null;
+  return (
+    <span className="text-ui-body uppercase tracking-label text-ink-tertiary">
+      Spam · no alert sent
+    </span>
+  );
+}
+
 function ConversationViewV2({
   thread,
   messages,
@@ -660,6 +702,8 @@ function ConversationViewV2({
   onBack,
   onOpenProfile,
   onMarkSpam,
+  onNotSpam,
+  spamTagOn = false,
   smsLike = false,
   onLiked,
 }) {
@@ -675,6 +719,7 @@ function ConversationViewV2({
   // unlinked number (outbound only, nothing ever received) does not offer it.
   const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
   const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
+  const { spamTagged, canNotSpam } = spamTagState(thread, { spamTagOn, canAct: !!contactPhone && typeof onNotSpam === "function" });
   // GATE_SMS_LIKE: customer likes become badges on our quoted text, and the
   // customer's newest text gets the like button. Off: the list is unchanged.
   const likeView = smsLikeThread(messages, smsLike);
@@ -708,12 +753,25 @@ function ConversationViewV2({
           </div>{" "}
         </div>{" "}
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
-          {canMarkSpam ? (
+          {canNotSpam ? (
             <Button
               size="sm"
               variant="secondary"
               className="flex-1 md:flex-none"
-              title="Block this number and mark the thread read"
+              title="Bring this number's texts back as needing a reply"
+              onClick={() => onNotSpam(thread)}
+            >
+              <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Not spam
+            </Button>
+          ) : canMarkSpam && !spamTagged ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="flex-1 md:flex-none"
+              title={spamTagOn
+                ? "Tag this number as spam: its texts stay here, marked read, with no alerts"
+                : "Block this number and mark the thread read"}
               onClick={() => onMarkSpam(thread)}
             >
               <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -802,6 +860,7 @@ function ConversationViewV2({
                       {m.messageType.replace(/_/g, " ")}
                     </span>
                   )}
+                  <SpamLabel message={m} />
                   {receipt && (
                     <span
                       className={cn(
@@ -870,6 +929,13 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
   } re-service here: ${url}`;
 }
 
+// Moving link text (owner 2026-11-02, GATE_MOVING_FLOW): fixed words, no price.
+export function buildMovingPrefill({ firstName, url }) {
+  const first = String(firstName || "").trim();
+  if (!first || !url) return null;
+  return `Hi ${first}, it's Waves. Moving? Tell us your new address and move dates here: ${url}`;
+}
+
 // Both-channel review ask: the /sms response says whether the email copy went.
 export function reviewEmailNote(outcome) {
   if (!outcome) return "";
@@ -895,6 +961,7 @@ export function reviewEmailNote(outcome) {
 export const CUSTOMER_COMPOSER_LINKS = [
   { key: "reschedule", name: "Reschedule link", keywords: "appointment move change visit time", dynamic: true },
   { key: "reservice", name: "Re-service link", keywords: "free callback between visit retreat", dynamic: true },
+  { key: "moving", name: "Moving link", keywords: "moving move relocating new address new home moved", dynamic: true },
   // channels: picking the row asks Text / Email / Both (owner ruling
   // 2026-09-03) — Text inserts the link, Email sends the review email now,
   // Both inserts the link and emails when the text is sent.
@@ -1247,6 +1314,11 @@ export function SmsTab({
   const [insertingReservice, setInsertingReservice] = useState(false);
   // Same contract for the standing re-service link (free between-visit
   // callback booking) — a bearer credential tracked per recipient.
+  // The moving link (GATE_MOVING_FLOW): same contract as the re-service link, with
+  // local state. movingLinkGone hides the entry once the server answers 404.
+  const [insertingMoving, setInsertingMoving] = useState(false);
+  const [insertedMoving, setInsertedMoving] = useState(null);
+  const [movingLinkGone, setMovingLinkGone] = useState(false);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
@@ -1291,7 +1363,7 @@ export function SmsTab({
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
   useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
-  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled } = useLinkLibrary(active && showLinkSheet);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled, movingLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
@@ -1319,6 +1391,9 @@ export function SmsTab({
   // full digits so a foreign block can never hide a NANP thread sharing
   // its suffix (the server enforces the same split).
   const [blocked, setBlocked] = useState(() => new Set());
+  // GATE_SMS_SPAM_TAG, from the /log payload: Mark spam tags the sender (texts
+  // stay, no alerts) instead of blocking it.
+  const [spamTagOn, setSpamTagOn] = useState(false);
   const blockedFromNumbers = (numbers) => {
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
@@ -1477,13 +1552,7 @@ export function SmsTab({
       })).then((pages) => {
         const hasInvalidPage = pages.some((pageData) => !Array.isArray(pageData?.messages) || pageData.error);
         if (hasInvalidPage) return { error: "One or more message pages could not be refreshed." };
-        return {
-          messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
-          hasMore: !!pages.at(-1)?.hasMore,
-          page: pages.at(-1)?.page || loadedPageCount,
-          // GATE_SMS_LIKE: every page answers it; the combined result keeps it.
-          smsLike: pages.every((pageData) => pageData.smsLike === true),
-        };
+        return mergeRefreshedLogPages(pages, loadedPageCount);
       })
       : adminFetch(logUrl, { signal: controller.signal });
     const logRequest = Promise.resolve(loadedPagesRequest).then(async (logData) => {
@@ -1542,6 +1611,7 @@ export function SmsTab({
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
+        setSpamTagOn(logData.smsSpamTag === true);
         const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
         if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
@@ -2533,6 +2603,111 @@ export function SmsTab({
     }
   }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
 
+  // Insert the selected customer's moving link (GATE_MOVING_FLOW). The server
+  // opens the customer's move if there is none and answers 404 while the gate
+  // is dark, which hides the entry. Nothing is sent: the operator's own send is
+  // the only text.
+  const handleInsertMovingLink = async () => {
+    const requestRecipient = toNumber.trim();
+    if (!requestRecipient || insertingMoving) return;
+    const requestRecipientKey = smsThreadKey(requestRecipient);
+    const requestCustomerId = selectedCustomerId || null;
+    const requestThreadKey = activeThread?.contactPhone
+      ? smsThreadKey(activeThread.contactPhone)
+      : "";
+    const movingContextChanged = () => {
+      const latest = rewriteContextRef.current;
+      const latestRecipient = latest.toNumber.trim();
+      const latestRecipientKey = latestRecipient
+        ? smsThreadKey(latestRecipient)
+        : "";
+      return (
+        latestRecipientKey !== requestRecipientKey ||
+        (latest.selectedCustomerId || null) !== requestCustomerId ||
+        latest.activeThreadKey !== requestThreadKey
+      );
+    };
+    setInsertingMoving(true);
+    setSendResult(null);
+    try {
+      const d = await adminFetch("/admin/communications/moving-link", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: requestRecipient,
+          customerId: requestCustomerId || undefined,
+        }),
+      });
+      if (movingContextChanged()) return;
+      // A new text by phone has no selected customer: take the one the server
+      // resolved (same as the other minted links).
+      adoptResolvedOwner(d, requestCustomerId, requestRecipientKey);
+      const clause = `Moving? Tell us your new address and move dates here: ${d.url}`;
+      const prefill = buildMovingPrefill({ firstName: d.firstName, url: d.url });
+      const prevUrl = insertedMoving?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl
+          ? b
+              .split("\n")
+              .filter((l) => !l.includes(prevUrl))
+              .join("\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim()
+          : b;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
+      });
+      setInsertedMoving({
+        url: d.url,
+        recipientKey: requestRecipientKey,
+        customerId: d.customerId || requestCustomerId,
+      });
+      setSendResult({ ok: true, text: "Moving link added." });
+    } catch (e) {
+      if (e && e.status === 404 && /not enabled/i.test(e.message || "")) {
+        setMovingLinkGone(true);
+        setSendResult({ ok: false, text: "Moving links are not turned on." });
+      } else if (!movingContextChanged()) {
+        setSendResult({ ok: false, text: e.message });
+      }
+    } finally {
+      setInsertingMoving(false);
+    }
+  };
+
+  // Same bearer-credential rule as the re-service link: an inserted moving link
+  // must not survive a recipient change, and the tracked link is forgotten once
+  // the operator deletes it from the body.
+  useEffect(() => {
+    if (!insertedMoving) return;
+    if (!msgBody.includes(insertedMoving.url)) {
+      setInsertedMoving(null);
+      return;
+    }
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient
+      ? smsThreadKey(currentRecipient)
+      : "";
+    if (
+      currentRecipientKey !== insertedMoving.recipientKey ||
+      (selectedCustomerId || null) !== insertedMoving.customerId
+    ) {
+      setMsgBody((b) =>
+        b
+          .split("\n")
+          .filter((l) => !l.includes(insertedMoving.url))
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim(),
+      );
+      setInsertedMoving(null);
+      setSendResult({
+        ok: true,
+        text: "Moving link removed — the recipient changed.",
+      });
+    }
+  }, [insertedMoving, msgBody, toNumber, selectedCustomerId]);
+
   const openLinkSheet = () => setShowLinkSheet(true);
 
   // Insert a static library row (or the portal-login customer row). No
@@ -2826,17 +3001,19 @@ export function SmsTab({
     () => [
       ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim()))
         && (l.key !== "receipt" || receiptLinksEnabled)
-        && (l.key !== "consultation" || consultationLinksEnabled)),
+        && (l.key !== "consultation" || consultationLinksEnabled)
+        && (l.key !== "moving" || (movingLinksEnabled && !movingLinkGone))),
       ...HOW_TO_GUIDE_LINKS,
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled],
+    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled, movingLinksEnabled, movingLinkGone],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {
     setShowLinkSheet(false);
     if (link.key === "reschedule") return handleInsertRescheduleLink();
     if (link.key === "reservice") return handleInsertReserviceLink();
+    if (link.key === "moving") return handleInsertMovingLink();
     if (link.dynamic) return handleInsertCustomerLink(link.key, channel);
     return handleInsertLibraryLink(link);
   };
@@ -3114,6 +3291,7 @@ export function SmsTab({
   const handleMarkSpam = async (thread) => {
     const number = thread?.contactPhone;
     if (!number) return;
+    if (spamTagOn) return handleTagSpam(number);
     if (!window.confirm(`Block ${number} as spam? Future texts AND calls from this number are rejected before they reach anyone, and this thread is marked read.`)) return;
     try {
       await adminFetch(`/admin/communications/blocked-numbers`, {
@@ -3141,6 +3319,44 @@ export function SmsTab({
     } catch (e) {
       alert(`${number} is blocked, but marking the thread read failed: ${e.message}. Its messages may still show as unread if this number is ever unblocked.`);
     }
+  };
+
+  // GATE_SMS_SPAM_TAG: tag the sender. Nothing is removed: its texts stay in
+  // the inbox, marked read with a Spam tag and no alerts, and calls still ring.
+  // The server refuses a customer's or an open lead's number.
+  const handleTagSpam = async (number) => {
+    if (!window.confirm(`Mark ${number} as spam? Its texts stay in the inbox with a Spam tag and no alerts. Calls are not blocked.`)) return;
+    try {
+      const result = await adminFetch(`/admin/communications/spam-senders`, {
+        method: "POST",
+        body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
+      });
+      if (result?.readFailed) {
+        alert(`${number} is tagged as spam, but marking its texts read failed. They may still show as unread.`);
+      }
+    } catch (e) {
+      alert(`Could not mark spam: ${e.message}`);
+      return;
+    }
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
+  };
+
+  // GATE_SMS_SPAM_TAG: undo the tag. The number's texts come back as needing a reply.
+  const handleNotSpam = async (thread) => {
+    const number = thread?.contactPhone;
+    if (!number) return;
+    if (!window.confirm(`Bring ${number}'s texts back as needing a reply?`)) return;
+    try {
+      await adminFetch(`/admin/communications/spam-senders/${encodeURIComponent(number)}`, { method: "DELETE" });
+    } catch (e) {
+      alert(`Could not undo spam: ${e.message}`);
+      return;
+    }
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
   };
 
   // GATE_SMS_LIKE: the thumbs-up went out. Show the like now, then reload so
@@ -3632,6 +3848,7 @@ export function SmsTab({
               disabled={
                 insertingResched ||
                 insertingReservice ||
+                insertingMoving ||
                 !!insertingCustomerLink || sending
               }
               title="Quick Links — insert a link or send a prep guide"
@@ -3640,7 +3857,7 @@ export function SmsTab({
               aria-haspopup="dialog"
               aria-expanded={showLinkSheet}
             >
-              {insertingResched || insertingReservice || insertingCustomerLink ? (
+              {insertingResched || insertingReservice || insertingMoving || insertingCustomerLink ? (
                 <Loader2 size={16} strokeWidth={2.2} className="animate-spin" aria-hidden />
               ) : (
                 <Link2 size={16} strokeWidth={2.2} aria-hidden />
@@ -3821,6 +4038,7 @@ export function SmsTab({
               // the response) — wait out the link fetches.
               insertingResched ||
               insertingReservice ||
+              insertingMoving ||
               !!insertingCustomerLink ||
               !toNumber.trim() ||
               (!msgBody.trim() && attachments.length === 0)
@@ -3852,7 +4070,7 @@ export function SmsTab({
           <Button
             variant="secondary"
             className="mt-3"
-            disabled={sending || uploading || hearing || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
+            disabled={sending || uploading || hearing || rewritingSms || aiDrafting || insertingResched || insertingReservice || insertingMoving || !!insertingCustomerLink}
             onClick={leaveApprovalDraft}
           >
             Leave approval draft
@@ -3881,7 +4099,9 @@ export function SmsTab({
               ? "reschedule"
               : insertingReservice
                 ? "reservice"
-                : insertingCustomerLink
+                : insertingMoving
+                  ? "moving"
+                  : insertingCustomerLink
           }
           onPick={handleInsertSheetPick}
           groupCaptions={{
@@ -3977,6 +4197,8 @@ export function SmsTab({
             // Blocking a number is owner-only (2026-10-02); the server
             // refuses a technician, so the button is not offered.
             onMarkSpam={smsIsAdminRole ? handleMarkSpam : undefined}
+            onNotSpam={smsIsAdminRole ? handleNotSpam : undefined}
+            spamTagOn={spamTagOn}
             smsLike={smsLike}
             onLiked={handleLiked}
           />{" "}

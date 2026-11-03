@@ -260,6 +260,70 @@ describe('new recurring welcome SMS', () => {
       entry_point: 'admin_recurring_appointment_created',
       admin_user_id: 'tech-1',
     }));
+    // Only the customer's own accept stamps an action time (no send-window exemption here).
+    expect(meta).not.toHaveProperty('customer_action_at');
+  });
+
+  test("the customer's own accept stamps its action time on the queued row", async () => {
+    const actedAt = '2026-11-02T23:35:00.000Z';
+    await service.sendNewRecurringWelcome({
+      customer: { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' },
+      scheduledServiceId: 'svc-1',
+      entryPoint: 'estimate_converter_welcome',
+      customerActionAt: actedAt,
+    });
+
+    expect(mockInserts).toHaveLength(1);
+    expect(JSON.parse(mockInserts[0].data.metadata).customer_action_at).toBe(actedAt);
+  });
+
+  // Owner 2026-11-02: a welcome that answers the customer's own fresh action
+  // is not held to the 8 AM-8 PM window; a late retry or a row from any other
+  // path still is.
+  test.each([
+    ['70 minutes after the accept', 70, true],
+    ['just inside the freshness bound', 179, true],
+    ['past the freshness bound (a late retry)', 181, false],
+    ['a stamp in the future', -10, false],
+  ])('delivery %s: customerInitiated is %s', async (_label, minutesAgo, exempt) => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        entry_point: 'estimate_converter_welcome',
+        customer_action_at: new Date(Date.now() - minutesAgo * 60 * 1000).toISOString(),
+      }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, auditLogId: 'audit-1', providerMessageId: 'SM123' });
+
+    await service.processDueWelcomes();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    const input = mockSendCustomerMessage.mock.calls[0][0];
+    if (exempt) expect(input.customerInitiated).toBe(true);
+    else expect(input).not.toHaveProperty('customerInitiated');
+  });
+
+  test('a row with no action stamp (every path but the online accept) keeps the send window', async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1', entry_point: 'appointment_tagger_welcome' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, auditLogId: 'audit-1', providerMessageId: 'SM123' });
+
+    await service.processDueWelcomes();
+
+    expect(mockSendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('customerInitiated');
   });
 
   test('does not queue when the customer already has the welcome sequence', async () => {

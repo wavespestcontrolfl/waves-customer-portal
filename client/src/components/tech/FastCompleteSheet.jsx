@@ -82,6 +82,7 @@ import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { isReserviceVisit } from '../../lib/pest-fast-complete';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import FastCompleteWrapUp, { WrapUpClock, useWrapUp } from './FastCompleteWrapUp';
+import FastCompleteReserviceAsks, { heldByAsks, useReserviceAsks, withAsksHold } from './FastCompleteReserviceAsks';
 import { rowsShowSpray } from '../../lib/spray-evidence';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -392,7 +393,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
   };
 }
 
-// The short re-service form's Wrap-up (GATE_FAST_COMPLETE_WRAP_UP), as one seam: the gate, the spray
+// The short re-service form's Wrap-up, as one seam: the gate, the spray
 // evidence, the section's state and the submit-time check. `customerText()` is the body's customer-text
 // flags: without the section they are today's (the fixed text's flags, or all false while
 // GATE_FAST_COMPLETE_RECAP is off); with it the tech's choices stand in and the fixed-text mode stays,
@@ -449,7 +450,7 @@ function sheetVisitIdentity(visit, reportFlow, oneTap) {
 // visit with only bait or station rows does not): each row at the method it will be recorded with.
 const pestSprayEvidence = (active, draft) => rowsShowSpray(active, (row) => rowMethod(row, reportSprayMethod(draft?.facts)));
 
-// The Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP) is on when the server says so: the report flow
+// The Wrap-up section is on when the server says so: the report flow
 // (a re-service or callback too: owner 2026-10-10) and the short re-service form (see shortFormWrapUpGate).
 const wrapUpGateOf = (data) => data?.wrapUp === true;
 
@@ -761,6 +762,8 @@ const VOICE_SHEET_OPS = {
 function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy, onWrapChecking }) {
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct, clearFollowingRates } = products;
+  // GATE_RESERVICE_ASKS (the schedule row's reserviceAsksEnabled): "They told us" at the top of the sheet. Off, it reads and sends nothing.
+  const asks = useReserviceAsks({ service, request, rows });
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
     pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, methodPicked: false, linearFt: '', activity: '', note: '',
@@ -825,7 +828,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     onPick: (product) => addProduct(product, form.method),
   });
 
-  const { reason: missingReason, stockRow, stockNotices } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong }, ctx.stockAdvisory);
+  const { reason: sheetReason, stockRow, stockNotices } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong }, ctx.stockAdvisory);
+  const missingReason = withAsksHold(sheetReason, asks);
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
   const [checkingStock, setCheckingStock] = useState(false);
@@ -844,9 +848,13 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     if (!(await passesCheck())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody(form, rows, {
-        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, customerText: customerText(),
-        officeNote: voice.enabled ? voice.officeNote : '',
+      // The tech's answer to each thing the customer told us rides last; absent unless the block loaded items.
+      () => ({
+        ...completionBody(form, rows, {
+          visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, customerText: customerText(),
+          officeNote: voice.enabled ? voice.officeNote : '',
+        }),
+        ...asks.field(),
       }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
@@ -862,6 +870,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         {/* Disabled as one block while the voice mic is live, so no control inside
             (now or added later) can end the speech session early. */}
         <fieldset className="tech-visit-form" disabled={formLocked}>
+          <FastCompleteReserviceAsks asks={asks} locked={formLocked} />
           <VoiceFillReview voice={voice} locked={formLocked} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={serviceId} locked={formLocked} micInside />
           <OfficeNote voice={voice} locked={formLocked} />
@@ -1855,6 +1864,8 @@ function ReportFlowForm({
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
   const isReservice = isReserviceVisit(ctx.visit);
+  // GATE_RESERVICE_ASKS (the schedule row's reserviceAsksEnabled): "They told us" on the visit step. Off, it reads and sends nothing.
+  const asks = useReserviceAsks({ service, request, rows });
   const [form, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
@@ -1891,7 +1902,7 @@ function ReportFlowForm({
   useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
+  // The Wrap-up: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A re-service
   // (not in ctx.wrapUp) keeps its fixed text.
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
@@ -2041,14 +2052,17 @@ function ReportFlowForm({
     const areas = where ? where() : (draft?.facts?.areas || []);
     return [active.map((row) => row.name).join(', '), areas.join(', ')].filter(Boolean).join(' · ');
   };
-  const buildBody = () => reportCompletionBody({
+  // The tech's answer to each thing the customer told us rides last; absent unless the block loaded items.
+  const buildBody = () => ({ ...reportCompletionBody({
     form, rows, draft, perimeterFeet: oneTap && !trace.zone ? typedFeetValue : perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, customerText: wrapUp.fields(reportCustomerText(isReservice)), promiseMarks,
     recordFields: recordState.inputs(record, draft?.facts),
     traceOnReport: ctx.traceOnReport,
     visitPhotos,
-  });
+  }), ...asks.field() });
+  // Complete also waits for every "They told us" item to be answered (the full-form hold above stays on the original).
+  const completeHeld = heldByAsks(completeMissing, asks);
   const submit = async () => {
-    if (completeMissing.reason && !submission.hasPendingBody()) return;
+    if (completeHeld.reason && !submission.hasPendingBody()) return;
     // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
     if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     submission.submit(buildBody, summary());
@@ -2115,7 +2129,7 @@ function ReportFlowForm({
         locked={locked}
         submission={submission}
         generateMissing={generateMissing}
-        completeMissing={completeMissing}
+        completeMissing={completeHeld}
         stockButton={stockButton}
         // Only a perimeter spray is traced: a spot visit has no trace step
         // (nor has a lane or typed visit: the schedule routes it untraced,
@@ -2156,6 +2170,7 @@ function ReportFlowForm({
   }
   return (
     <VisitStep
+      asks={asks}
       wrapUp={wrapUp}
       service={service}
       ctx={ctx}
@@ -2292,7 +2307,7 @@ function ReportStep({
 // The visit step: talk, products, photos, the three taps, the tip, the
 // promise check, then write the report (or go back to it while current).
 function VisitStep({
-  wrapUp, service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
+  asks, wrapUp, service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
   noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
   productVoice, noteClipEnabled = false, onRate, stockNotices, trace, tracer, onTrace,
@@ -2336,6 +2351,7 @@ function VisitStep({
       <div className="tech-visit-body" {...picker.coverProps}>
         <WrapUpClock wrapUp={wrapUp} since={service.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
+          <FastCompleteReserviceAsks asks={asks} locked={locked} />
           {/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the note's mic
               waits while a photo's description is open or a change is
               saving, so one microphone records at a time. */}

@@ -489,8 +489,10 @@ export class ApiClient {
     return this.request('/schedule/properties-next');
   }
 
-  confirmAppointment(id) {
-    return this.request(`/schedule/${id}/confirm`, { method: 'POST' });
+  // `shown` = the { date, windowStart } the card displayed, echoed as the
+  // schedule payload sent them: the server confirms only that slot.
+  confirmAppointment(id, shown) {
+    return this.request(`/schedule/${id}/confirm`, { method: 'POST', body: JSON.stringify(shown || {}) });
   }
 
   // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): posts the SAME
@@ -703,6 +705,16 @@ export class ApiClient {
       method: 'POST',
       body: JSON.stringify(body),
     });
+  }
+
+  // Moving flow PR 2a (GATE_MOVING_PORTAL): whether My Plan offers "Take
+  // WaveGuard with you", and the signed-in customer's own moving page path.
+  getMovingEntry() {
+    return this.request('/property/moving');
+  }
+
+  startMove() {
+    return this.request('/property/moving', { method: 'POST', body: JSON.stringify({}) });
   }
 
   // C4: a cancelled customer asks to restart — the server mints (or reuses)

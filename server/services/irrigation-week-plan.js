@@ -206,6 +206,7 @@ function decideWeekPlan({
         planEvents: plan.action !== 'hold' ? (plan.events ?? null) : null,
         waterSource,
         county,
+        restriction,
       })
       : null);
   // Everything the decision was made from, for the snapshot (the report

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// The pest re-service SHORT form with the Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP; owner 2026-10-10
-// "show on": the review request is shown and starts on). Gate off it is as it was; gate on and untouched
+// The pest re-service SHORT form with the Wrap-up section (owner 2026-10-10
+// "show on": the review request is shown and starts on). With no wrapUp key it is as it was; with the key and untouched
 // it posts what it posts today plus requestReview true; the fixed text carries no pay link, so the section
 // has no pay-link row and the pay link stays false; with the fixed text itself off (GATE_FAST_COMPLETE_RECAP)
 // the section is not shown and the all-false flags go; the sheet is locked while the review send-time
@@ -78,7 +78,7 @@ const WRAP_UP_KEYS = ['reviewTiming', 'reviewDelayMinutes', 'reviewScheduledFor'
 // What the short form posts today with the fixed text on.
 const TODAY = { sendCompletionSms: true, requestReview: false, includePayLink: false, customerRecapMode: 'reservice_fixed' };
 
-describe('gate off (the context carries no wrapUp)', () => {
+describe('no wrapUp key in the context', () => {
   test('no Wrap-up, no extra reads, and today\'s flags exactly', async () => {
     const request = makeRequest({ wrapUp: false });
     await openSheet(request);
@@ -100,7 +100,7 @@ describe('gate off (the context carries no wrapUp)', () => {
   });
 });
 
-describe('gate on', () => {
+describe('wrapUp key in the context', () => {
   test('shows the section; untouched it posts today\'s body with one change: requestReview true', async () => {
     const request = makeRequest();
     await openSheet(request);

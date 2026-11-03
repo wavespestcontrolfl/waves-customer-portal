@@ -1250,7 +1250,16 @@ function initScheduledJobs() {
         } catch (err) {
           logger.error(`[geocoder] service-location backstop failed (${err.code || 'service_sweep_error'}): ${err.message}`);
         }
-        await sweepUngeocodedCustomers();
+        // County-roll pins (GATE_GEOCODE_COUNTY_FALLBACK, dark): runs after the existing sweeps, and a
+        // customer sweep failure must not suppress it. It never throws; gate off it does nothing.
+        let customerSweepError = null;
+        try {
+          await sweepUngeocodedCustomers();
+        } catch (err) {
+          customerSweepError = err;
+        }
+        await require('./geocoder-county-fallback').sweepCountyFallback();
+        if (customerSweepError) throw customerSweepError;
       });
     } catch (err) {
       logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
@@ -5208,6 +5217,47 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Quiet overdue invoices failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 8:20AM — Follow-up due alerts (GATE_FOLLOWUP_DUE_ALERT; returns before
+  // any read when off). Owner 2026-11-02 (B1): a flagged follow-up that is due
+  // and has no later visit gets one Schedule bell on its due date (link to the
+  // customer page, where the owner books); the ones already more than 3 days
+  // past due share one catch-up bell. Each run closes the bells whose
+  // follow-up got booked. Admin notifications only: books nothing, sends
+  // nothing to a customer.
+  // =========================================================================
+  cron.schedule('20 8 * * *', async () => {
+    if (!require('../config/feature-gates').followupDueAlertLive()) return;
+    try {
+      await runExclusive('followup-due-alerts', async () => {
+        const result = await require('./followup-due-alerts').runFollowupDueAlerts();
+        logger.info(`Follow-up due alerts: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed, ${result.listed ?? 0} on the catch-up list (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Follow-up due alerts failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // MONDAYS 9:20AM — Monday review bell (GATE_MONDAY_REVIEW_BELL; returns before
+  // any read when off). Owner 2026-11-02 ("build all", B2): one needs-you bell a
+  // week for the work that sits: needs-you alerts unread 14+ days, overdue
+  // promises, completed visits with only a draft invoice, open past visits. The
+  // key is the ET Monday date, so a rerun the same day writes nothing; last
+  // week's row closes first. Sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('20 9 * * 1', async () => {
+    if (!require('../config/feature-gates').mondayReviewBellLive()) return;
+    try {
+      await runExclusive('monday-review-bell', async () => {
+        const result = await require('./monday-review-bell').runMondayReview();
+        logger.info(`Monday review bell: ${result.count ?? 0} list(s) (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Monday review bell failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -9193,6 +9243,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10:20 AM — Move pause (moving PR 2b, owner Q4): the one reminder
+  // text a week before move-out for a customer with no new address, then the
+  // pause of the plans at the house left, then the close of a pause past 60
+  // days. Gate read per tick (GATE_MOVING_PAUSE), so a flip needs no restart.
+  // =========================================================================
+  cron.schedule('20 10 * * *', async () => {
+    if (!require('../config/feature-gates').movingPauseLive()) return;
+    try {
+      await runExclusive('moving-pause', async () => {
+        const result = await require('./customer-moves').runMovePauseJob();
+        logger.info(`[moving-pause] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-pause] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 11AM — Owner heads-up for an imminent visit with a balance 30+ days
   // overdue. The customer-facing reminders (pre-visit tiers, account late
   // check) are retired: the 10:05 pre-visit balance reminder and the invoice
@@ -9308,6 +9376,10 @@ function initScheduledJobs() {
     const started = Date.now();
     try {
       const deleted = await db('terminal_handoff_tokens')
+        // Payment handoffs only: a save_card row never gets a PaymentIntent,
+        // so it would read as orphaned 15 minutes after validate. The daily
+        // cleanup above removes it once it has expired.
+        .where({ kind: 'collect' })
         .whereNotNull('used_at')
         .whereNull('stripe_payment_intent_id')
         .where('used_at', '<', db.raw("NOW() - INTERVAL '15 minutes'"))

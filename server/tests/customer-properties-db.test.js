@@ -262,6 +262,34 @@ suite('saved-property operations against isolated Postgres', () => {
   }, 30000);
 
 
+  test('a primary change to another saved copy of the same house is not a move; a change to another house is (owner 2026-11-02)', async () => {
+    const service = require('../services/customer-properties');
+    const customerId = crypto.randomUUID();
+    // The lead form's one-line address in line 1 (owner 2026-10-30), with sprinkler settings saved for that house.
+    await db('customers').insert({ id: customerId, first_name: 'Fixture', last_name: `Copy${customerId.slice(0, 8)}`, phone: '+15552201220',
+      address_line1: '2201 Example Grove, Sarasota, FL 34201', address_line2: null, city: 'Sarasota', state: 'FL', zip: null });
+    await service.ensurePrimaryProperty(customerId);
+    await db('property_preferences').insert({ customer_id: customerId, irrigation_run_minutes: 20, irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes']) });
+    const promote = async (fields) => {
+      const saved = await service.addManualProperty(customerId, { address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201', occupancy_type: 'unknown', label: null, ...fields }, { actorId: actor });
+      const preview = await service.previewManualPropertyChange(customerId, 'primary', {}, saved.propertyId);
+      await service.changePrimaryProperty(customerId, saved.propertyId, { actorId: actor, expectedVersion: preview._version });
+    };
+    const prefs = () => db('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at', 'irrigation_confirmed_fields');
+    await promote({ address_line1: '2201 Example Grove' });
+    expect(await prefs()).toEqual({ irrigation_home_changed_at: null, irrigation_confirmed_fields: ['irrigation_run_minutes'] });
+    await promote({ address_line1: '2203 Example Grove' });
+    const moved = await prefs();
+    expect(moved.irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(moved.irrigation_confirmed_fields).toEqual([]);
+    // Another unit in the same building is another home, even with the same line 2 (pre-push P1).
+    await db('property_preferences').where({ customer_id: customerId }).update({ irrigation_home_changed_at: null, irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes']) });
+    await promote({ address_line1: '2205 Example Grove Apt 4', address_line2: 'Building A' });
+    await db('property_preferences').where({ customer_id: customerId }).update({ irrigation_home_changed_at: null, irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes']) });
+    await promote({ address_line1: '2205 Example Grove Apt 5', address_line2: 'Building A' });
+    expect((await prefs()).irrigation_home_changed_at).toBeInstanceOf(Date);
+  }, 30000);
+
   test('address gap checks follow the review queue\'s effective pin: a pinned matching primary counts, a customer with no pin stays with the queue', async () => {
     const service = require('../services/customer-properties');
     const { addressKey } = require('../services/customer-property-address-keys');

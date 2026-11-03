@@ -164,8 +164,27 @@ async function lookupSettled(db, { scheduledServiceId, serviceLine }) {
   }
 }
 
+// The alert a missed deduction raises: one headline and one why for a named product, another for the
+// visit-wide lookup bell (which names no product).
+function missedDeductionAlert(product, scheduledServiceId) {
+  const { fitAction } = require('./admin-alert-names');
+  return {
+    area: 'Inventory',
+    action: product
+      ? fitAction('Inventory', product.name, [(n) => `adjust ${n} stock by hand`, (n) => `adjust ${n} by hand`])
+      : 'adjust yard-sign supplies by hand',
+    why: product
+      ? 'A completed visit did not deduct this supply, so adjust the count by hand.'
+      : 'The supplies lookup failed for a completed visit, so check what to deduct by hand.',
+    severity: 'needs-you',
+    link: '/admin/inventory',
+    subject: { type: 'visit', id: scheduledServiceId },
+    doneWhen: 'supplies_adjusted',
+    who: 'person',
+  };
+}
+
 async function ringMissedDeductionBell(db, result, { scheduledServiceId, product = null, reason, serviceLine = null }) {
-  const title = product ? `Inventory: ${product.name} was not deducted for a completed visit` : 'Inventory: yard-sign supplies were not deducted for a completed visit';
   // The lookup bell names no product: which kit items this visit should
   // have consumed is decided only after the lookup (service-line scope), so
   // it must not prescribe a deduction (Codex r15 P2).
@@ -174,7 +193,9 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
     : `The consumables lookup failed for this visit — check on the Inventory page which per-visit supplies apply to this service line, then adjust by hand ONLY the ones with no usage movement for this visit yet (a concurrent retry may have deducted some already; those show a movement). Reason: ${reason}`;
   const dedupeKey = product ? `supplies-consumption-failed:${product.id}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
-    const bell = await require('./notification-service').notifyAdmin('system', title, body, { bell: true, link: '/admin/inventory', dedupeKey, metadata: { productId: product?.id || null, scheduledServiceId } });
+    // Raised through raiseAdminAlert (alert step E2): same category, bell tag, dedupe key and link as before.
+    const bell = await require('./admin-alert-compose').raiseAdminAlert('system', missedDeductionAlert(product, scheduledServiceId),
+      { bell: true, dedupeKey, detail: body, metadata: { productId: product?.id || null, scheduledServiceId } });
     if (!bell) throw new Error('notification not persisted');
     // Race (Codex r18 P1, r24 P1): a concurrent retry may have deducted
     // this product — or, for the visit-wide lookup bell, any of the visit's

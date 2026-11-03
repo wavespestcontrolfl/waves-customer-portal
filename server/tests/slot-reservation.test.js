@@ -1,4 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
+// Moving PR B1: no move by default; one test sets a move-in date.
+jest.mock('../services/customer-moves', () => ({ lockMoveForConversion: jest.fn(async () => null) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -83,6 +85,30 @@ describe('slot reservation helpers', () => {
     // No canonical label at all → link name.
     expect(classifierStableServiceType('Lawn Dethatching Service', ''))
       .toBe('Lawn Dethatching Service');
+  });
+
+  test('a pest specialty catalog name replaces the generic one-time "Pest Control" label; renames still cannot downgrade classification', () => {
+    const { classifierStableServiceType } = slotReservation._internals;
+    for (const name of [
+      'German Roach Cleanout Service',
+      'Cockroach Treatment Service',
+      'Bed Bug Treatment Service',
+      'Flea Control Service',
+      'Vehicle German Roach Treatment (2 Visits)',
+    ]) {
+      expect(classifierStableServiceType(name, 'Pest Control')).toBe(name);
+    }
+    // A renamed specialty row that dropped its family tokens classifies
+    // 'general' — the generic label stays so classification cannot degrade.
+    expect(classifierStableServiceType('Kitchen Cleanout', 'Pest Control')).toBe('Pest Control');
+    expect(classifierStableServiceType('Bee / Wasp Nest Removal Service', 'Pest Control')).toBe('Pest Control');
+    // The WDO r20 protection is unchanged.
+    expect(classifierStableServiceType('Real Estate Report', 'WDO Inspection')).toBe('WDO Inspection');
+    expect(classifierStableServiceType('Complete WDO Inspection Service', 'WDO Inspection'))
+      .toBe('Complete WDO Inspection Service');
+    // A specialty canonical is never swapped for a different specialty link.
+    expect(classifierStableServiceType('Flea Control Service', 'Bed Bug Treatment Service'))
+      .toBe('Bed Bug Treatment Service');
   });
 
   test('canonicalizes rodent trapping reservations to the trapping service type', () => {
@@ -318,6 +344,32 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reserveSlot refuses a new-home estimate\'s slot before the move-in date, read under a lock in the hold transaction (moving PR B1)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const { lockMoveForConversion } = require('../services/customer-moves');
+    try {
+      const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', estimate_data: JSON.stringify({ move: { moveId: 'move-1' } }) });
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder] });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      const reserve = () => slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+      });
+      lockMoveForConversion.mockResolvedValueOnce({ id: 'move-1', move_in_date: '2027-05-21' });
+      await expect(reserve()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is before the move-in date' });
+      expect(lockMoveForConversion).toHaveBeenCalledWith(trx, { move: { moveId: 'move-1' } });
+      // A move that no longer stands behind the estimate (judged whatever the gate): the generic not-found.
+      lockMoveForConversion.mockRejectedValueOnce(Object.assign(new Error('stale'), { code: 'MOVE_ESTIMATE_STALE' }));
+      await expect(reserve()).rejects.toMatchObject({ code: 'ESTIMATE_NOT_FOUND' });
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('reserveSlot refuses a row under a clarify re-price hold on the LOCKED read — generic not-found, no hold minted (codex r11 P0 on #3804)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
@@ -429,6 +481,59 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reserveSlot stamps the catalog specialty name on a one-time german roach accept (not the generic "Pest Control")', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time',
+        serviceLabel: 'German Roach Cleanout Service',
+        durationMinutes: 60,
+        services: [{ service: 'pest_control', engineKey: 'german_roach', durationMinutes: 60 }],
+      });
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-790',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      });
+      const technicianBuilder = makeTechnicianBuilder();
+      const insertBuilder = makeInsertBuilder({
+        id: 'scheduled-790',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      });
+      const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+      const trx = makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders });
+      // Catalog lookup: engine-key containment resolves exactly one row.
+      const servicesBuilder = {
+        whereRaw: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue([
+          { id: 'svc-german-roach', name: 'German Roach Cleanout Service', service_key: 'german_roach' },
+        ]),
+      };
+      // The same savepoint hook also serves the occupancy raw read (no
+      // interview conflicts here) — give the savepoint both shapes.
+      const savepoint = Object.assign(() => servicesBuilder, { raw: jest.fn().mockResolvedValue({ rows: [] }) });
+      trx.transaction = jest.fn(async (callback) => callback(savepoint));
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await slotReservation.reserveSlot({
+        estimateId: 'estimate-790',
+        slotId: signedSlotId({ estimateId: 'estimate-790', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 60 }),
+        serviceMode: 'one_time',
+      });
+
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({
+        service_id: 'svc-german-roach',
+        service_type: 'German Roach Cleanout Service',
+        is_recurring: false,
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('commitReservation refuses to graduate a hold whose technician was offboarded since the reserve (SLOT_UNAVAILABLE, no write)', async () => {
     const dateProbeBuilder = {
       where: jest.fn().mockReturnThis(),
@@ -507,6 +612,22 @@ describe('slot reservation helpers', () => {
           scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
           estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
         })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: expect.stringMatching(/notice window/) });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    test('a new-home estimate\'s hold the move-in date has moved past is refused SLOT_UNAVAILABLE on the locked move (moving PR B1)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-10T15:00:00Z'));
+      const { lockMoveForConversion } = require('../services/customer-moves');
+      try {
+        const { trx, updateBuilder } = wire({ reservationExpiresAt: '2027-05-10T15:15:00.000Z' });
+        lockMoveForConversion.mockResolvedValueOnce({ id: 'move-1', move_in_date: '2027-05-21' });
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+          estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control', estimate_data: { move: { moveId: 'move-1' } } }, trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is before the move-in date' });
+        expect(lockMoveForConversion).toHaveBeenCalledWith(trx, { move: { moveId: 'move-1' } });
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { jest.useRealTimers(); }
     });

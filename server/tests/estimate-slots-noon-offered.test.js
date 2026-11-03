@@ -18,9 +18,13 @@ jest.mock('../services/scheduling/find-time', () => ({
   })),
 }));
 jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: jest.fn(async () => null) }));
+// Moving PR B1: no move by default; one test sets a move-in date.
+jest.mock('../services/customer-moves', () => ({ moveForEstimate: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   zoneRouteDaysLive: jest.fn(() => false),
+  // Moving PR B1: the offer window reads a new-home estimate's move-in date.
+  movingEstimateLive: jest.fn(() => false),
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
   // The same-hour technician scope (GATE_MULTI_TECH_CONFIRM) reads the real call-time reader.
   multiTechConfirmLive: jest.requireActual('../config/feature-gates').multiTechConfirmLive,
@@ -121,6 +125,41 @@ describe('estimate slots — noon is a normal hour', () => {
       expect(allOffered(result).some(overlapsNoon)).toBe(true);
     });
 
+    test('a new-home estimate offers no time before the move-in date, and a moved date misses the cache (moving PR B1)', async () => {
+      const { moveForEstimate } = require('../services/customer-moves');
+      const { findAvailableSlots } = require('../services/scheduling/find-time');
+      const original = findAvailableSlots.getMockImplementation();
+      // A route lane that honours the window it is asked for, as find-time does.
+      findAvailableSlots.mockImplementation(async (args) => {
+        const all = await original(args);
+        return { ...all, slots: all.slots.filter((slot) => slot.date >= args.dateFrom && slot.date <= args.dateTo) };
+      });
+      // A new-home estimate: only a stamped estimate reads its move.
+      const priorData = ESTIMATE_ROW.estimate_data;
+      ESTIMATE_ROW.estimate_data = JSON.stringify({ move: { moveId: 'move-1' } });
+      try {
+        moveForEstimate.mockResolvedValue({ id: 'move-1', move_in_date: '2027-05-21' });
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts))).toEqual([]);
+        moveForEstimate.mockResolvedValue({ id: 'move-1', move_in_date: '2027-05-20' });
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts)).length).toBeGreaterThan(0);
+        // The rolling window opens on the move-in date.
+        moveForEstimate.mockResolvedValue({ id: 'move-1', move_in_date: '2027-05-25' });
+        const rolling = allOffered(await getAvailableSlots('est-lunch-1', {}));
+        expect(rolling.length).toBeGreaterThan(0);
+        expect(rolling.every((slot) => slot.date >= '2027-05-25')).toBe(true);
+        expect(moveForEstimate).toHaveBeenCalledWith('est-lunch-1');
+        // An ordinary estimate never reads a move, so no move-in date limits it.
+        ESTIMATE_ROW.estimate_data = null;
+        moveForEstimate.mockClear();
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts)).length).toBeGreaterThan(0);
+        expect(moveForEstimate).not.toHaveBeenCalled();
+      } finally {
+        ESTIMATE_ROW.estimate_data = priorData;
+        findAvailableSlots.mockImplementation(original);
+        moveForEstimate.mockResolvedValue(null);
+      }
+    });
+
     // Codex push-audit P1 on #4663: the cache key includes the
     // booking_config-resolved lunch interval/day-end. The resolved bounds
     // refresh on their own 60s TTL, independent of this 5-min offer cache —
@@ -181,5 +220,36 @@ describe('estimate slots — noon is a normal hour', () => {
         jest.useRealTimers();
       }
     });
+  });
+});
+
+// Moving PR B1: the move-in window keeps the horizon reserveSlot accepts for the
+// selection, the seasonal one included (codex #7532 r4).
+describe('moveInWindow — a new-home estimate never offers a day before move-in', () => {
+  const { moveInWindow } = estimateSlotAvailability._internals;
+  const now = new Date('2026-11-03T15:00:00Z');
+
+  test('a seasonal selection opens on a February move-in past the standard 90 days and stays bookable', () => {
+    expect(moveInWindow({ moveInDate: '2027-02-10', dateFrom: '2027-02-01', dateTo: '2027-02-16', explicit: false, seasonal: true, windowDays: 14, now }))
+      .toEqual({ dateFrom: '2027-02-10', dateTo: '2027-02-24' });
+  });
+
+  test('an off-season move-in opens at the next season start the window already uses', () => {
+    expect(moveInWindow({ moveInDate: '2026-12-15', dateFrom: '2027-02-01', dateTo: '2027-02-16', explicit: false, seasonal: true, windowDays: 14, now }))
+      .toEqual({ dateFrom: '2027-02-01', dateTo: '2027-02-16' });
+  });
+
+  test('a standard selection opens on move-in and stops at the 90-day horizon (past it: nothing offered)', () => {
+    expect(moveInWindow({ moveInDate: '2026-11-20', dateFrom: '2026-11-03', dateTo: '2026-11-17', explicit: false, seasonal: false, windowDays: 14, now }))
+      .toEqual({ dateFrom: '2026-11-20', dateTo: '2026-12-04' });
+    const late = moveInWindow({ moveInDate: '2027-02-10', dateFrom: '2026-11-03', dateTo: '2026-11-17', explicit: false, seasonal: false, windowDays: 14, now });
+    expect(late.dateFrom > late.dateTo).toBe(true);
+  });
+
+  test('an explicit window only loses the days before move-in; no move-in changes nothing', () => {
+    expect(moveInWindow({ moveInDate: '2026-11-20', dateFrom: '2026-11-18', dateTo: '2026-11-25', explicit: true, seasonal: false, windowDays: 14, now }))
+      .toEqual({ dateFrom: '2026-11-20', dateTo: '2026-11-25' });
+    expect(moveInWindow({ moveInDate: null, dateFrom: '2026-11-03', dateTo: '2026-11-17', explicit: false, seasonal: false, windowDays: 14, now }))
+      .toEqual({ dateFrom: '2026-11-03', dateTo: '2026-11-17' });
   });
 });

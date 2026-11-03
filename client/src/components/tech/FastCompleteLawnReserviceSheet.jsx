@@ -44,6 +44,7 @@ import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import { rowsShowSpray } from '../../lib/spray-evidence';
 import FastCompleteWrapUp, { WrapUpClock, useWrapUp } from './FastCompleteWrapUp';
+import FastCompleteReserviceAsks, { useReserviceAsks, withAsksHold } from './FastCompleteReserviceAsks';
 import {
   UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
@@ -129,7 +130,7 @@ export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Rec
 // (SchedulePage: sendSms starts true; includePayLink is true whenever there is
 // no invoice to link). The review ask is the one flag that differs: the owner
 // kept it off re-services (the pest sheet's rule), so it is false here. With the
-// Wrap-up on (GATE_FAST_COMPLETE_WRAP_UP) a re-service asks for a review by
+// Wrap-up, a re-service asks for a review by
 // default (owner 2026-10-10) and the section's choices stand in for these.
 const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: false, includePayLink: true };
 
@@ -283,7 +284,7 @@ function contextFrom(data, service) {
     lastVisit: data?.lastVisit && typeof data.lastVisit === 'object' ? data.lastVisit : null,
     customerRequest: data?.customerRequest && typeof data.customerRequest === 'object' ? data.customerRequest : null,
     visitIdentity: recapVisitIdentity(data?.service),
-    // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+    // The Wrap-up section is on when the server says so.
     wrapUp: data?.wrapUp === true,
   };
 }
@@ -549,6 +550,8 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     setField('issues', toggleInSet(form.issues, label));
   };
   const { rows } = products;
+  // GATE_RESERVICE_ASKS (the schedule row's reserviceAsksEnabled): "They told us" at the top of the sheet. Off, it reads and sends nothing.
+  const asks = useReserviceAsks({ service, request, rows });
   const [form, setForm] = useState({ note: '', issues: new Set(), pressure: '', condition: '' });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -576,10 +579,10 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     onPick: products.addProduct,
   });
 
-  const missingReason = missingRequirement({
+  const missingReason = withAsksHold(missingRequirement({
     form, rows, ctx, dictationPending,
     voice: voice.enabled ? { filling: voice.filling, confirms: voice.confirms.length, checks: voice.checks.length } : null,
-  });
+  }), asks);
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the note and taps.
   const stockRow = !ctx.stockAdvisory && rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -593,7 +596,7 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     }
     setCheckingStock(false);
   };
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section. A re-service asks for a review by default
+  // The Wrap-up: the full form's bottom section. A re-service asks for a review by default
   // (owner 2026-10-10); this sheet posted no `reviewTiming` before, and its pay link follows the usual
   // will-invoice rule (a free callback does not invoice, so it shows none).
   const wrapUp = useWrapUp({
@@ -605,7 +608,8 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) }),
+      // The tech's answer to each thing the customer told us rides last; absent unless the block loaded items.
+      () => ({ ...completionBody({ form, rows, ctx, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) }), ...asks.field() }),
       [names, inOptionOrder(TURF_ISSUE_OPTIONS, form.issues)].filter(Boolean).join(' · '),
     );
   };
@@ -615,7 +619,9 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
       <div className="tech-visit-body" {...picker.coverProps}>
         <WrapUpClock wrapUp={wrapUp} since={service.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
-          <CustomerRequest request={ctx.customerRequest} />
+          <FastCompleteReserviceAsks asks={asks} locked={locked} />
+          {/* The "They told us" block, when it shows items, already leads with the booking words. */}
+          {!asks.shows && <CustomerRequest request={ctx.customerRequest} />}
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || voice.filling} onClip={noteClip.onClip} micInside />
           {noteClip.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{noteClip.error}</p>}
           <NoteProductsFill voice={voice} note={form.note} locked={locked} busy={dictationPending} />

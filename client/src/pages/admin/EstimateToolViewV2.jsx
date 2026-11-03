@@ -61,6 +61,7 @@ import {
   recurringDiscountApplies,
   savedAreaAddOns,
 } from "../../lib/areaAddOns";
+import { formatCalendarDate, moveEstimateForm } from "../../lib/moveEstimateForm";
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
@@ -1523,6 +1524,9 @@ export default function EstimateToolViewV2({
   // the form seeds from its saved inputs and Save PUTs a revision instead of
   // creating a new estimate (the customer's link stays the same).
   editEstimateId = "",
+  // New-home estimate for a customer move (Moving card): the form seeds from the
+  // customer's recurring services and the new address. Ignored while editing.
+  moveId = "",
   onDraftSaved,
   onBack,
   onStartNew,
@@ -2247,6 +2251,9 @@ export default function EstimateToolViewV2({
   const [editMode, setEditMode] = useState(null);
   const [editLoadError, setEditLoadError] = useState(null);
   const [editLoadAttempt, setEditLoadAttempt] = useState(0);
+  // The saved estimate is a new-home estimate for a move (edit-source moveEstimate).
+  // Keyed by estimate id so it never applies to another estimate on screen.
+  const [moveEstimate, setMoveEstimate] = useState(null);
   useEffect(() => {
     if (!editMode || !/^#estimate-(customer|services|pricing|review)$/.test(window.location.hash)) return;
     requestAnimationFrame(() => document.querySelector(window.location.hash)?.scrollIntoView({ block: "start" }));
@@ -2465,6 +2472,7 @@ export default function EstimateToolViewV2({
           customerName: d.customerName || "",
           hasInputs: !!d.inputs,
         });
+        setMoveEstimate(d.moveEstimate ? { ...d.moveEstimate, estimateId: d.id } : null);
         setAddressUnverified(d.addressUnverified && d.addressUnverified.reason ? d.addressUnverified : null);
         setConfirmAddress(false);
         // The Customer Lookup panel's only linked-customer visual is this
@@ -2484,6 +2492,68 @@ export default function EstimateToolViewV2({
       cancelled = true;
     };
   }, [editEstimateId, estimateRefresh, editLoadAttempt]);
+
+  // ── Move mode: a new-home estimate started from the Moving card ──
+  // Seeds the form once from GET /customers/:id/moves/:moveId/estimate-source.
+  // Never routed through addAnotherProperty: a move is not a multi-property
+  // group (no groupAnchorId, no Multi-Home discount).
+  const [moveSeed, setMoveSeed] = useState({ moveId: "", status: "idle", data: null, droppedDiscountLabel: "", error: "", estimateId: null });
+  const [moveSeedAttempt, setMoveSeedAttempt] = useState(0);
+  useEffect(() => {
+    if (!moveId || editEstimateId) return undefined;
+    const customerId = initialCustomerId;
+    let cancelled = false;
+    if (!customerId) {
+      setMoveSeed({ moveId, status: "error", data: null, droppedDiscountLabel: "", error: "The link has no customer. Open the estimate from the customer's Moving card.", estimateId: null });
+      return undefined;
+    }
+    setMoveSeed({ moveId, status: "loading", data: null, droppedDiscountLabel: "", error: "", estimateId: null });
+    (async () => {
+      try {
+        const r = await fetch(
+          `/api/admin/customers/${encodeURIComponent(customerId)}/moves/${encodeURIComponent(moveId)}/estimate-source`,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+            },
+          },
+        );
+        const d = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!r.ok) {
+          setMoveSeed({ moveId, status: "error", data: null, droppedDiscountLabel: "", error: d.error || `HTTP ${r.status}`, estimateId: d.code === "estimate_exists" ? d.estimateId || null : null });
+          return;
+        }
+        const { form: seeded, droppedDiscountLabel } = moveEstimateForm(d, {
+          base: buildDefaultEstimateForm(),
+          clearedProperty: clearedPropertyFields(),
+        });
+        savedFormRef.current = JSON.stringify(seeded);
+        setForm(seeded);
+        setEstimate(null);
+        setSavedId(null);
+        setSavedViewUrl(null);
+        setEnrichedProfile(null);
+        forgetScopeAnswer();
+        setSatelliteData(null);
+        setGroupAnchorId(null);
+        setMoveSeed({ moveId, status: "ready", data: d, droppedDiscountLabel, error: "", estimateId: null });
+      } catch (e) {
+        if (!cancelled) setMoveSeed({ moveId, status: "error", data: null, droppedDiscountLabel: "", error: e.message || "Could not load the move.", estimateId: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [moveId, editEstimateId, initialCustomerId, moveSeedAttempt]);
+  const editMoveEstimate = editMode?.id && moveEstimate?.estimateId === editMode.id ? moveEstimate : null;
+  const moveMode = !!moveId && !editEstimateId && !editMode?.id && moveSeed.moveId === moveId;
+  // Until this move's data has seeded the form (loading, failed, or the first
+  // render before the fetch starts), Generate and Save stay off.
+  const moveSeedPending = !!moveId && !editEstimateId && !editMode?.id && !(moveSeed.moveId === moveId && moveSeed.status === "ready");
+  // Sent with calculate and create only after the move's data seeded the form.
+  const moveRequestId = moveMode && moveSeed.status === "ready" ? moveId : "";
 
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
@@ -4371,6 +4441,9 @@ export default function EstimateToolViewV2({
         // P1). A revise keeps its stored group linkage (not sent here either).
         address: form.address || null,
         ...(!editMode?.id && groupAnchorId ? { groupWithEstimateId: groupAnchorId } : {}),
+        ...(moveRequestId ? { moveId: moveRequestId } : {}),
+        // A reopened new-home estimate: the server waives the setup fee for the stored link.
+        ...(editMoveEstimate ? { moveEstimateId: editMoveEstimate.estimateId } : {}),
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
         // Availability gates only the CHECKBOX (new selections); a selection
         // already in the form — e.g. seeded from a saved estimate's inputs
@@ -4825,6 +4898,9 @@ export default function EstimateToolViewV2({
   // the pre-generate value (React state doesn't update mid-handler).
   async function doSave(estimateOverride = null, { deferInvoiceTotals = false } = {}) {
     if (editEstimateId && !editMode) return null;
+    // A new-home estimate saves only once its move seeded the form: without
+    // it the save would be an ordinary estimate with no move link or waiver.
+    if (moveSeedPending) return null;
     if (saveInFlightRef.current) return null;
     const estimateToSave = estimateOverride || estimate;
     if (!estimateToSave) return null;
@@ -4903,6 +4979,9 @@ export default function EstimateToolViewV2({
         ...(!isEditRevision && groupAnchorId
           ? { groupWithEstimateId: groupAnchorId }
           : {}),
+        // New-home estimate: the server verifies the move, waives the setup
+        // fee and links it. Create only; a revise never sends it.
+        ...(!isEditRevision && moveRequestId && !groupAnchorId ? { moveId: moveRequestId } : {}),
       };
       // Edit mode publishes on save (same id + token — the customer's link
       // starts showing the updated quote), so a server-side reprice must be
@@ -4974,6 +5053,10 @@ export default function EstimateToolViewV2({
         setConfirmAddress(false);
       }
       setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
+      if (!isEditRevision && moveRequestId) {
+        const savedMove = moveSeed.data?.move || {};
+        setMoveEstimate({ estimateId: id, moveId: moveRequestId, moveOutDate: savedMove.moveOutDate || null, moveInDate: savedMove.moveInDate || null });
+      }
       savedFormRef.current = savingForm;
       // A slow save must not bless fields edited while it was in flight.
       const stillCurrent = JSON.stringify(formRef.current) === savingForm;
@@ -5386,7 +5469,7 @@ export default function EstimateToolViewV2({
   // Present-mode trust gates: a custom-quote estimate has no firm price to show,
   // and an unsaved one hasn't been through the server-authoritative recompute.
   const presentQuoteRequired = !!estimate && estimateRequiresQuote(estimate);
-  const generateBusy = generating || saving || sending || (!!editEstimateId && !editMode);
+  const generateBusy = generating || saving || sending || (!!editEstimateId && !editMode) || moveSeedPending;
 
   // ═══════════════════════════════════════════════════════════════
   // RENDER
@@ -5433,6 +5516,53 @@ export default function EstimateToolViewV2({
                 Dismiss
               </Button>
             </div>
+          </div>
+        )}
+        {moveMode && (
+          <div className="mb-4 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3 text-14 text-zinc-700" data-testid="move-estimate-banner">
+            {moveSeed.status === "loading" && <div>Loading the move details…</div>}
+            {moveSeed.status === "error" && (
+              <div>
+                <span className="font-medium text-zinc-900">Could not start the new-home estimate.</span> {moveSeed.error}
+                {moveSeed.estimateId && (
+                  <> <a className="underline" href={`/admin/estimates?editEstimateId=${encodeURIComponent(moveSeed.estimateId)}`}>Open new-home estimate</a></>
+                )}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setMoveSeedAttempt((n) => n + 1)}>Try again</Button>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => onStartNew?.()}>Start a normal estimate instead</Button>
+                </div>
+              </div>
+            )}
+            {moveSeed.status === "ready" && (
+              <>
+                <div className="font-medium text-zinc-900">New-home estimate: {moveSeed.data.move.address}</div>
+                <div className="mt-1">
+                  Move-out {formatCalendarDate(moveSeed.data.move.moveOutDate) || "not known yet"} · Move-in {formatCalendarDate(moveSeed.data.move.moveInDate) || "not known yet"}
+                </div>
+                <div className="mt-1">The $99 setup fee is waived for this move.</div>
+                {moveSeed.data.planServices?.length > 0 && (
+                  <div className="mt-1">
+                    Today&apos;s plan: {moveSeed.data.planServices.map((svc) => (svc.frequency ? `${svc.name} (${svc.frequency})` : svc.name)).join(", ")}
+                  </div>
+                )}
+                {moveSeed.data.leftOut?.length > 0 && (
+                  <div className="mt-1">
+                    Not copied: {moveSeed.data.leftOut.map((svc) => (svc.reason ? `${svc.name} (${svc.reason})` : svc.name)).join("; ")}
+                  </div>
+                )}
+                {moveSeed.droppedDiscountLabel && (
+                  <div className="mt-1">
+                    The old estimate had a discount ({moveSeed.droppedDiscountLabel}). Add it again if it still applies.
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+        {editMoveEstimate && (
+          <div className="mb-4 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3 text-14 text-zinc-700" data-testid="move-estimate-edit-banner">
+            New-home estimate for a move. The $99 setup fee is waived.
+            {formatCalendarDate(editMoveEstimate.moveInDate) && <> Move-in {formatCalendarDate(editMoveEstimate.moveInDate)}.</>}
           </div>
         )}
         {editMode && (
@@ -5560,7 +5690,7 @@ export default function EstimateToolViewV2({
                     <Button
                       variant="ghost"
                       size="sm"
-                      disabled={!savedId && !editMode?.id}
+                      disabled={(!savedId && !editMode?.id) || moveMode || !!editMoveEstimate}
                       onClick={() => addAnotherProperty({ address: composedAddress })}
                     >
                       Quote next
@@ -8458,7 +8588,8 @@ export default function EstimateToolViewV2({
                   : "Draft saved. It has not been sent."}
               </ActionFeedback>
             )}
-            {(savedId || editMode?.id) && (
+            {/* A new-home estimate is never part of a multi-property group (moving PR B1). */}
+            {(savedId || editMode?.id) && !moveMode && !editMoveEstimate && (
               <Button
                 variant="secondary"
                 size="md"

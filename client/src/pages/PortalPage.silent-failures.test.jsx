@@ -158,7 +158,8 @@ describe('dashboard appointment confirmation', () => {
     } });
     render(<PortalReadProvider enabled><PortalRefreshArea><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalRefreshArea></PortalReadProvider>);
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm Visit', exact: true }));
-    expect(api.confirmAppointment).toHaveBeenCalledWith('visit-a');
+    // The slot the card showed rides along: the server confirms only that one.
+    expect(api.confirmAppointment).toHaveBeenCalledWith('visit-a', { date: futureDate, windowStart: undefined });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
     expect(await screen.findByText('Replacement appointment')).toBeInTheDocument();
     await act(async () => { finishConfirmation({ success: true }); });
@@ -180,6 +181,7 @@ describe('schedule survives notification-preference failures', () => {
       .mockImplementationOnce(() => new Promise(resolve => { canonicalRefresh = resolve; }));
     render(<PortalReadProvider enabled><PortalRefreshArea><ScheduleTab customer={customer} properties={[]} /></PortalRefreshArea></PortalReadProvider>);
     fireEvent.click(await screen.findByRole('button', { name: /Confirm/i }));
+    expect(api.confirmAppointment).toHaveBeenCalledWith('visit-a', { date: futureDate, windowStart: '09:00' });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
     await act(async () => confirm({ success: true }));
     expect(api.getSchedule).toHaveBeenCalledTimes(3);

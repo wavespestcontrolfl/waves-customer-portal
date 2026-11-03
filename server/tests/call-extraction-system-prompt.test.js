@@ -172,12 +172,12 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   const oneMessage = buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
   const { system } = buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
 
-  test('this is the v33 cohort, one hash per layout', () => {
-    expect(PROMPT_VERSION).toBe('v33');
-    expect(PROMPT_HASH).toMatch(/^v33-[a-f0-9]{12}$/);
-    expect(APS_PROMPT_HASH).toMatch(/^v33a-[a-f0-9]{12}$/);
-    expect(SYSTEM_PROMPT_HASH).toMatch(/^v33s-[a-f0-9]{12}$/);
-    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v33b-[a-f0-9]{12}$/);
+  test('this is the v34 cohort, one hash per layout', () => {
+    expect(PROMPT_VERSION).toBe('v34');
+    expect(PROMPT_HASH).toMatch(/^v34-[a-f0-9]{12}$/);
+    expect(APS_PROMPT_HASH).toMatch(/^v34a-[a-f0-9]{12}$/);
+    expect(SYSTEM_PROMPT_HASH).toMatch(/^v34s-[a-f0-9]{12}$/);
+    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v34b-[a-f0-9]{12}$/);
     expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
   });
 
@@ -204,6 +204,29 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   test('billing_choice sits in the SERVICE REQUEST section, before the price object', () => {
     expect(oneMessage.indexOf('- billing_choice:')).toBeGreaterThan(oneMessage.indexOf('SERVICE REQUEST:'));
     expect(oneMessage.indexOf('- billing_choice:')).toBeLessThan(oneMessage.indexOf('- price: The PRIMARY price'));
+  });
+
+  test('household safety notes: the prompt gives each field, its caller-only bar and the evidence pin', () => {
+    for (const text of [oneMessage, system]) {
+      expect(text).toContain('- household_children_or_elderly: a SHORT note (a few words) ONLY when the CALLER says children or elderly people LIVE at the service address or will be PRESENT at the visit');
+      expect(text).toContain('visitors who will not be there at service time ("my grandkids visit at Christmas")');
+      expect(text).toContain('- no_spray_areas: a SHORT note naming the areas of THIS property the caller asks us NOT to spray or treat');
+      expect(text).toContain('a pond or garden merely mentioned with no request to avoid it is null');
+      expect(text).toContain('- chemical_sensitivity_note: a SHORT note ONLY when the CALLER says someone in the home is sensitive to chemicals');
+      expect(text).toContain('a plain preference for pet-safe or natural products with no health reason is null');
+      expect(text).toContain('- property.household_children_or_elderly, property.no_spray_areas and property.chemical_sensitivity_note (when non-null — the CALLER\'s own sentence; speaker must be "caller")');
+    }
+    // They sit in the PROPERTY section, after the building rules and before MULTIPLE PROPERTIES.
+    const at = oneMessage.indexOf('- household_children_or_elderly:');
+    expect(at).toBeGreaterThan(oneMessage.indexOf('- whole_building_occupancy_final'));
+    expect(at).toBeLessThan(oneMessage.indexOf('MULTIPLE PROPERTIES (service_address'));
+  });
+
+  test('the output contract the model is given carries the three household safety notes', () => {
+    const schema = require('../schemas/call-extraction.model-output.schema.json');
+    for (const key of ['household_children_or_elderly', 'no_spray_areas', 'chemical_sensitivity_note']) {
+      expect(schema.properties.property.properties[key]).toBeDefined();
+    }
   });
 
   test('the output contract the model is given carries billing_choice', () => {

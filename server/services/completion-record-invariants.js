@@ -41,8 +41,25 @@
  */
 
 const db = require('../models/db');
+const { INTERNAL_TEST_CUSTOMERS, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
 
 const SAMPLE = 25;
+
+// Visits of the owner's internal test customers owe no customer artifact (no
+// report, notice or follow-up), so every predicate skips them. The match is the
+// same one the dashboard / MRR exclusions use (internal-test-customers.js):
+// customer id in INTERNAL_TEST_CUSTOMER_IDS, or lower("first last") in
+// INTERNAL_TEST_CUSTOMERS. The lists are code constants, but literals are still
+// quoted (single quotes doubled); both lists empty makes this a no-op.
+const sqlLiteral = (v) => `'${String(v).replace(/'/g, "''")}'`;
+function internalTestVisitSql(visitAlias = 'ss', ids = INTERNAL_TEST_CUSTOMER_IDS, names = INTERNAL_TEST_CUSTOMERS) {
+  const conds = [];
+  if (ids.length) conds.push(`itc.id::text IN (${ids.map(sqlLiteral).join(', ')})`);
+  if (names.length) conds.push(`LOWER(COALESCE(itc.first_name, '') || ' ' || COALESCE(itc.last_name, '')) IN (${names.map(sqlLiteral).join(', ')})`);
+  if (!conds.length) return 'FALSE';
+  return `EXISTS (SELECT 1 FROM customers itc WHERE itc.id = ${visitAlias}.customer_id AND (${conds.join(' OR ')}))`;
+}
+const NOT_INTERNAL_TEST_VISIT = `NOT (${internalTestVisitSql('ss')})`;
 
 // Yesterday-and-older in ET wall-clock terms: today's visits are still
 // closing and are the dashboard's job.
@@ -228,6 +245,7 @@ const PREDICATES = Object.freeze({
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ${NOT_INTERNAL_TEST_VISIT}
            AND ${COMPLETED_TRANSITION_SINCE(RECORD_FK_SINCE)}
            AND ${BEFORE_TODAY_ET}
            AND NOT EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id)`),
@@ -249,6 +267,8 @@ const PREDICATES = Object.freeze({
              WHERE sr.scheduled_service_id IS NOT NULL
                AND sr.status = 'completed'
                AND sr.completion_source IN ('detailed_form', 'one_tap_completion', 'project_completion')
+               AND NOT EXISTS (SELECT 1 FROM scheduled_services tv
+                                WHERE tv.id = sr.scheduled_service_id AND ${internalTestVisitSql('tv')})
              GROUP BY sr.scheduled_service_id, sr.completion_source
             HAVING count(*) > 1
           ) g
@@ -265,6 +285,7 @@ const PREDICATES = Object.freeze({
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ${NOT_INTERNAL_TEST_VISIT}
            AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
                  SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
@@ -292,6 +313,7 @@ const PREDICATES = Object.freeze({
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ${NOT_INTERNAL_TEST_VISIT}
            AND ss.completed_at IS NULL
            AND ${BEFORE_TODAY_ET}
            AND ${COMPLETED_TRANSITION_SINCE(TRACKING_STAMP_SINCE, TRACKER_STAMP_GRACE)}
@@ -333,6 +355,7 @@ const PREDICATES = Object.freeze({
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ${NOT_INTERNAL_TEST_VISIT}
            AND ${VISIT_NOT_PROJECT_BACKED}
            AND EXISTS (
                  SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
@@ -379,6 +402,7 @@ const PREDICATES = Object.freeze({
         SELECT ss.id, ss.scheduled_date AS ord
           FROM scheduled_services ss
          WHERE ss.status = 'completed'
+           AND ${NOT_INTERNAL_TEST_VISIT}
            AND EXISTS (
                  SELECT 1 FROM service_records sr
                   WHERE sr.scheduled_service_id = ss.id
@@ -417,5 +441,6 @@ module.exports = {
     SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE, TRACKER_STAMP_GRACE,
     OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_NOT_OWED, FROZEN_SNAPSHOT_VALID, CATALOG_NOT_OWED,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
+    internalTestVisitSql, NOT_INTERNAL_TEST_VISIT,
   },
 };

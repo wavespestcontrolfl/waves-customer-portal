@@ -104,6 +104,22 @@ describe('weekly email decision — plan mode', () => {
     expect(buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: null, weekPlanEnabled: false }).templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
   });
 
+  test('from the second plan week the summary quotes last week\'s plan, so the derived figure\'s provenance stays out and the renderer\'s own notes return (owner 2026-11-02)', () => {
+    const second = { ...BASE, irrigationInchesPerWeek: null, priorWeekPrescribedInches: 0.75, priorWeekEvents: 1 };
+    // Last week's plan was skipped after ½" of rain: the irrigation row reads 0", never the schedule's 2".
+    const skipped = buildWeeklyEmailDecision(second);
+    expect(skipped.payload.irrigation_inches).toBe('0" (last week\'s plan — rain-skip rule)');
+    expect(skipped.payload.plan_note).not.toContain('We worked that');
+    // Last week's plan ran: still the plan's figure, still no sentence about a number the email never prints.
+    const ran = buildWeeklyEmailDecision({ ...second, rainfallInches7d: 0.2 });
+    expect(ran.payload.summary_line).toContain('last week\'s watering plan (0.75" of irrigation)');
+    expect(ran.payload.plan_note).not.toContain('We worked that');
+    expect(ran.payload.plan_note).toContain('Minutes assume');
+    const sensor = buildWeeklyEmailDecision({ ...second, rainfallInches7d: 0.2, rainSensor: true });
+    expect(sensor.payload.plan_note).toContain('will skip a run on its own');
+    expect(sensor.payload.plan_note).not.toContain('read it as the most your system would have applied');
+  });
+
   test('tech-sourced schedule keeps confirm_schedule even in plan mode', () => {
     const d = buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: null, irrigationRunMinutes: null, turfIrrigationInchesPerWeek: 1 });
     expect(d.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);

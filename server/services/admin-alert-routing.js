@@ -177,6 +177,21 @@ const claudeQueuePatch = ({ className, severity }) => ({ feed: 'activity', who: 
 // Already stamped by an earlier step of the same write (notifyAdmin, then create).
 const isStamped = (meta) => Boolean(meta && meta.claudeQueue && meta.feed === 'activity');
 
+// A bell row the owner sent to Claude with the bell's "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE,
+// services/admin-alert-send-to-claude.js) carries this class, and `sentToClaude` says when, by whom and about whom.
+const SENT_TO_CLAUDE_CLASS = 'sent-to-claude';
+const SENT_FIELDS = ['feed', 'who', 'severity', 'claudeQueue', 'sentToClaude'];
+
+// A refresh of a row the owner sent to Claude keeps the fields the send set while the row is open, whatever the new
+// emission carries: the emitter still updates its text, but the row never moves back to the bell by itself. A done row
+// keeps nothing, so the same alert raised again after Claude closed it is news for the bell. Pure; never throws.
+function keepSentToClaude(existing, existingMeta, metadata) {
+  const meta = metaOf(existingMeta);
+  if (meta.claudeQueue !== SENT_TO_CLAUDE_CLASS || !meta.sentToClaude || existing?.done_at != null) return metadata;
+  const kept = Object.fromEntries(SENT_FIELDS.filter((k) => k in meta).map((k) => [k, meta[k]]));
+  return { ...metaOf(metadata), ...kept };
+}
+
 // The metadata to write for an admin row: the same object when the row stays in the bell (gate off, no
 // match, already stamped), else a copy with the Claude-queue fields. Never throws.
 function stampClaudeQueue({ category, metadata, dedupeKey }) {
@@ -264,6 +279,8 @@ module.exports = {
   CLAUDE_FAULT_TRIGGERS,
   CLAUDE_FAULT_TRIGGERS_LEFT_OUT,
   CLAUDE_FAULT_CATEGORIES,
+  SENT_TO_CLAUDE_CLASS,
+  keepSentToClaude,
   classifyClaudeQueue,
   classifyClaudeFault,
   claudeQueueEnabled,

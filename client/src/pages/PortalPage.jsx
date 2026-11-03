@@ -26,6 +26,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
+import MovingEntry, { useMovingEntry } from '../components/portal/MovingEntry';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
@@ -3158,7 +3159,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
                   if (confirmingVisit) return;
                   setConfirmingVisit(true);
                   try {
-                    await api.confirmAppointment(nextService.id);
+                    await api.confirmAppointment(nextService.id, { date: nextService.date, windowStart: nextService.windowStart });
                     await nextRead.refresh();
                   } catch (err) {
                     console.error(err);
@@ -4269,17 +4270,17 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         )}
       </div>
       <div id={settingsId} hidden={!showSettings} style={{ marginTop: 12, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Allow app notifications</div>
-          <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
-        </div>
-        {(prefs.pushEnabled === false || (!connected && registered)) && (
-          <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
-            {prefs.pushEnabled === false ? 'Your notification history is still available.'
-              : 'Open the app to refresh its connection.'}
+        {prefs.pushEnabled !== false && !connected && registered && (
+          <p style={{ margin: '0 0 12px', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
+            Open the app to refresh its connection.
           </p>
         )}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {prefs.pushEnabled === false && (
+            <button type="button" data-glass-accent="" disabled={saving} onClick={() => onSave({ pushEnabled: true })} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+              Turn on app notifications
+            </button>
+          )}
           {isNativeApp() && app.deviceState !== 'granted' && (
             <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
               {app.busy ? 'Connecting…' : 'Connect this device'}
@@ -4303,7 +4304,14 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
           <p style={{ margin: '0 0 12px' }}>
             Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
           </p>
-          <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+            {prefs.pushEnabled !== false && (
+              <button type="button" data-glass="chip" disabled={saving} onClick={() => onSave({ pushEnabled: false })} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+                Turn off app notifications on all devices
+              </button>
+            )}
+          </div>
         </details>
       </div>
     </div>
@@ -5229,11 +5237,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     }
   };
 
-  const handleConfirm = async (id) => {
+  const handleConfirm = async (id, shown) => {
     if (confirmingIds[id]) return;
     setConfirmingIds(prev => ({ ...prev, [id]: true }));
     try {
-      await api.confirmAppointment(id);
+      await api.confirmAppointment(id, shown);
       const ts = new Date();
       setConfirmTimestamps(prev => ({ ...prev, [id]: ts }));
       await scheduleRead.refresh();
@@ -5405,7 +5413,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     if (s.customerPickBy) return null;
     const busy = !!confirmingIds[s.id];
     return (
-      <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{
+      <button type="button" onClick={() => handleConfirm(s.id, { date: s.date, windowStart: s.windowStart })} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{
         ...primaryButton, padding: compact ? '9px 14px' : '10px 14px', flex: compact ? undefined : 1,
         fontSize: 14,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
@@ -11765,6 +11773,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     : (!!activeTierName || !!nextService
       || upcomingServices.length > 0
       || Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0) > 0);
+  // "Take WaveGuard with you" (GATE_MOVING_PORTAL): the server says whether to offer it. Asked only
+  // while Account Options can render: a cancelled account's read-only portal never calls the route.
+  const movingEntryEnabled = useMovingEntry(hasCancellableAccount && !cancelledAccount);
 
   const detectCatalogServiceId = (service) => {
     for (const svc of SERVICE_CATALOG) {
@@ -12549,6 +12560,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
           {hasCancellableAccount && !cancelledAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div data-glass="chip" style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
+            <MovingEntry enabled={movingEntryEnabled} styles={{ muted, secondaryButton }} />
             {/* C1 three-screen cancel flow (GATE_CANCEL_FLOW_V2); falls back to
                 the H0 single-step form inside the component when the gate is off. */}
             <CancelFlow
@@ -12556,6 +12568,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
               compact={compact}
               onOpenRequest={onOpenRequest}
               refreshCustomer={refreshCustomer}
+              movingEntryEnabled={movingEntryEnabled}
               styles={{ muted, subtle, primaryButton, secondaryButton, smallLinkButton }}
             />
           </section>

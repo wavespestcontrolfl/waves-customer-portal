@@ -241,6 +241,74 @@ is the pure builder.
 The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
 when the card is present.
 
+Re-service asks report (owner-approved design 2026-11-02, consolidated re-service
+report step S3a; `GATE_RESERVICE_ASKS` — dark, off unless exactly `'true'`, read
+at call time): on the same service-report payload (`/api/reports/:token/data` and
+the PDF, which share `buildReportV1Data`), gate on adds an optional
+`data.reserviceAsksReport` when the record carries a version-2
+`service_records.service_data.reserviceAsks` block (version 2 is the first
+to mark account-wide items; a version-1 freeze never renders) (frozen at completion: pest /
+lawn re-services completed as performed on a live closeout), the report's
+`reserviceReport` copy block, when composed, reads a performed (`treated`)
+outcome, and at least one item shows. When the key is present
+`data.reserviceReportCard` is omitted: the block replaces the card on the web
+page and the PDF. Gate off, no freeze, a not-performed outcome, or nothing to
+show: the key is omitted (never `null`), and the payload, the card and every PDF
+key are byte-identical to before.
+`server/services/service-report/reservice-asks-report.js` is the pure builder.
+Shape: `{ version: 1, title: 'Your re-service', lane, summary, told: [{ label,
+words, quoted }], did: [{ chip, subject, line }], products: [{ name, where, how
+}], expectation, stillSeeing }`.
+- Which items: an item shows only with a technician answer that is not
+  `hidden`, and only when `officeOnlyReason`
+  (`server/services/reservice-office-only.js`: a health complaint after a
+  treatment or a person or pet that ate, licked, touched or got into our
+  product, damage we caused, money, a
+  complaint about the service, a missed or late visit) passes it: the verdict
+  on the customer's ORIGINAL words is frozen as the item's `officeOnly` (the
+  scrub keeps only pest talk, so it would hide "I want a refund"), and the
+  shown words are screened again. Unless the account provably has one
+  premises (`reservice-property-scope.js`, the shared fail-closed proof in
+  `visit-property-scope.js`), texts, calls and emails name no property and may
+  be about another one: they are frozen `accountWide` and never print; only
+  the visit's own booking words do (an unproven account or a failed read
+  counts as several).
+  The office's not-today reasons (`officeNotes`) are never read; no item ids
+  are exposed.
+- `told`: `label` is `<Source> · <Mon D>` (Eastern date; a question reads
+  `Your question · <Mon D>`); `words` are quoted words in curly quotes, or a
+  call / office lead plus the words. At render they pass the card's own
+  egress screens (a sentence saying where a key, lockbox, remote or fob is, or
+  making any pesticide-safety claim, is dropped; a third-person paraphrase
+  never sits under a lead), then a private-topic rule (a sentence that names a
+  pet or another person, a bait, poison, granule, dust, gel, station or trap,
+  or a health or safety word is dropped, whatever the office-only screen
+  found), and then `customerCopyViolations`; `null` (label only) when the
+  frozen item is not `printable` or nothing passes. The technician's own
+  answer keeps only the card's screens.
+- `did`: one row per shown item, in card 1's order. `subject` names the
+  message: card 1's label plus its first six printed words ("Text · Oct 30 ·
+  “Ants are back in the kitchen”"; a label-only message keeps its label).
+  The line is fixed wording from the technician's tap: `Treated` (`We treated it
+  with <products>.` from the record's product rows the answer names, plus
+  `Where: …` on lawn reports only, since pest reports name no treated areas,
+  owner 2026-10-05), `Checked`, `Noted`, `Follow-up` (`We will follow up on
+  this one.`) or `Answered` (the technician's sentence, re-screened at render
+  with the same egress screens; it prints whole or its row is dropped).
+- `products`: the visit's product rows once each (termite and rodent
+  monitoring stations and bait left out), `where` on lawn reports only, and `how` = the approved
+  `how_it_works` line (`report-product-copy.js`) only while
+  `GATE_REPORT_PRODUCT_COPY` is on. The report's standard products section is
+  unchanged.
+- `expectation`: the copy block's expectation line, or `null`. `stillSeeing`:
+  the card's topic rule and the same `/?tab=schedule` button rule (live view
+  only, `reserviceEligible === true`; no token or new route).
+The PDF prints the four cards (no button). Its cache key part `-ras1` (`-ras1p`
+with `GATE_REPORT_PRODUCT_COPY` on) takes the card's `-rcd1` place, and stands
+alone when the copy block is `null`; the render fence
+(`reserviceCardRenderFence`) appends `|asks:0` / `|asks:1` only while the gate
+is on.
+
 **Owner 2026-10-05: the `rain` key and the `pestWeekWeatherUncacheable` /
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
@@ -3938,7 +4006,22 @@ them, and an enforced verdict never creates a suppression row. The
 unanswered digest omits a thread only when its latest eligible inbound has
 an enforced verdict, so a later genuine message resurfaces.
 Verdict attachment merges metadata without replacing unrelated fields. Failed
-verdict attachment bypasses enforcement. Provider request/auth contracts are unchanged. The SMS operational extension
+verdict attachment bypasses enforcement.
+`GATE_SMS_SPAM_TAG=true` (dark; strict `true`, read at call time) adds a manual
+spam tag the admin inbox sets (`sms_spam_senders`, `services/sms-spam-tag.js`):
+a new text from a tagged sender takes the same enforced path as a confident
+screen verdict, with a manual verdict (`method: 'manual'`, `enforced: true`)
+and no model call, whatever `GATE_SMS_SPAM_CLASSIFIER` is set to. Both message
+stores keep the text, it is marked read, and the webhook returns empty TwiML
+before lead creation, quoting, alerts or auto-replies. A tag never applies to
+a staff sender, the AI assistant line, a reaction, a message with media, an
+empty body, an applicant reply, a carrier keyword (STOP, START, HELP, YES and
+the like) or any text the webhook treats as an opt-out or opt-in command, a
+sender with a customer record or a failed customer lookup, or a sender with an
+open lead: those keep ordinary handling, and consent handling is unchanged. A
+failed tag lookup or a failed verdict write also means ordinary handling. Off =
+no tag lookup and byte-identical behavior.
+Provider request/auth contracts are unchanged. The SMS operational extension
 runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
@@ -6220,6 +6303,56 @@ adjustments do not add up to the handoff amount, every item carries
 never shows prices that disagree with the charge; a failure building them
 returns empty lists, never an error, because the jti is already burned. No
 contact field, address, note or other invoice rides this reply.
+`POST /api/stripe/terminal/validate-save-card-handoff` (machine-to-machine
+burn of the 60s single-use Tap to Pay CARD-SAVE handoff JWT — the token IS the
+auth; no charge ever happens on this surface). Minted by the admin-only,
+`GATE_TAP_SAVE_CARD`-gated `POST /save-card-handoff` (404 while dark; body
+`{ secure_token, consent_text_version, agreed }`; admin session and two-step
+rules as `/handoff`; same advisory-locked, per-tech `HANDOFF_MINTS_PER_HOUR`
+budget). Same secret, `iss` `waves-portal`, `aud` `waves-pay-ios` and 60s TTL as
+`/validate-handoff`; the JWT carries `kind: 'save_card'` and `card_request_id`
+and no invoice fields. Verification: signature/iss/aud/exp (401
+`signature_invalid`, 410 `expired`), `kind === 'save_card'` (a payment token is
+refused with 400 `wrong_token_kind` BEFORE the burn, and `/validate-handoff`
+refuses a save_card token the same way), then ONE atomic
+`UPDATE terminal_handoff_tokens SET used_at = now() WHERE jti = ? AND kind =
+'save_card' AND used_at IS NULL AND expires_at > now()` (410 `replay` /
+`expired`). The row, not the claim, is the authority: technician, two-step
+proof and card request must agree with the claims (else 401
+`signature_invalid`); the technician must still be active (409
+`technician_not_active`) with the same token version and two-step proof (401
+`staff_session_revoked`); the card request must still be pending, its visit
+still need a card and the plan rule hold (409 `request_changed`); the
+SetupIntent must still await a card (409 `setup_intent_not_usable`, 503
+`setup_intent_unavailable` when Stripe cannot be read). Every outcome is
+audited (`terminal.handoff.validate`, metadata `kind: 'save_card'`). RESPONSE:
+`kind: 'save_card'`, `auth_token` (a 15-minute `scope: 'terminal'` staff JWT
+with `save_card: true` and the `jti`), `setup_intent_client_secret`,
+`setup_intent_id`, `customer_name` (first + last, or null), `service_name` (the
+visit's stored `service_type`) and `card_request_id`. The client secret is the
+only secret in the reply and works only for that one `card_present`
+SetupIntent; no contact field, address, note, price or invoice rides it. THE
+CHARGE FENCE: `terminalAuthenticate` refuses any `save_card: true` token with
+403 `save_card_token` on `/payment-intent` and `/apply-surcharge` (and a
+save_card handoff row is refused by jti there too), `/connection-token` takes
+both kinds, and `/complete-setup` takes only a save_card token. The 5-minute sweeper of orphaned validated rows targets `kind = 'collect'` only.
+PRIVACY HEADERS: the reply carries a customer name, the SetupIntent client
+secret and a terminal bearer token, so `/validate-save-card-handoff` (and
+`/save-card-handoff` and `/complete-setup`, which return the handoff token and
+the saved card's brand, last four and funding) answer with the shared `noStore`
+middleware (`Cache-Control: no-store, no-cache, must-revalidate`, `Pragma:
+no-cache`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`)
+on every outcome, success and refusal: it is mounted at those three exact paths in `server/index.js` BEFORE the global `/api` limiter and the body parsers (so a 429, a malformed-JSON 400 or a 413 carries it) and ahead of the mint's dark-gate 404 (answered in `server/index.js` for the mint path only, before the limiter and parsers), and the router re-stamps it. WEBHOOK RECOVERY: a `setup_intent.succeeded`
+event whose SetupIntent metadata has `source: 'admin_tap_to_pay'` and an
+`appointment_card_request_id` (no `purpose`) runs the SAME verify and completion
+tail as `/complete-setup` (`completeTerminalSetupForRequest`), so a save the app
+never finished (disconnect, or the 15-minute terminal token expired) still saves
+the generated card and enrolls Auto Pay. Whichever of the webhook and
+`/complete-setup` finishes first wins; the other finds the completed row. A
+transient state (`verification_failed`, `completion_failed`,
+`completion_in_progress`) throws so Stripe redelivers; an empty `generated_card`
+leaves the request pending, acks, and raises one deduped Billing bell
+(`tap_card_not_saveable:<setup_intent_id>`).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).
@@ -6968,6 +7101,94 @@ id, gate off, a non-multipart body (answered by
 `reservicePhotosPreParserGuard` ahead of the shared body parsers), another
 customer's or a non-re-service visit, an ineligible visit — is the generic
 404. Sends nothing to a customer.
+`/api/public/moving/:token` (GET, plus `POST /:token/check` and
+`POST /:token/submit`; the moving page the office sends a customer who is
+moving, by email from the Customer 360 Moving card or by text from the
+Communications composer, always on a staff click). Dark behind
+`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
+the generic 404 before any DB read. 48-hex token format gate on
+`customer_moves.token`; a malformed, unknown or closed move is the same
+generic 404. Privacy headers (`Cache-Control: private, no-store`,
+`X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
+answer, and the `/moving/<token>` SPA shell gets the sensitive-page headers.
+Router limit 60 req/min per IP; `/check` 6 req/min per IP and `/submit` 10
+req/min per IP on top. GET payload (`services/customer-moves.js`
+`publicMoveView`): `firstName`, the plan's recurring service names, `status`
+(`open` | `submitted`), `moveOutDate` / `moveInDate` (`YYYY-MM-DD` or null),
+`newCity` (only the CITY of a submitted new address), `verdict`
+(`in_area` | `out_of_area` | `unverified` | null) and `addressOnFile`. Never
+the current street address, a phone, an email or money. `/check` takes
+`{ address }` (5-200 chars) and makes one paid Google address check: the
+same text is answered from `customer_moves.last_check` for 24 hours, and a
+link gets at most 10 paid checks per Eastern day (claimed atomically in SQL;
+the 11th is a 429). It answers `{ typed, normalized, verdict, checkId }` for
+the NEW address only; `checkId` is an opaque 16-hex id of that check.
+`/submit` takes `{ checkId, moveOutDate, moveInDate }`: the browser never
+sends an address or a verdict. A `checkId` uses the address of that check,
+and only while it is still the check the server holds (read under the move's
+row lock); a check replaced since (another tab or device) is a 409, never
+swapped in. No `checkId` keeps the address already saved. It needs a checked
+address or a move-out date; dates must be real and inside 60 days back to 400 days
+ahead. A submit writes one `service_requests` row (`category` `moving`,
+reused and reopened on a resubmit), an `activity_log` row and one admin
+alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
+receipt sentences. It changes no visit, price, property or primary address
+and sends nothing to a customer.
+Move pause (moving PR 2b, owner Q4, 2026-11-02): while `GATE_MOVING_PAUSE`
+is on (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the
+receipt of a submit with no checked address on file and a move-out date
+follows the customer's billing lane (`customer-moves.js` `pauseLane`): a
+customer billed per visit reads that the visits pause after the move-out
+date until the new address comes in, for up to 60 days; an annual-prepay or
+monthly member, or a move whose pause the office took over (a move-out
+date changed after the pause ran), reads that we will contact them about the
+visits booked after that date; anyone else reads the plain no-address
+sentence. A resubmit that changes the move-out date of a paused move hands
+it to the office (`pause_state` `office`) under the move's row lock. The GET
+payload, the `view` and every other answer are unchanged. The daily
+move-pause job (not a route) closes a paused move with still no address 60
+days after its move-out date (`closed_reason` `pause_expired`); from then on
+its token is the generic 404, like any closed move. Gate off: the plain
+no-address sentence, and no move closes this way.
+New-home estimates on the estimate routes (moving PR B1, owner 2026-11-02):
+`/estimate/:token` and its data, accept and decline routes,
+`/api/public/estimates/:token/find-slots`, `/available-slots`, `/reserve`,
+the first-visit routes and every other surface that reads the shared estimate
+guard (`utils/estimate-claim-sql.js` `callSideBlockForEstimateData`). An
+estimate whose `estimate_data.move` stamp exists (written only by a staff
+save that names a verified move while `GATE_MOVING_ESTIMATE` is on) leaves
+those surfaces exactly like a stale call link (the generic 404, accept and
+reserve refused) once its move is missing, closed for any reason but
+`applied`, links another estimate (a replacement supersedes it for good), or
+names another address than the stamped one (`services/customer-moves.js`
+`moveLinkBlock`, fail closed); this guard reads only stamped estimates, gate
+on or off. Every accept repeats the same rules at commit on the move row
+share-locked inside its own transaction (`lockMoveForConversion`): the public
+accept right after it locks the estimate row, for every branch including the
+one-time accept (stale = the generic 404), and the converter for every other
+accept path (409 `MOVE_ESTIMATE_STALE`, rolled back). A new-home estimate is
+never a multi-property group member or anchor. While `GATE_MOVING_ESTIMATE` is on
+(strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the submitted,
+in-area move linked to the estimate (`customer_moves.estimate_id`,
+`moveForEstimate`) limits the first visit: `available-slots` / `find-slots`
+offer no day before the move-in date (the rolling window opens on it, a
+seasonal selection at the first in-season day on or after it, and stops at
+the horizon `/reserve` accepts for that selection, the seasonal one included;
+an explicit window loses only the days before it; the offer cache keys on the
+date), `/reserve` refuses an earlier
+slot (`SLOT_UNAVAILABLE`), and the accept-time commit of a hold refuses one
+the move-in date has since passed (`SLOT_UNAVAILABLE`, the recoverable
+pick-another-time answer). Both booking checks lock and judge the stamped
+move inside the booking transaction whatever the gate (`slot-reservation.js`
+`moveBookingRefusal` through `lockMoveForConversion`: a stale move refuses
+like a stale call link), so a moving-page resubmit waits for that commit. The
+estimate page offers no existing visit before the move-in date for adoption
+(`findLinkedUpcomingAppointment`), and the accept compares an adopted
+(non-hold) visit's date with the move-in date read under its move lock (409
+`BEFORE_MOVE_IN`). An
+accept with no picked time places the first visit from the new city on or
+after the move-in date. Gate off: no move-in limit. No new route, token,
+header, rate limit or payload field.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

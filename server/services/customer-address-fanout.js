@@ -29,9 +29,11 @@ const logger = require('./logger');
 const { clearedNewSodColumns } = require('./lawn-sod-holds');
 const {
   formatAddress,
+  leadAddressFields,
   normalizeStreetLine,
   normalizeUnitLine,
   splitStreetLineUnit,
+  streetLineHoldsLocality,
   unitLineValueKey,
   UNIT_DESIGNATORS,
 } = require('../utils/address-normalizer');
@@ -224,20 +226,36 @@ async function markSprinklerSettingsMoved(customerId, conn = db, { clearNewSod =
   return 1;
 }
 
+// A street line that also holds its locality ("12 Sample Ct East, Parrish, FL
+// 34219": the lead form's one-line address) is the same house as that address
+// saved in parts (owner 2026-10-30), so it is read the way the lead split
+// reads it, the row's own city and ZIP winning. Any other row is unchanged.
+function premiseFields(row) {
+  if (!row || !streetLineHoldsLocality(row)) return row;
+  const split = leadAddressFields({ address: row.address_line1, city: row.city, zip: row.zip });
+  return { ...row, address_line1: split.line1, address_line2: row.address_line2 || split.line2, city: split.city, zip: split.zip };
+}
+
 // Two customer rows describe DIFFERENT homes (normalized street, unit, zip,
 // city) — the premise test the sprinkler-settings move guard uses, shared
 // with the customer merge (a duplicate pair can be the old and new home).
-function homesDiffer(a, b) {
+function homesDiffer(rowA, rowB) {
+  const a = premiseFields(rowA);
+  const b = premiseFields(rowB);
   const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
   // Street + unit resolved the way snapshotMatchesContact does: an inline
   // unit on line 1 ("123 Main St Apt 4") is the same premise as line 1 +
-  // line 2 ("123 Main St" / "Apt 4") — a cleanup is never a move. Suffix-
-  // normalized ("Main Street" == "Main St") like every street compare here.
+  // line 2 ("123 Main St" / "Apt 4") — a cleanup is never a move. Both unit
+  // sources count, as in addressKey: "Apt 4" + "Building A" is not "Apt 5" +
+  // "Building A"; the same unit given twice counts once. Suffix-normalized
+  // ("Main Street" == "Main St") like every street compare here.
   const premise = (row) => {
     const inline = splitStreetLineUnit(row?.address_line1 || '');
+    const embedded = unitKey(inline.unit || '');
+    const line2 = unitKey(row?.address_line2 || '');
     return {
       street: addressMatchKey(normalizeStreetLine(inline.unit ? inline.street : (row?.address_line1 || ''))),
-      unit: unitKey(row?.address_line2 || inline.unit || ''),
+      unit: embedded && line2 && embedded !== line2 ? `${embedded}${line2}` : (embedded || line2),
     };
   };
   const pa = premise(a);

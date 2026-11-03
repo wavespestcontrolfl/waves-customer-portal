@@ -1,8 +1,8 @@
 /**
  * The phone page for a customer's ask inside the app (GATE_PORTAL_ASK_PUSH, owner 2026-11-02).
  *
- * A portal chat hand-off, a customer service request, the late "Still waiting" re-ring and an estimate page's
- * change or call request each write an admin bell row. None of them rang a phone: three new leads asked ten times
+ * A portal chat hand-off, a customer service request, the late "Still waiting" re-ring, an estimate page's change
+ * or call request and an unfinished booking each write an admin bell row. None of them rang a phone: three new leads asked ten times
  * in the app and the bells sat unread for weeks. A customer text rings a phone because it goes through the
  * trigger registry (sms_reply). This sends the same kind of page for the app's asks: the portal_ask trigger,
  * pushOnly, so the bell keeps its one row per ask and the push is the page. notification-triggers.js owns the

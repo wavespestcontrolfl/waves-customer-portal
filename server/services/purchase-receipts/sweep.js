@@ -56,6 +56,7 @@ const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('.
 const siteOne = require('./siteone-invoices');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { raiseAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
+const { raiserFor } = require('../admin-alert-injected');
 
 const GATE = 'GATE_PURCHASE_RECEIPT_RESTOCK';
 const SINCE_ENV = 'PURCHASE_RECEIPT_SINCE';
@@ -88,6 +89,28 @@ const HELD_REASONS = {
   unreadable: "The invoice couldn't be read. If it has stock, log it by hand.",
 };
 
+// The same reasons as one short sentence each: the bell's why (a headline's second line).
+// HELD_REASONS stays the full text, carried in the bell's detail.
+const HELD_WHY = {
+  possible_duplicate: 'A manual restock or count was logged around then, so check the count.',
+  size_mismatch: 'The listing size or pack count does not match the catalog, so log it by hand.',
+  needs_size: 'The product has no container size in the catalog, so log it by hand.',
+  no_items: 'The email does not name the item; if it is stock, log it by hand.',
+  no_order_number: 'The order number could not be read, so log it by hand.',
+  returned: 'It is a return, so take it out of stock by hand.',
+  unverified: 'Its quantity or unit could not be checked, so log it by hand.',
+  unreadable: 'The invoice could not be read; if it has stock, log it by hand.',
+};
+
+// What a person does for a held line, named for the receipt ("Amazon delivery", "SiteOne invoice").
+function heldAction(status, noun) {
+  if (status === 'possible_duplicate') return `check the count for the ${noun}`;
+  if (status === 'returned') return `take the returned ${noun} out of stock`;
+  return `log the ${noun} by hand`;
+}
+const HELD_DONE_WHEN = { possible_duplicate: 'count_checked', returned: 'stock_removed_by_hand' };
+const heldDoneWhen = (status) => HELD_DONE_WHEN[status] || 'line_logged_by_hand';
+
 // NOTE: the bucket is `alreadyProcessed`, never `skipped` — the whole-email
 // early returns use `{ skipped: '<reason>' }` as their sentinel, and an
 // array is always truthy, so runPurchaseReceiptRestockSweep's
@@ -103,10 +126,6 @@ function summarize(result) {
   const held = Object.values(SUMMARY_BUCKETS).filter((bucket) => !['logged', 'unmatched', 'agentPending'].includes(bucket))
     .reduce((sum, bucket) => sum + result[bucket].length, result.undelivered.length);
   return { logged: result.logged.length, held, errors: result.errors.length, agentPending: result.agentPending.length };
-}
-
-function adminNotifier(notify) {
-  return notify || ((...args) => require('../notification-service').notifyAdmin(...args));
 }
 
 function displayUnit(unit) {
@@ -193,11 +212,22 @@ async function ringUnmatchedUnverifiedBell({ receipt, email, item, outcome, trx 
 }
 
 async function ringHeldBell(notifyAdmin, { receipt, email, item, outcome, trx }) {
-  await notifyAdmin('inventory', `${receipt.noun} not added`, `${heldSubject({ receipt, item, outcome })} wasn't added. ${HELD_REASONS[outcome.status]}`, {
+  // Raised through raiseAdminAlert (alert step E2): same category, bell tag, dedupe key and link as before.
+  // `notifyAdmin` is the injected old-shape notifier (tests); none means the real one.
+  await raiserFor(notifyAdmin)('inventory', {
+    area: 'Inventory',
+    action: heldAction(outcome.status, receipt.noun),
+    why: HELD_WHY[outcome.status],
+    severity: 'needs-you',
     link: INVENTORY_LINK,
+    subject: { type: 'check', id: `purchase-receipt:${outcome.lineId}` },
+    doneWhen: heldDoneWhen(outcome.status),
+    who: 'person',
+  }, {
     bell: true,
     dedupeKey: `purchase-receipt:${outcome.lineId}`,
     trx,
+    detail: `${heldSubject({ receipt, item, outcome })} wasn't added. ${HELD_REASONS[outcome.status]}`,
     metadata: { emailId: email.id, productId: outcome.product?.id || null, status: outcome.status },
   });
 }
@@ -249,7 +279,7 @@ function authenticated(email) {
  * to call multiple times for the same email (idempotent via
  * purchase_receipt_lines).
  */
-async function processReceiptEmail(email, { notify } = {}) {
+async function processReceiptEmail(email, { notify: notifyAdmin } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated' };
   const since = gateEnvTimestamp(SINCE_ENV);
   if (!since) return { skipped: 'no_since' };
@@ -267,7 +297,6 @@ async function processReceiptEmail(email, { notify } = {}) {
     return { skipped: 'unauthenticated' };
   }
 
-  const notifyAdmin = adminNotifier(notify);
   const summary = emptySummary();
   const lines = amazonEmailLines(email, parsed);
   for (const [index, line] of lines.entries()) {
@@ -403,13 +432,12 @@ async function closeLoggedDeliveryBells() {
  * The ~15-minute scheduler sweep (see the header). Idempotent: anything
  * already recorded contributes nothing new.
  */
-async function runPurchaseReceiptRestockSweep({ notify } = {}) {
+async function runPurchaseReceiptRestockSweep({ notify: notifyAdmin } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated' };
   const since = gateEnvTimestamp(SINCE_ENV);
   if (!since) return { skipped: 'no_since' };
   const now = Date.now();
   const floor = new Date(Math.max(since.getTime(), now - SWEEP_LOOKBACK_MS));
-  const notifyAdmin = adminNotifier(notify);
 
   const emails = await db('emails')
     .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at', 'authentication_results')
@@ -442,7 +470,7 @@ module.exports = {
   // Reused by inventory-agent.js's drainAgentQueue (never duplicated) — a
   // line the agent gate stranded is restored to the status it would have
   // held under without the agent, and rings the SAME "not added" bell text.
-  HELD_REASONS,
+  HELD_REASONS, HELD_WHY, heldAction, heldDoneWhen,
   // The live lanes' own line builders, reused by the read-only replay tool
   // (ops/agents/inventory-agent-replay.js) so it replays exactly the lines
   // this sweep records — authentication, copy ownership, placeholders and

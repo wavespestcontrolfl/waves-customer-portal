@@ -9,6 +9,7 @@ import { Radio } from "../ui/Radio";
 export const PREP_GUIDE_LINKS = [
   ["flea", "Flea treatment", "flea infestation"],
   ["bed_bug", "Bed bug treatment", "bedbug mattress"],
+  ["bed_bug_heat", "Bed bug heat treatment", "bedbug heat hybrid"],
   ["cockroach", "Cockroach treatment", "roach german"],
   ["interior_pest", "Interior pest treatment", "indoor pest control"],
   ["rodent", "Rodent service", "rat mouse mice"],

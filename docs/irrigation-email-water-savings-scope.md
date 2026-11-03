@@ -161,7 +161,9 @@ portal pill row, and the rate table.
 
 Decided 2026-10-22 (owner): default schedule is twice a week, 20 minutes a zone,
 ½ inch per run. The default stands in for a missing schedule; it never overrides
-one on file.
+one on file. 2026-11-02 (owner "fix copy"): the default never runs more often
+than the plan week's watering order allows, so under the SWFWMD one-day order a
+hold counts one skipped run, not "both of this week's runs".
 
 Note: no Gmail connector was attached to this session, so the sent emails in the
 inbox were not reviewed; the scope is from the code and the public rate tables.

@@ -309,11 +309,34 @@ function customerNameFor(n, type) {
   return String(n.title || '').toLowerCase().includes(name.toLowerCase()) ? null : name;
 }
 
+// "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE) inside "What to do", on a row the server marked `sendToClaude` (never
+// customer contact). One tap moves the row out of the bell into Claude's queue, where a terminal tab works on it;
+// onSend resolves 'sent' (the row leaves the list), 'refreshed' (the list was read again with a note) or 'failed'.
+function SendToClaude({ n, color, onSend }) {
+  const [state, setState] = useState(null); // null | 'sending' | 'failed'
+  const send = async () => {
+    setState('sending');
+    const result = await onSend(n);
+    setState(result === 'failed' ? 'failed' : null);
+  };
+  const text = { fontSize: 14, lineHeight: 1.4, color };
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button type="button" onClick={send} disabled={state === 'sending'}
+        style={{ padding: '6px 12px', minHeight: 36, borderRadius: 6, border: `1px solid ${color}`, background: 'none', cursor: state === 'sending' ? 'default' : 'pointer', fontSize: 14, fontWeight: 600, color }}>
+        {state === 'sending' ? 'Sending\u2026' : 'Send to Claude'}
+      </button>
+      <div style={{ ...text, marginTop: 4 }}>Moves it out of your bell. A Claude terminal tab works on it.</div>
+      {state === 'failed' && <div role="alert" style={{ ...text, marginTop: 4 }}>Couldn&apos;t send it. Try again.</div>}
+    </div>
+  );
+}
+
 // "What to do" (GATE_ALERT_EXPLAINER): replaces "Show full text" on a row the server marked `explainable`. The first
 // open asks the server for the row's plain-words summary (onExplain resolves it, or null); a summary the list already
 // carried shows at once. The alert's own long text stays one tap further, under "Show original text". Its own click
 // and key handling, never the row's (the row navigates to its link and marks itself read only on its own tap).
-function WhatToDo({ n, color, marginTop, onExplain }) {
+function WhatToDo({ n, color, marginTop, onExplain, onSend }) {
   const [shown, setShown] = useState(false);
   // The server checked the shape: a summary has its text and a steps list. The customer is on the row's own line.
   const [summary, setSummary] = useState(n.explainer);
@@ -362,6 +385,7 @@ function WhatToDo({ n, color, marginTop, onExplain }) {
               )}
             </>
           )}
+          {n.sendToClaude && onSend && <SendToClaude n={n} color={color} onSend={onSend} />}
           {original && (
             <div style={{ marginTop: 8 }}>
               <button type="button" aria-expanded={originalShown} onClick={() => setOriginalShown((v) => !v)} style={linkStyle}>
@@ -398,8 +422,8 @@ function CustomerLine({ n, type, color, marginTop }) {
 // detail (fullTextFor), else nothing.
 // The panel is keyed on the row's content version: an alert whose text changed (a refreshed list) starts a fresh panel,
 // so a summary of the old text never stays on screen.
-function MoreText({ n, type, color, marginTop, onExplain }) {
-  if (type === 'admin' && n.explainable) return <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} />;
+function MoreText({ n, type, color, marginTop, onExplain, onSend }) {
+  if (type === 'admin' && n.explainable) return <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} onSend={onSend} />;
   const fullText = fullTextFor(n, type);
   return fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null;
 }
@@ -786,6 +810,26 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     setNotifications(prev => prev.filter(x => x.id !== n.id));
     if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
     fetchCount();
+  };
+
+  // "Send to Claude" (SendToClaude): same content fence as Done. Success moves the row out of the bell like Done and
+  // shows the server's note; a row that changed, closed or can no longer be sent re-reads the list with a note; any
+  // other failure keeps the row and the button shows an inline error. Resolves 'sent' | 'refreshed' | 'failed'.
+  const sendRowToClaude = async (n) => {
+    setActionNote(null);
+    let d;
+    try {
+      d = await requestJson(`${basePath}/${encodeURIComponent(n.id)}/send-to-claude`, { method: 'POST', body: JSON.stringify({ version: n.version }) });
+    } catch (err) {
+      if (err?.status !== 409 && err?.status !== 422 && err?.status !== 404) return 'failed';
+      loadNotifications();
+      setActionNote(err.data?.error === 'changed' ? CHANGED_NOTE : 'That alert was already handled or can\u2019t be sent to Claude.');
+      return 'refreshed';
+    }
+    if (d?.sent !== true) return 'failed';
+    removeDoneRow(n);
+    setActionNote(typeof d.message === 'string' && d.message ? d.message : 'Sent to Claude.');
+    return 'sent';
   };
 
   // A row button the server set on this row (RowActions): same content fence
@@ -1256,7 +1300,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                           color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
                         }}>Full report</button>
                     )}
-                    <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} />
+                    <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} onSend={sendRowToClaude} />
                     {actions.length > 0 && <RowActions tall marginTop={8} actions={actions} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onRun={(e, a) => runAction(e, n, a)} />}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                       <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted }}>
@@ -1428,7 +1472,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                               fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
                             }}>Full report</button>
                         )}
-                        <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} />
+                        <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} onSend={sendRowToClaude} />
                         {actions.length > 0 && <RowActions marginTop={6} actions={actions} color={colors.text} onRun={(e, a) => runAction(e, n, a)} />}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
                           <div style={{ fontSize: 11, color: colors.muted }}>

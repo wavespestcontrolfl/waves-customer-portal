@@ -12,7 +12,7 @@ function safeErrorSummary(err) {
 }
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
-const { stampClaudeQueue, rescueClaudeFault } = require('./admin-alert-routing');
+const { stampClaudeQueue, rescueClaudeFault, keepSentToClaude } = require('./admin-alert-routing');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
   'appointment_confirmation',
@@ -401,7 +401,8 @@ function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
     // ask, or GATE_ALERT_CLAUDE_QUEUE turned off): drop the fields routing set, so the row returns to the bell.
     // Whatever this emission itself carries stands (its own feed / who / severity); a feed the emitter wrote
     // itself on a row that was never routed is not touched, because this branch needs claudeQueue.
-    const { claudeQueue: _gone, who, severity, feed: _routedFeed, ...rest } = merged;
+    // A row the owner had sent to Claude drops that stamp too: it is back in the bell, and can be sent again.
+    const { claudeQueue: _gone, who, severity, feed: _routedFeed, sentToClaude: _sent, ...rest } = merged;
     return {
       ...rest,
       ...('who' in metadata ? { who } : {}),
@@ -691,7 +692,9 @@ const NotificationService = {
           // refresh should write; `quiet` writes it without ringing or bumping.
           const adjusted = refreshOnDedupe && typeof standingRefresh === 'function'
             ? await standingRefresh(existing, existingMeta) : null;
-          const useMeta = adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata;
+          // A row the owner sent to Claude (GATE_ALERT_SEND_TO_CLAUDE) stays in Claude's queue while it is open: this
+          // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
+          const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);
           const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
@@ -1007,7 +1010,7 @@ const NotificationService = {
     const row = await scopeAdminFeedToRole(
       db('notifications').where({ id, recipient_type: 'admin' }),
       role, technicianId,
-    ).first('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', 'explainer',
+    ).first('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', 'done_at', 'explainer',
       db.raw(`${NOTIFICATION_VERSION_SQL} AS version`));
     return row || null;
   },
@@ -1018,6 +1021,21 @@ const NotificationService = {
     return db('notifications').where({ id, recipient_type: 'admin' })
       .whereRaw(`${NOTIFICATION_VERSION_SQL} = ?`, [version])
       .update({ explainer: JSON.stringify(explainer) });
+  },
+
+  // "Send to Claude" (services/admin-alert-send-to-claude.js): merges `patch` (the Claude's-queue fields) into one admin
+  // row's metadata, only while the row is open, still in the bell and at the content version the admin saw. A keyed row
+  // takes its emitter's dedupe lock first, so a refresh of the same alert can never write over the send with metadata it
+  // read before it. Returns the rows written, 0 or 1.
+  async markAdminSentToClaude(id, version, patch) {
+    return db.transaction(async (trx) => {
+      const row = await trx('notifications').where({ id, recipient_type: 'admin' }).first(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+      if (!row) return 0;
+      if (row.dedupe_key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${row.dedupe_key}`]);
+      return excludeActivityOnlyFromBell(trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at'))
+        .whereRaw(`${NOTIFICATION_VERSION_SQL} = ?`, [version])
+        .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]) });
+    });
   },
 
   // Recently done admin rows (the "Recently done" list, so an accidental Done

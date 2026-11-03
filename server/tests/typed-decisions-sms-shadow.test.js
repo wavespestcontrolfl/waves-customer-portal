@@ -110,7 +110,9 @@ describe('twilio-webhook wiring', () => {
     // a message with an attachment is never shadowed (Jev would see only the caption)
     expect(src.slice(hook - 600, hook)).toMatch(/if \(Body && !smsReaction && inboundMedia\.length === 0 && customer\?\.id && smsLogEntry\?\.id\)/);
     // and after the solicitation stop, which keeps no customer conversation
-    expect(hook).toBeGreaterThan(src.indexOf('if (solicitationEnforced) return res.type('));
+    const stop = src.indexOf('if (solicitationEnforced && !tagReleased) return res.type(');
+    expect(stop).toBeGreaterThan(-1);
+    expect(hook).toBeGreaterThan(stop);
     expect(src.slice(hook - 400, hook)).toMatch(/res\.once\('finish'/);
   });
 
@@ -124,7 +126,9 @@ describe('twilio-webhook wiring', () => {
     expect(src.slice(hook - 400, hook)).toMatch(/res\.once\('finish'/);
     // after the inbound row persists, BEFORE the enforcement stop: a silenced text is shadowed too
     expect(hook).toBeGreaterThan(src.indexOf("const [smsLogEntry] = await db('sms_log').insert("));
-    expect(hook).toBeLessThan(src.indexOf('if (solicitationEnforced) return res.type('));
+    const stop = src.indexOf('if (solicitationEnforced && !tagReleased) return res.type(');
+    expect(stop).toBeGreaterThan(-1);
+    expect(hook).toBeLessThan(stop);
     // it is handed the screen's verdict, whatever the gate's mode
     expect(src.slice(hook, hook + 300)).toMatch(/verdict: solicitation,/);
   });

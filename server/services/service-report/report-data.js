@@ -87,6 +87,7 @@ const featureGates = require('../../config/feature-gates');
 const { printableCitations } = require('./tip-library');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { buildReserviceReportCard } = require('./reservice-report-card');
+const { buildReserviceAsksReport } = require('./reservice-asks-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, readReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
@@ -7435,7 +7436,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // then NO key joins the payload, so a dark gate leaves it byte-identical.
   // The customer's words come from the copy FROZEN on the record at
   // completion (service_data.reserviceRequest), never from the live booking.
-  const reserviceReportCardBlock = buildReserviceReportCard(service, {
+  // Re-service asks report (GATE_RESERVICE_ASKS, reservice-asks-report.js):
+  // "Your re-service", from the frozen service_data.reserviceAsks. When it
+  // applies it REPLACES the card above for this payload (web and PDF read the
+  // same payload), so the card is not built; otherwise null and nothing moves.
+  const reserviceAsksReportBlock = buildReserviceAsksReport(service, {
+    block: reserviceReportBlock,
+    products,
+    city: service.city,
+  });
+  const reserviceReportCardBlock = reserviceAsksReportBlock ? null : buildReserviceReportCard(service, {
     block: reserviceReportBlock,
     products,
     // The gauge's own per-record visibility decision (switches, service
@@ -7585,6 +7595,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the client then keeps its legacy name-regex headline unchanged.
     reserviceReport: reserviceReportBlock,
     ...(reserviceReportCardBlock ? { reserviceReportCard: reserviceReportCardBlock } : {}),
+    ...(reserviceAsksReportBlock ? { reserviceAsksReport: reserviceAsksReportBlock } : {}),
     // True when the gated composer ran: a null reserviceReport on a callback
     // is then a deliberate withholding (unsupported line), and the client
     // must not fall back to the legacy name-regex copy.

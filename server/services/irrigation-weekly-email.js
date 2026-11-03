@@ -934,15 +934,28 @@ function decideWeeklyEmail({
       waterSource,
       now,
     });
+    // A moved home's schedule is not quoted as last week's watering — the
+    // narrative is rain-only until the settings are re-saved.
+    // From the second plan week on, last week's irrigation is what the
+    // delivered plan prescribed — never the programmed schedule it
+    // superseded (codex gh-r31); no surplus/deficit claim is made from it.
+    // The CREDITED figure (the plan's rain rule said skip after ≥ ½" ⇒ 0),
+    // the same one the decision balanced from (codex gh-r34).
+    const priorPlanIrrig = !scheduleUnconfirmed && decisionInputs.priorWeekCreditedInches != null ? roundHundredth(decisionInputs.priorWeekCreditedInches) : null;
     // A derived schedule's provenance sentence (below) already names the
     // assumed head rate, the Weekly Inches ask AND — for a sensor system —
     // that last week's programmed total is only an upper bound; skip the
-    // renderer's generic copies so the note doesn't say them twice.
+    // renderer's generic copies so the note doesn't say them twice (the
+    // sensor copy prints only for a plan with a sensor). The sentence
+    // explains the derived figure, so it rides only an email that quotes it:
+    // beside last week's PLAN figure, "We worked that 0.67" out" would point
+    // at a number the email never prints (owner 2026-11-02).
     const sensorOn = rainSensor === true || rainSensor === 't';
+    const derivedNote = scheduleSource === 'portal_derived' && priorPlanIrrig == null;
     const planCopy = renderWeekPlanEmail(plan, {
       firstName, grassLabel, runMinutes: scheduleUnconfirmed ? null : runtimeInputs.runMinutes, restriction,
-      omitRateNote: scheduleSource === 'portal_derived',
-      omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
+      omitRateNote: derivedNote,
+      omitSensorNote: derivedNote,
       scheduleUnconfirmed,
       rateTable: table,
       // The gallons sentence reads the block this decision froze (or the replayed snapshot's), never the live gate.
@@ -964,14 +977,6 @@ function decideWeeklyEmail({
       const scheduleClause = scheduleSource === 'portal_derived'
         ? `your sprinkler schedule as entered in your portal (about ${irrigationFmt}" per week)`
         : `your irrigation schedule (${irrigationFmt}" per week)`;
-      // A moved home's schedule is not quoted as last week's watering — the
-      // narrative is rain-only until the settings are re-saved.
-      // From the second plan week on, last week's irrigation is what the
-      // delivered plan prescribed — never the programmed schedule it
-      // superseded (codex gh-r31); no surplus/deficit claim is made from it.
-      // The CREDITED figure (the plan's rain rule said skip after ≥ ½" ⇒ 0),
-      // the same one the decision balanced from (codex gh-r34).
-      const priorPlanIrrig = !scheduleUnconfirmed && decisionInputs.priorWeekCreditedInches != null ? roundHundredth(decisionInputs.priorWeekCreditedInches) : null;
       const priorPlanSkipped = priorPlanIrrig != null && decisionInputs.priorWeekRainOverride === true;
       // A multi-run plan skips ONE run after rain; the other run's depth is
       // still counted (codex gh-r35).
@@ -1001,7 +1006,7 @@ function decideWeeklyEmail({
       // rides the note, INCLUDING the sensor upper-bound disclosure — the
       // summary quotes the full programmed amount as "received", and a
       // sensor may have skipped some of it (codex #3478 r13 / #3565 r5).
-      const provenance = scheduleSource === 'portal_derived' && !scheduleUnconfirmed
+      const provenance = derivedNote && !scheduleUnconfirmed
         ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: sensorOn, rateTable: table })
         : '';
       const planNote = [planCopy.plan_note, provenance].filter(Boolean).join(' ');
@@ -1522,6 +1527,7 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  * runExclusive in the cron wiring prevents concurrent sweeps.
  */
 async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN, inProgressRetryMs = IN_PROGRESS_RETRY_MS,
+  customerIds = null,
 } = {}) {
   const startedAt = now || new Date();
   // The wall clock is re-read PER CUSTOMER (and again at each queue
@@ -1535,7 +1541,11 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   const weekPlanGate = gateEnvValue('GATE_IRRIGATION_WEEK_PLAN');
   const appPublication = gateEnvValue('GATE_IRRIGATION_APP_PLAN') && weekPlanGate;
   const emailEnabled = isEnabled('irrigationWeeklyEmail');
-  const candidates = await findEligibleCustomers({ now: startedAt, includeApp: appPublication });
+  // `customerIds` narrows a hand run to those customers (a late send for one the
+  // Monday run skipped); the cron passes none. Each must still be eligible.
+  const only = Array.isArray(customerIds) ? new Set(customerIds.map(String)) : null;
+  const candidates = (await findEligibleCustomers({ now: startedAt, includeApp: appPublication }))
+    .filter((c) => !only || only.has(String(c.id)));
 
   if (!emailEnabled && !appPublication) {
     logger.info(`[irrigation-weekly-email] shadow mode (gate off): ${candidates.length} candidate(s) for week ending ${weekEnding} — no emails sent`);
@@ -1571,6 +1581,16 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
 
   const pendingEmails = [];
+  // For the rain-unknown bells after the run (irrigation-rain-unknown-alert.js).
+  const sentCustomerIds = new Set();
+  const rainUnknownCustomerIds = [];
+  // Only a customer the email could reach gets a bell: an app-only one (no email, or email
+  // off) was never going to be emailed, so there is no missed email to decide on.
+  const countSkip = (decision, customer, canEmail) => {
+    if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
+    else summary.skipped.unknown += 1;
+    if (decision.reason === 'rain_unknown' && canEmail) rainUnknownCustomerIds.push(customer.id);
+  };
   // Both preparation failures and ambiguous provider outcomes use the same
   // durable delivery reconciliation before releasing a snapshot claim.
   const recordFailure = async (err, customer, snapshotArgs) => {
@@ -1842,6 +1862,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         summary.deduped += 1;
       } else if (result.sent) {
         summary.sent += 1;
+        sentCustomerIds.add(String(customer.id));
         await logEmailAttempt({
           customerId: customer.id,
           templateKey: decision.templateKey,
@@ -1948,8 +1969,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.
       let decision = buildWeeklyEmailDecision(decisionInputs);
       if (!decision.shouldSend) {
-        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
-        else summary.skipped.unknown += 1;
+        countSkip(decision, customer, canEmail);
         continue;
       }
       const upcoming = frozen ? { rainInches: frozen.forecastRainInches, et0Inches: frozen.forecastEt0Inches } : await fetchUpcomingWeekForecast({
@@ -1967,8 +1987,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // Defensive recheck — today the forecast only reroutes a deficit to the
       // on-track template (still a send), but a no-send here must be counted.
       if (!decision.shouldSend) {
-        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
-        else summary.skipped.unknown += 1;
+        countSkip(decision, customer, canEmail);
         continue;
       }
 
@@ -2127,6 +2146,8 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     + `${summary.sent} sent, ${summary.deduped} deduped, ${summary.blocked} suppressed, `
     + `${summary.skipped.rain_unknown} rain-unknown, ${summary.failed} failed`,
   );
+  // The office hears about each rain-unknown skip; a customer emailed now closes theirs.
+  await require('./irrigation-rain-unknown-alert').settleRainUnknownAlerts({ sentCustomerIds, rainUnknownCustomerIds, weekEnding });
   return summary;
 }
 

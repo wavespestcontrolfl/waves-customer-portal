@@ -32,7 +32,9 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // routes/appointment-public.js's .ics route applies the same predicate, so the
 // portal can never advertise a link that 404s or hide one the route serves
 // (codex r3 P1).
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
+const {
+  DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL,
+} = require('../services/call-booking-source-actions');
 const { awaitingCustomerPick, AWAITING_PICK_REFUSAL } = require('../services/scheduling/self-serve-notice');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 // Contact session (GATE_CONTACT_LOGIN): a contact is view-only, so its
@@ -412,8 +414,11 @@ router.post('/:id/confirm', async (req, res, next) => {
     const serviceQuery = db('scheduled_services')
       .where({ id: req.params.id, customer_id: req.customerId });
     applyPropertyPredicate(serviceQuery, scope);
+    // 'confirmed' too: the office books most visits straight to 'confirmed'
+    // with customer_confirmed false, and the app offers Confirm on every row
+    // the customer has not confirmed. Refusing those rows 404'd the button.
     const service = await serviceQuery
-      .whereIn('status', ['pending', 'rescheduled'])
+      .whereIn('status', ['pending', 'rescheduled', 'confirmed'])
       .first();
 
     if (!service) {
@@ -432,6 +437,37 @@ router.post('/:id/confirm', async (req, res, next) => {
     // confirmation would hold it out of the Auto-Dispatch booking its text
     // promised).
     if (awaitingCustomerPick(service)) return res.status(409).json(AWAITING_PICK_REFUSAL);
+
+    const officeConfirmed = service.status === 'confirmed';
+    // An office-review booking (outbound callback, voice agent) the office
+    // confirmed still owes its activation legs while customer_confirmed is
+    // unset: that stamp is their receipt and retry rail
+    // (outbound-review-confirm.js), so the customer must not write it.
+    if (officeConfirmed && !service.customer_confirmed
+      && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(service.source_action)) {
+      return res.status(404).json({ error: 'Appointment not found or already confirmed' });
+    }
+
+    // The slot the app showed (date + windowStart, echoed from GET / or
+    // GET /next), compared the way the token page compares its own. A
+    // customer confirm takes the visit out of Auto-Dispatch (eligibility.js
+    // CUSTOMER_CONFIRMED), so it must land on the time the customer saw, not
+    // on one a move wrote after the page loaded. Required for a confirmed
+    // row (that path never worked, so no older client relies on it);
+    // checked for a pending row whenever the client sends it.
+    const shown = req.body || {};
+    if ((officeConfirmed || shown.date != null)
+      && !require('./appointment-public').slotMatchesShown(service, shown)) {
+      return res.status(409).json({
+        error: 'This appointment changed before it could be confirmed. Refresh to see the latest status.',
+      });
+    }
+
+    // A second tap (another device, a stale card) on a visit the customer
+    // already confirmed at this slot is a success, not an error.
+    if (officeConfirmed && service.customer_confirmed) {
+      return res.json({ success: true, message: 'Appointment confirmed' });
+    }
 
     // The staff board can move this visit after the read above. Gate the write
     // on the customer and status we actually observed so a stale portal click
@@ -458,16 +494,25 @@ router.post('/:id/confirm', async (req, res, next) => {
         // and this write; a confirm scoped to the old house must then miss,
         // not land on the newly assigned property.
         property_id: service.property_id || null,
+        // The observed SLOT too: a move between the read and this write
+        // keeps a confirmed row's status, so only the slot can tell.
+        scheduled_date: service.scheduled_date ?? null,
+        window_start: service.window_start ?? null,
       })
       // A hand-off landing after the read keeps the status, so the CAS above
       // would still match: never confirm a row now waiting for the pick.
       .where((q) => q.whereNull('customer_pick_by').orWhereNotNull('window_start'))
-      .update({
-        status: 'confirmed',
-        customer_confirmed: true,
-        confirmed_at: new Date(),
-        updated_at: new Date(),
-      });
+      // An office-confirmed row records only the customer's confirmation;
+      // confirmed_at (the status transition) stays as written, the same as
+      // the token page's staff-confirmed anchor (appointment-public.js).
+      .update(officeConfirmed
+        ? { customer_confirmed: true, updated_at: new Date() }
+        : {
+          status: 'confirmed',
+          customer_confirmed: true,
+          confirmed_at: new Date(),
+          updated_at: new Date(),
+        });
 
     if (!updatedCount) {
       return res.status(409).json({

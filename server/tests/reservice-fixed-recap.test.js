@@ -231,9 +231,9 @@ describe('complete-scheduled-service wiring', () => {
     expect((src.match(/await sendCustomerMessage\(sendInput\)/g) || []).length).toBe(1);
   });
 
-  test('no review ask rides it, and none follows it unless the Wrap-up gate is on (owner 2026-10-10)', () => {
-    // One decision, made once beside the fixed-mode handling, read live ...
-    expect(src).toMatch(/const reviewAskAllowed = ReserviceFixedRecap\.reviewAskAllowed\(\{\s*marker: wrapUpReviewAsk === true,\s*wrapUpGate: require\('\.\.\/config\/feature-gates'\)\.fastCompleteWrapUpLive\(\),\s*fixedRequested: reserviceFixedRecapRequested,\s*fixedHonored: reserviceFixedRecap,\s*\}\);/);
+  test('no review ask rides it, and a re-service asks for one on its own message otherwise (owner 2026-10-10)', () => {
+    // One decision, made once beside the fixed-mode handling ...
+    expect(src).toMatch(/const reviewAskAllowed = ReserviceFixedRecap\.reviewAskAllowed\(\{\s*fixedRequested: reserviceFixedRecapRequested,\s*fixedHonored: reserviceFixedRecap,\s*\}\);/);
     // ... and it ends the effective ask; the stored intent drops only a marked, refused ask.
     expect(src).toMatch(/&& !suppressTypedCustomerComms\s*(?:\/\/[^\n]*\n\s*)+&& reviewAskAllowed;/);
     expect(src).toContain(': requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),');
@@ -479,37 +479,28 @@ describe('pre-push fix (#5363 r7)', () => {
   });
 });
 
-describe('the review ask on a re-service (GATE_FAST_COMPLETE_WRAP_UP)', () => {
-  // Every combination of {marker, gate live, fixed requested, fixed honored}. Honored implies requested.
-  const rules = ({ marker, gate, requested, honored }) => {
-    if (marker && !gate) return false;
-    if (requested && !honored) return false;
-    return !(honored && !gate);
-  };
-  const combos = [];
-  for (const marker of [false, true]) for (const gate of [false, true]) {
-    for (const [requested, honored] of [[false, false], [true, false], [true, true]]) combos.push({ marker, gate, requested, honored });
-  }
-  test.each(combos)('marker=$marker gate=$gate requested=$requested honored=$honored', ({ marker, gate, requested, honored }) => {
-    expect(reviewAskAllowed({ marker, wrapUpGate: gate, fixedRequested: requested, fixedHonored: honored })).toBe(rules({ marker, gate, requested, honored }));
+describe('the review ask on a re-service', () => {
+  // Every combination of {fixed requested, fixed honored}. Honored implies requested.
+  test.each([
+    [false, false, true],
+    [true, false, false],
+    [true, true, true],
+  ])('requested=%p honored=%p -> allowed %p', (requested, honored, allowed) => {
+    expect(reviewAskAllowed({ fixedRequested: requested, fixedHonored: honored })).toBe(allowed);
   });
 
   test('the cases that matter, by name', () => {
-    // The full form (no marker, not fixed): untouched, gate on or off.
-    expect(reviewAskAllowed({ marker: false, wrapUpGate: false, fixedRequested: false, fixedHonored: false })).toBe(true);
-    expect(reviewAskAllowed({ marker: false, wrapUpGate: true, fixedRequested: false, fixedHonored: false })).toBe(true);
-    // A marked ask from a sheet left open after the gate went off: refused.
-    expect(reviewAskAllowed({ marker: true, wrapUpGate: false, fixedRequested: false, fixedHonored: false })).toBe(false);
-    // The fixed text asked for but not honored (no text goes): no ask, gate on or off.
-    expect(reviewAskAllowed({ marker: true, wrapUpGate: true, fixedRequested: true, fixedHonored: false })).toBe(false);
-    // The fixed text honored: today's rule, the gate decides.
-    expect(reviewAskAllowed({ marker: true, wrapUpGate: true, fixedRequested: true, fixedHonored: true })).toBe(true);
-    expect(reviewAskAllowed({ marker: false, wrapUpGate: false, fixedRequested: true, fixedHonored: true })).toBe(false);
+    // The full form (not fixed): untouched.
+    expect(reviewAskAllowed({ fixedRequested: false, fixedHonored: false })).toBe(true);
+    // The fixed text asked for but not honored (no text goes): no ask.
+    expect(reviewAskAllowed({ fixedRequested: true, fixedHonored: false })).toBe(false);
+    // The fixed text honored: the review goes as its own message.
+    expect(reviewAskAllowed({ fixedRequested: true, fixedHonored: true })).toBe(true);
   });
 
-  test('only exactly true counts as live or marked', () => {
-    expect(reviewAskAllowed({ marker: true, wrapUpGate: 'true', fixedRequested: false, fixedHonored: false })).toBe(false);
-    expect(reviewAskAllowed({ marker: 'yes', wrapUpGate: false, fixedRequested: false, fixedHonored: false })).toBe(true);
+  test('only exactly true counts as requested or honored', () => {
+    expect(reviewAskAllowed({ fixedRequested: true, fixedHonored: 'true' })).toBe(false);
+    expect(reviewAskAllowed({ fixedRequested: 'yes', fixedHonored: false })).toBe(true);
   });
 
   test('the fixed text is the same whether or not a review will be asked: it carries no review line', () => {

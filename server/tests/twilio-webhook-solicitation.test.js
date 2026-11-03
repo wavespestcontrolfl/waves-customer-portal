@@ -24,6 +24,13 @@ const mockOutboundHistoryCalls = [];
 // to simulate a matched customer for the sender (null/[] = no match).
 let mockCustomersRows = null;
 const mockOptoutReceipts = new Map();
+// GATE_SMS_SPAM_TAG: the sms_spam_senders row the tag lookup finds (null = untagged),
+// whether that lookup throws, and how many times it ran.
+let mockTaggedRow = null;
+// When non-empty, each tag lookup takes the next row from here instead.
+const mockTaggedRowQueue = [];
+let mockTagLookupFails = false;
+let mockTagLookups = 0;
 function mockDb(table) {
   const query = { rows: table === 'customers' && mockCustomersRows ? mockCustomersRows : [] };
   for (const method of ['where', 'whereNull', 'whereNot', 'whereNotIn', 'orWhereNull', 'orderBy', 'limit']) {
@@ -36,6 +43,7 @@ function mockDb(table) {
   // twilio_sid}).first('is_read')`) never do, so this flag alone tells them
   // apart for `mockOutboundHistoryCalls` below.
   query.join = () => { query.usedJoin = true; return query; };
+  query.update = async (patch) => { mockWrites.push({ table, update: patch, filter: query.filter }); return 1; };
   query.whereRaw = (...args) => { mockWhereRawCalls.push({ table, args }); return query; };
   query.insert = (row) => {
     if (table === 'inbound_sms_optout_receipts') mockOptoutReceipts.set(row.message_sid, row);
@@ -47,6 +55,11 @@ function mockDb(table) {
     return query;
   };
   query.first = async () => {
+    if (table === 'sms_spam_senders') {
+      mockTagLookups += 1;
+      if (mockTagLookupFails) throw new Error('tag table unavailable');
+      return mockTaggedRowQueue.length ? mockTaggedRowQueue.shift() : mockTaggedRow;
+    }
     if (table === 'inbound_sms_optout_receipts') return mockOptoutReceipts.get(query.filter.message_sid) || null;
     if (table === 'messages' && query.usedJoin) {
       mockOutboundHistoryCalls.push(table);
@@ -80,6 +93,7 @@ jest.mock('../config/feature-gates', () => ({
   gateEnvValue: (gate) => process.env[gate] === 'true',
   smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   smsBareYesReplyLive: () => process.env.GATE_SMS_BARE_YES_REPLY === 'true',
+  smsSpamTagLive: () => process.env.GATE_SMS_SPAM_TAG === 'true',
 }));
 // The bare-YES decision's own reads are covered in sms-bare-yes-reply.test.js.
 jest.mock('../services/messaging/bare-yes-reply', () => ({ bareYesIsReply: jest.fn(async () => true) }));
@@ -174,6 +188,11 @@ beforeEach(() => {
   mockOutboundHistoryCalls.length = 0;
   mockCustomersRows = null;
   mockOptoutReceipts.clear();
+  mockTaggedRow = null;
+  mockTaggedRowQueue.length = 0;
+  mockTagLookupFails = false;
+  mockTagLookups = 0;
+  delete process.env.GATE_SMS_SPAM_TAG;
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
   process.env.ADAM_PHONE = '+12025550199';
   delete process.env.GATE_SMS_BARE_YES_REPLY;
@@ -181,6 +200,7 @@ beforeEach(() => {
   findKnownCallerCustomer.mockResolvedValue(null);
 });
 afterAll(() => {
+  delete process.env.GATE_SMS_SPAM_TAG;
   if (savedGate === undefined) delete process.env.GATE_SMS_SPAM_CLASSIFIER;
   else process.env.GATE_SMS_SPAM_CLASSIFIER = savedGate;
   if (savedOwner === undefined) delete process.env.ADAM_PHONE;
@@ -823,4 +843,133 @@ test.each(['suppression', 'recipient'])('a swallowed %s STOP write failure canno
   expect(mockOptoutReceipts.size).toBe(0);
   expect(mockWrites.filter(({ table }) => table === 'sms_log')).toHaveLength(0);
   expect(require('../services/messaging/inbound-dedupe').releaseInboundWebhook).toHaveBeenCalledTimes(1);
+});
+
+// GATE_SMS_SPAM_TAG (owner 2026-11-02): a sender the office tagged is silenced
+// through the same enforced-verdict path as the auto screen, with a manual
+// verdict and no model call. Customers, open leads and carrier commands win.
+describe('GATE_SMS_SPAM_TAG=true', () => {
+  const TAG_ROW = { phone: '+12025550101', marked_by: '00000000-0000-4000-8000-0000000000aa', marked_at: new Date('2026-11-02T12:00:00Z') };
+  beforeEach(() => {
+    process.env.GATE_SMS_SPAM_TAG = 'true';
+    mockTaggedRow = TAG_ROW;
+    // The auto screen is off: the tag must work on its own.
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'off';
+  });
+  const expectOrdinary = () => {
+    const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+    expect(row.is_read).not.toBe(true);
+    expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
+    expect(updateByTwilioSid.mock.calls.some(([, patch]) => patch.is_read === true)).toBe(false);
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  };
+
+  test('a tagged unknown sender is kept, read, and raises nothing', async () => {
+    const res = await receive('Can I interest you in a business loan today?');
+    expect(res.body).toBe('<Response></Response>');
+    // The tag is read once to decide, and once more after both rows are
+    // written (the in-flight "Not spam" check).
+    expect(mockTagLookups).toBe(2);
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    const verdictPatch = updateByTwilioSid.mock.calls[0][1];
+    expect(JSON.parse(verdictPatch.metadata.bindings[0]).spam_verdict).toMatchObject({
+      solicitation: true, enforced: true, method: 'manual', mode: 'manual', version: 'sms-spam-tag-v1', marked_by: TAG_ROW.marked_by,
+    });
+    // Marked read only in the second call, after the legacy row persists.
+    expect(verdictPatch.is_read).toBeUndefined();
+    expect(updateByTwilioSid.mock.calls.some(([, patch]) => patch.is_read === true)).toBe(true);
+    const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+    expect(row.is_read).toBe(true);
+    expect(row.message_body).toBe('Can I interest you in a business loan today?');
+    expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ enforced: true, method: 'manual' });
+    expect(handleClarifyReply).not.toHaveBeenCalled();
+    expect(startSmsThreadDraft).not.toHaveBeenCalled();
+    expect(processInboundSms).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(sendSMS).not.toHaveBeenCalled();
+    expect(mockWrites.filter(({ table }) => table === 'leads')).toHaveLength(0);
+  });
+
+  // Pre-push audit P1: "Not spam" lands while this text is in flight. The
+  // first read finds the tag; the re-read after both rows are written does not,
+  // so the text is released to ordinary handling and both rows are cleared.
+  test('a tag undone while the text is in flight releases it to ordinary handling', async () => {
+    mockTaggedRowQueue.push(TAG_ROW, null);
+    const res = await receive('Can I interest you in a business loan today?');
+    expect(mockTagLookups).toBe(2);
+    const cleared = mockWrites.filter(({ update }) => update && update.metadata);
+    expect(cleared.map(({ table }) => table).sort()).toEqual(['messages', 'sms_log']);
+    for (const { update } of cleared) {
+      expect(update.is_read).toBe(false);
+      expect(JSON.parse(update.metadata.bindings[0])).toMatchObject({ enforced: false });
+    }
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(200);
+  });
+
+  test('a tag still in place at the re-read keeps the text quiet', async () => {
+    mockTaggedRowQueue.push(TAG_ROW, TAG_ROW);
+    const res = await receive('Can I interest you in a business loan today?');
+    expect(res.body).toBe('<Response></Response>');
+    expect(mockTagLookups).toBe(2);
+    expect(mockWrites.filter(({ update }) => update && update.metadata)).toHaveLength(0);
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+  });
+
+  test('an untagged sender keeps ordinary handling', async () => {
+    mockTaggedRow = null;
+    await receive('Can I interest you in a business loan today?');
+    expectOrdinary();
+  });
+
+  test('a tagged number that now matches a customer keeps ordinary handling', async () => {
+    findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+    await receive('Can I interest you in a business loan today?');
+    expect(mockTagLookups).toBe(0);
+    const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+    expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
+    expect(row.is_read).not.toBe(true);
+  });
+
+  test('the gate off keeps ordinary handling and never reads the tag table', async () => {
+    delete process.env.GATE_SMS_SPAM_TAG;
+    await receive('Can I interest you in a business loan today?');
+    expect(mockTagLookups).toBe(0);
+    expectOrdinary();
+  });
+
+  test('a photo text keeps ordinary handling', async () => {
+    uploadTwilioMedia.mockResolvedValueOnce([{ url: 'https://example.com/photo.jpg', contentType: 'image/jpeg' }]);
+    await receive('Here is the problem area');
+    expect(mockTagLookups).toBe(0);
+    expectOrdinary();
+  });
+
+  test.each(['STOP', 'START', 'HELP', 'YES'])('a bare %s from a tagged sender keeps the carrier-keyword path', async (body) => {
+    await receive(body);
+    expect(mockTagLookups).toBe(0);
+    const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+    expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
+    expect(row.is_read).not.toBe(true);
+  });
+
+  test('a tagged known sender\'s STOP still reaches the consent path', async () => {
+    findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+    const res = await receive('STOP');
+    expect(res.body).toContain('unsubscribed');
+    expect(recordSuppression).toHaveBeenCalledTimes(1);
+    expect(mockTagLookups).toBe(0);
+  });
+
+  test('a failed tag lookup fails open: ordinary handling, and the auto screen still runs', async () => {
+    mockTagLookupFails = true;
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
+    await receive('We have exclusive pest leads for you.');
+    expect(mockTagLookups).toBe(1);
+    const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+    expect(row.is_read).not.toBe(true);
+    // The shadow screen still wrote its own (not enforced) verdict.
+    expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ method: 'regex', mode: 'shadow' });
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  });
 });

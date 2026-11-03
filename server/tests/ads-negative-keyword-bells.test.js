@@ -208,7 +208,7 @@ describe('the bell row', () => {
     expect(opts).toMatchObject({ bell: true, dedupeKey: `ads-negative:${id(1)}`, detail: 'Six clicks, $9.50, no conversions.', metadata: { negativeId: id(1) } });
     expect(spec).toMatchObject({
       area: 'Leads', severity: 'needs-you', who: 'person', doneWhen: 'negative_decided',
-      link: `/admin/ads?tab=advisor&negative=${id(1)}`, subject: { type: 'check', id: id(1) },
+      link: `/admin/ppc?tab=advisor&negative=${id(1)}`, subject: { type: 'check', id: id(1) },
     });
   });
 

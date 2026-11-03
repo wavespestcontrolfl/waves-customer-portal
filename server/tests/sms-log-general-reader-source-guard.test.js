@@ -67,6 +67,11 @@ const ALLOWLIST = [
     reason: 'The bell Call on a new-lead alert for an unknown sender\'s text: one inbound row keyed by its twilio_sid, reading only the sender\'s number and customer; a send reservation is an outbound placeholder with no sid, so it can never match.',
   },
   {
+    file: 'services/sms-spam-tag.js',
+    snippet: "return conn('sms_log')",
+    reason: 'legacyRows: scoped to direction inbound (a send reservation is an outbound placeholder, so it can never match) and used only to stamp or clear a spam verdict on one sender\'s texts; it presents rows to nobody.',
+  },
+  {
     file: 'services/one-text-per-day.js',
     snippet: "const log = await db('sms_log').where({ twilio_sid: sid }).first('message_type');",
     reason: 'isTrackerText: keyed by twilio_sid (the text Twilio reports undelivered) and reads only its message type; a send reservation has no sid until it is promoted to a real send, so no placeholder can match.',

@@ -41,7 +41,7 @@ vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
 }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
   default: ({ service, onCompleted }) => (
-    <div>
+    <div data-reservice-asks={String(service.reserviceAsksEnabled)}>
       Lawn re-service sheet for {service.id} (invoice sent {String(service.completionInvoiceAlreadySent)})
       <button type="button" onClick={() => onCompleted(UNPAID_RESPONSE)}>Sheet completed</button>
     </div>
@@ -105,6 +105,21 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ alerts: [] }) })));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+// GATE_RESERVICE_ASKS rides the same schedule row (GitHub Codex P1 on #7500): only an exact true reaches the lawn
+// re-service sheet Dispatch opens.
+describe('the lawn re-service sheet on admin Dispatch gets reserviceAsksEnabled', () => {
+  it.each([
+    [true, 'true'],
+    [undefined, 'false'],
+    ['true', 'false'],
+  ])('passes %s as %s', async (flag, expected) => {
+    mount([visit('lawn_reservice', flag === undefined ? {} : { reserviceAsksEnabled: flag })]);
+    await open();
+    const sheet = (await screen.findByText(SHEET_TEXT.lawn_reservice)).closest('[data-reservice-asks]');
+    expect(sheet.getAttribute('data-reservice-asks')).toBe(expected);
+  });
+});
 
 describe('a visit already invoiced, on admin Dispatch', () => {
   for (const kind of Object.keys(FIXTURES)) {

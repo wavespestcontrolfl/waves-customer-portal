@@ -222,7 +222,7 @@
     },
     {
       "endpoint": "/admin/customers/:id/comms",
-      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed 2026-10-29 (#6959): the chain change is sms-intent.js isCourtesyOnly gaining the dark GATE_SMS_COURTESY_TAIL rule (classifier text only); signals and unresolved unchanged, no new read or write. Re-signed after the Codex P2 refactor on #6959 (the same rule split into helper functions). Re-reviewed 2026-11-02 (GATE_SMS_LIKE, dark): mapCommsMessage gains the like fields (officeLike: status, staff name and time from messages.metadata.office_like, never its claim token; customerReaction: emoji, removed and quoted target parsed from the body by sms-intent.js customerLikeReaction; likeable: the body is not a reaction, sms-intent.js isSmsReaction) and listCustomerComms reads the gate once (sms-office-like.js likesLive) and adds smsLike when on. Pure mapping over columns the query already selects; keep mode drops every new key; signals and unresolved unchanged, no new read or write.",
+      "reviewed": "Handler + customer-history.listCustomerComms: messages joined to conversations for one customer (sms and voice), limit default 100 max 100, no mark-read, media signed by signMediaForClient (S3 presigned URLs, removed by the signed-link pass). The row omits readScope (conversation ids) and composerComms (a duplicate of one message for the composer) so the answer is the thread only. Message bodies and summaries are free text and are withheld by the key-name default (the thread shows who, when, channel and delivery). Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed 2026-10-29 (#6959): the chain change is sms-intent.js isCourtesyOnly gaining the dark GATE_SMS_COURTESY_TAIL rule (classifier text only); signals and unresolved unchanged, no new read or write. Re-signed after the Codex P2 refactor on #6959 (the same rule split into helper functions). Re-reviewed 2026-11-02 (admin alert audit finding 5): the only chain change is sms-intent.js COURTESY_TOKEN_RE gaining a bare good token that never anchors a closer (Ok good closes like Ok great; Good alone stays content); classifier text only, no new read or write. Re-reviewed 2026-11-02 (GATE_SMS_LIKE, dark): mapCommsMessage gains the like fields (officeLike: status, staff name and time from messages.metadata.office_like, never its claim token; customerReaction: emoji, removed and quoted target parsed from the body by sms-intent.js customerLikeReaction; likeable: the body is not a reaction, sms-intent.js isSmsReaction) and listCustomerComms reads the gate once (sms-office-like.js likesLive) and adds smsLike when on. Pure mapping over columns the query already selects; keep mode drops every new key; signals and unresolved unchanged, no new read or write.",
       "scope": "customer",
       "scopeParam": "id",
       "params": {
@@ -279,7 +279,7 @@
         "services/sms-media.js#getSignedUrl",
         "services/sms-media.js#new GetObjectCommand"
       ],
-      "hash": "455b35d10ddd33f05a188c5607b2ab63"
+      "hash": "3a91f1ad7db50b83280c92d0cba28564"
     },
     {
       "endpoint": "/admin/customers/:id/credits",
@@ -779,7 +779,7 @@
     },
     {
       "endpoint": "/admin/email-templates",
-      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field. Re-reviewed 2026-11-02 (bed bug heat prep, Drive audit item 3): the only chain change is the protected template and automation key sets gaining prep.bed_bug_heat (constants); signals and unresolved unchanged, no new read or write.",
       "scope": "broad",
       "office": true,
       "query": [
@@ -815,11 +815,11 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "7eca8f5c382949092cebdbb948877d81"
+      "hash": "bde4baf555a45475bc944cde32cd3dc6"
     },
     {
       "endpoint": "/admin/email-templates/automations",
-      "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field.",
+      "reviewed": "Handler (admin-email-templates.js GET /automations): email_template_automations joined to email_templates and the active email_template_versions row, plus three 30-day aggregates (email_messages count by template, run-event would_send/would_block counts by automation, shadow-origin only); rows mapped with parsed JSON settings and counts. No customer data, no write; read end to end. Keep mode: only the automation's identity, trigger, template, timing, status and the counts reach the model. The *_key fields are left out: the run-time credential rule masks any key-named field. Re-reviewed 2026-11-02 (bed bug heat prep, Drive audit item 3): the only chain change is the protected template and automation key sets gaining prep.bed_bug_heat (constants); signals and unresolved unchanged, no new read or write.",
       "scope": "broad",
       "office": true,
       "keywords": [
@@ -852,7 +852,7 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "19248f920bdbcbfd4dcb1e5d3019ad67"
+      "hash": "78656695b66527b13bdf411fa7484db8"
     },
     {
       "endpoint": "/admin/estimates",

@@ -24397,7 +24397,14 @@ router.get('/:id/estimate-source', async (req, res, next) => {
 router.get('/card-request-availability', async (req, res, next) => {
   try {
     const { isSecureCardLaneReady } = require('../services/appointment-card-request');
-    res.json({ enabled: await isSecureCardLaneReady() });
+    const enabled = await isSecureCardLaneReady();
+    // Book at the Table (owner 2026-11-02, GATE_IN_PERSON_CARD): `inPerson`
+    // is present ONLY while that gate is on, so a dark gate answers the
+    // exact body it always did. It follows the same lane readiness.
+    if (require('../config/feature-gates').inPersonCardLive()) {
+      return res.json({ enabled, inPerson: enabled });
+    }
+    res.json({ enabled });
   } catch (err) { next(err); }
 });
 
@@ -26003,6 +26010,32 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
     const { requestCardForAppointment } = require('../services/appointment-card-request');
     const result = await requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin' });
     res.json({ requested: result.requested, action: result.action, reason: result.reason });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/card-request/in-person — Book at the Table
+// (owner 2026-11-02, GATE_IN_PERSON_CARD): the customer is at the table and
+// saves the card on the owner's phone. Same funnel as the text route, with
+// inline delivery (no text, no one-text claim) and the first-time-customers-
+// only ask rule lifted for this trigger alone; every other card rule still
+// applies. Dark gate answers 404 {enabled:false} like the other dark routes.
+router.post('/:id/card-request/in-person', requireAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').inPersonCardLive()) return res.status(404).json({ enabled: false });
+    const visit = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id');
+    if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+    const { requestCardForAppointment } = require('../services/appointment-card-request');
+    const result = await requestCardForAppointment({
+      scheduledServiceId: visit.id,
+      trigger: 'admin',
+      delivery: 'inline',
+      inPerson: true,
+    });
+    const body = { requested: result.requested, action: result.action, reason: result.reason };
+    if (result.action === 'link_created' && result.secureUrl) body.secureUrl = result.secureUrl;
+    res.json(body);
   } catch (err) { next(err); }
 });
 

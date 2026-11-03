@@ -7,7 +7,8 @@
  * instruction to skip has a number behind it. Gallons = depth per run × lawn area × 623 gal per inch per
  * 1,000 sq ft (UF/IFAS AE220). Depth per run is the customer's own schedule when one is on file (typed weekly
  * inches over their watering days, else zone minutes on the plan's head rate table), otherwise the OWNER
- * DEFAULT: a typical 20-minute run, twice a week, putting down half an inch. The lawn area is never defaulted:
+ * DEFAULT: a typical 20-minute run, twice a week (no more often than the plan week's watering order allows),
+ * putting down half an inch. The lawn area is never defaulted:
  * no lawn_sqft on file, no sentence (owner call still open on a default area).
  *
  * FREEZE RULE (same shape as the head rate table, irrigation-rates.js): the gate is read only when a NEW
@@ -24,7 +25,9 @@ const { deriveIrrigationInchesPerWeek, normalizeRuntimeInputs } = require('@wave
 
 // Gallons one inch of water is over 1,000 sq ft (UF/IFAS AE220).
 const GALLONS_PER_INCH_PER_1000_SQFT = 623;
-// Owner default (2026-10-22): a typical run is 20 minutes, twice a week, and puts down half an inch.
+// Owner default (2026-10-22): a typical run is 20 minutes, twice a week, and puts down half an inch. A watering order
+// that allows fewer days caps the runs (owner 2026-11-02 "fix copy": a hold beside the SWFWMD one-day order said
+// "skipping both of this week's runs").
 const DEFAULT_RUN_MINUTES = 20;
 const DEFAULT_RUNS_PER_WEEK = 2;
 const DEFAULT_DEPTH_PER_RUN_INCHES = 0.5;
@@ -111,6 +114,9 @@ function roundGallons(gallons) {
  * @param {string|null}        input.waterSource         the portal answer: 'county' | 'reclaimed' | 'well' | null (withheld
  *                                                        after a move until re-saved); dollars print for 'county' only
  * @param {string|null}        input.county              the decision's jurisdiction (resolveRestrictionCounty), the rate key
+ * @param {object|null}        input.restriction         the plan week's watering order (currentRestrictionPolicy), or null:
+ *                                                        its day limit caps the owner default's runs, never the customer's
+ *                                                        own schedule
  * @param {boolean}            input.ignoreDrip          how the caller's own derivation reads drip zones: the plan engine
  *                                                        leaves drip out (one turf head + drip is one head), the email's
  *                                                        ask paths count it (mixed heads → the setup ask), so each caller
@@ -119,12 +125,14 @@ function roundGallons(gallons) {
  * @returns {{ v: 1, basis: 'plan'|'schedule'|'default', lawnSqft: number, depthInches: number, runsPerWeek: number,
  *             gallonsPerRun: number, gallonsPerWeek: number } | null}
  */
-function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates, planDepthInches = null, planEvents = null, ignoreDrip = true, waterSource = null, county = null } = {}) {
+function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates, planDepthInches = null, planEvents = null, ignoreDrip = true, waterSource = null, county = null, restriction } = {}) {
   const sqft = positiveLawnSqft(lawnSqft);
   if (!sqft) return null;
 
   let depth = DEFAULT_DEPTH_PER_RUN_INCHES;
-  let runs = DEFAULT_RUNS_PER_WEEK;
+  // The default's runs never exceed the days the order allows; no order (or no positive day count) leaves two.
+  const orderDays = [Object(restriction).maxDaysPerWeek].filter((n) => Number.isInteger(n) && n > 0);
+  let runs = Math.min(DEFAULT_RUNS_PER_WEEK, ...orderDays);
   let basis = 'default';
   const explicit = Number(explicitInchesPerWeek);
   const days = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType }).wateringDays;

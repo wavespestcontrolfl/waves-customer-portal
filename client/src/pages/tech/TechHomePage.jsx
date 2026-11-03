@@ -1019,7 +1019,7 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteSheet
           key={fastCompleteService.id}
           service={{
-            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            // What the Wrap-up reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(fastCompleteService),
             // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
             ...accessSheetFields(fastCompleteService),
@@ -1056,6 +1056,8 @@ export default function TechHomePage({ section = 'today' }) {
             // the visit's photos in the note's box (the report flow only;
             // never lawn or tree, shrub & palm, which the payload leaves off).
             noteBoxPhotosEnabled: fastCompleteService.noteBoxPhotosEnabled === true,
+            // GATE_RESERVICE_ASKS rides the same row: only an exact true shows "They told us" on the sheet.
+            reserviceAsksEnabled: fastCompleteService.reserviceAsksEnabled === true,
             technicianName: fastCompleteService.technicianName || fastCompleteService.technician_name || null,
             lat: fastCompleteService.lat ?? null,
             lng: fastCompleteService.lng ?? null,
@@ -1100,7 +1102,7 @@ export default function TechHomePage({ section = 'today' }) {
             serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
             address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || '',
             timeLabel: serviceWindowLabel(treeShrubFastService) || '',
-            // The Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the customer for the next visit, the Time on-site clock, and the billing keys.
+            // The Wrap-up: the customer for the next visit, the Time on-site clock, and the billing keys.
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),
@@ -1138,7 +1140,7 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteLawnReserviceSheet
           key={lawnReserviceFastService.id}
           service={{
-            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            // What the Wrap-up reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(lawnReserviceFastService),
             // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
             ...accessSheetFields(lawnReserviceFastService),
@@ -1153,6 +1155,8 @@ export default function TechHomePage({ section = 'today' }) {
             routedScheduledDate: lawnReserviceFastService.scheduledDate || lawnReserviceFastService.scheduled_date || null,
             routedPropertyId: 'propertyId' in lawnReserviceFastService ? lawnReserviceFastService.propertyId : undefined,
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
+            // GATE_RESERVICE_ASKS rides the same row: only an exact true shows "They told us" on the sheet.
+            reserviceAsksEnabled: lawnReserviceFastService.reserviceAsksEnabled === true,
           }}
           request={techRequest}
           operatorId={staffIdForDevice}

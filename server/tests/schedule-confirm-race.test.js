@@ -4,7 +4,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })) }));
 jest.mock('../services/request-app-notifications', () => ({ send: jest.fn(async () => ({})) }));
+// The real exports stay: the confirm route lazily loads appointment-public,
+// whose require chain (visit-prep -> routes/requests) reads others.
 jest.mock('../middleware/auth', () => ({
+  ...jest.requireActual('../middleware/auth'),
   authenticate: (req, _res, next) => {
     req.customerId = 'cust-1';
     req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Customer' };
@@ -67,7 +70,7 @@ describe('customer appointment confirmation race guard', () => {
       });
     });
 
-    expect(update.where).toHaveBeenCalledWith({ id: 'svc-1', customer_id: 'cust-1', status: 'pending', visit_id: null, property_id: null }); // membership + property pinned (codex #3609 r28, #4207 r1)
+    expect(update.where).toHaveBeenCalledWith({ id: 'svc-1', customer_id: 'cust-1', status: 'pending', visit_id: null, property_id: null, scheduled_date: null, window_start: null }); // membership + property + slot pinned (codex #3609 r28, #4207 r1)
     expect(logger.info).not.toHaveBeenCalled();
   });
 
@@ -116,6 +119,82 @@ describe('customer appointment confirmation race guard', () => {
     guard(q);
     expect(q.whereNull).toHaveBeenCalledWith('customer_pick_by');
     expect(q.orWhereNotNull).toHaveBeenCalledWith('window_start');
+  });
+});
+
+describe('customer confirm of a visit the office already confirmed', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // The office books most visits straight to 'confirmed' with
+  // customer_confirmed false; the app shows Confirm on them, and the route
+  // used to 404 every tap.
+  const officeConfirmed = {
+    id: 'svc-1', status: 'confirmed', customer_confirmed: false, source_action: null,
+    scheduled_date: new Date('2026-11-06T00:00:00.000Z'), window_start: '07:00:00',
+  };
+  // What GET /next printed for that row: JSON gives the pg Date in ISO form.
+  const shownSlot = { date: '2026-11-06T00:00:00.000Z', windowStart: '07:00:00' };
+
+  async function postConfirm(body) {
+    let response;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/schedule/svc-1/confirm`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      response = { status: res.status, body: await res.json() };
+    });
+    return response;
+  }
+
+  test('records the customer confirmation at the slot shown, leaving status and confirmed_at as written', async () => {
+    const read = readChain(officeConfirmed);
+    const update = updateChain(1);
+    db.mockReturnValueOnce(read).mockReturnValueOnce(update);
+
+    expect(await postConfirm(shownSlot)).toEqual({ status: 200, body: { success: true, message: 'Appointment confirmed' } });
+
+    expect(read.whereIn).toHaveBeenCalledWith('status', ['pending', 'rescheduled', 'confirmed']);
+    expect(update.where).toHaveBeenCalledWith({
+      id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', visit_id: null, property_id: null,
+      scheduled_date: officeConfirmed.scheduled_date, window_start: '07:00:00',
+    });
+    expect(update.update).toHaveBeenCalledWith({ customer_confirmed: true, updated_at: expect.any(Date) });
+  });
+
+  test.each([
+    ['no slot (an older app bundle)', {}],
+    ['another day', { ...shownSlot, date: '2026-11-09T00:00:00.000Z' }],
+    ['another time', { ...shownSlot, windowStart: '15:00:00' }],
+  ])('refuses %s with a refresh conflict and writes nothing', async (_label, body) => {
+    db.mockReturnValueOnce(readChain(officeConfirmed));
+
+    const res = await postConfirm(body);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Refresh');
+    expect(db).toHaveBeenCalledTimes(1); // the read only: no update
+  });
+
+  test('a pending visit moved after the card loaded is refused when the app sends its slot', async () => {
+    db.mockReturnValueOnce(readChain({ ...officeConfirmed, status: 'pending' }));
+
+    expect((await postConfirm({ ...shownSlot, date: '2026-11-05T00:00:00.000Z' })).status).toBe(409);
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('never stamps an office-review booking whose activation is still owed', async () => {
+    db.mockReturnValueOnce(readChain({ ...officeConfirmed, source_action: 'ai_call_outbound_review' }));
+
+    expect((await postConfirm(shownSlot)).status).toBe(404);
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
+  test('a second tap on a visit the customer already confirmed is a success with no write', async () => {
+    db.mockReturnValueOnce(readChain({ ...officeConfirmed, customer_confirmed: true }));
+
+    expect(await postConfirm(shownSlot)).toEqual({ status: 200, body: { success: true, message: 'Appointment confirmed' } });
+    expect(db).toHaveBeenCalledTimes(1);
   });
 });
 

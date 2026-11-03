@@ -212,6 +212,14 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
 // rejects the unknown type; Codex r3). project-types is a pure data module.
 const { PROJECT_TYPES } = require('../services/project-types');
 
+// Registry keys that are ABSENT from the prod catalog BY DESIGN: the
+// "registry-only" (stale) detectors must not report them every day.
+// pest_initial_cleanout is seeded in fresh/CI catalogs but absent from prod
+// (see its ONE_TIME_GENERIC_BY_DESIGN note above); it stays registered until a
+// migration retires the key in every environment. Only the stale list honours
+// this: an active catalog row or a ghost lane for the key is still a defect.
+const ABSENT_FROM_PROD_BY_DESIGN_KEYS = Object.freeze(['pest_initial_cleanout']);
+
 const ALL_LISTS = {
   owner_excluded: OWNER_EXCLUDED_KEYS,
   compliance_project: Object.keys(COMPLIANCE_PROJECT_KEYS),
@@ -368,6 +376,7 @@ module.exports = {
   BILLING_RIDER_KEYS,
   ASSESSMENT_EXPERIENCE_KEYS,
   RECURRING_GENERIC_BY_DESIGN,
+  ABSENT_FROM_PROD_BY_DESIGN_KEYS,
   ALL_LISTS,
   classifyCatalogRow,
 };

@@ -12,7 +12,9 @@
  * never a worker self-report) whose link_type is an entity-PROFILE kind
  * (directory/citation/social), i.e. listings that REPRESENT the business.
  * Editorial/guest_post/HARO/resource links are inbound backlinks from other
- * sites — NOT our profiles — so they are excluded from sameAs.
+ * sites — NOT our profiles — so they are excluded from sameAs. A live link on a
+ * search or category page is still not a profile: sameAsRejectReason() keeps only
+ * pages that ARE a Waves listing.
  *
  * SCOPE: PER-OFFICE. The signup runner maps every citation to a GBP location
  * (quality_signals.location); a default/brand-level listing maps to the default
@@ -77,6 +79,47 @@ function officeSlugForLocation(location) {
   return LOCATION_TO_OFFICE_SLUG[location] || null; // unknown id → drop
 }
 
+// Hand-reviewed refusals (astro #817, 2026-11-02). Each still links to us, so the
+// verifier keeps tracking it as a backlink; it only stays out of sameAs. Remove an
+// entry once its page is fixed. Hosts match their subdomains too.
+const SAMEAS_EXCLUDED_HOSTS = new Set([
+  'adsly.io', // ad-space marketplace ("Advertise on wavespestcontrol.com"), not a profile
+  'leakdirectory.org', // ISP filter blocks it as a suspicious site; page unreadable
+  'mybusinessplaces.com', // same
+  'wildlifecontrol.io', // domain does not resolve
+]);
+// host + path, lower-case, no www, no trailing slash.
+const SAMEAS_EXCLUDED_PAGES = new Set([
+  'ajax-directory.com/listings810335/waves-pest-control-venice', // 664 Grove Rd: not the Venice office
+  'victordirectory.com/listings784135/waves-pest-control-venice', // same
+  'kevsbest.com/listing/waves-pest-control', // 7057 Pinebay Blvd, Englewood: not an office
+  'local-biz.directory/listing/waves-pest-control-sarasota', // 404
+]);
+
+function isExcludedHost(host) {
+  return [...SAMEAS_EXCLUDED_HOSTS].some((h) => host === h || host.endsWith(`.${h}`));
+}
+
+/**
+ * Why a verified URL stays out of sameAs, or null when it may ship. A sameAs entry
+ * must be ONE page that IS a Waves listing, but the verifier's domain reconcile
+ * records whatever page DataForSEO saw linking to us: often a search, city or
+ * paginated category page that lists Waves among others (astro #817: a Yellow
+ * Pages "pest control in Rotonda West" search, Enigma city lists, "?page=2").
+ * Those are backlinks, not profiles. So the path must name Waves and there is no
+ * query string. A wrong refusal only omits a listing; it never adds one.
+ */
+function sameAsRejectReason(rawUrl) {
+  let u;
+  try { u = new URL(rawUrl); } catch { return 'invalid'; }
+  if (u.protocol !== 'https:') return 'invalid';
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  const path = u.pathname.toLowerCase().replace(/\/+$/, '');
+  if (isExcludedHost(host) || SAMEAS_EXCLUDED_PAGES.has(host + path)) return 'excluded';
+  if (u.search || !path.includes('waves')) return 'not_profile';
+  return null;
+}
+
 /**
  * Verified-live profile URLs grouped by office slug. status is live/indexed, set
  * by the portal's own verifier + indexer (never a worker self-report), so only
@@ -93,13 +136,17 @@ async function getVerifiedProfilesByOffice() {
   const byOffice = {};
   for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
   let dropped = 0;
+  let refused = 0;
   for (const r of rows) {
     const slug = officeSlugForLocation(r.location);
     const url = String(r.live_url || '').trim();
     if (!slug) { dropped++; continue; }
-    if (/^https:\/\/\S+$/.test(url)) byOffice[slug].add(url);
+    if (!/^https:\/\/\S+$/.test(url)) continue;
+    if (sameAsRejectReason(url)) { refused++; continue; }
+    byOffice[slug].add(url);
   }
   if (dropped) logger.warn(`[backlink-sync] dropped ${dropped} listing(s) with an unknown location id`);
+  if (refused) logger.info(`[backlink-sync] kept ${refused} verified link(s) out of sameAs (not a Waves profile page)`);
 
   const offices = {};
   for (const slug of OFFICE_SLUGS) offices[slug] = [...byOffice[slug]].sort();
@@ -248,4 +295,4 @@ async function syncProfilesToAstro({ dryRun = false } = {}) {
   return { wrote: true, count: total, pr: pr.html_url, branch };
 }
 
-module.exports = { syncProfilesToAstro, getVerifiedProfilesByOffice };
+module.exports = { syncProfilesToAstro, getVerifiedProfilesByOffice, sameAsRejectReason };

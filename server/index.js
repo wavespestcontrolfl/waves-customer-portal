@@ -557,6 +557,27 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
 // the appointment route's visitPrepPreParserGuard above.
 app.use('/api/public/reservice', require('./routes/reservice-public').reservicePhotosPreParserGuard);
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+// Tap to Pay card save (GATE_TAP_SAVE_CARD): these three answers carry a
+// SetupIntent client secret, a terminal bearer token, a customer name or the
+// saved card's details. Privacy headers land BEFORE the mint's dark-gate 404,
+// the global /api limiter (429) and the body parsers (400/413), so no outcome
+// is cacheable. The router re-stamps them (docs/public-route-contracts.md).
+app.use([
+  '/api/stripe/terminal/save-card-handoff',
+  '/api/stripe/terminal/validate-save-card-handoff',
+  '/api/stripe/terminal/complete-setup',
+], require('./middleware/no-store').noStore);
+// The mint alone is dark behind GATE_TAP_SAVE_CARD: the generic unknown-route
+// 404 lands here, after the privacy headers and BEFORE the global limiter (429)
+// and the body parsers (400/413), so a probe never sees a revealing status.
+// Validation and completion stay open for handoffs already issued. The route
+// re-runs the same gate.
+app.use('/api/stripe/terminal/save-card-handoff', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('tapSaveCard')) {
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
+  }
+  return next();
+});
 
 // Estimate map-image proxy: privacy headers + the dark overlay 404 must land
 // BEFORE the global limiter, or an over-budget IP gets a 429 (and no
@@ -840,6 +861,8 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
 app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
+// Moving link routes (GATE_MOVING_FLOW): per-route requireAdmin, so technician paths on the shared prefix fall through.
+app.use('/api/admin/customers', require('./routes/admin-customer-moves'));
 app.use('/api/admin/customers/:customerId/consumer-notices', require('./routes/admin-consumer-notices'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
@@ -938,6 +961,9 @@ app.use('/api/public/appointment', require('./routes/appointment-public'));
 app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/price-change', require('./routes/price-change-public'));
+// Customer moving page (GATE_MOVING_FLOW): the link the office sends a customer who is moving. Token-gated on
+// customer_moves.token; every route 404s until the gate is on.
+app.use('/api/public/moving', require('./routes/moving-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
 app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));

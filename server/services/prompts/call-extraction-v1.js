@@ -194,7 +194,14 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // called the day contested and nothing was booked. On a call from 12:00 AM up to 4:00 AM, a said
 // weekday or date decides what "tomorrow" names (the call date or the day after); a bare "tomorrow"
 // is not guessed (ambiguous; a reschedule day stays null). Extraction only: no judge has the clock.
-const PROMPT_VERSION = 'v33';
+// v34: three household safety facts (schema 1.30.0; owner direction 2026-11-02, Drive audit):
+// property.household_children_or_elderly, property.no_spray_areas and
+// property.chemical_sensitivity_note. Each is a short note the CALLER states (children or elderly
+// people who live there or will be present at the visit; areas not to spray; someone sensitive to
+// chemicals), null otherwise, with the caller's sentence pinned. call-profile-enrichment files them
+// on the property preferences the technician's visit brief shows; it never overwrites staff text.
+// New fields and instructions: a new cohort.
+const PROMPT_VERSION = 'v34';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -394,6 +401,9 @@ PROPERTY:
 - hoa_common_area_service: true ONLY if service is FOR HOA-owned common areas (clubhouse, retention ponds, entry beds). A single-family home inside an HOA is hoa_community_flag=true but hoa_common_area_service=false.
 - whole_building_occupancy: true ONLY when the CALLER states they own, bought, lease, rent or occupy the ENTIRE building at the service address ("we just bought this building", "we own the whole building", "the building is ours and we're making it a flower shop"). false when the caller says the address is only part of a building (a suite, unit, bay, space, a storefront in a plaza or strip center). null when unstated. A business name or property_type=commercial alone is NOT enough, and neither is "my business" or "our shop" (a tenant of one suite says that too). When true, pin the caller's statement to /property/whole_building_occupancy with speaker "caller": copy ONLY the shortest plain clause that states it ("We just bought this building"), word for word, with no hedge, question or condition inside it.
 - whole_building_occupancy_final (judge it over the WHOLE call): true ONLY when whole_building_occupancy is true AND the caller never hedged about occupying the entire building, never corrected it to a part (a floor, suite, space, storefront, side, wing, unit or bay), never said they share the building with another tenant, and the claim was a plain statement, not a question or a condition. false when ANY of that happened. null when whole_building_occupancy is not true. A hedge about a SIDE detail (when the sale closed, who signed, "I think the owner bought it a couple weeks ago, but we're just moving in") does not make it false; a hedge about WHETHER they occupy the whole building does. Examples that are false: "we only lease the second floor"; "I think we own the whole building"; "we probably have the whole building"; "do we own the whole building?" (a question); "if closing happens we'll own the whole building" (a condition); "actually we share it with a dentist"; "we have the storefront on the left". Examples that are true: "We just bought this building, and we're making it a flower shop"; "we own the whole building".
+- household_children_or_elderly: a SHORT note (a few words) ONLY when the CALLER says children or elderly people LIVE at the service address or will be PRESENT at the visit ("we have two toddlers", "my elderly mother lives with us", "the grandkids are here all summer"). null otherwise: visitors who will not be there at service time ("my grandkids visit at Christmas"), a neighbor's family, and anything inferred from the home or voice. Pin the caller's sentence to /property/household_children_or_elderly with speaker "caller" when set.
+- no_spray_areas: a SHORT note naming the areas of THIS property the caller asks us NOT to spray or treat ("keep off the vegetable garden by the back fence", "fruit trees", "koi pond"). null when the caller names none; a pond or garden merely mentioned with no request to avoid it is null. Pin the caller's sentence to /property/no_spray_areas with speaker "caller" when set.
+- chemical_sensitivity_note: a SHORT note ONLY when the CALLER says someone in the home is sensitive to chemicals, sprays or strong smells, or is pregnant, asthmatic or immune-compromised and ties it to the treatment ("my husband has asthma and reacts to sprays"). null when unstated; a plain preference for pet-safe or natural products with no health reason is null. Pin the caller's sentence to /property/chemical_sensitivity_note with speaker "caller" when set.
 
 MULTIPLE PROPERTIES (service_address vs additional_properties):
 - When the caller wants service at MORE THAN ONE property (a second home, a rental, another unit, "we bought a condo AND a house"), service_address holds the PRIMARY property and EVERY other property goes into property.additional_properties — never drop one, never merge two addresses into one.
@@ -516,6 +526,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - caller.on_site_authorization (when caller != owner)
 - property.hoa_common_area_service (when true)
 - property.whole_building_occupancy (when true — the CALLER's sentence stating they own/bought/lease/occupy the entire building; speaker must be "caller")
+- property.household_children_or_elderly, property.no_spray_areas and property.chemical_sensitivity_note (when non-null — the CALLER's own sentence; speaker must be "caller")
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
 - scheduling.confirmed_start_at (the quote must contain the agreed date AND time — except for a NEW booking whose day was already set earlier in the call, e.g. the caller's "today between 1:30 and 3:30" and then the agent's "can we plan on 2 o'clock?": then quote the one turn that states the agreed time, verbatim, and resolve the day from that earlier turn; never stitch two turns into one quote)
