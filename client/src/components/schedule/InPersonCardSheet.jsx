@@ -2,13 +2,12 @@
 //
 // Shown by CreateAppointmentModal after a booking saved with "Customer saves
 // it here, now". On open it asks POST /admin/schedule/:id/card-request/in-person
-// for the secure card page, then offers: hand the phone to the customer, show a
-// QR code of the page, text the link, or skip. Nothing is charged and no text
+// for the secure card page, then offers: show a QR code of the page,
+// text the link, or skip. Nothing is charged and no text
 // goes out unless staff tap "Text the link". The booking stays whatever happens
 // here.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useInRouterContext, useNavigate } from 'react-router-dom';
 import QRCode from 'qrcode';
 import useModalFocus from '../../hooks/useModalFocus';
 import { describeCardRequestResult } from './cardLinkStatus';
@@ -64,7 +63,7 @@ export function describeInPersonOutcome(result, firstName) {
 // only rule, so a customer with past visits is not texted: say so plainly.
 export function describeTextOutcome(result) {
   if (String(result?.reason || '') === 'existing_customer') {
-    return { tone: 'muted', text: 'Not texted: this customer has past visits, and the text rule skips them. Use the phone or the QR code.' };
+    return { tone: 'muted', text: 'Not texted: this customer has past visits, and the text rule skips them. Use the QR code.' };
   }
   return describeCardRequestResult(result);
 }
@@ -116,9 +115,9 @@ function useSavedPolling({ active, adminFetch, visitId }) {
 const toneColor = (t) => (t === 'good' ? D.text : t === 'bad' ? D.red : D.muted);
 const sectionLabel = { fontSize: 14, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, marginBottom: 4 };
 
-// The four choices once the card page exists: hand over the phone, QR code,
-// text the link, or not now.
-function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onClose }) {
+// The four choices once the card page exists: QR code, text the link, or not
+// now.
+function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
   const [qrOpen, setQrOpen] = useState(false);
   const [textState, setTextState] = useState(null); // null | 'sending' | { tone, text }
   const mountedRef = useRef(true);
@@ -129,11 +128,6 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onCl
   const saved = useSavedPolling({ active: qrOpen, adminFetch, visitId });
   const first = firstName || 'the customer';
 
-  const handoff = () => {
-    let path = secureUrl;
-    try { path = new URL(secureUrl, window.location.origin).pathname; } catch { /* keep as given */ }
-    navigate(`${path}?handoff=1`);
-  };
   const textTheLink = () => {
     setTextState('sending');
     adminFetch(`/admin/schedule/${visitId}/card-request`, { method: 'POST' })
@@ -145,11 +139,10 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onCl
     <div>
       <div style={sectionLabel}>Card for Auto Pay</div>
       <p style={{ fontSize: 14, margin: '0 0 12px' }}>
-        {first} saves a card on your phone now. Nothing is charged today. Auto Pay charges after each completed service.
+        {first} can save a card now on their own phone: show the QR code, or text the link. Nothing is charged today. Auto Pay charges after each completed service.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <button type="button" style={primaryButton} onClick={handoff}>Hand the phone to {first}</button>
-        <button type="button" style={secondaryButton} aria-expanded={qrOpen} onClick={() => setQrOpen((open) => !open)}>
+        <button type="button" style={primaryButton} aria-expanded={qrOpen} onClick={() => setQrOpen((open) => !open)}>
           {qrOpen ? 'Hide the QR code' : 'Show a QR code'}
         </button>
         {qrOpen && <QrPanel url={absoluteHref(secureUrl)} firstName={firstName} saved={saved} />}
@@ -167,7 +160,7 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, navigate, onCl
 
 function SheetBody({
   visitId, date, time, serviceName, estimateAccepted, estimateRef, confirmationText,
-  firstName, adminFetch, onClose, navigate,
+  firstName, adminFetch, onClose,
 }) {
   const dialogRef = useModalFocus(true, onClose);
   const [phase, setPhase] = useState('loading'); // loading | error | result
@@ -238,24 +231,13 @@ function SheetBody({
         )}
 
         {phase === 'result' && secureUrl && (
-          <CardActions secureUrl={secureUrl} firstName={firstName} adminFetch={adminFetch} visitId={visitId} navigate={navigate} onClose={onClose} />
+          <CardActions secureUrl={secureUrl} firstName={firstName} adminFetch={adminFetch} visitId={visitId} onClose={onClose} />
         )}
       </div>
     </div>
   );
 }
 
-// useNavigate needs a router; the app always has one, a bare render (some
-// tests) does not and then falls back to a full page load.
-function WithRouter(props) {
-  const navigate = useNavigate();
-  return <SheetBody {...props} navigate={navigate} />;
-}
-
 export default function InPersonCardSheet(props) {
-  const inRouter = useInRouterContext();
-  const body = inRouter
-    ? <WithRouter {...props} />
-    : <SheetBody {...props} navigate={(to) => window.location.assign(to)} />;
-  return createPortal(body, document.body);
+  return createPortal(<SheetBody {...props} />, document.body);
 }

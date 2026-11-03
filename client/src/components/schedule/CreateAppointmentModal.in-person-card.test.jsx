@@ -116,7 +116,7 @@ describe("card choice in the booking window", () => {
     const radios = screen.getAllByRole("radio", { name: /Customer saves it here, now|Text them the link|No card ask/ });
     expect(radios).toHaveLength(3);
     expect(screen.getByRole("radio", { name: /No card ask/ })).toBeChecked();
-    expect(screen.getByText("On this phone. Nothing charged today.")).toBeInTheDocument();
+    expect(screen.getByText("At the table, by QR code. Nothing charged today.")).toBeInTheDocument();
     expect(screen.getByText("Texts a secure link to save a card.")).toBeInTheDocument();
     expect(screen.queryByText("Text card-on-file link (Auto Pay setup)")).toBeNull();
   });
@@ -160,7 +160,8 @@ describe("card choice in the booking window", () => {
     expect(await screen.findByRole("heading", { name: "Booked" })).toBeInTheDocument();
     expect(screen.getByText("Quarterly Pest Control Service")).toBeInTheDocument();
     expect(screen.getByText("Confirmation text going out")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Hand the phone to Pat" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Show a QR code" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Hand the phone/ })).toBeNull();
     expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/admin/schedule/appt-1/card-request/in-person"), expect.objectContaining({ method: "POST" }));
 
     // Callers close on a non-background report: both reports say background, so they stay mounted.

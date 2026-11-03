@@ -3,7 +3,6 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import React from "react";
 
 vi.mock("qrcode", () => ({
@@ -38,9 +37,7 @@ const LINK = { requested: true, action: "link_created", reason: "created", secur
 function renderSheet(props = {}, fetcher = makeFetch({ inPerson: LINK })) {
   const onClose = vi.fn();
   const view = render(
-    <MemoryRouter>
-      <InPersonCardSheet {...BASE} adminFetch={fetcher} onClose={onClose} {...props} />
-    </MemoryRouter>,
+    <InPersonCardSheet {...BASE} adminFetch={fetcher} onClose={onClose} {...props} />,
   );
   return { fetcher, onClose, ...view };
 }
@@ -56,8 +53,8 @@ describe("InPersonCardSheet", () => {
     expect(screen.getByText("Estimate EST-2026-0001 marked accepted")).toBeInTheDocument();
     expect(screen.getByText("Confirmation text going out")).toBeInTheDocument();
     expect(await screen.findByText("Card for Auto Pay")).toBeInTheDocument();
-    expect(screen.getByText("Pat saves a card on your phone now. Nothing is charged today. Auto Pay charges after each completed service.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Hand the phone to Pat" })).toBeInTheDocument();
+    expect(screen.getByText("Pat can save a card now on their own phone: show the QR code, or text the link. Nothing is charged today. Auto Pay charges after each completed service.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Hand the phone/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Show a QR code" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Text the link" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument();
@@ -71,22 +68,21 @@ describe("InPersonCardSheet", () => {
     expect(screen.queryByText("Confirmation text going out")).toBeNull();
   });
 
-  it("Hand the phone navigates to the secure page path with ?handoff=1", async () => {
-    function Where() { const l = useLocation(); return <div data-testid="where">{l.pathname + l.search}</div>; }
-    render(
-      <MemoryRouter initialEntries={["/admin/estimates"]}>
-        <Routes><Route path="*" element={<Where />} /></Routes>
-        <InPersonCardSheet {...BASE} adminFetch={makeFetch({ inPerson: LINK })} onClose={vi.fn()} />
-      </MemoryRouter>,
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Hand the phone to Pat" }));
-    expect(screen.getByTestId("where")).toHaveTextContent("/secure/tok123?handoff=1");
+  it("has no hand-off button and never navigates the admin tab", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign, origin: window.location.origin });
+    renderSheet();
+    await screen.findByText("Card for Auto Pay");
+    expect(screen.queryByRole("button", { name: /Hand the phone/ })).toBeNull();
+    for (const button of screen.getAllByRole("button")) fireEvent.click(button);
+    expect(assign).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it("auto_secured: says Auto Pay is on and offers only Done", async () => {
     const { onClose } = renderSheet({}, makeFetch({ inPerson: { requested: false, action: "auto_secured", reason: "saved_method_satisfied" } }));
     expect(await screen.findByText("Auto Pay is already on for Pat.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Hand the phone to Pat" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show a QR code" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(onClose).toHaveBeenCalled();
   });
@@ -105,7 +101,7 @@ describe("InPersonCardSheet", () => {
     renderSheet({}, fetcher);
     expect(await screen.findByText("The card page did not load. The booking is saved.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("button", { name: "Hand the phone to Pat" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Show a QR code" })).toBeInTheDocument();
   });
 
   it("Text the link posts the existing card-request route and shows the result", async () => {
