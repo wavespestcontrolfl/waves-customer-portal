@@ -32,6 +32,7 @@ const SOURCE_LABELS = {
   customer_confirmation: "Customer confirmation",
   site_visit: "Site visit",
   google: "Google address lookup",
+  county_parcel: "County parcel records",
 };
 
 const REVIEW_REASON_HELP = {

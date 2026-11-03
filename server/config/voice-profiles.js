@@ -32,7 +32,7 @@ const VOICE_PROFILES = {
       //   1. Noun-triple + kicker: "X, Y & Z — hype interjection"
       //   2. Full declarative sentence with a curiosity gap
       examples: [
-        'Twisters, Tail Wags & Pirates? Unleash The Weekend',
+        'Twisters, Tail Wags & Pirates? Your Weekend Plan',
         'Swifty Beats, Glitter Trolls & Gold Medals — Let\'s GOOOO!!!',
         'This Weekend\'s a Whole Circus (Literally)',
         'Someone\'s Going to Win Big for Baking a Pie',

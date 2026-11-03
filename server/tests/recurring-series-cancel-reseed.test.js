@@ -523,11 +523,16 @@ describe('cancel surfaces wire the hook (source guards)', () => {
   test('dispatch: the hook sits in the single-visit cancelled branch, not the series-scope cancel', () => {
     const hook = dispatch.indexOf("source: 'admin-dispatch-status-cancel'");
     const branch = dispatch.lastIndexOf("} else if (toStatus === 'cancelled') {", hook);
-    const seriesStop = dispatch.indexOf('recordRecurringSeriesStops(');
+    // The series-scope branch runs the shared cancel (services/recurring-series-cancel.js),
+    // which records the series stop and never reseeds.
+    const seriesStop = dispatch.indexOf('cancelSeriesRemainder(');
     expect(hook).toBeGreaterThan(branch);
     expect(branch).toBeGreaterThan(-1);
     expect(seriesStop).toBeGreaterThan(-1);
     expect(seriesStop).toBeLessThan(branch);
+    const shared = read('../services/recurring-series-cancel.js');
+    expect(shared).toContain('recordRecurringSeriesStops(');
+    expect(shared).not.toMatch(/runPostCancelSeriesReseed/);
   });
 
   test('PUT /api/admin/schedule/:id/status refuses cancel before any write, so it needs no hook (fallback auditor false positive on 652b7fda26)', () => {

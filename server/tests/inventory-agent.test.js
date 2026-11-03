@@ -1226,7 +1226,7 @@ describe('recordAttemptFailure — attempts, then hands off to a person (LLM fai
     const result = await recordAttemptFailure(conn, 'line-1', notify, 'Cannot convert fl_oz to inventory unit each');
     expect(result).toEqual({ status: 'agent_unsure' });
     expect(getLine()).toMatchObject({ agent_decision: { kind: 'unsure', reason: 'Cannot convert fl_oz to inventory unit each' } });
-    expect(notify.mock.calls[0][2]).toMatch(/Cannot convert fl_oz to inventory unit each/);
+    expect(notify.mock.calls[0][3].detail).toMatch(/Cannot convert fl_oz to inventory unit each/);
   });
 
   test('a line no longer agent_pending (already resolved by another run) is left alone', async () => {

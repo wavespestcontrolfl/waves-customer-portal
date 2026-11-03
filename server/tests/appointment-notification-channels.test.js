@@ -5,6 +5,8 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 jest.mock('../services/customer-contact', () => ({
   getAppointmentContacts: jest.fn(() => []),
   isServiceContactRole: jest.fn(() => false),
+  prefsUnavailable: jest.fn(() => false),
+  firstNameFrom: jest.fn(() => null),
   // Same marker shape as the real sentinel — getReminderPrefs' fail-closed
   // `unavailable` flag keys on __prefsUnavailable.
   PREFS_UNAVAILABLE: Object.freeze({ __prefsUnavailable: true }),
@@ -555,7 +557,7 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
     // difference proves the send-window hold and the held email leg read the
     // promoted channel, without driving the real SMS send.
     const { isWithinSendWindowET } = require('../services/messaging/send-window');
-    function tableAwareDb({ completedRow, longStandingRow = null }) {
+    function tableAwareDb({ completedRow, longStandingRow = null, customerPhone = null }) {
       db.mockImplementation((table) => {
         const q = {};
         ['whereIn', 'whereRaw', 'whereNotNull', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
@@ -564,7 +566,7 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
         q.update = jest.fn(async () => 1);
         const rows = {
           notification_prefs: { appointment_confirmation_channel: 'sms' },
-          customers: { id: 'c1', account_id: 'acct-1', is_primary_profile: true, first_name: 'Sample' },
+          customers: { id: 'c1', account_id: 'acct-1', is_primary_profile: true, first_name: 'Sample', ...(customerPhone ? { phone: customerPhone } : {}) },
           scheduled_services: completedRow,
         };
         q.first = jest.fn(async () => (q.memberSince ? longStandingRow : rows[table] ?? null));
@@ -608,6 +610,37 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
       tableAwareDb({ completedRow: null });
       await expect(run()).resolves.toBe(false);
       expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
+
+    // Owner 2026-11-02: the customer's own online booking confirms at once,
+    // at any hour. Only the inline first attempt carries the marker; the
+    // sweep's re-calls (no marker) keep the window, as the first run shows.
+    test('a self-booking (customerInitiated) after hours texts the account holder now instead of waiting for 8 AM', async () => {
+      const logger = require('../services/logger');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      const { getTemplate } = require('../routes/admin-sms-templates');
+      const holds = require('../services/disclaimed-number-holds');
+      const holdSpy = jest.spyOn(holds, 'disclaimedNumberHeldForVisit').mockResolvedValue(false);
+      try {
+        tableAwareDb({ completedRow: { id: 'done-1' } });
+        await run();
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('outside 8AM-8PM ET send window'));
+
+        jest.clearAllMocks();
+        tableAwareDb({ completedRow: { id: 'done-1' }, customerPhone: '+19415550001' });
+        getAppointmentContacts.mockImplementation(() => [{ phone: '+19415550001', role: 'primary' }]);
+        getTemplate.mockResolvedValue('Your visit is confirmed.');
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        await deliverConfirmation(
+          { id: 'rem1' },
+          { scheduledServiceId: 'ss1', customerId: 'c1', apptTime: new Date(Date.now() + 3 * 86400000), serviceLabel: 'X', customerInitiated: true },
+        );
+        expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('outside 8AM-8PM ET send window'));
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerInitiated: true }));
+      } finally {
+        holdSpy.mockRestore();
+      }
     });
   });
 

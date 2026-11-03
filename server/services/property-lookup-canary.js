@@ -117,7 +117,7 @@ function errLabel(err) {
 // COUNTY_LOOKUP_UA, no deploy) vs an IP-level block (probe hangs too →
 // needs a proxy/edge path). Result rides in the check detail.
 const COUNTY_PROBE_URLS = {
-  Sarasota: 'https://www.sc-pa.com/propertysearch/',
+  Sarasota: 'https://www.sarasotapropertyappraiser.gov/propertysearch/',
   Manatee: 'https://www.manateepao.gov/',
   Charlotte: 'https://www.ccappraiser.com/',
   Hillsborough: 'https://gis.hcpafl.org/propertysearch/',

@@ -537,6 +537,7 @@ async function runParkedRunDigest(opts = {}) {
   try {
     result = await deliverOpsDigest({
       fallOff: true, // retired by retireIfClean on the clean run
+      supersedePrior: true, // a new send closes the older open copy (ops-digest supersedeOlderDigests)
       key: 'parked-run-digest',
       subject: composed.subject,
       html: composed.bodyHtml,

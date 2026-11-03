@@ -24,6 +24,8 @@
  *                                 refreshes never add one (see
  *                                 affiliateComponentFindings)
  *   P2 KEYWORD_STUFFING         — primary keyword density above threshold
+ *   P2 AI_TELL_PHRASES          — stock multi-word AI phrases ("delve into",
+ *                                 "look no further"…); nudge only, never blocks
  *
  * Phone-number injection is NOT re-checked here — content-quality-gate's
  * redaction hard check already rejects any non-Waves phone in the body.
@@ -5540,6 +5542,57 @@ function keywordStuffingFinding(body, primaryKeyword) {
   return null;
 }
 
+// ── Stock AI phrases (P2 AI_TELL_PHRASES) ─────────────────────────────────
+// Multi-word tells from the owner's Banned-AI-Words sheet (Drive audit
+// 2026-11-02, finding B). Deliberately NOT the whole 126-entry sheet: 59 of
+// those are normal words on the live site ("landscape", "critical",
+// "ensure"), so only phrases that are never ordinary pest/lawn copy are
+// listed. Advisory only (P2): it rides the redraft feedback and the run's
+// content_guardrails_result, and never parks or blocks a publish.
+const AI_TELL_PHRASES = [
+  'delve into', 'dive into', 'deep dive', 'look no further',
+  "we've got you covered", 'peace of mind', "today's digital age",
+  "it's important to note", "it's worth mentioning", "it's interesting to note",
+  "it's crucial to note", 'it should be noted', 'in a nutshell', 'to sum up',
+  'in summary', 'in this article', 'in essence', 'one might argue',
+  'fascinating world', 'explore the world of', 'breath of fresh air',
+  'break the bank', 'breaking the bank', 'top-notch', 'a testament to',
+  'tapestry of', 'embark on',
+];
+
+// Words are joined by whitespace/hyphen runs (a phrase split across a line
+// break or typed "top notch" still matches); a straight or curly apostrophe
+// both match. Word boundaries on both ends, case-insensitive.
+function aiTellPattern(phrase) {
+  return phrase
+    .split(/[\s-]+/)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, "['\u2019]"))
+    .join('[\\s-]+');
+}
+const AI_TELL_RE = new RegExp(
+  `(?<![\\w'\u2019-])(?:${AI_TELL_PHRASES.map(aiTellPattern).join('|')})(?![\\w\u2019-])`,
+  'gi',
+);
+
+// Matched text back to the canonical list entry for the message.
+function canonicalAiTellPhrase(matched) {
+  const flat = (x) => x.toLowerCase().replace(/\u2019/g, "'").replace(/[\s-]+/g, ' ');
+  const norm = flat(matched);
+  return AI_TELL_PHRASES.find((p) => flat(p) === norm) || norm;
+}
+
+function aiTellPhraseFinding(body, editableMeta = '') {
+  const rendered = [
+    blankToRenderedText(blankNonRenderedMarkdown(String(body || ''))),
+    blankToRenderedText(String(editableMeta || '')),
+  ].join('\n\n');
+  const found = new Set();
+  for (const m of rendered.matchAll(AI_TELL_RE)) found.add(canonicalAiTellPhrase(m[0]));
+  if (!found.size) return null;
+  const list = [...found].map((p) => `"${p}"`).join(', ');
+  return finding('P2', 'AI_TELL_PHRASES', `Draft uses stock AI phrases: ${list}. Rewrite them in plain neighbor-to-neighbor wording (nudge only, never a publish blocker).`);
+}
+
 // ── Product / inventory claims (P1 PRODUCT_CLAIM) ─────────────────────────
 // Autonomous drafts have repeatedly asserted professional product names,
 // active-ingredient mechanisms, and "what our techs carry" inventory claims
@@ -6932,6 +6985,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // (publishAstro, mined opportunities) keeps full enforcement.
     operatorFaqException ? null : faqBlockedFinding(body, service),
     keywordStuffingFinding(body, kw),
+    // Stock AI phrases: P2 nudge over body AND meta; never blocks (the pass
+    // flag below reads P0/P1 only).
+    aiTellPhraseFinding(body, editableMeta),
     // Product/mechanism/inventory claims and prevention promises ship in meta
     // just like in body — scan the full publishable text for both.
     productClaimFinding(publishableText),
@@ -7098,7 +7154,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { closeOfExpressionAt, eachJsxAttr, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
+  _internals: { closeOfExpressionAt, eachJsxAttr, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, aiTellPhraseFinding, AI_TELL_PHRASES, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call

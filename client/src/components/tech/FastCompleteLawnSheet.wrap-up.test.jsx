@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// The regular lawn Fast Complete sheet with the Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP): gate
-// off it is as it was (no section, no extra reads, the four customer-text flags); gate on and
+// The regular lawn Fast Complete sheet with the Wrap-up section: with no wrapUp key
+// it is as it was (no section, no extra reads, the four customer-text flags); with the key and
 // untouched it posts the same four flags; each change rides the /complete body. Synthetic data only.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -124,7 +124,7 @@ const FOUR_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLin
 const WRAP_UP_KEYS = ['timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote', 'reviewDelayMinutes', 'reviewScheduledFor', 'wrapUpReviewAsk'];
 const reads = (pattern) => requests.filter((r) => pattern.test(r.path));
 
-describe('gate off (the context carries no wrapUp)', () => {
+describe('no wrapUp key in the context', () => {
   test('no Wrap-up, no extra reads, and the four flags exactly', async () => {
     await openSheet({ request: makeRequest({ wrapUp: false }) });
     expect(screen.queryByRole('heading', { name: 'Wrap-up' })).toBeNull();
@@ -136,7 +136,7 @@ describe('gate off (the context carries no wrapUp)', () => {
   });
 });
 
-describe('gate on', () => {
+describe('wrapUp key in the context', () => {
   test('shows the section after the treatment zone map; untouched it posts the same four flags', async () => {
     await openSheet();
     const wrap = await screen.findByRole('heading', { name: 'Wrap-up' });

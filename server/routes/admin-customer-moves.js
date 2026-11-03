@@ -5,7 +5,27 @@
  *   GET  /:id/moves         the customer's latest 5 moves and where "Text
  *                           moving link" opens ({ phone, hasTexts }). Gate
  *                           off: 200 { enabled: false, moves: [] } so the
- *                           card hides.
+ *                           card hides. With GATE_MOVING_ESTIMATE on, each
+ *                           move carries new_home ({ action, estimateId,
+ *                           reason }) for the "Estimate for new home" button;
+ *                           with GATE_MOVING_APPLY on, apply ({ action,
+ *                           reason }) for the "Apply move" button.
+ *   GET  /:id/moves/:moveId/estimate-source
+ *                           what the estimator needs to start the new
+ *                           house's estimate (moving PR B1). 404 when
+ *                           GATE_MOVING_ESTIMATE is off; 409 { code, error }
+ *                           when the move cannot get one.
+ *   GET  /:id/moves/:moveId/apply-preview
+ *                           what "Apply move" would do (moving PR B2): the
+ *                           primary change, the old-house plans that stop
+ *                           after move-out, the termite pickup task, and the
+ *                           version the confirm must send. 404 when
+ *                           GATE_MOVING_APPLY is off; 409 { code, error }
+ *                           when the move cannot be applied.
+ *   POST /:id/moves/:moveId/apply { version }
+ *                           apply it. 409 apply_changed when the preview is
+ *                           stale; a step that fails answers { code, error,
+ *                           progress } and the next confirm resumes it.
  *   POST /:id/moving-link   open (or reuse) the customer's move and answer its
  *                           link { url, moveId, status }. Sends nothing.
  *   POST /:id/moving-email  email the link on this staff click { ok, sent, reason }.
@@ -19,7 +39,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { movingFlowLive } = require('../config/feature-gates');
+const { movingFlowLive, movingEstimateLive, movingApplyLive } = require('../config/feature-gates');
 const Moves = require('../services/customer-moves');
 // A knex error message carries the query's bindings (typed addresses, link
 // tokens): log the code only (AGENTS.md, no PII in logs).
@@ -51,8 +71,15 @@ router.get('/:id/moves', ...adminOnly, async (req, res) => {
   const id = String(req.params.id || '');
   if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Customer not found' });
   try {
-    const [moves, text] = await Promise.all([Moves.recentMoves(id, 5), Moves.textTarget(id)]);
-    return res.json({ enabled: true, moves, text });
+    const [rows, text] = await Promise.all([Moves.recentMoves(id, 5), Moves.textTarget(id)]);
+    const estimateEnabled = movingEstimateLive();
+    const applyEnabled = movingApplyLive();
+    const moves = await Promise.all(rows.map(async (move) => ({
+      ...move,
+      new_home: estimateEnabled ? await Moves.newHomeAction(move) : null,
+      apply: applyEnabled ? await Moves.applyAction(move) : null,
+    })));
+    return res.json({ enabled: true, estimateEnabled, applyEnabled, moves, text });
   } catch (err) {
     logger.error(`[admin-customer-moves] list failed (${errCode(err)})`);
     return res.status(500).json({ error: 'Could not load moves' });
@@ -77,6 +104,57 @@ router.post('/:id/moving-email', ...adminOnly, gateOn, liveCustomer, async (req,
   } catch (err) {
     logger.error(`[admin-customer-moves] email failed (${errCode(err)})`);
     return res.status(500).json({ error: 'Could not send the moving email' });
+  }
+});
+
+router.get('/:id/moves/:moveId/estimate-source', ...adminOnly, gateOn, liveCustomer, async (req, res) => {
+  try {
+    return res.json(await Moves.moveEstimateSource(req.params.id, String(req.params.moveId || '')));
+  } catch (err) {
+    if (err instanceof Moves.MoveError) return res.status(err.status).json(moveErrorBody(err));
+    logger.error(`[admin-customer-moves] estimate source failed (${errCode(err)})`);
+    return res.status(500).json({ error: 'Could not load the move for an estimate' });
+  }
+});
+
+function moveErrorBody(err) {
+  return {
+    error: err.message,
+    code: err.code,
+    ...(err.estimateId ? { estimateId: err.estimateId } : {}),
+    ...(err.progress ? { progress: err.progress } : {}),
+  };
+}
+
+function applyGate(req, res, next) {
+  if (!movingApplyLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+
+router.get('/:id/moves/:moveId/apply-preview', ...adminOnly, gateOn, applyGate, liveCustomer, async (req, res) => {
+  try {
+    return res.json(await Moves.applyMovePreview(req.params.id, String(req.params.moveId || '')));
+  } catch (err) {
+    if (err instanceof Moves.MoveError) return res.status(err.status).json(moveErrorBody(err));
+    logger.error(`[admin-customer-moves] apply preview failed (${errCode(err)})`);
+    return res.status(500).json({ error: 'Could not read what Apply move would do' });
+  }
+});
+
+router.post('/:id/moves/:moveId/apply', ...adminOnly, gateOn, applyGate, liveCustomer, async (req, res) => {
+  try {
+    const version = typeof req.body?.version === 'string' ? req.body.version : '';
+    const result = await Moves.applyMove(req.params.id, String(req.params.moveId || ''), {
+      version, actorId: req.technicianId || null,
+    });
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof Moves.MoveError) return res.status(err.status).json(moveErrorBody(err));
+    logger.error(`[admin-customer-moves] apply failed (${errCode(err)})`);
+    return res.status(500).json({
+      error: 'Apply move stopped. Refresh the card: it shows what is left, and Apply move resumes from there.',
+      ...(err && err.progress ? { progress: err.progress } : {}),
+    });
   }
 });
 

@@ -3,7 +3,10 @@
 // write failure → email still goes out; notify:false → email skipped only.
 
 const mockNotifyAdmin = jest.fn();
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...args) => mockNotifyAdmin(...args),
+  _private: { doneColumns: (a) => ({ done_by: a.by, resolution: a.resolution }), openToCloser: (query) => query },
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 // The helper reads the env at call time, so the tests flip the variable
@@ -41,6 +44,33 @@ describe('deliverOpsDigest', () => {
     expect(opts).not.toHaveProperty('dedupeWindowMs');
     expect(opts).not.toHaveProperty('refreshOnDedupe');
     expect(opts.metadata).not.toHaveProperty('fallOff');
+  });
+
+  it('gate on: supersedePrior closes the older open rows of the key after the new row lands', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n12', metadata: { opsKey: 'unworked-comms' }, created_at: '2026-11-02T12:00:00Z' });
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.whereRaw = jest.fn(() => q);
+    q.whereNull = jest.fn(() => q);
+    q.update = jest.fn(async () => 3);
+    const trx = jest.fn(() => q);
+    trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    await deliverOpsDigest({ key: 'unworked-comms', subject: 'ACT: x', text: 't', supersedePrior: true, trx, sendEmail: jest.fn() });
+    expect(trx).toHaveBeenCalledWith('notifications');
+    expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'opsKey' = ?", ['unworked-comms']);
+    expect(q.where).toHaveBeenCalledWith('id', '<>', 'n12');
+    expect(q.update.mock.calls[0][0]).toMatchObject({ done_by: 'unworked-comms', resolution: 'Replaced by a newer digest from the same check' });
+  });
+
+  it('gate on: without supersedePrior no older row is touched, and a failed close never fails the send', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n13', metadata: {} });
+    const trx = jest.fn(() => { throw new Error('db down'); });
+    await deliverOpsDigest({ key: 'k', subject: 's', text: 't', trx, sendEmail: jest.fn() });
+    expect(trx).not.toHaveBeenCalled();
+    const out = await deliverOpsDigest({ key: 'k', subject: 's', text: 't', supersedePrior: true, trx, sendEmail: jest.fn() });
+    expect(out).toEqual({ ok: true, channel: 'in_app', id: 'n13' });
   });
 
   it('gate on: fallOff stamps metadata.fallOff so the feed pins the row until resolved', async () => {

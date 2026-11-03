@@ -908,6 +908,31 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  // property household safety notes (schema 1.30.0, prompt v34): file onto the technician's visit
+  // brief. Without them in FIELD_GROUPS, an extractor that drops, invents or rewrites one would go
+  // unnoticed by the weekly replay/model bake-off.
+  describe('household safety notes variance coverage', () => {
+    const FIELDS = ['household_children_or_elderly', 'no_spray_areas', 'chemical_sensitivity_note'];
+
+    test('all three are registered in FIELD_GROUPS at medium severity', () => {
+      for (const field of FIELDS) expect(FIELD_GROUPS.medium).toContain(field);
+    });
+
+    test.each(FIELDS)('compareFlatFields reports %s when it is dropped, invented or rewritten', (field) => {
+      const note = 'two toddlers live here';
+      const dropped = compareFlatFields({ [field]: note }, { [field]: null }, true).find((v) => v.field === field);
+      expect(dropped).toMatchObject({ severity: 'medium', old: note, current: null });
+      const invented = compareFlatFields({ [field]: null }, { [field]: note }, true).find((v) => v.field === field);
+      expect(invented).toMatchObject({ severity: 'medium', old: null, current: note });
+      expect(compareFlatFields({ [field]: note }, { [field]: 'two toddlers and a baby' }, true).find((v) => v.field === field)).toBeDefined();
+    });
+
+    test.each(FIELDS)('%s: a missing key equals null, and casing or spacing alone is no variance', (field) => {
+      expect(compareFlatFields({}, { [field]: null }, true).filter((v) => v.field === field)).toEqual([]);
+      expect(compareFlatFields({ [field]: 'Koi  pond' }, { [field]: 'koi pond' }, true).filter((v) => v.field === field)).toEqual([]);
+    });
+  });
+
   // consent.sms_declined (schema 1.19.0, codex P1 on #5292): the dedicated
   // explicit-SMS-refusal field the booking-link staging check reads
   // (call-booking-link-text.js) — without it in FIELD_GROUPS, a model that

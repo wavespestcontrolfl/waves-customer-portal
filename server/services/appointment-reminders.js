@@ -1863,7 +1863,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null, operatorInitiated = false) {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null, operatorInitiated = false, customerInitiated = false) {
   // Per-contact phase state (codex r19): dispatchStarted must reflect THIS
   // attempt only — a prior contact's handoff must not classify a later
   // contact's pre-dispatch throw as uncertain. (retryable/dispatchUncertain
@@ -1941,6 +1941,11 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // route through the handler — never defaulted true, and cron/
     // customer-driven callers leave it false so they stay fenced.
     ...(operatorInitiated === true ? { operatorInitiated: true } : {}),
+    // The customer side of the same exemption: this text answers the
+    // account holder's own action this request (an online self-booking's
+    // confirmation). Threaded per contact by safeSendAppointment, never
+    // defaulted true, never persisted on a replay.
+    ...(customerInitiated === true ? { customerInitiated: true } : {}),
     metadata: { original_message_type: messageType, ...recordedMeta, useCustomerChannel: true },
     // Canonical visit linkage for the audit row (messaging_audit_log.
     // appointment_id) — sms_log metadata does NOT survive the provider
@@ -2244,7 +2249,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       } : sendOptions.preDispatchCheck || null;
     const contactMeta = sendOptions.expectedChannel === 'push'
       ? { ...metaExtra, requestedChannel: 'push' } : metaExtra;
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, contactMeta, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true);
+    // sendOptions.customerInitiated covers the account holder only: on a
+    // self-booking that is who acted. Any other appointment contact keeps
+    // the send window (a held one rides the partial rail below).
+    const contactCustomerInitiated = sendOptions.customerInitiated === true && lastTenDigits(contact.phone) === primaryPhone;
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, contactMeta, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true, contactCustomerInitiated);
     if (!sent && ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sharedOutcome.lastCode)) break;
     // sendOptions.noDeferredQueue (the cancel recovery send): a held recipient is never queued for a later replay, which would
     // run without the cancellation generation and visit-date constraints. It is reported as not reached instead.
@@ -2622,7 +2631,7 @@ async function renderConfirmationBody({ scheduledServiceId, customerId, firstNam
   );
 }
 
-async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false }) {
+async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false, customerInitiated }) {
   if (apptTime.getTime() <= Date.now()) {
     // Deferred path (codex #3609 r22 P2): the time this sender read can have
     // elapsed while a silent grouped move (keepPendingConfirmation) already
@@ -2714,7 +2723,11 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Attempting the send instead would burn the confirmation: the
       // canonical-path block collapses to false here, the email fallback
       // fires at night, and the unconditional mark below ends all retries.
-      if (reminderSendWindowHold(confirmationChannel, { smsEnabled: prefs.smsEnabled })) {
+      // customerInitiated (an online self-booking confirming in the same
+      // request, owner rulings 2026-08-29 and 2026-11-02): the customer chose
+      // the moment, so the account holder's text goes now. The sweep's later
+      // re-calls never pass it and stay inside the window.
+      if (!customerInitiated && reminderSendWindowHold(confirmationChannel, { smsEnabled: prefs.smsEnabled })) {
         // 'both': the customer's requested EMAIL is not subject to the SMS
         // window — send it NOW and defer only the SMS leg via the unmarked
         // row. Idempotent per occurrence, so the sweep's replay (which
@@ -2765,7 +2778,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
           // the send records the row that actually rendered (v2 or base).
           if (ladder.templateKey) confirmationMeta.templateKey = ladder.templateKey;
           return appendHeldEstimateAcceptLine(rendered, { record, contact, customer, scheduledServiceId });
-        }, 'confirmation', 'appointment_confirmation', Object.assign(confirmationMeta, { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }), { sendOutcome: smsOutcome }),
+        }, 'confirmation', 'appointment_confirmation', Object.assign(confirmationMeta, { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }), { sendOutcome: smsOutcome, customerInitiated }),
       });
 
       // Boundary hold — same treatment as the pre-check above: return
@@ -4054,6 +4067,9 @@ const AppointmentReminders = {
         customerId,
         apptTime,
         serviceLabel: registration.serviceLabel,
+        // options.customerInitiated: the caller is the customer's own
+        // booking (createSelfBooking). Only this inline first attempt.
+        ...(options.customerInitiated === true ? { customerInitiated: true } : {}),
       });
       return record;
     } catch (err) {

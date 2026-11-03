@@ -27,6 +27,14 @@ const SUPPRESSED_RETRY_MINUTES = 60;
 const STALE_CLAIM_MINUTES = 30;
 // Email twin of the welcome, sent directly at the same delivery moment.
 const TEMPLATE_EMAIL_KEY = 'welcome.new_recurring';
+// A welcome queued by the customer's own online acceptance answers that
+// action, so it goes out at any hour (owner rulings 2026-08-29 and
+// 2026-11-02: the customer chose the moment, as for the accept's other
+// texts). Only while the action is this fresh: the welcome waits
+// WELCOME_DELAY_MINUTES by design, and a retry or a queue backlog that
+// delivers hours later is the queue's timing again, held to the 8 AM-8 PM
+// send window like every other queued send.
+const CUSTOMER_ACTION_FRESH_MINUTES = 180;
 
 // "New recurring customer" = no recurring series and no serviced visit
 // anywhere in their history. Visit history is checked in BOTH tables:
@@ -148,12 +156,25 @@ function parseMetadata(row) {
   try { return JSON.parse(row.metadata); } catch { return {}; }
 }
 
+// True while the customer action that queued this welcome (stamped at
+// enqueue as customer_action_at) is recent enough for the send to answer it.
+function customerActionStillFresh(meta, now = Date.now()) {
+  const actedAt = Date.parse(meta?.customer_action_at || '');
+  if (!Number.isFinite(actedAt)) return false;
+  const age = now - actedAt;
+  return age >= 0 && age <= CUSTOMER_ACTION_FRESH_MINUTES * 60 * 1000;
+}
+
 /**
  * Queue the welcome text for a new recurring customer. Keeps the historical
  * name because every booking path calls it fire-and-forget — but since
  * 2026-07-06 it enqueues an sms_sequences row for the scheduler to deliver
  * ~1 hour later instead of texting inline (see WELCOME_DELAY_MINUTES).
  * Idempotent: any existing new_customer_welcome row blocks a second enqueue.
+ *
+ * customerActionAt: set ONLY by a caller answering the customer's own action
+ * (the public estimate accept). It is stamped on the row, and a delivery
+ * while it is fresh is exempt from the send window (CUSTOMER_ACTION_FRESH_MINUTES).
  */
 async function sendNewRecurringWelcome({
   customer,
@@ -161,6 +182,7 @@ async function sendNewRecurringWelcome({
   recurringPattern,
   entryPoint = 'new_recurring_welcome',
   adminUserId = null,
+  customerActionAt,
 } = {}) {
   if (!customer?.id) return { sent: false, skipped: true, reason: 'missing_customer' };
   // The queued sequence is the scheduling vehicle for BOTH welcome legs
@@ -201,6 +223,8 @@ async function sendNewRecurringWelcome({
         entry_point: entryPoint,
         admin_user_id: adminUserId || null,
         queued_at: new Date().toISOString(),
+        // An unreadable value simply never reads as fresh at delivery.
+        ...(customerActionAt ? { customer_action_at: customerActionAt } : {}),
       });
     }
     // Check-and-insert ATOMIC under a per-customer advisory lock (codex
@@ -442,6 +466,9 @@ async function deliverQueuedWelcome(row) {
     appointmentId: scheduledServiceId || null,
     identityTrustLevel: 'service_contact_authorized',
     entryPoint: meta.entry_point || 'new_recurring_welcome',
+    // Answers the customer's own fresh action: no 8 AM hold (see
+    // CUSTOMER_ACTION_FRESH_MINUTES). Every other row stays in the window.
+    ...(customerActionStillFresh(meta) ? { customerInitiated: true } : {}),
     metadata: {
       original_message_type: TEMPLATE_KEY,
       template_key: TEMPLATE_KEY,
@@ -616,5 +643,6 @@ module.exports = {
     combinedSignupEmailCoversWelcome,
     recordWelcomeInteraction,
     renderWelcomeBody,
+    customerActionStillFresh,
   },
 };

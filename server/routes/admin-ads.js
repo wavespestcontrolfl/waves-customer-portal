@@ -183,11 +183,15 @@ router.get('/campaigns', async (req, res, next) => {
       .where('status', '!=', 'removed')
       .orderBy('campaign_name');
 
-    // Attach 7d & 30d perf summaries
-    const d7 = etDateString(addETDays(new Date(), -7));
-    const d30 = etDateString(addETDays(new Date(), -30));
-    const perf7 = await db('ad_performance_daily').where('date', '>=', d7);
-    const perf30 = await db('ad_performance_daily').where('date', '>=', d30);
+    // Attach 7d & 30d perf summaries over COMPLETE ET days: the Google sync runs
+    // once at 6 AM, so today's row holds midnight-6 AM at most. last7d = the 7
+    // days before today (Google's "Last 7 days"); `>= today-7` alone was 8 dates.
+    const now = new Date();
+    const today = etDateString(now);
+    const d7 = etDateString(addETDays(now, -7));
+    const d30 = etDateString(addETDays(now, -30));
+    const perf7 = await db('ad_performance_daily').where('date', '>=', d7).where('date', '<', today);
+    const perf30 = await db('ad_performance_daily').where('date', '>=', d30).where('date', '<', today);
 
     const enriched = campaigns.map(c => {
       const p7 = perf7.filter(p => p.campaign_id === c.id);
@@ -674,7 +678,9 @@ router.post('/call-bridge/apply', requireAdmin, async (req, res, next) => {
 router.get('/service-lines', async (req, res, next) => {
   try {
     const periodDays = parseInt(req.query.period?.replace('d', '') || 30);
-    const since = etDateString(addETDays(new Date(), -periodDays));
+    // Leads are live, so the window ends today: "7d" = today and the 6 days
+    // before it (`>= today-7` was 8 dates).
+    const since = etDateString(addETDays(new Date(), -(periodDays - 1)));
 
     const attributions = await db('ad_service_attribution').where('lead_date', '>=', since);
 

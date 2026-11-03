@@ -287,9 +287,11 @@ describe('accept-time annual-prepay charge provenance (Codex #3598 r3 P1 — sou
     expect(callIdx).toBeGreaterThan(-1);
     const optsHead = src.slice(callIdx, src.indexOf('expectedTotal:', callIdx));
     expect(optsHead).toContain('customerInitiated: true,');
-    // Only this customer-at-keyboard site opts in; every other saved-method
-    // caller keeps the machine default.
-    const count = (src.match(/customerInitiated: true,/g) || []).length;
-    expect(count).toBe(1);
+    // Only this customer-at-keyboard charge opts in; every other saved-method
+    // charge keeps the machine default. Counted over the charge calls only:
+    // the accept's pay-link text (sendViaSMSAndEmail) passes its own
+    // customerInitiated for the send window (owner 2026-11-02).
+    const chargeCalls = src.split('chargeInvoiceWithSavedCard(').slice(1).map((rest) => rest.slice(0, 1500));
+    expect(chargeCalls.filter((call) => call.includes('customerInitiated: true,'))).toHaveLength(1);
   });
 });

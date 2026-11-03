@@ -31,6 +31,8 @@ jest.mock('../services/weather-forecast', () => ({
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   zoneRouteDaysLive: jest.fn(() => false),
+  // Moving PR B1: the offer window reads a new-home estimate's move-in date.
+  movingEstimateLive: jest.fn(() => false),
   // The travel-gap rule reads its gate through the registry's parser at call
   // time (scheduling/travel-gap.js); keep the real helper so the collision
   // filter runs exactly as it does in prod with the gate unset.

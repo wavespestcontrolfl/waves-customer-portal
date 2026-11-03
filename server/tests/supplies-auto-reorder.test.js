@@ -124,8 +124,12 @@ test('low product with no open request → one auto_reorder row + one deduped be
   expect(notify).toHaveBeenCalledTimes(1);
   const [category, title, body, opts] = notify.mock.calls[0];
   expect(category).toBe('system');
-  expect(title).toMatch(/low/);
-  expect(body).toContain('gemplers.com');
+  // Raised through raiseAdminAlert (alert step E2): rule-format headline, one-sentence why, the old title and body in detail.
+  expect(title).toMatch(/^Inventory — restock /);
+  expect(body).toBe('Stock is low; order it manually, then mark the restock request ordered.');
+  expect(opts.detail).toContain('is low (80 each)');
+  expect(opts.detail).toContain('gemplers.com');
+  expect(opts.metadata).toMatchObject({ area: 'Inventory', severity: 'needs-you', who: 'person', doneWhen: 'restock_request_ordered', subject: { type: 'check', id: `auto-reorder:${row.id}` } });
   expect(opts.dedupeKey).toBe(`auto-reorder:${row.id}`);
   expect(opts.link).toBe('/admin/inventory?tab=restock');
   expect(opts.bell).toBe(true); // bell-policy opt-in: a suppressed restock alert is an unworked reorder
@@ -166,6 +170,23 @@ test('vendor pricing learned after the request was raised → request refreshed 
   expect(notify.mock.calls[0][3].refreshOnDedupe).toBe(true);
 });
 
+test('the restock bell converted to raiseAdminAlert adds no ring: a standing old-format row is rewritten quietly, a real change still rings (alert step E2)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/x' };
+  const notify = jest.fn(async () => ({}));
+  await runSuppliesAutoReorderSweep({ notify });
+  const { ringOnRefresh, detail } = notify.mock.calls[0][3];
+  const [oldTitle, oldBody] = detail.split('\n');
+  const link = '/admin/inventory?tab=restock';
+  // The row the pre-conversion emitter wrote, rung again with the same facts: format change alone, no ring.
+  expect(ringOnRefresh({ title: oldTitle, body: oldBody, link }, {})).toBe(false);
+  // The same old-format row when the vendor or quantity text moved: the old code rang here, so this rings.
+  expect(ringOnRefresh({ title: oldTitle, body: oldBody.replace('Gemplers', 'Amazon'), link }, {})).toBe(true);
+  expect(ringOnRefresh({ title: oldTitle.replace('80 each', '12 each'), body: oldBody, link }, {})).toBe(true);
+  // A row already in the new format keeps the default: any content change rings.
+  expect(ringOnRefresh({ title: 'x', body: 'y', link }, { area: 'Inventory' })).toBe(true);
+});
+
 test('a vendor id learned alone (name already on the request, no SKU/URL yet) is still written to the request (pre-push P1)', async () => {
   mockState.candidates = [lowSign];
   mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', metadata: {} };
@@ -185,9 +206,9 @@ test('a request pinned to another vendor learns nothing from the product\'s new 
   const res = await runSuppliesAutoReorderSweep({ notify });
   expect(res.refreshed).toEqual([]);
   expect(mockState.updates).toHaveLength(0);
-  const [, , body, opts] = notify.mock.calls[0];
-  expect(body).toContain('from Gemplers');
-  expect(body).not.toContain('amazon');
+  const [, , , opts] = notify.mock.calls[0];
+  expect(opts.detail).toContain('from Gemplers');
+  expect(opts.detail).not.toContain('amazon');
   expect(opts.metadata.vendorSku).toBeNull();
 });
 
@@ -244,7 +265,7 @@ test('reorder quantity edited between the scan and the lock → the request and 
   expect(mockState.inserted[0].requested_quantity).toBe(325);
   expect(mockState.inserted[0].target_stock).toBe(405);
   expect(res.created[0].requestedQuantity).toBe(325);
-  expect(notify.mock.calls[0][2]).toContain('Reorder 325 each');
+  expect(notify.mock.calls[0][3].detail).toContain('Reorder 325 each');
 });
 
 test('the vendor SKU/link come from the pricing row read UNDER the lock, not an unlocked scan (Codex r9 P2)', async () => {
@@ -388,7 +409,7 @@ test('a deactivated vendor steers nothing: no name, SKU or link on the request, 
   expect(r.created).toHaveLength(1);
   expect(mockState.inserted[0].vendor).toBeNull();
   expect(mockState.inserted[0].metadata).toMatchObject({ vendorId: null, vendorSku: null, vendorProductUrl: null });
-  expect(notify.mock.calls[0][2]).not.toContain('gemplers.com');
+  expect(notify.mock.calls[0][3].detail).not.toContain('gemplers.com');
 });
 
 test('an open auto request is still re-belled after "reorder when low" was turned off; nothing new is raised for that product (Codex r16 P2)', async () => {
@@ -479,10 +500,10 @@ test('re-bell on an open auto request says what the REQUEST says, not the produc
   const notify = jest.fn(async () => ({}));
   await runSuppliesAutoReorderSweep({ notify });
   expect(mockState.updates).toHaveLength(0); // populated request never rewritten
-  const [, , body, opts] = notify.mock.calls[0];
-  expect(body).toContain('Reorder 650 each from Gemplers');
-  expect(body).toContain('gemplers.com/x');
-  expect(body).not.toContain('amazon');
+  const [, , , opts] = notify.mock.calls[0];
+  expect(opts.detail).toContain('Reorder 650 each from Gemplers');
+  expect(opts.detail).toContain('gemplers.com/x');
+  expect(opts.detail).not.toContain('amazon');
   expect(opts.metadata).toMatchObject({ vendorId: 'vend-gemplers', vendorSku: '127544' });
 });
 

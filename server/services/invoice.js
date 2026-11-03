@@ -8191,6 +8191,10 @@ const InvoiceService = {
   async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true, hasEmailLeg = false,
     // Opt-out of the default-on dispute-hold check: 'operator' | 'customer' only.
     holdExempt = null,
+    // Send-window customer marker (validators/send-window.js): set only by a
+    // caller answering the customer's own action this request (the estimate
+    // accept), so the pay-link text is not held to 8 AM. Never persisted.
+    customerInitiated = false,
     // Internal-only: sends this same call once more after a not_zero_due
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
@@ -8268,7 +8272,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, expectedSmsDigest, verifyOwner, noReplay, approvedCadence,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, customerInitiated, _zeroDueRetried: true, expectedSmsPhone, expectedSmsDigest, verifyOwner, noReplay, approvedCadence,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -8542,6 +8546,8 @@ const InvoiceService = {
         // admin send click and automated resends — only the authenticated
         // routes pass operatorInitiated (see validators/send-window.js).
         ...(operatorInitiated ? { operatorInitiated: true } : {}),
+        // Same window, customer side: the customer's own action this request.
+        ...(customerInitiated ? { customerInitiated: true } : {}),
         // Preserve the legacy messageType so the admin-sms-templates
         // 'invoice' template kill switch (invoice → invoice_sent) still
         // applies. If ops disables the invoice template to halt broken
@@ -8904,6 +8910,9 @@ const InvoiceService = {
       operatorInitiated = false,
       // Opt-out of the default-on dispute-hold check: 'operator' | 'customer' only.
       holdExempt = null,
+      // The customer's own action this request (see sendViaSMS): the text leg
+      // is not held to the 8 AM send window. Never persisted or replayed.
+      customerInitiated = false,
       // The staff user behind an operator send (attribution for the
       // invoice-issued closeout's audit row); null for automated sends.
       actorTechnicianId = null,
@@ -8952,7 +8961,7 @@ const InvoiceService = {
     }
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, emailCc, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
+      emailRecipientOverride, emailCc, payUrlParams, operatorInitiated, holdExempt, customerInitiated, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
       expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
     });
 
@@ -8975,7 +8984,7 @@ const InvoiceService = {
       if (renewal) {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-          emailRecipientOverride, emailCc, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+          emailRecipientOverride, emailCc, payUrlParams, operatorInitiated, holdExempt, customerInitiated, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
           expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
         }));
       }
@@ -9170,6 +9179,7 @@ const InvoiceService = {
           payUrlParams,
           operatorInitiated,
           holdExempt,
+          customerInitiated,
           hasEmailLeg: true,
           // This wrapper's own claim above already adopted (and will
           // restore/resolve) any queued pay-link SMS this send supersedes —

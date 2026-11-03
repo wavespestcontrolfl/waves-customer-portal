@@ -6,6 +6,10 @@
 // Communications composer. Sending is always this click; nothing here sends
 // by itself. While the gate is dark the server answers { enabled: false } and
 // the card renders nothing, so the page looks exactly as it did before.
+//
+// Moving PR B2 (GATE_MOVING_APPLY): "Apply move" opens a preview of what will
+// change, and only the office's confirm applies it (new home primary, old
+// house's plans stopped after move-out with no customer text and no fee).
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, buttonStyles } from "../ui";
 import { adminFetch } from "../../lib/adminFetch";
@@ -44,6 +48,12 @@ function parseAddress(value) {
 // One plain sentence for the newest move.
 export function moveStatusText(move) {
   if (!move) return "No move yet";
+  if (move.status === "closed" && move.closed_reason === "applied") {
+    return `Move applied${move.applied_at ? ` ${shortDate(move.applied_at)}` : ""}`;
+  }
+  if (move.status === "closed" && move.closed_reason === "pause_expired") {
+    return `Pause ended${move.closed_at ? ` ${shortDate(move.closed_at)}` : ""}: no new address in 60 days`;
+  }
   if (move.status === "submitted") {
     const normalized = parseAddress(move.normalized_address);
     const where = move.typed_address
@@ -58,6 +68,27 @@ export function moveStatusText(move) {
   }
   // A copied link may have gone out some other way: never claim "not sent".
   return "Link made";
+}
+
+// The move pause (GATE_MOVING_PAUSE, owner Q4) for a submitted move: the
+// reminder text and the pause, or null when neither has happened.
+export function movePauseText(move) {
+  if (!move || move.status !== "submitted") return null;
+  const parts = [];
+  if (move.pause_reminder_at) {
+    const day = shortDate(move.pause_reminder_at);
+    if (move.pause_reminder_sent === true) parts.push(`Reminder text sent ${day}`);
+    else if (move.pause_reminder_sent === false) parts.push(`Reminder text not sent (${day})`);
+    else parts.push(`Reminder text tried ${day}, result unknown`);
+  }
+  if (move.pause_state === "paused") {
+    parts.push(`Visits paused after ${dayOnly(move.move_out_date)}, held until ${dayOnly(move.pause_ends_on)}`);
+  } else if (move.pause_state === "office") {
+    parts.push(`Pause left to the office: ${move.pause_note || "pause the visits by hand"}`);
+  } else if (move.paused_at) {
+    parts.push(`Pause started ${shortDate(move.paused_at)}, not finished yet`);
+  }
+  return parts.length ? parts.join(". ") : null;
 }
 
 // "Text moving link": the customer's SMS thread when one exists, else a new
@@ -75,10 +106,147 @@ const EMAIL_REASONS = {
   prefs_unavailable: "Email settings could not be read. Try again.",
 };
 
+// The new-home estimate action the server picked for one move.
+function NewHomeAction({ move, customerId }) {
+  const { action, estimateId, reason } = move.new_home;
+  if (action === "start") {
+    const href = `/admin/estimates?tab=new&moveId=${encodeURIComponent(move.id)}&customerId=${encodeURIComponent(customerId)}`;
+    return (
+      <div className="mt-2" data-testid="new-home-action">
+        <a className={buttonStyles({ variant: "secondary", size: "sm" })} href={href}>Estimate for new home</a>
+      </div>
+    );
+  }
+  if (action === "open" && estimateId) {
+    return (
+      <div className="mt-2" data-testid="new-home-action">
+        <a className={buttonStyles({ variant: "secondary", size: "sm" })} href={`/admin/estimates?editEstimateId=${encodeURIComponent(estimateId)}`}>Open new-home estimate</a>
+      </div>
+    );
+  }
+  if (action === "blocked" && reason) {
+    return <div className="text-14 text-ink-secondary mt-2" data-testid="new-home-action">{reason}</div>;
+  }
+  return null;
+}
+
+// One plan in plain words: "Quarterly Pest Control Service (quarterly)".
+function planLine(item) {
+  return item.frequency ? `${item.name} (${item.frequency})` : item.name;
+}
+
+// What "Apply move" will do, in plain words, from the server's preview.
+export function applyPreviewLines(preview) {
+  if (!preview) return [];
+  const lines = [];
+  lines.push(preview.primaryChange
+    ? `The new home becomes the primary address: ${preview.toAddress}.`
+    : `The new home is already the primary address: ${preview.toAddress}.`);
+  if (preview.newPlan?.length) lines.push(`New-home plan: ${preview.newPlan.map(planLine).join(", ")}.`);
+  for (const stop of preview.stops || []) {
+    const keep = stop.keepCount ? ` ${stop.keepCount} before move-out stay.` : "";
+    lines.push(stop.cancelCount
+      ? `${planLine(stop)} at the old house stops after ${dayOnly(preview.moveOutDate)}: ${stop.cancelCount} visit${stop.cancelCount === 1 ? "" : "s"} from ${dayOnly(stop.firstCancelDate)} cancelled.${keep}`
+      : `${planLine(stop)} at the old house stops after ${dayOnly(preview.moveOutDate)}. No visit after move-out is booked.${keep}`);
+  }
+  for (const other of preview.others || []) lines.push(`${planLine(other)} at another property does not change.`);
+  if (preview.oneOffs?.length) {
+    lines.push(`One-time visits at the old house after move-out stay booked: ${preview.oneOffs.map((v) => `${v.name} ${dayOnly(v.date)}`).join(", ")}. Cancel them by hand if needed.`);
+  }
+  if (preview.pastOpen?.length) {
+    lines.push(`Open visits at the old house dated after move-out but before today stay as they are: ${preview.pastOpen.map((v) => `${v.name} ${dayOnly(v.date)}`).join(", ")}. Complete or cancel them by hand.`);
+  }
+  if (preview.stations) {
+    lines.push(preview.stations.count
+      ? `A task opens to pick up ${preview.stations.count} rented termite station${preview.stations.count === 1 ? "" : "s"} after move-out.`
+      : "A task opens to confirm and pick up the rented termite stations after move-out.");
+  }
+  lines.push("No text or email goes to the customer. No late-cancel fee.");
+  return lines;
+}
+
+// The Apply move control for one move: the button, its preview and confirm.
+// onDone(message) reloads the card and shows the message on the card itself,
+// because an applied move no longer renders this control.
+function ApplyMoveAction({ move, customerId, onDone }) {
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [note, setNote] = useState("");
+  const { action, reason } = move.apply;
+
+  const review = async () => {
+    setBusy("preview"); setNote("");
+    try {
+      const res = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/moves/${encodeURIComponent(move.id)}/apply-preview`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setPreview(data);
+    } catch (e) {
+      setNote(e?.message || "Could not read what Apply move would do.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const confirm = async () => {
+    setBusy("apply"); setNote("");
+    try {
+      const res = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/moves/${encodeURIComponent(move.id)}/apply`, {
+        method: "POST",
+        body: JSON.stringify({ version: preview.version }),
+      });
+      const data = await res.json().catch(() => ({}));
+      setPreview(null);
+      if (!res.ok) {
+        // Part of the move already happened: reload so the card shows what is left.
+        if (data.progress) await onDone(data.error || `HTTP ${res.status}`);
+        else setNote(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      await onDone(`Move applied. ${data.summary || ""}`.trim());
+    } catch (e) {
+      setNote(e?.message || "Apply move did not finish. Refresh the card before you try again.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  if (action === "blocked" && reason) {
+    return <div className="text-14 text-ink-secondary mt-2" data-testid="apply-move-action">{reason}</div>;
+  }
+  if (action !== "review") return note ? <div className="text-14 text-ink-secondary mt-2" role="status">{note}</div> : null;
+  return (
+    <div className="mt-2" data-testid="apply-move-action">
+      {!preview && (
+        <Button variant="secondary" size="sm" onClick={review} disabled={!!busy}>
+          {busy === "preview" ? "Loading" : "Apply move"}
+        </Button>
+      )}
+      {preview && (
+        <div className="border-hairline border-zinc-200 rounded-sm px-3 py-2 mt-1" data-testid="apply-move-preview">
+          <div className="text-14 font-medium text-zinc-900">Apply move</div>
+          <ul className="list-disc pl-5 mt-1 text-14 text-zinc-900">
+            {applyPreviewLines(preview).map((line) => <li key={line}>{line}</li>)}
+          </ul>
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            <Button variant="primary" size="sm" onClick={confirm} disabled={!!busy}>
+              {busy === "apply" ? "Applying" : "Confirm Apply move"}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setPreview(null)} disabled={!!busy}>Cancel</Button>
+          </div>
+        </div>
+      )}
+      {note && <div className="text-14 text-ink-secondary mt-1.5" role="status">{note}</div>}
+    </div>
+  );
+}
+
 export default function CustomerMovingCardV2({ customerId }) {
   const [enabled, setEnabled] = useState(false);
   const [moves, setMoves] = useState([]);
   const [text, setText] = useState(null);
+  const [estimateEnabled, setEstimateEnabled] = useState(false);
+  const [applyEnabled, setApplyEnabled] = useState(false);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const [manualUrl, setManualUrl] = useState("");
@@ -93,6 +261,8 @@ export default function CustomerMovingCardV2({ customerId }) {
       setEnabled(data.enabled === true);
       setMoves(Array.isArray(data.moves) ? data.moves : []);
       setText(data.text || null);
+      setEstimateEnabled(data.estimateEnabled === true);
+      setApplyEnabled(data.applyEnabled === true);
     } catch {
       // The card is optional: a failed read leaves it hidden.
     }
@@ -103,6 +273,8 @@ export default function CustomerMovingCardV2({ customerId }) {
     setEnabled(false);
     setMoves([]);
     setText(null);
+    setEstimateEnabled(false);
+    setApplyEnabled(false);
     setNote("");
     setManualUrl("");
     const ac = new AbortController();
@@ -152,12 +324,17 @@ export default function CustomerMovingCardV2({ customerId }) {
 
   if (!enabled) return null;
   const textLink = textHref(customerId, text);
+  // New-home estimate (GATE_MOVING_ESTIMATE): only moves the server marked.
+  const newHomeMoves = estimateEnabled ? moves.filter((m) => m?.new_home) : [];
+  // Apply move (GATE_MOVING_APPLY): only moves the server marked for review or blocked.
+  const applyMoves = applyEnabled ? moves.filter((m) => m?.apply && m.apply.action !== "applied") : [];
 
   return (
     <div className="mt-5" data-testid="customer-moving-card">
       <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary mb-1.5">Moving</div>
       <div className="border-hairline border-zinc-200 rounded-sm px-3 py-2 text-13">
         <div className="text-zinc-900" data-testid="moving-status">{moveStatusText(moves[0])}</div>
+        {movePauseText(moves[0]) && <div className="text-14 text-ink-secondary mt-1" data-testid="moving-pause">{movePauseText(moves[0])}</div>}
         <div className="flex flex-wrap gap-1.5 mt-2">
           <Button variant="secondary" size="sm" onClick={emailLink} disabled={!!busy}>
             {busy === "email" ? "Sending" : "Email moving link"}
@@ -175,6 +352,17 @@ export default function CustomerMovingCardV2({ customerId }) {
             </Button>
           )}
         </div>
+        {newHomeMoves.map((move) => (
+          <NewHomeAction key={move.id} move={move} customerId={customerId} />
+        ))}
+        {applyMoves.map((move) => (
+          <ApplyMoveAction
+            key={move.id}
+            move={move}
+            customerId={customerId}
+            onDone={async (message) => { setNote(message || ""); setManualUrl(""); await load(); }}
+          />
+        ))}
         {note && <div className="text-12 text-ink-secondary mt-1.5" role="status">{note}</div>}
         {manualUrl && (
           <input

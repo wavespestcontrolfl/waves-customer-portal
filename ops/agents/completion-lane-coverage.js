@@ -73,7 +73,7 @@ async function main() {
         if (inactiveByKey.has(key)) {
           const s = inactiveByKey.get(key);
           inactive.push(`${list}: ${key} (${s.is_archived ? 'archived' : 'inactive'})`);
-        } else {
+        } else if (!(registry.ABSENT_FROM_PROD_BY_DESIGN_KEYS || []).includes(key)) {
           stale.push(`${list}: ${key}`);
         }
       }

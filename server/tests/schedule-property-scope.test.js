@@ -165,7 +165,7 @@ describe('saved-property scope on the customer schedule routes', () => {
       const res = await fetch(`${base}/schedule/svc-b/confirm`, { method: 'POST' });
       expect(res.status).toBe(409);
       const updateChain = db.mock.results[1].value;
-      expect(updateChain.calls[0]).toEqual(['where', { id: 'svc-b', customer_id: 'cust-1', status: 'pending', visit_id: null, property_id: 'prop-b' }]);
+      expect(updateChain.calls[0]).toEqual(['where', { id: 'svc-b', customer_id: 'cust-1', status: 'pending', visit_id: null, property_id: 'prop-b', scheduled_date: null, window_start: null }]);
       // Quick Move hand-off guard: never confirm a row now waiting for the customer's pick.
       expect(updateChain.calls[1]).toEqual(['where(fn)', [['whereNull', 'customer_pick_by'], ['orWhereNotNull', 'window_start']]]);
       expect(updateChain.calls[2][0]).toBe('update');

@@ -342,7 +342,14 @@ function durablyLinkedLeadId(data) {
 // `estimateStatus` (codex #4815 r7 P0): the row's status column — lets a
 // queued row-scoped verdict spare a terminal row (see callDraftVerdict).
 // Omitted, the row is judged as possibly non-terminal (fail closed).
+// Moving PR B1: the same verdict covers a new-home estimate's move linkage
+// (customer-moves moveLinkBlock): once its move is gone, cancelled, or now
+// names another address, the estimate leaves every customer surface.
 async function callSideBlockForEstimateData(dbc, data, { estimateStatus = null } = {}) {
+  if (data?.move?.moveId) {
+    const moveBlock = await require('../services/customer-moves').moveLinkBlock(dbc, data);
+    if (moveBlock) return moveBlock;
+  }
   const callLogId = data?.estimatorEngine?.callLogId || null;
   if (!callLogId) return null;
   try {

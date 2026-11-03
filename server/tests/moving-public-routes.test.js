@@ -130,11 +130,13 @@ test('a MoveError keeps its status and plain words; anything else is a generic 5
 });
 
 test('submit passes a checkId only as a non-empty string and answers the receipt', async () => {
-  Moves.submitMove.mockResolvedValue({ view: { firstName: 'Chris', status: 'submitted' } });
+  Moves.submitMove.mockResolvedValue({ view: { firstName: 'Chris', status: 'submitted' }, pauseLane: 'auto' });
   const res = await request(app()).post(`/api/public/moving/${TOKEN}/submit`)
     .send({ checkId: true, moveOutDate: '2026-11-15', moveInDate: '' });
   expect(res.status).toBe(200);
+  // The pause lane picks the receipt sentence and never reaches the page.
   expect(res.body).toEqual({ ok: true, receipt: ['Thanks, Chris. We have your move.'], view: { firstName: 'Chris', status: 'submitted' } });
+  expect(Moves.receiptFor).toHaveBeenCalledWith({ firstName: 'Chris', status: 'submitted' }, 'auto');
   expect(Moves.submitMove).toHaveBeenCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-15', moveInDate: '' });
   await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ checkId: 'abcdef0123456789' });
   expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: 'abcdef0123456789', moveOutDate: undefined, moveInDate: undefined });

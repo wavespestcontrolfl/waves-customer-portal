@@ -112,7 +112,15 @@ Upcoming scheduled services within `days` window (default 90).
 Next upcoming service only.
 
 ### POST /schedule/:id/confirm
-Customer confirms an appointment. Changes status to `confirmed`.
+Customer confirms an appointment. A `pending` or `rescheduled` visit changes to `confirmed`; a visit the office already confirmed records `customer_confirmed` only. Either way the visit leaves Auto-Dispatch.
+
+**Request:** the slot the card showed, echoed from `GET /schedule` or `GET /schedule/next`. Required for an office-confirmed visit; checked whenever sent. A different slot is a 409 (refresh).
+```json
+{
+  "date": "2026-11-06T00:00:00.000Z",
+  "windowStart": "07:00:00"
+}
+```
 
 ### POST /schedule/:id/reschedule
 Customer requests a reschedule.

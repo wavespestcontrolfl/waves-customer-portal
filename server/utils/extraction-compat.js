@@ -38,6 +38,11 @@ function pricesSignature(prices) {
   return prices.map(priceEntrySignature).join(';');
 }
 
+// A household safety note (schema 1.30.0) as flat text: a non-empty string, else null.
+function safetyNote(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function flatView(extraction) {
   if (!extraction) return {};
   if (!isV2Extraction(extraction)) return extraction;
@@ -144,6 +149,12 @@ function flatView(extraction) {
     // Caller-stated unit bedroom count (schema 1.10.0) — the bedroom-band
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
+    // Household safety notes the CALLER stated (schema 1.30.0): children or elderly at the home,
+    // areas not to spray, a chemical sensitivity. Trimmed text or null; replay variance watches
+    // them (FIELD_GROUPS medium) because the technician's visit brief shows what they file.
+    household_children_or_elderly: safetyNote(property.household_children_or_elderly),
+    no_spray_areas: safetyNote(property.no_spray_areas),
+    chemical_sensitivity_note: safetyNote(property.chemical_sensitivity_note),
     secondary_contact: secondary,
     secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
     // Flat mirrors of the first other party's on-site flags (schema 1.22.0) so

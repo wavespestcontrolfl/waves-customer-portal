@@ -796,6 +796,22 @@ function seasonalMaxHorizonDays(now = new Date()) {
   return Math.max(MAX_SLOT_HORIZON_DAYS, daysOut);
 }
 
+// Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate's offer window
+// never opens before the move-in date. The rolling window opens on it (a
+// seasonal selection at the first in-season day on or after it) and stops at
+// the horizon reserveSlot accepts for that selection (the seasonal one for a
+// seasonal profile); an explicit window only loses the days before move-in.
+// An empty window (dateFrom > dateTo) offers nothing.
+function moveInWindow({ moveInDate, dateFrom, dateTo, explicit, seasonal, windowDays, now = new Date() }) {
+  if (!moveInDate || dateFrom >= moveInDate) return { dateFrom, dateTo };
+  if (explicit) return { dateFrom: moveInDate, dateTo };
+  const span = Math.max(1, Number(windowDays) || DEFAULT_OPTS.windowDays);
+  const start = seasonal ? nextSeasonStartFrom(moveInDate) : moveInDate;
+  const end = seasonal ? seasonalWindowEnd(start, span) : etDateString(addETDays(new Date(`${start}T12:00:00Z`), span));
+  const horizon = etDateString(addETDays(now, seasonal ? seasonalMaxHorizonDays(now) : MAX_SLOT_HORIZON_DAYS));
+  return { dateFrom: start, dateTo: end < horizon ? end : horizon };
+}
+
 // In-season sub-ranges of a window. A straddling window (late-October start
 // crossing to February) must reach the slot GENERATORS as separate segments:
 // their candidate caps apply during date enumeration, so a continuous
@@ -2124,8 +2140,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // null = config unreadable this request: neither read nor write the cache.
   const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
   const routeCheckMode = routeCheckModeFor(userOpts);
+  // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
+  // visit before the move-in date, which the customer can still change. Only
+  // a stamped estimate reads its move; every other estimate skips the lookup.
+  const moveInDate = parseEstimateData(estimate.estimate_data)?.move?.moveId
+    ? (await require('./customer-moves').moveForEstimate(estimateId))?.move_in_date || null
+    : null;
   const cacheKey = [
     estimateId,
+    `move-in:${moveInDate || 'none'}`,
     `route-days:${routeDayPolicyKey}`,
     capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
     // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
@@ -2244,6 +2267,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     dateFrom = nextSeasonStartFrom(dateFrom);
     dateTo = seasonalWindowEnd(dateFrom, Number(opts.windowDays) || DEFAULT_OPTS.windowDays);
   }
+  ({ dateFrom, dateTo } = moveInWindow({
+    moveInDate, dateFrom, dateTo,
+    explicit: !!(opts.dateFrom && opts.dateTo),
+    seasonal: !!seasonalSelectionProfile(serviceProfile),
+    windowDays: opts.windowDays,
+  }));
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   // Resolved once per (uncached) generation and threaded through every
   // filterCollidingSlots pass — reserveSlot resolves the same zone (same
@@ -2773,6 +2802,7 @@ module.exports = {
   MAX_SLOT_HORIZON_DAYS,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
+    moveInWindow,
     oneTimeProfileServices,
     filterSeasonalSlots,
     parseAnchorTime,

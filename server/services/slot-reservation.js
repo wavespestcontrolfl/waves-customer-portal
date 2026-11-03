@@ -737,6 +737,31 @@ function slotDateRefusal(date, todayEt, offerArrivalGrace) {
   return null;
 }
 
+// Moving PR B1: the booking-time move check, run INSIDE the booking
+// transaction, for a new-home estimate only (estimate_data.move, server-
+// stamped). The stamped move is share-locked and judged whatever the gate
+// (lockMoveForConversion, the rule every accept runs): a stale move books
+// nothing (the stale-call-link answer). The move-in limit applies while
+// GATE_MOVING_ESTIMATE is on. Returns the error to throw, or null.
+async function moveBookingRefusal(conn, estimateData, date) {
+  if (!estimateData?.move?.moveId) return null;
+  let move = null;
+  try {
+    move = await require('./customer-moves').lockMoveForConversion(conn, estimateData);
+  } catch (moveErr) {
+    if (moveErr.code !== 'MOVE_ESTIMATE_STALE') throw moveErr;
+    const err = new Error('estimate is no longer for its move');
+    err.code = 'ESTIMATE_NOT_FOUND';
+    return err;
+  }
+  if (move && move.move_in_date && date < move.move_in_date) {
+    const err = new Error('slot is before the move-in date');
+    err.code = 'SLOT_UNAVAILABLE';
+    return err;
+  }
+  return null;
+}
+
 // Codex r4 P1 on #5314: another estimate's live hold on this same tech/date
 // can be minted DURING a signed offer's 45-minute life. reserveSlot's grace
 // check (verifyArrivalCapacity's arrivalGraceMinutes) only compares the
@@ -1084,6 +1109,9 @@ async function reserveSlot({
             throw err;
           }
         }
+        // Moving PR B1: the move behind a new-home estimate, on locked rows.
+        const moveRefusal = await moveBookingRefusal(trx, reservationData, date);
+        if (moveRefusal) throw moveRefusal;
       }
 
       // Caller-supplied no-booking revalidation on the LOCKED row, before the profile resolve, any capacity
@@ -1843,6 +1871,21 @@ async function commitReservation({
       const err = new Error('slot start is inside the booking notice window');
       err.code = 'SLOT_UNAVAILABLE';
       throw err;
+    }
+    // Moving PR B1: a new-home estimate's hold graduates only while its move
+    // still stands behind it and the move-in date has not moved past it (the
+    // date refusal is the recoverable code: the customer picks another time).
+    if (row.source_estimate_id) {
+      const holdEstimate = estimate && String(estimate.id) === String(row.source_estimate_id)
+        ? estimate
+        : await client('estimates').where({ id: row.source_estimate_id }).first('id', 'estimate_data');
+      const raw = holdEstimate && holdEstimate.estimate_data;
+      let holdData = raw && typeof raw === 'object' ? raw : null;
+      if (typeof raw === 'string') {
+        try { holdData = JSON.parse(raw); } catch { holdData = null; }
+      }
+      const moveRefusal = await moveBookingRefusal(client, holdData, dateOnly(row.scheduled_date));
+      if (moveRefusal) throw moveRefusal;
     }
     // Graduating inside the grace window: reservation_expires_at itself has
     // passed (the row would have 409ed before this PR), but not by enough to

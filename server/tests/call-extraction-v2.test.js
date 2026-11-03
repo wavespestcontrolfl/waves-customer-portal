@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.29.0');
+    expect(SCHEMA_VERSION).toBe('1.30.0');
   });
 
   describe('model-output schema', () => {
@@ -258,6 +258,38 @@ describe('schema validation', () => {
       }
     });
 
+    test('1.30.0: the three household safety notes validate in both schemas as optional nullable strings, older payloads without them still do, non-strings are refused', () => {
+      const KEYS = ['household_children_or_elderly', 'no_spray_areas', 'chemical_sensitivity_note'];
+      expect(validateModelOutput(validModelOutput()).valid).toBe(true); // absent: unchanged
+      for (const key of KEYS) {
+        for (const value of ['short note', null]) {
+          const out = validModelOutput();
+          out.property[key] = value;
+          expect(validateModelOutput(out).valid).toBe(true);
+          const persisted = validPersisted();
+          persisted.meta.schema_version = '1.30.0';
+          persisted.property[key] = value;
+          expect(validatePersisted(persisted).valid).toBe(true);
+        }
+        for (const bad of [true, 12, ['a'], { a: 1 }]) {
+          const out = validModelOutput();
+          out.property[key] = bad;
+          expect(validateModelOutput(out).valid).toBe(false);
+          const persisted = validPersisted();
+          persisted.property[key] = bad;
+          expect(validatePersisted(persisted).valid).toBe(false);
+        }
+      }
+      for (const schema of [require('../schemas/call-extraction.model-output.schema.json'), require('../schemas/call-extraction.persisted.schema.json')]) {
+        for (const key of KEYS) {
+          const field = schema.properties.property.properties[key];
+          expect(field.type).toEqual(['string', 'null']);
+          expect(schema.properties.property.required).not.toContain(key);
+          expect(field.description).toContain(`/property/${key}`);
+        }
+      }
+    });
+
     test('1.29.0: billing_choice survives normalization and reads in the flat view, null when absent or not a plan', () => {
       for (const value of ['annual_prepay', 'per_application']) {
         const out = validModelOutput();
@@ -273,6 +305,27 @@ describe('schema validation', () => {
       odd.meta.schema_version = '1.29.0';
       odd.service_request.billing_choice = 'monthly';
       expect(flatView(odd).billing_choice).toBeNull();
+    });
+
+    test('1.30.0: the household safety notes survive normalization and read in the flat view, null when absent, blank or not text', () => {
+      const KEYS = ['household_children_or_elderly', 'no_spray_areas', 'chemical_sensitivity_note'];
+      const out = validModelOutput();
+      out.meta.schema_version = '1.30.0'; // flatView reads only a stamped (V2) extraction
+      KEYS.forEach((key, i) => { out.property[key] = `  note ${i}  `; });
+      const normalized = normalizeExtractionV2(out);
+      KEYS.forEach((key, i) => {
+        expect(normalized.property[key]).toBe(`  note ${i}  `);
+        expect(flatView(out)[key]).toBe(`note ${i}`); // trimmed in the flat view
+      });
+      const bare = validModelOutput();
+      bare.meta.schema_version = '1.30.0';
+      for (const key of KEYS) expect(flatView(bare)[key]).toBeNull();
+      const odd = validModelOutput();
+      odd.meta.schema_version = '1.30.0';
+      for (const key of KEYS) odd.property[key] = '   ';
+      for (const key of KEYS) expect(flatView(odd)[key]).toBeNull();
+      for (const key of KEYS) odd.property[key] = true;
+      for (const key of KEYS) expect(flatView(odd)[key]).toBeNull();
     });
 
     test('1.18.0: a family_member caller validates in both schemas', () => {

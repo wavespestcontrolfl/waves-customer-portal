@@ -12,6 +12,7 @@ const { irrigationOwnerRatesLive } = require('../services/irrigation-rates');
 const AwayWatch = require('../services/away-watch');
 const { yardPets } = require('../services/pet-name-line');
 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
+const { movingPortalLive } = require('../config/feature-gates');
 
 // GATE_IRRIGATION_OWNER_RATES: the portal's "About N inches a week" line must use the table the emails use, and the
 // client cannot read the environment, so the preferences response carries the choice. The key exists only while the
@@ -30,6 +31,25 @@ function awayWatchPayload(req) {
 // property preferences never need more than a few KB.
 router.use(express.json({ limit: '64kb' }));
 router.use(authenticate);
+
+// Moving flow PR 2a (GATE_MOVING_PORTAL, needs GATE_MOVING_FLOW): the customer app's "Take WaveGuard with you".
+//   GET  /moving  { enabled }: whether My Plan shows the button. No database read.
+//   POST /moving  opens (or reuses) the signed-in customer's move and answers the moving page path { path }: the same
+//                 /moving/<token> page the office's moving link opens, for this customer only. Sends nothing.
+router.get('/moving', (req, res) => res.json({ enabled: movingPortalLive() }));
+
+router.post('/moving', async (req, res) => {
+  if (!movingPortalLive()) return res.status(404).json({ error: 'Not found' });
+  try {
+    const Moves = require('../services/customer-moves');
+    const move = await Moves.openMoveForCustomer(req.customerId);
+    return res.json({ path: `/moving/${move.token}` });
+  } catch (err) {
+    // A knex error message carries bindings: log the code only.
+    logger.error(`[property] moving page open failed for customer ${req.customerId} (${String(err?.code || err?.name || 'error')})`);
+    return res.status(500).json({ error: 'We could not open the moving page. Please try again, or call us.' });
+  }
+});
 
 router.get('/watering-plan', async (req, res, next) => {
   res.set('Cache-Control', 'private, no-store');

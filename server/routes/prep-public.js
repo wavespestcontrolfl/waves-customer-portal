@@ -180,6 +180,7 @@ const VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY = {
   'prep.flea': 'flea',
   'prep.cockroach': 'cockroach',
   'prep.bed_bug': 'bed_bug',
+  'prep.bed_bug_heat': 'bed_bug',
   'prep.rodent': 'rodent_trapping',
   'prep.termite': 'termite_treatment',
   'prep.mosquito': 'mosquito_event',

@@ -130,7 +130,7 @@ router.post('/:token/submit', submitLimiter, async (req, res) => {
       moveOutDate: body.moveOutDate,
       moveInDate: body.moveInDate,
     });
-    return res.json({ ok: true, receipt: Moves.receiptFor(saved.view), view: saved.view });
+    return res.json({ ok: true, receipt: Moves.receiptFor(saved.view, saved.pauseLane), view: saved.view });
   } catch (err) {
     return sendFailure(res, err, 'submit');
   }

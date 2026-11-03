@@ -8,10 +8,15 @@ jest.mock('../models/db', () => {
   qb.raw = () => { throw new Error('db.raw must not be touched when loaders are injected'); };
   return qb;
 });
+jest.mock('../services/ops-digest', () => {
+  const actual = jest.requireActual('../services/ops-digest');
+  return { ...actual, deliverOpsDigest: jest.fn(actual.deliverOpsDigest) };
+});
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
 
 const sendgrid = require('../services/sendgrid-mail');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
+const { deliverOpsDigest } = require('../services/ops-digest');
 const {
   runUnworkedCommsWatcher,
   _private: { composeUnworkedCommsDigest, unworkedCommsHeadlineAndSummary },
@@ -250,6 +255,12 @@ describe('runUnworkedCommsWatcher', () => {
     expect(result.sent).toBe(true);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     expect(stamp).toHaveBeenCalledTimes(1);
+  });
+
+  test('each send asks the bell seam to close the older open digest', async () => {
+    await runUnworkedCommsWatcher(loaders({ loadCallbackCalls: async () => [callback()] }));
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest).toHaveBeenCalledWith(expect.objectContaining({ key: 'unworked-comms', supersedePrior: true, fallOff: true }));
   });
 
   test('quiet day sends nothing', async () => {
