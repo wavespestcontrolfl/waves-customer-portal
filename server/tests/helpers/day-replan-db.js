@@ -32,6 +32,7 @@ function row(id, lngOffset, hour, extra = {}) {
     service_address_line2: null,
     service_address_city: 'Parrish',
     service_address_zip: '34219',
+    service_address_state: 'FL',
     customer_address_line1: `${id} Test Ln`,
     customer_city: 'Parrish',
     customer_zip: '34219',
@@ -39,6 +40,9 @@ function row(id, lngOffset, hour, extra = {}) {
     recurring_dispatch_due_date: null,
     lat: HQ.lat,
     lng: HQ.lng + lngOffset,
+    // The stored location the move's CAS pins (the loader aliases the raw columns).
+    raw_lat: HQ.lat,
+    raw_lng: HQ.lng + lngOffset,
     ...extra,
   };
 }
@@ -81,6 +85,10 @@ function makeDb({ rows = [], reminders = [], blocks = [] } = {}) {
             };
           case 'whereIn':
             return (col, list) => { preds.push((r) => list.map(String).includes(String(r[colOf(col)]))); return chain; };
+          case 'whereNotNull':
+            return (col) => { preds.push((r) => r[colOf(col)] != null); return chain; };
+          case 'whereNull':
+            return (col) => { preds.push((r) => r[colOf(col)] == null); return chain; };
           case 'whereNotIn':
             return (col, list) => { preds.push((r) => !list.map(String).includes(String(r[colOf(col)]))); return chain; };
           case 'first':
@@ -88,7 +96,13 @@ function makeDb({ rows = [], reminders = [], blocks = [] } = {}) {
           case 'insert':
             return async (rowToInsert) => { db.inserts.push({ table, row: rowToInsert }); if (table === 'day_replan_plans') db.plans.push({ ...rowToInsert }); return []; };
           case 'update':
-            return async (patch) => { const m = match(); db.updates.push({ table, patch, count: m.length }); return m.length; };
+            return async (patch) => {
+              const m = match();
+              db.updates.push({ table, patch, count: m.length });
+              // Plain values only (a raw expression is not modelled): the rows follow the write, as the real table would.
+              m.forEach((r) => Object.keys(patch).forEach((k) => { if (typeof patch[k] !== 'object' || patch[k] === null) r[k] = patch[k]; }));
+              return m.length;
+            };
           default:
             return () => chain;
         }
@@ -98,6 +112,7 @@ function makeDb({ rows = [], reminders = [], blocks = [] } = {}) {
   };
   conn.raw = (sql) => ({ sql });
   conn.fn = { now: () => 'NOW()' };
+  conn.transaction = async (fn) => fn(conn);
   return { conn, db };
 }
 

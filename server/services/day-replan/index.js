@@ -43,7 +43,7 @@ const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
 const { planDay, DEFAULT_OPTIONS } = require('./planner');
 const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
-const { applyAcceptedDay } = require('./apply');
+const { applyAcceptedDay, findInterrupted, recoverInterrupted } = require('./apply');
 
 const DEFAULT_DAYS_AHEAD = 14;
 const MAX_DAYS_AHEAD = 30;
@@ -104,6 +104,9 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
       // Apply mode's version hash reads these (the shadow plan ignores them).
       'scheduled_services.scheduled_date', 'scheduled_services.customer_confirmed', 'scheduled_services.updated_at',
+      // The columns the move's CAS pins (apply mode): the stored location, not the guarded pin the planner reads.
+      'scheduled_services.property_id', 'scheduled_services.service_address_state', 'scheduled_services.recurring_dispatch_due_date',
+      conn.raw('scheduled_services.lat AS raw_lat'), conn.raw('scheduled_services.lng AS raw_lng'),
       ...guardedCoordSelects(conn),
     ],
   }).whereRaw(_internals.LIVE_HOLD_SQL);
@@ -479,6 +482,32 @@ async function planDate(conn, env, dateStr, now, summary) {
  * @returns {Promise<{status: string, runId?: string, days?: number, accepted?: number, savedMin?: number,
  *   changedVisits?: number, skipped?: object[], failed?: object[]}>}
  */
+/** The run's environment: start points, the departure minute, the occupancy rule, the night pass's day bounds. */
+async function buildEnv(conn, { apply, runId, deps }) {
+  // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
+  const { techScopedConfirmActive } = require('../scheduling/occupancy');
+  // The night pass's own day bounds (candidate-slots.js DAY_OPEN / DAY_CLOSE, the after_hours rule), not a copy.
+  const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
+  return {
+    runId,
+    mode: apply ? 'apply' : 'shadow',
+    techHomes: await loadTechStartPoints(conn),
+    departureMin: await dayDepartureMinutes(conn),
+    techBlind: !techScopedConfirmActive(),
+    openMin: DAY_OPEN,
+    closeMin: DAY_CLOSE,
+    deps: apply ? (deps || applyDeps()) : null,
+  };
+}
+
+/** Before anything new is planned, a day a previous run left mid-apply is put back (apply and shadow alike). */
+async function recoverFirst(conn, env, deps, summary) {
+  const interrupted = await findInterrupted(conn);
+  if (!interrupted.length) return;
+  summary.recovered = await recoverInterrupted({ conn, deps: env.deps || deps || applyDeps(), plans: interrupted });
+  if (summary.recovered.some((r) => r.status === 'failed')) summary.status = 'completed_with_errors';
+}
+
 async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null } = {}) {
   const mode = dayReplanMode();
   if (mode === 'off') return { status: 'off' };
@@ -489,24 +518,12 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
   if (apply) Object.assign(summary, { apply: [], appliedVisits: 0 });
   let env;
   try {
-    // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
-    const { techScopedConfirmActive } = require('../scheduling/occupancy');
-    // The night pass's own day bounds (candidate-slots.js DAY_OPEN / DAY_CLOSE, the after_hours rule), not a copy.
-    const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
-    env = {
-      runId,
-      mode: apply ? 'apply' : 'shadow',
-      techHomes: await loadTechStartPoints(conn),
-      departureMin: await dayDepartureMinutes(conn),
-      techBlind: !techScopedConfirmActive(),
-      openMin: DAY_OPEN,
-      closeMin: DAY_CLOSE,
-      deps: apply ? (deps || applyDeps()) : null,
-    };
+    env = await buildEnv(conn, { apply, runId, deps });
   } catch (err) {
     logger.error(`[day-replan] could not read start points or departure time (${err.message}); nothing planned`);
     return { ...summary, status: 'failed' };
   }
+  await recoverFirst(conn, env, deps, summary);
   for (const dateStr of horizonDates(now)) {
     await planDate(conn, env, dateStr, now, summary);
   }
@@ -515,7 +532,8 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
   const baselines = summary.plans.reduce((counts, p) => ({ ...counts, [p.baseline]: (counts[p.baseline] || 0) + 1 }), {});
   const byStatus = apply ? summary.apply.reduce((counts, a) => ({ ...counts, [a.status]: (counts[a.status] || 0) + 1 }), {}) : {};
   const applied = apply ? ` apply=${JSON.stringify(byStatus)} appliedVisits=${summary.appliedVisits}` : '';
-  logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}`);
+  const recovered = summary.recovered ? ` recovered=${summary.recovered.length}` : '';
+  logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}${recovered}`);
   return summary;
 }
 
@@ -530,6 +548,9 @@ function applyDeps() {
     syncMovedReminders: nightWriter.syncMovedReminders,
     locationFields: nightWriter.LOCATION_FIELDS,
     raiseAlert: require('../admin-alert-compose').raiseAdminAlert,
+    // The scheduling fence the route order is written under: date occupancy first, then the tech-day (the ordering contract).
+    acquireOccupancyLock: require('../scheduling/occupancy').acquireOccupancyLock,
+    lockTechDays: require('../scheduling/tech-day-lock').lockTechDays,
     now: () => new Date(),
   };
 }
