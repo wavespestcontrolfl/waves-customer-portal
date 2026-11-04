@@ -257,7 +257,8 @@ customer's message by this rule.
    for the customer-contact bells (owner 2026-10-24: "most of these should close
    automatically ... text sent, agent confirms resolved, appt booked, rescheduled").
    A customer's text, voicemail callback request, email or new lead closes once
-   a person answered it (a missed-call bell is closed by `server/services/missed-call-bell.js`,
+   a person answered it (a text to a website or van-wrap line from a number with no customer
+   record too, judged by that text's sender number: owner 2026-11-04, "D") (a missed-call bell is closed by `server/services/missed-call-bell.js`,
    its one owner, on the same facts: a person's text, a booked visit, a handed-off quote, beside
    its own called-back proof), judged only by what happened AFTER the text, call or email the bell
    is about, and only by the repo's shared witnesses: the Messages "needs a reply" reader
