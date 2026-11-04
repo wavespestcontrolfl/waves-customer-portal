@@ -151,7 +151,7 @@ describe('shadow run', () => {
       expect(c.from).toMatch(/^\d\d:\d\d$/);
       expect(c.to).toMatch(/^\d\d:\d\d$/);
     }
-    expect(JSON.parse(plan.fixed).stops).toEqual([]);
+    expect(JSON.parse(plan.fixed)).toEqual([]);
 
     // Nothing but reads, plus the one plan insert.
     const writes = calls.filter(([, method]) => ['insert', 'update', 'del', 'delete', 'upsert', 'merge'].includes(method));
@@ -168,9 +168,12 @@ describe('shadow run', () => {
     const run = async (rows) => {
       jest.clearAllMocks();
       const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
-      await runDayReplanIfEnabled({ now: NOW, conn });
+      const out = await runDayReplanIfEnabled({ now: NOW, conn });
       const result = planDay.mock.results[0].value;
-      return { result, fixed: JSON.parse(inserts[0].row.fixed), call: planDay.mock.calls[0][0] };
+      // The table keeps the documented shape: `fixed` is an array of stops, and no baseline key is in the row.
+      expect(Array.isArray(JSON.parse(inserts[0].row.fixed))).toBe(true);
+      expect(Object.keys(inserts[0].row).filter((k) => /baseline|stale/.test(k))).toEqual([]);
+      return { result, fixed: out.plans[0], out, call: planDay.mock.calls[0][0] };
     };
 
     test('a real stored order that is cheaper than clock order is the baseline (route_order 1 first)', async () => {
@@ -179,9 +182,15 @@ describe('shadow run', () => {
       expect(result.current.baseline).toBe('stored');
       expect(result.current.order).toEqual(['y', 'x', 'z']);
       expect(fixed.baseline).toBe('stored');
-      expect(fixed.stored_order_stale).toEqual([]);
+      expect(fixed).toMatchObject({ date: TOMORROW, technician_id: TECH, stored_order_stale: [] });
       expect(fixed.baseline_drive_min.stored).toBeLessThan(fixed.baseline_drive_min.clock);
       expect(call.options.baselines.map((b) => b.name)).toEqual(['stored', 'clock']);
+    });
+
+    test('the summary and the one info line name the baseline of each planned day', async () => {
+      const { out } = await run(day());
+      expect(out.plans).toEqual([expect.objectContaining({ date: TOMORROW, technician_id: TECH, baseline: 'stored' })]);
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('baselines={"stored":1}'));
     });
 
     test('a stored order that drives more than clock order is not used', async () => {
@@ -254,7 +263,7 @@ describe('shadow run', () => {
       const rows = [...zigzagRows(), row('e', 0.04, 12, { auto_dispatch_locked: true, customer_id: 'cust-e' })];
       const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows }, blocks: [blockRow('12:00:00', '13:00:00')] });
       await runDayReplanIfEnabled({ now: NOW, conn });
-      expect(JSON.parse(inserts[0].row.fixed).stops).toEqual([{ id: 'e', why: 'staff_lock', note: 'overlaps_block_as_booked' }]);
+      expect(JSON.parse(inserts[0].row.fixed)).toEqual([{ id: 'e', why: 'staff_lock', note: 'overlaps_block_as_booked' }]);
     });
   });
 
@@ -319,7 +328,7 @@ describe('shadow run', () => {
     const reminders = [{ scheduled_service_id: 'e', reminder_24h_sent: true }];
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows }, reminders });
     await runDayReplanIfEnabled({ now: NOW, conn });
-    const fixed = Object.fromEntries(JSON.parse(inserts[0].row.fixed).stops.map((f) => [f.id, f.why]));
+    const fixed = Object.fromEntries(JSON.parse(inserts[0].row.fixed).map((f) => [f.id, f.why]));
     const moved = JSON.parse(inserts[0].row.changes).map((c) => c.id);
     for (const id of Object.keys(fixed)) expect(moved).not.toContain(id);
     expect(fixed).toEqual({
@@ -337,7 +346,7 @@ describe('shadow run', () => {
     await runDayReplanIfEnabled({ now: NOW, conn });
     const asked = getCustomerSchedulingPreferences.mock.calls.map((c) => c[0]).sort();
     expect(asked).toEqual(['cust-b', 'cust-c', 'cust-d']);
-    expect(JSON.parse(inserts[0].row.fixed).stops).toEqual(expect.arrayContaining([{ id: 'a', why: 'staff_lock' }, { id: 'c', why: 'pref_unknown' }]));
+    expect(JSON.parse(inserts[0].row.fixed)).toEqual(expect.arrayContaining([{ id: 'a', why: 'staff_lock' }, { id: 'c', why: 'pref_unknown' }]));
     const changeToB = JSON.parse(inserts[0].row.changes).find((c) => c.id === 'b');
     if (changeToB) expect(changeToB.to).toBe('11:00');
   });

@@ -246,7 +246,7 @@ function fixedList(entries, grandfathered) {
   }));
 }
 
-function planRow({ runId, techId, dateStr, entries, result, staleReasons }) {
+function planRow({ runId, techId, dateStr, entries, result }) {
   const best = result.best;
   return {
     run_id: runId,
@@ -262,13 +262,7 @@ function planRow({ runId, techId, dateStr, entries, result, staleReasons }) {
     accepted: result.accepted,
     reason: result.reason,
     changes: JSON.stringify(result.changes.map((c) => ({ id: c.id, from: minToHhmm(c.fromMin), to: minToHhmm(c.toMin) }))),
-    // Stops that kept their hour, and which current route the savings were measured against.
-    fixed: JSON.stringify({
-      baseline: result.current.baseline,
-      baseline_drive_min: result.current.baselineDrives,
-      stored_order_stale: staleReasons,
-      stops: fixedList(entries, result.grandfathered),
-    }),
+    fixed: JSON.stringify(fixedList(entries, result.grandfathered)),
   };
 }
 
@@ -301,8 +295,16 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
       closeMin: env.closeMin,
     },
   });
-  await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result, staleReasons }));
+  await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result }));
   summary.days += 1;
+  // Which current route the saving was measured against stays out of the table: it is in the returned summary and the log line.
+  summary.plans.push({
+    date: dateStr,
+    technician_id: techId,
+    baseline: result.current.baseline,
+    baseline_drive_min: result.current.baselineDrives,
+    stored_order_stale: staleReasons,
+  });
   if (result.accepted) {
     summary.accepted += 1;
     summary.savedMin += result.savedMin;
@@ -368,7 +370,7 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
   if (mode === 'off') return { status: 'off' };
   if (mode === 'apply') logger.info('[day-replan] GATE_DAY_REPLAN=true: apply is not built yet; running as shadow');
   const runId = crypto.randomUUID();
-  const summary = { status: 'completed', runId, days: 0, accepted: 0, savedMin: 0, changedVisits: 0, skipped: [], failed: [] };
+  const summary = { status: 'completed', runId, days: 0, accepted: 0, savedMin: 0, changedVisits: 0, plans: [], skipped: [], failed: [] };
   let env;
   try {
     // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
@@ -391,7 +393,8 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
     await planDate(conn, env, dateStr, now, summary);
   }
   if (summary.failed.length) summary.status = 'completed_with_errors';
-  logger.info(`[day-replan] shadow run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} skipped=${summary.skipped.length} failed=${summary.failed.length}`);
+  const baselines = summary.plans.reduce((counts, p) => ({ ...counts, [p.baseline]: (counts[p.baseline] || 0) + 1 }), {});
+  logger.info(`[day-replan] shadow run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}`);
   return summary;
 }
 
