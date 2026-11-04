@@ -119,16 +119,6 @@ describe('gate', () => {
       expect(calls).toEqual([]);
     }
   });
-
-  test('true behaves like shadow and says apply is not built yet', async () => {
-    process.env.GATE_DAY_REPLAN = 'true';
-    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
-    const out = await runDayReplanIfEnabled({ now: NOW, conn });
-    expect(out.status).toBe('completed');
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0].row.mode).toBe('shadow');
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('apply is not built yet'));
-  });
 });
 
 describe('shadow run', () => {
@@ -342,6 +332,16 @@ describe('shadow run', () => {
     });
   });
 
+  describe('open-ended visits', () => {
+    const stopOf = (extra) => _internals.plannerStop([{ row: { ...zigzagRows()[0], ...extra }, why: null, pref: null }]);
+
+    test('a booked end is the width; a visit with no end holds its estimated duration (else 60) and is marked open-ended', () => {
+      expect(stopOf({})).toMatchObject({ slotWidthMin: 60, openEnd: false });
+      expect(stopOf({ window_end: null, estimated_duration_minutes: 90 })).toMatchObject({ slotWidthMin: 90, openEnd: true });
+      expect(stopOf({ window_end: null, estimated_duration_minutes: null })).toMatchObject({ slotWidthMin: 60, openEnd: true });
+    });
+  });
+
   describe('dry window', () => {
     const info = (extra = {}) => ({ mode: 'true', hours: 4, class: 'long', source: 'service_rule', window_key: 'dry_long', customer_time: false, ...extra });
 
@@ -441,9 +441,11 @@ describe('shadow run', () => {
 
   test('a failed plan insert is reported, never thrown', async () => {
     const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+    // Only the INSERT fails: the recovery lookup on the same table must still read (a failed lookup stops the run).
     const failing = (table) => {
       const chain = conn(table);
-      return table === 'day_replan_plans' ? { insert: () => Promise.reject(new Error('disk full')) } : chain;
+      if (table !== 'day_replan_plans') return chain;
+      return new Proxy(chain, { get: (target, prop) => (prop === 'insert' ? () => Promise.reject(new Error('disk full')) : target[prop]) });
     };
     failing.raw = conn.raw;
     const out = await runDayReplanIfEnabled({ now: NOW, conn: failing });
@@ -488,6 +490,15 @@ describe('movable or fixed', () => {
     expect(_internals.fixedReason(stop({ visit_id: 'v1' }), { ...base(), visitCounts: new Map([['v1', 2]]) })).toBe('grouped');
     expect(_internals.fixedReason(stop({ visit_id: 'v1' }), { ...base(), visitCounts: new Map([['v1', 1]]) })).toBeNull();
     expect(_internals.fixedReason(stop(), { ...base(), customerCounts: new Map([['c1', 2]]) })).toBe('same_customer');
+  });
+
+  test('a booking still waiting for the office review keeps its time; once confirmed it may move', () => {
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+    for (const action of OFFICE_REVIEW_PENDING_SOURCE_ACTIONS) {
+      expect(_internals.fixedReason(stop({ source_action: action, status: 'pending', customer_confirmed: false }), base())).toBe('office_review_pending');
+      expect(_internals.fixedReason(stop({ source_action: action, customer_confirmed: true }), base())).toBeNull();
+    }
+    expect(_internals.fixedReason(stop({ source_action: 'admin_booking' }), base())).toBeNull();
   });
 
   test('first visits, one-time visits and hand-placed visits are not locked by kind', () => {

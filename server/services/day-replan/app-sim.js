@@ -50,7 +50,9 @@ const toMin = (value) => {
 /** The row with its booked hour moved to slotMin, keeping its window width. */
 function withHour(row, slotMin) {
   const start = toMin(row.window_start);
-  const width = row.window_end ? Math.max(0, toMin(row.window_end) - start) : 60;
+  // An open-ended visit stays open-ended (the writer keeps its end NULL), exactly as the current-route baseline reads it.
+  if (!row.window_end) return { ...row, window_start: hhmmss(slotMin), window_end: null };
+  const width = Math.max(0, toMin(row.window_end) - start);
   return { ...row, window_start: hhmmss(slotMin), window_end: hhmmss(slotMin + width) };
 }
 

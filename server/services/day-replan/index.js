@@ -43,6 +43,7 @@ const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
 const { planDay, DEFAULT_OPTIONS } = require('./planner');
 const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
+const { applyAcceptedDay, reconcileApplied } = require('./apply');
 
 const DEFAULT_DAYS_AHEAD = 14;
 const MAX_DAYS_AHEAD = 30;
@@ -93,7 +94,7 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.customer_id',
       'scheduled_services.visit_id', 'scheduled_services.status',
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
-      'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type',
+      'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type', 'scheduled_services.source_action',
       'scheduled_services.is_recurring', 'scheduled_services.is_callback',
       // Identity and premise fields the co-visit helpers (isCoVisitPair) read, exactly as the 04:20 pass selects them.
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
@@ -101,6 +102,11 @@ async function loadDayStops(conn, dateStr) {
       ...CUSTOMER_PREMISE_ALIASES,
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
       'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
+      // Apply mode's version hash reads these (the shadow plan ignores them).
+      'scheduled_services.scheduled_date', 'scheduled_services.customer_confirmed', 'scheduled_services.updated_at',
+      // The columns the move's CAS pins (apply mode): the stored location, not the guarded pin the planner reads.
+      'scheduled_services.property_id', 'scheduled_services.service_address_state', 'scheduled_services.recurring_dispatch_due_date',
+      conn.raw('scheduled_services.lat AS raw_lat'), conn.raw('scheduled_services.lng AS raw_lng'),
       ...guardedCoordSelects(conn),
     ],
   }).whereRaw(_internals.LIVE_HOLD_SQL);
@@ -113,6 +119,28 @@ async function loadReminder24hSent(conn, ids) {
     .whereIn('scheduled_service_id', ids)
     .select('scheduled_service_id', 'reminder_24h_sent');
   return new Set(rows.filter((r) => r.reminder_24h_sent === true).map((r) => r.scheduled_service_id));
+}
+
+/** The date's live rows and the facts every tech-day plan of that date reads. Null when the date has no rows. Throws on a failed read. */
+async function loadDayContext(conn, dateStr, now) {
+  const rows = await loadDayStops(conn, dateStr);
+  if (!rows || rows.length === 0) return null;
+  const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
+  return { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
+}
+
+/**
+ * A version of the date's rows that changes when anything the plan or the write depends on changes (apply mode):
+ * every row's id, date, window, technician, status, confirmation, staff locks, hold and last update.
+ */
+function versionHash(rows) {
+  const iso = (v) => (v instanceof Date ? v.toISOString() : (v == null ? null : String(v)));
+  const parts = rows.map((r) => [
+    String(r.id), iso(r.scheduled_date), r.window_start == null ? null : String(r.window_start), r.window_end == null ? null : String(r.window_end),
+    r.technician_id == null ? null : String(r.technician_id), r.status, r.customer_confirmed === true, r.auto_dispatch_locked === true,
+    r.auto_dispatch_excluded === true, iso(r.reservation_expires_at), iso(r.updated_at),
+  ]).sort((a, b) => a[0].localeCompare(b[0]));
+  return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
 
 function countBy(rows, key) {
@@ -130,10 +158,20 @@ function startsMoreThanLockAway(row, dateStr, now) {
 }
 
 /** Why a stop stays fixed at its hour, or null when it may move. */
+/** True for a pending office-review booking (call-booking-source-actions.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS) that
+ *  nobody confirmed yet. */
+function officeReviewPending(row) {
+  const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../call-booking-source-actions');
+  return OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) && row.customer_confirmed !== true;
+}
+
 function fixedReason(row, { dateStr, now, visitCounts, customerCounts, sent24 }) {
   if (!MOVABLE_STATUSES.includes(row.status)) return 'status';
   if (row.reservation_expires_at) return 'hold';
   if (row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return 'staff_lock';
+  // A booking still waiting for the office's review (a voice-agent or legacy outbound-review row, not yet confirmed)
+  // keeps its time: an automatic re-time must never stand in for the office's approval (Codex #7555 P2).
+  if (officeReviewPending(row)) return 'office_review_pending';
   if (row.visit_id != null && visitCounts.get(row.visit_id) > 1) return 'grouped';
   if (row.customer_id != null && customerCounts.get(row.customer_id) > 1) return 'same_customer';
   if (!startsMoreThanLockAway(row, dateStr, now)) return 'within_24h';
@@ -236,13 +274,16 @@ async function attachPrefs(conn, entries) {
 function plannerStop(group) {
   const lead = group[0].row;
   const start = hhmmToMin(lead.window_start);
-  const widthOf = (r) => Math.max(0, (r.window_end ? hhmmToMin(r.window_end) : start + 60) - start);
+  // A booked end is the window; with none, the visit holds its estimated duration (as rowHours and the app's occupancy do), else 60.
+  const widthOf = (r) => Math.max(0, (r.window_end ? hhmmToMin(r.window_end) : start + (Number(r.estimated_duration_minutes) || 60)) - start);
   return {
     id: lead.id,
     lat: Number(lead.lat),
     lng: Number(lead.lng),
     slotStartMin: start,
     slotWidthMin: Math.max(...group.map((e) => widthOf(e.row))),
+    // No booked end: a move keeps it open (the writer clears the end instead of persisting one) and a rollback restores NULL.
+    openEnd: group.length === 1 && !lead.window_end,
     workMin: group.length > 1 ? coVisitMinutes(group.map((e) => e.row)) : workDuration(lead),
     movable: group.every((e) => !e.why),
     pref: group[0].pref || null,
@@ -257,14 +298,15 @@ function fixedList(entries, grandfathered) {
   }));
 }
 
-function planRow({ runId, techId, dateStr, entries, result, check, verdict }) {
+function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode = 'shadow', planId = null }) {
   // The numbers are the app's own simulation (route-reorder-window-fit simulateArrivalRoute); the planner's stand in
   // only where that simulation gave none.
   const current = check.current || result.current;
   const planned = check.planned || (result.best && !check.current ? result.best : null);
   return {
+    ...(planId ? { id: planId } : {}),
     run_id: runId,
-    mode: 'shadow',
+    mode,
     technician_id: techId,
     service_date: dateStr,
     stop_count: entries.length,
@@ -280,19 +322,15 @@ function planRow({ runId, techId, dateStr, entries, result, check, verdict }) {
   };
 }
 
-async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, summary) {
+/**
+ * Plans one tech-day. Returns { skip: {reason} } for a day that is not planned, else the plan with everything the
+ * insert, the summary and (apply mode) the writer need.
+ */
+async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) {
   const reason = skipReason(rows);
-  if (reason) {
-    summary.skipped.push({ date: dateStr, technician_id: techId, reason, stops: rows.length });
-    logger.info(`[day-replan] ${dateStr} tech ${techId}: skipped (${reason}, ${rows.length} stops)`);
-    return;
-  }
+  if (reason) return { skip: { reason } };
   const blocks = await loadBlocks(conn, dateStr, techId);
-  if (blocksWholeDay(blocks, env.openMin, env.closeMin)) {
-    summary.skipped.push({ date: dateStr, technician_id: techId, reason: 'DAY_BLOCKED', stops: rows.length });
-    logger.info(`[day-replan] ${dateStr} tech ${techId}: skipped (DAY_BLOCKED, ${rows.length} stops)`);
-    return;
-  }
+  if (blocksWholeDay(blocks, env.openMin, env.closeMin)) return { skip: { reason: 'DAY_BLOCKED' } };
   const origin = homeFromMap(env.techHomes, techId);
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
@@ -302,8 +340,9 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   const groups = rowGroups.map((g) => g.map((r) => entryById.get(String(r.id))));
   const leaderOf = new Map(rowGroups.flatMap((g) => g.map((r) => [String(r.id), g[0].id])));
   const { staleReasons, baselines } = baselinesFor(rows);
+  const stops = groups.map(plannerStop);
   const result = planDay({
-    stops: groups.map(plannerStop),
+    stops,
     origin,
     departureMin: env.departureMin,
     legMin,
@@ -323,17 +362,68 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   const verdict = finalVerdict(result, check, DEFAULT_OPTIONS.minSavingMin);
   const members = new Map(rowGroups.map((g) => [String(g[0].id), g.map((r) => r.id)]));
   const finalResult = { ...result, grandfathered: result.grandfathered.flatMap((id) => members.get(String(id)) || [id]) };
-  await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result: finalResult, check, verdict }));
+  return {
+    entries, rowGroups, stops, blocks, origin, staleReasons, check, verdict, dayContext,
+    result: finalResult, plannerResult: result, hash: versionHash(dayContext.allRows),
+  };
+}
+
+function skipDay(summary, { dateStr, techId, reason, stops }) {
+  summary.skipped.push({ date: dateStr, technician_id: techId, reason, stops });
+  logger.info(`[day-replan] ${dateStr} tech ${techId}: skipped (${reason}, ${stops} stops)`);
+}
+
+/** Apply mode: writes an accepted plan (./apply.js) and records the outcome on its plan row. Never throws. */
+async function applyPlan(conn, env, { dateStr, techId, plan, planId, summary }) {
+  const { deps } = env;
+  const replan = async () => {
+    const ctx = await loadDayContext(conn, dateStr, deps.now());
+    const techRows = ctx && groupByTech(ctx.allRows).find(([id]) => String(id) === String(techId));
+    return techRows ? computeTechDay(conn, env, { dateStr, techId, rows: techRows[1], dayContext: ctx }) : null;
+  };
+  let outcome;
+  try {
+    outcome = await applyAcceptedDay({ conn, env, dateStr, techId, plan, planId, replan, deps });
+  } catch (err) {
+    logger.error(`[day-replan] ${dateStr} tech ${techId}: apply failed (${err.message})`);
+    outcome = { status: 'failed', reason: `error:${String(err.code || 'unknown').slice(0, 40)}`, moved: 0 };
+  }
+  summary.apply.push({ date: dateStr, technician_id: techId, status: outcome.status, reason: outcome.reason, moved: outcome.moved });
+  if (outcome.status === 'applied') summary.appliedVisits += outcome.moved;
+  logger.info(`[day-replan] ${dateStr} tech ${techId}: apply ${outcome.status} (${outcome.reason}, ${outcome.moved} visits)`);
+  // An applied day was recorded inside its own schedule transaction (apply.js writeDay); only the other outcomes here.
+  if (outcome.status === 'applied') return outcome;
+  try {
+    await conn(PLAN_TABLE).where({ id: planId }).update({ apply_status: outcome.status, apply_reason: outcome.reason });
+  } catch (err) {
+    logger.error(`[day-replan] ${dateStr} tech ${techId}: could not record the apply outcome (${err.message})`);
+  }
+  return outcome;
+}
+
+/** Returns true when apply mode attempted writes for the day (its rows may have changed). */
+async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, summary) {
+  const plan = await computeTechDay(conn, env, { dateStr, techId, rows, dayContext });
+  if (plan.skip) {
+    skipDay(summary, { dateStr, techId, reason: plan.skip.reason, stops: rows.length });
+    return false;
+  }
+  const { entries, check, verdict, staleReasons, result, plannerResult } = plan;
+  const apply = env.mode === 'apply';
+  const planId = apply ? crypto.randomUUID() : null;
+  await conn(PLAN_TABLE).insert(planRow({
+    runId: env.runId, techId, dateStr, entries, result, check, verdict, ...(apply ? { mode: 'apply', planId } : {}),
+  }));
   summary.days += 1;
   // Which current route the saving was measured against, and the planner's own figures, stay out of the table:
   // they are in the returned summary and the log line.
   summary.plans.push({
     date: dateStr,
     technician_id: techId,
-    baseline: result.current.baseline,
-    baseline_drive_min: result.current.baselineDrives,
+    baseline: plannerResult.current.baseline,
+    baseline_drive_min: plannerResult.current.baselineDrives,
     stored_order_stale: staleReasons,
-    planner: { accepted: result.accepted, reason: result.reason, saved_min: result.savedMin },
+    planner: { accepted: plannerResult.accepted, reason: plannerResult.reason, saved_min: plannerResult.savedMin },
     app_sim: check,
   });
   if (verdict.accepted) {
@@ -341,6 +431,9 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     summary.savedMin += verdict.savedMin;
     summary.changedVisits += result.changes.length;
   }
+  if (!apply || !verdict.accepted) return false;
+  const outcome = await applyPlan(conn, env, { dateStr, techId, plan, planId, summary });
+  return outcome.status !== 'skipped';
 }
 
 /**
@@ -370,21 +463,27 @@ function groupByTech(rows) {
 }
 
 async function planDate(conn, env, dateStr, now, summary) {
-  let rows;
-  let sent24;
+  let dayContext;
   try {
-    rows = await loadDayStops(conn, dateStr);
-    if (!rows || rows.length === 0) return;
-    sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
+    dayContext = await loadDayContext(conn, dateStr, now);
   } catch (err) {
     summary.failed.push({ date: dateStr, reason: 'LOAD_FAILED' });
     logger.error(`[day-replan] ${dateStr}: load failed (${err.message}); day skipped`);
     return;
   }
-  const dayContext = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
-  for (const [techId, techRows] of groupByTech(rows)) {
+  if (!dayContext) return;
+  let techDays = groupByTech(dayContext.allRows);
+  for (const [techId, firstRows] of techDays) {
     try {
-      await planTechDay(conn, env, { dateStr, techId, rows: techRows, dayContext }, summary);
+      // Apply mode: once a tech-day was written, the date's rows changed. The next technician plans from a fresh read
+      // (their blocked hours and version hash must see the new hours).
+      let rows = firstRows;
+      if (dayContext.stale) {
+        dayContext = (await loadDayContext(conn, dateStr, env.deps ? env.deps.now() : now)) || dayContext;
+        techDays = groupByTech(dayContext.allRows);
+        rows = (techDays.find(([id]) => String(id) === String(techId)) || [null, firstRows])[1];
+      }
+      if (await planTechDay(conn, env, { dateStr, techId, rows, dayContext }, summary)) dayContext.stale = true;
     } catch (err) {
       summary.failed.push({ date: dateStr, technician_id: techId, reason: 'PLAN_FAILED' });
       logger.error(`[day-replan] ${dateStr} tech ${techId}: plan failed (${err.message})`);
@@ -396,37 +495,95 @@ async function planDate(conn, env, dateStr, now, summary) {
  * @returns {Promise<{status: string, runId?: string, days?: number, accepted?: number, savedMin?: number,
  *   changedVisits?: number, skipped?: object[], failed?: object[]}>}
  */
-async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
+/** The run's environment: start points, the departure minute, the occupancy rule, the night pass's day bounds. */
+async function buildEnv(conn, { apply, runId, deps }) {
+  // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
+  const { techScopedConfirmActive } = require('../scheduling/occupancy');
+  // The night pass's own day bounds (candidate-slots.js DAY_OPEN / DAY_CLOSE, the after_hours rule), not a copy.
+  const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
+  return {
+    runId,
+    mode: apply ? 'apply' : 'shadow',
+    techHomes: await loadTechStartPoints(conn),
+    departureMin: await dayDepartureMinutes(conn),
+    techBlind: !techScopedConfirmActive(),
+    openMin: DAY_OPEN,
+    closeMin: DAY_CLOSE,
+    deps: apply ? (deps || applyDeps()) : null,
+  };
+}
+
+async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null } = {}) {
   const mode = dayReplanMode();
   if (mode === 'off') return { status: 'off' };
-  if (mode === 'apply') logger.info('[day-replan] GATE_DAY_REPLAN=true: apply is not built yet; running as shadow');
+  const apply = mode === 'apply';
   const runId = crypto.randomUUID();
   const summary = { status: 'completed', runId, days: 0, accepted: 0, savedMin: 0, changedVisits: 0, plans: [], skipped: [], failed: [] };
+  // Apply mode only: what the writer did, per tech-day.
+  if (apply) Object.assign(summary, { apply: [], appliedVisits: 0 });
   let env;
   try {
-    // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
-    const { techScopedConfirmActive } = require('../scheduling/occupancy');
-    // The night pass's own day bounds (candidate-slots.js DAY_OPEN / DAY_CLOSE, the after_hours rule), not a copy.
-    const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
-    env = {
-      runId,
-      techHomes: await loadTechStartPoints(conn),
-      departureMin: await dayDepartureMinutes(conn),
-      techBlind: !techScopedConfirmActive(),
-      openMin: DAY_OPEN,
-      closeMin: DAY_CLOSE,
-    };
+    env = await buildEnv(conn, { apply, runId, deps });
   } catch (err) {
     logger.error(`[day-replan] could not read start points or departure time (${err.message}); nothing planned`);
     return { ...summary, status: 'failed' };
   }
+  // A day committed on an earlier run whose after-commit syncs did not finish is made to match again (apply and shadow alike).
+  summary.repaired = await reconcileApplied(conn, () => env.deps || deps || applyDeps(), { today: etDateString(now) });
   for (const dateStr of horizonDates(now)) {
     await planDate(conn, env, dateStr, now, summary);
   }
-  if (summary.failed.length) summary.status = 'completed_with_errors';
+  // A day the writer could not write (nothing changed) shows in the job's health.
+  if (summary.failed.length || (summary.apply || []).some((a) => a.status === 'failed')) summary.status = 'completed_with_errors';
   const baselines = summary.plans.reduce((counts, p) => ({ ...counts, [p.baseline]: (counts[p.baseline] || 0) + 1 }), {});
-  logger.info(`[day-replan] shadow run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}`);
+  const byStatus = apply ? summary.apply.reduce((counts, a) => ({ ...counts, [a.status]: (counts[a.status] || 0) + 1 }), {}) : {};
+  const applied = apply ? ` apply=${JSON.stringify(byStatus)} appliedVisits=${summary.appliedVisits}` : '';
+  const recovered = summary.repaired ? ` repaired=${summary.repaired}` : '';
+  logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}${recovered}`);
   return summary;
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+/** Locks every live row of the date (in id order) before the day is read again: the scheduling fence's row locks. */
+async function lockDayRows(conn, dateStr) {
+  const { _internals } = require('../route-reorder');
+  return conn('scheduled_services')
+    .where('scheduled_date', dateStr)
+    .whereNotIn('status', EXCLUDED_STATUSES)
+    .whereRaw(_internals.LIVE_HOLD_SQL)
+    .orderBy('id')
+    .forUpdate()
+    .select('id');
+}
+
+/** The writer's collaborators, loaded when apply mode runs (never in shadow or off, except the repair of a committed day). */
+function applyDeps() {
+  const nightWriter = require('../auto-dispatch/apply');
+  const occupancy = require('../scheduling/occupancy');
+  const afterMove = require('./after-move');
+  const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+  return {
+    fixedReason,
+    rowHours,
+    excludedStatuses: EXCLUDED_STATUSES,
+    // The rebooker's own occupancy statuses for a move: a completed morning visit never blocks an afternoon one.
+    occupancyExcludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+    findConflicts: occupancy.findConflictingVisits,
+    syncMovedReminders: nightWriter.syncMovedReminders,
+    locationFields: nightWriter.LOCATION_FIELDS,
+    // The scheduling fence the day is written under: date occupancy first, then the tech-days (the ordering contract).
+    acquireOccupancyLock: occupancy.acquireOccupancyLock,
+    lockTechDays: require('../scheduling/tech-day-lock').lockTechDays,
+    lockDayRows,
+    loadDayRows: loadDayStops,
+    versionHash,
+    loadBlocks,
+    trackTokenExpiry: require('../track-token-expiry').scheduledServiceTrackTokenExpiry,
+    // The rebooker's strict test for a night writer (a day the company is closed).
+    isBlackoutDate: (dateStr) => require('../scheduling/blackout-dates').isBlackoutDate(dateStr, undefined, { strict: true }),
+    afterMoveEffects: afterMove.afterMoveEffects,
+    repairMoved: afterMove.repairMoved,
+    now: () => new Date(),
+  };
+}
+
+module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };

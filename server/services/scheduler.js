@@ -1867,11 +1867,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:40AM — Day RE-PLAN, SHADOW (GATE_DAY_REPLAN, dark; owner ruling
-  // 2026-11-03, PR 1 of 3). After the 4:20 reorder pass it plans each
+  // DAILY 4:40AM — Day RE-PLAN (GATE_DAY_REPLAN, dark; owner ruling
+  // 2026-11-03). After the 4:20 reorder pass it plans each
   // technician-day from tomorrow out with the free straight-line drive model
-  // and LOGS what it would do to day_replan_plans. It never writes a visit or
-  // a reminder and sends/notifies nobody. Nested inside the 4:10 writer lock
+  // and LOGS what it would do to day_replan_plans. In shadow it never writes a
+  // visit or a reminder and sends/notifies nobody; in apply (GATE_DAY_REPLAN=true,
+  // the owner's flip) it also writes each accepted day, silently
+  // (services/day-replan/apply.js). Nested inside the 4:10 writer lock
   // so it never overlaps a night writer. Gate off: returns before any read.
   // =========================================================================
   cron.schedule('40 4 * * *', async () => {

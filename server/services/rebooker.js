@@ -431,8 +431,13 @@ const SERIES_MOVE_SNAPSHOT_COLUMNS = [
 // cadence POSITION is the date it deviated from — kept across repeated
 // single moves so the sweep still orders it by where it belongs in the
 // series. Auto-dispatch nudges are placement, not intent: no stamp.
+// The two automatic night writers: auto-dispatch and the day re-plan (services/day-replan, owner 2026-11-03). Neither
+// is a person's choice of date or time, so neither stamps a date exception, ends a customer-pick hand-off, or resets the
+// recurring due date; both fail closed on an unreadable blackout list.
+const isNightWriter = (initiatedBy) => initiatedBy === 'auto_dispatch' || initiatedBy === 'day_replan';
+
 function dateExceptionStamp(row, source) {
-  if (!row || row.is_recurring !== true || source === 'auto_dispatch') return {};
+  if (!row || row.is_recurring !== true || isNightWriter(source)) return {};
   return {
     date_exception: true,
     date_exception_source: source,
@@ -776,7 +781,7 @@ async function recordFailedSeriesMove(fields, err) {
 // the marker so the later 72-hour reminder can tell the customer the visit was
 // booked for them. Not gated: a row without the marker adds nothing.
 function customerPickEnd(row, initiatedBy, landedWindowStart) {
-  return row && row.customer_pick_by && initiatedBy !== 'auto_dispatch' && landedWindowStart
+  return row && row.customer_pick_by && !isNightWriter(initiatedBy) && landedWindowStart
     ? { customer_pick_by: null } : {};
 }
 
@@ -1929,7 +1934,7 @@ class SmartRebooker {
     // for the nightly auto-dispatch move: it blocks when the list is unreadable.
     if (initiatedBy !== 'admin') {
       const { isBlackoutDate } = require('./scheduling/blackout-dates');
-      if (await isBlackoutDate(newDateStr, undefined, { strict: initiatedBy === 'auto_dispatch' })) {
+      if (await isBlackoutDate(newDateStr, undefined, { strict: isNightWriter(initiatedBy) })) {
         throw Object.assign(new Error('That day is no longer available'), {
           statusCode: 409,
           isOperational: true,
@@ -2006,7 +2011,7 @@ class SmartRebooker {
       window_end: windowEnd,
       status: landedStatus,
       ...(options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
-      ...(initiatedBy !== 'auto_dispatch' ? recurringDispatchDuePatch(service, {
+      ...(!isNightWriter(initiatedBy) ? recurringDispatchDuePatch(service, {
         scheduled_date: newDate, window_start: win.start || service.window_start,
       }) : {}),
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
