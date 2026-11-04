@@ -7,11 +7,11 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/day-replan/planner', () => {
   const actual = jest.requireActual('../services/day-replan/planner');
-  return { planDay: jest.fn(actual.planDay) };
+  return { planDay: jest.fn(actual.planDay), DEFAULT_OPTIONS: actual.DEFAULT_OPTIONS };
 });
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
-jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' } }));
+jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: {} }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 
 const logger = require('../services/logger');
@@ -79,6 +79,14 @@ function row(id, lngOffset, hour, extra = {}) {
     auto_dispatch_excluded: false,
     reservation_expires_at: null,
     route_order: null,
+    // Each stop is its own property unless a test says otherwise.
+    service_address_line1: `${id} Test Ln`,
+    service_address_line2: null,
+    service_address_city: 'Parrish',
+    service_address_zip: '34219',
+    customer_address_line1: `${id} Test Ln`,
+    customer_city: 'Parrish',
+    customer_zip: '34219',
     lat: HQ.lat,
     lng: HQ.lng + lngOffset,
     ...extra,
@@ -226,6 +234,63 @@ describe('shadow run', () => {
       expect(first.result.current.order).toEqual(['y', 'x', 'z']);
       expect(second.result.current.order).toEqual(first.result.current.order);
       expect(second.result.current.baseline).toBe(first.result.current.baseline);
+    });
+  });
+
+  describe('co-visit rows and the app simulation', () => {
+    // One customer, one property, one promised hour, no real estimate: one physical stop of one hour.
+    const pairRows = () => [
+      row('x1', 0.05, 9, { customer_id: 'cust-pair', estimated_duration_minutes: null, service_address_line1: '9 Pair Ln', customer_address_line1: '9 Pair Ln' }),
+      row('x2', 0.05, 9, { customer_id: 'cust-pair', estimated_duration_minutes: null, service_address_line1: '9 Pair Ln', customer_address_line1: '9 Pair Ln' }),
+      row('o1', 0.30, 10),
+      row('o2', 0.02, 11),
+    ];
+
+    test('a co-visit pair is ONE fixed planner stop charged one stay, and both rows are listed as fixed', async () => {
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: pairRows() } });
+      await runDayReplanIfEnabled({ now: NOW, conn });
+      const { stops, options } = planDay.mock.calls[0][0];
+      expect(stops.map((st) => st.id).sort()).toEqual(['o1', 'o2', 'x1']);
+      const merged = stops.find((st) => st.id === 'x1');
+      expect(merged).toMatchObject({ movable: false, workMin: 60, slotStartMin: 9 * 60 });
+      // Baselines name the group by its first row.
+      for (const b of options.baselines) expect(b.order.sort()).toEqual(['o1', 'o2', 'x1']);
+      const fixed = JSON.parse(inserts[0].row.fixed).filter((f) => f.why === 'same_customer').map((f) => f.id).sort();
+      expect(fixed).toEqual(['x1', 'x2']);
+    });
+
+    test('the row stores the app simulation numbers, and the summary has both sets', async () => {
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+      const out = await runDayReplanIfEnabled({ now: NOW, conn });
+      const plan = inserts[0].row;
+      const sim = out.plans[0].app_sim;
+      expect(plan.current_drive_min).toBe(sim.current.driveMin);
+      expect(plan.planned_drive_min).toBe(sim.planned.driveMin);
+      expect(plan.current_end_min).toBe(sim.current.endMin);
+      expect(plan.planned_end_min).toBe(sim.planned.endMin);
+      expect(plan.saved_min).toBe(sim.current.driveMin - sim.planned.driveMin);
+      expect(sim.planned.kept).toBe(true);
+      expect(out.plans[0].planner).toMatchObject({ accepted: true, reason: 'accepted' });
+    });
+
+    test('a planner plan the app simulation rejects is not accepted and lists no changes', async () => {
+      // The planner (stubbed) claims a big saving by booking every stop at 08:00; the app simulation sees the van
+      // reach the later stops far past their promise.
+      planDay.mockImplementationOnce(() => ({
+        current: { driveMin: 200, endMin: 900, order: ['a', 'b', 'c', 'd'], baseline: 'clock', baselineDrives: { clock: 200 } },
+        best: { driveMin: 20, endMin: 800, order: ['a', 'b', 'c', 'd'], slots: { a: 480, b: 480, c: 480, d: 480 } },
+        accepted: true,
+        reason: 'accepted',
+        savedMin: 180,
+        grandfathered: [],
+        changes: [{ id: 'b', fromMin: 540, toMin: 480 }],
+      }));
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+      const out = await runDayReplanIfEnabled({ now: NOW, conn });
+      expect(inserts[0].row).toMatchObject({ accepted: false, reason: 'app_sim_rejects', changes: '[]' });
+      expect(out.accepted).toBe(0);
+      expect(out.changedVisits).toBe(0);
+      expect(out.plans[0].app_sim.planned.kept).toBe(false);
     });
   });
 

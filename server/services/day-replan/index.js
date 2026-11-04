@@ -24,6 +24,8 @@
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
  * and, only in dry-time mode 'true' with no customer-set time, a rain-sensitive stop stays in its dry window.
  * The night pass's 'weekend' filter (skip_weekends series) is a date rule: this job never changes a date.
+ * Co-visit rows (isCoVisitPair) are merged into one fixed planner stop; after the search, the app's own
+ * simulateArrivalRoute re-simulates the baseline and the best plan (./app-sim.js) and has the last word.
  * A day is skipped (and the reason logged) with fewer than 2 stops, a day-long schedule block, a stop without coordinates, a
  * stop without a time, or a stop already en route or on site.
  */
@@ -39,7 +41,8 @@ const { workDuration, currentOrder, promisedWindowOrder, staleOrderReasons } = r
 const { getCustomerSchedulingPreferences } = require('../auto-dispatch/preferences');
 const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
-const { planDay } = require('./planner');
+const { planDay, DEFAULT_OPTIONS } = require('./planner');
+const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
 
 const DEFAULT_DAYS_AHEAD = 14;
 const MAX_DAYS_AHEAD = 30;
@@ -82,7 +85,7 @@ function legMin(a, b) {
 }
 
 async function loadDayStops(conn, dateStr) {
-  const { _internals } = require('../route-reorder');
+  const { _internals, CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
   return dayStopsQuery(conn, {
     dateStr,
     excludeStatuses: EXCLUDED_STATUSES,
@@ -92,6 +95,10 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type',
       'scheduled_services.is_recurring', 'scheduled_services.is_callback',
+      // Identity and premise fields the co-visit helpers (isCoVisitPair) read, exactly as the 04:20 pass selects them.
+      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+      'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+      CUSTOMER_PREMISE_ALIASES,
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
       'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
       ...guardedCoordSelects(conn),
@@ -222,19 +229,23 @@ async function attachPrefs(conn, entries) {
   }
 }
 
-function plannerStop(entry) {
-  const { row } = entry;
-  const start = hhmmToMin(row.window_start);
-  const end = row.window_end ? hhmmToMin(row.window_end) : start + 60;
+/**
+ * One planner stop for a group of entries: a lone row, or a co-visit group (same customer, property and window)
+ * merged into ONE fixed stop charged the co-visit helpers' on-site minutes, so the search can never separate it.
+ */
+function plannerStop(group) {
+  const lead = group[0].row;
+  const start = hhmmToMin(lead.window_start);
+  const widthOf = (r) => Math.max(0, (r.window_end ? hhmmToMin(r.window_end) : start + 60) - start);
   return {
-    id: row.id,
-    lat: Number(row.lat),
-    lng: Number(row.lng),
+    id: lead.id,
+    lat: Number(lead.lat),
+    lng: Number(lead.lng),
     slotStartMin: start,
-    slotWidthMin: Math.max(0, end - start),
-    workMin: workDuration(row),
-    movable: !entry.why,
-    pref: entry.pref || null,
+    slotWidthMin: Math.max(...group.map((e) => widthOf(e.row))),
+    workMin: group.length > 1 ? coVisitMinutes(group.map((e) => e.row)) : workDuration(lead),
+    movable: group.every((e) => !e.why),
+    pref: group[0].pref || null,
   };
 }
 
@@ -246,22 +257,25 @@ function fixedList(entries, grandfathered) {
   }));
 }
 
-function planRow({ runId, techId, dateStr, entries, result }) {
-  const best = result.best;
+function planRow({ runId, techId, dateStr, entries, result, check, verdict }) {
+  // The numbers are the app's own simulation (route-reorder-window-fit simulateArrivalRoute); the planner's stand in
+  // only where that simulation gave none.
+  const current = check.current || result.current;
+  const planned = check.planned || (result.best && !check.current ? result.best : null);
   return {
     run_id: runId,
     mode: 'shadow',
     technician_id: techId,
     service_date: dateStr,
     stop_count: entries.length,
-    current_drive_min: result.current.driveMin,
-    planned_drive_min: best ? best.driveMin : null,
-    saved_min: result.savedMin,
-    current_end_min: result.current.endMin,
-    planned_end_min: best ? best.endMin : null,
-    accepted: result.accepted,
-    reason: result.reason,
-    changes: JSON.stringify(result.changes.map((c) => ({ id: c.id, from: minToHhmm(c.fromMin), to: minToHhmm(c.toMin) }))),
+    current_drive_min: current.driveMin,
+    planned_drive_min: planned ? planned.driveMin : null,
+    saved_min: verdict.savedMin,
+    current_end_min: current.endMin,
+    planned_end_min: planned ? planned.endMin : null,
+    accepted: verdict.accepted,
+    reason: verdict.reason,
+    changes: JSON.stringify(verdict.accepted ? result.changes.map((c) => ({ id: c.id, from: minToHhmm(c.fromMin), to: minToHhmm(c.toMin) })) : []),
     fixed: JSON.stringify(fixedList(entries, result.grandfathered)),
   };
 }
@@ -279,35 +293,52 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     logger.info(`[day-replan] ${dateStr} tech ${techId}: skipped (DAY_BLOCKED, ${rows.length} stops)`);
     return;
   }
+  const origin = homeFromMap(env.techHomes, techId);
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
+  // Co-visit rows (one physical stop) are merged into one planner stop; the baselines name each group by its first row.
+  const entryById = new Map(entries.map((e) => [String(e.row.id), e]));
+  const rowGroups = coVisitGroups(promisedWindowOrder(rows));
+  const groups = rowGroups.map((g) => g.map((r) => entryById.get(String(r.id))));
+  const leaderOf = new Map(rowGroups.flatMap((g) => g.map((r) => [String(r.id), g[0].id])));
   const { staleReasons, baselines } = baselinesFor(rows);
   const result = planDay({
-    stops: entries.map(plannerStop),
-    origin: homeFromMap(env.techHomes, techId),
+    stops: groups.map(plannerStop),
+    origin,
     departureMin: env.departureMin,
     legMin,
     options: {
       blockedHours: blockedHoursFor(dayContext.allRows, techId, env.techBlind),
       blocks,
-      baselines,
+      baselines: baselines.map((b) => ({ ...b, order: [...new Set(b.order.map((id) => leaderOf.get(String(id))))] })),
       firstHour: env.openMin / 60,
       closeMin: env.closeMin,
     },
   });
-  await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result }));
+  // The app's own simulator has the last word on the planner's best plan.
+  const check = appSimCheck({
+    groups: rowGroups, baselineOrder: result.current.order, best: result.best, origin,
+    departureMin: env.departureMin, marginMin: DEFAULT_OPTIONS.marginMin,
+  });
+  const verdict = finalVerdict(result, check, DEFAULT_OPTIONS.minSavingMin);
+  const members = new Map(rowGroups.map((g) => [String(g[0].id), g.map((r) => r.id)]));
+  const finalResult = { ...result, grandfathered: result.grandfathered.flatMap((id) => members.get(String(id)) || [id]) };
+  await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result: finalResult, check, verdict }));
   summary.days += 1;
-  // Which current route the saving was measured against stays out of the table: it is in the returned summary and the log line.
+  // Which current route the saving was measured against, and the planner's own figures, stay out of the table:
+  // they are in the returned summary and the log line.
   summary.plans.push({
     date: dateStr,
     technician_id: techId,
     baseline: result.current.baseline,
     baseline_drive_min: result.current.baselineDrives,
     stored_order_stale: staleReasons,
+    planner: { accepted: result.accepted, reason: result.reason, saved_min: result.savedMin },
+    app_sim: check,
   });
-  if (result.accepted) {
+  if (verdict.accepted) {
     summary.accepted += 1;
-    summary.savedMin += result.savedMin;
+    summary.savedMin += verdict.savedMin;
     summary.changedVisits += result.changes.length;
   }
 }
