@@ -262,6 +262,7 @@ maybeDescribe('moving flow (live Postgres)', () => {
     expect(requests[0].description).toContain('Move-out date: Nov 15, 2026.');
     expect(requests[0].description).toContain('Move-in date: not known yet.');
     expect(requests[0].description).toContain('Current plan: Lawn Care Service, Monthly Pest Control Service.');
+    expect(requests[0].description).toContain('Billing: per visit.');
     expect(first.move).toMatchObject({ status: 'submitted', address_verdict: 'in_area', typed_address: '12 Example Way, Parrish FL', service_request_id: requests[0].id });
     expect(first.view).toMatchObject({ newCity: 'Parrish', verdict: 'in_area', addressOnFile: true, moveOutDate: '2026-11-15', moveInDate: null });
 
@@ -292,6 +293,25 @@ maybeDescribe('moving flow (live Postgres)', () => {
 
     // A move changes no property, visit or primary.
     expect(await counts()).toEqual(before);
+  });
+
+  test('the office item names how the customer pays: a prepaid year with its last paid day, or a monthly membership', async () => {
+    await db('customers').where({ id: customerId }).update({ billing_mode: 'annual_prepay' });
+    // A live year (deleted with the customer). A termite plan's year never counts.
+    await db('annual_prepay_terms').insert([
+      { customer_id: customerId, term_start: '2026-06-01', term_end: '2027-05-31', status: 'active' },
+      { customer_id: customerId, term_start: '2026-06-01', term_end: '2027-09-30', status: 'active', annual_plan_version: 'v3' },
+    ]);
+    const move = await Moves.openMoveForCustomer(customerId);
+    await Moves.submitMove(move, { moveOutDate: '2026-11-15' }, { now: NOW });
+    const [item] = await db('service_requests').where({ customer_id: customerId });
+    expect(item.description).toContain('Billing: annual prepay, paid through May 31, 2027. Make no estimate the customer can accept this year: follow the steps on the Moving card.');
+
+    await db('customers').where({ id: customerId }).update({ billing_mode: 'monthly_membership' });
+    await Moves.submitMove(await db('customer_moves').where({ id: move.id }).first(), { moveOutDate: '2026-11-15' }, { now: NOW });
+    const [again] = await db('service_requests').where({ customer_id: customerId });
+    expect(again.description).toContain('Billing: monthly membership. Set the new price by hand, never with an estimate: follow the steps on the Moving card.');
+    expect(again.description).not.toContain('annual prepay');
   });
 
   test('submit with dates only works and says the address is not known yet', async () => {

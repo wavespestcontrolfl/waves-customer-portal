@@ -177,14 +177,22 @@ describe('CustomerMovingCardV2', () => {
       moves: [
         { ...submitted, id: 'move-start', new_home: { action: 'start', estimateId: null, reason: null } },
         { ...submitted, id: 'move-open', new_home: { action: 'open', estimateId: 'est-9', reason: null } },
-        { ...submitted, id: 'move-blocked', new_home: { action: 'blocked', estimateId: null, reason: 'This customer prepaid for the year. Ask the owner.' } },
+        {
+          ...submitted,
+          id: 'move-blocked',
+          new_home: { action: 'blocked', estimateId: null, reason: 'This customer prepaid for the year.', steps: ['Send no estimate this year.', 'Move the visits after move-out.'] },
+        },
       ],
     };
     render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     expect(await screen.findByRole('link', { name: 'Estimate for new home' }))
       .toHaveAttribute('href', `/admin/estimates?tab=new&moveId=move-start&customerId=${CUSTOMER}`);
     expect(screen.getByRole('link', { name: 'Open new-home estimate' })).toHaveAttribute('href', '/admin/estimates?editEstimateId=est-9');
-    expect(screen.getByText('This customer prepaid for the year. Ask the owner.')).toBeInTheDocument();
+    expect(screen.getByText('This customer prepaid for the year.')).toBeInTheDocument();
+    // A prepay refusal lists the office's steps, in order.
+    const steps = screen.getByTestId('new-home-action-steps');
+    expect(steps.tagName).toBe('OL');
+    expect([...steps.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['Send no estimate this year.', 'Move the visits after move-out.']);
     expect(screen.getAllByTestId('new-home-action')).toHaveLength(3);
     // The blocked move has no button or link of its own.
     expect(screen.getAllByRole('link', { name: /new home|new-home/i })).toHaveLength(2);
@@ -270,6 +278,8 @@ describe('CustomerMovingCardV2', () => {
     state.list = { enabled: true, applyEnabled: true, text: null, moves: [{ ...applyMove, apply: { action: 'blocked', reason: 'The customer has not given a move-out date.' } }] };
     const { unmount } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     expect(await screen.findByTestId('apply-move-action')).toHaveTextContent('The customer has not given a move-out date.');
+    // A refusal with no steps shows no list.
+    expect(screen.queryByTestId('apply-move-action-steps')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Apply move' })).toBeNull();
     unmount();
     state.list = { enabled: true, applyEnabled: false, text: null, moves: [{ ...applyMove, apply: { action: 'review', reason: null } }] };
