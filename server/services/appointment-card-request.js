@@ -2638,6 +2638,20 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
     }
   }
 
+  // Book at the Table (GATE_TAP_SAVE_CARD): the hand-off page offers Tap to Pay only when
+  // the mint would take it (disclosedCapEligibility, services/terminal-save-card.js): a
+  // recurring visit, or a one-time visit whose price THIS render displayed and froze as
+  // accepted_amount above (a row pinned to the 0 sentinel never qualifies again). Otherwise
+  // the typed save stays the only option. It echoes the fee NUMBER behind `cancelFeeNote` as
+  // the amount the customer was shown. Neither key rides while the gate is dark.
+  const tapCapFrozen = visit?.is_recurring === true
+    || (planContext != null && Number(planContext.perVisit) > 0
+      && !(request.accepted_amount != null && Number(request.accepted_amount) === 0));
+  if (visitPriced && tapCapFrozen && require('../config/feature-gates').isEnabled('tapSaveCard')) {
+    readyEcho.tapSaveCard = true;
+    if (feeDisclosure) readyEcho.cancelFeeAmount = feeDisclosure.feeAmount;
+  }
+
   if (planState?.state === 'prepay_selected') {
     return {
       state: 'prepay_selected',

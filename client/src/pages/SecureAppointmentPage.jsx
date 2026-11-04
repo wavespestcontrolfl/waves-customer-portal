@@ -29,6 +29,13 @@
  * "Prepay the year" instead of a pay page. The app draws its own hand-back bar. Without
  * the bridge the page is unchanged.
  *
+ * Tap to Pay (GATE_TAP_SAVE_CARD): in hand-off mode only, when the payload says
+ * `tapSaveCard` AND the app answers `saveCard` to its capabilities ask, a "Tap your card on
+ * this phone" button sits under the typed save. It rides the SAME consent checkbox, the same
+ * consent text version, the fee number the page showed (`cancelFeeAmount`) and the same
+ * sticky disclosure echo the typed save sends; the estimate terms are recorded first. The
+ * app takes the tap and the server completes the request, so success re-pulls the payload.
+  *
  * Styling follows the customer-facing brand idiom used by ReschedulePage
  * (WavesShell customer variant + warm surface palette + inline styles).
  */
@@ -42,7 +49,7 @@ import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
 import HandoffTermsBox from '../components/estimate/HandoffTermsBox';
 import HandoffPrepayQr from '../components/estimate/HandoffPrepayQr';
-import { isHandoffMode, TERMS_CHANGED_MESSAGE } from '../lib/wavesCustomerHandoff';
+import { askHandoffCapabilities, isHandoffMode, requestTapSave, SAVE_CARD_CAPABILITY, TERMS_CHANGED_MESSAGE } from '../lib/wavesCustomerHandoff';
 import { fmtMoney } from '../lib/money';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import { CONSENT_VERSION, consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE } from '../lib/paymentMethodConsentText';
@@ -140,6 +147,10 @@ export default function SecureAppointmentPage() {
   const [termsRecorded, setTermsRecorded] = useState(false);
   const [prepayQr, setPrepayQr] = useState(false);
   const [termsChanged, setTermsChanged] = useState(false);
+  // Tap to Pay: the app's answer to its capabilities ask (asked once, below), and whether a
+  // tap is waiting on the app right now.
+  const [appCapabilities, setAppCapabilities] = useState([]);
+  const [tapBusy, setTapBusy] = useState(false);
   // Plan-choice lane (payload carries planContext only while the gate is
   // on). selectedPlan mirrors the server's recorded choice; per-application
   // must be picked before the card form appears on plan-bearing pages.
@@ -166,6 +177,15 @@ export default function SecureAppointmentPage() {
       try { sessionStorage.removeItem(`waves-sdv-${token}`); } catch { /* ignore */ }
     }
   }, [data, token]);
+
+  // Ask the app what it can do once, and only when the server says the tap save is on.
+  const tapSaveOn = handoffMode && data?.tapSaveCard === true;
+  const askedCapabilitiesRef = useRef(false);
+  useEffect(() => {
+    if (!tapSaveOn || askedCapabilitiesRef.current) return;
+    askedCapabilitiesRef.current = true;
+    askHandoffCapabilities().then(setAppCapabilities);
+  }, [tapSaveOn]);
 
   // Re-pull the page payload (plan availability can change under us — the
   // office edits the visit, a term appears). Server truth wins.
@@ -535,6 +555,36 @@ export default function SecureAppointmentPage() {
     }
   }, [busy, termsBlocking, recordTerms, reopenTerms, complete, refresh, refreshOrSecured, pendingStickyEcho, data?.kind]);
 
+  // Tap to Pay: the same gates as the typed save (consent ticked, terms recorded), then the
+  // app takes the tap and the server completes the request. The consent values are the ones
+  // the typed save attests: this bundle's text version, the fee number the page showed and the
+  // sticky echo THIS tab rendered.
+  const handleTapSave = useCallback(async () => {
+    if (busy || replacingRef.current || termsBlocking || termsChanged) return;
+    if (!captureState.agreed || captureState.methodType === 'us_bank_account') return;
+    setBusy(true);
+    setTapBusy(true);
+    setError(null);
+    try {
+      if (!(await recordTerms())) return;
+      const outcome = await requestTapSave({
+        consentTextVersion: CONSENT_VERSION,
+        agreed: true,
+        feeDisclosedAmount: Number.isFinite(data?.cancelFeeAmount) ? data.cancelFeeAmount : null,
+        disclosureVersion: pendingStickyEcho(),
+      });
+      if (outcome.status === 'succeeded') {
+        // The server completed the request: re-pull so the saved-card view renders.
+        await refreshOrSecured();
+      } else if (outcome.status === 'failed') {
+        setError(outcome.message);
+      }
+    } finally {
+      setTapBusy(false);
+      setBusy(false);
+    }
+  }, [busy, termsBlocking, termsChanged, captureState.agreed, captureState.methodType, recordTerms, data?.cancelFeeAmount, pendingStickyEcho, refreshOrSecured]);
+
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;
     setPlanBusy(true);
@@ -842,6 +892,9 @@ export default function SecureAppointmentPage() {
   // everything else (one-time, gate off) shows it immediately as today.
   const showCapture = !planRecurring || selectedPlan === 'per_application';
   const saveDisabled = busy || !(captureState.ready && captureState.agreed) || termsBlocking || termsChanged;
+  // The tap is card-only: a ticked bank authorization is not consent to save a card.
+  const tapOffered = tapSaveOn && !standalone && appCapabilities.includes(SAVE_CARD_CAPABILITY);
+  const tapDisabled = busy || !captureState.agreed || captureState.methodType === 'us_bank_account' || termsBlocking || termsChanged;
 
   return (
     <Shell locked={handoffMode}>
@@ -952,6 +1005,29 @@ export default function SecureAppointmentPage() {
                   ? (captureState.methodType === 'us_bank_account' ? 'Save bank account & turn on Auto Pay' : 'Save card & turn on Auto Pay')
                   : (planRecurring ? 'Save card & confirm my plan' : 'Save card & secure my visit')}
             </button>
+            {tapOffered ? (
+              <div data-testid="tap-to-pay-option">
+                <button
+                  type="button"
+                  onClick={handleTapSave}
+                  disabled={tapDisabled}
+                  style={{
+                    ...PRIMARY_CTA,
+                    marginTop: 12,
+                    background: '#FFFFFF',
+                    color: S.text,
+                    border: `1px solid ${S.border}`,
+                    opacity: tapDisabled ? 0.55 : 1,
+                    cursor: tapDisabled ? 'default' : 'pointer',
+                  }}
+                >
+                  {tapBusy ? 'Waiting for your card…' : 'Tap your card on this phone'}
+                </button>
+                <p style={{ textAlign: 'center', fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 8, marginBottom: 0 }}>
+                  The next screen shows where to hold your card.
+                </p>
+              </div>
+            ) : null}
             {(planRecurring || planOneTime) ? (
               <p style={{ textAlign: 'center', fontSize: 16, color: S.muted, lineHeight: 1.5, marginTop: 10, marginBottom: 0 }}>
                 Nothing is charged today.
