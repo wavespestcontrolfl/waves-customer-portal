@@ -1068,6 +1068,25 @@ const NotificationService = {
     });
   },
 
+  // The 10-second Undo of an idea sent from the Intelligence Bar box (admin-claude-ideas.js): closes the row as done by
+  // the admin. Same dedupe lock as the send; the row is locked and the fence re-checked inside the transaction: open,
+  // still in Claude's queue, an 'owner-idea' send stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the
+  // rows written, 0 or 1.
+  async markAdminIdeaCancelled(id, at, by, resolution) {
+    return db.transaction(async (trx) => {
+      const row = await trx('notifications').where({ id, recipient_type: 'admin' }).first(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+      if (!row) return 0;
+      if (row.dedupe_key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${row.dedupe_key}`]);
+      const fenced = () => trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
+        .whereRaw("metadata->>'claudeQueue' = ?", [SENT_TO_CLAUDE_CLASS])
+        .whereRaw("metadata->'sentToClaude'->>'kind' = 'owner-idea'")
+        .whereRaw("metadata->'sentToClaude'->>'at' = ?", [at])
+        .whereRaw("metadata->'sentToClaude'->>'startedAt' IS NULL");
+      if (!(await fenced().forUpdate().first('id'))) return 0;
+      return fenced().update(doneColumns({ by, resolution, keepExisting: true, conn: trx }));
+    });
+  },
+
   // Recently done admin rows (the "Recently done" list, so an accidental Done
   // can be reopened). Role-scoped like the bell list, but Activity-only rows
   // are INCLUDED: Activity has its own Done and this is the one recovery

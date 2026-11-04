@@ -139,15 +139,16 @@ function withSendToClaudeFields(rows, { role } = {}) {
 const NOTE_MAX = 500;
 // Cc except newline, Cf, and the tag block (some of it is unassigned, so it is named outright).
 const NOTE_STRIP_RE = /(?!\n)\p{Cc}|\p{Cf}|[\u{E0000}-\u{E007F}]/gu;
+const plainText = (raw) => raw
+  .replace(/\t/g, ' ')
+  .replace(/[\u2028\u2029]/g, '\n')
+  .replace(NOTE_STRIP_RE, '')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim();
 function cleanNote(raw) {
   if (raw === undefined || raw === null || raw === '') return { note: null };
   if (typeof raw !== 'string') return { error: 'invalid_note' };
-  const note = raw
-    .replace(/\t/g, ' ')
-    .replace(/[\u2028\u2029]/g, '\n')
-    .replace(NOTE_STRIP_RE, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const note = plainText(raw);
   if ([...note].length > NOTE_MAX) return { error: 'note_too_long' };
   return { note: note || null };
 }
@@ -245,6 +246,7 @@ async function unsendAdminAlertFromClaude(id, { at, by, role, technicianId = nul
 }
 
 module.exports = {
-  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendRefusal, sendToClaudeLive, sentPatch,
+  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, plainText, byStamp, uuidOrNull, UUID_RE,
+  sendRefusal, sendToClaudeLive, sentPatch,
   CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES,
 };

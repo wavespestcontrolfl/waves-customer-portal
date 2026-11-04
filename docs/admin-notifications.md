@@ -399,6 +399,19 @@ gets the stamp's ids only; it never texts, emails or calls a customer,
 never moves money, and closes the row with what fixed it when the fix is live. `needs-me` marks a sent row `sent: true`,
 so the queue tab leaves it to its own tab.
 
+**Send an idea to Claude from the Intelligence Bar box** (owner 2026-11-03: "it should be for any issue, even ones that dont
+have an issue mid day, but ideas"; `GATE_IB_SEND_TO_CLAUDE`). The owner types or dictates an idea in the Cmd+K / mobile
+box and taps the free **Send to Claude** button beside Ask (no model call; Ask stays the paid path). `POST /api/admin/claude-ideas`
+(`server/services/admin-claude-ideas.js`) writes one row through `notifyAdmin`, not `raiseAdminAlert`: it is not an alert,
+its title and body are the owner's own words. Shape: category `system`, title `Idea for Claude`, body the idea's first line
+(100 characters), `detail` the full cleaned idea, Activity-only (`feed` `activity`, `who` `claude`, `severity` `needs-you`,
+`claudeQueue` `sent-to-claude`), and a `sentToClaude` stamp with `kind` `owner-idea`, `at`, `by`, `records` (UUID-shaped ids),
+`page.route` (a plain `/admin/...` path or null), `viewedDate`, `pasted` and `was`. The dedupe key is `owner-idea:<16 hex of
+sha1 of the lowercased, whitespace-collapsed idea>`, so the same idea while its row is open answers `duplicate` and writes
+nothing. The 10-second Undo (`POST /api/admin/claude-ideas/:id/cancel`, `markAdminIdeaCancelled`) closes the row as done by the
+admin ("Cancelled by the owner.") under the same dedupe lock unless `sentToClaude.startedAt` is set. The Mac launcher opens a
+Claude tab that scopes the idea and asks the owner.
+
 ## 6. What is enforced today
 
 | Rule | Where | State |
