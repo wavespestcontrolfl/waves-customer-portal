@@ -9,11 +9,13 @@ jest.mock('../services/day-replan/planner', () => {
   const actual = jest.requireActual('../services/day-replan/planner');
   return { planDay: jest.fn(actual.planDay) };
 });
+jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' } }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 
 const logger = require('../services/logger');
 const { planDay } = require('../services/day-replan/planner');
+const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
 const { runDayReplanIfEnabled, _internals } = require('../services/day-replan');
 
@@ -94,6 +96,7 @@ beforeEach(() => {
   delete process.env.GATE_TECH_START_POINTS;
   delete process.env.GATE_AUTO_DISPATCH_DAY_RULES;
   getCustomerSchedulingPreferences.mockResolvedValue({ preferred_time_window: null });
+  techScopedConfirmActive.mockReturnValue(false);
 });
 afterAll(() => { process.env = savedEnv; });
 
@@ -166,6 +169,50 @@ describe('shadow run', () => {
     await runDayReplanIfEnabled({ now: NOW, conn });
     expect(planDay.mock.calls[0][0].stops.map((s) => s.id)).toEqual(['y', 'x', 'r', 'n1', 'n2']);
     expect(planDay.mock.results[0].value.current.order).toEqual(['y', 'x', 'r', 'n1', 'n2']);
+  });
+
+  describe('hours held by rows that are not this technician\'s stops', () => {
+    const OTHER_TECH = '00000000-0000-4000-8000-000000000002';
+    const blockedFor = async (extraRows) => {
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: [...zigzagRows(), ...extraRows] } });
+      await runDayReplanIfEnabled({ now: NOW, conn });
+      const call = planDay.mock.calls.find(([arg]) => arg.stops.length === 4);
+      return { call, inserts };
+    };
+
+    test('an unassigned 10:00 row blocks 10:00 for a movable stop and is not a stop', async () => {
+      const { call, inserts } = await blockedFor([row('u', 0.06, 10, { technician_id: null })]);
+      expect(call[0].options.blockedHours).toEqual([10]);
+      expect(call[0].stops.map((s) => s.id).sort()).toEqual(['a', 'b', 'c', 'd']);
+      const result = planDay.mock.results.find((r) => r.value.current.order.length === 4).value;
+      expect(Object.values(result.best.slots)).not.toContain(10 * 60);
+      expect(inserts).toHaveLength(1);
+    });
+
+    test('a 2-hour unassigned row blocks both hours; an untimed one blocks nothing', async () => {
+      const wide = row('u', 0.06, 10, { technician_id: null, window_end: '12:00:00' });
+      expect((await blockedFor([wide])).call[0].options.blockedHours).toEqual([10, 11]);
+      jest.clearAllMocks();
+      const untimed = row('u2', 0.06, 10, { technician_id: null, window_start: null });
+      expect((await blockedFor([untimed])).call[0].options.blockedHours).toEqual([]);
+    });
+
+    test('another technician\'s 10:00 row blocks it while occupancy is tech-blind, and not once it is tech-scoped', async () => {
+      const other = row('o', 0.06, 10, { technician_id: OTHER_TECH });
+      techScopedConfirmActive.mockReturnValue(false);
+      expect((await blockedFor([other])).call[0].options.blockedHours).toEqual([10]);
+      jest.clearAllMocks();
+      techScopedConfirmActive.mockReturnValue(true);
+      expect((await blockedFor([other])).call[0].options.blockedHours).toEqual([]);
+      jest.clearAllMocks();
+      // Scoped occupancy still blocks for an unassigned row.
+      const unassigned = row('u', 0.06, 10, { technician_id: null });
+      expect((await blockedFor([unassigned])).call[0].options.blockedHours).toEqual([10]);
+    });
+
+    test('the technician\'s own stops never block themselves', () => {
+      expect(_internals.blockedHoursFor(zigzagRows(), TECH, true)).toEqual([]);
+    });
   });
 
   test('looks from tomorrow out DAY_REPLAN_DAYS_AHEAD days (default 14)', async () => {

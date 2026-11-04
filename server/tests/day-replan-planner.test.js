@@ -242,6 +242,34 @@ describe('multi-hour windows', () => {
   });
 });
 
+describe('blocked hours (rows that are not route stops)', () => {
+  test('no movable stop takes a blocked hour, and the blocked row adds no stop or drive', () => {
+    const free = planDay(input(zigzag()));
+    expect(Object.values(free.best.slots)).toContain(10 * 60);
+    const inp = input(zigzag(), { options: { blockedHours: [10] } });
+    const r = planDay(inp);
+    expect(Object.values(r.best.slots)).not.toContain(10 * 60);
+    expect(r.best.order).toHaveLength(4);
+    expect(r.current.driveMin).toBe(free.current.driveMin);
+    replayAndCheck(inp, r);
+  });
+
+  test('a fixed stop may still sit in a blocked hour as booked', () => {
+    const stops = zigzag();
+    stops[2] = { ...stops[2], movable: false }; // p3 fixed at 10:00
+    const inp = input(stops, { options: { blockedHours: [10] } });
+    const r = planDay(inp);
+    expect(r.best.slots.p3).toBe(10 * 60);
+    replayAndCheck(inp, r);
+  });
+
+  test('a movable 2-hour stop cannot start in the hour before a blocked hour', () => {
+    const inp = input([stop('w', 5, 8, { slotWidthMin: 120, pref: { startMin: 9 * 60, endMin: 10 * 60 } }), stop('q', 4, 12)],
+      { options: { blockedHours: [10] } });
+    expect(planDay(inp).reason).toBe('no_feasible_order');
+  });
+});
+
 describe('the saving floor', () => {
   test('a saving below the floor is not accepted and lists no changes', () => {
     const r = planDay(input(zigzag(), { options: { minSavingMin: 71 } }));

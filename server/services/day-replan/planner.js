@@ -30,6 +30,9 @@
  * The current plan is every stop at its current slot (all treated fixed), in slot order, with
  * lateness allowed and reported. The search never ends later than the current plan.
  *
+ * options.blockedHours (array of hours 0..23) are held by rows that are not route stops; no movable stop takes
+ * them, and they add no drive.
+ *
  * Search: up to exactLimit stops, every order (depth-first, pruning prefixes that cannot win);
  * above it, local search (move one stop, reverse a segment) from the current order and from a
  * nearest-neighbour order. Tie-break: less drive, earlier end, fewer changed hours, then ids.
@@ -89,6 +92,11 @@ function buildContext(stops, origin, departureMin, legMin, options) {
   let fixedMask = 0;
   for (const s of stops) {
     if (!s.movable) fixedMask |= fixedHoursMask(s);
+  }
+  // Hours held by rows that are NOT this day's route stops (unassigned visits, other technicians' visits):
+  // no movable stop may take them, and they add no drive.
+  for (const hour of (options && options.blockedHours) || []) {
+    if (Number.isInteger(hour) && hour >= 0 && hour < 31) fixedMask |= hourBit(hour);
   }
   return {
     stops,

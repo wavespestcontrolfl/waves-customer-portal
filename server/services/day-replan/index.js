@@ -128,6 +128,32 @@ function fixedReason(row, { dateStr, now, visitCounts, customerCounts, sent24 })
   return null;
 }
 
+/** Hours a row's booked window covers (window_start up to window_end, else start + estimate, else 60 min), at least one. */
+function rowHours(row) {
+  const start = hhmmToMin(row.window_start);
+  const end = row.window_end ? hhmmToMin(row.window_end) : start + (Number(row.estimated_duration_minutes) || 60);
+  const first = Math.floor(start / 60);
+  const last = Math.max(first, Math.ceil(Math.max(end, start + 1) / 60) - 1);
+  return Array.from({ length: last - first + 1 }, (_, i) => first + i);
+}
+
+/**
+ * Hours held by live timed rows that are not this technician's route stops. The app's occupancy check
+ * (scheduling/occupancy.js) blocks an hour for EVERY technician when an unassigned row holds it, and, while it
+ * is tech-blind (GATE_MULTI_TECH_CONFIRM off), when another technician's row holds it too.
+ * `rows` is the whole date's live rows, so expired estimate-slot holds are already out.
+ */
+function blockedHoursFor(rows, techId, techBlind) {
+  const hours = new Set();
+  for (const row of rows) {
+    if (!row.window_start) continue;
+    const own = row.technician_id != null && String(row.technician_id) === String(techId);
+    if (own) continue;
+    if (row.technician_id == null || techBlind) for (const h of rowHours(row)) hours.add(h);
+  }
+  return [...hours].sort((a, b) => a - b);
+}
+
 /** Why the whole tech-day is not planned, or null. */
 function skipReason(rows) {
   if (rows.length < 2) return 'FEWER_THAN_2_STOPS';
@@ -208,6 +234,7 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     origin: homeFromMap(env.techHomes, techId),
     departureMin: env.departureMin,
     legMin,
+    options: { blockedHours: blockedHoursFor(dayContext.allRows, techId, env.techBlind) },
   });
   await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result }));
   summary.days += 1;
@@ -255,7 +282,7 @@ async function planDate(conn, env, dateStr, now, summary) {
     logger.error(`[day-replan] ${dateStr}: load failed (${err.message}); day skipped`);
     return;
   }
-  const dayContext = { dateStr, now, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
+  const dayContext = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
   for (const [techId, techRows] of groupByTech(rows)) {
     try {
       await planTechDay(conn, env, { dateStr, techId, rows: techRows, dayContext }, summary);
@@ -278,7 +305,14 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
   const summary = { status: 'completed', runId, days: 0, accepted: 0, savedMin: 0, changedVisits: 0, skipped: [], failed: [] };
   let env;
   try {
-    env = { runId, techHomes: await loadTechStartPoints(conn), departureMin: await dayDepartureMinutes(conn) };
+    // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
+    const { techScopedConfirmActive } = require('../scheduling/occupancy');
+    env = {
+      runId,
+      techHomes: await loadTechStartPoints(conn),
+      departureMin: await dayDepartureMinutes(conn),
+      techBlind: !techScopedConfirmActive(),
+    };
   } catch (err) {
     logger.error(`[day-replan] could not read start points or departure time (${err.message}); nothing planned`);
     return { ...summary, status: 'failed' };
@@ -291,4 +325,4 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
   return summary;
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { storedOrder, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { blockedHoursFor, storedOrder, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
