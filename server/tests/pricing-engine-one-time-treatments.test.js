@@ -115,7 +115,7 @@ describe('pricing engine one-time treatment rules', () => {
     // priceOneTimeLawn reads it.
     const lawn = priceLawnCare(p, { track: 'st_augustine', tier: 'standard', lawnFreq: 6, includeHiddenTiers: true, useLawnCostFloor: false, applyProgramMinimum: false });
     expect(lawn.tier).toBe('standard');
-    const base = Math.max(115, Math.round(lawn.perApp * 1.50));
+    const base = Math.max(115, Math.round(lawn.perApp * 2.20));
     const treated = Math.max(115, Math.round(base * 1.38));
     const expected = Math.max(115, Math.round(treated * 1.50 * 0.85));
     const result = priceOneTimeLawn(p, {

@@ -1600,7 +1600,10 @@ const ONE_TIME = {
     },
     floor: r(115),
     fungicideFloor: r(115),
-    oneTimeMultiplier: 1.50,
+    // Same multiple as one-time pest (owner 2026-11-04). DB-authoritative:
+    // pricing_config.onetime_lawn.recurringPerAppMultiplier (migration
+    // 20261104210000 moves a row still at the old 1.50).
+    oneTimeMultiplier: 2.20,
   },
   mosquito: {
     // Repriced 2026-07 to sit ~25% under the one-time pest band (quarterly

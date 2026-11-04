@@ -2968,7 +2968,8 @@ export function calculateEstimate(inputs) {
     const baselineMonthly = baselinePrice.monthly;
     if (baselinePrice.pricingBasis === 'EXTRAPOLATED_ABOVE_TABLE_MAX') addLawnCustomQuoteNote();
     const baselinePerApp = Math.round((baselineMonthly * 12) / 6 * 100) / 100;
-    let bl = Math.max(115, Math.round(baselinePerApp * 1.50));
+    // 2.20 = ONE_TIME.lawn.oneTimeMultiplier (owner 2026-11-04: same multiple as one-time pest).
+    let bl = Math.max(115, Math.round(baselinePerApp * 2.20));
     let tm = 1.0, tl = 'Fertilization';
     if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
