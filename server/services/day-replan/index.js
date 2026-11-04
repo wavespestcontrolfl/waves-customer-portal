@@ -98,7 +98,7 @@ async function loadDayStops(conn, dateStr) {
       // Identity and premise fields the co-visit helpers (isCoVisitPair) read, exactly as the 04:20 pass selects them.
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
       'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
-      CUSTOMER_PREMISE_ALIASES,
+      ...CUSTOMER_PREMISE_ALIASES,
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
       'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
       ...guardedCoordSelects(conn),
