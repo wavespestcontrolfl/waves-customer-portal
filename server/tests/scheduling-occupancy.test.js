@@ -393,6 +393,10 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     ['commitReservation (services/slot-reservation.js)',
       read('services/slot-reservation.js'), 'async function commitReservation(',
       'await acquireOccupancyLock(client, lockedDate);'],
+    // The nightly day re-plan (GATE_DAY_REPLAN=true): one transaction per tech-day, the lock handed in as a dependency.
+    ['day re-plan writeDay (services/day-replan/apply.js)',
+      read('services/day-replan/apply.js'), 'async function writeDay(',
+      'await deps.acquireOccupancyLock(trx, dateStr);'],
   ];
 
   test.each(WRITERS)('%s takes the shared date lock before any other advisory lock', (_label, src, startMarker, rungOneCall) => {
@@ -491,6 +495,14 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
       'await acquireOccupancyLock(client, lockedDate);',
       'const committedClash = ',
       '.update(updates)'],
+    // The day re-plan probes the FINAL state of the whole day (every moved visit, after its UPDATE in the same
+    // transaction, so the other moved visits count at their new hours) and a hit rolls the transaction back: the
+    // probe sits under rung 1 and before the last write (the route numbers) and the commit.
+    ['day re-plan writeDay (services/day-replan/apply.js)',
+      read('services/day-replan/apply.js'), 'async function writeDay(',
+      'await deps.acquireOccupancyLock(trx, dateStr);',
+      'await assertNoClash(trx, deps',
+      'await writeRouteOrder(trx, deps'],
   ];
 
   test.each(PROBED_WRITERS)('%s runs the GLOBAL predicate under rung 1, before its write', (_label, src, startMarker, rungOneCall, probeCall, writeMarker) => {

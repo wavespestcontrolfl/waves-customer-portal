@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_DAY_REPLAN=shadow|true (owner 2026-11-03, "lenient re-plan": the route is re-planned as leniently as possible to save drive time. Any visit may get a new hour (first visits, one-time visits, hand-placed visits and customer-confirmed visits too); the only lock is 24 hours: a visit whose 24-hour reminder is due or sent never changes. NO text about the change goes out; the 24-hour reminder carries the new time, and the night writer already re-syncs reminders silently. A read-only replay over 25 past work days measured 258 minutes less drive (7%) with a 10-minute floor. Shadow (PR 1) plans and only LOGS: a nightly 4:40 AM ET job (services/day-replan, after the 4:20 reorder pass, holding the same writer lock as the 4:10 run) plans each technician's days from tomorrow out to DAY_REPLAN_DAYS_AHEAD (default 14) days with the free straight-line drive model (no Google, no AI, no paid call) and writes one row per planned technician-day to day_replan_plans (ids and minutes only). In shadow it NEVER writes scheduled_services or appointment_reminders and sends or notifies nobody. Values: shadow = log the plans; true = APPLY (PR 2, the owner's flip): the same plans, and each tech-day the planner and the app's own simulator accept is re-read and, in ONE transaction under the app's scheduling fence (date occupancy lock, tech-day locks, every live row of the date locked), re-validated, written (the moved visits' windows, one reschedule_log row each with the initiator day_replan, the route numbers) and checked against the app's occupancy predicate, all or nothing, with no text or push (reminders sync silently after the commit); unset or anything else = off, no database read. Rollback of the flip = set it back to shadow. Read at call time via dayReplanMode(), so a flip needs no redeploy; dark by default.)
  *   GATE_FOLLOWUP_DUE_ALERT=true (owner 2026-11-02, "build all", B1: a visit finished with the outcome "follow-up needed" parks a card on the dispatch board that no bell ever shows, so a follow-up nobody books just sits there. On, a daily 8:20 AM ET job (followup-due-alerts) raises one admin bell per card on its due date (the card's suggested follow-up date, else its Eastern created date + 14 days), titled "Schedule — book <First L.>'s follow-up (due <date>)" and linked to the customer page, where the owner books. A card more than 3 days past due with no alert of its own goes on ONE catch-up bell that rings when it is first raised or when a card joins it, and closes itself when empty. Each run closes the open bells whose card is covered: resolved, customer inactive, or any later live visit (created after the card, dated after it up to due + 7 days, or booked from it). Admin notifications only: books nothing, sends nothing to a customer, calls no paid API, never resolves or edits a card. Read at call time via followupDueAlertLive(), strict 'true', dark by default; off = the job returns before any read.)
  *   GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE=true (owner 2026-11-02, option A: an email reply pauses the estimate follow-up emails the way a text already does. On, hasRepliedRecently also returns true when the customer emailed Waves inside the same 14 days: an inbound row in the Gmail sync table linked to the estimate's customer_id, or whose from_address equals the estimate's email (leads have no customer_id). Gmail SENT rows never count, and the address match is skipped when the estimate's email is one of ours. A failed read fails open on the cron path and holds the replay, same as the text check. Strict `=== 'true'`, read at call time via estimateFollowupEmailReplyPauseLive(); dark by default; off = the emails table is never queried and nothing changes. Sends nothing; it only holds back follow-up emails.)
  *   GATE_SOCIAL_STUDIO_SKIP_META=true (owner 2026-11-01, social audit "studio trim": from Sep 1 to Nov 1 the autonomous Social Studio's Instagram stills reached about 1.5 to 3 people each and gained no followers, so the autonomous studio stops posting to Facebook and Instagram and keeps LinkedIn and Google Business. On, an autonomous run (the 6:30 AM ET cron, the admin Run Draft and Run Publish buttons, and the approval of a queued autonomous draft) drops facebook and instagram from its channel list: no copy or image is made for them, no Veo clip is made, and an old queued draft publishes to its other channels only. A run whose channels were only facebook and instagram is skipped and logged. The manual Social Studio, Campaign Builder, Publish All, blog and RSS shares, testimonial graphics and scheduled posts are NOT touched. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialStudioSkipMetaLive().)
@@ -193,6 +194,7 @@
  *   GATE_AUTO_DISPATCH_CATCH_UP=true (owner 2026-10-26 ("build A"): a 5:00 AM Eastern catch-up run of the auto-dispatch night tool. The 04:10 run is cut off when a deploy restarts the server mid-run (2026-09-03 and 2026-10-26: nothing moved, nothing re-ran it). On, a 05:00 job checks whether today already has a finished night run (cron or catch_up, completed or completed_with_errors); if not, it marks any cron run left 'running' by a dead process as failed and runs the night tool once more (triggered_by catch_up, at most one catch-up a day), under the same run lock. It uses the same mode and rules as the 04:10 run. Strict opt-in: exactly 'true', read at call time via autoDispatchCatchUpLive(). Ships DARK; off = the 05:00 job does nothing and reads nothing. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_DRY_TIME_ORDER=shadow|true (owner 2026-11-01, rain backtest of 440 outdoor stops + D5, ruling "forget the pest-early rule": auto-dispatch orders the day by product dry time. The service-family default time window (pest 8-10 AM, lawn 10 AM-12 PM) is replaced by a dry-time window from the products the visit uses: 4 h or more dry time 8-10 AM, 1-3 h 8 AM-12 PM, rain-proof (granular, bait, gel, dust, water-in, rain-OK services) 1-5 PM. DRY_TIME_ORDER_SEASON ('MM-DD..MM-DD', wrap-around allowed) narrows the dates; default all year. Customer-set times, blackouts and the flex-tier freeze are unchanged. Values: shadow = live windows unchanged, each pass-1 audit row logs constraints_checked.dry_time (class, hours, source, the slot today's window picked and the slot the dry window would pick); true = the dry window replaces the family default as the soft default time window, and for the rain-sensitive classes (4 h or more, 1-3 h) the credit also counts in a placed visit's move gain on its CURRENT date only: a timed visit is re-timed into its dry window on the same date, never moved to another date (owner 2026-10-24: no automatic day moves for rain). A rain-proof visit never gains from its afternoon window (a soft default only), and the flex-tier freeze, the score bar, the drive floor and the road check are unchanged. When the dry window opens after the day's first hour (rain-proof 1-5 PM) the search also asks the same slot finder for starts at or after the window start (not in capacity or arrival-search mode; no new paid calls): true adds them to the live candidates after the route options, shadow scores them for shadow_best only. shadow_best is the slot true would pick under these move rules; would_move says it differs from the current slot. Strict: exactly 'shadow' or 'true', read at call time via autoDispatchDryTimeOrderMode(). Ships DARK; off = byte-identical, no extra database read. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_AUTO_DISPATCH_MOWING_DAYS=shadow|true (owner 2026-11-02: keep Lawn Care Service visits off the customer's mowing day and one day on each side. The blocked weekdays are each saved property_preferences.mowing_days day, the day before and the day after; a weekday the customer chose as their preferred day is never blocked. Scope: a service_type matching /lawn/i and not /aerat|thatch/i (auto-dispatch/mowing-days.js isLawnCareService), and a grouped unit with such a member. Values: shadow = live decisions unchanged, each evaluated Lawn Care Service visit's audit row logs constraints_checked.mowing_days (mowing_days, blocked_weekdays, current_blocked, chosen_blocked, shadow_best = the slot true would pick, would_move), pure ranking only, no road check, no proofreader; true = a HARD filter drops every candidate on a blocked weekday (drops.mowing_day; the schedule gap tool too), and with GATE_AUTO_DISPATCH_CONFLICT_MOVES on a visit already on a blocked weekday is in conflict (kind mowing_day, after closed_day and overlap) and moves to the best legal slot without the score bar, inside every other guard. A mowing_day conflict raises no needs-a-person notice. Strict: exactly 'shadow' or 'true', read at call time via autoDispatchMowingDaysMode(). Ships DARK; off = byte-identical, no extra database read. Auto-dispatch sends no move text. true also turns on the mowing-days line of the Monday watering email (irrigation-weekly-email.js mowingAskLive: a customer on a recurring lawn program with nothing saved under Mowing, first 3 sends, then once every 4 weeks); shadow and off never show it. Kill switch: unset.)
+ *   GATE_NIGHT_LOCK_24H=true (owner 2026-11-03: "i want this as lenient as possible to save us time, i think we bring the 24 hr in and remove the 72 hr, and we dont need to text clients about moves". The two night passes, the 04:10 auto-dispatch pass (guard modes flex and tiers, incl. its apply-time and grouped-sibling guards) and the 04:20 route-reorder pass, freeze a visit only when it starts inside the 24-hour reminder's band (24 h clock; 25 h in the flex tier, its usual 1-hour margin over the clock) or when its 24-hour reminder was sent (reminder_24h_sent). The 72-hour reminder stops locking anything; the 09-25 rule was 72 h clock / 73 h flex and a sent 72-hour reminder. Unchanged: the 5-day destination floor, the +/-5-day window, the 2-move cap, the tiers, the proofreader and the road checks. Staff series moves (rebooker.js) keep the 72-hour freeze. Strict opt-in: exactly 'true', read at call time via nightLock24hLive() and once per night run. Ships DARK; off = both passes byte-identical. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; exactly 'live' (build 4, owner "DO THIS NOW" 2026-10-30) = record AND pick: /book offers, the phone booking recheck, the after-call booking, the office Auto choice, the estimate time offers and the estimate accept send a mapped line's new work to its home technician, else its gap technician; a line with no technician set keeps today's choice. Anything else, including 'true', = off, no resolver call and no query. Shadow never changes a booking; neither value sends anything to a customer or staff member.)
  *   GATE_TERRITORY_ROUTING=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page: each technician has a territory, drawn as a ZIP list in territory_zips. On, the service-line map (GATE_SERVICE_LINE_MAP) lays the territory over a pest, mosquito, rodent or termite / WDO line: the technician who owns the visit's ZIP is that line's home technician, and the line's own home (else gap) technician covers gaps. Lawn / tree & shrub keeps the line map. The ZIP comes from the visit's ZIP, else its map position (Census ZIP shapes), else the customer's row. A ZIP with no territory technician adds no rule. It acts only where the line map acts: shadow rows show it under 'shadow', picks follow it under 'live'. Strict opt-in: exactly 'true', read at call time via territoryRoutingLive(). Ships DARK; off = the line map exactly as before, no territory query. Sends nothing to a customer.)
  *   GATE_TERRITORY_NIGHT_RUN=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page, build 7: the auto-dispatch night run gives an UNASSIGNED pest, mosquito, rodent or termite / WDO visit only to the technician who owns the visit's ZIP (territory_zips): every other technician's slot is dropped as a candidate (drops.other_territory), so with no slot for that technician the visit keeps its place. The ZIP comes from the visit's service ZIP, else its map position, else the customer row. A visit with a technician, a lawn / tree & shrub visit, or a ZIP with no territory technician adds no rule. Strict opt-in: exactly 'true', read at call time via territoryNightRunLive(). Ships DARK; off = the night run byte-identical, no territory query. Sends nothing to a customer.)
@@ -4719,6 +4721,8 @@ const gates = {
   homeLine: process.env.GATE_HOME_LINE === 'true',
   // GATE_SMS_LIKE: read at CALL time via smsLikeLive(); this entry is for logGateStatus.
   smsLike: process.env.GATE_SMS_LIKE === 'true',
+  // GATE_NIGHT_LOCK_24H: read at CALL time via nightLock24hLive(); this entry is for logGateStatus.
+  nightLock24h: process.env.GATE_NIGHT_LOCK_24H === 'true',
   // GATE_BELL_BANNERS: read at CALL time via bellBannersLive(); this entry is for logGateStatus.
   bellBanners: process.env.GATE_BELL_BANNERS === 'true',
   // GATE_PORTAL_ASK_PUSH: read at CALL time via portalAskPushLive(); this entry is for logGateStatus, so the boot
@@ -7451,6 +7455,13 @@ function territoryNightRunLive() {
   return process.env.GATE_TERRITORY_NIGHT_RUN === 'true';
 }
 
+// GATE_NIGHT_LOCK_24H read at CALL time - strict `=== 'true'`. On: the night passes (auto-dispatch
+// guard modes flex/tiers and route-reorder) lock a visit at 24 hours, not 72/73 (owner 2026-11-03).
+// Each night run reads it once and passes the answer down. Off = byte-identical.
+function nightLock24hLive() {
+  return process.env.GATE_NIGHT_LOCK_24H === 'true';
+}
+
 // GATE_TERRITORY_READOUT read at CALL time - strict `=== 'true'`. On: the Team tab's Territories card
 // (routes/admin-timetracking.js GET /territory-readout): stops a week per technician and area. Read
 // only. Off = no roster flag and the route answers 404.
@@ -9203,6 +9214,8 @@ module.exports.autoDispatchMowingDaysMode = autoDispatchMowingDaysMode;
 // GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE reader, on its own line so gate PRs never conflict.
 module.exports.estimateFollowupEmailReplyPauseLive = estimateFollowupEmailReplyPauseLive;
 module.exports.smsLikeLive = smsLikeLive;
+// GATE_NIGHT_LOCK_24H reader, on its own line so gate PRs never conflict.
+module.exports.nightLock24hLive = nightLock24hLive;
 
 // GATE_SOCIAL_STUDIO_SKIP_META read at CALL time (so a flip needs no redeploy); strict 'true'.
 // Owner 2026-11-01 "studio trim": the autonomous Social Studio stops drafting and posting to
@@ -9857,6 +9870,19 @@ function alertSendToClaudeLive() {
 }
 // GATE_ALERT_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
 module.exports.alertSendToClaudeLive = alertSendToClaudeLive;
+
+// GATE_IB_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-03: "it should be
+// for any issue, even ones that dont have an issue mid day, but ideas"). On, the Intelligence Bar box (the Cmd+K palette
+// and the mobile sheet) carries a free "Send to Claude" button beside Ask: it makes NO model call, writes one admin
+// notification row in Claude's queue, and the Mac launcher opens a Claude tab that scopes the idea
+// (services/admin-claude-ideas.js). Off = no button, the send and cancel routes answer 404 and /status says
+// `{ enabled: false }`.
+function ibSendToClaudeLive() {
+  return process.env.GATE_IB_SEND_TO_CLAUDE === 'true';
+}
+// GATE_IB_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
+module.exports.ibSendToClaudeLive = ibSendToClaudeLive;
+
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
 
@@ -10410,14 +10436,12 @@ function morningBannerLive() {
 // GATE_MORNING_BANNER reader, on its own line so gate PRs never conflict.
 module.exports.morningBannerLive = morningBannerLive;
 
-// GATE_IB_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-03: "it should be
-// for any issue, even ones that dont have an issue mid day, but ideas"). On, the Intelligence Bar box (the Cmd+K palette
-// and the mobile sheet) carries a free "Send to Claude" button beside Ask: it makes NO model call, writes one admin
-// notification row in Claude's queue, and the Mac launcher opens a Claude tab that scopes the idea
-// (services/admin-claude-ideas.js). Off = no button, the send and cancel routes answer 404 and /status says
-// `{ enabled: false }`.
-function ibSendToClaudeLive() {
-  return process.env.GATE_IB_SEND_TO_CLAUDE === 'true';
+// GATE_DAY_REPLAN read at CALL time (so a flip needs no redeploy): exactly 'shadow' or 'true', anything else
+// (unset is the kill) is 'off'. Owner 2026-11-03. PR 1: 'true' behaves as 'shadow' (services/day-replan/index.js).
+function dayReplanMode() {
+  const value = process.env.GATE_DAY_REPLAN;
+  if (value === 'shadow') return 'shadow';
+  return value === 'true' ? 'apply' : 'off';
 }
-// GATE_IB_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
-module.exports.ibSendToClaudeLive = ibSendToClaudeLive;
+// GATE_DAY_REPLAN reader, on its own line so gate PRs never conflict.
+module.exports.dayReplanMode = dayReplanMode;

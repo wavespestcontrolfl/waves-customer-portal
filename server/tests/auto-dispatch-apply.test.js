@@ -874,6 +874,18 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(routeTiers.loadReminderFreeze).not.toHaveBeenCalled();
   });
 
+  test('GATE_NIGHT_LOCK_24H (config.nightLock24h): tiers siblings are frozen by the 24-hour reminder, not the 72-hour one', async () => {
+    const members = [primary, { id: 's2', status: 'pending' }, { id: 's3', status: 'confirmed' }];
+    const on = makeMemberGuard({ service: SERVICE, best: BEST, config: { guardMode: 'tiers', nightLock24h: true }, techChanged: false });
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set(['s3']) });
+    const trx = fakeTrx();
+    await expect(on({ trx, members })).rejects.toMatchObject({
+      code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3', message: expect.stringContaining('24-hour reminder window'),
+    });
+    // The explicit option is passed; the band stays the module default for the 24-hour leg.
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true });
+  });
+
   test('the primary is rechecked on the move transaction with a fresh row read (Codex #6055 r5, r7)', async () => {
     const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
     const { makeMoveGuard } = require('../services/auto-dispatch/apply');

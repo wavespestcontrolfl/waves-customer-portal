@@ -43,7 +43,8 @@ function deny(reason_code, reason_description) {
 // lock here:
 //   - an unplaced recurring due-date visit (no customer-promised time yet);
 //   - GATE_AUTO_DISPATCH_FLEX_TIER on — the Flexible tier's OWN lock is the
-//     73h reminder freeze, decided later in index.js from the live
+//     73h reminder freeze (25h with GATE_NIGHT_LOCK_24H, which makes the 24-hour
+//     reminder the lock), decided later in index.js from the live
 //     reminder row (flex-tier.js), never from days-out;
 //   - GATE_ROUTE_TIERS on and the visit clears its days-out tier radius.
 function resolveDateLockDenial(service, ctx, dateStr) {
@@ -205,7 +206,8 @@ async function lapsedPlanKeys(services, db) {
  * Fails CLOSED and DEGRADED: a read error skips the visit for this run and
  * marks the result degraded so the run does not report as healthy.
  */
-const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto']);
+// 'day_replan': the nightly day re-plan (services/day-replan/apply.js, owner 2026-11-03) is an automatic mover too.
+const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto', 'day_replan']);
 const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
 const HUMAN_EXCEPTION_SOURCES = new Set([...CUSTOMER_INITIATORS,
   'admin', 'admin_ib', 'admin_bulk', 'operator', 'tech', 'rider_onetime_move']);

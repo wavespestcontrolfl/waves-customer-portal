@@ -14,6 +14,14 @@
  *     (appointment_reminders.reminder_72h_sent; the reminder is the hard gate
  *     because its SMS promises an arrival window). Unreadable reminder status
  *     freezes the run's every day (fail closed).
+ *     GATE_NIGHT_LOCK_24H (owner 2026-11-03) moves that lock to the 24-hour
+ *     reminder for the nightly pass: frozen = starts within 24 hours OR
+ *     reminder_24h_sent; the 72-hour reminder locks nothing. The gate is read
+ *     once by the cron entry (runRouteReorderIfEnabled) and handed down as
+ *     opts.nightLock24h; every other caller (change-triggered repair, the
+ *     cleanup script, direct calls) keeps the 72-hour rule. Skip reason codes
+ *     (WITHIN_72H, REMINDER_SENT_FROZEN) are unchanged either way; the ledger's
+ *     freeze_hours records the hours actually used.
  *   - Today is never touched (band starts tomorrow; the 8am day-open plus the
  *     72h clock already exclude it — the band floor makes it structural).
  *   - >25 geocoded stops for one tech-day = Google Routes cap → distance
@@ -44,7 +52,9 @@ const { etDateString, etParts, addETDays, parseETDateTime, validCalendarDate } =
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { effectiveServiceAddress } = require('./stamped-address');
-const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
+const {
+  loadReminderFreeze, freezeHoursFor, TIER2_MIN_DAYS_OUT,
+} = require('./auto-dispatch/route-tiers');
 const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration,
   simulateArrivalRoute, isCoVisitPair, advanceCoVisit, startCoVisitChain,
   staleOrderReasons, promisedWindowOrder } = require('./route-reorder-window-fit');
@@ -285,13 +295,21 @@ function violatesWindowChronology(orderedStops, sourceStops) {
   return false;
 }
 
-/** True when the visit starts within FREEZE_HOURS of `now` (windowless visits
- *  freeze off the canonical 08:00 slot time the reminder system uses). */
-function withinFreezeClock(dateStr, windowStart, now) {
+/** loadReminderFreeze's trailing arguments for this pass: none gate off (the
+ *  pre-gate call, byte for byte), the explicit lock24h option gate on. */
+function lockOptArgs(lock24h) {
+  return lock24h ? [undefined, { lock24h: true }] : [];
+}
+
+/** True when the visit starts within the freeze clock of `now` — 72 hours, or
+ *  24 with `lock24h` (GATE_NIGHT_LOCK_24H, passed down by the nightly pass);
+ *  windowless visits freeze off the canonical 08:00 slot time the reminder
+ *  system uses. */
+function withinFreezeClock(dateStr, windowStart, now, lock24h = false) {
   const start = String(windowStart || '08:00').slice(0, 5);
   const appt = parseETDateTime(`${dateStr}T${start}:00`);
   if (!appt || Number.isNaN(appt.getTime())) return true; // unparseable ⇒ frozen (fail closed)
-  return appt.getTime() - now.getTime() < FREEZE_HOURS * 3600000;
+  return appt.getTime() - now.getTime() < freezeHoursFor(lock24h) * 3600000;
 }
 
 /**
@@ -1175,7 +1193,10 @@ async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdere
       }
     }
     const commitNow = opts.now || new Date();
-    const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id), commitNow);
+    // GATE_NIGHT_LOCK_24H, as the nightly run read it (opts.nightLock24h) —
+    // never re-read here, so a mid-run flip cannot mix the two rules.
+    const lock24h = opts.nightLock24h === true;
+    const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id), commitNow, ...lockOptArgs(lock24h));
     if (commitFreeze.failed) {
       throw Object.assign(new Error('reminder status unreadable at commit'), { code: 'REMINDER_GUARD_OUTAGE' });
     }
@@ -1183,9 +1204,9 @@ async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdere
       throw stale('route repair was disabled during the run');
     }
     if (etDateString(commitNow) >= dateStr) throw stale('the service day started during the run');
-    if (!repair && techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
-    if (!repair && techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
-      throw stale('day entered the 72h freeze window during the run');
+    if (!repair && techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale(`a ${freezeHoursFor(lock24h)}h reminder was sent during the run`);
+    if (!repair && techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow, lock24h))) {
+      throw stale(`day entered the ${freezeHoursFor(lock24h)}h freeze window during the run`);
     }
     await writeRouteOrderRows(trx, { dateStr, techId, finalOrdered, positions: opts.positions, stale });
   }, { isolationLevel: 'serializable' });
@@ -1445,6 +1466,10 @@ async function runRouteReorder(opts = {}, conn = db) {
   const repairEnabled = repairGates.every(gateEnvValue);
   if (opts.repairOnly && !repairEnabled) return { status: 'gate_off' };
   const completeOrderEnabled = gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER');
+  // GATE_NIGHT_LOCK_24H: only the cron entry passes opts.nightLock24h (its one
+  // read of the gate for this run); a repair run, the cleanup script or a
+  // direct call keeps the 72-hour freeze.
+  const lock24h = opts.nightLock24h === true;
   // Stale-order canonicalization mode (owner ruling 2026-09-26: "a driveable
   // order beats a stale one"): opts.canonicalizeStale opts in directly (the
   // route-order-cleanup script), or the gate opts in the nightly pass itself.
@@ -1556,12 +1581,12 @@ async function runRouteReorder(opts = {}, conn = db) {
       }
 
       // ── Day-level freeze: ANY frozen visit freezes the whole day. ──
-      const clockFrozen = stops.some((s) => withinFreezeClock(dateStr, s.window_start, now));
+      const clockFrozen = stops.some((s) => withinFreezeClock(dateStr, s.window_start, now, lock24h));
       if (clockFrozen && !repairEnabled) {
         summary.skipped.push({ date: dateStr, reason: 'WITHIN_72H', stops: stops.length });
         continue;
       }
-      const freeze = await loadReminderFreeze(conn, stops.map((s) => s.id), now);
+      const freeze = await loadReminderFreeze(conn, stops.map((s) => s.id), now, ...lockOptArgs(lock24h));
       if (freeze.failed) {
         // Fail closed AND fail loud — cannot prove no reminder went out for
         // this day, and an outage that silently disables the whole pass must
@@ -1897,7 +1922,9 @@ async function runRouteReorder(opts = {}, conn = db) {
     return { status, plan: buildDryRunPlan(summary) };
   }
   // ── Ledger: one route_optimization_planner_runs row per run. ──
-  const ledger = await writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn);
+  const ledger = await writeLedgerRow({
+    status, today, bandStart, bandEnd, techIds, config, summary, lock24h,
+  }, conn);
   // A lost ledger row means the promised audit record is missing — the run
   // must surface as an exception, never report green (codex round-13 P1).
   const finalStatus = ledger == null && status === 'completed' ? 'completed_with_errors' : status;
@@ -1984,7 +2011,9 @@ async function loadAutoDispatchSummary(today, conn = db) {
   }
 }
 
-async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn = db) {
+async function writeLedgerRow({
+  status, today, bandStart, bandEnd, techIds, config, summary, lock24h = false,
+}, conn = db) {
   try {
     const autoDispatch = summary.run_type === 'route_tiers_nightly' ? await loadAutoDispatchSummary(today, conn) : null;
     const includeMeasurements = summary.measurements && gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS');
@@ -2003,7 +2032,8 @@ async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, conf
           min_savings_meters: config.minSavingsMeters,
           max_applies_per_run: config.maxAppliesPerRun,
           waypoint_cap: GOOGLE_WAYPOINT_CAP,
-          freeze_hours: FREEZE_HOURS,
+          freeze_hours: freezeHoursFor(lock24h),
+          ...(lock24h ? { night_lock_24h: true } : {}),
           repair_enabled: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
           complete_order: gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER'),
           ...(includeMeasurements ? { day_quality_version: 2, code_revision: process.env.RAILWAY_GIT_COMMIT_SHA || null } : {}),
@@ -2031,7 +2061,11 @@ async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, conf
 /** Cron entry — double-checks the gate so a stale scheduler can never run it. */
 async function runRouteReorderIfEnabled() {
   if (!gateEnvValue('GATE_ROUTE_REORDER')) return { status: 'gate_off' };
-  return runRouteReorder();
+  // GATE_NIGHT_LOCK_24H (owner 2026-11-03): this nightly entry is the pass that
+  // opts in — one call-time read, handed down as opts.nightLock24h.
+  const { nightLock24hLive } = require('../config/feature-gates');
+  const lock24h = typeof nightLock24hLive === 'function' && nightLock24hLive() === true;
+  return lock24h ? runRouteReorder({ nightLock24h: true }) : runRouteReorder();
 }
 
 /**

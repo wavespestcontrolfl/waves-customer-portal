@@ -1423,6 +1423,61 @@ describe('internal-link PR auto-merge', () => {
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
+  describe('Codex status/summary comment (astro #823, 2026-11-03)', () => {
+    const summary = (state, sha = HEAD.slice(0, 7)) => `<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 ${state} -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| Code Review | Completed | \`${sha}\` | PR opened |`;
+    const state = (sha, extra = {}) => JSON.stringify({ code_review: { commit_sha: sha, has_any_findings: false, has_unresolved_findings: false, status: 'completed', ...extra }, security_review: { commit_sha: null, has_any_findings: null, has_unresolved_findings: null, status: null } });
+    const codexComment = (body) => ({ user: { login: 'chatgpt-codex-connector[bot]' }, body, created_at: new Date().toISOString() });
+
+    test('a clean summary on the head is not a finding', async () => {
+      GitHubClient.listIssueComments.mockResolvedValue([codexComment(summary(state(HEAD)))]);
+      expect(await instance._codexVerdict(77, HEAD, 'waves-bot')).toMatchObject({ findings: 0, clean: false });
+    });
+
+    test('a summary reporting findings on the head counts as a finding', async () => {
+      GitHubClient.listIssueComments.mockResolvedValue([codexComment(summary(state(HEAD, { has_any_findings: true })))]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(1);
+      GitHubClient.listIssueComments.mockResolvedValue([codexComment(summary(state(HEAD.slice(0, 7), { has_unresolved_findings: true })))]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(1);
+    });
+
+    test('a summary with findings for another commit is ignored', async () => {
+      const other = 'b'.repeat(40);
+      GitHubClient.listIssueComments.mockResolvedValue([codexComment(summary(state(other, { has_any_findings: true }), HEAD.slice(0, 7)))]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(0);
+    });
+
+    test('a summary with broken or missing state JSON is not a finding', async () => {
+      GitHubClient.listIssueComments.mockResolvedValue([codexComment(summary('{"code_review": {oops'))]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(0);
+      GitHubClient.listIssueComments.mockResolvedValue([codexComment(`<!-- codex-pull-request-review-summary -->\n## Codex Review Summary\n\`${HEAD.slice(0, 7)}\``)]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(0);
+    });
+
+    test('a summary from a non-Codex author is ignored', async () => {
+      GitHubClient.listIssueComments.mockResolvedValue([{ user: { login: 'drive-by-user' }, body: summary(state(HEAD, { has_any_findings: true })) }]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(0);
+    });
+
+    test('the old clean comment still reads clean and inline comments on the head still count', async () => {
+      const cleanComment = codexComment(`Codex Review: Didn't find any major issues. Breezy!\nReviewed commit: ${HEAD.slice(0, 10)}`);
+      const requested = { user: { login: 'waves-bot' }, body: `@codex review on \`${HEAD}\``, created_at: new Date(Date.now() - 3 * 3600e3).toISOString() };
+      GitHubClient.listIssueComments.mockResolvedValue([requested, cleanComment]);
+      expect(await instance._codexVerdict(77, HEAD, 'waves-bot')).toMatchObject({ findings: 0, clean: true });
+      GitHubClient.listIssueComments.mockResolvedValue([requested, cleanComment, codexComment(summary(state(HEAD)))]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(0);
+      GitHubClient.listPrReviewComments.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector[bot]' }, commit_id: HEAD, body: 'P1' }]);
+      expect((await instance._codexVerdict(77, HEAD, 'waves-bot')).findings).toBe(1);
+    });
+
+    test('a clean summary alone does not close the PR (grace window decides)', async () => {
+      GitHubClient.listIssueComments.mockResolvedValue([
+        { user: { login: 'waves-bot' }, body: `@codex review on \`${HEAD}\``, created_at: new Date(Date.now() - 3 * 3600e3).toISOString() },
+        codexComment(summary(state(HEAD))),
+      ]);
+      expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', codex: 'silent' });
+    });
+  });
+
   test('a review-level Codex rejection with no inline comments blocks the merge', async () => {
     GitHubClient.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, commit_id: HEAD, state: 'CHANGES_REQUESTED', body: '### Codex Review\nThe anchor misleads readers.' }]);
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'codex_findings' });

@@ -254,15 +254,20 @@ function isUnplacedDueDate(row) {
 // member's own derived window — so the check is as late as the write itself
 // (the member guard's earlier planning-time check alone could go stale while
 // the members before it move).
-async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination) {
+//
+// `lock24h` is the run's one read of GATE_NIGHT_LOCK_24H (config.nightLock24h,
+// resolved once in config.js): the freeze is 25 hours instead of 73, so the
+// refusal text names the hours actually enforced (flexFreezeHoursFor).
+async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination, lock24h = false) {
   if (guardMode !== 'flex' || row.is_recurring !== true || !row.recurring_parent_id
     || isUnplacedDueDate(row)) return;
   const now = new Date();
-  if (await flexTier.ownScheduleFrozen(trx, row, now)) {
-    throw refuse(row.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
+  const hours = flexTier.flexFreezeHoursFor(lock24h);
+  if (await flexTier.ownScheduleFrozen(trx, row, now, lock24h)) {
+    throw refuse(row.id, `is within ${hours} hours of its own scheduled time (frozen, independent of reminder evidence)`);
   }
-  if (destination && flexTier.destinationFrozen(row, destination.date, destination.windowStart, now)) {
-    throw refuse(row.id, `would start within 73 hours at its destination (${destination.date} ${destination.windowStart || 'no start'}) — frozen`);
+  if (destination && flexTier.destinationFrozen(row, destination.date, destination.windowStart, now, lock24h)) {
+    throw refuse(row.id, `would start within ${hours} hours at its destination (${destination.date} ${destination.windowStart || 'no start'}) — frozen`);
   }
   await fenceFlexSeries(trx, [row], refuse);
   await assertFlexWindows(trx, [row], best, etDateString(new Date()), refuse);
@@ -355,7 +360,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
-    await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
+    await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination, config.nightLock24h === true);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     // GATE_AUTO_DISPATCH_MOWING_DAYS='true': the destination against the mowing rule as saved now.
     await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
@@ -430,11 +435,13 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
 
 // ROUTE-TIERS sibling legality (extracted, unchanged behavior): each
 // sibling's OWN durable anchor and tier radius must admit best.date.
-async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse) {
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date());
+// GATE_NIGHT_LOCK_24H (`lock24h`, the run's one read): the freeze is the
+// 24-hour reminder's band and sent flag instead of the 72-hour one.
+async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false) {
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, { lock24h: true }] : []));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
-  if (frozen) throw refuse(frozen.id, 'is inside its 72-hour reminder window (frozen)');
+  if (frozen) throw refuse(frozen.id, `is inside its ${lock24h ? 24 : 72}-hour reminder window (frozen)`);
   // Same legality math as the orchestrator's pass-1/apply-time checks, per
   // SIBLING: its own anchor (durable evidence, fail closed), its own
   // days-out tier radius, the destination floor — best.date must fall
@@ -463,24 +470,25 @@ async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse)
 // land before this move commits. Each sibling's DESTINATION must clear the
 // freeze too: best.date + that member's own derived start from the unit
 // mover's `targets` (a member with no target fails closed).
-async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets) {
+async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, lock24h = false) {
   const now = new Date();
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, flexTier.FLEX_TIER_FREEZE_HOURS);
+  const hours = flexTier.flexFreezeHoursFor(lock24h);
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, ...(lock24h ? [hours, { lock24h: true }] : [hours]));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
-  if (frozen) throw refuse(frozen.id, 'is inside its 73-hour reminder window (frozen)');
+  if (frozen) throw refuse(frozen.id, `is inside its ${hours}-hour reminder window (frozen)`);
   // Same exemption as checkFlexOwnBounds: an unplaced due-date sibling has
   // no time to freeze on or slot to bound (Codex pre-push P1).
   const placed = rows.filter((r) => !isUnplacedDueDate(r));
   if (!placed.length) return;
   for (const r of placed) {
-    if (await flexTier.ownScheduleFrozen(trx, r, now)) {
-      throw refuse(r.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
+    if (await flexTier.ownScheduleFrozen(trx, r, now, lock24h)) {
+      throw refuse(r.id, `is within ${hours} hours of its own scheduled time (frozen, independent of reminder evidence)`);
     }
     const target = (targets || []).find((t) => String(t.id) === String(r.id));
     const start = target ? target.startHHMM : null;
-    if (flexTier.destinationFrozen(r, best.date, start, now)) {
-      throw refuse(r.id, `would start within 73 hours at its destination (${best.date} ${start || 'no start'}) — frozen`);
+    if (flexTier.destinationFrozen(r, best.date, start, now, lock24h)) {
+      throw refuse(r.id, `would start within ${hours} hours at its destination (${best.date} ${start || 'no start'}) — frozen`);
     }
   }
   await fenceFlexSeries(trx, placed, refuse);
@@ -535,9 +543,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a ${isSaturday(best.date) ? 'Saturday' : 'Sunday'}`);
     }
     if (guardMode === 'tiers') {
-      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse);
+      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, config.nightLock24h === true);
     } else if (guardMode === 'flex') {
-      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets);
+      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, config.nightLock24h === true);
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
     // GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service member holds the unit to the mowing rule as saved now.
@@ -1199,3 +1207,6 @@ module.exports = {
   // guard closures.
   checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds,
 };
+// Own lines: the day re-plan writer (services/day-replan/apply.js) runs the same silent reminder sync and pins the same fields.
+module.exports.syncMovedReminders = syncMovedReminders;
+module.exports.LOCATION_FIELDS = LOCATION_FIELDS;
