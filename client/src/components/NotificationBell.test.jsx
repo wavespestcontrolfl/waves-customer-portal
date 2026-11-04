@@ -1595,6 +1595,80 @@ describe('NotificationBell push Call (Waves Admin app)', () => {
   });
 });
 
+// The 8 AM banner (server morning-banner.js) opens /admin/dashboard?bell=open: the bell opens its list, then takes the
+// param out of the address without a reload.
+describe('NotificationBell 8 AM banner link (?bell=open)', () => {
+  const panelOpen = () => screen.queryByRole('button', { name: 'Close notifications' });
+  const listReads = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/admin/notifications?limit=')).length;
+  afterEach(() => { window.history.replaceState(null, '', '/'); });
+
+  it('cold start: opens the list once, keeps the rest of the address, and never opens again', async () => {
+    window.history.replaceState(null, '', '/admin/dashboard?bell=open&tab=x#top');
+    render(<NotificationBell type="admin" />);
+    expect(await screen.findByRole('button', { name: 'Close notifications' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/admin/dashboard');
+    expect(window.location.search).toBe('?tab=x');
+    expect(window.location.hash).toBe('#top');
+    await waitFor(() => expect(listReads()).toBe(1));
+    // A second bell on the page finds nothing left in the address.
+    cleanup();
+    render(<NotificationBell type="admin" />);
+    await act(async () => {});
+    expect(panelOpen()).toBeNull();
+  });
+
+  it('waits for the verified staff session, then opens', async () => {
+    window.history.replaceState(null, '', '/admin/dashboard?bell=open');
+    const { rerender } = render(<NotificationBell type="admin" sessionReady={false} />);
+    await act(async () => {});
+    expect(panelOpen()).toBeNull();
+    expect(window.location.search).toBe('?bell=open');
+    rerender(<NotificationBell type="admin" sessionReady />);
+    expect(await screen.findByRole('button', { name: 'Close notifications' })).toBeInTheDocument();
+    expect(window.location.search).toBe('');
+  });
+
+  it('warm tap: opens without cancelling the app link, then clears the param once the router has navigated', async () => {
+    window.history.replaceState(null, '', '/admin/today');
+    render(<NotificationBell type="admin" />);
+    await act(async () => {});
+    expect(panelOpen()).toBeNull();
+    // The layout's own listener: it cancels the event and navigates through the router.
+    const layout = (event) => { event.preventDefault(); window.history.pushState(null, '', '/admin/dashboard?bell=open'); };
+    window.addEventListener('wavesadmin:openlink', layout);
+    try {
+      const event = new CustomEvent('wavesadmin:openlink', { detail: { url: `${window.location.origin}/admin/dashboard?bell=open` }, cancelable: true });
+      act(() => { window.dispatchEvent(event); });
+      expect(await screen.findByRole('button', { name: 'Close notifications' })).toBeInTheDocument();
+      await waitFor(() => expect(window.location.search).toBe(''));
+      expect(window.location.pathname).toBe('/admin/dashboard');
+    } finally {
+      window.removeEventListener('wavesadmin:openlink', layout);
+    }
+  });
+
+  it('a tapped link without bell=open, or with another value, leaves the panel shut', async () => {
+    window.history.replaceState(null, '', '/admin/today?bell=closed');
+    render(<NotificationBell type="admin" />);
+    await act(async () => {});
+    expect(panelOpen()).toBeNull();
+    expect(window.location.search).toBe('?bell=closed');
+    for (const url of [`${window.location.origin}/admin/customers?id=1`, `${window.location.origin}/admin/dashboard?bell=closed`, 'not a url']) {
+      act(() => { window.dispatchEvent(new CustomEvent('wavesadmin:openlink', { detail: { url }, cancelable: true })); });
+    }
+    await act(async () => {});
+    expect(panelOpen()).toBeNull();
+  });
+
+  it('the customer bell ignores the param', async () => {
+    window.history.replaceState(null, '', '/portal?bell=open');
+    render(<NotificationBell type="customer" customerId="c1" />);
+    await act(async () => {});
+    expect(screen.queryByRole('button', { name: 'Close notifications' })).toBeNull();
+    expect(window.location.search).toBe('?bell=open');
+  });
+});
+
 describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', () => {
   const SUMMARY = {
     happened: 'The check that reads home details from the county website failed.',

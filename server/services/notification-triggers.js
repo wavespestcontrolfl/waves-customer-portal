@@ -1150,6 +1150,26 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // The 8:00 AM ET banner (GATE_MORNING_BANNER, owner 2026-11-03 "ok add", choice C): one phone banner that says how many
+  // items wait for the owner and opens his alert list. services/morning-banner.js sends it pushOnly, so it writes no bell
+  // row (rule: fyi, only the retention sweep would ever close one) and the owner can switch it off in Push Settings. It
+  // takes the place of a banner for each of his other action items. p = { count, areas: [{ area, count }], day }.
+  waiting_summary: {
+    label: 'Morning summary: items waiting for you',
+    category: 'alert',
+    priority: 'normal',
+    group: 'Alerts',
+    rule: { area: 'System', severity: 'fyi', who: 'person', expiryDays: 7 },
+    build: (p) => {
+      const count = Number(p.count) || 0;
+      const areas = (Array.isArray(p.areas) ? p.areas : []).slice(0, 3);
+      return {
+        title: count === 1 ? '1 item waits for you' : `${count} items wait for you`,
+        body: areas.map((a) => `${a.area} ${a.count}`).join(' \u00b7 ') || null,
+        link: '/admin/dashboard?bell=open',
+      };
+    },
+  },
 };
 
 const PRIORITY_VIBRATE = {
@@ -1256,6 +1276,10 @@ function pushTagFor(triggerKey, payload = {}) {
     // Per-service-record tag: an outage that fails several completions must
     // not let later customers' banners silently replace earlier ones.
     return `waves-${triggerKey}-${payload.serviceRecordId || 'unknown-record'}`;
+  }
+  // One banner per ET day: a late or repeated send replaces the same day's banner, and tomorrow's never replaces today's.
+  if (triggerKey === 'waiting_summary') {
+    return `waves-waiting_summary-${payload.day || 'unknown-day'}`;
   }
   return `waves-${triggerKey}`;
 }

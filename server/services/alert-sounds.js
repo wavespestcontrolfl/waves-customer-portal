@@ -23,6 +23,7 @@ const ALERT_SOUNDS = Object.freeze({
   customer_email_received: 'waves-email.caf',
   sms_operational_followup: 'waves-reminder.caf',
   call_commitment_overdue: 'waves-reminder.caf',
+  waiting_summary: 'waves-reminder.caf',
   payment_failed: 'waves-payment-problem.caf',
   bill_payment_error: 'waves-payment-problem.caf',
 });

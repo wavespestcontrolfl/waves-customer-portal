@@ -364,4 +364,4 @@ async function listNeedsMe({ who, area, limit, role, after = null, customers = f
   };
 }
 
-module.exports = { listNeedsMe, mapAlertRow, mapStanding, decodeCursor };
+module.exports = { listNeedsMe, mapAlertRow, mapStanding, decodeCursor, openAlertRows };

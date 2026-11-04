@@ -15,6 +15,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   customerAlertsRingLive: jest.fn(() => false),
+  morningBannerLive: jest.fn(() => false),
 }));
 jest.mock('../services/internal-test-customers', () => ({
   isInternalTestCustomerId: jest.fn(() => false),
@@ -48,7 +49,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled, customerAlertsRingLive } = require('../config/feature-gates');
+const { isEnabled, customerAlertsRingLive, morningBannerLive } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const NotificationService = require('../services/notification-service');
 const bellPolicy = require('../services/notification-bell-policy');
@@ -82,6 +83,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   gateOff();
   customerAlertsRingLive.mockReturnValue(false);
+  morningBannerLive.mockReturnValue(false);
   bellPolicy.clearOverrideCache();
 });
 
@@ -591,6 +593,20 @@ describe('bellAllowed decision order', () => {
     // Only that one joins: the other payment bells keep today's answers.
     await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'payment_succeeded' })).resolves.toBe(false);
     await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: null })).resolves.toBe(false);
+    expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
+  });
+
+  test('GATE_MORNING_BANNER: the waiting_summary banner passes the policy only while the gate is on, even with the alert category silenced', async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:alert', bell_enabled: false }]) });
+    const summary = { category: 'alert', triggerKey: 'waiting_summary' };
+    await expect(bellPolicy.bellAllowed(summary)).resolves.toBe(false);
+    morningBannerLive.mockReturnValue(true);
+    await expect(bellPolicy.bellAllowed(summary)).resolves.toBe(true);
+    // Only that one joins: other alert-category events keep today's answer.
+    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'dashboard_alert' })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: null })).resolves.toBe(false);
+    expect([...bellPolicy._private.MORNING_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['waiting_summary']);
+    // The customer-alerts gate list is untouched.
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 

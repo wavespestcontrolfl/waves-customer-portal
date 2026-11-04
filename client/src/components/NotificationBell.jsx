@@ -203,6 +203,25 @@ function takeAlertCall() {
   return match ? { id: match[1], version: match[2] } : null;
 }
 
+// The 8 AM banner (server morning-banner.js, GATE_MORNING_BANNER) opens /admin/dashboard?bell=open: the alert list shows.
+// Cold start: the page loads with ?bell=open, and the first bell on the page takes it out of the address before anything
+// runs, so a reload or Back never opens it again. Warm: the Waves Admin app sends the tap as a cancelable
+// 'wavesadmin:openlink' event (detail = { url }), which the layout answers with its own router navigation, so the bell
+// opens without cancelling it and clears the param once that navigation has landed.
+const OPEN_LINK_EVENT = 'wavesadmin:openlink';
+function clearBellOpen() {
+  let params;
+  try { params = new URLSearchParams(window.location.search); } catch { return false; }
+  if (params.get('bell') !== 'open') return false;
+  params.delete('bell');
+  const rest = params.toString();
+  window.history.replaceState(window.history.state, '', `${window.location.pathname}${rest ? `?${rest}` : ''}${window.location.hash}`);
+  return true;
+}
+function linkOpensBell(url) {
+  try { return new URL(url, window.location.origin).searchParams.get('bell') === 'open'; } catch { return false; }
+}
+
 // Buttons the server set on an open persisted admin row (`actions`: an array of
 // { id, label, prompt? }). Never on a `live:` row or a customer bell.
 function actionsFor(n, type) {
@@ -969,6 +988,30 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
       window.removeEventListener(ALERT_CALL_ANSWER_EVENT, showAnswer);
     };
   }, [sessionReady]);
+
+  // The 8 AM banner's tap (see clearBellOpen): the panel opens on the Account tab with the list read again. Admin
+  // staff only, once the staff session is verified, on the web admin and in the Waves Admin app alike.
+  useEffect(() => {
+    if (type !== 'admin' || !sessionReady) return undefined;
+    const showList = () => {
+      setTab('account');
+      setDoneOpen(false);
+      setOpen(true);
+      loadNotifications();
+    };
+    if (clearBellOpen()) showList();
+    let timer;
+    const onOpenLink = (event) => {
+      if (!linkOpensBell(event?.detail?.url)) return;
+      showList();
+      timer = setTimeout(clearBellOpen, 0);
+    };
+    window.addEventListener(OPEN_LINK_EVENT, onOpenLink);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener(OPEN_LINK_EVENT, onOpenLink);
+    };
+  }, [type, sessionReady]);
 
   const doneSeqRef = useRef(0);
   // more: append the page after the last one read (keyset cursor), so every
