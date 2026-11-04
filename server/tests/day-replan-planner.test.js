@@ -27,7 +27,12 @@ function zigzag(extra = {}) {
 function replayAndCheck(inp, result, { promise = 120, margin = 15 } = {}) {
   expect(result.best).not.toBeNull();
   const byId = new Map(inp.stops.map((s) => [s.id, s]));
-  const fixedHours = new Set(inp.stops.filter((s) => !s.movable).map((s) => Math.floor(s.slotStartMin / 60)));
+  const held = (slot, width) => {
+    const first = Math.floor(slot / 60);
+    const last = Math.max(first, Math.ceil((slot + width) / 60) - 1);
+    return Array.from({ length: last - first + 1 }, (_, i) => first + i);
+  };
+  const fixedHours = new Set(inp.stops.filter((s) => !s.movable).flatMap((s) => held(s.slotStartMin, s.slotWidthMin)));
   const movableHours = [];
   let t = inp.departureMin;
   let prev = inp.origin;
@@ -48,7 +53,7 @@ function replayAndCheck(inp, result, { promise = 120, margin = 15 } = {}) {
         expect(slot).toBeGreaterThanOrEqual(s.pref.startMin);
         expect(slot).toBeLessThan(s.pref.endMin);
       }
-      movableHours.push(slot / 60);
+      movableHours.push(...held(slot, s.slotWidthMin));
     } else {
       expect(slot).toBe(s.slotStartMin);
     }
@@ -183,6 +188,57 @@ describe('search', () => {
         replayAndCheck(inp, r);
       }
     }
+  });
+});
+
+describe('multi-hour windows', () => {
+  // A fixed 13:00-15:00 stop (it holds hours 13 and 14), a movable stop that may only go at 14:00, and a late
+  // fixed stop that keeps the day open past 14:30.
+  const wide = (fixedWidth) => input([
+    stop('f', 10, 13, { movable: false, slotWidthMin: fixedWidth, workMin: 120 }),
+    stop('m', 5, 9, { pref: { startMin: 14 * 60, endMin: 15 * 60 } }),
+    stop('z', 0, 17, { movable: false }),
+  ]);
+
+  test('a fixed 2-hour window blocks a movable stop from its second hour', () => {
+    const blocked = planDay(wide(120));
+    expect(blocked.best).toBeNull();
+    expect(blocked.reason).toBe('no_feasible_order');
+  });
+
+  test('the same day with a 1-hour fixed window lets the movable stop take 14:00', () => {
+    const inp = wide(60);
+    const r = planDay(inp);
+    expect(r.best.slots.m).toBe(14 * 60);
+    replayAndCheck(inp, r);
+  });
+
+  test('a movable 2-hour stop needs two free hours and holds both', () => {
+    const blocked = input([
+      stop('a', 10, 10, { movable: false }),
+      stop('w', 5, 8, { slotWidthMin: 120, pref: { startMin: 9 * 60, endMin: 11 * 60 } }),
+    ]);
+    // Starting at 09:00 or 10:00 would overlap the fixed 10:00 stop.
+    expect(planDay(blocked).reason).toBe('no_feasible_order');
+
+    const open = input([
+      stop('a', 10, 10, { movable: false }),
+      stop('w', 5, 8, { slotWidthMin: 120 }),
+      stop('b', 3, 12),
+    ]);
+    const r = planDay(open);
+    expect(r.best).not.toBeNull();
+    replayAndCheck(open, r);
+    const wHour = r.best.slots.w / 60;
+    // Its two hours are both free of the fixed stop's hour 10.
+    expect([wHour, wHour + 1]).not.toContain(10);
+  });
+
+  test('a movable stop keeps its own width', () => {
+    const inp = input([stop('w', 5, 8, { slotWidthMin: 120 }), stop('q', 4, 11)]);
+    const r = planDay(inp);
+    replayAndCheck(inp, r);
+    expect(inp.stops[0].slotWidthMin).toBe(120);
   });
 });
 

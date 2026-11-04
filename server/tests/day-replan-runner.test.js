@@ -5,10 +5,15 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/day-replan/planner', () => {
+  const actual = jest.requireActual('../services/day-replan/planner');
+  return { planDay: jest.fn(actual.planDay) };
+});
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' } }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 
 const logger = require('../services/logger');
+const { planDay } = require('../services/day-replan/planner');
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
 const { runDayReplanIfEnabled, _internals } = require('../services/day-replan');
 
@@ -146,6 +151,21 @@ describe('shadow run', () => {
     // Nothing but reads, plus the one plan insert.
     const writes = calls.filter(([, method]) => ['insert', 'update', 'del', 'delete', 'upsert', 'merge'].includes(method));
     expect(writes).toEqual([['day_replan_plans', 'insert']]);
+  });
+
+  test('stops sharing an hour keep the order the 04:20 pass saved (route_order, nulls last, then id)', async () => {
+    // Returned in reverse of their saved order; the planner's baseline must visit route_order 1 first.
+    const rows = [
+      row('x', 0.05, 9, { route_order: 2 }),
+      row('y', 0.01, 9, { route_order: 1 }),
+      row('n2', 0.02, 10, { route_order: null }),
+      row('n1', 0.03, 10, { route_order: null }),
+      row('r', 0.04, 10, { route_order: 5 }),
+    ];
+    const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    expect(planDay.mock.calls[0][0].stops.map((s) => s.id)).toEqual(['y', 'x', 'r', 'n1', 'n2']);
+    expect(planDay.mock.results[0].value.current.order).toEqual(['y', 'x', 'r', 'n1', 'n2']);
   });
 
   test('looks from tomorrow out DAY_REPLAN_DAYS_AHEAD days (default 14)', async () => {

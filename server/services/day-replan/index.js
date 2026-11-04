@@ -218,6 +218,20 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   }
 }
 
+/**
+ * The day's stored order: window start, then the route_order the 04:20 reorder pass saved (nulls last), then id.
+ * The planner breaks equal-hour ties by input order, so this makes its baseline the order already saved and
+ * never an arbitrary query order (which would book savings the 04:20 pass already made).
+ */
+function storedOrder(a, b) {
+  const byStart = (a.window_start ? hhmmToMin(a.window_start) : Infinity) - (b.window_start ? hhmmToMin(b.window_start) : Infinity);
+  if (byStart !== 0 && !Number.isNaN(byStart)) return byStart;
+  const ra = a.route_order == null ? Infinity : Number(a.route_order);
+  const rb = b.route_order == null ? Infinity : Number(b.route_order);
+  if (ra !== rb) return ra < rb ? -1 : 1;
+  return String(a.id) < String(b.id) ? -1 : (String(a.id) > String(b.id) ? 1 : 0);
+}
+
 function groupByTech(rows) {
   const byTech = new Map();
   for (const row of rows) {
@@ -225,6 +239,7 @@ function groupByTech(rows) {
     if (!byTech.has(row.technician_id)) byTech.set(row.technician_id, []);
     byTech.get(row.technician_id).push(row);
   }
+  for (const techRows of byTech.values()) techRows.sort(storedOrder);
   return [...byTech.entries()].sort(([a], [b]) => String(a).localeCompare(String(b)));
 }
 
@@ -276,4 +291,4 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
   return summary;
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { storedOrder, fixedReason, skipReason, horizonDates, LOCK_HOURS } };

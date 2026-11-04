@@ -9,7 +9,9 @@
  * Stop: { id, lat, lng, slotStartMin, slotWidthMin, workMin, movable, pref: null | {startMin, endMin} }
  *   slotStartMin  the stop's arrival hour today, in minutes from midnight (the promise is that hour
  *                 plus options.promiseMin).
- *   slotWidthMin  the booked window width; carried for the caller, not used by the simulation.
+ *   slotWidthMin  the booked window width. A fixed stop holds every hour its window covers
+ *                 (floor(start/60) through ceil((start+width)/60) - 1, at least one); a movable stop
+ *                 needs ceil(width/60) free hours from its new hour and holds them all, keeping its width.
  *   workMin       planned minutes on site.
  *   movable       false = FIXED: keeps slotStartMin and its arrival bound.
  *   pref          explicit customer time window (hard filter), or null.
@@ -18,7 +20,7 @@
  *   for each stop: d = legMin(prev, stop); drive += d; t += d.
  *   FIXED: slot = slotStartMin; infeasible when t > slot + promiseMin - marginMin.
  *   MOVABLE: h0 = floor(t / 60). Try hours h0-1 and h0: inside [firstHour, lastHour], not held by
- *     another stop, pref ok, t at or after the hour, and t - hour <= promiseMin - marginMin; take the
+ *     another stop (all the hours its window covers), pref ok, t at or after the hour, and t - hour <= promiseMin - marginMin; take the
  *     first that passes. Else the first later hour (from max(firstHour, h0+1)) that is free and pref ok
  *     (the van waits). None = infeasible.
  *   Then t = max(t, slot); t += workMin; infeasible when t > dayEndMin. The drive back to the origin
@@ -49,8 +51,23 @@ function hourBit(hour) {
   return 1 << hour;
 }
 
-function hasBit(mask, hour) {
-  return (mask & hourBit(hour)) !== 0;
+/** Mask of `count` hours starting at `startHour`. */
+function hoursMask(startHour, count) {
+  let mask = 0;
+  for (let h = startHour; h < startHour + count; h += 1) mask |= hourBit(h);
+  return mask;
+}
+
+/** Whole hours a booked window of this width covers when it starts on the hour (at least 1). */
+function widthHours(stop) {
+  return Math.max(1, Math.ceil((Number(stop.slotWidthMin) || 60) / 60));
+}
+
+/** The hours a FIXED stop's booked window covers: floor(start/60) through ceil((start+width)/60) - 1, at least 1. */
+function fixedHoursMask(stop) {
+  const first = Math.floor(stop.slotStartMin / 60);
+  const last = Math.ceil((stop.slotStartMin + (Number(stop.slotWidthMin) || 60)) / 60) - 1;
+  return hoursMask(first, Math.max(1, last - first + 1));
 }
 
 function resolveOptions(options) {
@@ -71,7 +88,7 @@ function buildContext(stops, origin, departureMin, legMin, options) {
   const opts = resolveOptions(options);
   let fixedMask = 0;
   for (const s of stops) {
-    if (!s.movable) fixedMask |= hourBit(Math.floor(s.slotStartMin / 60));
+    if (!s.movable) fixedMask |= fixedHoursMask(s);
   }
   return {
     stops,
@@ -92,7 +109,8 @@ function prefAllows(pref, hour) {
 
 function hourUsable(ctx, stop, hour, used) {
   if (hour < ctx.opts.firstHour || hour > ctx.opts.lastHour) return false;
-  return !hasBit(used, hour) && prefAllows(stop.pref, hour);
+  // A movable stop holds every hour its own window covers, so all of them must be free.
+  return (used & hoursMask(hour, widthHours(stop))) === 0 && prefAllows(stop.pref, hour);
 }
 
 /** The arrival hour (minutes) a movable stop takes when the van gets there at t, or null. */
@@ -117,7 +135,7 @@ function step(ctx, state, idx) {
   if (stop.movable) {
     slot = pickHour(ctx, stop, t, used);
     if (slot == null) return null;
-    used |= hourBit(slot / 60);
+    used |= hoursMask(slot / 60, widthHours(stop));
   } else {
     slot = stop.slotStartMin;
     if (t > slot + ctx.bound) return null;
