@@ -112,38 +112,69 @@ function makeDb({ rows = [], reminders = [], blocks = [] } = {}) {
   };
   conn.raw = (sql) => ({ sql });
   conn.fn = { now: () => 'NOW()' };
-  conn.transaction = async (fn) => fn(conn);
+  // A real transaction undoes its writes when it throws: the rows come back as they were.
+  conn.transaction = async (fn) => {
+    const snap = { rows: db.rows.map(copy), inserts: db.inserts.length, updates: db.updates.length };
+    try {
+      return await fn(conn);
+    } catch (err) {
+      db.rows.splice(0, db.rows.length, ...snap.rows);
+      db.inserts.length = snap.inserts;
+      db.updates.length = snap.updates;
+      throw err;
+    }
+  };
   return { conn, db };
 }
 
 const toMin = (v) => { const [hh, mm] = String(v).slice(0, 5).split(':').map(Number); return hh * 60 + mm; };
 
-/** A rebooker over the in-memory schedule: runs beforeMove, the CAS and the occupancy check like the real one. */
-function fakeRebooker(db, conn, { failWhen = () => false, textWhen = () => false, techBlind = true } = {}) {
-  const calls = [];
-  const reschedule = jest.fn(async (id, date, win, reason, by, options) => {
-    calls.push({ id, date, win, reason, by, options });
-    if (failWhen(id, win, calls.length)) throw Object.assign(new Error('That time is no longer available'), { code: 'SLOT_TAKEN', statusCode: 409 });
-    if (options.beforeMove) await options.beforeMove(conn);
-    const r = db.rows.find((x) => x.id === id);
-    for (const [key, value] of Object.entries(options.expect)) {
-      if (String(r[key] ?? null) !== String(value ?? null)) throw Object.assign(new Error('The visit changed'), { code: 'CAS_MISS', statusCode: 409 });
-    }
-    const start = toMin(win.start);
-    // No end given: a kept end stays; clearWindowEnd opens it. Occupancy is judged on the span the row will hold.
-    const end = win.end ? toMin(win.end) : start + (Number(r.estimated_duration_minutes) || 60);
-    const clash = db.rows.find((o) => o.id !== id && o.scheduled_date === date && o.window_start
-      && (techBlind || o.technician_id == null || o.technician_id === r.technician_id)
-      && toMin(o.window_start) < end
-      && (o.window_end ? toMin(o.window_end) : toMin(o.window_start) + (Number(o.estimated_duration_minutes) || 60)) > start && !['cancelled', 'completed'].includes(o.status));
-    if (clash) throw Object.assign(new Error('That time is taken'), { code: 'SLOT_TAKEN', statusCode: 409 });
-    r.window_start = `${win.start}:00`;
-    r.window_end = win.end ? `${win.end}:00` : (options.clearWindowEnd === true ? null : r.window_end);
-    r.updated_at = new Date();
-    return { landedStatus: r.status, smsSent: textWhen(id, win) };
+/** The app's occupancy predicate (occupancy.js findConflictingVisits) over the in-memory schedule, tech-blind. */
+function fakeFindConflicts(db) {
+  const minutes = (v) => toMin(v);
+  return jest.fn(async ({ date, windowStart, windowEnd, excludeServiceIds = [], excludeStatuses = [] }) => {
+    const start = minutes(windowStart);
+    const end = minutes(windowEnd);
+    return db.rows.filter((o) => String(o.scheduled_date).slice(0, 10) === date && !excludeServiceIds.map(String).includes(String(o.id))
+      && !excludeStatuses.includes(o.status) && !o.reservation_expires_at && o.window_start
+      && minutes(o.window_start) < end
+      && (o.window_end ? minutes(o.window_end) : minutes(o.window_start) + (Number(o.estimated_duration_minutes) || 60)) > start);
   });
-  return { reschedule, calls };
 }
 
+/**
+ * The apply writer's collaborators over the in-memory schedule: the real pure helpers of the runner, fakes for the
+ * fence, the day reads, the occupancy predicate and the after-commit effects. `mocks` are the jest.fn()s to assert on.
+ */
+function makeApplyDeps(db, { now, blocks = [], over = {} } = {}) {
+  const { _internals } = require('../../services/day-replan');
+  const excludedStatuses = ['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show'];
+  const mocks = {
+    syncMovedReminders: jest.fn(async () => {}),
+    afterMoveEffects: jest.fn(async () => {}),
+    repairMoved: jest.fn(async () => {}),
+    acquireOccupancyLock: jest.fn(async () => {}),
+    lockTechDays: jest.fn(async () => {}),
+    lockDayRows: jest.fn(async () => []),
+    trackTokenExpiry: jest.fn(() => 'expiry'),
+    isBlackoutDate: jest.fn(async () => false),
+    findConflicts: fakeFindConflicts(db),
+    loadBlocks: jest.fn(async () => blocks),
+  };
+  const liveRows = (dateStr) => db.rows.filter((r) => String(r.scheduled_date).slice(0, 10) === dateStr && !excludedStatuses.includes(r.status) && !r.reservation_expires_at);
+  const deps = {
+    fixedReason: _internals.fixedReason,
+    rowHours: _internals.rowHours,
+    versionHash: _internals.versionHash,
+    excludedStatuses,
+    occupancyExcludeStatuses: ['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'],
+    locationFields: ['property_id', 'lat', 'lng'],
+    loadDayRows: jest.fn(async (_conn, dateStr) => liveRows(dateStr).map((r) => ({ ...r }))),
+    now: () => now,
+    ...mocks,
+    ...over,
+  };
+  return { deps, mocks };
+}
 
-module.exports = { HQ, row, zigzagRows, makeDb, fakeRebooker, toMin };
+module.exports = { HQ, row, zigzagRows, makeDb, fakeFindConflicts, makeApplyDeps, toMin };

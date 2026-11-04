@@ -43,7 +43,7 @@ const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
 const { planDay, DEFAULT_OPTIONS } = require('./planner');
 const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
-const { applyAcceptedDay, findInterrupted, recoverInterrupted } = require('./apply');
+const { applyAcceptedDay, reconcileApplied } = require('./apply');
 
 const DEFAULT_DAYS_AHEAD = 14;
 const MAX_DAYS_AHEAD = 30;
@@ -373,7 +373,7 @@ async function applyPlan(conn, env, { dateStr, techId, plan, planId, summary }) 
   };
   let outcome;
   try {
-    outcome = await applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, planId, deps });
+    outcome = await applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, deps });
   } catch (err) {
     logger.error(`[day-replan] ${dateStr} tech ${techId}: apply failed (${err.message})`);
     outcome = { status: 'failed', reason: `error:${String(err.code || 'unknown').slice(0, 40)}`, moved: 0 };
@@ -503,22 +503,6 @@ async function buildEnv(conn, { apply, runId, deps }) {
   };
 }
 
-/** Before anything new is planned, a day a previous run left mid-apply is put back (apply and shadow alike).
- *  Returns false when the lookup itself failed: the run then plans and writes nothing. */
-async function recoverFirst(conn, env, deps, summary) {
-  let interrupted;
-  try {
-    interrupted = await findInterrupted(conn);
-  } catch (err) {
-    logger.error(`[day-replan] could not look for interrupted plans (${err.message}); nothing planned`);
-    return false;
-  }
-  if (!interrupted.length) return true;
-  summary.recovered = await recoverInterrupted({ conn, deps: env.deps || deps || applyDeps(), plans: interrupted });
-  if (summary.recovered.some((r) => r.status === 'failed')) summary.status = 'completed_with_errors';
-  return true;
-}
-
 async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null } = {}) {
   const mode = dayReplanMode();
   if (mode === 'off') return { status: 'off' };
@@ -534,36 +518,62 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
     logger.error(`[day-replan] could not read start points or departure time (${err.message}); nothing planned`);
     return { ...summary, status: 'failed' };
   }
-  if (!(await recoverFirst(conn, env, deps, summary))) return { ...summary, status: 'failed', reason: 'recovery_lookup_failed' };
+  // A day committed on an earlier run whose after-commit syncs did not finish is made to match again (apply and shadow alike).
+  summary.repaired = await reconcileApplied(conn, () => env.deps || deps || applyDeps(), { today: etDateString(now) });
   for (const dateStr of horizonDates(now)) {
     await planDate(conn, env, dateStr, now, summary);
   }
-  // A day the writer could not restore needs a person: the job's health shows it too.
+  // A day the writer could not write (nothing changed) shows in the job's health.
   if (summary.failed.length || (summary.apply || []).some((a) => a.status === 'failed')) summary.status = 'completed_with_errors';
   const baselines = summary.plans.reduce((counts, p) => ({ ...counts, [p.baseline]: (counts[p.baseline] || 0) + 1 }), {});
   const byStatus = apply ? summary.apply.reduce((counts, a) => ({ ...counts, [a.status]: (counts[a.status] || 0) + 1 }), {}) : {};
   const applied = apply ? ` apply=${JSON.stringify(byStatus)} appliedVisits=${summary.appliedVisits}` : '';
-  const recovered = summary.recovered ? ` recovered=${summary.recovered.length}` : '';
+  const recovered = summary.repaired ? ` repaired=${summary.repaired}` : '';
   logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}${recovered}`);
   return summary;
 }
 
-/** The writer's collaborators, loaded when apply mode runs (never in shadow or off). */
+/** Locks every live row of the date (in id order) before the day is read again: the scheduling fence's row locks. */
+async function lockDayRows(conn, dateStr) {
+  const { _internals } = require('../route-reorder');
+  return conn('scheduled_services')
+    .where('scheduled_date', dateStr)
+    .whereNotIn('status', EXCLUDED_STATUSES)
+    .whereRaw(_internals.LIVE_HOLD_SQL)
+    .orderBy('id')
+    .forUpdate()
+    .select('id');
+}
+
+/** The writer's collaborators, loaded when apply mode runs (never in shadow or off, except the repair of a committed day). */
 function applyDeps() {
   const nightWriter = require('../auto-dispatch/apply');
+  const occupancy = require('../scheduling/occupancy');
+  const afterMove = require('./after-move');
+  const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   return {
     fixedReason,
     rowHours,
     excludedStatuses: EXCLUDED_STATUSES,
-    rebooker: require('../rebooker'),
+    // The rebooker's own occupancy statuses for a move: a completed morning visit never blocks an afternoon one.
+    occupancyExcludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+    findConflicts: occupancy.findConflictingVisits,
     syncMovedReminders: nightWriter.syncMovedReminders,
     locationFields: nightWriter.LOCATION_FIELDS,
-    raiseAlert: require('../admin-alert-compose').raiseAdminAlert,
-    // The scheduling fence the route order is written under: date occupancy first, then the tech-day (the ordering contract).
-    acquireOccupancyLock: require('../scheduling/occupancy').acquireOccupancyLock,
+    // The scheduling fence the day is written under: date occupancy first, then the tech-days (the ordering contract).
+    acquireOccupancyLock: occupancy.acquireOccupancyLock,
     lockTechDays: require('../scheduling/tech-day-lock').lockTechDays,
+    lockDayRows,
+    loadDayRows: loadDayStops,
+    versionHash,
+    loadBlocks,
+    trackTokenExpiry: require('../track-token-expiry').scheduledServiceTrackTokenExpiry,
+    // The rebooker's strict test for a night writer (a day the company is closed).
+    isBlackoutDate: (dateStr) => require('../scheduling/blackout-dates').isBlackoutDate(dateStr, undefined, { strict: true }),
+    afterMoveEffects: afterMove.afterMoveEffects,
+    repairMoved: afterMove.repairMoved,
     now: () => new Date(),
   };
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, plannerStop, versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };

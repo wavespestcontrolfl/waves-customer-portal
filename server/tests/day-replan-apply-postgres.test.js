@@ -1,21 +1,19 @@
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 /**
- * The day re-plan APPLY writer on real PostgreSQL, with the REAL rebooker, reminders and night-writer reminder sync
- * (owner ruling 2026-11-03, GATE_DAY_REPLAN=true). One technician, four customers, one zigzag tech-day with a
- * reminder row for each visit, planned and written by runDayReplanIfEnabled in apply mode:
- *   - every visit lands its planned hour, the route_order follows the plan, each reminder's appointment_time follows
- *     its visit with the 24-hour leg still pending, reschedule_log carries initiated_by 'day_replan', and the plan
- *     row says 'applied';
- *   - a forced failure of the second write puts every visit (hour, route_order, reminder) back and says
- *     'rolled_back';
- *   - a day left mid-apply by a stopped process is put back by the next run before anything new is planned: after a
- *     forward step, with only an intent journaled, in the middle of a rollback (an undo that landed is not repeated,
- *     the one that did not is finished), and with the reminder of an undone visit re-synced to its hour;
- *   - the rollback is fenced: a visit a person moved after our step is left alone, the plan says 'failed' and ONE
- *     notice for Claude's queue is raised, while the other visits are put back.
+ * The day re-plan APPLY writer on real PostgreSQL, with the REAL occupancy predicate, scheduling locks, reminder
+ * sync and after-commit effects (owner ruling 2026-11-03, GATE_DAY_REPLAN=true). One technician, four customers, one
+ * zigzag tech-day with a reminder row for each visit, planned and written by runDayReplanIfEnabled in apply mode:
+ *   - the whole day is written in ONE transaction: every visit lands its planned hour with no temporary hour ever
+ *     written (a trigger logs every window_start change), the route_order follows the plan, each reminder's
+ *     appointment_time follows its visit with the 24-hour leg still pending, reschedule_log carries day_replan, and
+ *     the plan row says 'applied';
+ *   - the columns the writer changes on a moved visit are the ones the rebooker changes for the same move;
+ *   - an edit committed before the fence, or an occupancy clash appearing at commit, changes nothing at all;
+ *   - the night pass still reads these visits as automatic (isPersonPlacedVisit) and move-limit does not count them;
+ *   - the after-commit repair of a day whose reminder sync did not finish.
  * Outbound SMS, email and push are stubbed and asserted never called. The whole test runs inside one transaction
- * that always rolls back (the rebooker's own transactions become savepoints), on a far-future date, and it refuses
+ * that always rolls back (the writer's own transaction becomes a savepoint), on a far-future date, and it refuses
  * any database but a private QA one or CI's.
  */
 let mockConn;
@@ -155,7 +153,30 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
   const reminders = async () => mockConn('appointment_reminders').whereIn('scheduled_service_id', visits.map((v) => v.id)).select('scheduled_service_id', 'appointment_time', 'reminder_24h_sent', 'reminder_72h_sent', 'cancelled');
   const sentAnything = () => Object.entries(mockOutbound).filter(([, fn]) => fn.mock && fn.mock.calls.length > 0).map(([name]) => name);
 
-  test('writes the planned hours, the route order and the reminders, silently, and says applied', async () => {
+  const OPTS = { seriesPolicy: 'single', visitPolicy: 'single', keepStatus: true, suppressTechNotice: true, notifyRequested: false, placeInRoute: false };
+  const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  const minutes = (value) => { const [h, m] = String(value).slice(0, 5).split(':').map(Number); return h * 60 + m; };
+  const reminderMs = async (id) => new Date((await mockConn('appointment_reminders').where({ scheduled_service_id: id }).first()).appointment_time).getTime();
+  const applyDeps = () => require('../services/day-replan')._internals.applyDeps();
+  const snapshot = async () => ({ rows: await visitRows(), rem: await reminders(), log: (await mockConn('reschedule_log').whereIn('scheduled_service_id', visits.map((v) => v.id))).length });
+
+  /** Logs every change of a visit's window_start in this transaction (a trigger that dies with the rollback). */
+  async function trackWindowWrites() {
+    await mockConn.raw('CREATE TEMP TABLE win_writes (id uuid, new_start time, new_end time) ON COMMIT DROP');
+    await mockConn.raw(`CREATE FUNCTION pg_temp.log_win() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.window_start IS DISTINCT FROM OLD.window_start OR NEW.window_end IS DISTINCT FROM OLD.window_end THEN
+          INSERT INTO win_writes VALUES (NEW.id, NEW.window_start, NEW.window_end);
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await mockConn.raw('CREATE TRIGGER log_win AFTER UPDATE ON scheduled_services FOR EACH ROW EXECUTE FUNCTION pg_temp.log_win()');
+    return async () => (await mockConn.raw('SELECT id, new_start, new_end FROM win_writes')).rows;
+  }
+  const changedColumns = (before, after) => Object.keys(after).filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k])).sort();
+
+  test('writes the planned hours, the route order and the reminders in one go, silently, and says applied', async () => {
+    const writes = await trackWindowWrites();
     const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
     expect(out.status).toBe('completed');
     expect(out.apply).toEqual([expect.objectContaining({ date: DAY, technician_id: techId, status: 'applied', reason: 'applied' })]);
@@ -163,14 +184,11 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const plan = await mockConn('day_replan_plans').where({ run_id: out.runId }).first();
     expect(plan).toMatchObject({ mode: 'apply', accepted: true, apply_status: 'applied', apply_reason: 'applied' });
     expect(plan.applied_at).toBeTruthy();
-    expect(plan.apply_started_at).toBeTruthy();
-    expect(plan.apply_steps).toMatchObject({ complete: true, routePersisted: true });
+    // No journal any more: the columns stay empty.
+    expect(plan.apply_started_at).toBeNull();
+    expect(plan.apply_steps).toBeNull();
     const changes = plan.changes; // jsonb
     expect(changes.length).toBeGreaterThan(0);
-    // The zigzag is a cycle (every hour is taken), so the write went through one temporary hour, which no visit keeps.
-    const parked = plan.apply_steps.steps.filter((s) => s.temp);
-    expect(parked).toHaveLength(1);
-    expect(plan.apply_steps.steps.length).toBe(changes.length + 1);
 
     // Every changed visit sits on its planned hour; the others did not move.
     const rows = await visitRows();
@@ -179,9 +197,12 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
       const was = `${String(v.hour).padStart(2, '0')}:00`;
       expect(startOf(rows, v.id)).toBe(changed.get(v.id) || was);
     }
-    // No two visits share an hour (no temporary hour left behind), and the status is what it was.
     expect(new Set(rows.map((r) => startOf(rows, r.id))).size).toBe(4);
     for (const v of visits) expect(rows.find((r) => r.id === v.id).status).toBe(v.status);
+    // The zigzag is a cycle, and it was written directly: each moved visit's window changed exactly once, to its final hour.
+    const logged = await writes();
+    expect(logged).toHaveLength(changes.length);
+    for (const w of logged) expect(String(w.new_start).slice(0, 5)).toBe(changed.get(w.id));
 
     // route_order is 1..4 in the order of the final hours.
     const byOrder = [...rows].sort((x, y) => x.route_order - y.route_order);
@@ -189,381 +210,176 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(byOrder.map((r) => startOf(rows, r.id))).toEqual([...byOrder.map((r) => startOf(rows, r.id))].sort());
 
     // Each reminder names its visit's new time and keeps the 24-hour leg pending; nothing was cancelled.
-    const rem = await reminders();
-    for (const r of rem) {
+    for (const r of await reminders()) {
       expect(new Date(r.appointment_time).getTime()).toBe(TZ_START(startOf(rows, r.scheduled_service_id)));
       expect(r.reminder_24h_sent).toBe(false);
       expect(r.reminder_72h_sent).toBe(false);
       expect(r.cancelled).toBe(false);
     }
 
-    // The log: every move by the day re-plan, and nothing under the night pass's signature.
-    const log = await mockConn('reschedule_log').whereIn('scheduled_service_id', visits.map((v) => v.id)).select('scheduled_service_id', 'initiated_by', 'reason_code', 'new_window');
-    expect(log.length).toBeGreaterThanOrEqual(changes.length);
+    // The log: one row per moved visit, all day_replan, in the rebooker's same-day shape.
+    const log = await mockConn('reschedule_log').whereIn('scheduled_service_id', visits.map((v) => v.id)).select('scheduled_service_id', 'initiated_by', 'reason_code', 'original_date', 'new_date', 'original_window', 'new_window');
+    expect(log).toHaveLength(changes.length);
     expect(new Set(log.map((l) => l.initiated_by))).toEqual(new Set(['day_replan']));
     expect(new Set(log.map((l) => l.reason_code))).toEqual(new Set(['day_replan']));
     for (const c of changes) {
-      // (rows share one transaction timestamp here, so their order is not stable: the final hour is among the visit's rows)
-      const starts = log.filter((l) => l.scheduled_service_id === c.id).map((l) => String(l.new_window).split('-')[0].slice(0, 5));
-      expect(starts).toContain(c.to);
+      const l = log.find((x) => x.scheduled_service_id === c.id);
+      expect(String(l.new_window)).toBe(`${c.to}-${hhmm(minutes(c.to) + 60)}`);
+      expect(String(l.original_window)).toBe(`${c.from}:00-${hhmm(minutes(c.from) + 60)}:00`);
     }
-
     expect(sentAnything()).toEqual([]);
   });
 
-  test('a failed write puts every visit back: hour, route order and reminder; and says rolled_back', async () => {
-    let calls = 0;
-    const original = rebooker.reschedule.bind(rebooker);
-    jest.spyOn(rebooker, 'reschedule').mockImplementation(async (...args) => {
-      calls += 1;
-      if (calls === 2) throw Object.assign(new Error('That time slot is no longer available.'), { statusCode: 409, code: 'SLOT_TAKEN' });
-      return original(...args);
-    });
-    const before = await visitRows();
-    const remBefore = await reminders();
-
+  test('the columns changed on a moved visit are the rebooker\'s for the same move (the route number aside)', async () => {
+    const [a] = visits;
+    // The writer.
+    const beforeA = (await mockConn('scheduled_services').where({ id: a.id }).first());
     const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
-    expect(out.apply).toEqual([expect.objectContaining({ status: 'rolled_back', reason: 'step_failed:SLOT_TAKEN', moved: 0 })]);
+    expect(out.apply[0].status).toBe('applied');
+    const afterA = (await mockConn('scheduled_services').where({ id: a.id }).first());
+    const ours = changedColumns(beforeA, afterA).filter((c) => c !== 'route_order');
+    expect(ours).toEqual(['track_token_expires_at', 'updated_at', 'window_end', 'window_start']);
+  });
 
-    const after = await visitRows();
+  test('...and the rebooker changes exactly those columns for a same-day window move by a night writer', async () => {
+    const [a] = visits;
+    const before = (await mockConn('scheduled_services').where({ id: a.id }).first());
+    await rebooker.reschedule(a.id, DAY, { start: '15:00', end: '16:00' }, 'day_replan', 'day_replan', OPTS);
+    const after = (await mockConn('scheduled_services').where({ id: a.id }).first());
+    expect(changedColumns(before, after)).toEqual(['track_token_expires_at', 'updated_at', 'window_end', 'window_start']);
+    // Its log row has the shape the writer copies.
+    const l = await mockConn('reschedule_log').where({ scheduled_service_id: a.id }).first();
+    expect(Object.keys(l).sort()).toEqual(expect.arrayContaining(['occurrence_property_id', 'occurrence_service_id', 'occurrence_service_type', 'original_window', 'new_window']));
+    expect(String(l.new_window)).toBe('15:00-16:00');
+    expect(String(l.original_window)).toBe('08:00:00-09:00:00');
+  });
+
+  test('the night pass still sees these visits as automatic, and move-limit does not count them', async () => {
+    const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
+    const { countAutoMoves } = require('../services/auto-dispatch/move-limit');
+    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
+    expect(out.apply[0].status).toBe('applied');
     for (const v of visits) {
-      expect(startOf(after, v.id)).toBe(startOf(before, v.id));
-      expect(Number(after.find((r) => r.id === v.id).route_order)).toBe(Number(before.find((r) => r.id === v.id).route_order));
+      const current = await mockConn('scheduled_services').where({ id: v.id }).first();
+      expect(await isPersonPlacedVisit(current, mockConn)).toEqual({ placed: false });
     }
-    for (const r of await reminders()) {
-      expect(new Date(r.appointment_time).getTime()).toBe(new Date(remBefore.find((x) => x.scheduled_service_id === r.scheduled_service_id).appointment_time).getTime());
-      expect(r.reminder_24h_sent).toBe(false);
-    }
-    const plan = await mockConn('day_replan_plans').where({ run_id: out.runId }).first();
-    expect(plan).toMatchObject({ apply_status: 'rolled_back', apply_reason: 'step_failed:SLOT_TAKEN' });
-    expect(plan.apply_steps.steps.length).toBeGreaterThanOrEqual(1);
-    expect(sentAnything()).toEqual([]);
+    expect((await countAutoMoves(mockConn, visits.map((v) => v.id))).size).toBe(0);
   });
 
-  test('no step touches route_order: the numbers stay as they were until the one final write', async () => {
-    const original = rebooker.reschedule.bind(rebooker);
-    const seen = [];
-    jest.spyOn(rebooker, 'reschedule').mockImplementation(async (...args) => {
-      const out = await original(...args);
-      seen.push((await visitRows()).sort((x, y) => String(x.id).localeCompare(String(y.id))).map((r) => `${r.id}:${r.route_order}`).join(' '));
-      return out;
-    });
-    const initial = (await visitRows()).sort((x, y) => String(x.id).localeCompare(String(y.id))).map((r) => `${r.id}:${r.route_order}`).join(' ');
-    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
-    expect(out.apply).toEqual([expect.objectContaining({ status: 'applied' })]);
-    expect(seen.length).toBeGreaterThanOrEqual(3);
-    // After every step (forward, temporary or final) the numbers are exactly the original ones.
-    for (const line of seen) expect(line).toBe(initial);
-    // The rebooker was asked not to place the visit in the route.
-    for (const call of rebooker.reschedule.mock.calls) expect(call[5].placeInRoute).toBe(false);
-    expect(sentAnything()).toEqual([]);
-  });
-
-  /** Runs the day and, right after `when(call)` is true for a rebooker call, edits `target` on the table (committed before the fence). */
-  async function editBeforeFence({ extraStop = false, target, when, edit }) {
-    let fixed = null;
-    if (extraStop) {
-      // A staff-locked stop the plan cannot move, still part of the technician's day.
-      fixed = { id: randomUUID(), customerId: randomUUID() };
-      await mockConn('customers').insert({
-        id: fixed.customerId, first_name: 'Replanezq', last_name: 'Fixturezq', email: `${fixed.customerId}@example.invalid`, phone: '+19415551999',
-        address_line1: '199 Replan Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
-      });
-      await mockConn('scheduled_services').insert({
-        id: fixed.id, customer_id: fixed.customerId, technician_id: techId, scheduled_date: DAY, service_type: 'Quarterly Pest Control Service',
-        status: 'confirmed', window_start: '15:00', window_end: '16:00', estimated_duration_minutes: 60, lat: HQ.lat, lng: HQ.lng + 0.05,
-        route_order: 5, auto_dispatch_locked: true,
-      });
-    }
-    const original = rebooker.reschedule.bind(rebooker);
-    let edited = null;
-    jest.spyOn(rebooker, 'reschedule').mockImplementation(async (...args) => {
-      const out = await original(...args);
-      if (!edited) {
-        const plan = await mockConn('day_replan_plans').where({ technician_id: techId, service_date: DAY }).whereNotNull('apply_started_at').first();
-        const id = target({ fixed, changes: plan.changes, args });
-        if (id && when({ changes: plan.changes, args })) {
-          await mockConn('scheduled_services').where({ id }).update(edit);
-          edited = id;
-        }
-      }
-      return out;
-    });
-    const before = await visitRows();
-    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
-    return { out, edited, before, fixed };
-  }
-
-  const expectDayBack = async (before, out) => {
-    const after = await visitRows();
-    for (const v of visits) {
-      expect(startOf(after, v.id)).toBe(startOf(before, v.id));
-      expect(Number(after.find((r) => r.id === v.id).route_order)).toBe(Number(before.find((r) => r.id === v.id).route_order));
-    }
-    const plan = await mockConn('day_replan_plans').where({ run_id: out.runId }).first();
-    expect(plan.apply_steps.routePersisted).toBe(false);
-    expect(sentAnything()).toEqual([]);
+  /** An edit by another writer that committed before our locks: it runs when the writer takes the row locks. */
+  const editBeforeFence = (edit) => {
+    const real = applyDeps();
+    return { ...real, lockDayRows: async (c, d) => { const out = await real.lockDayRows(c, d); await edit(c); return out; } };
   };
 
-  test('an unrelated stop of the same day is edited before the final fence: no route write, rolled_back', async () => {
-    const { out, edited, before } = await editBeforeFence({
-      extraStop: true,
-      edit: { status: 'pending' },
-      target: ({ fixed }) => fixed.id,
-      when: () => true, // after the first step: the stop is never moved by the plan
+  test.each([
+    ['a moved visit\'s duration', (c, v) => c('scheduled_services').where({ id: v[0].id }).update({ estimated_duration_minutes: 90 })],
+    ['a moved visit\'s staff lock', (c, v) => c('scheduled_services').where({ id: v[1].id }).update({ auto_dispatch_locked: true })],
+    ['a moved visit\'s status', (c, v) => c('scheduled_services').where({ id: v[0].id }).update({ status: 'pending' === visits[0].status ? 'confirmed' : 'pending' })],
+    ['a stop that joined the technician\'s day', (c) => c('scheduled_services').insert({
+      id: randomUUID(), customer_id: visits[0].customerId, technician_id: techId, scheduled_date: DAY, service_type: 'Quarterly Pest Control Service',
+      status: 'confirmed', window_start: '16:00', window_end: '17:00', estimated_duration_minutes: 60, lat: HQ.lat, lng: HQ.lng,
+    })],
+    ['an unassigned stop that joined the date', (c) => c('scheduled_services').insert({
+      id: randomUUID(), customer_id: visits[0].customerId, technician_id: null, scheduled_date: DAY, service_type: 'Quarterly Pest Control Service',
+      status: 'confirmed', window_start: '16:00', window_end: '17:00', estimated_duration_minutes: 60,
+    })],
+  ])('an edit to %s committed before the fence: nothing changes', async (_label, edit) => {
+    const before = await snapshot();
+    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn, deps: editBeforeFence((c) => edit(c, visits)) });
+    expect(out.apply).toEqual([expect.objectContaining({ status: 'skipped', reason: 'changed_since_plan', moved: 0 })]);
+    const after = await snapshot();
+    // Only the other writer's own edit differs; our columns (hours, route numbers, reminders, log) are as they were.
+    for (const v of visits) {
+      expect(startOf(after.rows, v.id)).toBe(startOf(before.rows, v.id));
+      expect(Number(after.rows.find((r) => r.id === v.id).route_order)).toBe(Number(before.rows.find((r) => r.id === v.id).route_order));
+    }
+    expect(after.rem).toEqual(before.rem);
+    expect(after.log).toBe(before.log);
+    const plan = await mockConn('day_replan_plans').where({ run_id: out.runId }).first();
+    expect(plan).toMatchObject({ apply_status: 'skipped', apply_reason: 'changed_since_plan' });
+    expect(sentAnything()).toEqual([]);
+  });
+
+  test('a moved visit whose 24-hour reminder went out meanwhile is refused under the fence', async () => {
+    const before = await snapshot();
+    const out = await runDayReplanIfEnabled({
+      now: NOW,
+      conn: mockConn,
+      deps: editBeforeFence((c) => c('appointment_reminders').where({ scheduled_service_id: visits[0].id }).update({ reminder_24h_sent: true })),
     });
-    expect(edited).toBeTruthy();
-    expect(out.apply).toEqual([expect.objectContaining({ status: 'rolled_back', reason: 'step_failed:ROUTE_CHANGED', moved: 0 })]);
-    await expectDayBack(before, out);
-    // The unrelated stop keeps its own number: the fence wrote nothing at all.
-    expect(Number((await mockConn('scheduled_services').where({ id: edited }).first()).route_order)).toBe(5);
+    expect(out.apply[0].status).toBe('skipped');
+    expect(out.apply[0].reason).toMatch(/^visit_not_movable:/);
+    const after = await snapshot();
+    for (const v of visits) expect(startOf(after.rows, v.id)).toBe(startOf(before.rows, v.id));
+    expect(after.log).toBe(before.log);
   });
 
-  test('a stop the plan moved is edited by a person after its last step: no route write, the day is not renumbered', async () => {
-    const { out, edited, before } = await editBeforeFence({
-      edit: { auto_dispatch_locked: true },
-      target: ({ args }) => args[0],
-      when: ({ changes, args }) => changes.some((c) => c.id === args[0] && c.to === args[2].start),
+  test('an occupancy clash appearing at commit (an unassigned row at a new hour): nothing changes at all', async () => {
+    const real = applyDeps();
+    let inserted = null;
+    const before = await snapshot();
+    const out = await runDayReplanIfEnabled({
+      now: NOW,
+      conn: mockConn,
+      deps: {
+        ...real,
+        // The clash is written by another writer between the writes and the probe; the probe is the app's own.
+        findConflicts: async (args) => {
+          if (!inserted) {
+            inserted = randomUUID();
+            await args.db('scheduled_services').insert({
+              id: inserted, customer_id: visits[0].customerId, technician_id: null, scheduled_date: DAY, service_type: 'Quarterly Pest Control Service',
+              status: 'confirmed', window_start: args.windowStart, window_end: args.windowEnd, estimated_duration_minutes: 60,
+            });
+          }
+          return real.findConflicts(args);
+        },
+      },
     });
-    expect(edited).toBeTruthy();
-    // The route write is refused at the fence; the undo then leaves the person's visit as it is (failed), the rest go back.
-    expect(out.apply).toEqual([expect.objectContaining({ status: 'failed', reason: 'rollback_failed:DIVERGED' })]);
-    // The person's visit stays on its new hour, which may be another visit's old one, so that visit may stay too: failed, one notice.
-    expect(await noticeCount()).toBe(1);
-    // Nothing renumbered the day.
-    const after = await visitRows();
-    for (const v of visits) expect(Number(after.find((r) => r.id === v.id).route_order)).toBe(Number(before.find((r) => r.id === v.id).route_order));
-    expect((await mockConn('day_replan_plans').where({ run_id: out.runId }).first()).apply_steps.routePersisted).toBe(false);
+    expect(out.apply).toEqual([expect.objectContaining({ status: 'skipped', reason: 'slot_taken', moved: 0 })]);
+    const after = await snapshot();
+    expect(after.rows).toEqual(before.rows);
+    expect(after.rem).toEqual(before.rem);
+    expect(after.log).toBe(before.log);
+    // The clash row was the other writer's savepoint work inside our transaction: it went with the rollback.
+    expect(await mockConn('scheduled_services').where({ id: inserted }).first()).toBeUndefined();
     expect(sentAnything()).toEqual([]);
   });
 
-  // ---- a stopped process: the journal is hand-built, every move is the real rebooker's ----------------------------
-
-  const OPTS = { seriesPolicy: 'single', visitPolicy: 'single', keepStatus: true, suppressTechNotice: true, notifyRequested: false };
-  const minutes = (value) => { const [h, m] = String(value).slice(0, 5).split(':').map(Number); return h * 60 + m; };
-  const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-  const moveTo = (id, start, by = 'day_replan', open = false) => rebooker.reschedule(
-    id, DAY, { start, end: open ? null : hhmm(minutes(start) + 60) }, by, by, open ? { ...OPTS, clearWindowEnd: true } : OPTS,
-  );
-  const setReminder = (id, start) => mockConn('appointment_reminders').where({ scheduled_service_id: id }).update({ appointment_time: parseETDateTime(`${DAY}T${start}`) });
-  const reminderMs = async (id) => new Date((await mockConn('appointment_reminders').where({ scheduled_service_id: id }).first()).appointment_time).getTime();
-
-  /** Makes one journaled step AND performs it for real: the fingerprints are those of the rows before and after. */
-  async function forwardStepFor(v, start, extra = {}) {
-    const { _internals: internals } = require('../services/day-replan/apply');
-    const deps = require('../services/day-replan')._internals.applyDeps();
-    const row = await mockConn('scheduled_services').where({ id: v.id }).first();
-    const step = { id: v.id, fromStart: minutes(row.window_start), toStart: minutes(start), widthMin: 60, state: 'done', ...extra };
-    step.before = internals.fingerprintOf(row, deps);
-    step.after = internals.fingerprintOf(internals.afterStep(row, step), deps);
-    await moveTo(v.id, start, 'day_replan', step.openEnd === true);
-    await setReminder(v.id, start); // the silent reminder sync of that step
-    return step;
-  }
-
-  async function stoppedPlan(steps, extra = {}) {
-    const id = randomUUID();
-    await mockConn('day_replan_plans').insert({
-      id, run_id: randomUUID(), mode: 'apply', technician_id: techId, service_date: DAY, stop_count: 4,
-      current_drive_min: 100, saved_min: 0, current_end_min: 700, accepted: true, reason: 'accepted', changes: '[]', fixed: '[]',
-      apply_started_at: new Date('2097-06-09T08:41:00Z'),
-      apply_steps: JSON.stringify({ version: 1, routeBefore: Object.fromEntries(visits.map((v, i) => [v.id, i + 1])), routePersisted: false, complete: false, steps, ...extra }),
-    });
-    return id;
-  }
-
-  // Recovery runs first in shadow mode too; a shadow run then writes nothing but its own plan rows.
-  const recover = async () => {
-    process.env.GATE_DAY_REPLAN = 'shadow';
-    return runDayReplanIfEnabled({ now: NOW, conn: mockConn });
-  };
-  const noticeCount = async () => (await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`day-replan-failed:${DAY}:${techId}`])).length;
-
-  test('crash after a forward step: recovery undoes it, the reminder and the plan row follow, one notice', async () => {
-    const [a] = visits;
-    const step = await forwardStepFor(a, '15:00');
-    expect(startOf(await visitRows(), a.id)).toBe('15:00');
-    const id = await stoppedPlan([step]);
-
-    const out = await recover();
-    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'rolled_back', reason: 'recovered_after_interruption' })]);
-    expect(startOf(await visitRows(), a.id)).toBe('08:00');
-    expect(await reminderMs(a.id)).toBe(TZ_START('08:00'));
-    expect(await mockConn('day_replan_plans').where({ id }).first()).toMatchObject({ apply_status: 'rolled_back', apply_reason: 'recovered_after_interruption' });
-    expect(await noticeCount()).toBe(1);
-    const journal = (await mockConn('day_replan_plans').where({ id }).first()).apply_steps;
-    expect(journal.steps[0]).toMatchObject({ state: 'done', undo: 'done' });
-    expect(sentAnything()).toEqual([]);
-  });
-
-  test('crash with only an intent journaled (the step never landed): nothing moves and the plan closes', async () => {
-    const [a] = visits;
-    const { _internals: internals } = require('../services/day-replan/apply');
-    const deps = require('../services/day-replan')._internals.applyDeps();
-    const row = await mockConn('scheduled_services').where({ id: a.id }).first();
-    const step = { id: a.id, fromStart: 8 * 60, toStart: 15 * 60, widthMin: 60, state: 'intent' };
-    step.before = internals.fingerprintOf(row, deps);
-    step.after = internals.fingerprintOf(internals.afterStep(row, step), deps);
-    const spy = jest.spyOn(rebooker, 'reschedule');
-    const id = await stoppedPlan([step]);
-
-    const out = await recover();
-    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'rolled_back' })]);
-    expect(spy).not.toHaveBeenCalled();
-    expect(startOf(await visitRows(), a.id)).toBe('08:00');
-  });
-
-  test('crash mid-rollback: the undo that landed is not repeated, the one that did not is finished, and the reminders follow', async () => {
-    const [a, b] = visits;
-    const stepA = await forwardStepFor(a, '15:00');
-    const stepB = await forwardStepFor(b, '16:00');
-    // The rollback undid b (the move landed, its reminder sync never ran, the journal still says intent).
-    await moveTo(b.id, '09:00');
-    await setReminder(b.id, '16:00'); // the process stopped before the reminder followed the undo
-    const logBefore = (await mockConn('reschedule_log').where({ scheduled_service_id: b.id })).length;
-    expect(await reminderMs(b.id)).toBe(TZ_START('16:00'));
-    const id = await stoppedPlan([stepA, { ...stepB, undo: 'intent' }], { rollback: true });
-    const spy = jest.spyOn(rebooker, 'reschedule');
-
-    const out = await recover();
-    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'rolled_back' })]);
-    // Only a was moved; b was not written again.
-    expect(spy.mock.calls.map(([visit]) => visit)).toEqual([a.id]);
-    expect((await mockConn('reschedule_log').where({ scheduled_service_id: b.id })).length).toBe(logBefore);
-    const rows = await visitRows();
-    expect([startOf(rows, a.id), startOf(rows, b.id)]).toEqual(['08:00', '09:00']);
-    // Both reminders follow their visits' hours again, with the 24-hour leg still pending.
-    expect(await reminderMs(a.id)).toBe(TZ_START('08:00'));
-    expect(await reminderMs(b.id)).toBe(TZ_START('09:00'));
-    for (const r of await reminders()) expect(r.reminder_24h_sent).toBe(false);
-    expect(sentAnything()).toEqual([]);
-  });
-
-  test('a person moves a visit after our step: it is left alone, the other visits go back, the plan says failed, one notice', async () => {
-    const [a, b] = visits;
-    const stepA = await forwardStepFor(a, '15:00');
-    const stepB = await forwardStepFor(b, '16:00');
-    await moveTo(a.id, '14:00', 'admin'); // a person's move, after our step
-    await setReminder(a.id, '14:00');
-    const id = await stoppedPlan([stepA, stepB]);
-    const spy = jest.spyOn(rebooker, 'reschedule');
-
-    const out = await recover();
-    expect(out.status).toBe('completed_with_errors');
-    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'failed', reason: 'rollback_failed:DIVERGED' })]);
-    expect(spy.mock.calls.map(([visit]) => visit)).toEqual([b.id]);
-    const rows = await visitRows();
-    expect([startOf(rows, a.id), startOf(rows, b.id)]).toEqual(['14:00', '09:00']);
-    // The person's move keeps its own reminder time; b's was put back.
-    expect(await reminderMs(a.id)).toBe(TZ_START('14:00'));
-    expect(await reminderMs(b.id)).toBe(TZ_START('09:00'));
-    // The route numbers are not rewritten under a day a person changed.
-    expect((await visitRows()).map((r) => Number(r.route_order)).sort()).toEqual([1, 2, 3, 4]);
-    expect(await mockConn('day_replan_plans').where({ id }).first()).toMatchObject({ apply_status: 'failed' });
-    expect(await noticeCount()).toBe(1);
-    expect(sentAnything()).toEqual([]);
-  });
-
-  test('a finished day whose last reminder sync was cut short is re-synced to the final hour and recorded applied', async () => {
-    const [a] = visits;
-    const step = await forwardStepFor(a, '15:00');
-    await setReminder(a.id, '08:00'); // the sync never ran
-    const id = await stoppedPlan([step], { complete: true, routePersisted: true });
-    const spy = jest.spyOn(rebooker, 'reschedule');
-
-    const out = await recover();
-    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'applied', reason: 'applied_recovered' })]);
-    expect(spy).not.toHaveBeenCalled();
-    expect(startOf(await visitRows(), a.id)).toBe('15:00');
-    expect(await reminderMs(a.id)).toBe(TZ_START('15:00'));
-    expect(await noticeCount()).toBe(0);
-    expect(sentAnything()).toEqual([]);
-  });
-
-  const windowEnds = async () => Object.fromEntries((await visitRows()).map((r) => [r.id, r.window_end == null ? null : String(r.window_end).slice(0, 5)]));
-
-  test('a visit with no booked end stays open-ended through the move; a rolled-back day restores NULL, not an explicit end', async () => {
+  test('a visit with no booked end stays open-ended and holds its estimated duration', async () => {
     const [a] = visits;
     await mockConn('scheduled_services').where({ id: a.id }).update({ window_end: null }); // estimated 60: the plan is the usual one
     const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
     expect(out.apply).toEqual([expect.objectContaining({ status: 'applied' })]);
-    const ends = await windowEnds();
-    expect(ends[a.id]).toBeNull();
-    for (const v of visits.slice(1)) expect(ends[v.id]).not.toBeNull();
-    const plan = await mockConn('day_replan_plans').where({ run_id: out.runId }).first();
-    expect(plan.changes.map((c) => c.id)).toContain(a.id);
-    expect(plan.apply_steps.steps.filter((s) => s.id === a.id).every((s) => s.openEnd === true)).toBe(true);
-    expect(sentAnything()).toEqual([]);
-  });
-
-  test('...and when the last step fails, the open-ended visit is back on its start with end NULL', async () => {
-    const [a] = visits;
-    await mockConn('scheduled_services').where({ id: a.id }).update({ window_end: null });
-    const original = rebooker.reschedule.bind(rebooker);
-    let calls = 0;
-    jest.spyOn(rebooker, 'reschedule').mockImplementation(async (...args) => {
-      calls += 1;
-      if (calls === 5) throw Object.assign(new Error('That time slot is no longer available.'), { statusCode: 409, code: 'SLOT_TAKEN' });
-      return original(...args);
-    });
-    const before = await visitRows();
-    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
-    expect(out.apply).toEqual([expect.objectContaining({ status: 'rolled_back', reason: 'step_failed:SLOT_TAKEN' })]);
-    expect(calls).toBeGreaterThan(5); // four landed steps were undone
-    const after = await visitRows();
-    for (const v of visits) expect(startOf(after, v.id)).toBe(startOf(before, v.id));
-    const ends = await windowEnds();
-    expect(ends[a.id]).toBeNull();
-    for (const v of visits.slice(1)) expect(ends[v.id]).toBe(hhmm(minutes(startOf(before, v.id)) + 60));
-    expect(sentAnything()).toEqual([]);
-  });
-
-  test('a 90-minute open-ended visit left on another hour by a stopped process goes back with NULL end', async () => {
-    const [a] = visits;
-    await mockConn('scheduled_services').where({ id: a.id }).update({ window_end: null, estimated_duration_minutes: 90 });
-    // Room for its 90 minutes (08:00-09:30) at its old start: the others sit later in the day.
-    for (const [v, start] of [[visits[1], '10:00'], [visits[2], '12:00'], [visits[3], '14:00']]) {
-      await mockConn('scheduled_services').where({ id: v.id }).update({ window_start: start, window_end: hhmm(minutes(start) + 60) });
-    }
-    const step = await forwardStepFor(a, '15:00', { openEnd: true, widthMin: 90 });
     const row = await mockConn('scheduled_services').where({ id: a.id }).first();
-    expect([String(row.window_start).slice(0, 5), row.window_end]).toEqual(['15:00', null]);
-    const id = await stoppedPlan([step]);
-    const spy = jest.spyOn(rebooker, 'reschedule');
-
-    const out = await recover();
-    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'rolled_back' })]);
-    expect(spy.mock.calls[0][2]).toEqual({ start: '08:00', end: null });
-    const back = await mockConn('scheduled_services').where({ id: a.id }).first();
-    expect([String(back.window_start).slice(0, 5), back.window_end, Number(back.estimated_duration_minutes)]).toEqual(['08:00', null, 90]);
+    expect(row.window_end).toBeNull();
+    for (const v of visits.slice(1)) expect((await mockConn('scheduled_services').where({ id: v.id }).first()).window_end).not.toBeNull();
+    const log = await mockConn('reschedule_log').where({ scheduled_service_id: a.id }).first();
+    expect(String(log.new_window)).toMatch(/^\d\d:\d\d$/); // the start only
     expect(sentAnything()).toEqual([]);
   });
 
-  test('a duration edited by staff after the plan was validated misses the move (rolled_back)', async () => {
-    const { out, edited } = await editBeforeFence({
-      edit: { estimated_duration_minutes: 90 },
-      target: ({ args }) => visits.find((v) => v.id !== args[0]).id,
-      when: () => true,
-    });
-    expect(edited).toBeTruthy();
-    expect(out.apply).toEqual([expect.objectContaining({ status: 'rolled_back' })]);
-    expect(out.apply[0].reason).toMatch(/^step_failed:/);
-    const edit = await mockConn('scheduled_services').where({ id: edited }).first();
-    expect(Number(edit.estimated_duration_minutes)).toBe(90); // the staff edit is theirs and stays
-    expect((await mockConn('day_replan_plans').where({ run_id: out.runId }).first()).apply_steps.routePersisted).toBe(false);
+  test('the self-booking snapshot follows a moved self-booked visit; the repair brings back one a crash left behind', async () => {
+    const [a] = visits;
+    const sbId = randomUUID();
+    await mockConn('self_booked_appointments').insert({ id: sbId, customer_id: a.customerId, date: DAY, start_time: '08:00', end_time: '09:00', status: 'confirmed', confirmation_code: `RP${sbId.slice(0, 8)}` });
+    await mockConn('scheduled_services').where({ id: a.id }).update({ self_booking_id: sbId });
+    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
+    expect(out.apply[0].status).toBe('applied');
+    const moved = await mockConn('scheduled_services').where({ id: a.id }).first();
+    const snap = await mockConn('self_booked_appointments').where({ id: sbId }).first();
+    expect(String(snap.start_time).slice(0, 5)).toBe(String(moved.window_start).slice(0, 5));
+    expect(String(snap.end_time).slice(0, 5)).toBe(String(moved.window_end).slice(0, 5));
+    // A crash after the commit left the snapshot and the reminder on the old hour: the next run repairs both.
+    await mockConn('self_booked_appointments').where({ id: sbId }).update({ start_time: '08:00', end_time: '09:00' });
+    await mockConn('appointment_reminders').where({ scheduled_service_id: a.id }).update({ appointment_time: parseETDateTime(`${DAY}T08:00`) });
+    process.env.GATE_DAY_REPLAN = 'shadow';
+    const next = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
+    expect(next.repaired).toBeGreaterThan(0);
+    const repaired = await mockConn('self_booked_appointments').where({ id: sbId }).first();
+    expect(String(repaired.start_time).slice(0, 5)).toBe(String(moved.window_start).slice(0, 5));
+    expect(await reminderMs(a.id)).toBe(TZ_START(String(moved.window_start).slice(0, 5)));
     expect(sentAnything()).toEqual([]);
   });
-
-  test('a duration edited on a moved visit after its last step is refused at the fence', async () => {
-    const { out, edited } = await editBeforeFence({
-      edit: { estimated_duration_minutes: 90 },
-      target: ({ args }) => args[0],
-      when: ({ changes, args }) => changes.some((c) => c.id === args[0] && c.to === args[2].start),
-    });
-    expect(edited).toBeTruthy();
-    expect(out.apply).toEqual([expect.objectContaining({ status: 'failed', reason: 'rollback_failed:DIVERGED' })]);
-    expect((await mockConn('day_replan_plans').where({ run_id: out.runId }).first()).apply_steps.routePersisted).toBe(false);
-    expect(await noticeCount()).toBe(1);
-  });
-
 });

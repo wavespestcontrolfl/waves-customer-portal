@@ -248,6 +248,13 @@ function applyTechScope(query, column, technicianId) {
 //     own date, re-checked on the locked row) -> 6 -> 3 (tech-day fence)
 //     + probe on the locked row, excluding itself, when the date or window
 //     changes; terminal rows (record corrections) skip it.
+//   services/day-replan/apply.js writeDay (GATE_DAY_REPLAN=true, nightly) .... 1 -> 3 (tech + unassigned) -> row locks
+//     One transaction per tech-day: rung 1, the tech-day fence (the technician's day and the unassigned day, as
+//     the rebooker's single path takes them), then FOR UPDATE on every live row of the date in id order. The day
+//     is read again under the locks and must equal the validated plan (version hash of the date, every stop's
+//     signature, the blocks). Every moved visit is written in the same transaction, and the FINAL state is then
+//     probed with findConflictingVisits (excluding the visit itself, so the other moved visits count at their
+//     new hours); a hit rolls everything back. Reminders sync only after the commit.
 //   services/slot-reservation.js reserveSlot .... 1 -> 3 -> 4
 //     Rung 1 is the txn's FIRST statement — keyed off the slotId, before
 //     the estimate FOR UPDATE (the row-lock rule above; the FK deadlock).

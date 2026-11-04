@@ -9,41 +9,24 @@ jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulin
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 // Loading the real night writer or rebooker must never happen from these tests: deps are injected.
+// Loading the real night writer or rebooker must never happen from these tests: deps are injected.
 jest.mock('../services/auto-dispatch/apply', () => { throw new Error('the night writer must not be loaded here'); });
 jest.mock('../services/rebooker', () => { throw new Error('the rebooker must not be loaded here'); });
 
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
-const { runDayReplanIfEnabled, _internals } = require('../services/day-replan');
-const { makeDb, zigzagRows, row, fakeRebooker } = require('./helpers/day-replan-db');
-const { _internals: applyInternals } = require('../services/day-replan/apply');
+const { runDayReplanIfEnabled } = require('../services/day-replan');
+const { makeDb, zigzagRows, row, makeApplyDeps } = require('./helpers/day-replan-db');
 
 const NOW = new Date('2026-11-03T12:00:00Z'); // 07:00 ET; DST has ended
 const TOMORROW = '2026-11-04';
 const savedEnv = { ...process.env };
 
-function setup({ rows, reminders = [], rebookerOpts = {}, depsOver = {} }) {
+function setup({ rows, reminders = [], over = {} }) {
   const { conn, db } = makeDb({ rows, reminders });
-  const rebooker = fakeRebooker(db, conn, rebookerOpts);
-  const syncMovedReminders = jest.fn(async () => {});
-  const raiseAlert = jest.fn(async () => ({ id: 1 }));
-  const acquireOccupancyLock = jest.fn(async () => {});
-  const lockTechDays = jest.fn(async () => {});
-  const deps = {
-    fixedReason: _internals.fixedReason,
-    rowHours: _internals.rowHours,
-    excludedStatuses: ['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show'],
-    rebooker,
-    syncMovedReminders,
-    locationFields: ['property_id', 'lat', 'lng'],
-    raiseAlert,
-    acquireOccupancyLock,
-    lockTechDays,
-    now: () => NOW,
-    ...depsOver,
-  };
+  const { deps, mocks } = makeApplyDeps(db, { now: NOW, over });
   const run = () => runDayReplanIfEnabled({ now: NOW, conn, deps });
   const windows = () => Object.fromEntries(db.rows.map((r) => [r.id, String(r.window_start).slice(0, 5)]));
-  return { conn, db, rebooker, syncMovedReminders, raiseAlert, deps, run, windows };
+  return { conn, db, deps, ...mocks, run, windows };
 }
 
 beforeEach(() => {
@@ -57,12 +40,12 @@ beforeEach(() => {
 afterAll(() => { process.env = savedEnv; });
 
 describe('shadow and off never write a visit', () => {
-  test.each([[undefined], ['shadow'], ['false'], ['garbage']])('GATE_DAY_REPLAN=%s: no rebooker call, no visit or plan update', async (value) => {
+  test.each([[undefined], ['shadow'], ['false'], ['garbage']])('GATE_DAY_REPLAN=%s: no lock, no visit write, no plan update', async (value) => {
     if (value !== undefined) process.env.GATE_DAY_REPLAN = value;
     const w = setup({ rows: zigzagRows() });
     const before = w.windows();
     const out = await w.run();
-    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    expect(w.acquireOccupancyLock).not.toHaveBeenCalled();
     expect(w.syncMovedReminders).not.toHaveBeenCalled();
     expect(w.windows()).toEqual(before);
     expect(w.db.updates).toEqual([]);
@@ -82,7 +65,7 @@ describe('shadow and off never write a visit', () => {
 describe('apply mode', () => {
   beforeEach(() => { process.env.GATE_DAY_REPLAN = 'true'; });
 
-  test('writes the accepted day, records the outcome on its plan row, and counts the visits', async () => {
+  test('writes the accepted day in one go, records the outcome on its plan row, and counts the visits', async () => {
     const w = setup({ rows: zigzagRows() });
     const out = await w.run();
     expect(out.status).toBe('completed');
@@ -90,30 +73,28 @@ describe('apply mode', () => {
     expect(out.appliedVisits).toBe(out.changedVisits);
     expect(out.appliedVisits).toBeGreaterThan(0);
 
-    const insert = w.db.inserts[0].row;
+    const insert = w.db.inserts.find((i) => i.table === 'day_replan_plans').row;
     expect(insert.mode).toBe('apply');
     expect(insert.accepted).toBe(true);
     const changes = JSON.parse(insert.changes);
-    // The visits now sit on the planned hours, and every write used the day_replan initiator.
+    // The visits now sit on the planned hours, written directly: no temporary hour, one hour each.
     const after = w.windows();
     for (const c of changes) expect(after[c.id]).toBe(c.to);
-    expect(w.rebooker.calls.every((c) => c.reason === 'day_replan' && c.by === 'day_replan')).toBe(true);
-    // No visit ends on a temporary hour: the final hours are one per hour.
     expect(new Set(Object.values(after)).size).toBe(4);
-
-    // The only direct writes to visits are the accepted route numbers (the hours go through the rebooker).
-    const direct = w.db.updates.filter((u) => u.table === 'scheduled_services');
-    expect(direct.length).toBeGreaterThan(0);
-    for (const u of direct) expect(Object.keys(u.patch)).toEqual(['route_order']);
+    const hourWrites = w.db.updates.filter((u) => u.table === 'scheduled_services' && 'window_start' in u.patch);
+    expect(hourWrites).toHaveLength(changes.length);
     expect(w.db.rows.map((r) => r.route_order).sort()).toEqual([1, 2, 3, 4]);
+    // One reschedule_log row per moved visit, all day_replan.
+    const logs = w.db.inserts.filter((i) => i.table === 'reschedule_log').map((i) => i.row);
+    expect(logs).toHaveLength(changes.length);
+    expect(logs.every((l) => l.initiated_by === 'day_replan' && l.reason_code === 'day_replan')).toBe(true);
+    // The plan row holds only the outcome: no journal is written any more.
     const planUpdates = w.db.updates.filter((u) => u.table === 'day_replan_plans');
-    const outcome = planUpdates.at(-1);
-    expect(outcome.count).toBe(1);
-    // The journal was opened first and closed complete.
-    expect(planUpdates[0].patch).toHaveProperty('apply_started_at');
-    expect(JSON.parse(w.db.plans[0].apply_steps)).toMatchObject({ complete: true, routePersisted: true });
-    expect(outcome.patch).toMatchObject({ apply_status: 'applied', apply_reason: 'applied', applied_at: expect.anything() });
+    expect(planUpdates).toHaveLength(1);
+    expect(planUpdates[0].patch).toMatchObject({ apply_status: 'applied', apply_reason: 'applied', applied_at: expect.anything() });
+    expect(Object.keys(planUpdates[0].patch)).not.toContain('apply_steps');
     expect(insert.id).toBeTruthy();
+    expect(w.syncMovedReminders).toHaveBeenCalledTimes(changes.length);
   });
 
   test('a day the plan does not accept is planned and logged, never written', async () => {
@@ -121,7 +102,7 @@ describe('apply mode', () => {
     const w = setup({ rows: [row('a', 0.05, 9), row('b', 0.06, 10)] });
     const out = await w.run();
     expect(out.accepted).toBe(0);
-    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    expect(w.acquireOccupancyLock).not.toHaveBeenCalled();
     expect(w.db.inserts[0].row.mode).toBe('apply');
     expect(w.db.updates).toEqual([]); // no apply_status: nothing was attempted
     expect(out.apply).toEqual([]);
@@ -144,117 +125,80 @@ describe('apply mode', () => {
     const w = setup({
       rows: zigzagRows(),
       // The re-read happens right after deps.now() is called for it; touch one row then.
-      depsOver: { now: () => { calls += 1; if (calls === 1) w.db.rows[1].updated_at = new Date('2026-11-03T12:30:00Z'); return NOW; } },
+      over: { now: () => { calls += 1; if (calls === 1) w.db.rows[1].updated_at = new Date('2026-11-03T12:30:00Z'); return NOW; } },
     });
     const out = await w.run();
     expect(out.apply).toEqual([expect.objectContaining({ status: 'skipped', reason: 'changed_since_plan', moved: 0 })]);
-    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    expect(w.acquireOccupancyLock).not.toHaveBeenCalled();
     expect(w.db.updates[0].patch).toEqual({ apply_status: 'skipped', apply_reason: 'changed_since_plan' });
   });
 
-  test('a failed write rolls the day back and the plan row says rolled_back', async () => {
-    let n = 0;
-    const w = setup({ rows: zigzagRows(), rebookerOpts: { failWhen: () => { n += 1; return n === 2; } } });
+  test('a clash at commit changes nothing and the plan row says skipped', async () => {
+    const w = setup({ rows: zigzagRows() });
+    w.findConflicts.mockImplementationOnce(async () => [{ id: 'x' }]);
     const before = w.windows();
     const out = await w.run();
-    expect(out.apply[0]).toMatchObject({ status: 'rolled_back', moved: 0 });
+    expect(out.apply[0]).toMatchObject({ status: 'skipped', reason: 'slot_taken', moved: 0 });
     expect(w.windows()).toEqual(before);
-    expect(w.db.updates.filter((u) => u.table === 'day_replan_plans').at(-1).patch).toMatchObject({ apply_status: 'rolled_back' });
+    expect(w.db.rows.map((r) => r.route_order)).toEqual([null, null, null, null]);
+    expect(w.syncMovedReminders).not.toHaveBeenCalled();
+    expect(w.db.updates.filter((u) => u.table === 'day_replan_plans').at(-1).patch).toMatchObject({ apply_status: 'skipped', apply_reason: 'slot_taken' });
     expect(out.appliedVisits).toBe(0);
   });
 
-  test('a rollback that fails is recorded as failed with one notice for Claude', async () => {
-    let n = 0;
-    const w = setup({ rows: zigzagRows(), rebookerOpts: { failWhen: () => { n += 1; return n >= 2; } } });
+  test('an unexpected error in the writer is recorded, never thrown out of the run, and shows in the health', async () => {
+    const w = setup({ rows: zigzagRows(), over: { loadDayRows: jest.fn(async () => { throw new Error('boom'); }) } });
     const out = await w.run();
-    expect(out.apply[0].status).toBe('failed');
-    expect(out.status).toBe('completed_with_errors');
-    expect(w.raiseAlert).toHaveBeenCalledTimes(1);
-    expect(w.db.updates.filter((u) => u.table === 'day_replan_plans').at(-1).patch).toMatchObject({ apply_status: 'failed' });
-  });
-
-  test('an unexpected error in the writer is recorded, never thrown out of the run', async () => {
-    // A staff-locked fifth visit stays put, so the writer reads its hours (and the injected fault fires).
-    const w = setup({ rows: [...zigzagRows(), row('e', 0.04, 14, { auto_dispatch_locked: true })], depsOver: { rowHours: () => { throw new Error('boom'); } } });
-    const out = await w.run();
-    // A day the writer could not restore shows in the job's health, too.
     expect(out.status).toBe('completed_with_errors');
     expect(out.apply[0]).toMatchObject({ status: 'failed' });
   });
 });
 
-describe('recovering an interrupted day at the start of a run', () => {
-  const stuck = (w) => {
-    // A swap that stopped after parking a at 10:00 (the run before this one).
-    const a = w.db.rows.find((r) => r.id === 'a');
-    const step = { id: 'a', fromStart: 480, toStart: 600, widthMin: 60, temp: true, state: 'done' };
-    step.before = applyInternals.fingerprintOf({ ...a }, w.deps);
-    a.window_start = '10:00:00';
-    a.window_end = '11:00:00';
-    step.after = applyInternals.fingerprintOf({ ...a }, w.deps);
-    w.db.plans.push({
-      id: 'old-plan', service_date: TOMORROW, technician_id: 'tech-1', apply_status: null, apply_started_at: '2026-11-03T04:41:00Z',
-      apply_steps: JSON.stringify({ version: 1, routeBefore: {}, routePersisted: false, complete: false, steps: [step] }),
-    });
-  };
+describe('repairing a day committed on an earlier run', () => {
+  const etTime = (hhmm) => require('../utils/datetime-et').parseETDateTime(`${TOMORROW}T${hhmm}`);
+  const seed = (w) => w.db.plans.push({
+    id: 'old-plan', service_date: TOMORROW, apply_status: 'applied', applied_at: '2026-11-03T04:41:00Z', changes: [{ id: 'a', from: '08:00', to: '12:00' }],
+  });
+  const rows = () => [row('a', 0.30, 12), row('b', 0.02, 9), row('c', 0.31, 14), row('d', 0.03, 15)];
+  const reminders = () => [{ scheduled_service_id: 'a', appointment_time: etTime('08:00'), cancelled: false }];
 
-  test.each([['true'], ['shadow']])('GATE_DAY_REPLAN=%s: the day is put back BEFORE anything new is planned, and the summary says so', async (value) => {
+  test.each([['true'], ['shadow']])('GATE_DAY_REPLAN=%s: the moved visit\'s reminder is synced again and its records repaired, before planning', async (value) => {
     process.env.GATE_DAY_REPLAN = value;
-    // Rows with a at 10:00 would also be a second visit in b's... so give the day one stop per hour: a parked at 10:00, c elsewhere.
-    const w = setup({ rows: [row('a', 0.30, 8), row('b', 0.02, 9), row('c', 0.31, 12), row('d', 0.03, 13)] });
-    stuck(w);
-    const insertsAtFirstWrite = [];
-    const original = w.rebooker.reschedule.getMockImplementation();
-    w.rebooker.reschedule.mockImplementation(async (...args) => {
-      if (insertsAtFirstWrite.length === 0) insertsAtFirstWrite.push(w.db.inserts.length);
-      return original(...args);
-    });
+    const w = setup({ rows: rows(), reminders: reminders() });
+    seed(w);
     const out = await w.run();
-    expect(out.recovered).toEqual([expect.objectContaining({ id: 'old-plan', status: 'rolled_back', reason: 'recovered_after_interruption' })]);
-    expect(w.db.plans.find((p) => p.id === 'old-plan')).toMatchObject({ apply_status: 'rolled_back' });
-    expect(w.raiseAlert).toHaveBeenCalledTimes(1);
-    // The first write of the run is the recovery's, before any new plan row exists.
-    expect(w.rebooker.calls[0]).toMatchObject({ id: 'a', win: { start: '08:00', end: '09:00' }, reason: 'day_replan' });
-    expect(insertsAtFirstWrite).toEqual([0]);
+    expect(out.repaired).toBe(1);
+    expect(w.syncMovedReminders.mock.calls[0][1]).toMatchObject({ date: TOMORROW, start_time: '12:00' });
+    expect(w.repairMoved).toHaveBeenCalledWith(expect.anything(), 'a');
+    // Repair runs before any plan row is written.
+    expect(w.syncMovedReminders.mock.invocationCallOrder[0]).toBeLessThan(
+      Math.min(...[w.deps.loadDayRows.mock.invocationCallOrder[0] || Infinity]),
+    );
   });
 
   test('off never looks: the kill switch reads nothing', async () => {
     delete process.env.GATE_DAY_REPLAN;
-    const w = setup({ rows: zigzagRows() });
-    stuck(w);
+    const w = setup({ rows: rows(), reminders: reminders() });
+    seed(w);
     expect(await w.run()).toEqual({ status: 'off' });
-    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    expect(w.syncMovedReminders).not.toHaveBeenCalled();
   });
 
-  test('an unrestorable day makes the run unhealthy', async () => {
-    process.env.GATE_DAY_REPLAN = 'true';
-    const w = setup({ rows: [row('a', 0.30, 14), row('b', 0.02, 9), row('c', 0.31, 12), row('d', 0.03, 13)] });
-    stuck(w);
-    w.db.rows.find((r) => r.id === 'a').window_start = '14:00:00'; // a person moved it since
-    const out = await w.run();
-    expect(out.recovered[0].status).toBe('failed');
-    expect(out.status).toBe('completed_with_errors');
-    expect(w.raiseAlert).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('recovery lookup', () => {
-  test('a failed look for interrupted plans stops the run before anything is planned or written', async () => {
+  test('a repair that cannot read never stops the run', async () => {
     process.env.GATE_DAY_REPLAN = 'true';
     const w = setup({ rows: zigzagRows() });
+    let first = true;
     const failing = new Proxy(w.conn, {
       apply(target, thisArg, args) {
-        if (args[0] === 'day_replan_plans') {
-          const chain = { whereNotNull: () => chain, whereNull: () => chain, select: async () => { throw new Error('read failed'); } };
+        if (args[0] === 'day_replan_plans' && first) {
+          first = false;
+          const chain = { where: () => chain, whereNotNull: () => chain, select: async () => { throw new Error('read failed'); } };
           return chain;
         }
         return Reflect.apply(target, thisArg, args);
       },
     });
     const out = await runDayReplanIfEnabled({ now: NOW, conn: failing, deps: w.deps });
-    expect(out).toMatchObject({ status: 'failed', reason: 'recovery_lookup_failed' });
-    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
-    expect(out.days).toBe(0);
+    expect(out.status).toBe('completed');
   });
 });
-
