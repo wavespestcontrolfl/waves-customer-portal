@@ -2601,6 +2601,8 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // A spoken community/subdivision ("the Lakewood Ranch property") is
     // location evidence too — without street/city/ZIP it can't be verified,
     // so it must hold for review, not fall back to the on-file primary.
+    // The one exception is a community that names the on-file street itself
+    // (restatesOnFileAddress compares it as a house-less street).
     unclearServiceOk = unclearServiceAssessmentApplies(extraction, opts, avPositivelyValidated);
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
@@ -3342,7 +3344,7 @@ function streetNameParts(tokens) {
 function restatesOnFileAddress(sa, knownCustomer) {
   const saved = knownCustomer || {};
   const onFile = splitStreetLineUnit(saved.addressLine1);
-  if (!onFile.street || sa.subdivision_or_community) return false;
+  if (!onFile.street) return false;
   const raw = String(sa.raw_text || '').trim()
     .replace(/,\s*same (?:as (?:before|always)|place|address)\.?$/i, '')
     .replace(/^(?:over )?(?:on|at)\s+/i, '');
@@ -3397,6 +3399,12 @@ function restatesOnFileAddress(sa, knownCustomer) {
   });
   const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
   const streets = structured.map(part => part.street);
+  // A spoken community is street evidence too (call 657a96e6, 2026-11-04: a
+  // community heard as "Sample Palm Manor" for the on-file "1234 Sample Palm
+  // Manor Dr" held a confirmed re-service). It agrees only when it names the
+  // on-file street, with or without the suffix — the same test a house-less
+  // raw street passes. Any other community is another place and holds.
+  streets.push(String(sa.subdivision_or_community || '').trim());
   if (raw && !rawIsLocality && !acknowledgment) streets.push(tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress);
   // A raw ZIP restatement carrying ordinary punctuation or ZIP+4 ("34219.",
   // "34219-1234") is not the exact-string match rawIsLocality looks for, so it
