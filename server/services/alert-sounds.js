@@ -14,6 +14,7 @@
 const ALERT_SOUNDS = Object.freeze({
   sms_reply: 'waves-text.caf',
   portal_ask: 'waves-text.caf',
+  messenger_reply: 'waves-text.caf',
   customer_missed_call: 'waves-missed-call.caf',
   promise_chaser: 'waves-missed-call.caf',
   relay_hot_lead: 'waves-missed-call.caf',
@@ -23,6 +24,7 @@ const ALERT_SOUNDS = Object.freeze({
   customer_email_received: 'waves-email.caf',
   sms_operational_followup: 'waves-reminder.caf',
   call_commitment_overdue: 'waves-reminder.caf',
+  waiting_summary: 'waves-reminder.caf',
   payment_failed: 'waves-payment-problem.caf',
   bill_payment_error: 'waves-payment-problem.caf',
 });

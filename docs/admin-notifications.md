@@ -438,8 +438,32 @@ app bundle (`ios/WavesPay/Resources/Sounds`). iOS plays its default sound when t
 older app version still rings. A Sound switch set to off now holds on iOS too: `apns.js` sends no `aps.sound`
 for a `silent` push. A new alert type gets a sound by adding a line to the map and a file to the app.
 
+Bell-only kinds that also push (owner 2026-11-03, "ok add", choices A and B; gate `GATE_BELL_BANNERS`, dark): three
+kinds of alert reached only the portal bell and now also send a phone banner when a write rings. A: `sms_operational_followup`
+(a text follow-up due) and `call_commitment_overdue` (a promise to a caller overdue) push only from 7:00 AM up to 9:00 PM
+Eastern, judged when the banner is sent; outside those hours the bell row stays and no banner goes (the 8 AM summary banner
+covers them). B: the Facebook message bell (`messenger_reply`, one standing bell per thread) pushes at any hour, like a
+text. `NotificationService.notifyAdmin` calls `bannerAfterWrite` in `server/services/bell-banners.js` once per write; a banner
+goes only for a fresh unread row or a refresh that rang again, never for a repeat, a withheld bell, an Activity-only row (the
+call-commitment backlog summary) or a row routed to Claude's queue, and only after the row commits (a rollback sends
+nothing; a write inside a nested transaction waits for the outermost commit). It goes out through `triggerNotification` with
+`pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
+line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
+
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
+
+The 8 AM banner (owner 2026-11-03, "ok add", choice C; `GATE_MORNING_BANNER`, dark): once a day at 8:00 AM
+ET, `server/services/morning-banner.js` sends ONE phone banner, "N items wait for you" ("1 item waits for you"),
+with the three busiest areas in the text ("Comms 6 · Schedule 3 · Billing 2"). A tap opens the dashboard with the
+alert list open (`/admin/dashboard?bell=open`, read by `NotificationBell`). It counts the open bell alerts that need
+a person: an alert row not done, severity `needs-you` or `broken`, `who` = person, judged by `needs-me.js`
+`mapAlertRow`. It leaves out Activity-only rows, rows sent to Claude, unsorted rows and the dashboard's standing
+counts (an alert row already echoes most of them). With zero items it sends nothing. It is the `waiting_summary`
+trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner per ET day (the send first takes a
+`sms_send_claims` row `morning_banner:<ET date>`, so a deploy overlap or a restart cannot send a second one; a
+day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
+"Morning summary: items waiting for you") or by unsetting the gate. It sends nothing to a customer.
 
 ## 7. How to raise one
 

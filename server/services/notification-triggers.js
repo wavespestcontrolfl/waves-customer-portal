@@ -433,6 +433,22 @@ const TRIGGER_REGISTRY = {
         : require('./admin-alert-buttons').closeNoteButtons('handled') },
     }),
   },
+  // Written directly by messenger-inbox.js ringBell (raiseAdminAlert with a per-thread dedupeKey and bell: true):
+  // one standing bell per Facebook thread. Registered so the row carries a known trigger key and the phone banner
+  // (bell-banners.js, GATE_BELL_BANNERS) has a type to send under. `build` takes the written row's own words as
+  // alertTitle/alertBody/alertLink. Admin-only (not techVisible), as the bell row already is.
+  messenger_reply: {
+    label: 'Facebook message',
+    category: 'alert',
+    priority: 'high',
+    group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'customer_answered', closedBy: 'server/services/messenger-inbox.js', contact: true },
+    build: (p) => ({
+      title: p.alertTitle || 'New Facebook message',
+      body: p.alertBody || 'Open the thread to read it and reply.',
+      link: p.alertLink || '/admin/communications#tab=messenger',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a
@@ -461,10 +477,11 @@ const TRIGGER_REGISTRY = {
     priority: 'high',
     group: 'Communication',
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/sms-operational-actions.js', promise: true },
+    // The phone banner (bell-banners.js) carries the written row's own words as alertTitle/alertBody/alertLink.
     build: (p) => ({
-      title: 'An SMS request needs follow-up',
-      body: 'Open the customer profile to verify completion or take the next step.',
-      link: `/admin/customers?customerId=${encodeURIComponent(p.customerId)}&tab=comms`,
+      title: p.alertTitle || 'An SMS request needs follow-up',
+      body: p.alertBody || 'Open the customer profile to verify completion or take the next step.',
+      link: p.alertLink || `/admin/customers?customerId=${encodeURIComponent(p.customerId)}&tab=comms`,
     }),
   },
   // Written directly by call-commitments-watchdog (notifyAdmin with its own
@@ -480,10 +497,11 @@ const TRIGGER_REGISTRY = {
     priority: 'high',
     group: 'Communication',
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/call-commitments-watchdog.js', promise: true },
+    // The phone banner (bell-banners.js) carries the written row's own words as alertTitle/alertBody/alertLink.
     build: (p) => ({
-      title: p.count > 1 ? `${p.count} promises to callers are overdue` : 'A promise to a caller is overdue',
-      body: p.summary || 'Open the Owed tab to mark it done or dismiss it.',
-      link: '/admin/communications#tab=owed',
+      title: p.alertTitle || (p.count > 1 ? `${p.count} promises to callers are overdue` : 'A promise to a caller is overdue'),
+      body: p.alertBody || p.summary || 'Open the Owed tab to mark it done or dismiss it.',
+      link: p.alertLink || '/admin/communications#tab=owed',
     }),
   },
   // Fired by call-recording-processor (GATE_VOICEMAIL_CALLBACK_ALERT) for a
@@ -1150,6 +1168,26 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // The 8:00 AM ET banner (GATE_MORNING_BANNER, owner 2026-11-03 "ok add", choice C): one phone banner that says how many
+  // items wait for the owner and opens his alert list. services/morning-banner.js sends it pushOnly, so it writes no bell
+  // row (rule: fyi, only the retention sweep would ever close one) and the owner can switch it off in Push Settings. It
+  // takes the place of a banner for each of his other action items. p = { count, areas: [{ area, count }], day }.
+  waiting_summary: {
+    label: 'Morning summary: items waiting for you',
+    category: 'alert',
+    priority: 'normal',
+    group: 'Alerts',
+    rule: { area: 'System', severity: 'fyi', who: 'person', expiryDays: 7 },
+    build: (p) => {
+      const count = Number(p.count) || 0;
+      const areas = (Array.isArray(p.areas) ? p.areas : []).slice(0, 3);
+      return {
+        title: count === 1 ? '1 item waits for you' : `${count} items wait for you`,
+        body: areas.map((a) => `${a.area} ${a.count}`).join(' \u00b7 ') || null,
+        link: '/admin/dashboard?bell=open',
+      };
+    },
+  },
 };
 
 const PRIORITY_VIBRATE = {
@@ -1160,6 +1198,8 @@ const PRIORITY_VIBRATE = {
 };
 
 function pushTagFor(triggerKey, payload = {}) {
+  // A bell banner (bell-banners.js): one tag per bell row, so a refresh ring replaces its own banner.
+  if (payload.alertRowId) return `waves-${triggerKey}-${payload.alertRowId}`;
   if (triggerKey === 'new_lead' && payload.twilioSid) {
     return `waves-new_lead-${payload.twilioSid}`;
   }
@@ -1257,6 +1297,10 @@ function pushTagFor(triggerKey, payload = {}) {
     // not let later customers' banners silently replace earlier ones.
     return `waves-${triggerKey}-${payload.serviceRecordId || 'unknown-record'}`;
   }
+  // One banner per ET day: a late or repeated send replaces the same day's banner, and tomorrow's never replaces today's.
+  if (triggerKey === 'waiting_summary') {
+    return `waves-waiting_summary-${payload.day || 'unknown-day'}`;
+  }
   return `waves-${triggerKey}`;
 }
 
@@ -1286,7 +1330,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1331,7 +1375,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       // amounts, goes to admin-role users alone. adminRoleOnly remains as
       // explicit documentation on owner-only triggers; techVisible is the
       // operative flag for both push recipients and bell visibility.
-      if (!trigger.techVisible) recipientQuery = recipientQuery.where({ role: 'admin' });
+      // adminOnly: a caller that sends the owner a banner (bell-banners.js) skips technicians even for a techVisible type.
+      if (!trigger.techVisible || adminOnly) recipientQuery = recipientQuery.where({ role: 'admin' });
       activeAdmins = await recipientQuery.select('id', 'role');
       // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
       // for a customer on its own route (technicianServicesCustomer, the rule the
@@ -1391,7 +1436,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     try {
       const bellPolicy = require('./notification-bell-policy');
       if (bellPolicy.isBellPolicyEnabled()) {
-        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule }));
+        // bellAuthorized (pushOnly only): the banner for a bell row its writer already rang (bell-banners.js; each writer
+        // tags bell: true). The push keeps that answer instead of judging the event again without the tag, so the
+        // banner does not depend on GATE_CUSTOMER_ALERTS_RING.
+        const authorized = pushOnly && bellAuthorized ? { options: { bell: true } } : {};
+        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule, ...authorized }));
         // Guarded: a test that mocks the policy module without the helper keeps today's bell write.
         declaredCustomerAlert = !policySilenced && typeof bellPolicy.ringsAsCustomerAlert === 'function'
           && bellPolicy.ringsAsCustomerAlert({ triggerKey, declared: trigger.rule });
@@ -1614,7 +1663,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               // portal_ask: every push is an ask that is new or rang again (portal-ask-push.js callers), so a repeat on
               // the same tag (the customer asked again in the same chat) must alert again, not silently replace the
               // banner. The admin's sound preference still holds (silent/vibrate above).
-              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask',
+              renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask' || Boolean(payload.alertRowId),
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
               ...(pushCall && adminRoleIds.has(adminUserId) ? pushCall : {}),
             };

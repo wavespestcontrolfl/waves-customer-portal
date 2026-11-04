@@ -14,10 +14,11 @@ const { AREAS, SEVERITIES, WHO, DONE_WHEN } = require('../services/admin-alert-c
 const REPO_ROOT = path.join(__dirname, '..', '..');
 const entries = Object.entries(TRIGGER_REGISTRY);
 
-// The 7 types that were `informational: true` before the rule existed (a fact, not work).
+// The 7 types that were `informational: true` before the rule existed (a fact, not work), plus waiting_summary
+// (GATE_MORNING_BANNER, owner 2026-11-03): the 8 AM count banner, push only, no bell row, so it is a note, not work.
 const FYI_KEYS = [
   'job_application_withdrawn', 'job_interview_booked', 'job_complete', 'newsletter_proof_approved',
-  'one_tap_purchase_completed', 'payment_refunded', 'payment_succeeded',
+  'one_tap_purchase_completed', 'payment_refunded', 'payment_succeeded', 'waiting_summary',
 ];
 
 describe('trigger registry catalog contract', () => {
@@ -56,13 +57,13 @@ describe('trigger registry catalog contract', () => {
     const declared = (flag) => entries.filter(([, t]) => t.rule[flag] === true).map(([key]) => key).sort();
     expect(declared('contact')).toEqual([
       'appointment_reschedule_intent', 'bundle_quote_requested', 'customer_email_received', 'customer_missed_call',
-      'customer_voicemail_callback', 'new_lead', 'portal_ask', 'relay_hot_lead', 'relay_reservice_filed', 'relay_unbooked_call',
+      'customer_voicemail_callback', 'messenger_reply', 'new_lead', 'portal_ask', 'relay_hot_lead', 'relay_reservice_filed', 'relay_unbooked_call',
       'reservice_self_booked', 'sandy_transfer_no_context', 'sms_reply',
     ]);
     expect(declared('promise')).toEqual(['call_commitment_overdue', 'promise_chaser', 'sms_operational_followup']);
   });
 
-  test('the fyi set is the 7 former informational types', () => {
+  test('the fyi set is the 7 former informational types and the morning count banner', () => {
     const fyi = entries.filter(([, t]) => t.rule.severity === 'fyi').map(([key]) => key).sort();
     expect(fyi).toEqual([...FYI_KEYS].sort());
   });
