@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
@@ -309,25 +309,53 @@ function customerNameFor(n, type) {
   return String(n.title || '').toLowerCase().includes(name.toLowerCase()) ? null : name;
 }
 
-// "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE) inside "What to do", on a row the server marked `sendToClaude` (never
-// customer contact). One tap moves the row out of the bell into Claude's queue, where a terminal tab works on it;
-// onSend resolves 'sent' (the row leaves the list), 'refreshed' (the list was read again with a note) or 'failed'.
-function SendToClaude({ n, color, onSend }) {
+// "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE) on any row the server marked `sendToClaude` (never customer contact),
+// below the row's text. Two steps: the button opens a small panel with an optional note for Claude; Send then moves the
+// row out of the bell into Claude's queue, where a Claude tab works on it (owner 2026-11-03: for any issue). onSend(n,
+// note) resolves 'sent' (the row leaves the list), 'refreshed' (the list was read again with a note) or 'failed'.
+// Its own click and key handling, never the row's. Escape closes the panel only (data-modal-escape-owned keeps it from
+// closing the whole bell).
+const NOTE_MAX = 500;
+const SENT_NOTE = 'Sent to Claude.';
+function SendToClaude({ n, color, marginTop, onSend }) {
+  const [panel, setPanel] = useState(false);
+  const [note, setNote] = useState('');
   const [state, setState] = useState(null); // null | 'sending' | 'failed'
+  const noteId = useId();
+  const close = () => { setPanel(false); setNote(''); setState(null); };
   const send = async () => {
     setState('sending');
-    const result = await onSend(n);
-    setState(result === 'failed' ? 'failed' : null);
+    const result = await onSend(n, note.trim());
+    if (result === 'failed') setState('failed');
+    else close();
+  };
+  const onKeyDown = (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape' && state !== 'sending') close();
   };
   const text = { fontSize: 14, lineHeight: 1.4, color };
+  const button = { padding: '6px 12px', minHeight: 36, borderRadius: 6, border: `1px solid ${color}`, background: 'none', fontSize: 14, fontWeight: 600, color };
   return (
-    <div style={{ marginTop: 8 }}>
-      <button type="button" onClick={send} disabled={state === 'sending'}
-        style={{ padding: '6px 12px', minHeight: 36, borderRadius: 6, border: `1px solid ${color}`, background: 'none', cursor: state === 'sending' ? 'default' : 'pointer', fontSize: 14, fontWeight: 600, color }}>
-        {state === 'sending' ? 'Sending\u2026' : 'Send to Claude'}
-      </button>
-      <div style={{ ...text, marginTop: 4 }}>Moves it out of your bell. A Claude terminal tab works on it.</div>
-      {state === 'failed' && <div role="alert" style={{ ...text, marginTop: 4 }}>Couldn&apos;t send it. Try again.</div>}
+    <div onClick={(e) => e.stopPropagation()} onKeyDown={onKeyDown} data-modal-escape-owned="true" style={{ marginTop: marginTop ?? 8 }}>
+      {!panel ? (
+        <button type="button" onClick={() => setPanel(true)} style={{ ...button, cursor: 'pointer' }}>Send to Claude</button>
+      ) : (
+        <div>
+          <label htmlFor={noteId} style={{ ...text, fontWeight: 600, display: 'block' }}>Note for Claude (optional)</label>
+          <textarea id={noteId} value={note} maxLength={NOTE_MAX} rows={3} disabled={state === 'sending'}
+            onChange={(e) => setNote(e.target.value)}
+            style={{ display: 'block', boxSizing: 'border-box', width: '100%', marginTop: 4, padding: 8, borderRadius: 6, border: `1px solid ${color}`, background: 'transparent', color, fontSize: 16, lineHeight: 1.4, fontFamily: 'inherit', resize: 'vertical' }} />
+          <div style={{ ...text, marginTop: 2, textAlign: 'right' }}>{note.length}/{NOTE_MAX}</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button type="button" onClick={send} disabled={state === 'sending'} style={{ ...button, cursor: state === 'sending' ? 'default' : 'pointer' }}>
+              {state === 'sending' ? 'Sending\u2026' : 'Send'}
+            </button>
+            <button type="button" onClick={close} disabled={state === 'sending'} style={{ ...button, cursor: 'pointer' }}>Cancel</button>
+          </div>
+          <div style={{ ...text, marginTop: 4 }}>Moves it out of your bell. A Claude tab opens on the Mac within about 10 minutes.</div>
+          {state === 'failed' && <div role="alert" style={{ ...text, marginTop: 4 }}>Couldn&apos;t send it. Try again.</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -336,7 +364,7 @@ function SendToClaude({ n, color, onSend }) {
 // open asks the server for the row's plain-words summary (onExplain resolves it, or null); a summary the list already
 // carried shows at once. The alert's own long text stays one tap further, under "Show original text". Its own click
 // and key handling, never the row's (the row navigates to its link and marks itself read only on its own tap).
-function WhatToDo({ n, color, marginTop, onExplain, onSend }) {
+function WhatToDo({ n, color, marginTop, onExplain }) {
   const [shown, setShown] = useState(false);
   // The server checked the shape: a summary has its text and a steps list. The customer is on the row's own line.
   const [summary, setSummary] = useState(n.explainer);
@@ -385,7 +413,6 @@ function WhatToDo({ n, color, marginTop, onExplain, onSend }) {
               )}
             </>
           )}
-          {n.sendToClaude && onSend && <SendToClaude n={n} color={color} onSend={onSend} />}
           {original && (
             <div style={{ marginTop: 8 }}>
               <button type="button" aria-expanded={originalShown} onClick={() => setOriginalShown((v) => !v)} style={linkStyle}>
@@ -419,13 +446,22 @@ function CustomerLine({ n, type, color, marginTop }) {
 }
 
 // A row's longer text: "What to do" on a row the server marked explainable, else "Show full text" when the row has a
-// detail (fullTextFor), else nothing.
+// detail (fullTextFor), else nothing. Below it, "Send to Claude" on a row the server marked `sendToClaude`.
 // The panel is keyed on the row's content version: an alert whose text changed (a refreshed list) starts a fresh panel,
 // so a summary of the old text never stays on screen.
 function MoreText({ n, type, color, marginTop, onExplain, onSend }) {
-  if (type === 'admin' && n.explainable) return <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} onSend={onSend} />;
-  const fullText = fullTextFor(n, type);
-  return fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null;
+  const explainable = type === 'admin' && n.explainable;
+  const fullText = explainable ? null : fullTextFor(n, type);
+  const more = explainable
+    ? <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} />
+    : (fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null);
+  if (!(type === 'admin' && n.sendToClaude && onSend)) return more;
+  return (
+    <>
+      {more}
+      <SendToClaude key={`send-${n.version}`} n={n} color={color} marginTop={more ? 6 : marginTop} onSend={onSend} />
+    </>
+  );
 }
 
 // sessionReady (admin layout): false while the staff session is still being verified.
@@ -456,6 +492,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   const [doneNext, setDoneNext] = useState(null); // the server's cursor for older done rows
   const [doneNote, setDoneNote] = useState(null); // short inline note after a stale Reopen
   const [actionNote, setActionNote] = useState(null); // status note after a row button (top of the list)
+  const [undoOffer, setUndoOffer] = useState(null); // { id, at }: the 10-second Undo after a Send to Claude
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
   // hides itself once the user grants permission.
@@ -724,6 +761,11 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
 
   // The row-button status note lasts until the panel closes or another action runs.
   useEffect(() => { if (!open) setActionNote(null); }, [open]);
+  useEffect(() => {
+    if (!undoOffer) return undefined;
+    const timer = setTimeout(() => setUndoOffer(null), 10000);
+    return () => clearTimeout(timer);
+  }, [undoOffer]);
 
   // Full dialog contract via the shared hook: move focus into the panel,
   // trap Tab/Shift+Tab inside it, close on Escape, and restore focus to the
@@ -812,14 +854,18 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     fetchCount();
   };
 
-  // "Send to Claude" (SendToClaude): same content fence as Done. Success moves the row out of the bell like Done and
-  // shows the server's note; a row that changed, closed or can no longer be sent re-reads the list with a note; any
-  // other failure keeps the row and the button shows an inline error. Resolves 'sent' | 'refreshed' | 'failed'.
-  const sendRowToClaude = async (n) => {
+  // "Send to Claude" (SendToClaude): same content fence as Done, plus the admin's optional note. Success moves the row
+  // out of the bell like Done, shows "Sent to Claude." and offers Undo for 10 seconds (undoSend); a row that changed,
+  // closed or can no longer be sent re-reads the list with a note; any other failure keeps the row and the panel shows
+  // an inline error. Resolves 'sent' | 'refreshed' | 'failed'.
+  const sendRowToClaude = async (n, note) => {
     setActionNote(null);
+    setUndoOffer(null);
     let d;
     try {
-      d = await requestJson(`${basePath}/${encodeURIComponent(n.id)}/send-to-claude`, { method: 'POST', body: JSON.stringify({ version: n.version }) });
+      d = await requestJson(`${basePath}/${encodeURIComponent(n.id)}/send-to-claude`, {
+        method: 'POST', body: JSON.stringify({ version: n.version, ...(note ? { note } : {}) }),
+      });
     } catch (err) {
       if (err?.status !== 409 && err?.status !== 422 && err?.status !== 404) return 'failed';
       loadNotifications();
@@ -828,8 +874,26 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     }
     if (d?.sent !== true) return 'failed';
     removeDoneRow(n);
-    setActionNote(typeof d.message === 'string' && d.message ? d.message : 'Sent to Claude.');
+    setActionNote(SENT_NOTE);
+    if (typeof d.at === 'string' && d.at) setUndoOffer({ id: n.id, at: d.at });
     return 'sent';
+  };
+
+  // The Undo beside "Sent to Claude.": puts the row back while no Claude tab has started on it. The offer ends after
+  // 10 seconds (the effect below) or on any other note.
+  const undoSend = async () => {
+    const offer = undoOffer;
+    if (!offer) return;
+    setUndoOffer(null);
+    try {
+      await requestJson(`${basePath}/${encodeURIComponent(offer.id)}/unsend-from-claude`, { method: 'POST', body: JSON.stringify({ at: offer.at }) });
+    } catch (err) {
+      setActionNote(err?.status === 409 && err.data?.error === 'started' ? 'Claude already started on it.' : 'Couldn\'t undo. It stays with Claude.');
+      return;
+    }
+    loadNotifications();
+    fetchCount();
+    setActionNote('Back in your bell.');
   };
 
   // A row button the server set on this row (RowActions): same content fence
@@ -1012,7 +1076,16 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     : { bg: CUSTOMER_SURFACE.surface, border: CUSTOMER_SURFACE.border, text: CUSTOMER_SURFACE.text, muted: CUSTOMER_SURFACE.muted, teal: '#0A7EC2', unreadBg: 'rgba(10,126,194,0.10)', white: '#FFFFFF', badge: '#C8102E' };
 
   const actionNoteEl = type === 'admin' && actionNote && (
-    <div role="status" style={{ padding: '10px 20px', fontSize: 14, lineHeight: 1.4, color: colors.text, borderBottom: `1px solid ${colors.border}` }}>{actionNote}</div>
+    <div role="status" style={{ padding: '10px 20px', fontSize: 14, lineHeight: 1.4, color: colors.text, borderBottom: `1px solid ${colors.border}` }}>
+      {actionNote}
+      {undoOffer && actionNote === SENT_NOTE && (
+        <>
+          {' '}
+          <button type="button" onClick={undoSend}
+            style={{ padding: 0, border: 0, background: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.text }}>Undo</button>
+        </>
+      )}
+    </div>
   );
 
   const moreControl = type === 'admin' && !loading && !loadFailed && hasMore && (
