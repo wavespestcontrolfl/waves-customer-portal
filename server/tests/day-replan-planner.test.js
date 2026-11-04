@@ -350,6 +350,18 @@ describe('technician schedule blocks', () => {
     // Service 11:15-11:45 overlaps the block; the stop was not booked inside it (11:00-11:30), so no order is legal.
     expect(planDay(inp).reason).toBe('no_feasible_order');
   });
+
+  test('a grandfathered fixed stop may overlap a block only as much as it did as booked', () => {
+    // f is booked 13:00 for 35 min; a block 13:30-14:00 overlaps that booked service by 5 min (grandfathered).
+    const block = { startMin: 13 * 60 + 30, endMin: 14 * 60 };
+    const onTime = input([stop('f', 0, 13, { movable: false, workMin: 35 })], { departureMin: 13 * 60, options: { blocks: [block] } });
+    const ok = planDay(onTime);
+    expect(ok.grandfathered).toEqual(['f']);
+    expect(ok.reason).not.toBe('no_feasible_order');
+    // Reached at 13:20 the service runs 13:20-13:55: 25 min inside the block, more than the booked 5, so no plan.
+    const late = input([stop('f', 0, 13, { movable: false, workMin: 35 })], { departureMin: 13 * 60 + 20, options: { blocks: [block] } });
+    expect(planDay(late).reason).toBe('no_feasible_order');
+  });
 });
 
 describe('the day closes with the night pass bound', () => {

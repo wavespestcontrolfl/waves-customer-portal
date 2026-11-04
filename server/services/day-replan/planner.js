@@ -111,13 +111,30 @@ function hitsBlock(blocks, start, work) {
   return blocks.some((b) => start < b.endMin && start + work > b.startMin);
 }
 
+/** Minutes of [start, start + work) inside each block, in block order. */
+function blockOverlaps(blocks, start, work) {
+  return blocks.map((b) => Math.max(0, Math.min(start + work, b.endMin) - Math.max(start, b.startMin)));
+}
+
+/** A fixed stop's service may not overlap a block; a grandfathered one may overlap each block only as much as
+ *  its booked interval already did (never a new block, never more minutes). */
+function fixedBlockOk(ctx, idx, start, work) {
+  if (!ctx.grandfathered.has(idx)) return !hitsBlock(ctx.blocks, start, work);
+  const booked = ctx.bookedOverlaps.get(idx);
+  return blockOverlaps(ctx.blocks, start, work).every((m, j) => m <= booked[j]);
+}
+
 function buildContext(stops, origin, departureMin, legMin, options) {
   const opts = resolveOptions(options);
   const blocks = cleanBlocks(options && options.blocks);
   // A fixed stop that already overlaps a block as booked keeps its hour (grandfathered); a plan may not add overlaps.
   const grandfathered = new Set();
+  const bookedOverlaps = new Map();
   stops.forEach((s, i) => {
-    if (!s.movable && hitsBlock(blocks, s.slotStartMin, s.workMin)) grandfathered.add(i);
+    if (!s.movable && hitsBlock(blocks, s.slotStartMin, s.workMin)) {
+      grandfathered.add(i);
+      bookedOverlaps.set(i, blockOverlaps(blocks, s.slotStartMin, s.workMin));
+    }
   });
   let fixedMask = 0;
   for (const s of stops) {
@@ -138,6 +155,7 @@ function buildContext(stops, origin, departureMin, legMin, options) {
     fixedMask,
     blocks,
     grandfathered,
+    bookedOverlaps,
     dayEndMin: Infinity,
   };
 }
@@ -186,7 +204,7 @@ function step(ctx, state, idx) {
   } else {
     slot = stop.slotStartMin;
     if (t > slot + ctx.bound) return null;
-    if (!ctx.grandfathered.has(idx) && hitsBlock(ctx.blocks, Math.max(t, slot), stop.workMin)) return null;
+    if (!fixedBlockOk(ctx, idx, Math.max(t, slot), stop.workMin)) return null;
   }
   if (t < slot) t = slot;
   t += stop.workMin;
