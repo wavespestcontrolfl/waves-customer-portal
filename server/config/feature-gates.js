@@ -10432,3 +10432,12 @@ function dayReplanMode() {
 }
 // GATE_DAY_REPLAN reader, on its own line so gate PRs never conflict.
 module.exports.dayReplanMode = dayReplanMode;
+
+// GATE_PORTAL_EMAIL_RESUBSCRIBE read at CALL time (so a flip needs no redeploy); strict `=== 'true'`,
+// dark by default. Owner 2026-11-04 ("build", gap #18): turning the app's Email messages switch ON releases
+// the customer's OWN email unsubscribe (services/email-resubscribe.js). Off = the switch behaves as before.
+function portalEmailResubscribeLive() {
+  return process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE === 'true';
+}
+// GATE_PORTAL_EMAIL_RESUBSCRIBE reader, on its own line so gate PRs never conflict.
+module.exports.portalEmailResubscribeLive = portalEmailResubscribeLive;

@@ -5,7 +5,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled, accountSavedProperties } = require('../services/account-properties');
 const PropertyTexts = require('../services/property-notification-prefs');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, portalEmailResubscribeLive } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -482,6 +482,39 @@ async function ensurePrefs(customerId) {
 }
 
 
+// GATE_PORTAL_EMAIL_RESUBSCRIBE: the Email messages switch reads OFF while the
+// address carries an unsubscribe the customer made by email link (the send path
+// blocks on it whatever the stored switch says). Stored values are untouched.
+async function emailSwitchReflectsUnsubscribe(email, dbh = db) {
+  if (!portalEmailResubscribeLive() || !email) return false;
+  return require('../services/email-resubscribe').hasReleasableUnsubscribe(email, { dbh });
+}
+
+async function holderEmailOnFile(customerId, dbh = db) {
+  const row = await dbh('customers').where({ id: customerId }).first('email');
+  return row?.email || '';
+}
+
+// An OFF save for a switch that stored ON is only legitimate as the reading
+// emailSwitchReflectsUnsubscribe produced (a switch shown OFF cannot be turned
+// off again), so it is an echo, not an opt-out, and must not be stored.
+async function holderOffSaveIsEcho(customerId, updates, stored) {
+  return updates.emailEnabled === false && stored?.email_enabled !== false && portalEmailResubscribeLive()
+    && emailSwitchReflectsUnsubscribe(await holderEmailOnFile(customerId));
+}
+
+// Turning Email messages ON releases the customer's own unsubscribe in the
+// save's transaction; the caller clears SendGrid after the commit.
+async function releaseOwnUnsubscribesOnSwitchOn({ trx, email, customerId, actor, contactSlot }) {
+  if (!email || !portalEmailResubscribeLive()) return [];
+  return require('../services/email-resubscribe').releaseOwnUnsubscribes(
+    { email, customerId, actor, ...(actor === 'contact' ? { contactSlot } : {}) }, { dbh: trx });
+}
+
+async function clearReleasedUnsubscribes(released) {
+  if (released.length) await require('../services/email-resubscribe').clearSendgridUnsubscribes(released);
+}
+
 // Build the account-level preferences payload: per-property toggles/contacts
 // come from the current customer; delivery channels come from the account's
 // primary profile.
@@ -491,9 +524,12 @@ async function loadPreferencePayload(req) {
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
   const accountHasEmail = await accountEmailAvailable(req.customerId, primaryId);
   const billingHasEmail = await customerEmailAvailable(req.customerId) || deliverableEmail(prefs.billing_email);
+  const reflectUnsubscribe = prefs.email_enabled !== false && portalEmailResubscribeLive()
+    && await emailSwitchReflectsUnsubscribe(await holderEmailOnFile(req.customerId));
   return {
     ...preferencePayload({
       ...prefs,
+      ...(reflectUnsubscribe ? { email_enabled: false } : {}),
       appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
       service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
       service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
@@ -764,6 +800,7 @@ async function contactPreferencePayload(req) {
   ]);
   const emailOnFile = contactEmailOnFile(req.customer, contact.phoneKey);
   const { preferences, accountOff } = ContactPrefs.effectiveContactPreferences(accountRow, own, { emailAvailable: !!emailOnFile });
+  if (preferences.emailEnabled !== false && await emailSwitchReflectsUnsubscribe(emailOnFile)) preferences.emailEnabled = false;
   // The report rule (customer-contact.js slotWithheldFromReports) decides
   // whether this contact ever gets the visit's findings; the card says so
   // instead of offering a report toggle that would never fire.
@@ -827,6 +864,7 @@ router.put('/contact-preferences', async (req, res, next) => {
     // holder turned off never do.
     if (updates.consentAttested === true) patch.consent_attested_at = new Date();
 
+    let releasedUnsubscribes = [];
     const outcome = await withCustomerCommsLock(db, req.customerId, async (trx) => {
       // An attestation confirms this phone's ask and runs the consent
       // follow-up (onRecipientConfirmed), which locks the row of EVERY
@@ -859,7 +897,20 @@ router.put('/contact-preferences', async (req, res, next) => {
       ]);
       const enablesTexts = ContactPrefs.textPathsOpened(accountRow, existing, patch);
       if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) return 'consent_required';
+      // GATE_PORTAL_EMAIL_RESUBSCRIBE: a switch shown OFF only because of an
+      // email-link unsubscribe cannot be turned off again, so an OFF save that
+      // stored ON is that reading echoed back, not an opt-out (never stored).
+      const contactEmail = contactEmailOnFile(live, contact.phoneKey);
+      if (patch.email_enabled === false && existing?.email_enabled !== false
+        && await emailSwitchReflectsUnsubscribe(contactEmail, trx)) {
+        delete patch.email_enabled;
+        if (!Object.keys(patch).length) return 'saved';
+      }
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.customerId, contact.phone, patch);
+      if (patch.email_enabled === true) {
+        releasedUnsubscribes = await releaseOwnUnsubscribesOnSwitchOn({
+          trx, email: contactEmail, customerId: req.customerId, actor: 'contact', contactSlot: contact.slot });
+      }
       if (updates.consentAttested !== true) return 'saved';
       // The in-app attestation confirms THIS customer's pending or
       // undelivered ask for this phone. ask_failed included (the ask never
@@ -884,6 +935,8 @@ router.put('/contact-preferences', async (req, res, next) => {
     if (outcome === 'consent_required') {
       return res.status(400).json({ error: 'Please confirm the text-message consent statement to receive texts at this number.', code: 'CONSENT_REQUIRED' });
     }
+
+    await clearReleasedUnsubscribes(releasedUnsubscribes);
 
     logger.info(`Contact notification prefs updated for ${req.customerId} (slot ${contact.slot}): ${JSON.stringify({ fields: Object.keys(updates).sort() })}`);
     res.json({ success: true, ...(await contactPreferencePayload(req)) });
@@ -1007,6 +1060,9 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     const existing = await ensurePrefs(req.customerId);
+    // GATE_PORTAL_EMAIL_RESUBSCRIBE: an OFF save that only echoes the switch's
+    // reflected unsubscribe (stored ON) is not an opt-out; never store it.
+    if (await holderOffSaveIsEcho(req.customerId, updates, existing)) delete updates.emailEnabled;
     const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});
 
     // Delivery channels are account-level — persist them on the primary profile
@@ -1055,6 +1111,7 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     let billingDeliveryError;
+    let releasedUnsubscribes = [];
     await db.transaction(async (trx) => {
       for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
       // Row before key, like every other notification_prefs writer in this
@@ -1104,8 +1161,15 @@ router.put('/preferences', async (req, res, next) => {
         await trx('notification_prefs').where({ customer_id: primaryId })
           .update({ ...channelDbUpdates, updated_at: new Date() });
       }
+      // GATE_PORTAL_EMAIL_RESUBSCRIBE: turning Email messages ON releases the
+      // customer's own email unsubscribe in the same transaction.
+      if (updates.emailEnabled === true && portalEmailResubscribeLive()) {
+        releasedUnsubscribes = await releaseOwnUnsubscribesOnSwitchOn({
+          trx, email: await holderEmailOnFile(req.customerId, trx), customerId: req.customerId, actor: 'holder' });
+      }
     });
     if (billingDeliveryError) return res.status(409).json({ error: billingDeliveryError });
+    await clearReleasedUnsubscribes(releasedUnsubscribes);
 
     logger.info(`Notification prefs updated for ${req.customerId}: ${JSON.stringify({
       fields: Object.keys(updates).sort(),
