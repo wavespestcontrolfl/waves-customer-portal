@@ -8,38 +8,52 @@
 
 /* Begin PBXBuildFile section */
 		0F177742641723078AB6BCA4 /* WavesPayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAA9FEDF1B265FBD0000DBBE /* WavesPayApp.swift */; };
+		20851BE99C6071F4BDC48C2F /* waves-lead.caf in Resources */ = {isa = PBXBuildFile; fileRef = 249565D6A7B77B6762F6352A /* waves-lead.caf */; };
 		2FC5085502A029C40825F4AC /* StripeTerminal in Frameworks */ = {isa = PBXBuildFile; productRef = 8053A732CDA3023149165611 /* StripeTerminal */; };
 		3FAEE8D79C0CDE65D23C63FF /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B9C8A65672429056EA1F15D /* NativeBridge.swift */; };
+		42803B7A1C0B2F774D5BDE6C /* waves-payment-problem.caf in Resources */ = {isa = PBXBuildFile; fileRef = 9F0C0D1B2AE303E8A9318C96 /* waves-payment-problem.caf */; };
+		4326481737F7DF7716706BEA /* waves-text.caf in Resources */ = {isa = PBXBuildFile; fileRef = 5017D1CBE70714BB97CF75C1 /* waves-text.caf */; };
 		5B4CE5DF257AE388559CE024 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F66184170B2FD174561E1F62 /* RootView.swift */; };
 		693F6579FC4F8E662993A132 /* HowToTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72AB2068EA75B9DD83360CE /* HowToTap.swift */; };
 		71F2A1650406233E4A2CD653 /* CollectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1C0BACE518171B312F5B32 /* CollectView.swift */; };
+		7B9EAC228B2077C0B583CBCD /* waves-email.caf in Resources */ = {isa = PBXBuildFile; fileRef = 41D31E06469549347041ED35 /* waves-email.caf */; };
 		800C9C346EA5B9DC2141B9F1 /* API.swift in Sources */ = {isa = PBXBuildFile; fileRef = 382A9E95DB30F9858AEDB35D /* API.swift */; };
+		83D57EA577D98AF589865F70 /* waves-missed-call.caf in Resources */ = {isa = PBXBuildFile; fileRef = A1154949CD68A1AAA53CFF7F /* waves-missed-call.caf */; };
 		86A9F2A9DFE673C345410D1D /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95C2F50AD33493B67A02D814 /* AppState.swift */; };
 		9137995403FD7C04808657CB /* CustomerHandoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EBAFFDC0A86E08B3B304779 /* CustomerHandoff.swift */; };
 		A4BF8A56B5B17C4C0664DBAE /* Brand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5879EC992F1DFD981D2C3E75 /* Brand.swift */; };
 		ABACD8392484FDDF862BE0A6 /* PortalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8F12848DEA3C5874AD613B3 /* PortalView.swift */; };
 		AC3A5837C1092E9D149FB407 /* TerminalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F257791252A99A45F5501281 /* TerminalManager.swift */; };
+		BB946BE634915ACDEA59089B /* waves-reminder.caf in Resources */ = {isa = PBXBuildFile; fileRef = DA24BFF746349CCE14D56B23 /* waves-reminder.caf */; };
 		D309C1083AEC9EA81C1B28B4 /* HandoffLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 426214503520A893CF644F6B /* HandoffLock.swift */; };
 		D99E615FC3F554C7F4A69C6B /* StaffAlerts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B697676CF8667C3A3F9C626B /* StaffAlerts.swift */; };
 		D9FB03251C3C9A3B41F3A971 /* SaveCardFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 351DD25470E3B279414584FC /* SaveCardFlow.swift */; };
 		E3D72235F0CE1767D22C1AA5 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F12D9BA969C35A97B98616 /* Keychain.swift */; };
+		E9F638CD374B27B61851FC98 /* waves-voicemail.caf in Resources */ = {isa = PBXBuildFile; fileRef = 872CCDC578BFECDEE172FC4C /* waves-voicemail.caf */; };
 		F8EAA6884B0B6828AE6CF933 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5B9CD87D59328DCBC2F6C369 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		249565D6A7B77B6762F6352A /* waves-lead.caf */ = {isa = PBXFileReference; path = "waves-lead.caf"; sourceTree = "<group>"; };
 		351DD25470E3B279414584FC /* SaveCardFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveCardFlow.swift; sourceTree = "<group>"; };
 		382A9E95DB30F9858AEDB35D /* API.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = API.swift; sourceTree = "<group>"; };
+		41D31E06469549347041ED35 /* waves-email.caf */ = {isa = PBXFileReference; path = "waves-email.caf"; sourceTree = "<group>"; };
 		426214503520A893CF644F6B /* HandoffLock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandoffLock.swift; sourceTree = "<group>"; };
+		5017D1CBE70714BB97CF75C1 /* waves-text.caf */ = {isa = PBXFileReference; path = "waves-text.caf"; sourceTree = "<group>"; };
 		5879EC992F1DFD981D2C3E75 /* Brand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Brand.swift; sourceTree = "<group>"; };
 		5B9CD87D59328DCBC2F6C369 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		78F12D9BA969C35A97B98616 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		7B9C8A65672429056EA1F15D /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
 		7D1C0BACE518171B312F5B32 /* CollectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectView.swift; sourceTree = "<group>"; };
 		7EBAFFDC0A86E08B3B304779 /* CustomerHandoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomerHandoff.swift; sourceTree = "<group>"; };
+		872CCDC578BFECDEE172FC4C /* waves-voicemail.caf */ = {isa = PBXFileReference; path = "waves-voicemail.caf"; sourceTree = "<group>"; };
 		95C2F50AD33493B67A02D814 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		9F0C0D1B2AE303E8A9318C96 /* waves-payment-problem.caf */ = {isa = PBXFileReference; path = "waves-payment-problem.caf"; sourceTree = "<group>"; };
+		A1154949CD68A1AAA53CFF7F /* waves-missed-call.caf */ = {isa = PBXFileReference; path = "waves-missed-call.caf"; sourceTree = "<group>"; };
 		B697676CF8667C3A3F9C626B /* StaffAlerts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaffAlerts.swift; sourceTree = "<group>"; };
 		C8F12848DEA3C5874AD613B3 /* PortalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalView.swift; sourceTree = "<group>"; };
 		CAA9FEDF1B265FBD0000DBBE /* WavesPayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WavesPayApp.swift; sourceTree = "<group>"; };
+		DA24BFF746349CCE14D56B23 /* waves-reminder.caf */ = {isa = PBXFileReference; path = "waves-reminder.caf"; sourceTree = "<group>"; };
 		F257791252A99A45F5501281 /* TerminalManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalManager.swift; sourceTree = "<group>"; };
 		F2F14AD46D302EADCEB265C2 /* WavesPay.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = WavesPay.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F66184170B2FD174561E1F62 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -88,6 +102,21 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		65D2280A5D6767048FC94901 /* Sounds */ = {
+			isa = PBXGroup;
+			children = (
+				41D31E06469549347041ED35 /* waves-email.caf */,
+				249565D6A7B77B6762F6352A /* waves-lead.caf */,
+				A1154949CD68A1AAA53CFF7F /* waves-missed-call.caf */,
+				9F0C0D1B2AE303E8A9318C96 /* waves-payment-problem.caf */,
+				DA24BFF746349CCE14D56B23 /* waves-reminder.caf */,
+				5017D1CBE70714BB97CF75C1 /* waves-text.caf */,
+				872CCDC578BFECDEE172FC4C /* waves-voicemail.caf */,
+			);
+			name = Sounds;
+			path = Resources/Sounds;
+			sourceTree = "<group>";
+		};
 		76B32E87CDBB3864E86812B5 /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -100,6 +129,7 @@
 			isa = PBXGroup;
 			children = (
 				36B54F680A9256E06BDECEE1 /* Resources */,
+				65D2280A5D6767048FC94901 /* Sounds */,
 				44097CFA1C20FFBFA0814091 /* Sources */,
 				76B32E87CDBB3864E86812B5 /* Products */,
 			);
@@ -171,6 +201,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				F8EAA6884B0B6828AE6CF933 /* Assets.xcassets in Resources */,
+				7B9EAC228B2077C0B583CBCD /* waves-email.caf in Resources */,
+				20851BE99C6071F4BDC48C2F /* waves-lead.caf in Resources */,
+				83D57EA577D98AF589865F70 /* waves-missed-call.caf in Resources */,
+				42803B7A1C0B2F774D5BDE6C /* waves-payment-problem.caf in Resources */,
+				BB946BE634915ACDEA59089B /* waves-reminder.caf in Resources */,
+				4326481737F7DF7716706BEA /* waves-text.caf in Resources */,
+				E9F638CD374B27B61851FC98 /* waves-voicemail.caf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -275,7 +312,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -283,7 +320,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;
@@ -357,7 +394,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/WavesPay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.7;
@@ -365,7 +402,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wavespestcontrol.wavespay;
 				PRODUCT_NAME = WavesPay;
 				SDKROOT = iphoneos;
