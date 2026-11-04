@@ -55,6 +55,13 @@ const SERVICE_GROUP_KEY = 'service_operational';
 const RELEASE_CONSENT_SOURCE = 'portal_email_switch';
 const SENDGRID_TIMEOUT_MS = 8000;
 
+// Never log or store an error message: a database error can carry the SQL with
+// the address binding, and a fetch error can carry the URL. Code or name only.
+function errorWord(err) {
+  if (err?.name === 'TimeoutError') return 'timeout';
+  return String(err?.code || err?.name || 'error').replace(/[^\w.-]/g, '').slice(0, 60) || 'error';
+}
+
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
@@ -81,7 +88,7 @@ async function hasReleasableUnsubscribe(email, { dbh = db } = {}) {
   try {
     return (await releasableUnsubscribes(email, { dbh })).length > 0;
   } catch (err) {
-    logger.warn(`[email-resubscribe] releasable lookup failed: ${err.message}`);
+    logger.warn(`[email-resubscribe] releasable lookup failed (${errorWord(err)})`);
     return false;
   }
 }
@@ -142,7 +149,7 @@ async function sendgridDelete(path) {
     if (res.ok || res.status === 404) return { ok: true, status: res.status };
     return { ok: false, status: res.status };
   } catch (err) {
-    return { ok: false, reason: String(err?.name === 'TimeoutError' ? 'timeout' : err?.message || 'error').slice(0, 200) };
+    return { ok: false, reason: errorWord(err) };
   }
 }
 
@@ -208,7 +215,7 @@ async function clearSendgridBeforeRelease(email) {
       }
     }
   } catch (err) {
-    logger.warn(`[email-resubscribe] SendGrid pre-clear failed: ${err.message}`);
+    logger.warn(`[email-resubscribe] SendGrid pre-clear failed (${errorWord(err)})`);
     return { clearedIds: [], outcomes: [], clearById: {}, versionById: {} };
   }
   return result;

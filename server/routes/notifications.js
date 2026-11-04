@@ -484,23 +484,17 @@ async function ensurePrefs(customerId) {
 
 // GATE_PORTAL_EMAIL_RESUBSCRIBE: the Email messages switch reads OFF while the
 // address carries an unsubscribe the customer made by email link (the send path
-// blocks on it whatever the stored switch says). Stored values are untouched.
-async function emailSwitchReflectsUnsubscribe(email, dbh = db) {
+// blocks on it whatever the stored switch says). Stored values are untouched,
+// and an OFF save is always stored as before (the client only sends patch saves,
+// so a switch shown OFF never sends false: a false is an explicit opt-out).
+async function emailSwitchReflectsUnsubscribe(email) {
   if (!portalEmailResubscribeLive() || !email) return false;
-  return require('../services/email-resubscribe').hasReleasableUnsubscribe(email, { dbh });
+  return require('../services/email-resubscribe').hasReleasableUnsubscribe(email, { dbh: db });
 }
 
 async function holderEmailOnFile(customerId, dbh = db) {
   const row = await dbh('customers').where({ id: customerId }).first('email');
   return row?.email || '';
-}
-
-// An OFF save for a switch that stored ON is only legitimate as the reading
-// emailSwitchReflectsUnsubscribe produced (a switch shown OFF cannot be turned
-// off again), so it is an echo, not an opt-out, and must not be stored.
-async function holderOffSaveIsEcho(customerId, updates, stored) {
-  return updates.emailEnabled === false && stored?.email_enabled !== false && portalEmailResubscribeLive()
-    && emailSwitchReflectsUnsubscribe(await holderEmailOnFile(customerId));
 }
 
 // Turning Email messages ON releases the customer's own unsubscribe, in two
@@ -912,15 +906,8 @@ router.put('/contact-preferences', async (req, res, next) => {
       ]);
       const enablesTexts = ContactPrefs.textPathsOpened(accountRow, existing, patch);
       if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) return 'consent_required';
-      // GATE_PORTAL_EMAIL_RESUBSCRIBE: a switch shown OFF only because of an
-      // email-link unsubscribe cannot be turned off again, so an OFF save that
-      // stored ON is that reading echoed back, not an opt-out (never stored).
+      // GATE_PORTAL_EMAIL_RESUBSCRIBE: an OFF save is always stored, as before.
       const contactEmail = contactEmailOnFile(live, contact.phoneKey);
-      if (patch.email_enabled === false && existing?.email_enabled !== false
-        && await emailSwitchReflectsUnsubscribe(contactEmail, trx)) {
-        delete patch.email_enabled;
-        if (!Object.keys(patch).length) return 'saved';
-      }
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.customerId, contact.phone, patch);
       if (patch.email_enabled === true) {
         await releaseOwnUnsubscribesOnSwitchOn({
@@ -1073,9 +1060,6 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     const existing = await ensurePrefs(req.customerId);
-    // GATE_PORTAL_EMAIL_RESUBSCRIBE: an OFF save that only echoes the switch's
-    // reflected unsubscribe (stored ON) is not an opt-out; never store it.
-    if (await holderOffSaveIsEcho(req.customerId, updates, existing)) delete updates.emailEnabled;
     const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});
 
     // Delivery channels are account-level — persist them on the primary profile

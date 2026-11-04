@@ -89,6 +89,41 @@ describe('releaseOwnUnsubscribes', () => {
   });
 });
 
+describe('error text never reaches logs or stored notes', () => {
+  const SECRET = 'pat.private@example.com';
+  const logged = () => JSON.stringify([logger.warn, logger.error, logger.info].map((fn) => fn.mock.calls));
+
+  beforeEach(() => { [logger.warn, logger.error, logger.info].forEach((fn) => fn.mockClear()); });
+
+  test('a DB error carrying the address in its message is logged by code or name only (lookup and pre-clear)', async () => {
+    const { hasReleasableUnsubscribe } = require('../services/email-resubscribe');
+    const boom = () => { const err = new Error(`select * from email_suppressions where LOWER(email) = '${SECRET}' - relation missing`); err.code = '42P01'; throw err; };
+    db.mockImplementation(boom);
+    await expect(hasReleasableUnsubscribe(SECRET)).resolves.toBe(false);
+    await clearSendgridBeforeRelease(SECRET);
+    expect(logged()).not.toContain(SECRET);
+    expect(logged()).toContain('42P01');
+  });
+
+  test('a fetch error carrying the URL or address is stored as its name only, and not logged', async () => {
+    process.env.SENDGRID_API_KEY = 'SG.test';
+    const rows = [{ id: 'g', email: SECRET, group_key: null, row_version: '1' }];
+    db.mockImplementation(() => {
+      const b = { then: (resolve) => Promise.resolve(rows).then(resolve) };
+      ['where', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { b[m] = () => b; });
+      return b;
+    });
+    db.raw = (sql) => ({ sql });
+    global.fetch = jest.fn(async () => { throw new TypeError(`fetch failed for https://api.sendgrid.com/v3/asm/suppressions/global/${SECRET}`); });
+    const out = await clearSendgridBeforeRelease(SECRET);
+    delete global.fetch;
+    delete process.env.SENDGRID_API_KEY;
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expect(out.outcomes).toEqual([{ list: 'global', ok: false, reason: 'TypeError' }]);
+    expect(logged()).not.toContain(SECRET);
+  });
+});
+
 describe('releasableUnsubscribes query', () => {
   test('filters on the three customer-origin sources, the staff marker, the type and the groups', async () => {
     const { releasableUnsubscribes } = require('../services/email-resubscribe');
@@ -178,7 +213,7 @@ describe('clearSendgridBeforeRelease', () => {
     global.fetch = jest.fn(async () => { throw new Error('socket hang up'); });
     const out = await clearSendgridBeforeRelease('pat@example.com');
     expect(out.clearedIds).toEqual([]);
-    expect(out.outcomes).toEqual([{ list: 'global', ok: false, reason: 'socket hang up' }]);
+    expect(out.outcomes).toEqual([{ list: 'global', ok: false, reason: 'Error' }]);
     expect(logger.warn).toHaveBeenCalled();
   });
 

@@ -4,8 +4,8 @@
 //   holder   GET/PUT /api/notifications/preferences
 //   contact  GET/PUT /api/notifications/contact-preferences
 // Gate off: nothing changes (no read, no release, no SendGrid call). Gate on:
-// a customer-made unsubscribe reads as OFF, an OFF save that only echoes that
-// reading is not stored, and an ON save releases the block inside the save's
+// a customer-made unsubscribe reads as OFF, an OFF save is always stored as
+// before (it is an explicit opt-out), and an ON save releases the block inside the save's
 // own transaction, but only after SendGrid's own list was cleared BEFORE that
 // transaction, and only the rows SendGrid confirmed.
 // The service's row rules are proven on real SQL in email-resubscribe-postgres.test.js.
@@ -217,19 +217,15 @@ describe('account holder switch', () => {
     expect(storedHolder()).toBe(true);
   });
 
-  test('gate on: an OFF save that only echoes the reflected block is not stored', async () => {
+  test('gate on, block present: an OFF save is stored as OFF (an explicit opt-out), releases nothing; a later ON save stores ON and still releases', async () => {
     gateOn();
-    const res = await holderPut({ emailEnabled: false });
-    expect(res.status).toBe(200);
-    expect(storedHolder()).toBeUndefined();
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-  });
-
-  test('gate on: an OFF save is stored when nothing blocks the address', async () => {
-    gateOn();
-    blocked.clear();
     expect((await holderPut({ emailEnabled: false })).status).toBe(200);
     expect(storedHolder()).toBe(false);
+    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
+    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
+    expect((await holderPut({ emailEnabled: true })).status).toBe(200);
+    expect(storedHolder()).toBe(true);
+    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -284,25 +280,14 @@ describe('additional contact switch', () => {
     expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
   });
 
-  test('gate on: an OFF save that only echoes the reflected block is not stored', async () => {
+  test('gate on, block present: an OFF save is stored as OFF (an explicit opt-out), releases nothing; a later ON save stores ON and still releases', async () => {
     gateOn();
-    const res = await contactPut({ emailEnabled: false });
-    expect(res.status).toBe(200);
-    expect(tables.service_contact_notification_prefs).toEqual([]);
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-  });
-
-  test('gate on: an OFF save beside another change keeps the other change and drops only the echo', async () => {
-    gateOn();
-    expect((await contactPut({ emailEnabled: false, serviceReminder72h: false })).status).toBe(200);
-    expect(storedContact()).toBeUndefined();
-    expect(tables.service_contact_notification_prefs[0]).toMatchObject({ service_reminder_72h: false });
-  });
-
-  test('gate on: an OFF save is stored when nothing blocks the address', async () => {
-    gateOn();
-    blocked.clear();
     expect((await contactPut({ emailEnabled: false })).status).toBe(200);
     expect(storedContact()).toBe(false);
+    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
+    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
+    expect((await contactPut({ emailEnabled: true })).status).toBe(200);
+    expect(storedContact()).toBe(true);
+    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledTimes(1);
   });
 });
