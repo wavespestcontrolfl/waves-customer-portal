@@ -33,6 +33,13 @@ jest.mock('../models/db', () => {
   };
   return dbFn;
 });
+// The activation welcome (owner 2026-11-04) reads the customer's history through the shared
+// candidacy gate; stubbed so these seeding fixtures' queued reads are untouched. Its own
+// behavior is pinned in annual-prepay-activation-welcome.test.js.
+jest.mock('../services/new-recurring-welcome-sms', () => ({
+  isNewRecurringSignupCandidate: jest.fn(async () => false),
+  sendNewRecurringWelcome: jest.fn(),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),

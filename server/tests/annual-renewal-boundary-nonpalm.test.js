@@ -3,6 +3,13 @@
 // NON-palm path (coverageRowsForTerm only applies rowLinkedToAnotherTerm
 // inside the palm branch), so the renewal seeds and stamps one short.
 jest.mock('../models/db', () => jest.fn());
+// The activation welcome (owner 2026-11-04) reads the customer's history through the shared
+// candidacy gate; stubbed so these seeding fixtures' queued reads are untouched. Its own
+// behavior is pinned in annual-prepay-activation-welcome.test.js.
+jest.mock('../services/new-recurring-welcome-sms', () => ({
+  isNewRecurringSignupCandidate: jest.fn(async () => false),
+  sendNewRecurringWelcome: jest.fn(),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));

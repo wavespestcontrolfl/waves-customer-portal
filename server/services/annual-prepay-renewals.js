@@ -1282,6 +1282,64 @@ async function seriesRoundAnchorForTerm({ term, coverageCadence, existingRows, c
   }
 }
 
+// "New recurring customer" welcome text for the FIRST series a paid annual
+// prepay seeds (owner 2026-11-04, "welcome text"): the admin create route and
+// the estimate converter already send it, this activation path did not. The
+// candidacy is read BEFORE the seed loop inserts anything, so the series it is
+// about to create can never disqualify its own customer; a renewal (an earlier
+// recurring series exists) and a customer with serviced history older than the
+// shared window are not candidates. Only a first activation counts: a gap-fill
+// or a later refresh of an already-linked term never asks. A failed lookup is
+// "not a candidate" (the welcome is never worth a failed activation).
+async function firstSeriesWelcomeCandidate(term, { alreadyActivated, seedCount }) {
+  if (alreadyActivated || !seedCount || !term?.customer_id) return false;
+  try {
+    const { isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
+    return (await isNewRecurringSignupCandidate(term.customer_id)) === true;
+  } catch (err) {
+    logger.warn(`[annual-prepay] term ${term.id}: welcome candidacy lookup failed (${err.message}) — no welcome queued`);
+    return false;
+  }
+}
+
+// Queues the welcome only once the seeded rows are COMMITTED. The once-ever
+// guard, consent and suppression checks, and the send delay all live in
+// sendNewRecurringWelcome; nothing is duplicated here. On a caller
+// transaction the send waits for the OUTERMOST transaction's commit
+// (executionPromise settles at COMMIT; a rollback drops it with the rows);
+// a savepoint's own promise resolves on RELEASE, before the real commit, so
+// the walk up parentTransaction picks the outer one. On the global pool each
+// seed insert already committed, so it runs inline. Non-blocking: a failure
+// logs and never touches the activation.
+function queueFirstSeriesWelcomeAfterCommit(conn, term, { candidate, rootId, createdRows }) {
+  if (!candidate || !createdRows.length) return Promise.resolve();
+  const send = async () => {
+    try {
+      const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
+      const customer = await db('customers')
+        .where({ id: term.customer_id })
+        .first('id', 'first_name', 'last_name', 'phone', 'email');
+      if (!customer) return;
+      await sendNewRecurringWelcome({
+        customer,
+        scheduledServiceId: rootId,
+        recurringPattern: createdRows[0].recurring_pattern || null,
+        entryPoint: 'annual_prepay_activation',
+      });
+    } catch (err) {
+      logger.error(`[annual-prepay] new recurring welcome failed for term ${term?.id} (non-blocking): ${err.message}`);
+    }
+  };
+  let scope = conn;
+  while (scope?.parentTransaction) scope = scope.parentTransaction;
+  const done = scope && scope !== db && scope.executionPromise;
+  if (done && typeof done.then === 'function') {
+    done.then(send, () => {}); // rolled back: the series never existed
+    return Promise.resolve();
+  }
+  return send();
+}
+
 async function ensureCoverageRowsForTerm(term, conn = db, {
   today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null, gapFillOnly = false,
 } = {}) {
@@ -2183,6 +2241,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   };
 
   await resolveSeriesSlot();
+  // Decided before the first insert below (see firstSeriesWelcomeCandidate).
+  const welcomeCandidate = await firstSeriesWelcomeCandidate(term, { alreadyActivated, seedCount: datesToSeed.length });
   for (const scheduledDate of datesToSeed) {
     const wantsWindow = !!firstVisitWindowStart && scheduledDate === firstTargetDate;
     let created;
@@ -2228,6 +2288,11 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       createdParentId = created.id;
     }
   }
+  await queueFirstSeriesWelcomeAfterCommit(conn, term, {
+    candidate: welcomeCandidate,
+    rootId: createdParentId,
+    createdRows,
+  });
 
   // Persist the anchor the seeder ACTUALLY used whenever it differs from what
   // the term fields imply. Every later render of the paid invoice / pay page
@@ -11754,6 +11819,8 @@ module.exports = {
     normalizeCoverageVisitCount,
     attachScheduledServices,
     ensureCoverageRowsForTerm,
+    firstSeriesWelcomeCandidate,
+    queueFirstSeriesWelcomeAfterCommit,
     coverageRowsForTerm,
     detachCallbacksFromTerm,
     fileCoverageExceptionAfterCommit,
