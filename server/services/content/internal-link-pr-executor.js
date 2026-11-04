@@ -840,8 +840,18 @@ class InternalLinkPrExecutor {
     const reviewFindings = (reviews || []).filter((r) => isCodexAuthor(r?.user?.login) && onHead(r.commit_id)
       && !isLimit(r.body) && (String(r.state).toUpperCase() === 'CHANGES_REQUESTED' || !isClean(r.body))
       && !/approved/i.test(String(r.state || ''))).length;
-    const commentFindings = (comments || []).filter((c) => isCodexAuthor(c?.user?.login) && mentionsHead(c.body)
-      && /Codex Review/i.test(String(c.body || '')) && !isClean(c.body) && !isLimit(c.body)).length;
+    // Codex's status/summary comment ("## Codex Review Summary") exists on
+    // every PR and matches the generic "Codex Review" rule below even when
+    // the round found nothing: on 2026-11-03 astro #823 was closed two
+    // minutes after opening as "Codex left 1 finding(s)" while Codex was
+    // clean. Such a comment never counts through the generic rule; only its
+    // machine-readable state does, and only for this head.
+    const commentFindings = (comments || []).filter((c) => {
+      if (!isCodexAuthor(c?.user?.login)) return false;
+      if (isCodexSummaryComment(c.body)) return codexSummaryReportsFindings(c.body, headSha);
+      return mentionsHead(c.body)
+        && /Codex Review/i.test(String(c.body || '')) && !isClean(c.body) && !isLimit(c.body);
+    }).length;
     const findings = inlineFindings + reviewFindings + commentFindings;
     const clean = !findings && codexReviewStatus({ comments, reviews, headSha }).clean === true;
     // When the review of THIS head was requested (the grace window runs from
@@ -2220,7 +2230,38 @@ module.exports.requeueTransientDryRunFailures = async (results = []) => {
 // 5xx) — callers retry instead of treating it as a verdict.
 module.exports.isTransientLoadFailure = (reason) => !!reason && !MISSING_FILE_RE.test(String(reason))
   && /^(?!internal_link_|rendered_link_|frontmatter_)/.test(String(reason));
+// Codex's pull-request status comment carries one of these HTML markers.
+const CODEX_SUMMARY_MARKER_RE = /codex-pull-request-review-summary|codex-review-state:v1/i;
+const CODEX_STATE_RE = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/i;
+
+function isCodexSummaryComment(body) {
+  return CODEX_SUMMARY_MARKER_RE.test(String(body || ''));
+}
+
+// True only when the summary comment's embedded state names THIS head (full
+// SHA or an abbreviation of at least 7 hex chars) and reports findings.
+// Missing or garbled state, or a state for another commit, is not a finding.
+function codexSummaryReportsFindings(body, headSha) {
+  const match = CODEX_STATE_RE.exec(String(body || ''));
+  if (!match) return false;
+  let state;
+  try {
+    state = JSON.parse(match[1]);
+  } catch {
+    return false;
+  }
+  const head = String(headSha || '').toLowerCase();
+  return ['code_review', 'security_review'].some((key) => {
+    const review = state?.[key];
+    const sha = String(review?.commit_sha || '').toLowerCase();
+    if (!review || !head || !/^[0-9a-f]{7,40}$/.test(sha) || !head.startsWith(sha)) return false;
+    return review.has_any_findings === true || review.has_unresolved_findings === true;
+  });
+}
+
 module.exports._internals = {
+  isCodexSummaryComment,
+  codexSummaryReportsFindings,
   bumpFreshnessLine,
   restoreFreshnessLine,
   EXECUTOR_VERSION,
