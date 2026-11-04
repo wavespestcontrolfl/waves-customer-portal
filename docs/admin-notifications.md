@@ -403,13 +403,17 @@ so the queue tab leaves it to its own tab.
 have an issue mid day, but ideas"; `GATE_IB_SEND_TO_CLAUDE`). The owner types or dictates an idea in the Cmd+K / mobile
 box and taps the free **Send to Claude** button beside Ask (no model call; Ask stays the paid path). `POST /api/admin/claude-ideas`
 (`server/services/admin-claude-ideas.js`) writes one row through `notifyAdmin`, not `raiseAdminAlert`: it is not an alert,
-its title and body are the owner's own words. Shape: category `system`, title `Idea for Claude`, body the idea's first line
-(100 characters), `detail` the full cleaned idea, Activity-only (`feed` `activity`, `who` `claude`, `severity` `needs-you`,
-`claudeQueue` `sent-to-claude`), and a `sentToClaude` stamp with `kind` `owner-idea`, `at`, `by`, `records` (UUID-shaped ids),
+it carries the owner's own words. Shape: category `system`, title `Idea for Claude`, body `An idea from the owner.`, no
+`detail`, link `/admin`, Activity-only (`feed` `activity`, `who` `claude`, `severity` `needs-you`, `claudeQueue`
+`sent-to-claude`), **`ownerOnly: true`**, and a `sentToClaude` stamp with `kind` `owner-idea`, `idea` (the full cleaned idea,
+4,000 characters at most; the words live here and nowhere else), `at`, `by`, `records` (UUID-shaped ids),
 `page.route` (a plain `/admin/...` path or null), `viewedDate`, `pasted` and `was`. The dedupe key is `owner-idea:<16 hex of
 sha1 of the lowercased, whitespace-collapsed idea>`, so the same idea while its row is open answers `duplicate` and writes
 nothing. The 10-second Undo (`POST /api/admin/claude-ideas/:id/cancel`, `markAdminIdeaCancelled`) closes the row as done by the
-admin ("Cancelled by the owner.") under the same dedupe lock unless `sentToClaude.startedAt` is set. The Mac launcher opens a
+admin ("Cancelled by the owner.") under the same dedupe lock unless `sentToClaude.startedAt` is set. An `ownerOnly` row (metadata) is for the owner login alone
+(`ibFullAccess`; Codex security review round 4): the Recently done list (`getAdminDoneNotifications`, `fullAccess`) and the
+Activity feed (`getActivity`, `fullAccess`, focus included) leave it out for any other login, and `PUT /:id/done` and
+`PUT /:id/reopen` answer such a login 404 `not_found`, as for an unknown row. The Mac's `markAdminDone` is not affected. The Mac launcher opens a
 Claude tab that scopes the idea and asks the owner.
 
 ## 6. What is enforced today

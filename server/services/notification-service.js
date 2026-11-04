@@ -1095,6 +1095,16 @@ const NotificationService = {
     });
   },
 
+  // Is this admin row owner-only (metadata.ownerOnly: an idea sent to Claude)? Role-scoped like the others; false when the
+  // row is gone, out of scope or not owner-only.
+  async isAdminOwnerOnly(id, { role, technicianId = null } = {}) {
+    const row = await scopeAdminFeedToRole(
+      db('notifications').where({ id, recipient_type: 'admin' }),
+      role, technicianId,
+    ).first(db.raw("COALESCE(metadata->>'ownerOnly', '') = 'true' AS owner_only"));
+    return row?.owner_only === true;
+  },
+
   // Recently done admin rows (the "Recently done" list, so an accidental Done
   // can be reopened). Role-scoped like the bell list, but Activity-only rows
   // are INCLUDED: Activity has its own Done and this is the one recovery
@@ -1104,12 +1114,14 @@ const NotificationService = {
   // window stays reachable however many closed after it. done_at_token is
   // done_at::text at full precision: the cursor source, and the fence a
   // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
-  async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null } = {}) {
+  async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null, fullAccess = false } = {}) {
     const query = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
       role, technicianId,
     )
       .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
+    // An owner-only row (an idea sent to Claude) is listed for the owner login only.
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     if (before) query.whereRaw('(done_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     return query
       .select(

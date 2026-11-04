@@ -30,7 +30,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const NotificationService = require('../services/notification-service');
 const { ibSendToClaudeLive } = require('../config/feature-gates');
-const { cleanIdea, ideaDedupeKey, firstLine } = require('../services/admin-claude-ideas');
+const { cleanIdea, ideaDedupeKey } = require('../services/admin-claude-ideas');
 const router = require('../routes/admin-claude-ideas');
 
 const ID = '00000000-0000-4000-8000-0000000000a1';
@@ -76,16 +76,11 @@ describe('cleanIdea', () => {
   });
 });
 
-describe('dedupe key and body', () => {
+describe('dedupe key', () => {
   test('case and spacing do not make a new idea', () => {
     expect(ideaDedupeKey('Add  a button')).toBe(ideaDedupeKey('add a\nbutton '));
     expect(ideaDedupeKey('Add a button')).toMatch(/^owner-idea:[0-9a-f]{16}$/);
     expect(ideaDedupeKey('Add a button')).not.toBe(ideaDedupeKey('Add a link'));
-  });
-  test('the body is the first line cut to 100 characters', () => {
-    expect(firstLine('short\nsecond')).toBe('short');
-    expect(firstLine('x'.repeat(150))).toHaveLength(100);
-    expect(firstLine('\u{20000}'.repeat(80)).length).toBeLessThanOrEqual(100);
   });
 });
 
@@ -142,9 +137,11 @@ describe('routes', () => {
     });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect([category, title, body]).toEqual(['system', 'Idea for Claude', 'Show the last tech note on the dispatch card.']);
-    expect(opts.detail).toBe('Show the last tech note on the dispatch card.\nIt hides today.');
-    expect(opts.link).toBe('/admin/dispatch');
+    // The idea's words stay out of title, body and detail (the shared feeds serve those to every admin): owner-only row.
+    expect([category, title, body]).toEqual(['system', 'Idea for Claude', 'An idea from the owner.']);
+    expect(opts).not.toHaveProperty('detail');
+    expect(JSON.stringify([title, body, opts.link])).not.toMatch(/tech note/);
+    expect(opts.link).toBe('/admin');
     expect(opts.dedupeOpenOnly).toBe(true);
     expect(opts.dedupeKey).toMatch(/^owner-idea:[0-9a-f]{16}$/);
     expect(opts.metadata).toEqual({
@@ -152,11 +149,13 @@ describe('routes', () => {
       who: 'claude',
       severity: 'needs-you',
       claudeQueue: 'sent-to-claude',
+      ownerOnly: true,
       dedupeKey: opts.dedupeKey,
       sentToClaude: {
         at: expect.any(String),
         by: '11111111-1111-4111-8111-111111111111',
         kind: 'owner-idea',
+        idea: 'Show the last tech note on the dispatch card.\nIt hides today.',
         records: { customerId: CUSTOMER },
         page: { route: '/admin/dispatch' },
         viewedDate: '2026-11-03',

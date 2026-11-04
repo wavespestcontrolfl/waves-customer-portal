@@ -6,7 +6,14 @@ const express = require('express');
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ getAdminNotifications: jest.fn(async () => []) }));
+jest.mock('../services/notification-service', () => ({
+  getAdminNotifications: jest.fn(async () => []),
+  getAdminDoneNotifications: jest.fn(async () => []),
+  isAdminOwnerOnly: jest.fn(async () => false),
+  markAdminDone: jest.fn(async () => 1),
+  getAdminNotificationState: jest.fn(async () => null),
+  reopenAdminDone: jest.fn(async () => 'reopened'),
+}));
 jest.mock('../services/sms-operational-actions', () => ({ withTextNoteSources: jest.fn(async (rows) => rows) }));
 jest.mock('../services/push-notifications', () => ({ status: jest.fn(() => ({ available: true, configured: true })) }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn(async () => ({ alerts: [] })) }));
@@ -215,4 +222,62 @@ test('owner only (Codex security review on #7548): another admin gets no marks, 
   expect(withSendToClaudeFields).toHaveBeenCalledWith(expect.any(Array), { role: 'admin', fullAccess: false });
   expect(sendAdminAlertToClaude).not.toHaveBeenCalled();
   expect(unsendAdminAlertFromClaude).not.toHaveBeenCalled();
+});
+
+// Owner-only rows (metadata.ownerOnly: an idea sent to Claude, Codex security review round 4).
+describe('owner-only rows', () => {
+  const put = (base, path, { who, body }) => fetch(`${base}/admin/notifications/${ID}/${path}`, {
+    method: 'PUT', headers: { Authorization: `Bearer ${who}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const done = (base, who) => put(base, 'done', { who, body: { version: VERSION } });
+  const reopen = (base, who) => put(base, 'reopen', { who, body: { doneAt: '2026-11-03 20:00:00.123456+00' } });
+
+  test('Done on an owner-only row answers the office admin 404 not_found, like an unknown row, and closes nothing', async () => {
+    NotificationService.isAdminOwnerOnly.mockResolvedValue(true);
+    await withServer(async (base) => {
+      const res = await done(base, 'office');
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'not_found' });
+    });
+    expect(NotificationService.isAdminOwnerOnly).toHaveBeenCalledWith(ID, { role: 'admin', technicianId: 'office-1' });
+    expect(NotificationService.markAdminDone).not.toHaveBeenCalled();
+  });
+
+  test('Done on an owner-only row works for the owner, with no lookup', async () => {
+    NotificationService.isAdminOwnerOnly.mockResolvedValue(true);
+    await withServer(async (base) => {
+      expect(await (await done(base, 'admin')).json()).toEqual({ success: true, updated: true });
+    });
+    expect(NotificationService.markAdminDone).toHaveBeenCalledTimes(1);
+    expect(NotificationService.isAdminOwnerOnly).not.toHaveBeenCalled();
+  });
+
+  test('Done on any other row still works for the office admin', async () => {
+    NotificationService.isAdminOwnerOnly.mockResolvedValue(false);
+    await withServer(async (base) => {
+      expect((await done(base, 'office')).status).toBe(200);
+    });
+    expect(NotificationService.markAdminDone).toHaveBeenCalledTimes(1);
+  });
+
+  test('Reopen on an owner-only row answers the office admin 404 not_found and reopens nothing; the owner reopens', async () => {
+    NotificationService.isAdminOwnerOnly.mockResolvedValue(true);
+    await withServer(async (base) => {
+      const res = await reopen(base, 'office');
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'not_found' });
+      expect(NotificationService.reopenAdminDone).not.toHaveBeenCalled();
+      expect(await (await reopen(base, 'admin')).json()).toEqual({ success: true, updated: true });
+    });
+    expect(NotificationService.reopenAdminDone).toHaveBeenCalledTimes(1);
+  });
+
+  test('the Recently done list asks for owner-only rows only for the owner login', async () => {
+    await withServer(async (base) => {
+      for (const who of ['office', 'admin']) {
+        await fetch(`${base}/admin/notifications/done`, { headers: { Authorization: `Bearer ${who}` } });
+      }
+    });
+    expect(NotificationService.getAdminDoneNotifications.mock.calls.map(([o]) => o.fullAccess)).toEqual([false, true]);
+  });
 });

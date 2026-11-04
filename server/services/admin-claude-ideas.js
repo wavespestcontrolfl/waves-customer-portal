@@ -16,7 +16,6 @@ const { SENT_TO_CLAUDE_CLASS } = require('./admin-alert-routing');
 const { plainText, byStamp, uuidOrNull } = require('./admin-alert-send-to-claude');
 
 const IDEA_MAX = 4000;
-const BODY_MAX = 100;
 const KIND = 'owner-idea';
 const ROUTE_RE = /^\/admin(\/[A-Za-z0-9_-]{1,64}){0,6}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -50,16 +49,6 @@ function cleanRecords(ids) {
   return Object.fromEntries(RECORD_KEYS.map(([from, to]) => [to, uuidOrNull(source[from])]).filter(([, id]) => id));
 }
 
-// The row's one-line body: the idea's first line, cut to 100 characters (UTF-16 units, so the admin body rule holds).
-function firstLine(idea) {
-  let out = '';
-  for (const ch of idea.split('\n')[0].trimEnd()) {
-    if (out.length + ch.length > BODY_MAX) break;
-    out += ch;
-  }
-  return out;
-}
-
 // The same idea sent twice shares a key: case and spacing do not make a new idea.
 function ideaDedupeKey(idea) {
   const norm = idea.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -76,11 +65,12 @@ async function sendIdeaToClaude({ text, page, ids, pasted, by } = {}) {
   const dedupeKey = ideaDedupeKey(idea);
   const at = new Date().toISOString();
   // A raw notifyAdmin on purpose (the one baseline entry for this file in admin-alert-raw-callsites.json): this row is not an
-  // alert. Its title and body are the owner's own typed words, which composeAdminAlert's headline, one-sentence and
-  // forbidden-token rules would reject (a date, a file name), and the Mac launcher reads this exact row shape.
-  const result = await NotificationService.notifyAdmin('system', 'Idea for Claude', firstLine(idea), {
-    detail: idea,
-    link: route || '/admin',
+  // alert, and the Mac launcher reads this exact row shape. The idea's words stay OUT of title, body and detail (Codex
+  // security review round 4): the shared admin feeds (Activity, Recently done) serve those columns to every admin login, and
+  // the idea is the owner's alone. It rides in the stamp (`sentToClaude.idea`), and `ownerOnly` keeps the row out of the
+  // Activity feed and the done list, and refuses Done and Reopen, for any login that is not the owner.
+  const result = await NotificationService.notifyAdmin('system', 'Idea for Claude', 'An idea from the owner.', {
+    link: '/admin',
     dedupeKey,
     dedupeOpenOnly: true,
     metadata: {
@@ -88,11 +78,13 @@ async function sendIdeaToClaude({ text, page, ids, pasted, by } = {}) {
       who: 'claude',
       severity: 'needs-you',
       claudeQueue: SENT_TO_CLAUDE_CLASS,
+      ownerOnly: true,
       dedupeKey,
       sentToClaude: {
         at,
         by: byStamp(by),
         kind: KIND,
+        idea,
         records: cleanRecords(ids),
         page: { route },
         ...(viewedDate ? { viewedDate } : {}),
@@ -142,4 +134,4 @@ async function cancelClaudeIdea(id, { at, by, role, technicianId = null } = {}) 
   return { status: 200, body: { cancelled: true } };
 }
 
-module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, ideaSendLive, ideaDedupeKey, firstLine, cleanRecords, routeOrNull };
+module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, ideaSendLive, ideaDedupeKey, cleanRecords, routeOrNull };

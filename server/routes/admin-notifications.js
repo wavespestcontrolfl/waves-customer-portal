@@ -20,6 +20,13 @@ const {
 
 router.use(adminAuthenticate);
 
+// An owner-only row (metadata.ownerOnly: an idea sent to Claude, Codex security review round 4) answers any login that is not
+// the owner exactly as an unknown row does, so Done and Reopen reveal nothing. Only a UUID can name such a row.
+async function hiddenFromLogin(req, id) {
+  if (ibFullAccess(req) || !UUID_RE.test(id)) return false;
+  return NotificationService.isAdminOwnerOnly(id, { role: req.techRole, technicianId: req.technicianId });
+}
+
 function parseMetadata(value) {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -118,7 +125,7 @@ router.get('/done', requireAdmin, async (req, res, next) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
     const before = parseCursor(req.query.before);
     if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
-    const rows = await NotificationService.getAdminDoneNotifications({ role: req.techRole, technicianId: req.technicianId, limit: limit + 1, before });
+    const rows = await NotificationService.getAdminDoneNotifications({ role: req.techRole, technicianId: req.technicianId, limit: limit + 1, before, fullAccess: ibFullAccess(req) });
     const page = rows.slice(0, limit);
     res.json({
       notifications: page,
@@ -464,6 +471,7 @@ router.put('/:id/done', async (req, res, next) => {
     if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
       return res.status(400).json({ error: 'version is required' });
     }
+    if (await hiddenFromLogin(req, id)) return res.status(404).json({ error: 'not_found' });
     const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution : null;
     const updated = await NotificationService.markAdminDone([id], { by: String(req.technicianId), resolution, role: req.techRole, technicianId: req.technicianId, expectedVersion: version.toLowerCase() });
     if (!updated) {
@@ -574,6 +582,7 @@ router.put('/:id/reopen', requireAdmin, async (req, res, next) => {
     if (typeof doneAt !== 'string' || !TIMESTAMP_TEXT_RE.test(doneAt) || Number.isNaN(new Date(doneAt).getTime())) {
       return res.status(400).json({ error: 'doneAt is required' });
     }
+    if (await hiddenFromLogin(req, String(req.params.id))) return res.status(404).json({ error: 'not_found' });
     const result = await NotificationService.reopenAdminDone(String(req.params.id), { expectedDoneAt: doneAt });
     if (result === 'changed') return res.status(409).json({ error: 'changed' });
     if (result === 'not_reopenable') return res.status(409).json({ error: 'not_reopenable' });
