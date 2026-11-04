@@ -49,6 +49,9 @@
  * services/appointment-reminders.js + migration 20260401000078):
  *   appointment_reminders.reminder_72h_sent = true on the row whose
  *   scheduled_service_id = the visit (UNIQUE — at most one row per visit).
+ *   GATE_NIGHT_LOCK_24H (owner 2026-11-03) reads reminder_24h_sent instead,
+ *   the same way, for the night passes only (`loadReminderFreeze(..., { lock24h })`);
+ *   every other caller keeps reminder_72h_sent.
  *   suppressed_by_sibling=true rows are non-delivering placeholders (their
  *   flags are pre-set true at insert and never mean a send); for those the
  *   OWNER row for the same (customer_id, appointment_time) slot carries the
@@ -73,6 +76,14 @@ const TIER2_RADIUS_DAYS = 3;
 const DRIFT_BUDGET_DAYS = 5;
 const MIN_DESTINATION_DAYS_OUT = 5;
 const FREEZE_HOURS = 72;
+// GATE_NIGHT_LOCK_24H (owner 2026-11-03: "bring the 24 hr in and remove the 72
+// hr"): the night passes' lock moves to the 24-hour reminder. Gate off, the
+// constants above and below are the 09-25 rule (72 h clock, 72.25 h band, the
+// 72-hour reminder's sent flag). Gate on, the night passes read these instead:
+// the clock freeze is 24 h, the reminder-claimable band is the 24-hour leg's
+// 24.25 h (appointment-reminders.js: `hoursUntil <= 24.25`), and a sent
+// 24-hour reminder is what freezes. The 72-hour reminder locks nothing.
+const FREEZE_HOURS_24H = 24;
 // The reminder cron's own delivery band (appointment-reminders.js: the 72h
 // branch delivers while hoursUntil <= 72.25; the 24h branch below that). A
 // reminder ROW whose appointment_time is inside this band is CLAIMABLE by the
@@ -82,6 +93,18 @@ const FREEZE_HOURS = 72;
 // Recurring-series deferral also shares the customer-comms lock with delivery:
 // its freeze read cannot race a sender as the clock enters this band.
 const REMINDER_SENDABLE_HOURS = 72.25;
+const REMINDER_SENDABLE_HOURS_24H = 24.25;
+
+/** The clock freeze, in hours, for a night pass. `lock24h` is the pass's one
+ *  read of GATE_NIGHT_LOCK_24H (read once per run, passed down). */
+function freezeHoursFor(lock24h) {
+  return lock24h === true ? FREEZE_HOURS_24H : FREEZE_HOURS;
+}
+
+/** The reminder-claimable band, in hours, for a night pass (see above). */
+function sendableHoursFor(lock24h) {
+  return lock24h === true ? REMINDER_SENDABLE_HOURS_24H : REMINDER_SENDABLE_HOURS;
+}
 
 /** Whole calendar days from `fromStr` to `toStr` (YYYY-MM-DD each), UTC-noon
  *  anchored so DST seams can't roll the count. null on unparseable input. */
@@ -261,6 +284,13 @@ function resolveAnchor(service, anchorMap) {
  * (flex-tier.js's FLEX_TIER_FREEZE_HOURS), which fully covers 72.25h, so a
  * visit still claimable by the reminder sender is always caught either way.
  *
+ * `opts.lock24h` (GATE_NIGHT_LOCK_24H, owner 2026-11-03) is the night passes'
+ * opt-in, never the default: the sent flag read is reminder_24h_sent (not
+ * reminder_72h_sent), and with no explicit `freezeHours` the band is the
+ * 24-hour leg's 24.25h. The flex tier passes its own 25h with it. Callers
+ * that do not pass it (rebooker's staff series moves) keep the 72-hour
+ * behavior, byte for byte.
+ *
  * Returns { failed, frozen:Set<id> }:
  *   failed=true  → the status could not be read; callers MUST treat EVERY
  *                  visit as frozen (fail closed).
@@ -268,13 +298,16 @@ function resolveAnchor(service, anchorMap) {
  *                  the owning sibling row for the same appointment slot), or
  *                  whose appointment sits inside `freezeHours` of `now`.
  */
-async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours = REMINDER_SENDABLE_HOURS) {
+async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours, opts = {}) {
   if (!serviceIds || serviceIds.length === 0) return { failed: false, frozen: new Set() };
+  const lock24h = !!opts && opts.lock24h === true;
+  const sentColumn = lock24h ? 'reminder_24h_sent' : 'reminder_72h_sent';
+  const bandHours = freezeHours === undefined ? sendableHoursFor(lock24h) : freezeHours;
   try {
     const rows = await db('appointment_reminders')
       .whereIn('scheduled_service_id', serviceIds)
       .select('scheduled_service_id', 'customer_id', 'appointment_time',
-        'reminder_72h_sent', 'suppressed_by_sibling');
+        sentColumn, 'suppressed_by_sibling');
 
     // Inside the sender's claimable band ⇒ frozen regardless of flag (the row
     // may be mid-send). Unparseable appointment_time ⇒ frozen (fail closed).
@@ -292,7 +325,7 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours 
       // Inclusive <=, matching the sender's own `hoursUntil <= 72.25` — at
       // the exact boundary the sender may still claim the row, so the visit
       // must already be frozen.
-      return t - now.getTime() <= freezeHours * 3600000;
+      return t - now.getTime() <= bandHours * 3600000;
     };
 
     const frozen = new Set();
@@ -304,20 +337,21 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours 
         // Placeholder — its own flags never mean a send. The slot's OWNER row
         // (checked below) decides.
         suppressed.push(r);
-      } else if (r.reminder_72h_sent === true) {
+      } else if (r[sentColumn] === true) {
         frozen.add(r.scheduled_service_id);
       }
     }
 
     if (suppressed.length) {
       // Owner rows share (customer_id, appointment_time) and are the
-      // deliverable senders (suppressed_by_sibling=false). If the owner's 72h
-      // went out, the merged-label text covered the suppressed visit too.
+      // deliverable senders (suppressed_by_sibling=false). If the owner's
+      // reminder (72h, or 24h under lock24h) went out, the merged-label text
+      // covered the suppressed visit too.
       const customerIds = [...new Set(suppressed.map((r) => r.customer_id).filter(Boolean))];
       const owners = await db('appointment_reminders')
         .whereIn('customer_id', customerIds)
         .where('suppressed_by_sibling', false)
-        .where('reminder_72h_sent', true)
+        .where(sentColumn, true)
         .select('customer_id', 'appointment_time');
       const sentSlots = new Set(owners.map((o) => `${o.customer_id}:${new Date(o.appointment_time).getTime()}`));
       for (const r of suppressed) {
@@ -341,7 +375,11 @@ module.exports = {
   DRIFT_BUDGET_DAYS,
   MIN_DESTINATION_DAYS_OUT,
   FREEZE_HOURS,
+  FREEZE_HOURS_24H,
   REMINDER_SENDABLE_HOURS,
+  REMINDER_SENDABLE_HOURS_24H,
+  freezeHoursFor,
+  sendableHoursFor,
   daysBetween,
   tierRadiusForDaysOut,
   tierMoveWindow,
