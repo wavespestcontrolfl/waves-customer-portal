@@ -526,6 +526,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setPrompt("");
       resetAttachments();
     },
+    onRestore: setPrompt,
   });
 
   // With threads enabled, a context change no longer wipes the conversation

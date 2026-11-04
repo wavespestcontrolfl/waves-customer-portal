@@ -129,12 +129,47 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude besid
     type('An idea');
     fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
-    expect(await screen.findByText('Cancelled.')).toBeInTheDocument();
+    expect(await screen.findByText('Cancelled. Your text is back in the box.')).toBeInTheDocument();
     const cancels = callsTo(`/claude-ideas/${IDEA_ID}/cancel`);
     expect(cancels).toHaveLength(1);
     expect(cancels[0][1].method).toBe('POST');
     expect(JSON.parse(cancels[0][1].body)).toEqual({ at: AT });
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+  });
+
+  it('Undo puts the raw typed text back, exactly as typed, and never the photos', async () => {
+    await mount({ mobile });
+    const raw = '  Show the last tech note\tfirst.\n\n\n\nIt hides today.  ';
+    type(raw);
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
+    await screen.findByRole('button', { name: 'Undo' });
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Cancelled. Your text is back in the box.')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue(raw);
+    expect(screen.queryByRole('button', { name: /^Remove / })).not.toBeInTheDocument();
+  });
+
+  it('Undo keeps words typed after the send and says only "Cancelled."', async () => {
+    await mount({ mobile });
+    type('The first idea');
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
+    await screen.findByRole('button', { name: 'Undo' });
+    type('A new thought');
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Cancelled.')).toBeInTheDocument();
+    expect(screen.queryByText(/back in the box/)).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('A new thought');
+  });
+
+  it('a failed Undo restores nothing', async () => {
+    await mount({ mobile });
+    type('The first idea');
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
+    fetchMock.mockImplementationOnce(() => Promise.resolve(reply(409, { error: 'started' })));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Claude already started on it.')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('');
   });
 
   it('says Claude already started when the cancel answers 409 started, and has it for any other failure', async () => {

@@ -18,7 +18,7 @@ const ID_KEYS = ['customer_id', 'property_id', 'estimate_id', 'appointment_id', 
 const pickIds = (pageData) => Object.fromEntries(ID_KEYS.filter((key) => pageData?.[key]).map((key) => [key, pageData[key]]));
 
 // The send button's state for one palette. `onSent` clears the composer (prompt, attachments, paste mark) after a send.
-export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, pageData, route, onSent }) {
+export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, pageData, route, onSent, onRestore }) {
   // Whether the box offers the button: asked once per session (kept once answered); a failed ask reads as hidden and is
   // asked again the next time the box opens.
   const [enabled, setEnabled] = useState(false);
@@ -28,6 +28,8 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
   // { kind: 'sent' | 'duplicate' | 'error' | 'cancelled', text, id?, at?, undoable? }
   const [note, setNote] = useState(null);
   const timerRef = useRef(null);
+  const promptRef = useRef(prompt);
+  promptRef.current = prompt;
 
   useEffect(() => {
     if (!open || askedRef.current) return;
@@ -39,9 +41,9 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
-  // A message about an earlier tap goes when a new idea is typed; a fresh "Sent to Claude." keeps its Undo until it runs out.
+  // An error or duplicate line goes when the box changes; "Sent to Claude." keeps its Undo until it runs out, and "Cancelled." stays.
   useEffect(() => {
-    setNote((now) => (now && now.kind !== 'sent' ? null : now));
+    setNote((now) => (now && (now.kind === 'error' || now.kind === 'duplicate') ? null : now));
   }, [prompt, attachments.length]);
 
   const send = useCallback(async () => {
@@ -62,7 +64,8 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
         setNote({ kind: 'duplicate', text: 'You already sent this idea. Claude has it.' });
       } else if (out?.sent) {
         onSent();
-        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true });
+        // `raw` is the box as the owner typed it, for an Undo to put back.
+        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true, raw: prompt, pasted: pastedRef.current === true });
         clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => setNote((now) => (now?.kind === 'sent' ? { ...now, undoable: false } : now)), UNDO_MS);
       } else {
@@ -82,14 +85,20 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
     clearTimeout(timerRef.current);
     try {
       await adminFetch(`/admin/claude-ideas/${encodeURIComponent(note.id)}/cancel`, { method: 'POST', body: JSON.stringify({ at: note.at }) });
-      setNote({ kind: 'cancelled', text: 'Cancelled.' });
+      // The typed text comes back only into an empty box: words typed since the send are never overwritten.
+      const restore = !promptRef.current.trim();
+      if (restore) {
+        pastedRef.current = note.pasted === true;
+        onRestore(note.raw);
+      }
+      setNote({ kind: 'cancelled', text: restore ? 'Cancelled. Your text is back in the box.' : 'Cancelled.' });
     } catch (err) {
       const started = err?.status === 409 && err?.details?.error === 'started';
       setNote({ kind: 'error', text: started ? 'Claude already started on it.' : "Couldn't cancel. Claude has it." });
     } finally {
       sendingRef.current = false;
     }
-  }, [note]);
+  }, [note, pastedRef, onRestore]);
 
   return { enabled, sending, note, send, undo, canSend: Boolean(prompt.trim()) && !sending && !attachmentsLoading && !dictationPending };
 }
