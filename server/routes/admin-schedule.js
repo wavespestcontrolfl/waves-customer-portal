@@ -14270,6 +14270,47 @@ function retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate) {
   return vouched;
 }
 
+// "Make this recurring" from the edit screen turns a one-time visit into the
+// root of a NEW series. The create route already welcomes that customer
+// (owner 2026-11-04, "welcome text"); this path did not. Candidacy is read
+// BEFORE the save writes anything, so the series it is about to create can
+// never disqualify its own customer: a visit already in a series is not a new
+// series, a customer with an earlier recurring series (a renewal) or serviced
+// history older than the shared window is not a new customer. The caller
+// sends only after the save commits, via sendMakeRecurringWelcome. Returns the
+// customer id to welcome, or null.
+async function makeRecurringWelcomeCandidate(current) {
+  if (!current?.customer_id || current.is_recurring || current.recurring_parent_id) return null;
+  try {
+    return (await isNewRecurringSignupCandidate(current.customer_id)) === true ? current.customer_id : null;
+  } catch (e) {
+    logger.warn(`[schedule/update-details] new recurring welcome candidacy failed (no welcome): ${e.message}`);
+    return null;
+  }
+}
+
+// Post-commit and non-blocking: the once-ever guard, consent and suppression
+// checks and the send delay all live in sendNewRecurringWelcome. `spawned` is
+// true only when the committed save actually gave the visit its follow-ups.
+async function sendMakeRecurringWelcome({ customerId, spawned, serviceId, recurringPattern, adminUserId }) {
+  if (!customerId || !spawned) return;
+  try {
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .first('id', 'first_name', 'last_name', 'phone', 'email');
+    if (!customer) return;
+    await sendNewRecurringWelcome({
+      customer,
+      scheduledServiceId: serviceId,
+      recurringPattern,
+      entryPoint: 'admin_make_recurring',
+      adminUserId,
+    });
+  } catch (e) {
+    logger.error(`[schedule/update-details] new recurring welcome SMS failed (non-blocking): ${e.message}`);
+  }
+}
+
 router.put('/:id/update-details', requireAdmin, scheduleUpdateDetailsHandler);
 async function scheduleUpdateDetailsHandler(req, res, next) {
   try {
@@ -14669,10 +14710,15 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     // and every spawned child below carry the rounds pattern and no interval.
     // A visit already in a series keeps the pattern its rows already carry,
     // so a series never mixes the two.
+    // New-customer welcome for the series this save may create: decided here,
+    // before anything is written; sent after the commit (see below).
+    let makeRecurringWelcomeCustomerId = null;
+    let makeRecurringSpawned = false;
     if (isRecurring && spawnRecurringChildren !== false && recurringPattern) {
       const seriesCurrent = await db('scheduled_services')
         .where({ id: req.params.id })
-        .first('is_recurring', 'recurring_parent_id', 'service_type', 'service_id');
+        .first('is_recurring', 'recurring_parent_id', 'service_type', 'service_id', 'customer_id');
+      makeRecurringWelcomeCustomerId = await makeRecurringWelcomeCandidate(seriesCurrent);
       if (seriesCurrent && !seriesCurrent.is_recurring && !seriesCurrent.recurring_parent_id) {
         // The EFFECTIVE identity of this save, resolved the way the service
         // change below treats the request: a posted serviceId (truthy) is the
@@ -17497,6 +17543,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
               { statusCode: 409, isOperational: true, code: 'RECURRING_SPAWN_SHORTFALL' },
             );
           }
+          // The series now has children inside this (still uncommitted) save.
+          makeRecurringSpawned = inserted > 0;
         }
       }
 
@@ -17724,6 +17772,17 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     // Research must see committed address stamps and must not replay prep sends.
     void require('../services/appointment-address').refreshAppointmentAddressBriefs(db, addressUpdatedIds).catch((err) => {
       logger.error(`[schedule/update-details] address brief refresh failed: ${err.message}`);
+    });
+
+    // Welcome text for a customer whose FIRST recurring series this save just
+    // created. Only after the commit above: nothing here can roll back with
+    // the save, and a failure logs without touching the edit.
+    await sendMakeRecurringWelcome({
+      customerId: makeRecurringWelcomeCustomerId,
+      spawned: makeRecurringSpawned,
+      serviceId: req.params.id,
+      recurringPattern,
+      adminUserId: req.technicianId,
     });
 
     // Visit-group seam (visit-group-scope.md §2; codex #3590 r4/r8): a
@@ -29585,6 +29644,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
+  makeRecurringWelcomeCandidate, sendMakeRecurringWelcome,
   assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
   areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED, postedAreaAddOnTotals,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,

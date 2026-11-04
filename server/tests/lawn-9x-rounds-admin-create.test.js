@@ -23,6 +23,16 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 jest.mock('../models/db', () => jest.fn());
+// Welcome text on make-this-recurring (owner 2026-11-04): the real candidacy gate
+// stays the default; the enqueue is a spy so no sequence row is written.
+jest.mock('../services/new-recurring-welcome-sms', () => {
+  const actual = jest.requireActual('../services/new-recurring-welcome-sms');
+  return {
+    ...actual,
+    isNewRecurringSignupCandidate: jest.fn(actual.isNewRecurringSignupCandidate),
+    sendNewRecurringWelcome: jest.fn(async () => ({ sent: false, queued: true })),
+  };
+});
 jest.mock('../services/package-followup-booking', () => ({
   ...jest.requireActual('../services/package-followup-booking'),
   hasLivePackageChild: jest.fn(async () => false),
@@ -78,6 +88,8 @@ jest.mock('../services/call-booking-catalog', () => ({
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
 }));
 const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+const { isNewRecurringSignupCandidate, sendNewRecurringWelcome } = require('../services/new-recurring-welcome-sms');
+const logger = require('../services/logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const express = require('express');
 const adminScheduleRouter = require('../routes/admin-schedule');
@@ -569,6 +581,88 @@ describe('PUT /:id/update-details — make this lawn visit recurring', () => {
       const { status } = await put({ ...makeRecurring, recurringCount: 3 });
       expect(status).toBe(200);
       expect(stamps()).toEqual([{ recurring_round_anchor_date: '2099-07-01' }]);
+    });
+  });
+
+  // Welcome text for the first series (owner 2026-11-04, "welcome text"): decided before the
+  // save writes, sent only after the save commits, never fails the edit.
+  describe('the new recurring customer welcome text', () => {
+    test('a new customer: candidacy is read before the save, then one welcome after the commit', async () => {
+      mockVisit(lawnVisit);
+      isNewRecurringSignupCandidate.mockImplementationOnce(async () => true);
+      const { status } = await put(makeRecurring);
+      expect(status).toBe(200);
+      expect(isNewRecurringSignupCandidate).toHaveBeenCalledWith('cust-1');
+      expect(sendNewRecurringWelcome).toHaveBeenCalledTimes(1);
+      expect(sendNewRecurringWelcome).toHaveBeenCalledWith(expect.objectContaining({
+        customer: expect.objectContaining({ id: 'cust-1' }),
+        scheduledServiceId: 'svc-1',
+        recurringPattern: 'lawn_rounds_9',
+        entryPoint: 'admin_make_recurring',
+        adminUserId: 'staff-1',
+      }));
+      const asked = isNewRecurringSignupCandidate.mock.invocationCallOrder[0];
+      const committed = db.transaction.mock.invocationCallOrder[0];
+      const sent = sendNewRecurringWelcome.mock.invocationCallOrder[0];
+      expect(asked).toBeLessThan(committed);
+      expect(sent).toBeGreaterThan(committed);
+      expect(spawned).toHaveLength(2);
+    });
+
+    test('a renewal or an old customer (not a candidate): the series is made, no welcome', async () => {
+      mockVisit(lawnVisit);
+      isNewRecurringSignupCandidate.mockImplementationOnce(async () => false);
+      const { status } = await put(makeRecurring);
+      expect(status).toBe(200);
+      expect(isNewRecurringSignupCandidate).toHaveBeenCalledTimes(1);
+      expect(spawned).toHaveLength(2);
+      expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+    });
+
+    test('a visit already in a series is not a new series: no candidacy read, no welcome', async () => {
+      mockVisit({ ...lawnVisit, is_recurring: true, recurring_pattern: 'custom', recurring_interval_days: 42 });
+      const { status } = await put(makeRecurring);
+      expect(status).toBe(200);
+      expect(isNewRecurringSignupCandidate).not.toHaveBeenCalled();
+      expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+    });
+
+    test('an edit of an existing plan (no spawn) never welcomes', async () => {
+      mockVisit({ ...lawnVisit, is_recurring: true, recurring_pattern: 'custom', recurring_interval_days: 42 });
+      const { status } = await put({ ...makeRecurring, spawnRecurringChildren: false });
+      expect(status).toBe(200);
+      expect(isNewRecurringSignupCandidate).not.toHaveBeenCalled();
+      expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+    });
+
+    test('a count of one gives the visit no follow-ups, so no series and no welcome', async () => {
+      mockVisit(lawnVisit);
+      isNewRecurringSignupCandidate.mockImplementationOnce(async () => true);
+      const { status } = await put({ ...makeRecurring, recurringCount: 1 });
+      expect(status).toBe(200);
+      expect(spawned).toHaveLength(0);
+      expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+    });
+
+    test('a save that rolls back sends nothing', async () => {
+      mockVisit(lawnVisit);
+      isNewRecurringSignupCandidate.mockImplementationOnce(async () => true);
+      db.transaction = jest.fn(async () => {
+        throw Object.assign(new Error('save refused'), { statusCode: 409, isOperational: true });
+      });
+      const { status } = await put(makeRecurring);
+      expect(status).toBe(409);
+      expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+    });
+
+    test('a welcome that throws logs an error and the edit still succeeds', async () => {
+      mockVisit(lawnVisit);
+      isNewRecurringSignupCandidate.mockImplementationOnce(async () => true);
+      sendNewRecurringWelcome.mockRejectedValueOnce(new Error('queue down'));
+      const { status } = await put(makeRecurring);
+      expect(status).toBe(200);
+      expect(spawned).toHaveLength(2);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('new recurring welcome SMS failed'));
     });
   });
 });
