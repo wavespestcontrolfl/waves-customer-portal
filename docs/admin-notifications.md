@@ -207,6 +207,14 @@ Kinds today:
   The owner's own word list sends no bell. It sends nothing to a customer and moves no money; it changes where the ad
   can show, and **Undo** is on the Ads page.
 
+**Listen on a voicemail** (owner 2026-11-04: "for voicemails, can we have a button where we can click on the
+voicemail and listen to it within the admin section"). A voicemail row (`customer_voicemail_callback`; not the AI-call
+callback, `reason` `sandy_provider_failure`, raised before any recording exists) shows **Listen** above its buttons, for
+the admin role. One tap loads the recording of the call the row names (`payload.callLogId`) through the admin-only audio
+proxy the Calls tab uses (`GET /api/admin/call-recordings/audio/:id`) and plays it in the bell
+(`AuthenticatedCallAudio` with `playOnLoad`). It is not a button kind: it runs no server step, changes nothing on the
+row and never opens it; the row closes by its own done-when as before.
+
 ## 3. Never in a headline or a why
 
 Timestamps and ISO dates, UUIDs and hashes, table and column names, `GATE_*` and other
