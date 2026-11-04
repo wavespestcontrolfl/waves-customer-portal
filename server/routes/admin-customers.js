@@ -5,6 +5,7 @@ const { normalizeContactRole } = require('../constants/contact-roles');
 const { canonicalStoredPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const router = express.Router();
 const db = require('../models/db');
+const { LIFETIME_REVENUE_SQL, lifetimeRevenueFor } = require('../services/customer-lifetime-revenue');
 const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 const LeadScorer = require('../services/lead-scorer');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -2769,11 +2770,10 @@ router.get('/', async (req, res, next) => {
       // the second house only after the primary was booked (owner report
       // 2026-09-08). Retired rows (active=false) are not counted.
       db.raw("(SELECT COUNT(*) FROM customer_properties WHERE customer_properties.customer_id = customers.id AND customer_properties.active = TRUE) as property_count"),
-      // Net of all paid payments minus refunds — the same definition the
-      // customer-detail endpoint computes. customers.lifetime_revenue has NO
-      // production writer (only demo seeds ever set it), so reading the
-      // column shows $0 for every real customer.
-      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
+      // Lifetime revenue (customer-lifetime-revenue.js: paid payments net of
+      // refunds + estimate deposits), the same figure the customer-detail
+      // endpoint shows. customers.lifetime_revenue has NO production writer.
+      db.raw(`${LIFETIME_REVENUE_SQL} as lifetime_revenue_net`),
     );
     let query = withListColumns(scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters, healthColumns)));
 
@@ -3625,7 +3625,7 @@ router.get('/:id', async (req, res, next) => {
         : require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), c)
       ).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
-      db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
+      lifetimeRevenueFor(db, c.id).then(net => ({ net })).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
       // Upcoming, active-only — drives Customer 360's next appointment.
       db('scheduled_services as ss')
@@ -3776,7 +3776,8 @@ router.get('/:id', async (req, res, next) => {
       };
     });
     // Lifetime revenue is the net of all paid payments (Stripe + Zelle/manual),
-    // minus refunds. customers.lifetime_revenue isn't kept in sync, and summing
+    // minus refunds, plus estimate deposits (customer-lifetime-revenue.js).
+    // customers.lifetime_revenue isn't kept in sync, and summing
     // paid-invoice totals from the limit(10) query above would underreport for
     // long-tenured customers and miss off-gateway payments without invoices.
     const lifetimeRevenue = parseFloat(paymentsTotal?.net || 0);

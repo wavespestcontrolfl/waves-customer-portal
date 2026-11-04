@@ -9,6 +9,7 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
+const { LIFETIME_REVENUE_SQL, lifetimeRevenueFor } = require('../customer-lifetime-revenue');
 const { lockCustomerComms, lockSmsPhone } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
@@ -485,9 +486,9 @@ async function queryCustomers(input, readCustomerIds = [], pageCustomerId = null
       'customers.monthly_rate', 'customers.lead_score',
       'customers.active', 'customers.member_since', 'customers.lead_source',
       'customers.last_contact_date',
-      // customers.lifetime_revenue has no writer (it reads $0): net of paid
-      // payments, the same figure the admin customer list shows and sorts by.
-      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue"),
+      // customers.lifetime_revenue has no writer (it reads $0): paid payments
+      // net + deposits, the same figure the admin customer list shows and sorts by.
+      db.raw(`${LIFETIME_REVENUE_SQL} as lifetime_revenue`),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed')) as next_service_date"),
       db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC NULLS LAST, created_at DESC LIMIT 1) as health_score"),
@@ -1096,14 +1097,10 @@ async function getCustomerDetail(customerId) {
     .orderByRaw('scored_at DESC NULLS LAST, created_at DESC')
     .first();
 
-  // customers.lifetime_revenue has no writer (it reads $0): report the net of
-  // paid payments, as the admin customer page does. An unreadable sum is null,
-  // never a false $0.
-  const lifetimeRevenue = await db('payments')
-    .where({ customer_id: customerId, status: 'paid' })
-    .first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net'))
-    .then(row => parseFloat(row?.net || 0))
-    .catch(() => null);
+  // customers.lifetime_revenue has no writer (it reads $0): report paid
+  // payments net + deposits, as the admin customer page does. An unreadable
+  // sum is null, never a false $0.
+  const lifetimeRevenue = await lifetimeRevenueFor(db, customerId).catch(() => null);
 
   // The monthly bill by service (plan-rate ledger): monthly_rate is their sum,
   // so a rate edit must say which line changes (update_customer rate_service).

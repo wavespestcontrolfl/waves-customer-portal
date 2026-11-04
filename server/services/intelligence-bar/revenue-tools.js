@@ -8,6 +8,7 @@
  */
 
 const db = require('../../models/db');
+const { LIFETIME_REVENUE_SQL } = require('../customer-lifetime-revenue');
 const { computeMrrBreakdown } = require('../mrr-breakdown');
 const logger = require('../logger');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, parseETDateTime, addETDays } = require('../../utils/datetime-et');
@@ -233,14 +234,14 @@ async function getAdAttribution(period = 'month') {
   const p = getPeriodDates(period);
 
   // Get customers created in this period with lead source.
-  // customers.lifetime_revenue has NO writer (membership lane #2830) —
-  // compute the payments-derived net the customer list/detail endpoints
-  // use, so LTV-by-source answers match the rest of the portal.
+  // Lifetime revenue (payments net + deposits; customer-lifetime-revenue.js),
+  // the figure the customer list/detail endpoints use, so LTV-by-source
+  // answers match the rest of the portal.
   const customers = await db('customers')
     .whereBetween('created_at', [p.start, p.end + 'T23:59:59'])
     .select(
       'id', 'lead_source', 'monthly_rate',
-      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
+      db.raw(`${LIFETIME_REVENUE_SQL} as lifetime_revenue_net`),
     );
 
   // Get revenue from these customers
@@ -377,10 +378,10 @@ async function getTopRevenueCustomers(input) {
     .select(
       'customers.id', 'customers.first_name', 'customers.last_name',
       'customers.waveguard_tier', 'customers.monthly_rate',
-      // customers.lifetime_revenue has NO writer (#2830) — payments-derived
-      // net, same computation as the customer list/detail endpoints. Legal
-      // in the SELECT because customers.id (the PK) is grouped.
-      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
+      // Lifetime revenue, same computation as the customer list/detail
+      // endpoints (customer-lifetime-revenue.js). Legal in the SELECT
+      // because customers.id (the PK) is grouped.
+      db.raw(`${LIFETIME_REVENUE_SQL} as lifetime_revenue_net`),
       db.raw('SUM(service_records.revenue) as period_revenue'),
       db.raw('COUNT(*) as services'),
     )
