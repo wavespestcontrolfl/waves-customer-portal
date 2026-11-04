@@ -253,6 +253,20 @@ describe('queueFirstSeriesWelcomeAfterCommit', () => {
     expect(sendNewRecurringWelcome).toHaveBeenCalledTimes(1);
   });
 
+  test('a savepoint that rolled back (error swallowed) while the outer transaction commits sends nothing', async () => {
+    const outer = deferred();
+    const savepoint = deferred();
+    await send({
+      isTransaction: true,
+      executionPromise: savepoint.promise,
+      parentTransaction: { isTransaction: true, executionPromise: outer.promise },
+    });
+    savepoint.reject(new Error('savepoint rolled back'));
+    outer.resolve();
+    await flush();
+    expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+  });
+
   test('on the global pool the rows are already committed, so it sends inline', async () => {
     await send(db);
     expect(sendNewRecurringWelcome).toHaveBeenCalledTimes(1);

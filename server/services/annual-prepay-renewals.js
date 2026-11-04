@@ -1306,9 +1306,10 @@ async function firstSeriesWelcomeCandidate(term, { alreadyActivated, seedCount }
 // guard, consent and suppression checks, and the send delay all live in
 // sendNewRecurringWelcome; nothing is duplicated here. On a caller
 // transaction the send waits for the OUTERMOST transaction's commit
-// (executionPromise settles at COMMIT; a rollback drops it with the rows);
-// a savepoint's own promise resolves on RELEASE, before the real commit, so
-// the walk up parentTransaction picks the outer one. On the global pool each
+// (executionPromise settles at COMMIT; a rollback drops it with the rows)
+// AND for every savepoint between (a savepoint's promise resolves on RELEASE,
+// before the real commit, and rejects on its own rollback, which a caller may
+// swallow while the outer one still commits). On the global pool each
 // seed insert already committed, so it runs inline. Non-blocking: a failure
 // logs and never touches the activation.
 function queueFirstSeriesWelcomeAfterCommit(conn, term, { candidate, rootId, createdRows }) {
@@ -1330,11 +1331,15 @@ function queueFirstSeriesWelcomeAfterCommit(conn, term, { candidate, rootId, cre
       logger.error(`[annual-prepay] new recurring welcome failed for term ${term?.id} (non-blocking): ${err.message}`);
     }
   };
-  let scope = conn;
-  while (scope?.parentTransaction) scope = scope.parentTransaction;
-  const done = scope && scope !== db && scope.executionPromise;
-  if (done && typeof done.then === 'function') {
-    done.then(send, () => {}); // rolled back: the series never existed
+  const pending = [];
+  for (let scope = conn; scope && scope !== db; scope = scope.parentTransaction) {
+    if (typeof scope.executionPromise?.then === 'function') pending.push(scope.executionPromise);
+  }
+  if (pending.length) {
+    // Every enclosing transaction must succeed: a savepoint the caller rolled
+    // back and swallowed would otherwise still queue a welcome for rows that
+    // are gone once the outer one commits.
+    Promise.all(pending).then(send, () => {});
     return Promise.resolve();
   }
   return send();
