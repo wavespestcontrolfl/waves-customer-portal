@@ -64,7 +64,12 @@ const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
 // stopped running" every quiet day after (2026-08-17). A policy active on
 // fewer than DAILY_CADENCE_MIN_DAYS of the prior 7 must instead be silent for
 // SILENT_CONSECUTIVE_DAYS full ET days (yesterday inclusive) before alarming.
+// Volume counts too: a policy averaging under DAILY_CADENCE_MIN_CALLS_PER_DAY
+// has ordinary empty days even when it ran on 5 of 7. The public Ask Waves
+// chat (18 calls in the week, 11 of them one morning) alarmed on its first
+// quiet day (2026-11-04), so a low-volume policy takes the same 3-day silence.
 const DAILY_CADENCE_MIN_DAYS = 5;
+const DAILY_CADENCE_MIN_CALLS_PER_DAY = 5;
 const SILENT_CONSECUTIVE_DAYS = 3;
 
 // Episodic one-shot workloads (sealed exams burst >=10 items then
@@ -84,6 +89,19 @@ const EPISODIC_LANE_RE = /:(?:sealed|backfill|replay)$/;
 //   visitBrief        pre-visit brief rewrite, removed 2026-10-03 (#5835)
 //   jobCardParagraph  job card paragraph rewrite, removed 2026-10-03 (#5752)
 const RETIRED_POLICIES = new Set(['visitBrief', 'jobCardParagraph']);
+
+// Backup-only routes run only when another provider path fails, so a silent
+// day is their healthy state, never "may have stopped running". They are
+// excluded from absence detection; their failure/fallback exceptions still
+// report.
+//   callExtractionV1Backup  Claude/OpenAI backup for the V1 Gemini call
+//                           extractor (call-recording-processor.js), busy
+//                           only while Gemini refuses (2026-10-24..31)
+const BACKUP_ONLY_POLICIES = new Set(['callExtractionV1Backup']);
+
+// Silence is expected for both lists above; absence detection reads them as
+// one set.
+const SILENCE_EXPECTED_POLICIES = new Set([...RETIRED_POLICIES, ...BACKUP_ONLY_POLICIES]);
 
 // Synthetic policy used only by the write-path probe; inserted and deleted
 // within probeRecorder, and excluded from stats so a failed cleanup can never
@@ -957,14 +975,15 @@ function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, 
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
   for (const w of (recorderIssue || !absenceJudgeable) ? [] : priorWeekStats) {
     if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
-    if (RETIRED_POLICIES.has(w.policy)) continue; // call removed on purpose
+    if (SILENCE_EXPECTED_POLICIES.has(w.policy)) continue; // call removed on purpose, or backup-only
     if (w.total < SILENT_MIN_WEEKLY || yesterdayByPolicy.has(w.policy)) continue;
     // Cadence split: near-daily policies (or legacy stats without activeDays)
-    // alarm on one zero day; bursty ones need the whole recent window silent.
-    // `recentActivePolicies` = policies with >=1 call in the last
-    // SILENT_CONSECUTIVE_DAYS ET days; null (legacy caller/tests) means no
-    // recent-window evidence, which falls back to the immediate alarm.
-    const nearDaily = w.activeDays == null || w.activeDays >= DAILY_CADENCE_MIN_DAYS;
+    // alarm on one zero day; bursty or low-volume ones need the whole recent
+    // window silent. `recentActivePolicies` = policies with >=1 call in the
+    // last SILENT_CONSECUTIVE_DAYS ET days; null (legacy caller/tests) means
+    // no recent-window evidence, which falls back to the immediate alarm.
+    const nearDaily = w.activeDays == null
+      || (w.activeDays >= DAILY_CADENCE_MIN_DAYS && w.total >= DAILY_CADENCE_MIN_CALLS_PER_DAY * 7);
     if (nearDaily) {
       exceptions.push({
         policy: w.policy,
@@ -1177,7 +1196,9 @@ module.exports = {
   FALLBACK_MIN_VOLUME,
   SILENT_MIN_WEEKLY,
   DAILY_CADENCE_MIN_DAYS,
+  DAILY_CADENCE_MIN_CALLS_PER_DAY,
   RETIRED_POLICIES,
+  BACKUP_ONLY_POLICIES,
   SILENT_CONSECUTIVE_DAYS,
   _private: { emailExceptions },
 };
