@@ -66,6 +66,7 @@ import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet'
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
+import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 import useSavedFastCompletions, { projectReportTool, savedAtLabel, withSavedCompletions } from '../../hooks/useSavedFastCompletions';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
@@ -262,6 +263,13 @@ function scheduleStateFromResponse(data) {
   };
 }
 
+// How often the visible page re-reads the route in the background.
+const ROUTE_REFRESH_INTERVAL_MS = 60_000;
+
+// fetchSchedule is also wired to event handlers, which pass an event or
+// nothing; only the timed re-read passes `{ background: true }`.
+const isBackgroundRead = (options) => options?.background === true;
+
 function refreshingRouteNotice(savedAt) {
   const time = formatSnapshotTime(savedAt);
   return `Refreshing your route — showing the copy saved${time ? ` at ${time}` : ''}.`;
@@ -271,7 +279,7 @@ function serviceTechnicianId(service) {
   return service?.technicianId || service?.technician_id || service?.tech_id || '';
 }
 
-import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+import { serviceWindowLabel, groupServicesIntoStops, currentStopOf, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
 // The Tools tile for the truck check (GATE_TRUCK_KIT): present only while the
 // kit answered enabled. Kept out of the page component's decision count.
@@ -417,15 +425,18 @@ export default function TechHomePage({ section = 'today' }) {
   const currentRole = staff?.role || null;
 
   const scheduleSeq = useRef(0);
-  const fetchSchedule = useCallback(async () => {
+  // `{ background: true }` is the timed re-read: it leaves the button and the
+  // line lookup alone, and a failed read keeps the route on screen. Other
+  // callers pass nothing (some are used as event handlers).
+  const fetchSchedule = useCallback(async (options) => {
+    const background = isBackgroundRead(options);
     const seq = ++scheduleSeq.current;
-    setRefreshing(true);
     // Runs alongside the schedule read but never gates it: the route must
     // render even when the line lookup hangs on a poor connection (codex
     // #4072 r8 P2). The first render cannot show the personal-phone links
     // while the answer is in flight — the initial `{ unknown: true }` hides
     // every contact link until the lookup succeeds (r4 / r5 P2s).
-    fetchTechLine();
+    if (!background) { setRefreshing(true); fetchTechLine(); }
     const today = etDateString();
     const techId = staffRef.current?.id || null;
     // A request that hangs in a dead zone must not hold the page: cut it
@@ -464,6 +475,9 @@ export default function TechHomePage({ section = 'today' }) {
         return next.rows;
       }
       console.error('Failed to fetch schedule:', result.kind, result.message || '');
+      // A timed re-read that fails keeps the route already on screen; the
+      // tech's own Refresh or the next timed read shows a real error.
+      if (background) return;
       // Offline fallback: the last good route this tech loaded today, read
       // fresh each time (another tab or a later login may have replaced it).
       // A server answer of any kind keeps the saved copy hidden behind the
@@ -491,6 +505,12 @@ export default function TechHomePage({ section = 'today' }) {
   // A route refresh (the button, or a dispatch job update) re-reads the
   // truck kit too, so a stop added mid-day shows its missing-tool line.
   const refreshRoute = useCallback(() => { fetchSchedule(); truckKit.reload(); }, [fetchSchedule, truckKit.reload]);
+
+  // Office and customer moves send no socket event, so re-read the route
+  // every minute while the page is visible, and on resume. Starts after the
+  // first load so it can never replace that read.
+  const backgroundRouteRead = useCallback(() => fetchSchedule({ background: true }), [fetchSchedule]);
+  useVisiblePageRefresh(backgroundRouteRead, { intervalMs: ROUTE_REFRESH_INTERVAL_MS, enabled: !loading });
 
   // Recap clips kept on this device past the draft retention window are
   // abandoned (the visit left the route): sweep them here, since a tech who
@@ -623,11 +643,9 @@ export default function TechHomePage({ section = 'today' }) {
   // stop — one card, one En Route / On Site tap (the server fans out to the
   // siblings). Ungrouped rows are their own stop, exactly as before.
   const stops = groupServicesIntoStops(myServices);
-  const nextVisitStop = nextStopOf(stops);
   const selectedVisit = stops.find((stop) => stop.key === selectedVisitKey);
-  const fieldNextStop = stops.find((stop) => stop.services.some((service) => service.status === 'on_site'))
-    || stops.find((stop) => stop.services.some((service) => service.status === 'en_route'))
-    || nextVisitStop;
+  // The stop the tech is at: of the stops on site, the one arrived at last.
+  const fieldNextStop = currentStopOf(stops);
   // Reconcile FORWARD to the most advanced live member (codex r4): a sibling
   // that an admin/GPS signal already put on site pulls the whole stop to
   // on_site; the server's on-site path accepts an en_route primary.

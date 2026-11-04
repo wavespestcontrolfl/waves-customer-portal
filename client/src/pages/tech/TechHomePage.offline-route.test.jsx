@@ -258,3 +258,32 @@ it('shows the offline notice in the field layout too', async () => {
   expect(screen.getAllByText(/Fixture saved-one/).length).toBeGreaterThan(0);
   expect(screen.getByText('55% rain today')).toBeInTheDocument();
 });
+
+// The route re-reads itself every minute while the page is visible, so an
+// office or customer move (no socket event) reaches the tech's screen.
+const scheduleReads = () => fetchMock.mock.calls.filter(([path]) => String(path).includes('/admin/schedule?')).length;
+
+it('re-reads the route in the background every minute without a loading flash', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  mount();
+  await screen.findAllByText(/Fixture live-one/);
+  const before = scheduleReads();
+  fetchMock.mockClear();
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(scheduleReads()).toBe(1);
+  expect(before).toBeGreaterThan(0);
+  expect(screen.queryByText('Loading your route…')).not.toBeInTheDocument();
+  expect(screen.getAllByText(/Fixture live-one/).length).toBeGreaterThan(0);
+});
+
+it('keeps the route on screen when a background re-read fails', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  mount();
+  await screen.findAllByText(/Fixture live-one/);
+  scheduleMode = 'server-error';
+  fetchMock.mockClear();
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(scheduleReads()).toBe(1);
+  expect(screen.queryByText('Route connection unavailable')).not.toBeInTheDocument();
+  expect(screen.getAllByText(/Fixture live-one/).length).toBeGreaterThan(0);
+});

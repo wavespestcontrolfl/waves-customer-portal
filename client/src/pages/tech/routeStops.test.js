@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, stopHasCustomerSentPhotos } from './routeStops';
+import { currentStopOf, groupServicesIntoStops, nextStopOf, stillOpenStopsOf, stopArrivalMs, stopSummaryLabel, stopWindow, stopPropertyAlerts, stopHasCustomerSentPhotos } from './routeStops';
 
 const visit = { id: 'v1', serviceCount: 2 };
 
@@ -95,5 +95,54 @@ describe('stopHasCustomerSentPhotos (PR 3b)', () => {
   it('null/undefined stop is false, never a throw', () => {
     expect(stopHasCustomerSentPhotos(null)).toBe(false);
     expect(stopHasCustomerSentPhotos(undefined)).toBe(false);
+  });
+});
+
+// The tech starts the next stop before finishing the last one in the app:
+// the current stop is the one arrived at LAST, not the first on site.
+describe('currentStopOf / stillOpenStopsOf', () => {
+  const at = (id, status, checkInTime) => ({ id, status, checkInTime });
+  it('picks the on-site stop arrived at last, not the first one on site', () => {
+    const stops = groupServicesIntoStops([
+      at('a', 'completed', '2026-11-04T15:00:00Z'),
+      at('b', 'on_site', '2026-11-04T17:02:00Z'),
+      at('c', 'on_site', '2026-11-04T18:33:00Z'),
+      at('d', 'on_site', '2026-11-04T19:07:00Z'),
+      at('e', 'confirmed'),
+    ]);
+    expect(currentStopOf(stops).primary.id).toBe('d');
+    expect(stillOpenStopsOf(stops, currentStopOf(stops)).map((st) => st.primary.id)).toEqual(['b', 'c']);
+  });
+  it('orders the still-open stops oldest arrival first whatever the route order', () => {
+    const stops = groupServicesIntoStops([
+      at('a', 'on_site', '2026-11-04T18:00:00Z'),
+      at('b', 'on_site', '2026-11-04T16:00:00Z'),
+      at('c', 'on_site', '2026-11-04T19:00:00Z'),
+    ]);
+    const current = currentStopOf(stops);
+    expect(current.primary.id).toBe('c');
+    expect(stillOpenStopsOf(stops, current).map((st) => st.primary.id)).toEqual(['b', 'a']);
+  });
+  it('keeps route order when no on-site stop has a readable time, and a timed stop beats an untimed one', () => {
+    const untimed = groupServicesIntoStops([at('a', 'on_site'), at('b', 'on_site', 'not a date')]);
+    expect(currentStopOf(untimed).primary.id).toBe('a');
+    const mixed = groupServicesIntoStops([at('a', 'on_site'), at('b', 'on_site', '2026-11-04T16:00:00Z')]);
+    expect(currentStopOf(mixed).primary.id).toBe('b');
+    expect(stopArrivalMs(mixed[0])).toBeNull();
+  });
+  it('falls back to the en_route stop, then the next stop, and stills nothing open', () => {
+    const enRoute = groupServicesIntoStops([at('a', 'completed'), at('b', 'confirmed'), at('c', 'en_route')]);
+    expect(currentStopOf(enRoute).primary.id).toBe('c');
+    const next = groupServicesIntoStops([at('a', 'completed'), at('b', 'confirmed')]);
+    expect(currentStopOf(next).primary.id).toBe('b');
+    expect(stillOpenStopsOf(next, currentStopOf(next))).toEqual([]);
+    expect(currentStopOf([])).toBeNull();
+  });
+  it('reads a grouped stop\'s arrival from its earliest on-site member', () => {
+    const stops = groupServicesIntoStops([
+      { id: 'a', status: 'on_site', visit: { id: 'v' }, checkInTime: '2026-11-04T17:30:00Z' },
+      { id: 'b', status: 'on_site', visit: { id: 'v' }, checkInTime: '2026-11-04T17:00:00Z' },
+    ]);
+    expect(stopArrivalMs(stops[0])).toBe(Date.parse('2026-11-04T17:00:00Z'));
   });
 });
