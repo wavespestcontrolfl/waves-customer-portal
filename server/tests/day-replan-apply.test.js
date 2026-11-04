@@ -20,13 +20,16 @@ jest.mock('../services/appointment-reminders', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(), _private: { doneColumns: jest.fn(() => ({})) } }));
 
-const { applyAcceptedDay, findInterrupted, recoverInterrupted, INITIATOR, REASON_CODE } = require('../services/day-replan/apply');
+const { applyAcceptedDay, findInterrupted, recoverInterrupted, INITIATOR, REASON_CODE, _internals: applyInternals } = require('../services/day-replan/apply');
 const { _internals } = require('../services/day-replan');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const AppointmentReminders = require('../services/appointment-reminders');
 const logger = require('../services/logger');
 const { HQ, row, makeDb, fakeRebooker } = require('./helpers/day-replan-db');
 const { withHour, appSimCheck } = require('../services/day-replan/app-sim');
+const { parseETDateTime } = require('../utils/datetime-et');
+
+const reconcile = (w, ids, skip) => applyInternals.reconcileReminders(w.conn, w.deps, { ids, skip });
 
 const DATE = '2026-11-04';
 const TECH = 'tech-1';
@@ -307,6 +310,245 @@ describe('a failed step', () => {
   });
 });
 
+describe('a rollback is fenced on what this writer committed', () => {
+  /** Three visits moved forward; the third write is refused and `afterTwo` runs just before it (a person acting). */
+  function personActs(afterTwo, extra = {}) {
+    const w = world({
+      visits: [['a', 8], ['b', 9], ['c', 10]], changes: [['a', 8, 12], ['b', 9, 13], ['c', 10, 14]],
+      rowExtra: { a: { route_order: 1 }, b: { route_order: 2 }, c: { route_order: 3 } },
+      rebookerOpts: { failWhen: (_id, _win, n) => { if (n === 3) afterTwo(w.db.rows.find((r) => r.id === 'a')); return n === 3; } },
+      ...extra,
+    });
+    return w;
+  }
+
+  test.each([
+    ['moved it to another hour', (a) => { a.window_start = '15:00:00'; a.window_end = '16:00:00'; }],
+    ['gave it to another technician', (a) => { a.technician_id = 'tech-9'; }],
+    ['changed its status', (a) => { a.status = 'pending'; }],
+    ['locked it for staff', (a) => { a.auto_dispatch_locked = true; }],
+    ['edited its location', (a) => { a.lat += 0.5; a.raw_lat += 0.5; }],
+    ['put it in a visit record', (a) => { a.visit_id = 'visit-9'; }],
+  ])('a person %s after our step: it is left alone, the others go back, one notice, failed', async (_label, mutate) => {
+    const w = personActs(mutate);
+    const before = JSON.stringify(w.db.rows.find((r) => r.id === 'a'));
+    let after;
+    const out = await w.run();
+    after = w.db.rows.find((r) => r.id === 'a');
+    expect(out).toMatchObject({ status: 'failed' });
+    expect(out.reason).toBe('rollback_failed:DIVERGED');
+    // a is exactly as the person left it: no write touched it during the rollback.
+    expect(w.rebooker.calls.filter((c) => c.id === 'a')).toHaveLength(1);
+    expect(JSON.stringify(after)).not.toBe(before); // (it changed at the person's hand, and only theirs)
+    // b, whose step landed, was put back; the visit c was refused and never moved.
+    expect(w.windows().b).toBe('09:00');
+    expect(w.windows().c).toBe('10:00');
+    expect(w.raiseAlert).toHaveBeenCalledTimes(1);
+    expect(w.raiseAlert.mock.calls[0][1].why).toMatch(/could not be put back/);
+    expect(w.db.plans[0].apply_status ?? 'open').toBe('open'); // the runner records the outcome, not the writer
+  });
+
+  test('the route numbers stay as they are when a visit could not be put back', async () => {
+    const w = personActs((a) => { a.technician_id = 'tech-9'; });
+    await w.run();
+    expect(w.db.rows.map((r) => r.route_order)).toEqual([1, 2, 3]);
+  });
+
+  test('a person who put the visit back on its old hour needs no undo', async () => {
+    const w = personActs((a) => { a.window_start = '08:00:00'; a.window_end = '09:00:00'; });
+    const out = await w.run();
+    expect(out).toMatchObject({ status: 'rolled_back' });
+    expect(w.rebooker.calls.filter((c) => c.id === 'a')).toHaveLength(1);
+    expect(w.raiseAlert).not.toHaveBeenCalled();
+  });
+
+  test('a stuck visit holds back its older steps too, and the others are still put back', async () => {
+    // a is parked on a temporary hour by the first step of a swap, and a person then edits it.
+    const w = world({
+      visits: [['a', 8], ['b', 9], ['c', 11]], changes: [['a', 8, 9], ['b', 9, 8], ['c', 11, 13]],
+      rebookerOpts: { failWhen: (_id, _win, n) => { if (n === 4) { const a = w.db.rows.find((r) => r.id === 'a'); a.lng += 0.5; a.raw_lng += 0.5; } return n === 4; } },
+    });
+    const out = await w.run();
+    expect(out).toMatchObject({ status: 'failed' });
+    expect(w.raiseAlert).toHaveBeenCalledTimes(1);
+    // a (edited by a person) was not written again; every other visit is back on its own hour.
+    expect(w.rebooker.calls.map((c) => `${c.id}:${c.win.start}`)).toEqual(['c:13:00', 'a:10:00', 'b:08:00', 'a:09:00', 'b:09:00', 'c:11:00']);
+    expect(w.windows()).toEqual({ a: '10:00', b: '09:00', c: '11:00' });
+    // The visit left on its parking hour never has a reminder synced to that hour.
+    for (const [service, best] of w.syncMovedReminders.mock.calls) if (service.id === 'a') expect(best.start_time).not.toBe('10:00');
+    expect(w.windows().c).toBe('11:00');
+  });
+});
+
+describe('the route numbers on a rollback', () => {
+  test('are restored only where a number still equals the one this writer wrote', async () => {
+    const w = world({ visits: [['a', 8], ['b', 9]], changes: [['a', 8, 12], ['b', 9, 13]], rowExtra: { a: { route_order: 5 }, b: { route_order: 6 } } });
+    // This writer wrote 1 and 2 over the old 5 and 6; a person has since renumbered b to 9.
+    w.db.rows.find((r) => r.id === 'a').route_order = 1;
+    w.db.rows.find((r) => r.id === 'b').route_order = 9;
+    await applyInternals.restoreRouteOrder(w.conn, w.deps, { dateStr: DATE, techId: TECH, routeBefore: { a: 5, b: 6 }, routeAfter: { a: 1, b: 2 } });
+    expect(w.db.rows.map((r) => r.route_order)).toEqual([5, 9]);
+  });
+
+  test('a journal with no routeAfter (the numbers were never written) restores nothing', async () => {
+    const w = world({ visits: [['a', 8]], changes: [['a', 8, 12]], rowExtra: { a: { route_order: 7 } } });
+    await applyInternals.restoreRouteOrder(w.conn, w.deps, { dateStr: DATE, techId: TECH, routeBefore: { a: 1 }, routeAfter: undefined });
+    expect(w.db.rows[0].route_order).toBe(7);
+  });
+});
+
+describe('the rollback is journaled step by step', () => {
+  test('each undo is an intent before its write and done after', async () => {
+    let n = 0;
+    const w = world({ visits: [['a', 8], ['b', 9], ['c', 10]], changes: [['a', 8, 12], ['b', 9, 13], ['c', 10, 14]], rebookerOpts: { failWhen: () => { n += 1; return n === 3; } } });
+    const seen = [];
+    const original = w.rebooker.reschedule.getMockImplementation();
+    w.rebooker.reschedule.mockImplementation(async (...args) => {
+      const j = JSON.parse(w.db.plans[0].apply_steps);
+      if (j.rollback) seen.push(j.steps.map((s) => `${s.id}:${s.undo || '-'}`).join(' '));
+      return original(...args);
+    });
+    expect((await w.run()).status).toBe('rolled_back');
+    // At b's undo b is an intent and a is untouched; at a's undo b is done and a is an intent.
+    expect(seen).toEqual(['a:- b:intent c:done', 'a:intent b:done c:done']);
+    expect(w.journal().steps.map((s) => `${s.id}:${s.state}:${s.undo}`)).toEqual(['a:done:done', 'b:done:done', 'c:failed:done']);
+  });
+
+  /** The state a crash leaves, captured at the start of a rebooker call during the rollback. */
+  function crashImages() {
+    let n = 0;
+    const w = world({
+      visits: [['a', 8], ['b', 9], ['c', 10]], changes: [['a', 8, 12], ['b', 9, 13], ['c', 10, 14]],
+      rowExtra: { a: { route_order: 1 }, b: { route_order: 2 }, c: { route_order: 3 } },
+      rebookerOpts: { failWhen: () => { n += 1; return n === 3; } },
+    });
+    const images = [];
+    const original = w.rebooker.reschedule.getMockImplementation();
+    w.rebooker.reschedule.mockImplementation(async (...args) => {
+      images.push({ rows: w.db.rows.map((r) => ({ ...r })), steps: w.db.plans[0].apply_steps, call: w.rebooker.calls.length + 1 });
+      return original(...args);
+    });
+    const crash = async (image, stepsOverride) => {
+      w.db.rows.splice(0, w.db.rows.length, ...image.rows.map((r) => ({ ...r })));
+      Object.assign(w.db.plans[0], { service_date: DATE, technician_id: TECH, apply_status: null, apply_reason: null, apply_steps: stepsOverride || image.steps });
+      w.rebooker.calls.length = 0;
+      w.rebooker.reschedule.mockClear();
+      w.raiseAlert.mockClear();
+      return recoverInterrupted({ conn: w.conn, deps: w.deps, plans: await findInterrupted(w.conn) });
+    };
+    return { w, images, crash };
+  }
+
+  test('a crash before the first undo: recovery undoes every step, once each', async () => {
+    const { w, images, crash } = crashImages();
+    await w.run();
+    const image = images.find((i) => i.call === 4); // the first undo is about to be written
+    const out = await crash(image);
+    expect(out[0]).toMatchObject({ status: 'rolled_back' });
+    expect(w.rebooker.calls.map((c) => `${c.id}:${c.win.start}`)).toEqual(['b:09:00', 'a:08:00']);
+    expect(w.windows()).toEqual({ a: '08:00', b: '09:00', c: '10:00' });
+    expect(w.db.rows.map((r) => r.route_order)).toEqual([1, 2, 3]);
+  });
+
+  test('a crash mid-rollback (b undone and journaled): recovery resumes with a only, and never repeats b', async () => {
+    const { w, images, crash } = crashImages();
+    await w.run();
+    const out = await crash(images.find((i) => i.call === 5)); // b is back; a's undo is about to be written
+    expect(out[0]).toMatchObject({ status: 'rolled_back' });
+    expect(w.rebooker.calls.map((c) => `${c.id}:${c.win.start}`)).toEqual(['a:08:00']);
+    expect(w.windows()).toEqual({ a: '08:00', b: '09:00', c: '10:00' });
+  });
+
+  test('a crash after an undo landed but before it was journaled: that undo is not repeated', async () => {
+    const { w, images, crash } = crashImages();
+    await w.run();
+    // Rows as at a's undo (b already back) with the journal as at b's undo (b still an intent).
+    const out = await crash(images.find((i) => i.call === 5), images.find((i) => i.call === 4).steps);
+    expect(out[0]).toMatchObject({ status: 'rolled_back' });
+    expect(w.rebooker.calls.map((c) => `${c.id}:${c.win.start}`)).toEqual(['a:08:00']);
+  });
+
+  test('a crash right after the last undo: nothing is written again and the day closes', async () => {
+    const { w, images, crash } = crashImages();
+    await w.run();
+    const done = { rows: w.db.rows.map((r) => ({ ...r })), steps: w.db.plans[0].apply_steps, call: 99 };
+    const out = await crash(done, JSON.stringify({ ...JSON.parse(done.steps), steps: JSON.parse(done.steps).steps.map((s) => ({ ...s, undo: undefined })) }));
+    expect(out[0]).toMatchObject({ status: 'rolled_back' });
+    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    expect(images.length).toBeGreaterThan(0);
+  });
+
+  test('a person moves a visit between the crash and the recovery: that one is refused, the rest go back', async () => {
+    const { w, images, crash } = crashImages();
+    await w.run();
+    const image = images.find((i) => i.call === 4);
+    image.rows.find((r) => r.id === 'a').window_start = '15:00:00';
+    image.rows.find((r) => r.id === 'a').window_end = '16:00:00';
+    const out = await crash(image);
+    expect(out[0]).toMatchObject({ status: 'failed' });
+    expect(w.rebooker.calls.map((c) => c.id)).toEqual(['b']);
+    expect(w.raiseAlert).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the reminders after an undo', () => {
+  const etTime = (hhmm) => parseETDateTime(`${DATE}T${hhmm}`);
+
+  test('an undo that landed and stopped before its sync is re-synced to the visit\'s final hour', async () => {
+    let n = 0;
+    const w = world({
+      visits: [['a', 8], ['b', 9]], changes: [['a', 8, 12], ['b', 9, 13]],
+      reminders: [{ scheduled_service_id: 'a', appointment_time: etTime('12:00'), cancelled: false }, { scheduled_service_id: 'b', appointment_time: etTime('09:00'), cancelled: false }],
+      rebookerOpts: { failWhen: () => { n += 1; return n === 2; } },
+    });
+    // The rebooker moves the visit; the (mocked) sync of the undo does not run, as after a crash: a's reminder still names 12:00.
+    w.syncMovedReminders.mockImplementation(async (service, best) => {
+      if (best.start_time === '08:00') return;
+    });
+    const out = await w.run();
+    expect(out.status).toBe('rolled_back');
+    const synced = w.syncMovedReminders.mock.calls.map(([service, best]) => `${service.id}:${best.start_time}`);
+    // The undo sync did run once through the normal path, and the reconcile then found a's reminder still at 12:00.
+    expect(synced.filter((x) => x === 'a:08:00').length).toBeGreaterThanOrEqual(2);
+    expect(synced).not.toContain('b:13:00');
+  });
+
+  test('a reminder that already matches is left alone, and a cancelled one too', async () => {
+    const w = world({
+      visits: [['a', 8], ['b', 9]], changes: [['a', 8, 12], ['b', 9, 13]],
+      reminders: [{ scheduled_service_id: 'a', appointment_time: etTime('08:00'), cancelled: false }, { scheduled_service_id: 'b', appointment_time: etTime('15:00'), cancelled: true }],
+    });
+    await reconcile(w, ['a', 'b']);
+    expect(w.syncMovedReminders).not.toHaveBeenCalled();
+  });
+
+  test('a visit that is stuck on a person\'s change is never synced', async () => {
+    const w = world({
+      visits: [['a', 8]], changes: [['a', 8, 12]],
+      reminders: [{ scheduled_service_id: 'a', appointment_time: etTime('12:00'), cancelled: false }],
+    });
+    await reconcile(w, ['a'], new Set(['a']));
+    expect(w.syncMovedReminders).not.toHaveBeenCalled();
+  });
+
+  test('a recovered complete day re-syncs a reminder that a crash cut short', async () => {
+    const w = world({
+      visits: [['a', 8]], changes: [['a', 8, 12]],
+      reminders: [{ scheduled_service_id: 'a', appointment_time: etTime('08:00'), cancelled: false }],
+    });
+    w.db.rows.find((r) => r.id === 'a').window_start = '12:00:00';
+    w.db.rows.find((r) => r.id === 'a').window_end = '13:00:00';
+    w.db.plans[0] = {
+      id: 'plan-1', service_date: DATE, technician_id: TECH, apply_status: null, apply_started_at: '2026-11-04T04:41:00Z',
+      apply_steps: JSON.stringify({ version: 1, routeBefore: {}, routeAfter: {}, complete: true, steps: [{ id: 'a', fromStart: H(8), toStart: H(12), widthMin: 60, state: 'done' }] }),
+    };
+    const out = await recoverInterrupted({ conn: w.conn, deps: w.deps, plans: await findInterrupted(w.conn) });
+    expect(out[0]).toMatchObject({ status: 'applied' });
+    expect(w.syncMovedReminders.mock.calls.map(([s, best]) => `${s.id}:${best.start_time}`)).toEqual(['a:12:00']);
+    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+  });
+});
+
 describe('the reminder sync is the night writer\'s own', () => {
   test('handleReschedule gets exactly the arguments apply.js gives it', async () => {
     const { syncMovedReminders } = jest.requireActual('../services/auto-dispatch/apply');
@@ -471,14 +713,20 @@ describe('recovering an interrupted day', () => {
   /** A swap that stopped after parking a at 10:00: the journal says so, the table shows a at the parking hour. */
   function interruptedWorld({ done = true, complete = false } = {}) {
     const w = world({ visits: [['a', 8], ['b', 9]], changes: [['a', 8, 9], ['b', 9, 8]], rowExtra: { a: { route_order: 1 }, b: { route_order: 2 } } });
-    if (!complete) w.db.rows.find((r) => r.id === 'a').window_start = done ? '10:00:00' : '08:00:00';
+    // The step as the crashed process journaled it: the visit's fingerprint before and after (the rows as they were).
+    const step = { id: 'a', fromStart: H(8), toStart: H(10), widthMin: 60, temp: true, state: done ? 'done' : 'intent' };
+    const original = { ...w.db.rows.find((r) => r.id === 'a') };
+    step.before = applyInternals.fingerprintOf(original, w.deps);
+    step.after = applyInternals.fingerprintOf(applyInternals.afterStep(original, step), w.deps);
+    if (!complete) {
+      const a = w.db.rows.find((r) => r.id === 'a');
+      a.window_start = done ? '10:00:00' : '08:00:00';
+      a.window_end = done ? '11:00:00' : '09:00:00';
+    }
     w.db.rows.find((r) => r.id === 'a').route_order = 7;
     w.db.plans[0] = {
       id: 'plan-1', service_date: DATE, technician_id: TECH, apply_status: null, apply_started_at: '2026-11-04T04:41:00Z',
-      apply_steps: JSON.stringify({
-        version: 1, routeBefore: { a: 1, b: 2 }, routePersisted: false, complete,
-        steps: [{ id: 'a', fromStart: H(8), toStart: H(10), widthMin: 60, temp: true, state: done ? 'done' : 'intent' }],
-      }),
+      apply_steps: JSON.stringify({ version: 1, routeBefore: { a: 1, b: 2 }, routeAfter: { a: 7 }, routePersisted: false, complete, steps: [step] }),
     };
     return w;
   }

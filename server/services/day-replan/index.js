@@ -555,4 +555,4 @@ function applyDeps() {
   };
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };

@@ -9,8 +9,11 @@ const maybeDescribe = SKIP ? describe.skip : describe;
  *     row says 'applied';
  *   - a forced failure of the second write puts every visit (hour, route_order, reminder) back and says
  *     'rolled_back';
- *   - a day left mid-apply by a stopped process (a visit parked on a temporary hour, journal on the plan row) is put
- *     back by the next run before anything new is planned.
+ *   - a day left mid-apply by a stopped process is put back by the next run before anything new is planned: after a
+ *     forward step, with only an intent journaled, in the middle of a rollback (an undo that landed is not repeated,
+ *     the one that did not is finished), and with the reminder of an undone visit re-synced to its hour;
+ *   - the rollback is fenced: a visit a person moved after our step is left alone, the plan says 'failed' and ONE
+ *     notice for Claude's queue is raised, while the other visits are put back.
  * Outbound SMS, email and push are stubbed and asserted never called. The whole test runs inside one transaction
  * that always rolls back (the rebooker's own transactions become savepoints), on a far-future date, and it refuses
  * any database but a private QA one or CI's.
@@ -236,31 +239,144 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(sentAnything()).toEqual([]);
   });
 
-  test('a day a stopped process left on a temporary hour is put back before anything new is planned', async () => {
-    // The previous run parked visit a on 15:00 and stopped: its journal and the plan row are all that remain.
-    const a = visits[0];
-    await rebooker.reschedule(a.id, DAY, { start: '15:00', end: '16:00' }, 'day_replan', 'day_replan', {
-      seriesPolicy: 'single', visitPolicy: 'single', keepStatus: true, suppressTechNotice: true, notifyRequested: false,
-    });
-    const interruptedId = randomUUID();
+  // ---- a stopped process: the journal is hand-built, every move is the real rebooker's ----------------------------
+
+  const OPTS = { seriesPolicy: 'single', visitPolicy: 'single', keepStatus: true, suppressTechNotice: true, notifyRequested: false };
+  const minutes = (value) => { const [h, m] = String(value).slice(0, 5).split(':').map(Number); return h * 60 + m; };
+  const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  const moveTo = (id, start, by = 'day_replan') => rebooker.reschedule(id, DAY, { start, end: hhmm(minutes(start) + 60) }, by, by, OPTS);
+  const setReminder = (id, start) => mockConn('appointment_reminders').where({ scheduled_service_id: id }).update({ appointment_time: parseETDateTime(`${DAY}T${start}`) });
+  const reminderMs = async (id) => new Date((await mockConn('appointment_reminders').where({ scheduled_service_id: id }).first()).appointment_time).getTime();
+
+  /** Makes one journaled step AND performs it for real: the fingerprints are those of the rows before and after. */
+  async function forwardStepFor(v, start, extra = {}) {
+    const { _internals: internals } = require('../services/day-replan/apply');
+    const deps = require('../services/day-replan')._internals.applyDeps();
+    const row = await mockConn('scheduled_services').where({ id: v.id }).first();
+    const step = { id: v.id, fromStart: minutes(row.window_start), toStart: minutes(start), widthMin: 60, state: 'done', ...extra };
+    step.before = internals.fingerprintOf(row, deps);
+    step.after = internals.fingerprintOf(internals.afterStep(row, step), deps);
+    await moveTo(v.id, start);
+    await setReminder(v.id, start); // the silent reminder sync of that step
+    return step;
+  }
+
+  async function stoppedPlan(steps, extra = {}) {
+    const id = randomUUID();
     await mockConn('day_replan_plans').insert({
-      id: interruptedId, run_id: randomUUID(), mode: 'apply', technician_id: techId, service_date: DAY, stop_count: 4,
+      id, run_id: randomUUID(), mode: 'apply', technician_id: techId, service_date: DAY, stop_count: 4,
       current_drive_min: 100, saved_min: 0, current_end_min: 700, accepted: true, reason: 'accepted', changes: '[]', fixed: '[]',
       apply_started_at: new Date('2097-06-09T08:41:00Z'),
-      apply_steps: JSON.stringify({
-        version: 1, routeBefore: { [a.id]: 1 }, routePersisted: false, complete: false,
-        steps: [{ id: a.id, fromStart: 8 * 60, toStart: 15 * 60, widthMin: 60, temp: true, state: 'done' }],
-      }),
+      apply_steps: JSON.stringify({ version: 1, routeBefore: Object.fromEntries(visits.map((v, i) => [v.id, i + 1])), routePersisted: false, complete: false, steps, ...extra }),
     });
-    expect(startOf(await visitRows(), a.id)).toBe('15:00');
+    return id;
+  }
 
-    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
-    expect(out.recovered).toEqual([expect.objectContaining({ id: interruptedId, status: 'rolled_back', reason: 'recovered_after_interruption' })]);
-    const plan = await mockConn('day_replan_plans').where({ id: interruptedId }).first();
-    expect(plan).toMatchObject({ apply_status: 'rolled_back', apply_reason: 'recovered_after_interruption' });
-    // The notice for Claude's queue was raised once (a real notifications row, off the owner's bell list).
-    const notices = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`day-replan-failed:${DAY}:${techId}`]);
-    expect(notices.length).toBeLessThanOrEqual(1);
+  // Recovery runs first in shadow mode too; a shadow run then writes nothing but its own plan rows.
+  const recover = async () => {
+    process.env.GATE_DAY_REPLAN = 'shadow';
+    return runDayReplanIfEnabled({ now: NOW, conn: mockConn });
+  };
+  const noticeCount = async () => (await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`day-replan-failed:${DAY}:${techId}`])).length;
+
+  test('crash after a forward step: recovery undoes it, the reminder and the plan row follow, one notice', async () => {
+    const [a] = visits;
+    const step = await forwardStepFor(a, '15:00');
+    expect(startOf(await visitRows(), a.id)).toBe('15:00');
+    const id = await stoppedPlan([step]);
+
+    const out = await recover();
+    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'rolled_back', reason: 'recovered_after_interruption' })]);
+    expect(startOf(await visitRows(), a.id)).toBe('08:00');
+    expect(await reminderMs(a.id)).toBe(TZ_START('08:00'));
+    expect(await mockConn('day_replan_plans').where({ id }).first()).toMatchObject({ apply_status: 'rolled_back', apply_reason: 'recovered_after_interruption' });
+    expect(await noticeCount()).toBe(1);
+    const journal = (await mockConn('day_replan_plans').where({ id }).first()).apply_steps;
+    expect(journal.steps[0]).toMatchObject({ state: 'done', undo: 'done' });
+    expect(sentAnything()).toEqual([]);
+  });
+
+  test('crash with only an intent journaled (the step never landed): nothing moves and the plan closes', async () => {
+    const [a] = visits;
+    const { _internals: internals } = require('../services/day-replan/apply');
+    const deps = require('../services/day-replan')._internals.applyDeps();
+    const row = await mockConn('scheduled_services').where({ id: a.id }).first();
+    const step = { id: a.id, fromStart: 8 * 60, toStart: 15 * 60, widthMin: 60, state: 'intent' };
+    step.before = internals.fingerprintOf(row, deps);
+    step.after = internals.fingerprintOf(internals.afterStep(row, step), deps);
+    const spy = jest.spyOn(rebooker, 'reschedule');
+    const id = await stoppedPlan([step]);
+
+    const out = await recover();
+    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'rolled_back' })]);
+    expect(spy).not.toHaveBeenCalled();
+    expect(startOf(await visitRows(), a.id)).toBe('08:00');
+  });
+
+  test('crash mid-rollback: the undo that landed is not repeated, the one that did not is finished, and the reminders follow', async () => {
+    const [a, b] = visits;
+    const stepA = await forwardStepFor(a, '15:00');
+    const stepB = await forwardStepFor(b, '16:00');
+    // The rollback undid b (the move landed, its reminder sync never ran, the journal still says intent).
+    await moveTo(b.id, '09:00');
+    await setReminder(b.id, '16:00'); // the process stopped before the reminder followed the undo
+    const logBefore = (await mockConn('reschedule_log').where({ scheduled_service_id: b.id })).length;
+    expect(await reminderMs(b.id)).toBe(TZ_START('16:00'));
+    const id = await stoppedPlan([stepA, { ...stepB, undo: 'intent' }], { rollback: true });
+    const spy = jest.spyOn(rebooker, 'reschedule');
+
+    const out = await recover();
+    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'rolled_back' })]);
+    // Only a was moved; b was not written again.
+    expect(spy.mock.calls.map(([visit]) => visit)).toEqual([a.id]);
+    expect((await mockConn('reschedule_log').where({ scheduled_service_id: b.id })).length).toBe(logBefore);
+    const rows = await visitRows();
+    expect([startOf(rows, a.id), startOf(rows, b.id)]).toEqual(['08:00', '09:00']);
+    // Both reminders follow their visits' hours again, with the 24-hour leg still pending.
+    expect(await reminderMs(a.id)).toBe(TZ_START('08:00'));
+    expect(await reminderMs(b.id)).toBe(TZ_START('09:00'));
+    for (const r of await reminders()) expect(r.reminder_24h_sent).toBe(false);
+    expect(sentAnything()).toEqual([]);
+  });
+
+  test('a person moves a visit after our step: it is left alone, the other visits go back, the plan says failed, one notice', async () => {
+    const [a, b] = visits;
+    const stepA = await forwardStepFor(a, '15:00');
+    const stepB = await forwardStepFor(b, '16:00');
+    await moveTo(a.id, '14:00', 'admin'); // a person's move, after our step
+    await setReminder(a.id, '14:00');
+    const id = await stoppedPlan([stepA, stepB]);
+    const spy = jest.spyOn(rebooker, 'reschedule');
+
+    const out = await recover();
+    expect(out.status).toBe('completed_with_errors');
+    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'failed', reason: 'rollback_failed:DIVERGED' })]);
+    expect(spy.mock.calls.map(([visit]) => visit)).toEqual([b.id]);
+    const rows = await visitRows();
+    expect([startOf(rows, a.id), startOf(rows, b.id)]).toEqual(['14:00', '09:00']);
+    // The person's move keeps its own reminder time; b's was put back.
+    expect(await reminderMs(a.id)).toBe(TZ_START('14:00'));
+    expect(await reminderMs(b.id)).toBe(TZ_START('09:00'));
+    // The route numbers are not rewritten under a day a person changed.
+    expect((await visitRows()).map((r) => Number(r.route_order)).sort()).toEqual([1, 2, 3, 4]);
+    expect(await mockConn('day_replan_plans').where({ id }).first()).toMatchObject({ apply_status: 'failed' });
+    expect(await noticeCount()).toBe(1);
+    expect(sentAnything()).toEqual([]);
+  });
+
+  test('a finished day whose last reminder sync was cut short is re-synced to the final hour and recorded applied', async () => {
+    const [a] = visits;
+    const step = await forwardStepFor(a, '15:00');
+    await setReminder(a.id, '08:00'); // the sync never ran
+    const id = await stoppedPlan([step], { complete: true, routePersisted: true });
+    const spy = jest.spyOn(rebooker, 'reschedule');
+
+    const out = await recover();
+    expect(out.recovered).toEqual([expect.objectContaining({ id, status: 'applied', reason: 'applied_recovered' })]);
+    expect(spy).not.toHaveBeenCalled();
+    expect(startOf(await visitRows(), a.id)).toBe('15:00');
+    expect(await reminderMs(a.id)).toBe(TZ_START('15:00'));
+    expect(await noticeCount()).toBe(0);
     expect(sentAnything()).toEqual([]);
   });
 });

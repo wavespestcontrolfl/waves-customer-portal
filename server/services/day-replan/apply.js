@@ -22,8 +22,23 @@
  * transaction and its post-commit work), so the day is made recoverable instead of atomic: the plan row's
  * `apply_started_at` and `apply_steps` journal record each step (intent before, done after) and every route_order
  * the day had. A failed step rolls the day back at once; a process that stops part way is found by the next run
- * (recoverInterrupted), which reads where each visit actually is and puts it back, then raises one notice for
- * Claude. A temporary hour is therefore never left in place.
+ * (recoverInterrupted), which puts the day back, then raises one notice for Claude. A temporary hour is therefore
+ * never left in place.
+ *
+ * The rollback is FENCED on what this writer committed. Before each step the journal records a short fingerprint of
+ * the visit as it was (`before`) and as the step leaves it (`after`: date, window, technician, status, staff locks,
+ * visit record, location). An undo moves a visit back only while it still reads exactly `after`, with its CAS pinned
+ * on that very read; a visit that reads `before` (the step never landed, or its undo did) or sits on its old window
+ * needs no move; anything else is a person's change since, and the visit is NOT touched: the day is recorded
+ * 'failed' and the one notice for Claude says so, while every other visit is still put back. A stuck visit also
+ * holds back its older steps, and the route numbers are restored only when every visit is back and only where a
+ * number still equals the one this writer wrote (`routeAfter`).
+ *
+ * The rollback is journaled too: each undo is an `intent` before its write and `done` after, so a rollback that
+ * stops part way is resumed (a landed undo is recognised by the visit's state and is never written twice; one that
+ * did not land is finished). Last, the reminder of every visit whose hour differs from its reminder's appointment
+ * time is synced again through syncMovedReminders (final hours only; never a parking hour, never a stuck visit),
+ * which also closes an undo, or a forward step, that committed and stopped before its sync.
  *
  * After the hours, the accepted route order is written under the scheduling fence (occupancy lock, tech-day lock,
  * rows locked, the set and the hours verified) and read back. The reminder of a visit is synced only when the
@@ -33,7 +48,9 @@
  * 'auto_dispatch' signature that move-limit.js counts, so the night pass's own 2-move cap is untouched.
  */
 const logger = require('../logger');
+const crypto = require('crypto');
 const { toDateStr } = require('../auto-dispatch/dates');
+const { parseETDateTime } = require('../../utils/datetime-et');
 const { staleOrderReasons } = require('../route-reorder-window-fit');
 const { sequenceMoves, hoursMask } = require('./sequence');
 const { withHour, appSimCheck } = require('./app-sim');
@@ -118,6 +135,36 @@ async function pinRow(conn, deps, { id, snapshot }) {
 
 const pinned = (row, field) => (RAW_LOCATION[field] && row[RAW_LOCATION[field]] !== undefined ? row[RAW_LOCATION[field]] : row[field]) ?? null;
 
+const time8 = (value) => {
+  if (value == null) return null;
+  const text = String(value);
+  return text.length === 5 ? `${text}:00` : text.slice(0, 8);
+};
+
+/**
+ * What this writer commits to, as a short hash (ids and minutes never leave the row as text): the fields an undo
+ * would overwrite or put in a different place - date, window, technician, status, staff locks, visit record and the
+ * stored location. Not the customer's confirmation or the due date, which a move leaves alone and an undo does not
+ * touch. Read from a snapshot or a fresh row alike, so the journal can say what the visit looked like before a step
+ * and what it must look like after it.
+ */
+function fingerprintOf(row, deps) {
+  const parts = [
+    toDateStr(row.scheduled_date), time8(row.window_start), time8(row.window_end), row.technician_id == null ? null : String(row.technician_id),
+    row.status, row.auto_dispatch_locked === true, row.auto_dispatch_excluded === true, row.visit_id == null ? null : String(row.visit_id),
+    ...deps.locationFields.map((field) => {
+      const value = pinned(row, field);
+      return value == null ? null : String(value);
+    }),
+  ];
+  return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 24);
+}
+
+/** The visit as this writer's step leaves it: the same row, at the step's new window. */
+const afterStep = (row, step) => ({
+  ...row, window_start: `${minToHhmm(step.toStart)}:00`, window_end: `${minToHhmm(step.toStart + step.widthMin)}:00`,
+});
+
 /**
  * One write: the same path auto-dispatch/apply.js takes for a single occurrence, pinned on `snapshot`.
  * `recheck` is false for a rollback step, which must be able to put a visit back even after the 24-hour reach has
@@ -197,37 +244,113 @@ async function persistRouteOrder(conn, deps, { dateStr, techId, order, finalStar
   });
 }
 
-/** Puts the day's route_order values back as the journal recorded them (rows that still exist, under the same fence). */
-async function restoreRouteOrder(conn, deps, { dateStr, techId, routeBefore }) {
-  const ids = Object.keys(routeBefore || {});
+/**
+ * Puts the day's route_order values back as the journal recorded them, under the same fence. A row is touched only
+ * while it still holds the number THIS writer wrote (`routeAfter`): a number a person changed since, or one that was
+ * never written because the crash came first, is left alone.
+ */
+async function restoreRouteOrder(conn, deps, { dateStr, techId, routeBefore, routeAfter }) {
+  const ids = Object.keys(routeAfter || {}).filter((id) => routeBefore && id in routeBefore);
   if (ids.length === 0) return;
   await conn.transaction(async (trx) => {
     await deps.acquireOccupancyLock(trx, dateStr);
     await deps.lockTechDays(trx, [{ techId, date: dateStr }]);
     for (const id of ids) {
-      await trx('scheduled_services').where({ id }).whereRaw('route_order IS DISTINCT FROM ?', [routeBefore[id]]).update({ route_order: routeBefore[id] });
+      await trx('scheduled_services').where({ id, route_order: routeAfter[id] }).whereRaw('route_order IS DISTINCT FROM ?', [routeBefore[id]]).update({ route_order: routeBefore[id] });
     }
   });
 }
 
 // ---- rolling back -----------------------------------------------------------------------------------------------
 
+/** A journal write during a rollback is best effort: the moves are idempotent, so a lost line is re-derived from where each visit is. */
+async function tryJournal(conn, planId, journal) {
+  if (!planId) return;
+  try {
+    await writeJournal(conn, planId, journal);
+  } catch (err) {
+    logger.warn(`[day-replan] could not journal the rollback of plan ${planId} (${err.message})`);
+  }
+}
+
 /**
- * Reverses the journal's steps, newest first, by where each visit actually is: at the step's new hour it moves back
- * to the old one; at the old hour the step never landed; anywhere else a person changed it and the rollback stops
- * (the caller records 'failed'). The same function serves a step that failed now and a plan found after a restart.
+ * Undoes one journaled step. The visit must still be exactly what this writer committed (its fingerprint equals the
+ * step's `after`): then it is moved back, with the CAS pinned on that very read. If it already looks like it did
+ * before the step (the step never landed, or its undo already did) there is nothing to do. Anything else is a
+ * person's change since: the visit is not touched. Journals intent before and done after, so a rollback that stops
+ * part way is resumed, not repeated.
  */
-async function rollBack(conn, deps, { dateStr, journal }) {
+async function undoStep(conn, deps, { dateStr, journal, step, planId }) {
+  // A step the rebooker refused (nothing committed) has nothing to undo.
+  if (step.state === 'failed') {
+    step.undo = 'done';
+    return;
+  }
+  const row = await conn('scheduled_services').where({ id: step.id }).first(...READ_COLUMNS, ...deps.locationFields);
+  if (!row) throw coded('DIVERGED', `visit ${step.id} no longer exists`);
+  const now = fingerprintOf(row, deps);
+  const onOldWindow = toDateStr(row.scheduled_date) === dateStr && norm5(row.window_start) === minToHhmm(step.fromStart)
+    && norm5(row.window_end) === minToHhmm(step.fromStart + step.widthMin);
+  // Where the step started: it never landed, or its undo already did (a person may have changed other things since;
+  // the window is where we would put it, so there is nothing of ours to touch).
+  if (now === step.before || onOldWindow) {
+    step.undo = 'done';
+    return;
+  }
+  if (now !== step.after) throw coded('DIVERGED', `visit ${step.id} was changed after the day re-plan wrote it`);
+  step.undo = 'intent';
+  await tryJournal(conn, planId, journal);
+  // Going back to a temporary hour is not a landing: its reminder is left alone, as it was on the way out.
+  const backToTemp = journal.steps.some((s) => s.temp && s.id === step.id && s.toStart === step.fromStart);
+  await moveVisit(conn, deps, {
+    id: step.id, dateStr, fromStart: step.toStart, toStart: step.fromStart, widthMin: step.widthMin, recheck: false, syncReminder: !backToTemp, snapshot: row,
+  });
+  step.undo = 'done';
+  await tryJournal(conn, planId, journal);
+}
+
+/**
+ * Reverses the journal's steps, newest first, each fenced on the state this writer committed. A visit that cannot be
+ * undone (a person changed it) is left exactly as it is, and so is every older step of that visit; the other visits
+ * are still put back. Returns the failures by visit id (empty = the whole day is back).
+ */
+async function rollBack(conn, deps, { dateStr, journal, planId }) {
+  journal.rollback = true;
+  await tryJournal(conn, planId, journal);
+  const stuck = new Map();
   for (const step of [...journal.steps].reverse()) {
-    const row = await conn('scheduled_services').where({ id: step.id }).first('scheduled_date', 'window_start');
-    const at = row && toDateStr(row.scheduled_date) === dateStr ? norm5(row.window_start) : null;
-    if (at === minToHhmm(step.fromStart)) continue;
-    if (at !== minToHhmm(step.toStart)) throw coded('DIVERGED', `visit ${step.id} is not where the journal expects it`);
-    // Going back to a temporary hour is not a landing: its reminder is left alone, as it was on the way out.
-    const backToTemp = journal.steps.some((s) => s.temp && s.id === step.id && s.toStart === step.fromStart);
-    await moveVisit(conn, deps, {
-      id: step.id, dateStr, fromStart: step.toStart, toStart: step.fromStart, widthMin: step.widthMin, recheck: false, syncReminder: !backToTemp,
-    });
+    if (step.undo === 'done' || stuck.has(step.id)) continue;
+    try {
+      await undoStep(conn, deps, { dateStr, journal, step, planId });
+    } catch (err) {
+      logger.error(`[day-replan] ${dateStr}: could not undo a step of visit ${step.id} (${err.message})`);
+      stuck.set(step.id, err);
+    }
+  }
+  return stuck;
+}
+
+/**
+ * Re-syncs the reminder of every visit whose hour is not the one its reminder names (an undo that committed and then
+ * stopped before its sync). Final hours only: a visit left on a temporary hour (stuck) is never synced to it. Goes
+ * through the night writer's own syncMovedReminders; best effort, like that sync.
+ */
+async function reconcileReminders(conn, deps, { ids, skip = new Set() }) {
+  for (const id of new Set(ids)) {
+    if (skip.has(id)) continue;
+    try {
+      const row = await conn('scheduled_services').where({ id }).first('customer_id', 'scheduled_date', 'window_start', 'window_end');
+      const reminder = row ? await conn('appointment_reminders').where({ scheduled_service_id: id }).first('appointment_time', 'cancelled') : null;
+      if (!row || !reminder || reminder.cancelled === true || !row.window_start) continue;
+      const date = toDateStr(row.scheduled_date);
+      const start = norm5(row.window_start);
+      if (new Date(reminder.appointment_time).getTime() === parseETDateTime(`${date}T${start}`).getTime()) continue;
+      await deps.syncMovedReminders(
+        { id, customer_id: row.customer_id }, { date, start_time: start, end_time: norm5(row.window_end) || start }, {}, [],
+      );
+    } catch (err) {
+      logger.warn(`[day-replan] could not reconcile the reminder of visit ${id} (${err.message})`);
+    }
   }
 }
 
@@ -259,15 +382,21 @@ async function raiseDayAlert(deps, { dateStr, techId, planId, restored }) {
 
 /** Rolls the day back; { status, reason } for the plan row. Raises the one notice when it could not. */
 async function undoDay(conn, deps, { dateStr, techId, planId, journal, reasonPrefix }) {
+  const ids = journal.steps.map((s) => s.id);
+  let stuck;
   try {
-    await rollBack(conn, deps, { dateStr, journal });
-    await restoreRouteOrder(conn, deps, { dateStr, techId, routeBefore: journal.routeBefore });
-    return { status: 'rolled_back', reason: reasonPrefix };
+    stuck = await rollBack(conn, deps, { dateStr, journal, planId });
+    // The route numbers go back only when every visit did (a stuck visit's numbering is not ours to rewrite).
+    if (stuck.size === 0) await restoreRouteOrder(conn, deps, { dateStr, techId, routeBefore: journal.routeBefore, routeAfter: journal.routeAfter });
   } catch (err) {
-    logger.error(`[day-replan] ${dateStr} tech ${techId}: rollback failed (${err.message})`);
-    await raiseDayAlert(deps, { dateStr, techId, planId, restored: false });
-    return { status: 'failed', reason: `rollback_failed:${String(err.code || 'error').slice(0, 40)}` };
+    stuck = new Map([['route', err]]);
   }
+  await reconcileReminders(conn, deps, { ids, skip: new Set(stuck.keys()) });
+  if (stuck.size === 0) return { status: 'rolled_back', reason: reasonPrefix };
+  const first = [...stuck.values()][0];
+  logger.error(`[day-replan] ${dateStr} tech ${techId}: rollback failed for ${stuck.size} item(s) (${first.message})`);
+  await raiseDayAlert(deps, { dateStr, techId, planId, restored: false });
+  return { status: 'failed', reason: `rollback_failed:${String(first.code || 'error').slice(0, 40)}` };
 }
 
 // ---- the plan, before the first write ---------------------------------------------------------------------------
@@ -340,20 +469,42 @@ function finalRoute(fresh, env, techId) {
   return { order: ordered.map((r) => r.id), finalStarts, techId };
 }
 
+/**
+ * One forward step: the intent (with the visit's fingerprint before and after) is journaled BEFORE the write, the
+ * completion after it. A crash between the two leaves an intent whose visit is either still as it was or already
+ * as the step makes it; both are told apart by the fingerprints.
+ */
+async function forwardStep(conn, deps, { dateStr, planId, journal, step, fromStart, widthMin, snapshot }) {
+  const record = { id: step.id, fromStart, toStart: step.toStart, widthMin, temp: step.temp, state: 'intent', before: fingerprintOf(snapshot, deps) };
+  record.after = fingerprintOf(afterStep(snapshot, record), deps);
+  journal.steps.push(record);
+  await writeJournal(conn, planId, journal);
+  try {
+    await moveVisit(conn, deps, {
+      id: record.id, dateStr, fromStart, toStart: record.toStart, widthMin, recheck: true, syncReminder: !step.temp, snapshot,
+    });
+  } catch (err) {
+    // The rebooker's refusals (a missed CAS, a taken hour, a recheck) commit nothing: the step is marked so an undo
+    // never has to guess. Any other error may have come after the commit and stays an intent.
+    if (err.statusCode === 409 || err.code === 'NOT_MOVABLE' || err.code === 'CHANGED_SINCE_PLAN') {
+      record.state = 'failed';
+      await tryJournal(conn, planId, journal);
+    }
+    throw err;
+  }
+  record.state = 'done';
+  await writeJournal(conn, planId, journal);
+  return record;
+}
+
 /** Writes the steps in order, journaling each (intent before, done after); throws the failing step's error. */
 async function runSteps(conn, deps, { steps, moves, dateStr, planId, journal, snapshots }) {
   const widthOf = new Map(moves.map((m) => [m.id, m.widthMin]));
   const where = new Map(moves.map((m) => [m.id, m.fromStart]));
   for (const step of steps) {
-    const record = { id: step.id, fromStart: where.get(step.id), toStart: step.toStart, widthMin: widthOf.get(step.id), temp: step.temp, state: 'intent' };
-    journal.steps.push(record);
-    await writeJournal(conn, planId, journal);
-    await moveVisit(conn, deps, {
-      id: record.id, dateStr, fromStart: record.fromStart, toStart: record.toStart, widthMin: record.widthMin,
-      recheck: true, syncReminder: !step.temp, snapshot: snapshots.get(String(step.id)),
+    await forwardStep(conn, deps, {
+      dateStr, planId, journal, step, fromStart: where.get(step.id), widthMin: widthOf.get(step.id), snapshot: snapshots.get(String(step.id)),
     });
-    record.state = 'done';
-    await writeJournal(conn, planId, journal);
     where.set(step.id, step.toStart);
   }
 }
@@ -407,6 +558,9 @@ async function applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, plan
 
   try {
     await runSteps(conn, deps, { steps, moves, dateStr, planId, journal, snapshots });
+    // The numbers this writer is about to write, journaled first: a rollback restores only a number that is still ours.
+    journal.routeAfter = Object.fromEntries(route.order.map((id, i) => [String(id), i + 1]));
+    await writeJournal(conn, planId, journal);
     await persistRouteOrder(conn, deps, { dateStr, techId, order: route.order, finalStarts: route.finalStarts });
     journal.routePersisted = true;
     journal.complete = true;
@@ -448,6 +602,8 @@ async function recoverInterrupted({ conn, deps, plans }) {
     try {
       const journal = parseJournal(plan.apply_steps);
       if (journal.complete) {
+        // The day was fully made; a crash may have cut a reminder sync short, so the final hours are reconciled.
+        await reconcileReminders(conn, deps, { ids: journal.steps.map((s) => s.id) });
         outcome = { status: 'applied', reason: 'applied_recovered' };
       } else {
         outcome = await undoDay(conn, deps, { dateStr, techId, planId: plan.id, journal, reasonPrefix: 'recovered_after_interruption' });
@@ -472,5 +628,8 @@ async function recoverInterrupted({ conn, deps, plans }) {
 
 module.exports = {
   applyAcceptedDay, findInterrupted, recoverInterrupted, INITIATOR, REASON_CODE,
-  _internals: { changesKey, recheckVisit, moveVisit, movesFrom, heldMaskFor, hoursMask, finalRoute, persistRouteOrder, rollBack, parseJournal },
+  _internals: {
+    changesKey, recheckVisit, moveVisit, movesFrom, heldMaskFor, hoursMask, finalRoute, persistRouteOrder, restoreRouteOrder, rollBack, parseJournal,
+    fingerprintOf, forwardStep, undoStep, writeJournal, reconcileReminders, afterStep,
+  },
 };

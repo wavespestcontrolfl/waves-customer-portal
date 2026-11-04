@@ -15,6 +15,7 @@ jest.mock('../services/rebooker', () => { throw new Error('the rebooker must not
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
 const { runDayReplanIfEnabled, _internals } = require('../services/day-replan');
 const { makeDb, zigzagRows, row, fakeRebooker } = require('./helpers/day-replan-db');
+const { _internals: applyInternals } = require('../services/day-replan/apply');
 
 const NOW = new Date('2026-11-03T12:00:00Z'); // 07:00 ET; DST has ended
 const TOMORROW = '2026-11-04';
@@ -186,11 +187,14 @@ describe('recovering an interrupted day at the start of a run', () => {
   const stuck = (w) => {
     // A swap that stopped after parking a at 10:00 (the run before this one).
     const a = w.db.rows.find((r) => r.id === 'a');
+    const step = { id: 'a', fromStart: 480, toStart: 600, widthMin: 60, temp: true, state: 'done' };
+    step.before = applyInternals.fingerprintOf({ ...a }, w.deps);
     a.window_start = '10:00:00';
     a.window_end = '11:00:00';
+    step.after = applyInternals.fingerprintOf({ ...a }, w.deps);
     w.db.plans.push({
       id: 'old-plan', service_date: TOMORROW, technician_id: 'tech-1', apply_status: null, apply_started_at: '2026-11-03T04:41:00Z',
-      apply_steps: JSON.stringify({ version: 1, routeBefore: {}, routePersisted: false, complete: false, steps: [{ id: 'a', fromStart: 480, toStart: 600, widthMin: 60, temp: true, state: 'done' }] }),
+      apply_steps: JSON.stringify({ version: 1, routeBefore: {}, routePersisted: false, complete: false, steps: [step] }),
     });
   };
 
