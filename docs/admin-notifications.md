@@ -425,6 +425,18 @@ app bundle (`ios/WavesPay/Resources/Sounds`). iOS plays its default sound when t
 older app version still rings. A Sound switch set to off now holds on iOS too: `apns.js` sends no `aps.sound`
 for a `silent` push. A new alert type gets a sound by adding a line to the map and a file to the app.
 
+Bell-only kinds that also push (owner 2026-11-03, "ok add", choices A and B; gate `GATE_BELL_BANNERS`, dark): three
+kinds of alert reached only the portal bell and now also send a phone banner when a write rings. A: `sms_operational_followup`
+(a text follow-up due) and `call_commitment_overdue` (a promise to a caller overdue) push only from 7:00 AM up to 9:00 PM
+Eastern, judged when the banner is sent; outside those hours the bell row stays and no banner goes (the 8 AM summary banner
+covers them). B: the Facebook message bell (`messenger_reply`, one standing bell per thread) pushes at any hour, like a
+text. `NotificationService.notifyAdmin` calls `bannerAfterWrite` in `server/services/bell-banners.js` once per write; a banner
+goes only for a fresh unread row or a refresh that rang again, never for a repeat, a withheld bell, an Activity-only row (the
+call-commitment backlog summary) or a row routed to Claude's queue, and only after the row commits (a rollback sends
+nothing; a write inside a nested transaction waits for the outermost commit). It goes out through `triggerNotification` with
+`pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
+line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
+
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
 

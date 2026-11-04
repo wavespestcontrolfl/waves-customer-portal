@@ -442,6 +442,38 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  // GATE_BELL_BANNERS: a banner for a bell row its writer rang under bell: true keeps that authorization, so it does
+  // not depend on GATE_CUSTOMER_ALERTS_RING (real policy on, that gate off).
+  test.each(['call_commitment_overdue', 'sms_operational_followup', 'messenger_reply'])(
+    'policy on, GATE_CUSTOMER_ALERTS_RING off: a %s banner pushes only as bellAuthorized pushOnly', async (key) => {
+      const PushService = require('../services/push-notifications');
+      const bellPolicy = require('../services/notification-bell-policy');
+      bellPolicy.clearOverrideCache();
+      const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+      db.mockImplementation((table) => (
+        table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
+      ));
+      delete process.env.GATE_CUSTOMER_ALERTS_RING;
+      const payload = { alertRowId: 'n-1', alertTitle: 'Comms — follow up', alertBody: 'Body.', alertLink: '/admin', customerId: 'cust-1' };
+      try {
+        PushService.sendToAdminUsers.mockClear();
+        const plain = await triggerNotification(key, payload, { pushOnly: true, adminOnly: true });
+        expect(plain.policySilenced).toBe(true);
+        expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+        const notPushOnly = await triggerNotification(key, payload, { bellAuthorized: true });
+        expect(notPushOnly.policySilenced).toBe(true);
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+        const banner = await triggerNotification(key, payload, { pushOnly: true, adminOnly: true, bellAuthorized: true });
+        expect(Boolean(banner.policySilenced)).toBe(false);
+        expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      } finally {
+        gateSpy.mockRestore();
+        bellPolicy.clearOverrideCache();
+      }
+    },
+  );
+
   test('an iPhone alert sound rides on the admin push only when the Sound switch is on and the trigger has one', async () => {
     const PushService = require('../services/push-notifications');
     const soundPref = (soundEnabled) => (table) => (
@@ -1226,5 +1258,101 @@ describe('sms_reply keeps the whole text for the bell', () => {
     expect(built.detail).toBe(long);
     const short = TRIGGER_REGISTRY.sms_reply.build({ fromName: 'Dana Example', message: 'See you at 4.', threadId: 'customer-123' });
     expect(short.detail).toBeUndefined();
+  });
+});
+
+// GATE_BELL_BANNERS (bell-banners.js): three bell-only alerts also send a phone banner, built from the written row's words.
+describe('bell banner triggers', () => {
+  const PushService = require('../services/push-notifications');
+  const recipients = [];
+  const withRecipients = (rows) => {
+    recipients.length = 0;
+    db.mockImplementation((table) => {
+      if (table !== 'technicians') return tableMock([]);
+      const chain = tableMock(rows);
+      const where = chain.where;
+      chain.where = jest.fn((cond) => { recipients.push(cond); return where(cond); });
+      return chain;
+    });
+  };
+  const bannerPayload = { alertRowId: 'n-42', alertTitle: 'Reply to Pat S. on Facebook', alertBody: 'Facebook: can you call me?', alertLink: '/admin/communications#tab=messenger&thread=t-1' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    withRecipients([{ id: 'admin-1', role: 'admin' }]);
+  });
+
+  test('builds prefer the written row\'s words and keep today\'s shapes without them', () => {
+    const { sms_operational_followup: sms, call_commitment_overdue: calls, messenger_reply: fb } = TRIGGER_REGISTRY;
+    expect(sms.build({ customerId: 'c-1', ...bannerPayload })).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(calls.build({ count: 3, summary: 'old', ...bannerPayload })).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(fb.build(bannerPayload)).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    // No alert fields: the shapes the registry always had.
+    expect(sms.build({ customerId: 'c 1' })).toEqual({
+      title: 'An SMS request needs follow-up',
+      body: 'Open the customer profile to verify completion or take the next step.',
+      link: '/admin/customers?customerId=c%201&tab=comms',
+    });
+    expect(calls.build({ count: 3 }).title).toBe('3 promises to callers are overdue');
+    expect(calls.build({}).title).toBe('A promise to a caller is overdue');
+    expect(calls.build({ summary: 'Call Pat S. back.' }).body).toBe('Call Pat S. back.');
+    expect(calls.build({}).link).toBe('/admin/communications#tab=owed');
+    expect(fb.build({}).link).toBe('/admin/communications#tab=messenger');
+  });
+
+  test('messenger_reply is a needs-you customer contact for a person, closed by the Messenger inbox, and admin-only like its bell', () => {
+    const fb = TRIGGER_REGISTRY.messenger_reply;
+    expect(fb).toEqual(expect.objectContaining({ label: 'Facebook message', category: 'alert', priority: 'high', group: 'Communication' }));
+    expect(fb.techVisible).toBeUndefined();
+    expect(fb.rule).toEqual({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'customer_answered', closedBy: 'server/services/messenger-inbox.js', contact: true });
+    // It sits right after sms_reply.
+    const keys = Object.keys(TRIGGER_REGISTRY);
+    expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
+  });
+
+  test('the banner is tagged by its row, so a refresh ring replaces it, and a second row never does', () => {
+    expect(__private.pushTagFor('messenger_reply', { alertRowId: 'n-42' })).toBe('waves-messenger_reply-n-42');
+    expect(__private.pushTagFor('call_commitment_overdue', { alertRowId: 'n-43' })).toBe('waves-call_commitment_overdue-n-43');
+    expect(__private.pushTagFor('messenger_reply', { alertRowId: 'n-42' })).not.toBe(__private.pushTagFor('messenger_reply', { alertRowId: 'n-44' }));
+    // Without a row id the old behavior stands.
+    expect(__private.pushTagFor('messenger_reply', {})).toBe('waves-messenger_reply');
+  });
+
+  test('pushOnly sends the row\'s words with its sound, re-alerts on a repeat, and writes no bell', async () => {
+    await triggerNotification('messenger_reply', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    const sent = PushService.sendToAdminUsers.mock.calls[0][1]('admin-1');
+    expect(sent).toMatchObject({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, url: bannerPayload.alertLink, tag: 'waves-messenger_reply-n-42', renotify: true, sound: 'waves-text.caf' });
+  });
+
+  test('the two reminders keep their reminder sound', async () => {
+    for (const key of ['sms_operational_followup', 'call_commitment_overdue']) {
+      PushService.sendToAdminUsers.mockClear();
+      await triggerNotification(key, { ...bannerPayload, customerId: null }, { pushOnly: true, adminOnly: true });
+      expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1')).toMatchObject({ sound: 'waves-reminder.caf', tag: `waves-${key}-n-42` });
+    }
+  });
+
+  test('adminOnly keeps a banner off technician phones even for a tech-visible type; without it the type reaches them', async () => {
+    await triggerNotification('call_commitment_overdue', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(recipients).toContainEqual({ role: 'admin' });
+    withRecipients([{ id: 'admin-1', role: 'admin' }]);
+    await triggerNotification('call_commitment_overdue', bannerPayload, { pushOnly: true });
+    expect(recipients).not.toContainEqual({ role: 'admin' });
+  });
+
+  test('a test account\'s customer gets no banner', async () => {
+    jest.resetModules();
+    jest.doMock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: (id) => id === 'cust-test' }));
+    jest.doMock('../models/db', () => jest.fn(() => tableMock([])));
+    jest.doMock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async () => ({})) }));
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+    const fresh = require('../services/notification-triggers');
+    const Push = require('../services/push-notifications');
+    const out = await fresh.triggerNotification('sms_operational_followup', { ...bannerPayload, customerId: 'cust-test' }, { pushOnly: true, adminOnly: true });
+    expect(out.suppressed).toBe(true);
+    expect(Push.sendToAdminUsers).not.toHaveBeenCalled();
+    jest.dontMock('../services/internal-test-customers');
   });
 });

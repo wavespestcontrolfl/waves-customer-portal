@@ -14,6 +14,7 @@
 const ALERT_SOUNDS = Object.freeze({
   sms_reply: 'waves-text.caf',
   portal_ask: 'waves-text.caf',
+  messenger_reply: 'waves-text.caf',
   customer_missed_call: 'waves-missed-call.caf',
   promise_chaser: 'waves-missed-call.caf',
   relay_hot_lead: 'waves-missed-call.caf',

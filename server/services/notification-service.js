@@ -604,8 +604,16 @@ const NotificationService = {
     }
   },
 
-  // Create admin notification (no recipient_id needed)
+  // Create admin notification (no recipient_id needed). The write itself is writeAdmin below; a write that rang a
+  // bell-only reminder or a Facebook message also sends its phone banner (bell-banners.js, GATE_BELL_BANNERS), after
+  // the row commits. Gate off: bannerAfterWrite returns at once and nothing else changes.
   async notifyAdmin(category, title, body, opts = {}) {
+    const written = await this.writeAdmin(category, title, body, opts);
+    require('./bell-banners').bannerAfterWrite(written, { metadata: opts.metadata, trx: opts.trx });
+    return written;
+  },
+
+  async writeAdmin(category, title, body, opts = {}) {
     // Opt-in dedupe, mirroring notifyCustomer's mechanism (PR #3496 review
     // P1: replayed emitters — e.g. repeated recap edits re-detecting the
     // same stranded card hold — must not crowd the billing feed with

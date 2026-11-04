@@ -428,6 +428,43 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(reopened[0].done_at).toBeNull();
     });
 
+    test('the bell carries the messenger_reply trigger key; with GATE_BELL_BANNERS on each ring sends one phone banner, a quiet poll none', async () => {
+      const triggers = require('../services/notification-triggers');
+      const banner = jest.spyOn(triggers, 'triggerNotification').mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
+      const settle = () => new Promise((resolve) => { setTimeout(resolve, 150); });
+      try {
+        // Gate off: the trigger key is on the row, and nothing is sent.
+        const conv = conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'First question', at: ago(8) }] });
+        await messenger.pollMessenger();
+        await settle();
+        const [first] = await bellsOf('a');
+        expect(first.metadata).toMatchObject({ triggerKey: 'messenger_reply', conversationId: first.metadata.conversationId });
+        expect(banner).not.toHaveBeenCalled();
+
+        // Gate on: the next message re-rings the same row and sends one banner built from that row.
+        process.env.GATE_BELL_BANNERS = 'true';
+        await db('notifications').where({ id: first.id }).update({ read_at: new Date() });
+        conv.messages.push({ id: mid('a', 1), fromPage: false, text: 'Second question', at: ago(4) });
+        conv.updated = ago(4);
+        await messenger.pollMessenger();
+        await settle();
+        expect(banner).toHaveBeenCalledTimes(1);
+        const [key, payload, opts] = banner.mock.calls[0];
+        expect(key).toBe('messenger_reply');
+        expect(payload).toMatchObject({ alertRowId: first.id, alertLink: first.link });
+        expect(payload.alertBody).toContain('Second question');
+        expect(opts).toMatchObject({ pushOnly: true, adminOnly: true });
+
+        // A poll that finds nothing new rings nothing and sends nothing.
+        await messenger.pollMessenger();
+        await settle();
+        expect(banner).toHaveBeenCalledTimes(1);
+      } finally {
+        delete process.env.GATE_BELL_BANNERS;
+        banner.mockRestore();
+      }
+    });
+
     test('a conversation that cannot be read holds the cursor, is retried, and fails the job', async () => {
       conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'older thread', at: ago(20) }] });
       const broken = conversation('b', { name: 'Kim Sample', unread: 1, messages: [{ fromPage: false, text: 'newer thread', at: ago(10) }] });
