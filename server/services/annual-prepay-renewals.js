@@ -1309,14 +1309,21 @@ async function firstSeriesWelcomeCandidate(term, { alreadyActivated, seedCount }
 // (executionPromise settles at COMMIT; a rollback drops it with the rows)
 // AND for every savepoint between (a savepoint's promise resolves on RELEASE,
 // before the real commit, and rejects on its own rollback, which a caller may
-// swallow while the outer one still commits). On the global pool each
-// seed insert already committed, so it runs inline. Non-blocking: a failure
+// swallow while the outer one still commits). A bare rollback() resolves the
+// promise instead of rejecting it, so the seeded rows are also read back on the
+// pool before anything is queued. On the global pool each seed insert already
+// committed, so it runs inline. Non-blocking: a failure
 // logs and never touches the activation.
 function queueFirstSeriesWelcomeAfterCommit(conn, term, { candidate, rootId, createdRows }) {
   if (!candidate || !createdRows.length) return Promise.resolve();
   const send = async () => {
     try {
       const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
+      // A bare rollback() resolves executionPromise (knex doNotRejectOnRollback),
+      // so a settled promise alone does not prove a commit. Read the rows back
+      // on the pool: a rolled-back seed must not spend the once-ever welcome.
+      const survived = await db('scheduled_services').whereIn('id', createdRows.map((row) => row.id)).first('id');
+      if (!survived) return;
       const customer = await db('customers')
         .where({ id: term.customer_id })
         .first('id', 'first_name', 'last_name', 'phone', 'email');

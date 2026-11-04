@@ -92,7 +92,8 @@ const CUSTOMER = { id: 'customer-1', first_name: 'Test', last_name: 'Customer', 
 
 // Queue order for a first activation with nothing seeded yet: columns, the
 // existing-coverage read, the already-activated probe, the two candidacy
-// reads (prior recurring series, prior serviced visit), then four inserts.
+// reads (prior recurring series, prior serviced visit), four inserts, then
+// the read-back of the seeded rows.
 function activationQueues({ priorSeries, priorVisit, priorRecord } = {}) {
   const inserts = [
     query({ returning: [{ id: 'svc-1', scheduled_date: '2026-06-15', recurring_pattern: 'quarterly' }] }),
@@ -108,6 +109,8 @@ function activationQueues({ priorSeries, priorVisit, priorRecord } = {}) {
       query({ first: priorSeries }),
       query({ first: priorVisit }),
       ...inserts,
+      // Read-back of the seeded rows once committed (queueFirstSeriesWelcomeAfterCommit).
+      query({ first: { id: 'svc-1' } }),
     ],
     service_records: [query({ first: priorRecord })],
     customers: [query({ first: CUSTOMER })],
@@ -201,6 +204,12 @@ describe('annual prepay activation sends the new recurring welcome', () => {
 });
 
 describe('queueFirstSeriesWelcomeAfterCommit', () => {
+  // `rowsSurvived: false` models a bare rollback(): knex resolves executionPromise
+  // anyway, but the seeded rows are gone when read back on the pool.
+  const setSurvivors = ({ rowsSurvived }) => setDbQueues({
+    scheduled_services: [query({ first: rowsSurvived ? { id: 'svc-1' } : undefined })],
+    customers: [query({ first: CUSTOMER })],
+  });
   const flush = () => new Promise((resolve) => setImmediate(resolve));
   const deferred = () => {
     let resolve;
@@ -214,7 +223,7 @@ describe('queueFirstSeriesWelcomeAfterCommit', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    setDbQueues({ customers: [query({ first: CUSTOMER })] });
+    setSurvivors({ rowsSurvived: true });
   });
 
   test('inside a transaction nothing is sent until COMMIT', async () => {
@@ -253,6 +262,15 @@ describe('queueFirstSeriesWelcomeAfterCommit', () => {
     expect(sendNewRecurringWelcome).toHaveBeenCalledTimes(1);
   });
 
+  test('a bare rollback() resolves the promise but the rows are gone: nothing is sent', async () => {
+    setSurvivors({ rowsSurvived: false });
+    const commit = deferred();
+    await send({ isTransaction: true, executionPromise: commit.promise });
+    commit.resolve(); // knex doNotRejectOnRollback: a rollback without an error resolves
+    await flush();
+    expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+  });
+
   test('a savepoint that rolled back (error swallowed) while the outer transaction commits sends nothing', async () => {
     const outer = deferred();
     const savepoint = deferred();
@@ -279,7 +297,7 @@ describe('queueFirstSeriesWelcomeAfterCommit', () => {
   });
 
   test('a missing customer row sends nothing and does not throw', async () => {
-    setDbQueues({ customers: [query({ first: undefined })] });
+    setDbQueues({ scheduled_services: [query({ first: { id: 'svc-1' } })], customers: [query({ first: undefined })] });
     await expect(send(db)).resolves.toBeUndefined();
     expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
   });
