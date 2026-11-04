@@ -149,7 +149,7 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
 
     test('an out-of-area or incomplete address, a prepay or a monthly plan is refused with a reason', async () => {
       const outside = await insertMove({ address_verdict: 'out_of_area' });
-      expect(await Moves.newHomeAction(outside)).toMatchObject({ action: 'blocked', reason: Moves.NEW_HOME_REFUSALS.out_of_area });
+      expect(await Moves.newHomeAction(outside)).toEqual({ action: 'blocked', estimateId: null, reason: Moves.NEW_HOME_REFUSALS.out_of_area });
       await trx('customer_moves').where({ id: outside.id }).del();
 
       const partial = await insertMove({ normalized_address: JSON.stringify({ ...NEW_HOUSE, zip: null }) });
@@ -157,10 +157,12 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
       await trx('customer_moves').where({ id: partial.id }).del();
 
       const move = await insertMove();
+      // A prepay or monthly refusal lists what the office does by hand
+      // instead (owner B3 "A"); other refusals carry no steps.
       await trx('customers').where({ id: customerId }).update({ billing_mode: 'annual_prepay' });
-      expect(await Moves.newHomeAction(move)).toMatchObject({ action: 'blocked', reason: Moves.NEW_HOME_REFUSALS.prepay });
+      expect(await Moves.newHomeAction(move)).toEqual({ action: 'blocked', estimateId: null, reason: Moves.NEW_HOME_REFUSALS.prepay, steps: Moves.BILLING_STEPS.prepay });
       await trx('customers').where({ id: customerId }).update({ billing_mode: 'monthly_membership' });
-      expect(await Moves.newHomeAction(move)).toMatchObject({ action: 'blocked', reason: Moves.NEW_HOME_REFUSALS.monthly });
+      expect(await Moves.newHomeAction(move)).toEqual({ action: 'blocked', estimateId: null, reason: Moves.NEW_HOME_REFUSALS.monthly, steps: Moves.BILLING_STEPS.monthly });
     });
 
     test('the billing code\'s own lane decides: a legacy row with no mode, a real tier and a monthly rate is a monthly member', async () => {

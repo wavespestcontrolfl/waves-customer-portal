@@ -410,6 +410,8 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
 
     await trx('customers').where({ id: customerId }).update({ billing_mode: 'annual_prepay' });
     await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'prepay' });
+    // The card lists what the office does by hand instead (owner B3 "A").
+    expect(await Moves.applyAction(s.move)).toEqual({ action: 'blocked', reason: Moves.APPLY_REFUSALS.prepay, steps: Moves.BILLING_STEPS.prepay });
     await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', contact_role: 'tenant' });
     await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'primary_role_unavailable' });
     await trx('customers').where({ id: customerId }).update({ contact_role: null });
