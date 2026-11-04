@@ -1,4 +1,5 @@
 // Shared delivery lifecycle for inbound SMS alerts and durable recovery.
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -104,6 +105,30 @@ async function receivedAtMs(MessageSid) {
   } catch (e) {
     return Date.now();
   }
+}
+
+// One bell row per unknown sender on a website or van-wrap tracking line (owner screenshot 2026-11-04: two texts
+// from one number rang two "New text from wavespestcontrol.com" rows four minutes apart). It is the thread row a
+// known customer's texts get (threadRefresh above): a new text rewrites it with the latest text and a running count,
+// unread again and back on top, and still pushes. Keyed on a hash of the sender's number, so the row's metadata
+// never holds the number in the clear. Still the new_lead bell (admin role only), as before.
+const trackingThreadBellKey = (phone) => `sms-tracking-thread:${crypto.createHash('sha256').update(String(phone || '').replace(/\D/g, '')).digest('hex').slice(0, 32)}`;
+
+async function ringTrackingLineTextBell({ From, MessageSid, source, message, mediaCount = 0 }) {
+  const { triggerNotification } = require('./notification-triggers');
+  const arrivedAtMs = await receivedAtMs(MessageSid);
+  return triggerNotification('new_lead', {
+    name: 'Unknown sender',
+    twilioSid: MessageSid,
+    phone: From,
+    message: message || '',
+    mediaCount,
+    source,
+    textCount: 1,
+    receivedAtMs: arrivedAtMs,
+    // The unknown sender's thread, named by the message (no phone in a link).
+    link: `/admin/communications?message=${encodeURIComponent(MessageSid)}`,
+  }, { dedupeKey: trackingThreadBellKey(From), refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) });
 }
 
 async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead, leadPreference }) {
@@ -241,4 +266,4 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
   return delivered || suppressed || alreadyRead;
 }
 
-module.exports = { ringSmsReplyBell, dispatchUnknownSenderAlert, claimUnknownSenderAlertWindow, confirmUnknownSenderAlertWindow, releaseUnknownSenderAlertClaim };
+module.exports = { ringSmsReplyBell, ringTrackingLineTextBell, dispatchUnknownSenderAlert, claimUnknownSenderAlertWindow, confirmUnknownSenderAlertWindow, releaseUnknownSenderAlertClaim };

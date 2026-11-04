@@ -233,6 +233,12 @@ customer's message by this rule.
    text rewrites it (latest text as the body, "3 texts from Name" in the title, unread,
    moved to the top) and still pushes; the count restarts once the row was read or done.
    The link keeps its `?thread=<customerId>` prefix, which the thread-read matchers use.
+   A number with no customer record texting a website or van-wrap line is one subject too
+   (owner screenshot 2026-11-04: two texts from one number rang two rows): its texts share
+   one `new_lead` row (`dedupeKey` `sms-tracking-thread:<hash of the number>`, the same
+   refresh, `ringTrackingLineTextBell` in `server/services/sms-reply-alert-delivery.js`),
+   "2 texts from wavespestcontrol.com" in the title and the latest text quoted in the why,
+   masked like every bell body, then the masked number. Its link and Call follow the latest text.
    A standing backlog (overdue promises past five) is a count on its page, never a bell:
    its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
    Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed

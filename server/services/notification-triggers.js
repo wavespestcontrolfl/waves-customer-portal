@@ -201,6 +201,27 @@ const TRIGGER_REGISTRY = {
     // surface — neither the bell row nor the push reaches non-admin staff.
     adminRoleOnly: true,
     build: (p) => {
+      // A text from a number with no customer record to a website or van-wrap line
+      // (sms-reply-alert-delivery.js ringTrackingLineTextBell): one row per sender, rewritten by each new text
+      // like a known customer's thread row ("2 texts from wavespestcontrol.com"). It says who and what (owner
+      // audit 2026-10-01): the latest text in quotes, masked like every bell body, then the masked number.
+      if (p.twilioSid && !p.leadId) {
+        const { redactedWords, whyWithQuote } = require('./admin-alert-names');
+        const count = Math.max(1, Math.floor(Number(p.textCount)) || 1);
+        const words = redactedWords(p.message);
+        const photos = Math.max(1, Math.floor(Number(p.mediaCount)) || 1);
+        const tail = ` — unknown sender ${maskPhone(p.phone)}`;
+        const body = words ? whyWithQuote({ quote: words, tail }) : `Sent ${photos > 1 ? `${photos} photos` : 'a photo'}${tail}`;
+        return {
+          title: `${count > 1 ? `${count} texts` : 'New text'} from ${p.source || 'a tracking line'}`,
+          body,
+          // The whole text for "Show full text" when the quote had to be cut.
+          ...(words && !body.includes(words) ? { detail: words.slice(0, 1600) } : {}),
+          link: p.link || '/admin/communications',
+          // Call: the Communications thread's Call back for the sender (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+          ...callButtonAlert({ smsSid: p.twilioSid }),
+        };
+      }
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
       ];
@@ -212,9 +233,8 @@ const TRIGGER_REGISTRY = {
         body: bodyParts.join(' - '),
         link: p.leadId ? `/admin/leads?lead=${p.leadId}` : (p.link || '/admin/leads'),
         // Call: the Leads page's Call Now for the lead, else the customer page's Call (a web form whose lead row
-        // failed sends the customer id as leadId), else the Communications thread's Call back for an unknown
-        // sender's text (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
-        ...callButtonAlert({ leadId: p.leadId === p.customerId ? null : p.leadId, customerId: p.customerId, smsSid: p.twilioSid }),
+        // failed sends the customer id as leadId) (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+        ...callButtonAlert({ leadId: p.leadId === p.customerId ? null : p.leadId, customerId: p.customerId }),
       };
     },
   },
@@ -604,18 +624,19 @@ const TRIGGER_REGISTRY = {
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/promise-chaser-bell.js', promise: true },
     allowContactDetails: true,
     build: (p) => {
-      const who = p.name || p.phone || 'A lead';
-      // The headline leads with WHO (owner 2026-10-21): the name, else the
-      // number in its usual form, else a plain "A lead".
+      // The headline and the body lead with WHO (owner 2026-10-21): the name,
+      // else the number in its usual form, else a plain "A lead". The body
+      // used to show the raw +1 number under a formatted headline (owner
+      // screenshot 2026-11-04).
       const digits = String(p.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
       const shownPhone = digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : p.phone;
-      const headlineWho = p.name || shownPhone || 'A lead';
+      const who = p.name || shownPhone || 'A lead';
       // Dispatched only by the durable sweep now (no more live /voice call
       // site) — the call has always already ended by the time this fires,
       // so the copy always states when they called, never "is calling in
       // now".
       return {
-        title: `${headlineWho} called back — we still owe a ${p.what || 'follow-up'}`,
+        title: `${who} called back — we still owe a ${p.what || 'follow-up'}`,
         body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
         link: callLink(p),
         ...callButtonAlert({ callLogId: p.callLogId }),
@@ -1419,6 +1440,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // idempotent replay of a booking whose bell already landed.
     // relay_hot_lead: keyed per call, so a hit is a reconnect's or the
     // hourly sweep's retry of a page that already landed.
+    // new_lead: only an unknown sender's text thread passes a key (one row
+    // per sender, rewritten by each new text), so a plain hit is the same
+    // text delivered again (a webhook retry), which already pushed.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1522,7 +1546,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead')) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || triggerKey === 'new_lead')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

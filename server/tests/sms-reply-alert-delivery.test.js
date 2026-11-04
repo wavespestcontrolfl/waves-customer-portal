@@ -283,3 +283,36 @@ describe('known-sender thread bell', () => {
     expect(payload.textCount).toBeUndefined();
   });
 });
+
+// One bell row per unknown sender on a website or van-wrap line (owner screenshot 2026-11-04: two texts from one
+// number rang two rows): the keyed, refreshed thread row a known sender's texts get, keyed on a hash of the number.
+describe('tracking-line unknown-sender thread bell', () => {
+  const ringTracking = (From = input.From, MessageSid = 'SM-t1') => delivery.ringTrackingLineTextBell({
+    From, MessageSid, source: 'wavespestcontrol.com', message: 'Do you treat roaches?', mediaCount: 0,
+  });
+
+  test('rings the new_lead bell keyed per sender, never the number in the clear, and refreshed in place', async () => {
+    await ringTracking();
+    const [key, payload, options] = triggerNotification.mock.calls.at(-1);
+    expect(key).toBe('new_lead');
+    expect(payload).toMatchObject({
+      twilioSid: 'SM-t1', phone: input.From, message: 'Do you treat roaches?', source: 'wavespestcontrol.com',
+      textCount: 1, receivedAtMs: expect.any(Number), link: '/admin/communications?message=SM-t1',
+    });
+    expect(options).toMatchObject({ refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(options.dedupeKey).toMatch(/^sms-tracking-thread:[0-9a-f]{32}$/);
+    expect(options.dedupeKey).not.toContain('2025550101');
+    // The known thread's count rules, decided under notifyAdmin's lock: a newer text on the open row counts one more.
+    const open = { read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-t0', textCount: 1, receivedAtMs: 0 } } };
+    expect(await options.refreshPayload(open, open.metadata.payload)).toEqual({ payload: { textCount: 2 }, keepContent: false });
+  });
+
+  test('a later text from the same number keys the same row; another number keys its own', async () => {
+    await ringTracking(input.From, 'SM-t1');
+    await ringTracking(input.From, 'SM-t2');
+    await ringTracking('+19415550000', 'SM-t3');
+    const keys = triggerNotification.mock.calls.map((call) => call[2].dedupeKey);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+});

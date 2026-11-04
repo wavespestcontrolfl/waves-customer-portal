@@ -93,8 +93,13 @@ test.each([0, 1])('tracking line %s logs unknown senders without creating custom
   const to = kind === 0 ? numbers.domainTracking[0].number : numbers.tracking.vanWrap.number;
   const sid = await receive('Please quote service for the garden shed.', to);
   expect(mockState.sms[0].customer_id).toBeNull();
+  // One row per sender (owner screenshot 2026-11-04): the text rides as the row's latest text, and the row is keyed
+  // on the sender and rewritten by each new text instead of a new row per text.
   expect(triggerNotification).toHaveBeenCalledWith('new_lead', expect.objectContaining({
     twilioSid: sid, name: 'Unknown sender', link: `/admin/communications?message=${sid}`,
+    message: 'Please quote service for the garden shed.', textCount: 1,
+  }), expect.objectContaining({
+    dedupeKey: expect.stringMatching(/^sms-tracking-thread:[0-9a-f]{32}$/), refreshOnDedupe: true, bumpOnRefresh: true,
   }));
   expect(require('../services/conversations').recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({ customerId: undefined }));
 });

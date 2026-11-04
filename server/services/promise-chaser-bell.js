@@ -86,7 +86,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { etDateString, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { etDateString, formatETDayDate, formatETTime } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
 const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
@@ -137,7 +137,8 @@ function describePromise(row) {
   const source = Number.isFinite(row.__obligationAtMs) ? row.__obligationAtMs
     : (row.source === 'human' ? row.created_at : row.call_started_at);
   const at = source != null ? new Date(source) : null;
-  const when = at && !Number.isNaN(at.getTime()) ? `${formatETDate(at)} ${formatETTime(at)}` : 'an earlier call';
+  // The short day an office alert names ("Wed, Nov 4 at 1:27 PM"), as the follow-up pager's own rows read.
+  const when = at && !Number.isNaN(at.getTime()) ? `${formatETDayDate(at)} at ${formatETTime(at)}` : 'an earlier call';
   return { what, when };
 }
 
