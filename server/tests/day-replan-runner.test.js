@@ -10,6 +10,7 @@ jest.mock('../services/day-replan/planner', () => {
   return { planDay: jest.fn(actual.planDay) };
 });
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
+jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' } }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 
@@ -25,7 +26,7 @@ const TECH = '00000000-0000-4000-8000-000000000001';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 
 /** A chainable fake knex: reads resolve from `tables`, only inserts into day_replan_plans are expected. */
-function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false } = {}) {
+function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false, blocks = [] } = {}) {
   const calls = [];
   const inserts = [];
   const conn = (table) => {
@@ -36,6 +37,7 @@ function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false } = 
           return (resolve, reject) => {
             let out = [];
             if (table === 'scheduled_services') out = stopsByDate[target.date] || [];
+            if (table === 'tech_schedule_blocks') out = blocks;
             if (table === 'appointment_reminders') {
               if (failReminders) return Promise.reject(new Error('reminders down')).then(resolve, reject);
               out = reminders;
@@ -212,6 +214,82 @@ describe('shadow run', () => {
 
     test('the technician\'s own stops never block themselves', () => {
       expect(_internals.blockedHoursFor(zigzagRows(), TECH, true)).toEqual([]);
+    });
+  });
+
+  describe('technician schedule blocks', () => {
+    const blockRow = (start, end, extra = {}) => ({ id: 'blk', technician_id: TECH, start_time: start, end_time: end, block_type: 'blocked', ...extra });
+
+    test('loads own and global non-available blocks for the date, always, and hands them to the planner', async () => {
+      const { conn, calls } = fakeConn({
+        stopsByDate: { [TOMORROW]: zigzagRows() },
+        blocks: [blockRow('08:00:00', '10:00:00'), blockRow('12:00:00', '13:00:00', { technician_id: null, block_type: 'lunch' })],
+      });
+      await runDayReplanIfEnabled({ now: NOW, conn });
+      const methods = calls.filter(([t]) => t === 'tech_schedule_blocks').map(([, m]) => m);
+      expect(methods).toEqual(expect.arrayContaining(['where', 'whereNot', 'select']));
+      const options = planDay.mock.calls[0][0].options;
+      expect(options.blocks).toEqual([{ startMin: 480, endMin: 600 }, { startMin: 720, endMin: 780 }]);
+    });
+
+    test('a block that covers the whole day skips the day and writes no row', async () => {
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() }, blocks: [blockRow('07:00:00', '18:00:00')] });
+      const out = await runDayReplanIfEnabled({ now: NOW, conn });
+      expect(inserts).toEqual([]);
+      expect(out.skipped).toEqual([{ date: TOMORROW, technician_id: TECH, reason: 'DAY_BLOCKED', stops: 4 }]);
+    });
+
+    test('an unreadable block table fails that tech-day closed', async () => {
+      const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+      const failing = (table) => (table === 'tech_schedule_blocks' ? { where: () => { throw new Error('blocks down'); } } : conn(table));
+      failing.raw = conn.raw;
+      const out = await runDayReplanIfEnabled({ now: NOW, conn: failing });
+      expect(out.failed).toEqual([{ date: TOMORROW, technician_id: TECH, reason: 'PLAN_FAILED' }]);
+    });
+
+    test('a fixed stop that overlapped a block as booked is listed with a note', async () => {
+      const rows = [...zigzagRows(), row('e', 0.04, 12, { auto_dispatch_locked: true, customer_id: 'cust-e' })];
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows }, blocks: [blockRow('12:00:00', '13:00:00')] });
+      await runDayReplanIfEnabled({ now: NOW, conn });
+      expect(JSON.parse(inserts[0].row.fixed)).toEqual([{ id: 'e', why: 'staff_lock', note: 'overlaps_block_as_booked' }]);
+    });
+  });
+
+  describe('day bounds', () => {
+    test('the planner gets the night pass open and close, not its own copy', async () => {
+      const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+      await runDayReplanIfEnabled({ now: NOW, conn });
+      const { options } = planDay.mock.calls[0][0];
+      expect(options.firstHour).toBe(8);
+      expect(options.closeMin).toBe(17 * 60);
+    });
+  });
+
+  describe('dry window', () => {
+    const info = (extra = {}) => ({ mode: 'true', hours: 4, class: 'long', source: 'service_rule', window_key: 'dry_long', customer_time: false, ...extra });
+
+    test('applies only in mode true, with no customer time, a rain-sensitive class and an in-season window', () => {
+      expect(_internals.dryWindowPref(info())).toEqual({ startMin: 480, endMin: 600 });
+      expect(_internals.dryWindowPref(info({ class: 'short', window_key: 'dry_short' }))).toEqual({ startMin: 480, endMin: 720 });
+      expect(_internals.dryWindowPref(info({ mode: 'shadow' }))).toBeNull();
+      expect(_internals.dryWindowPref(info({ mode: 'off' }))).toBeNull();
+      expect(_internals.dryWindowPref(undefined)).toBeNull();
+      expect(_internals.dryWindowPref(info({ customer_time: true }))).toBeNull();
+      expect(_internals.dryWindowPref(info({ class: 'proof', window_key: 'dry_proof' }))).toBeNull();
+      expect(_internals.dryWindowPref(info({ window_key: null }))).toBeNull();
+    });
+
+    test('mode true limits a movable stop to its dry window; shadow leaves it free; a customer time wins', async () => {
+      const run = async (prefs) => {
+        jest.clearAllMocks();
+        getCustomerSchedulingPreferences.mockResolvedValue(prefs);
+        const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+        await runDayReplanIfEnabled({ now: NOW, conn });
+        return planDay.mock.calls[0][0].stops.map((s) => s.pref);
+      };
+      expect(await run({ preferred_time_window: null, dry_time: info() })).toEqual(Array(4).fill({ startMin: 480, endMin: 600 }));
+      expect(await run({ preferred_time_window: null, dry_time: info({ mode: 'shadow' }) })).toEqual(Array(4).fill(null));
+      expect(await run({ preferred_time_window: { startMin: 780, endMin: 900 }, dry_time: info() })).toEqual(Array(4).fill({ startMin: 780, endMin: 900 }));
     });
   });
 

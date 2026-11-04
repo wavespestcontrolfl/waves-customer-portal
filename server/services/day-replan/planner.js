@@ -19,7 +19,7 @@
  * Simulation of an order (t = clock, prev = last point, drive = minutes driven):
  *   for each stop: d = legMin(prev, stop); drive += d; t += d.
  *   FIXED: slot = slotStartMin; infeasible when t > slot + promiseMin - marginMin.
- *   MOVABLE: h0 = floor(t / 60). Try hours h0-1 and h0: inside [firstHour, lastHour], not held by
+ *   MOVABLE: h0 = floor(t / 60). Try hours h0-1 and h0: inside [firstHour, last start hour for closeMin], not held by
  *     another stop (all the hours its window covers), pref ok, t at or after the hour, and t - hour <= promiseMin - marginMin; take the
  *     first that passes. Else the first later hour (from max(firstHour, h0+1)) that is free and pref ok
  *     (the van waits). None = infeasible.
@@ -29,6 +29,12 @@
  *
  * The current plan is every stop at its current slot (all treated fixed), in slot order, with
  * lateness allowed and reported. The search never ends later than the current plan.
+ *
+ * options.blocks ([{ startMin, endMin }], the technician's unavailable intervals): a stop's service interval
+ * [start, start + workMin) may not overlap one. A movable stop moves to a later legal hour; a fixed stop that
+ * already overlapped a block as booked keeps its hour (listed in `grandfathered`) but the plan adds no new
+ * overlap. options.closeMin: a movable stop's window (start + slotWidthMin) must end by it; firstHour is the
+ * earliest start hour.
  *
  * options.blockedHours (array of hours 0..23) are held by rows that are not route stops; no movable stop takes
  * them, and they add no drive.
@@ -42,7 +48,9 @@ const DEFAULT_OPTIONS = Object.freeze({
   promiseMin: 120,
   marginMin: 15,
   firstHour: 8,
-  lastHour: 17,
+  // The day closes here (minutes): a movable stop's window must end by it. The runner passes the night pass's
+  // own DAY_CLOSE (candidate-slots.js after_hours); this is only the fallback for a bare call.
+  closeMin: 17 * 60,
   minSavingMin: 10,
   exactLimit: 9,
 });
@@ -87,8 +95,26 @@ function buildLegs(stops, origin, legMin) {
   return points.map((a, i) => points.map((b, j) => (i === j ? 0 : Number(legMin(a, b)) || 0)));
 }
 
+/** Sorted, valid { startMin, endMin } intervals the technician is unavailable. */
+function cleanBlocks(blocks) {
+  return (blocks || [])
+    .filter((b) => b && Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin)
+    .sort((a, b) => a.startMin - b.startMin);
+}
+
+/** True when a service interval [start, start + work) overlaps any block. */
+function hitsBlock(blocks, start, work) {
+  return blocks.some((b) => start < b.endMin && start + work > b.startMin);
+}
+
 function buildContext(stops, origin, departureMin, legMin, options) {
   const opts = resolveOptions(options);
+  const blocks = cleanBlocks(options && options.blocks);
+  // A fixed stop that already overlaps a block as booked keeps its hour (grandfathered); a plan may not add overlaps.
+  const grandfathered = new Set();
+  stops.forEach((s, i) => {
+    if (!s.movable && hitsBlock(blocks, s.slotStartMin, s.workMin)) grandfathered.add(i);
+  });
   let fixedMask = 0;
   for (const s of stops) {
     if (!s.movable) fixedMask |= fixedHoursMask(s);
@@ -106,6 +132,8 @@ function buildContext(stops, origin, departureMin, legMin, options) {
     opts,
     bound: opts.promiseMin - opts.marginMin,
     fixedMask,
+    blocks,
+    grandfathered,
     dayEndMin: Infinity,
   };
 }
@@ -115,8 +143,13 @@ function prefAllows(pref, hour) {
   return hour * 60 >= pref.startMin && hour * 60 < pref.endMin;
 }
 
+/** Last start hour whose window still ends by the day's close (the night pass's after_hours rule). */
+function lastStartHour(ctx, stop) {
+  return Math.floor((ctx.opts.closeMin - (Number(stop.slotWidthMin) || 60)) / 60);
+}
+
 function hourUsable(ctx, stop, hour, used) {
-  if (hour < ctx.opts.firstHour || hour > ctx.opts.lastHour) return false;
+  if (hour < ctx.opts.firstHour || hour > lastStartHour(ctx, stop)) return false;
   // A movable stop holds every hour its own window covers, so all of them must be free.
   return (used & hoursMask(hour, widthHours(stop))) === 0 && prefAllows(stop.pref, hour);
 }
@@ -124,11 +157,13 @@ function hourUsable(ctx, stop, hour, used) {
 /** The arrival hour (minutes) a movable stop takes when the van gets there at t, or null. */
 function pickHour(ctx, stop, t, used) {
   const h0 = Math.floor(t / 60);
+  // The service itself ([start, start + work)) may not run through a block.
+  const clear = (hour) => !hitsBlock(ctx.blocks, Math.max(t, hour * 60), stop.workMin);
   for (const hour of [h0 - 1, h0]) {
-    if (hourUsable(ctx, stop, hour, used) && t >= hour * 60 && t - hour * 60 <= ctx.bound) return hour * 60;
+    if (hourUsable(ctx, stop, hour, used) && t >= hour * 60 && t - hour * 60 <= ctx.bound && clear(hour)) return hour * 60;
   }
-  for (let hour = Math.max(ctx.opts.firstHour, h0 + 1); hour <= ctx.opts.lastHour; hour += 1) {
-    if (hourUsable(ctx, stop, hour, used)) return hour * 60;
+  for (let hour = Math.max(ctx.opts.firstHour, h0 + 1); hour <= lastStartHour(ctx, stop); hour += 1) {
+    if (hourUsable(ctx, stop, hour, used) && clear(hour)) return hour * 60;
   }
   return null;
 }
@@ -147,6 +182,7 @@ function step(ctx, state, idx) {
   } else {
     slot = stop.slotStartMin;
     if (t > slot + ctx.bound) return null;
+    if (!ctx.grandfathered.has(idx) && hitsBlock(ctx.blocks, Math.max(t, slot), stop.workMin)) return null;
   }
   if (t < slot) t = slot;
   t += stop.workMin;
@@ -370,6 +406,7 @@ function planDay({ stops, origin, departureMin, legMin, options = {} }) {
     best,
     ...verdict,
     savedMin: best ? current.driveMin - best.driveMin : 0,
+    grandfathered: [...ctx.grandfathered].sort((a, b) => a - b).map((i) => ctx.stops[i].id),
     changes: found && verdict.accepted ? slotChanges(ctx, found) : [],
   };
 }

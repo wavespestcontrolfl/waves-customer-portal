@@ -1314,3 +1314,6 @@ module.exports = {
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
+// Own lines: the day-replan job reads the same open/close bounds the after_hours filter uses.
+module.exports.DAY_OPEN = DAY_OPEN;
+module.exports.DAY_CLOSE = DAY_CLOSE;

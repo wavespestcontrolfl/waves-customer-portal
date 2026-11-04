@@ -19,7 +19,12 @@
  *   auto_dispatch_excluded), not part of a grouped visit (another live row shares its visit_id), no
  *   other live stop that day for the same customer (co-visits stay together), its appointment starts
  *   more than 24.25 hours from now (America/New_York), and its 24-hour reminder is not sent.
- * A day is skipped (and the reason logged) with fewer than 2 stops, a stop without coordinates, a
+ * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
+ * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
+ * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
+ * and, only in dry-time mode 'true' with no customer-set time, a rain-sensitive stop stays in its dry window.
+ * The night pass's 'weekend' filter (skip_weekends series) is a date rule: this job never changes a date.
+ * A day is skipped (and the reason logged) with fewer than 2 stops, a day-long schedule block, a stop without coordinates, a
  * stop without a time, or a stop already en route or on site.
  */
 const crypto = require('crypto');
@@ -32,6 +37,7 @@ const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-p
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { workDuration } = require('../route-reorder-window-fit');
 const { getCustomerSchedulingPreferences } = require('../auto-dispatch/preferences');
+const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
 const { planDay } = require('./planner');
 
@@ -154,6 +160,26 @@ function blockedHoursFor(rows, techId, techBlind) {
   return [...hours].sort((a, b) => a - b);
 }
 
+/**
+ * The technician's unavailable intervals on a date: their own tech_schedule_blocks and the global ones
+ * (technician_id NULL), every block_type but 'available'. The same read arrival-route.js makes, but always (it
+ * loads them only in capacity mode). Throws when the read fails.
+ */
+async function loadBlocks(conn, dateStr, techId) {
+  const rows = await conn('tech_schedule_blocks')
+    .where({ date: dateStr }).whereNot('block_type', 'available')
+    .where((q) => q.where('technician_id', techId).orWhereNull('technician_id'))
+    .select('id', 'start_time', 'end_time');
+  return rows
+    .map((r) => ({ startMin: hhmmToMin(r.start_time), endMin: hhmmToMin(r.end_time) }))
+    .filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin);
+}
+
+/** True when one block covers the whole working day (open to close). */
+function blocksWholeDay(blocks, openMin, closeMin) {
+  return blocks.some((b) => b.startMin <= openMin && b.endMin >= closeMin);
+}
+
 /** Why the whole tech-day is not planned, or null. */
 function skipReason(rows) {
   if (rows.length < 2) return 'FEWER_THAN_2_STOPS';
@@ -163,12 +189,24 @@ function skipReason(rows) {
   return null;
 }
 
-/** The customer's explicit preferred time window as { startMin, endMin }, or null. Throws when the read fails. */
+/**
+ * The dry window as a hard time filter for a movable stop, or null. Only when the night pass would apply it:
+ * dry-time mode 'true' (off and shadow, production today, are ignored as the night pass ignores them), no
+ * customer-set time, a rain-sensitive class (not rain-proof) and a window in season (window_key set).
+ */
+function dryWindowPref(info) {
+  if (!info || info.mode !== 'true' || info.customer_time || info.class === 'proof' || !info.window_key) return null;
+  const window = windowByKey(info.window_key);
+  return window ? { startMin: window.startMin, endMin: window.endMin } : null;
+}
+
+/** The stop's hard time window as { startMin, endMin }: the customer's explicit one, else the dry window, else null. Throws when the read fails. */
 async function loadPref(conn, row) {
   if (row.customer_id == null) return null;
   const prefs = await getCustomerSchedulingPreferences(row.customer_id, row.service_type, conn);
   const window = prefs && prefs.preferred_time_window;
-  return window ? { startMin: window.startMin, endMin: window.endMin } : null;
+  if (window) return { startMin: window.startMin, endMin: window.endMin };
+  return dryWindowPref(prefs && prefs.dry_time);
 }
 
 /** Adds the preference to each movable stop; one that cannot be read becomes FIXED (fail closed). */
@@ -200,6 +238,14 @@ function plannerStop(entry) {
   };
 }
 
+/** Every stop that keeps its hour and why; a fixed stop that already overlapped a block as booked carries a note. */
+function fixedList(entries, grandfathered) {
+  const grand = new Set(grandfathered || []);
+  return entries.filter((e) => e.why).map((e) => ({
+    id: e.row.id, why: e.why, ...(grand.has(e.row.id) ? { note: 'overlaps_block_as_booked' } : {}),
+  }));
+}
+
 function planRow({ runId, techId, dateStr, entries, result }) {
   const best = result.best;
   return {
@@ -216,7 +262,7 @@ function planRow({ runId, techId, dateStr, entries, result }) {
     accepted: result.accepted,
     reason: result.reason,
     changes: JSON.stringify(result.changes.map((c) => ({ id: c.id, from: minToHhmm(c.fromMin), to: minToHhmm(c.toMin) }))),
-    fixed: JSON.stringify(entries.filter((e) => e.why).map((e) => ({ id: e.row.id, why: e.why }))),
+    fixed: JSON.stringify(fixedList(entries, result.grandfathered)),
   };
 }
 
@@ -227,6 +273,12 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     logger.info(`[day-replan] ${dateStr} tech ${techId}: skipped (${reason}, ${rows.length} stops)`);
     return;
   }
+  const blocks = await loadBlocks(conn, dateStr, techId);
+  if (blocksWholeDay(blocks, env.openMin, env.closeMin)) {
+    summary.skipped.push({ date: dateStr, technician_id: techId, reason: 'DAY_BLOCKED', stops: rows.length });
+    logger.info(`[day-replan] ${dateStr} tech ${techId}: skipped (DAY_BLOCKED, ${rows.length} stops)`);
+    return;
+  }
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
   const result = planDay({
@@ -234,7 +286,12 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     origin: homeFromMap(env.techHomes, techId),
     departureMin: env.departureMin,
     legMin,
-    options: { blockedHours: blockedHoursFor(dayContext.allRows, techId, env.techBlind) },
+    options: {
+      blockedHours: blockedHoursFor(dayContext.allRows, techId, env.techBlind),
+      blocks,
+      firstHour: env.openMin / 60,
+      closeMin: env.closeMin,
+    },
   });
   await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result }));
   summary.days += 1;
@@ -307,11 +364,15 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
   try {
     // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
     const { techScopedConfirmActive } = require('../scheduling/occupancy');
+    // The night pass's own day bounds (candidate-slots.js DAY_OPEN / DAY_CLOSE, the after_hours rule), not a copy.
+    const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
     env = {
       runId,
       techHomes: await loadTechStartPoints(conn),
       departureMin: await dayDepartureMinutes(conn),
       techBlind: !techScopedConfirmActive(),
+      openMin: DAY_OPEN,
+      closeMin: DAY_CLOSE,
     };
   } catch (err) {
     logger.error(`[day-replan] could not read start points or departure time (${err.message}); nothing planned`);
@@ -325,4 +386,4 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
   return summary;
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { blockedHoursFor, storedOrder, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, storedOrder, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
