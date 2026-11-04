@@ -304,6 +304,16 @@ describe('the committed row decides', () => {
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
+  test('a fresh insert that a refresh rang again before the send sends no banner of its own (the refresh sends one)', async () => {
+    const insert = row({ id: 'n-1' });
+    stored.set('n-1', { ...stored.get('n-1'), title: 'Refreshed title', metadata: { rungAt: T2 } });
+    await bannerAfterWrite(insert, { metadata: meta('messenger_reply') });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    await bannerAfterWrite(rang(T2, { title: 'Refreshed title' }), { metadata: meta('messenger_reply') });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect(triggerNotification.mock.calls[0][1]).toMatchObject({ alertRowId: 'n-1', alertTitle: 'Refreshed title' });
+  });
+
   test('a failed lookup is unverified: no banner, and the log carries no row text', async () => {
     db.mockImplementation(() => { throw new Error('lookup down for Pat S.'); });
     await bannerAfterWrite(row({ body: 'Pat S. 941-555-0100' }), { metadata: meta('messenger_reply') });

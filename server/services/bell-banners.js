@@ -87,13 +87,14 @@ function ringStamp(written) {
 
 // The COMMITTED row this write rang, or null. The outer commit alone does not prove it: a savepoint inside the
 // transaction may have rolled back this write (knex resolves executionPromise for an explicit rollback() without an
-// error), leaving the older row, or no row, behind. So the stored row must still carry this write's ring stamp (when it
-// has one), be unread and be open. A lookup that fails reads as unverified: no banner (the bell row stays).
+// error), leaving the older row, or no row, behind. So the stored row must still carry exactly this write's ring stamp
+// (none for an unstamped fresh insert: a refresh that rang since stamped one, and that ring sends its own banner), be
+// unread and be open. A lookup that fails reads as unverified: no banner (the bell row stays).
 async function committedRing({ id, rungAt }) {
   try {
     const stored = await db('notifications').where({ id }).first('id', 'title', 'body', 'link', 'read_at', 'done_at', 'metadata');
     if (!stored || stored.read_at || stored.done_at) return null;
-    if (rungAt && metaOf(stored.metadata).rungAt !== rungAt) return null;
+    if ((metaOf(stored.metadata).rungAt || null) !== (rungAt || null)) return null;
     return stored;
   } catch (err) {
     logger.warn(`[bell-banners] committed row check failed: ${err?.code || err?.name || 'error'}`);
