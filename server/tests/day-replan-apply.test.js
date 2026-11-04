@@ -107,7 +107,7 @@ describe('writing an accepted plan', () => {
     expect(REASON_CODE.length).toBeLessThanOrEqual(30);
     expect([first.id, first.date, first.win, first.reason, first.by]).toEqual(['a', DATE, { start: '12:00', end: '13:00' }, 'day_replan', 'day_replan']);
     expect(first.options).toMatchObject({
-      seriesPolicy: 'single', visitPolicy: 'single', keepStatus: true, suppressTechNotice: true, placeInRoute: true, notifyRequested: false,
+      seriesPolicy: 'single', visitPolicy: 'single', keepStatus: true, suppressTechNotice: true, placeInRoute: false, notifyRequested: false,
     });
     expect(typeof first.options.beforeMove).toBe('function');
     // The CAS is pinned on the fresh read, not planned values: the whole placement, flags, status and location.
@@ -646,6 +646,48 @@ describe('the accepted route order', () => {
       return out;
     });
     expect((await w.run()).reason).toBe('step_failed:ROUTE_CHANGED');
+  });
+
+  test.each([
+    ['its status changed', (d) => { d.status = 'pending'; }],
+    ['it was confirmed by the customer', (d) => { d.customer_confirmed = true; }],
+    ['staff locked it', (d) => { d.auto_dispatch_locked = true; }],
+    ['its location was edited', (d) => { d.lat += 0.5; d.raw_lat += 0.5; }],
+    ['it was put in a visit record', (d) => { d.visit_id = 'visit-9'; }],
+    ['it was edited in a way only its version shows', (d) => { d.updated_at = new Date('2026-11-03T12:30:00Z'); }],
+    ['it was given a hold', (d) => { d.reservation_expires_at = new Date('2099-01-01T00:00:00Z'); }],
+  ])('an unrelated stop of the same day changed at the fence (%s): no route write, the day is rolled back', async (_label, mutate) => {
+    const w = plan4();
+    w.lockTechDays.mockImplementationOnce(async () => { mutate(w.db.rows.find((r) => r.id === 'd')); });
+    const before = w.db.rows.map((r) => r.route_order);
+    const out = await w.run();
+    expect(out).toMatchObject({ status: 'rolled_back', reason: 'step_failed:ROUTE_CHANGED' });
+    expect(w.windows()).toMatchObject({ a: '08:00', b: '09:00', c: '10:00', d: '11:00' });
+    expect(w.db.rows.map((r) => r.route_order)).toEqual(before);
+    expect(w.journal().routePersisted).toBe(false);
+  });
+
+  test('so is a visit this writer moved that a person changed after its step', async () => {
+    const w = plan4();
+    w.lockTechDays.mockImplementationOnce(async () => { w.db.rows.find((r) => r.id === 'a').auto_dispatch_excluded = true; });
+    const before = w.db.rows.map((r) => r.route_order);
+    // The fence refuses the route write; the rollback then leaves the person's visit alone (and so says failed).
+    expect(await w.run()).toMatchObject({ status: 'failed', reason: 'rollback_failed:DIVERGED' });
+    expect(w.db.rows.map((r) => r.route_order)).toEqual(before);
+    expect(w.windows().a).toBe('12:00');
+    expect(w.windows().b).toBe('09:00');
+  });
+
+  test('every step, forward, temporary and undo, leaves the route numbers to the one final write (placeInRoute false)', async () => {
+    const w = world({ visits: [['a', 8], ['b', 9]], changes: [['a', 8, 9], ['b', 9, 8]], rowExtra: { a: { route_order: 1 }, b: { route_order: 2 } } });
+    let calls = 0;
+    expect((await w.run()).status).toBe('applied');
+    expect(w.rebooker.calls.length).toBeGreaterThanOrEqual(3);
+    for (const c of w.rebooker.calls) expect(c.options.placeInRoute).toBe(false);
+    const f = world({ visits: [['a', 8], ['b', 9]], changes: [['a', 8, 12], ['b', 9, 13]], rebookerOpts: { failWhen: () => { calls += 1; return calls === 2; } } });
+    expect((await f.run()).status).toBe('rolled_back');
+    expect(f.rebooker.calls.length).toBe(3);
+    for (const c of f.rebooker.calls) expect(c.options.placeInRoute).toBe(false);
   });
 
   test('a final route the app would not read as a real plan is refused before any write', async () => {

@@ -40,8 +40,17 @@
  * time is synced again through syncMovedReminders (final hours only; never a parking hour, never a stuck visit),
  * which also closes an undo, or a forward step, that committed and stopped before its sync.
  *
+ * No step touches route_order: every move runs the rebooker with placeInRoute false (forward, temporary and undo
+ * alike), because placeInRoute renumbers the day's OTHER stops and a rollback could not restore numbers a step
+ * changed. A same-day, same-technician window move leaves route_order alone in the rebooker (it clears it only for a
+ * day or technician change, which this writer never makes). So the journal's `routeBefore` is exact, and the day's
+ * numbers are written ONCE, after the last hour.
+ *
  * After the hours, the accepted route order is written under the scheduling fence (occupancy lock, tech-day lock,
- * rows locked, the set and the hours verified) and read back. The reminder of a visit is synced only when the
+ * rows locked). With the rows locked, EVERY live stop of the tech-day is compared with the expected final snapshot
+ * (the validated rows advanced by this writer's own steps: id, date, hours, technician, status, staff locks, visit
+ * record, location, hold and, for a stop this writer never moved, confirmation and version); any difference writes
+ * nothing and the day is rolled back. The numbers are then written and read back. The reminder of a visit is synced only when the
  * visit lands its FINAL hour (never for a temporary one), through auto-dispatch/apply.js's own syncMovedReminders.
  *
  * The writes carry the initiator 'day_replan', which is automatic (eligibility.js) and is NOT the
@@ -182,7 +191,10 @@ async function moveVisit(conn, deps, { id, dateStr, fromStart, toStart, widthMin
     // The visit keeps its own status inside the move (pending stays pending), as in apply.js.
     keepStatus: true,
     suppressTechNotice: true,
-    placeInRoute: true,
+    // No step touches route_order: placeInRoute would renumber the day's OTHER stops, and a rollback could not restore
+    // numbers a step changed. Same-day, same-technician window moves leave route_order alone in the rebooker; the
+    // writer numbers the whole day once, under the fence, after the last hour (persistRouteOrder).
+    placeInRoute: false,
     notifyRequested: false,
     // The rebooker re-asserts all of this inside the move transaction (a plain 409 when anything changed).
     expect: {
@@ -216,11 +228,35 @@ async function moveVisit(conn, deps, { id, dateStr, fromStart, toStart, widthMin
 // ---- the accepted route order -----------------------------------------------------------------------------------
 
 /**
- * Writes route_order = position for the tech-day's live stops, in the accepted order, under the scheduling fence
- * (date occupancy lock, then the tech-day lock; the rows locked), after checking that the stops and their hours are
- * what the plan expects; then reads the numbers back. Throws when any of that does not hold.
+ * What a live stop must read as at the final fence: the identity, date, hours, technician, status, staff locks, visit
+ * record, location and hold of the validated row (advanced by this writer's own steps for a moved visit), plus its
+ * confirmation and last-update version when this writer never moved it (a move bumps updated_at by itself).
  */
-async function persistRouteOrder(conn, deps, { dateStr, techId, order, finalStarts }) {
+function stopSignature(row, deps, { moved }) {
+  const stamp = (value) => (value == null ? null : new Date(value).getTime());
+  return JSON.stringify([
+    String(row.id), fingerprintOf(row, deps), row.reservation_expires_at ? 1 : 0,
+    moved ? null : [row.customer_confirmed === true, stamp(row.updated_at)],
+  ]);
+}
+
+/** The tech-day's expected final snapshot: id -> { moved, sig }, from the validated rows advanced by our own steps. */
+function expectedDay(fresh, order, snapshots, deps) {
+  const want = new Set(order.map(String));
+  return new Map(fresh.dayContext.allRows.filter((r) => want.has(String(r.id))).map((r) => {
+    const moved = snapshots.get(String(r.id));
+    return [String(r.id), { moved: !!moved, sig: stopSignature(moved || r, deps, { moved: !!moved }) }];
+  }));
+}
+
+/**
+ * Writes route_order = position for the tech-day's live stops, in the accepted order, under the scheduling fence
+ * (date occupancy lock, then the tech-day lock; the rows locked). With the rows locked, EVERY live stop of the
+ * tech-day is compared with the expected final snapshot (`expected`: id, date, hours, technician, status, locks,
+ * visit record, location, hold and version); any difference, or a stop that is missing or new, throws and writes
+ * nothing, so the day is rolled back. Then the numbers are written and read back.
+ */
+async function persistRouteOrder(conn, deps, { dateStr, techId, order, finalStarts, expected }) {
   await conn.transaction(async (trx) => {
     await deps.acquireOccupancyLock(trx, dateStr);
     await deps.lockTechDays(trx, [{ techId, date: dateStr }]);
@@ -229,11 +265,14 @@ async function persistRouteOrder(conn, deps, { dateStr, techId, order, finalStar
       .whereNotIn('status', deps.excludedStatuses)
       .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
       .forUpdate()
-      .select('id', 'window_start');
+      .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status', 'auto_dispatch_locked', 'auto_dispatch_excluded',
+        'visit_id', 'customer_confirmed', 'reservation_expires_at', 'updated_at', ...deps.locationFields);
     const want = new Set(order.map(String));
     if (rows.length !== want.size || rows.some((r) => !want.has(String(r.id)))) throw coded('ROUTE_CHANGED', 'the technician\'s stops are not the planned ones');
     for (const r of rows) {
       if (norm5(r.window_start) !== minToHhmm(finalStarts.get(String(r.id)))) throw coded('ROUTE_CHANGED', 'a stop is not on its planned hour');
+      const exp = expected.get(String(r.id));
+      if (!exp || stopSignature(r, deps, { moved: exp.moved }) !== exp.sig) throw coded('ROUTE_CHANGED', `stop ${r.id} changed since the plan`);
     }
     for (const [i, id] of order.entries()) {
       await trx('scheduled_services').where({ id }).whereRaw('route_order IS DISTINCT FROM ?', [i + 1]).update({ route_order: i + 1 });
@@ -563,7 +602,7 @@ async function applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, plan
     // The numbers this writer is about to write, journaled first: a rollback restores only a number that is still ours.
     journal.routeAfter = Object.fromEntries(route.order.map((id, i) => [String(id), i + 1]));
     await writeJournal(conn, planId, journal);
-    await persistRouteOrder(conn, deps, { dateStr, techId, order: route.order, finalStarts: route.finalStarts });
+    await persistRouteOrder(conn, deps, { dateStr, techId, order: route.order, finalStarts: route.finalStarts, expected: expectedDay(fresh, route.order, snapshots, deps) });
     journal.routePersisted = true;
     journal.complete = true;
     await writeJournal(conn, planId, journal);

@@ -203,8 +203,9 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(new Set(log.map((l) => l.initiated_by))).toEqual(new Set(['day_replan']));
     expect(new Set(log.map((l) => l.reason_code))).toEqual(new Set(['day_replan']));
     for (const c of changes) {
-      const last = log.filter((l) => l.scheduled_service_id === c.id).at(-1);
-      expect(String(last.new_window).split('-')[0].slice(0, 5)).toBe(c.to);
+      // (rows share one transaction timestamp here, so their order is not stable: the final hour is among the visit's rows)
+      const starts = log.filter((l) => l.scheduled_service_id === c.id).map((l) => String(l.new_window).split('-')[0].slice(0, 5));
+      expect(starts).toContain(c.to);
     }
 
     expect(sentAnything()).toEqual([]);
@@ -236,6 +237,103 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const plan = await mockConn('day_replan_plans').where({ run_id: out.runId }).first();
     expect(plan).toMatchObject({ apply_status: 'rolled_back', apply_reason: 'step_failed:SLOT_TAKEN' });
     expect(plan.apply_steps.steps.length).toBeGreaterThanOrEqual(1);
+    expect(sentAnything()).toEqual([]);
+  });
+
+  test('no step touches route_order: the numbers stay as they were until the one final write', async () => {
+    const original = rebooker.reschedule.bind(rebooker);
+    const seen = [];
+    jest.spyOn(rebooker, 'reschedule').mockImplementation(async (...args) => {
+      const out = await original(...args);
+      seen.push((await visitRows()).sort((x, y) => String(x.id).localeCompare(String(y.id))).map((r) => `${r.id}:${r.route_order}`).join(' '));
+      return out;
+    });
+    const initial = (await visitRows()).sort((x, y) => String(x.id).localeCompare(String(y.id))).map((r) => `${r.id}:${r.route_order}`).join(' ');
+    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
+    expect(out.apply).toEqual([expect.objectContaining({ status: 'applied' })]);
+    expect(seen.length).toBeGreaterThanOrEqual(3);
+    // After every step (forward, temporary or final) the numbers are exactly the original ones.
+    for (const line of seen) expect(line).toBe(initial);
+    // The rebooker was asked not to place the visit in the route.
+    for (const call of rebooker.reschedule.mock.calls) expect(call[5].placeInRoute).toBe(false);
+    expect(sentAnything()).toEqual([]);
+  });
+
+  /** Runs the day and, right after `when(call)` is true for a rebooker call, edits `target` on the table (committed before the fence). */
+  async function editBeforeFence({ extraStop = false, target, when, edit }) {
+    let fixed = null;
+    if (extraStop) {
+      // A staff-locked stop the plan cannot move, still part of the technician's day.
+      fixed = { id: randomUUID(), customerId: randomUUID() };
+      await mockConn('customers').insert({
+        id: fixed.customerId, first_name: 'Replanezq', last_name: 'Fixturezq', email: `${fixed.customerId}@example.invalid`, phone: '+19415551999',
+        address_line1: '199 Replan Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
+      });
+      await mockConn('scheduled_services').insert({
+        id: fixed.id, customer_id: fixed.customerId, technician_id: techId, scheduled_date: DAY, service_type: 'Quarterly Pest Control Service',
+        status: 'confirmed', window_start: '15:00', window_end: '16:00', estimated_duration_minutes: 60, lat: HQ.lat, lng: HQ.lng + 0.05,
+        route_order: 5, auto_dispatch_locked: true,
+      });
+    }
+    const original = rebooker.reschedule.bind(rebooker);
+    let edited = null;
+    jest.spyOn(rebooker, 'reschedule').mockImplementation(async (...args) => {
+      const out = await original(...args);
+      if (!edited) {
+        const plan = await mockConn('day_replan_plans').where({ technician_id: techId, service_date: DAY }).whereNotNull('apply_started_at').first();
+        const id = target({ fixed, changes: plan.changes, args });
+        if (id && when({ changes: plan.changes, args })) {
+          await mockConn('scheduled_services').where({ id }).update(edit);
+          edited = id;
+        }
+      }
+      return out;
+    });
+    const before = await visitRows();
+    const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
+    return { out, edited, before, fixed };
+  }
+
+  const expectDayBack = async (before, out) => {
+    const after = await visitRows();
+    for (const v of visits) {
+      expect(startOf(after, v.id)).toBe(startOf(before, v.id));
+      expect(Number(after.find((r) => r.id === v.id).route_order)).toBe(Number(before.find((r) => r.id === v.id).route_order));
+    }
+    const plan = await mockConn('day_replan_plans').where({ run_id: out.runId }).first();
+    expect(plan.apply_steps.routePersisted).toBe(false);
+    expect(sentAnything()).toEqual([]);
+  };
+
+  test('an unrelated stop of the same day is edited before the final fence: no route write, rolled_back', async () => {
+    const { out, edited, before } = await editBeforeFence({
+      extraStop: true,
+      edit: { status: 'pending' },
+      target: ({ fixed }) => fixed.id,
+      when: () => true, // after the first step: the stop is never moved by the plan
+    });
+    expect(edited).toBeTruthy();
+    expect(out.apply).toEqual([expect.objectContaining({ status: 'rolled_back', reason: 'step_failed:ROUTE_CHANGED', moved: 0 })]);
+    await expectDayBack(before, out);
+    // The unrelated stop keeps its own number: the fence wrote nothing at all.
+    expect(Number((await mockConn('scheduled_services').where({ id: edited }).first()).route_order)).toBe(5);
+  });
+
+  test('a stop the plan moved is edited by a person after its last step: no route write, the day is not renumbered', async () => {
+    const { out, edited, before } = await editBeforeFence({
+      edit: { auto_dispatch_locked: true },
+      target: ({ args }) => args[0],
+      when: ({ changes, args }) => changes.some((c) => c.id === args[0] && c.to === args[2].start),
+    });
+    expect(edited).toBeTruthy();
+    // The route write is refused at the fence; the undo then leaves the person's visit as it is (failed), the rest go back.
+    expect(out.apply).toEqual([expect.objectContaining({ status: 'failed', reason: 'rollback_failed:DIVERGED' })]);
+    // The person's visit stays on its new hour, which may be another visit's old one, so that visit may stay too: failed, one notice.
+    expect(await noticeCount()).toBe(1);
+    // Nothing renumbered the day.
+    const after = await visitRows();
+    for (const v of visits) expect(Number(after.find((r) => r.id === v.id).route_order)).toBe(Number(before.find((r) => r.id === v.id).route_order));
+    expect((await mockConn('day_replan_plans').where({ run_id: out.runId }).first()).apply_steps.routePersisted).toBe(false);
     expect(sentAnything()).toEqual([]);
   });
 
