@@ -1207,3 +1207,6 @@ module.exports = {
   // guard closures.
   checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds,
 };
+// Own lines: the day re-plan writer (services/day-replan/apply.js) runs the same silent reminder sync and pins the same fields.
+module.exports.syncMovedReminders = syncMovedReminders;
+module.exports.LOCATION_FIELDS = LOCATION_FIELDS;

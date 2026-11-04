@@ -119,16 +119,6 @@ describe('gate', () => {
       expect(calls).toEqual([]);
     }
   });
-
-  test('true behaves like shadow and says apply is not built yet', async () => {
-    process.env.GATE_DAY_REPLAN = 'true';
-    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
-    const out = await runDayReplanIfEnabled({ now: NOW, conn });
-    expect(out.status).toBe('completed');
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0].row.mode).toBe('shadow');
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('apply is not built yet'));
-  });
 });
 
 describe('shadow run', () => {
