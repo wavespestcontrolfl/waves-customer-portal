@@ -274,7 +274,7 @@ async function writeRouteOrder(trx, deps, { dateStr, techId, order, finalStarts 
 }
 
 /** The whole day, all or nothing. Returns the written visits. */
-async function writeDay(trx, deps, { dateStr, techId, fresh, moves, route }) {
+async function writeDay(trx, deps, { dateStr, techId, fresh, moves, route, planId = null }) {
   // The ORDERING CONTRACT (scheduling/occupancy.js): rung 1 (the date), rung 3 (the technician's day and the unassigned day), then row locks.
   await deps.acquireOccupancyLock(trx, dateStr);
   await deps.lockTechDays(trx, [{ techId, date: dateStr }, { techId: null, date: dateStr }]);
@@ -284,6 +284,11 @@ async function writeDay(trx, deps, { dateStr, techId, fresh, moves, route }) {
   const written = await writeMoves(trx, deps, { dateStr, moves });
   await assertNoClash(trx, deps, { dateStr, techId, written });
   await writeRouteOrder(trx, deps, { dateStr, techId, order: route.order, finalStarts: route.finalStarts });
+  // The applied marker commits WITH the hours, before any post-commit effect: a crash right after the commit still
+  // leaves an applied plan that reconcileApplied repairs (self-booking snapshot, visit record, reminders).
+  if (planId) {
+    await trx(PLAN_TABLE).where({ id: planId }).update({ apply_status: 'applied', apply_reason: 'applied', applied_at: trx.fn.now() });
+  }
   return written;
 }
 
@@ -317,7 +322,7 @@ const SKIP_REASONS = {
  *           techId: string, plan: object, replan: () => Promise<object|null>, deps: object }} input
  * @returns {Promise<{ status: 'applied'|'skipped'|'failed', reason: string, moved: number }>}
  */
-async function applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, deps }) {
+async function applyAcceptedDay({ conn, env, dateStr, techId, plan, planId = null, replan, deps }) {
   const skipped = (reason) => ({ status: 'skipped', reason, moved: 0 });
   let fresh;
   try {
@@ -340,7 +345,7 @@ async function applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, deps
   try {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        written = await conn.transaction((trx) => writeDay(trx, deps, { dateStr, techId, fresh, moves, route }));
+        written = await conn.transaction((trx) => writeDay(trx, deps, { dateStr, techId, fresh, moves, route, planId }));
         break;
       } catch (err) {
         // A deadlock victim committed nothing: try again (as the rebooker does), twice at most.

@@ -97,6 +97,20 @@ describe('apply mode', () => {
     expect(w.syncMovedReminders).toHaveBeenCalledTimes(changes.length);
   });
 
+  test('the applied marker commits with the hours, before any post-commit effect runs', async () => {
+    const w = setup({ rows: zigzagRows() });
+    const seen = [];
+    // The first post-commit effect sees the plan row already applied: a crash right after the commit leaves a plan
+    // reconcileApplied repairs, never one it skips.
+    w.syncMovedReminders.mockImplementation(async () => { seen.push(w.db.plans[0] && w.db.plans[0].apply_status); });
+    const out = await w.run();
+    expect(out.apply[0].status).toBe('applied');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((st) => st === 'applied')).toBe(true);
+    // Recorded once, inside the schedule transaction (the runner does not write it again).
+    expect(w.db.updates.filter((u) => u.table === 'day_replan_plans')).toHaveLength(1);
+  });
+
   test('a day the plan does not accept is planned and logged, never written', async () => {
     // Two stops that cannot save 10 minutes.
     const w = setup({ rows: [row('a', 0.05, 9), row('b', 0.06, 10)] });

@@ -373,7 +373,7 @@ async function applyPlan(conn, env, { dateStr, techId, plan, planId, summary }) 
   };
   let outcome;
   try {
-    outcome = await applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, deps });
+    outcome = await applyAcceptedDay({ conn, env, dateStr, techId, plan, planId, replan, deps });
   } catch (err) {
     logger.error(`[day-replan] ${dateStr} tech ${techId}: apply failed (${err.message})`);
     outcome = { status: 'failed', reason: `error:${String(err.code || 'unknown').slice(0, 40)}`, moved: 0 };
@@ -381,10 +381,10 @@ async function applyPlan(conn, env, { dateStr, techId, plan, planId, summary }) 
   summary.apply.push({ date: dateStr, technician_id: techId, status: outcome.status, reason: outcome.reason, moved: outcome.moved });
   if (outcome.status === 'applied') summary.appliedVisits += outcome.moved;
   logger.info(`[day-replan] ${dateStr} tech ${techId}: apply ${outcome.status} (${outcome.reason}, ${outcome.moved} visits)`);
+  // An applied day was recorded inside its own schedule transaction (apply.js writeDay); only the other outcomes here.
+  if (outcome.status === 'applied') return outcome;
   try {
-    await conn(PLAN_TABLE).where({ id: planId }).update({
-      apply_status: outcome.status, apply_reason: outcome.reason, ...(outcome.status === 'applied' ? { applied_at: conn.fn.now() } : {}),
-    });
+    await conn(PLAN_TABLE).where({ id: planId }).update({ apply_status: outcome.status, apply_reason: outcome.reason });
   } catch (err) {
     logger.error(`[day-replan] ${dateStr} tech ${techId}: could not record the apply outcome (${err.message})`);
   }
