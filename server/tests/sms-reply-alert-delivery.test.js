@@ -314,8 +314,15 @@ describe('tracking-line unknown-sender thread bell', () => {
     await ringTracking(input.From, 'SM-t1');
     await ringTracking(input.From, 'SM-t2');
     await ringTracking('+19415550000', 'SM-t3');
+    // The key never merges two senders: two senders with no digits each key their own row, and a text with no
+    // sender keys on itself.
+    await ringTracking('WAVES', 'SM-t4');
+    await ringTracking('OTHER', 'SM-t5');
+    await ringTracking('', 'SM-t6');
+    await ringTracking('', 'SM-t7');
     const keys = triggerNotification.mock.calls.map((call) => call[2].dedupeKey);
     expect(keys[1]).toBe(keys[0]);
     expect(keys[2]).not.toBe(keys[0]);
+    expect(new Set(keys.slice(2)).size).toBe(5);
   });
 });

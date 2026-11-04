@@ -111,8 +111,13 @@ async function receivedAtMs(MessageSid) {
 // from one number rang two "New text from wavespestcontrol.com" rows four minutes apart). It is the thread row a
 // known customer's texts get (threadRefresh above): a new text rewrites it with the latest text and a running count,
 // unread again and back on top, and still pushes. Keyed on a hash of the sender's number, so the row's metadata
-// never holds the number in the clear. Still the new_lead bell (admin role only), as before.
-const trackingThreadBellKey = (phone) => `sms-tracking-thread:${crypto.createHash('sha256').update(String(phone || '').replace(/\D/g, '')).digest('hex').slice(0, 32)}`;
+// never holds the number in the clear. Still the new_lead bell (admin role only), as before. The key must never merge
+// two senders: a sender with no digits keys on its raw value, and a text with no sender at all on itself.
+const trackingThreadBellKey = (From, MessageSid) => {
+  const raw = String(From || '').trim();
+  const sender = raw.replace(/\D/g, '') || raw || `message:${MessageSid}`;
+  return `sms-tracking-thread:${crypto.createHash('sha256').update(sender).digest('hex').slice(0, 32)}`;
+};
 
 async function ringTrackingLineTextBell({ From, MessageSid, source, message, mediaCount = 0 }) {
   const { triggerNotification } = require('./notification-triggers');
@@ -128,7 +133,7 @@ async function ringTrackingLineTextBell({ From, MessageSid, source, message, med
     receivedAtMs: arrivedAtMs,
     // The unknown sender's thread, named by the message (no phone in a link).
     link: `/admin/communications?message=${encodeURIComponent(MessageSid)}`,
-  }, { dedupeKey: trackingThreadBellKey(From), refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) });
+  }, { dedupeKey: trackingThreadBellKey(From, MessageSid), refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) });
 }
 
 async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead, leadPreference }) {
