@@ -7880,6 +7880,11 @@ like an online accept. Hand-off mode itself (inside the Waves Admin app's isolat
 web view: URL `handoff=1` AND the `wavesCustomer` message handler) only changes the page: it
 hides every contact and outside link, never offers Apple Pay / Google Pay, and shows a QR
 code instead of the pay page for "Prepay the year". No new request is made in normal mode.
+While `GATE_TAP_SAVE_CARD` is on, a `ready` payload for a priced visit request the tap mint would
+accept (a recurring visit, or a one-time visit whose price this render displayed and froze as
+`accepted_amount`) also carries `tapSaveCard: true` and, when a fee is shown, `cancelFeeAmount`
+(the number behind `cancelFeeNote`, sent back as the fee the customer saw); hand-off mode uses
+them to offer Tap to Pay. Gate off, or a request the mint would refuse: neither key rides.
 **One-time visits only (owner ruling 2026-10-29):** the late-cancel /
 no-show fee never applies to a recurring-lineage visit
 (`isRecurringLineageVisit`: `is_recurring`, `recurring_parent_id` or

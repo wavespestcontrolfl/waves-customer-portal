@@ -20,6 +20,7 @@ import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { prepareInAppReader } from "../lib/tapToPay";
 import { onInAppAlertTap, registerInAppPush, releaseInAppPush } from "../native/wavesAdminPush";
+import { registerSaveCardRelay } from "../native/wavesAdminSaveCard";
 import { cn } from "./ui/cn";
 import { Button } from "./ui";
 import {
@@ -150,15 +151,19 @@ export default function AdminLayoutV2() {
 
   // Waves Admin (the iOS staff app): connect the phone's card reader while
   // staff work, so Tap to Pay opens at once, and register the app for staff
-  // alerts. Only the roles that /stripe/terminal/connection-token and staff
-  // push accept. No-op in a browser.
+  // alerts, and let a customer at the table save a card with a tap. Only the
+  // roles that /stripe/terminal/connection-token and staff push accept.
+  // No-op in a browser.
   useEffect(() => {
     if (!sessionReady || !["admin", "technician"].includes(user?.role)) return undefined;
     const stopReader = prepareInAppReader();
     const stopPush = registerInAppPush();
+    // The tap-to-save mint is admin-only on the server.
+    const stopSaveCard = user.role === "admin" ? registerSaveCardRelay() : () => {};
     return () => {
       stopReader();
       stopPush();
+      stopSaveCard();
     };
   }, [sessionReady, user?.role]);
 
