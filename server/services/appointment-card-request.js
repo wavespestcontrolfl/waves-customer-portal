@@ -2330,13 +2330,6 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
   // sticky_window_disclosed=true from a disclosure shown only AFTER consent.
   const readyEcho = visitPriced && feeDisclosure
     ? { stickyDisclosureVersion: STICKY_DISCLOSURE_VERSION } : {};
-  // Book at the Table (GATE_TAP_SAVE_CARD): the hand-off page offers Tap to Pay only when
-  // this says the tap save is on, and echoes the fee NUMBER behind `cancelFeeNote` as the
-  // amount the customer was shown. Neither key rides while the gate is dark.
-  if (visitPriced && require('../config/feature-gates').isEnabled('tapSaveCard')) {
-    readyEcho.tapSaveCard = true;
-    if (feeDisclosure) readyEcho.cancelFeeAmount = feeDisclosure.feeAmount;
-  }
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
   // already succeeded and the page POST or webhook holds the completion
@@ -2643,6 +2636,20 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
     } catch (e) {
       logger.warn(`[appt-card-request] no-price pin bell failed for request ${request.id}: ${e.message}`);
     }
+  }
+
+  // Book at the Table (GATE_TAP_SAVE_CARD): the hand-off page offers Tap to Pay only when
+  // the mint would take it (disclosedCapEligibility, services/terminal-save-card.js): a
+  // recurring visit, or a one-time visit whose price THIS render displayed and froze as
+  // accepted_amount above (a row pinned to the 0 sentinel never qualifies again). Otherwise
+  // the typed save stays the only option. It echoes the fee NUMBER behind `cancelFeeNote` as
+  // the amount the customer was shown. Neither key rides while the gate is dark.
+  const tapCapFrozen = visit?.is_recurring === true
+    || (planContext != null && Number(planContext.perVisit) > 0
+      && !(request.accepted_amount != null && Number(request.accepted_amount) === 0));
+  if (visitPriced && tapCapFrozen && require('../config/feature-gates').isEnabled('tapSaveCard')) {
+    readyEcho.tapSaveCard = true;
+    if (feeDisclosure) readyEcho.cancelFeeAmount = feeDisclosure.feeAmount;
   }
 
   if (planState?.state === 'prepay_selected') {

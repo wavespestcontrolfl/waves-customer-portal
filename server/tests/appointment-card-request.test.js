@@ -1932,6 +1932,9 @@ describe('loadSecureCardPageData — page state machine', () => {
     // The hand-off page offers the tap only on this flag, and posts cancelFeeAmount as the
     // fee the customer was shown; a dark gate leaves the payload byte-identical.
     const featureGates = require('../config/feature-gates');
+    const plans = require('../services/secure-appointment-plans');
+    const priceShown = () => jest.spyOn(plans, 'deriveSecurePlanContext')
+      .mockResolvedValueOnce({ mode: 'one_time', perVisit: 135, selected: null });
     const dark = await loadSecureCardPageData(REQUEST.token);
     expect('tapSaveCard' in dark).toBe(false);
     expect('cancelFeeAmount' in dark).toBe(false);
@@ -1939,11 +1942,36 @@ describe('loadSecureCardPageData — page state machine', () => {
     const before = featureGates.gates.tapSaveCard;
     featureGates.gates.tapSaveCard = true;
     try {
+      let spy = priceShown();
       const on = await loadSecureCardPageData(REQUEST.token);
+      spy.mockRestore();
       expect(on.state).toBe('ready');
       expect(on.tapSaveCard).toBe(true);
       expect(typeof on.cancelFeeAmount).toBe('number');
       expect(on.cancelFeeNote).toContain(`$${on.cancelFeeAmount}`);
+
+      // The mint refuses a one-time visit whose page showed no price (accepted_amount 0:
+      // plan context null, e.g. GATE_SECURE_PLAN_CHOICE off or a commercial property), so
+      // the page must not offer a tap that can only fail. The typed save stays.
+      const noPrice = await loadSecureCardPageData(REQUEST.token);
+      expect(noPrice.state).toBe('ready');
+      expect('tapSaveCard' in noPrice).toBe(false);
+      expect('cancelFeeAmount' in noPrice).toBe(false);
+
+      // A row an earlier no-price render pinned to the 0 sentinel never qualifies again.
+      mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, accepted_amount: '0.00' });
+      spy = priceShown();
+      const pinned = await loadSecureCardPageData(REQUEST.token);
+      spy.mockRestore();
+      expect(pinned.state).toBe('ready');
+      expect('tapSaveCard' in pinned).toBe(false);
+
+      // A recurring visit bills per application and needs no frozen price.
+      mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST });
+      mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, is_recurring: true, recurring_pattern: 'quarterly' });
+      const recurring = await loadSecureCardPageData(REQUEST.token);
+      expect(recurring.state).toBe('ready');
+      expect(recurring.tapSaveCard).toBe(true);
 
       mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completed', updated_at: new Date() });
       const secured = await loadSecureCardPageData(REQUEST.token);
