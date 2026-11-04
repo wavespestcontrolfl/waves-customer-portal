@@ -11,7 +11,8 @@
  * lock window (lockWindowDays, 14 days by default); 'tiers' (GATE_ROUTE_TIERS) =
  * the days-out tier ladder with a 5-day destination floor; 'flex'
  * (GATE_AUTO_DISPATCH_FLEX_TIER, wins over tiers) = a 73-hour freeze and a
- * 5-day destination floor.
+ * 5-day destination floor. GATE_NIGHT_LOCK_24H (owner 2026-11-03) makes that
+ * freeze 24 hours (25 in flex) for both modes.
  */
 
 function intEnv(name, def, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -50,6 +51,20 @@ function isFlexTierEnabled() {
   const { gateEnvValue } = require('../../config/feature-gates');
   try {
     return gateEnvValue('GATE_AUTO_DISPATCH_FLEX_TIER');
+  } catch (_) {
+    return false;
+  }
+}
+
+// GATE_NIGHT_LOCK_24H (owner 2026-11-03): the night passes lock a visit at 24
+// hours, not 72/73. Same call-time, fail-closed convention. Read ONCE per run,
+// here, into config.nightLock24h; every consumer (eligibility ctx, freeze
+// reads, candidate admission, apply-time guards) takes that value, so a
+// mid-run flip cannot mix the two rules. Off (or unreadable) = the 09-25 rule.
+function isNightLock24hEnabled() {
+  try {
+    const gates = require('../../config/feature-gates');
+    return typeof gates.nightLock24hLive === 'function' && gates.nightLock24hLive() === true;
   } catch (_) {
     return false;
   }
@@ -224,6 +239,12 @@ function moveRuleConfig(overrides) {
     // other technicians' slots (`other_tech`) and apply.js refuses a change
     // (TECH_CHANGE_BLOCKED). Unassigned visits are unchanged.
     keepTech: overrides.keepTech ?? keepTechEnabled(),
+    // GATE_NIGHT_LOCK_24H: the freeze is the 24-hour reminder (flex 25 h, tiers
+    // 24 h clock / 24.25 h band, reminder_24h_sent) instead of 72/73 h. Only
+    // the 'flex' and 'tiers' guards have a clock freeze; 'legacy' keeps its
+    // flat lock window either way. Resolved here once per run and carried on
+    // this same config object into apply.js's guards.
+    nightLock24h: overrides.nightLock24h ?? isNightLock24hEnabled(),
   };
 }
 
