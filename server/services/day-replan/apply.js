@@ -315,7 +315,9 @@ async function undoStep(conn, deps, { dateStr, journal, step, planId }) {
  * are still put back. Returns the failures by visit id (empty = the whole day is back).
  */
 async function rollBack(conn, deps, { dateStr, journal, planId }) {
+  // A rollback outranks completion: clear the marker first, so a crash mid-rollback is never recovered as applied.
   journal.rollback = true;
+  journal.complete = false;
   await tryJournal(conn, planId, journal);
   const stuck = new Map();
   for (const step of [...journal.steps].reverse()) {
@@ -577,15 +579,11 @@ async function applyAcceptedDay({ conn, env, dateStr, techId, plan, replan, plan
 
 // ---- recovery ---------------------------------------------------------------------------------------------------
 
-/** Plans a previous run left mid-apply: started, no outcome. Fails closed to an empty list on a failed read. */
+/** Plans a previous run left mid-apply: started, no outcome. A failed read THROWS: the caller must not plan or write
+ *  anything over a day that may still be half moved (an empty list means the read succeeded and found none). */
 async function findInterrupted(conn) {
-  try {
-    return await conn(PLAN_TABLE).whereNotNull('apply_started_at').whereNull('apply_status')
-      .select('id', 'service_date', 'technician_id', 'apply_steps');
-  } catch (err) {
-    logger.warn(`[day-replan] could not look for interrupted plans (${err.message})`);
-    return [];
-  }
+  return conn(PLAN_TABLE).whereNotNull('apply_started_at').whereNull('apply_status')
+    .select('id', 'service_date', 'technician_id', 'apply_steps');
 }
 
 /**
@@ -601,7 +599,7 @@ async function recoverInterrupted({ conn, deps, plans }) {
     let outcome;
     try {
       const journal = parseJournal(plan.apply_steps);
-      if (journal.complete) {
+      if (journal.complete && !journal.rollback) {
         // The day was fully made; a crash may have cut a reminder sync short, so the final hours are reconciled.
         await reconcileReminders(conn, deps, { ids: journal.steps.map((s) => s.id) });
         outcome = { status: 'applied', reason: 'applied_recovered' };

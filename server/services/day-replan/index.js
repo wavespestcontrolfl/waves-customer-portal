@@ -500,12 +500,20 @@ async function buildEnv(conn, { apply, runId, deps }) {
   };
 }
 
-/** Before anything new is planned, a day a previous run left mid-apply is put back (apply and shadow alike). */
+/** Before anything new is planned, a day a previous run left mid-apply is put back (apply and shadow alike).
+ *  Returns false when the lookup itself failed: the run then plans and writes nothing. */
 async function recoverFirst(conn, env, deps, summary) {
-  const interrupted = await findInterrupted(conn);
-  if (!interrupted.length) return;
+  let interrupted;
+  try {
+    interrupted = await findInterrupted(conn);
+  } catch (err) {
+    logger.error(`[day-replan] could not look for interrupted plans (${err.message}); nothing planned`);
+    return false;
+  }
+  if (!interrupted.length) return true;
   summary.recovered = await recoverInterrupted({ conn, deps: env.deps || deps || applyDeps(), plans: interrupted });
   if (summary.recovered.some((r) => r.status === 'failed')) summary.status = 'completed_with_errors';
+  return true;
 }
 
 async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null } = {}) {
@@ -523,7 +531,7 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
     logger.error(`[day-replan] could not read start points or departure time (${err.message}); nothing planned`);
     return { ...summary, status: 'failed' };
   }
-  await recoverFirst(conn, env, deps, summary);
+  if (!(await recoverFirst(conn, env, deps, summary))) return { ...summary, status: 'failed', reason: 'recovery_lookup_failed' };
   for (const dateStr of horizonDates(now)) {
     await planDate(conn, env, dateStr, now, summary);
   }

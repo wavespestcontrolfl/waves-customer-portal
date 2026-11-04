@@ -773,6 +773,23 @@ describe('recovering an interrupted day', () => {
     expect(w.db.plans[0]).toMatchObject({ apply_status: 'applied' });
   });
 
+  test('a rollback that crashed after completion is resumed, never recorded as applied', async () => {
+    const w = interruptedWorld({ complete: true });
+    const j = JSON.parse(w.db.plans[0].apply_steps);
+    w.db.plans[0].apply_steps = JSON.stringify({ ...j, rollback: true });
+    const out = await recoverInterrupted({ conn: w.conn, deps: w.deps, plans: await findInterrupted(w.conn) });
+    expect(out[0].status).toBe('rolled_back');
+    expect(w.windows().a).toBe('08:00');
+  });
+
+  test('a rollback clears the completion marker before its first undo', async () => {
+    const w = interruptedWorld({ complete: true });
+    const journal = JSON.parse(w.db.plans[0].apply_steps);
+    await applyInternals.rollBack(w.conn, w.deps, { dateStr: DATE, journal, planId: 'plan-1' });
+    expect(journal).toMatchObject({ rollback: true, complete: false });
+    expect(JSON.parse(w.db.plans[0].apply_steps)).toMatchObject({ rollback: true, complete: false });
+  });
+
   test('a visit a person moved meanwhile is left alone: failed, with the notice that says so', async () => {
     const w = interruptedWorld();
     w.db.rows.find((r) => r.id === 'a').window_start = '14:00:00';

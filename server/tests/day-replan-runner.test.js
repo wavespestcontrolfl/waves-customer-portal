@@ -431,9 +431,11 @@ describe('shadow run', () => {
 
   test('a failed plan insert is reported, never thrown', async () => {
     const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+    // Only the INSERT fails: the recovery lookup on the same table must still read (a failed lookup stops the run).
     const failing = (table) => {
       const chain = conn(table);
-      return table === 'day_replan_plans' ? { insert: () => Promise.reject(new Error('disk full')) } : chain;
+      if (table !== 'day_replan_plans') return chain;
+      return new Proxy(chain, { get: (target, prop) => (prop === 'insert' ? () => Promise.reject(new Error('disk full')) : target[prop]) });
     };
     failing.raw = conn.raw;
     const out = await runDayReplanIfEnabled({ now: NOW, conn: failing });

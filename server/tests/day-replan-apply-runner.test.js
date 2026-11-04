@@ -237,3 +237,24 @@ describe('recovering an interrupted day at the start of a run', () => {
     expect(w.raiseAlert).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('recovery lookup', () => {
+  test('a failed look for interrupted plans stops the run before anything is planned or written', async () => {
+    process.env.GATE_DAY_REPLAN = 'true';
+    const w = setup({ rows: zigzagRows() });
+    const failing = new Proxy(w.conn, {
+      apply(target, thisArg, args) {
+        if (args[0] === 'day_replan_plans') {
+          const chain = { whereNotNull: () => chain, whereNull: () => chain, select: async () => { throw new Error('read failed'); } };
+          return chain;
+        }
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    const out = await runDayReplanIfEnabled({ now: NOW, conn: failing, deps: w.deps });
+    expect(out).toMatchObject({ status: 'failed', reason: 'recovery_lookup_failed' });
+    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+    expect(out.days).toBe(0);
+  });
+});
+
