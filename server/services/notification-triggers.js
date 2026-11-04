@@ -1306,7 +1306,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1412,7 +1412,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     try {
       const bellPolicy = require('./notification-bell-policy');
       if (bellPolicy.isBellPolicyEnabled()) {
-        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule }));
+        // bellAuthorized (pushOnly only): the banner for a bell row its writer already rang (bell-banners.js; each writer
+        // tags bell: true). The push keeps that answer instead of judging the event again without the tag, so the
+        // banner does not depend on GATE_CUSTOMER_ALERTS_RING.
+        const authorized = pushOnly && bellAuthorized ? { options: { bell: true } } : {};
+        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule, ...authorized }));
         // Guarded: a test that mocks the policy module without the helper keeps today's bell write.
         declaredCustomerAlert = !policySilenced && typeof bellPolicy.ringsAsCustomerAlert === 'function'
           && bellPolicy.ringsAsCustomerAlert({ triggerKey, declared: trigger.rule });

@@ -85,7 +85,7 @@ describe('bannerAfterWrite: which writes send a banner', () => {
     const [key, payload, opts] = triggerNotification.mock.calls[0];
     expect(key).toBe(kind);
     expect(payload).toEqual({ alertRowId: 'n-77', alertTitle: 'Pat S. wrote on Facebook', alertBody: 'Can you call me?', alertLink: '/admin/communications#tab=messenger&thread=t-1' });
-    expect(opts).toEqual(expect.objectContaining({ pushOnly: true, adminOnly: true, beforePush: expect.any(Function) }));
+    expect(opts).toEqual(expect.objectContaining({ pushOnly: true, adminOnly: true, bellAuthorized: true, beforePush: expect.any(Function) }));
   });
 
   test('the customer the row is about rides along so a test account never gets a banner', async () => {

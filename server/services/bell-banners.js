@@ -116,7 +116,8 @@ async function sendBanner(ring, triggerKey, caller) {
     };
     // Looked at again just before the send: the row may be read or closed while the push is prepared.
     return await triggerNotification(triggerKey, payload, {
-      pushOnly: true, adminOnly: true,
+      // bellAuthorized: the row rang, so its writer's bell authorization (bell: true) carries to the banner.
+      pushOnly: true, adminOnly: true, bellAuthorized: true,
       beforePush: async () => Boolean(await committedRing(ring)),
     });
   } catch (err) {

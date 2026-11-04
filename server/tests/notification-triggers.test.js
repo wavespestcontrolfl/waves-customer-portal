@@ -422,6 +422,38 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  // GATE_BELL_BANNERS: a banner for a bell row its writer rang under bell: true keeps that authorization, so it does
+  // not depend on GATE_CUSTOMER_ALERTS_RING (real policy on, that gate off).
+  test.each(['call_commitment_overdue', 'sms_operational_followup', 'messenger_reply'])(
+    'policy on, GATE_CUSTOMER_ALERTS_RING off: a %s banner pushes only as bellAuthorized pushOnly', async (key) => {
+      const PushService = require('../services/push-notifications');
+      const bellPolicy = require('../services/notification-bell-policy');
+      bellPolicy.clearOverrideCache();
+      const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+      db.mockImplementation((table) => (
+        table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
+      ));
+      delete process.env.GATE_CUSTOMER_ALERTS_RING;
+      const payload = { alertRowId: 'n-1', alertTitle: 'Comms — follow up', alertBody: 'Body.', alertLink: '/admin', customerId: 'cust-1' };
+      try {
+        PushService.sendToAdminUsers.mockClear();
+        const plain = await triggerNotification(key, payload, { pushOnly: true, adminOnly: true });
+        expect(plain.policySilenced).toBe(true);
+        expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+        const notPushOnly = await triggerNotification(key, payload, { bellAuthorized: true });
+        expect(notPushOnly.policySilenced).toBe(true);
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+        const banner = await triggerNotification(key, payload, { pushOnly: true, adminOnly: true, bellAuthorized: true });
+        expect(Boolean(banner.policySilenced)).toBe(false);
+        expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      } finally {
+        gateSpy.mockRestore();
+        bellPolicy.clearOverrideCache();
+      }
+    },
+  );
+
   test('an iPhone alert sound rides on the admin push only when the Sound switch is on and the trigger has one', async () => {
     const PushService = require('../services/push-notifications');
     const soundPref = (soundEnabled) => (table) => (
