@@ -13,11 +13,16 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../config/feature-gates', () => ({ ibSendToClaudeLive: jest.fn(() => true) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
-    const users = { admin: { id: '11111111-1111-4111-8111-111111111111', role: 'admin' }, tech: { id: 'tech-1', role: 'technician' } };
+    const users = {
+      admin: { id: '11111111-1111-4111-8111-111111111111', role: 'admin', email: 'contact@wavespestcontrol.com' },
+      office: { id: '33333333-3333-4333-8333-333333333333', role: 'admin', email: 'office@example.test' },
+      tech: { id: 'tech-1', role: 'technician' },
+    };
     const user = users[String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')];
     if (!user) return res.status(401).json({ error: 'Admin authentication required' });
     req.technicianId = user.id;
     req.techRole = user.role;
+    req.technician = { id: user.id, email: user.email || null };
     return next();
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
@@ -110,6 +115,16 @@ describe('routes', () => {
       expect((await call(base, '/', { who: 'tech', body: { text: 'x' } })).status).toBe(403);
       expect((await call(base, '/status', { method: 'GET', who: 'nobody' })).status).toBe(401);
     });
+  });
+
+  test('owner only: another admin sees no button, and its send and cancel are refused 403 (Codex security review)', async () => {
+    await withServer(async (base) => {
+      expect(await call(base, '/status', { method: 'GET', who: 'office' })).toEqual({ status: 200, body: { enabled: false } });
+      expect(await call(base, '/', { who: 'office', body: { text: 'An idea' } }))
+        .toEqual({ status: 403, body: { error: 'This action is limited to the owner account.' } });
+      expect((await call(base, '/00000000-0000-4000-8000-0000000000a1/cancel', { who: 'office', body: { at: '2026-11-03T15:00:00.000Z' } })).status).toBe(403);
+    });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('a send writes one system row for Claude\'s queue with the exact shape', async () => {

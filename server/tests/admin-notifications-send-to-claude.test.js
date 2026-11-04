@@ -31,11 +31,16 @@ jest.mock('../services/admin-alert-send-to-claude', () => ({
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
-    const users = { admin: { id: 'admin-1', role: 'admin' }, tech: { id: 'tech-1', role: 'technician' } };
+    const users = {
+      admin: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+      office: { id: 'office-1', role: 'admin', email: 'office@example.test' },
+      tech: { id: 'tech-1', role: 'technician' },
+    };
     const user = users[String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')];
     if (!user) return res.status(401).json({ error: 'Admin authentication required' });
     req.technicianId = user.id;
     req.techRole = user.role;
+    req.technician = { id: user.id, email: user.email || null };
     return next();
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
@@ -191,5 +196,23 @@ test('the bell list passes its rows through withSendToClaudeFields with the call
     expect(res.status).toBe(200);
     expect((await res.json()).notifications).toEqual([expect.objectContaining({ id: ID, sendToClaude: true })]);
   });
-  expect(withSendToClaudeFields).toHaveBeenCalledWith([expect.objectContaining({ id: ID })], { role: 'admin' });
+  expect(withSendToClaudeFields).toHaveBeenCalledWith([expect.objectContaining({ id: ID })], { role: 'admin', fullAccess: true });
+});
+
+test('owner only (Codex security review on #7548): another admin gets no marks, and its send and undo are refused 403', async () => {
+  NotificationService.getAdminNotifications.mockResolvedValue([{ id: ID, version: VERSION, category: 'system', title: 't', created_at: '2026-11-03T15:00:00.000Z' }]);
+  await withServer(async (base) => {
+    expect((await fetch(`${base}/admin/notifications`, { headers: { Authorization: 'Bearer office' } })).status).toBe(200);
+    const send = await fetch(`${base}/admin/notifications/${ID}/send-to-claude`, {
+      method: 'POST', headers: { Authorization: 'Bearer office', 'Content-Type': 'application/json' }, body: JSON.stringify({ version: VERSION }),
+    });
+    expect(send.status).toBe(403);
+    const undo = await fetch(`${base}/admin/notifications/${ID}/unsend-from-claude`, {
+      method: 'POST', headers: { Authorization: 'Bearer office', 'Content-Type': 'application/json' }, body: JSON.stringify({ at: '2026-11-03T15:00:00.000Z' }),
+    });
+    expect(undo.status).toBe(403);
+  });
+  expect(withSendToClaudeFields).toHaveBeenCalledWith(expect.any(Array), { role: 'admin', fullAccess: false });
+  expect(sendAdminAlertToClaude).not.toHaveBeenCalled();
+  expect(unsendAdminAlertFromClaude).not.toHaveBeenCalled();
 });

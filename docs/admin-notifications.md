@@ -380,7 +380,7 @@ series price guard, an unbilled visit, first-application invoices that disagree)
 new class joins only after the same read. Never offered, whatever else the row says: the customer-contact categories,
 `review`, `internal_admin_alert`, and a row whose metadata or registry rule declares `contact: true` or `promise: true`.
 Everything else stays with the owner. The list route marks each such row `sendToClaude: true` for the admin role
-(`withSendToClaudeFields`). One tap and an optional note (`POST /api/admin/notifications/:id/send-to-claude`, admin only,
+(`withSendToClaudeFields`). One tap and an optional note (`POST /api/admin/notifications/:id/send-to-claude`, owner login only (ib-access `ibFullAccess`; Codex security review on #7548),
 fenced on the version the bell served like Done) moves the row into Claude's queue: Activity-only, `who = 'claude'`, `claudeQueue` =
 `sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp that holds
 trusted facts only (Codex security reviews): when, who sent it, the alert's `kind` (its trigger key or dedupe-key class),

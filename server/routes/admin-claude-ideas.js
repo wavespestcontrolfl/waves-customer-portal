@@ -3,14 +3,19 @@ const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { sendIdeaToClaude, cancelClaudeIdea, ideaSendLive } = require('../services/admin-claude-ideas');
 const { UUID_RE } = require('../services/admin-alert-send-to-claude');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
+
+// Owner login only (Codex security review on #7548): requireAdmin accepts every admin account, and an idea's text goes
+// into a Claude terminal tab. ibFullAccess keys off the login's own technicians-row email (IB_FULL_ACCESS_EMAILS).
+const OWNER_ONLY = 'This action is limited to the owner account.';
 
 router.use(adminAuthenticate, requireAdmin);
 
-// GET /api/admin/claude-ideas/status — does the Intelligence Bar box show "Send to Claude"? Admin only; never 404, so the
-// palette can ask (GATE_IB_SEND_TO_CLAUDE).
+// GET /api/admin/claude-ideas/status — does the Intelligence Bar box show "Send to Claude"? enabled only for the owner
+// login while GATE_IB_SEND_TO_CLAUDE is on; never 404, so the palette can ask.
 router.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ enabled: ideaSendLive() });
+  res.json({ enabled: ideaSendLive() && ibFullAccess(req) });
 });
 
 // POST /api/admin/claude-ideas — the box's free "Send to Claude" button (GATE_IB_SEND_TO_CLAUDE, owner 2026-11-03). Body:
@@ -21,6 +26,7 @@ router.get('/status', (req, res) => {
 router.post('/', async (req, res, next) => {
   try {
     if (!ideaSendLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: OWNER_ONLY });
     const { status, body } = await sendIdeaToClaude({ ...req.body, by: req.technicianId });
     res.status(status).json(body);
   } catch (err) { next(err); }
@@ -32,6 +38,7 @@ router.post('/', async (req, res, next) => {
 router.post('/:id/cancel', async (req, res, next) => {
   try {
     if (!ideaSendLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: OWNER_ONLY });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
     const at = req.body?.at;

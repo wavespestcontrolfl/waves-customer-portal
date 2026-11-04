@@ -124,11 +124,12 @@ function sendToClaudeLive() {
   try { return require('../config/feature-gates').alertSendToClaudeLive?.() === true; } catch { return false; }
 }
 
-// The bell list's persisted rows, marked `sendToClaude: true` where the allow-list permits a send, for the admin role
-// while GATE_ALERT_SEND_TO_CLAUDE is on; otherwise the rows as they are. Never throws: a row whose check throws stays
-// unmarked.
-function withSendToClaudeFields(rows, { role } = {}) {
-  if (!Array.isArray(rows) || role !== 'admin' || !sendToClaudeLive()) return rows;
+// The bell list's persisted rows, marked `sendToClaude: true` where the allow-list permits a send, for the owner login
+// (`fullAccess`: ib-access ibFullAccess) while GATE_ALERT_SEND_TO_CLAUDE is on; otherwise the rows as they are. Owner only
+// (Codex security review on #7548): a send and its note go into a Claude terminal tab, and requireAdmin accepts every admin
+// account. Never throws: a row whose check throws stays unmarked.
+function withSendToClaudeFields(rows, { role, fullAccess = false } = {}) {
+  if (!Array.isArray(rows) || role !== 'admin' || fullAccess !== true || !sendToClaudeLive()) return rows;
   return rows.map((row) => {
     try { return sendRefusal(row) ? row : { ...row, sendToClaude: true }; } catch { return row; }
   });

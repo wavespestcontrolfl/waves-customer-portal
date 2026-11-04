@@ -12,6 +12,7 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 // app-icon badge in notification-triggers so the two counts can't drift.
 const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 const { withAlertButtons, runAlertButton } = require('../services/admin-alert-buttons');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const { explainAdminAlert, explainerLive, withExplainerFields } = require('../services/admin-alert-explainer');
 const {
   sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendToClaudeLive,
@@ -95,7 +96,8 @@ router.get('/', async (req, res, next) => {
     // An SMS review bell's source text rides as `source_text`, read now and never stored on the row. Added last:
     // the explainer reads the stored row by id, never this.
     const { withTextNoteSources } = require('../services/sms-operational-actions');
-    const marked = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }), { role: req.techRole });
+    const marked = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }),
+      { role: req.techRole, fullAccess: ibFullAccess(req) });
     const rows = await withTextNoteSources(marked, { role: req.techRole });
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
@@ -514,8 +516,8 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/notifications/:id/send-to-claude — the bell's "Send to Claude" button (GATE_ALERT_SEND_TO_CLAUDE, admin
-// only; no explainer gate, owner 2026-11-03). `version` (required): the content version the bell served for the row.
+// POST /api/admin/notifications/:id/send-to-claude — the bell's "Send to Claude" button (GATE_ALERT_SEND_TO_CLAUDE, owner
+// login only; no explainer gate, owner 2026-11-03). `version` (required): the content version the bell served for the row.
 // `note` (optional text, 500 characters): the admin's own words for the Claude tab. Moves the row out of the bell into
 // Claude's queue, where the Mac launcher opens a Claude tab for it (services/admin-alert-send-to-claude.js). The answer
 // carries `at`, the send's time, for the undo. 422 for customer contact, a row our code did not write, a done row or a
@@ -524,6 +526,8 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
 router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
   try {
     if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
+    // Owner login only (Codex security review on #7548): a send and its note go into a Claude terminal tab.
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
     const version = req.body?.version;
@@ -540,12 +544,14 @@ router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/notifications/:id/unsend-from-claude — the 10-second Undo after a send (GATE_ALERT_SEND_TO_CLAUDE,
-// admin only). `at` (required): the time the send answered with. Puts the row back in the bell while it is open, still
+// owner login only). `at` (required): the time the send answered with. Puts the row back in the bell while it is open, still
 // carries that send and no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Sends nothing to
 // anyone. Gate off: 404, the same as an unknown route.
 router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
   try {
     if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
+    // Owner login only (Codex security review on #7548): a send and its note go into a Claude terminal tab.
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
     const at = req.body?.at;
