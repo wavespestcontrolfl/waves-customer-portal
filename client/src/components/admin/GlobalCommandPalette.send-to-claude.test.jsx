@@ -162,6 +162,38 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude besid
     expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('A new thought');
   });
 
+  it('a pasted idea keeps its paste mark through Undo, so the next send still says pasted', async () => {
+    await mount({ mobile });
+    const box = screen.getByPlaceholderText(/Ask anything/);
+    fireEvent.paste(box, { clipboardData: { getData: () => 'Pasted words' } });
+    type('Pasted words');
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Cancelled. Your text is back in the box.')).toBeInTheDocument();
+    expect(box).toHaveValue('Pasted words');
+    fireEvent.click(screen.getByRole('button', { name: 'Send to Claude (free)' }));
+    await waitFor(() => expect(callsTo('/claude-ideas')).toHaveLength(2));
+    const sends = callsTo('/claude-ideas').map(([, init]) => JSON.parse(init.body));
+    expect(sends[0].pasted).toBe(true);
+    expect(sends[1].pasted).toBe(true);
+  });
+
+  it('keeps words typed while the send was still running', async () => {
+    let finish;
+    ideaAnswer = () => new Promise((resolve) => { finish = () => resolve(reply(200, { sent: true, id: IDEA_ID, at: AT })); });
+    await mount({ mobile });
+    type('The first idea');
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
+    await waitFor(() => expect(typeof finish).toBe('function'));
+    type('More words typed meanwhile');
+    await act(async () => { finish(); });
+    expect(await screen.findByRole('button', { name: 'Undo' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('More words typed meanwhile');
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Cancelled.')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('More words typed meanwhile');
+  });
+
   it('a failed Undo restores nothing', async () => {
     await mount({ mobile });
     type('The first idea');

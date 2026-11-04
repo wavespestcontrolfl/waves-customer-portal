@@ -30,6 +30,8 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
   const timerRef = useRef(null);
   const promptRef = useRef(prompt);
   promptRef.current = prompt;
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
 
   useEffect(() => {
     if (!open || askedRef.current) return;
@@ -55,17 +57,22 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
     }
     sendingRef.current = true;
     setSending(true);
+    // The box as it was sent, read BEFORE the request: the paste mark and the text an Undo puts back. The box stays
+    // editable while the request runs, so what it holds afterwards can differ.
+    const raw = prompt;
+    const pasted = pastedRef.current === true;
     try {
       const out = await adminFetch('/admin/claude-ideas', {
         method: 'POST',
-        body: JSON.stringify({ text: prompt, page: { route }, ids: pickIds(pageData), pasted: pastedRef.current === true }),
+        body: JSON.stringify({ text: raw, page: { route }, ids: pickIds(pageData), pasted }),
       });
       if (out?.duplicate) {
         setNote({ kind: 'duplicate', text: 'You already sent this idea. Claude has it.' });
       } else if (out?.sent) {
-        onSent();
-        // `raw` is the box as the owner typed it, for an Undo to put back.
-        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true, raw: prompt, pasted: pastedRef.current === true });
+        // Clear the box only while it still holds exactly what was sent: words or photos added while the request ran stay.
+        if (promptRef.current === raw && !attachmentsRef.current.length) onSent();
+        // `raw` and `pasted` are the box as the owner sent it, for an Undo to put back.
+        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true, raw, pasted });
         clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => setNote((now) => (now?.kind === 'sent' ? { ...now, undoable: false } : now)), UNDO_MS);
       } else {
