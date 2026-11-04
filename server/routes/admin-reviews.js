@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { LIFETIME_REVENUE_SQL } = require('../services/customer-lifetime-revenue');
 const gbp = require('../services/google-business');
 const ReviewService = require('../services/review-request');
 const ReviewIncentives = require('../services/review-incentives');
@@ -726,9 +727,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         // payload's locationId (see below).
         'customers.latitude',
         'customers.longitude',
-        // Payments-derived net — customers.lifetime_revenue has no production
-        // writer and reads $0/stale for every real customer.
-        db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue")
+        // Lifetime revenue (payments net + deposits) — customers.lifetime_revenue
+        // has no production writer and reads $0/stale for every real customer.
+        db.raw(`${LIFETIME_REVENUE_SQL} as lifetime_revenue`)
       )
       .orderBy('customers.last_contact_date', 'desc')
       .limit(200);
