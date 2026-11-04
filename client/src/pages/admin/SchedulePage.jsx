@@ -15263,6 +15263,8 @@ export function CompletionPanel({
       typedActivityScore != null ||
       typedRecommendations.trim() ||
       typedPhotoSummary.trim() ||
+      // A typed gauge reading is tech input on its own.
+      turfHeight.heightIn != null ||
       Object.values(companionState).some(
         (entry) =>
           Object.keys(entry?.values || {}).length ||
@@ -15456,6 +15458,9 @@ export function CompletionPanel({
         // photos but submits no `typedPhotoSummary`, silently dropping the
         // customer narrative the tech reviewed (Codex r-375c002 P1).
         typedPhotoSummary,
+        // The lawn gauge reading is typed input the completion sends as
+        // manualHeightIn: a reload or billing detour must not drop it.
+        turfHeightIn: turfHeight.heightIn,
         // Companion section state rides the same draft (and the same
         // billing-409 checkout detour survival).
         companionState,
@@ -15552,6 +15557,8 @@ export function CompletionPanel({
     promiseMarks,
     // So is a picked blog post.
     blogPost,
+    // And a typed gauge reading.
+    turfHeight,
   ]);
 
   function restoreDraft() {
@@ -15689,6 +15696,7 @@ export function CompletionPanel({
     if (Number.isFinite(savedDraft.reentryInteriorMinutes)) {
       setReentryIntMinutes(Math.min(1440, Math.max(0, Math.round(savedDraft.reentryInteriorMinutes))));
     }
+    setTurfHeight({ heightIn: Number.isFinite(savedDraft.turfHeightIn) ? savedDraft.turfHeightIn : null });
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
     setRecapSource(savedDraft.recapSource || "draft");
