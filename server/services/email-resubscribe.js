@@ -37,6 +37,14 @@
 // transaction), then release locally only the rows whose SendGrid list was
 // confirmed cleared. A failed clear leaves the rows active: the switch keeps
 // reading OFF and the customer can simply try again.
+//
+// Between the SendGrid DELETE and the local release a newer opt-out can arrive:
+// the webhook (recordEmailSuppressionForEvent) updates an existing ACTIVE row
+// in place (same id) and SendGrid restores its own block. So the pre-read also
+// captures each row's Postgres row version (xmin, which any update changes),
+// and the release only touches a row whose version is unchanged under the lock.
+// A changed row stays active; the switch keeps reading OFF and the customer can
+// try again.
 
 const db = require('../models/db');
 const logger = require('./logger');
@@ -56,6 +64,7 @@ async function releasableUnsubscribes(email, { dbh = db } = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized) return [];
   return dbh('email_suppressions')
+    .select('email_suppressions.*', dbh.raw('xmin::text AS row_version'))
     .where(suppressionCoversEmail(normalized))
     .where({ status: 'active', suppression_type: 'unsubscribe' })
     .whereIn('source', RELEASABLE_SOURCES)
@@ -80,15 +89,19 @@ async function hasReleasableUnsubscribe(email, { dbh = db } = {}) {
 // Runs on the caller's transaction, after clearSendgridBeforeRelease. Takes the
 // shared per-address lock the SendGrid webhook writer takes, re-reads the
 // releasable rows for the address as it stands under the lock, and releases
-// only those whose id is in `onlyIds` (SendGrid confirmed that list cleared).
-// `sendgridClear` maps row id -> { ok: true, status, at }, written in the same
-// update. No onlyIds = nothing released.
-async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = null, onlyIds = [], sendgridClear = {} }, { dbh = db } = {}) {
+// only those whose id is in `onlyIds` (SendGrid confirmed that list cleared)
+// AND whose row version still equals the one captured at the pre-read
+// (`versionById`): a row updated since (a newer opt-out merged in place by the
+// webhook) is left active. `sendgridClear` maps row id -> { ok: true, status,
+// at }, written in the same update. No onlyIds = nothing released; an id with
+// no captured version is not released.
+async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = null, onlyIds = [], versionById = {}, sendgridClear = {} }, { dbh = db } = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized || !onlyIds.length) return [];
   await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, normalized);
   const allowed = new Set(onlyIds.map(String));
-  const rows = (await releasableUnsubscribes(normalized, { dbh })).filter((row) => allowed.has(String(row.id)));
+  const rows = (await releasableUnsubscribes(normalized, { dbh }))
+    .filter((row) => allowed.has(String(row.id)) && versionById[row.id] && versionById[row.id] === row.row_version);
   const now = new Date();
   const released = [];
   for (const row of rows) {
@@ -103,6 +116,7 @@ async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = 
     };
     const [updated] = await dbh('email_suppressions')
       .where({ id: row.id, status: 'active' })
+      .whereRaw('xmin::text = ?', [versionById[row.id]])
       .update({
         status: 'released',
         released_at: now,
@@ -169,10 +183,11 @@ function sendgridTargets(rows) {
 // clears SendGrid's list for each (global for a NULL-group row, the service ASM
 // group for a service_operational row; the address exactly as stored). Never
 // throws. `clearedIds` = rows whose list SendGrid confirmed cleared (2xx or
-// 404); `clearById` = the note to stamp on each. Anything else (no key, no
+// 404); `clearById` = the note to stamp on each; `versionById` = each cleared
+// row's row version at the pre-read. Anything else (no key, no
 // service group id, timeout, HTTP error) leaves its rows out and is logged.
 async function clearSendgridBeforeRelease(email) {
-  const result = { clearedIds: [], outcomes: [], clearById: {} };
+  const result = { clearedIds: [], outcomes: [], clearById: {}, versionById: {} };
   try {
     const rows = await releasableUnsubscribes(email);
     for (const [stored, lists] of sendgridTargets(rows)) {
@@ -188,12 +203,13 @@ async function clearSendgridBeforeRelease(email) {
         if (outcome && outcome.ok) {
           result.clearedIds.push(row.id);
           result.clearById[row.id] = { ok: true, status: outcome.status, at };
+          result.versionById[row.id] = row.row_version;
         }
       }
     }
   } catch (err) {
     logger.warn(`[email-resubscribe] SendGrid pre-clear failed: ${err.message}`);
-    return { clearedIds: [], outcomes: [], clearById: {} };
+    return { clearedIds: [], outcomes: [], clearById: {}, versionById: {} };
   }
   return result;
 }

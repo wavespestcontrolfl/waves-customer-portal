@@ -87,13 +87,51 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     });
   });
 
+  const versionsOf = async (trx, ids) => Object.fromEntries((await trx('email_suppressions').whereIn('id', ids)
+    .select('id', trx.raw('xmin::text AS row_version'))).map((r) => [r.id, r.row_version]));
+
+  // xmin only changes across transactions (an update inside the inserting
+  // transaction keeps its xid), so this case commits real rows, as the route
+  // does between the pre-read and the release, and deletes them at the end.
+  test('a row updated in place after the pre-read (a newer opt-out merged by the webhook) is NOT released; an unchanged row still is', async () => {
+    const email = `${uniq()}@example.com`;
+    const ids = [];
+    try {
+      const untouched = await sup(db, { email });
+      const bumped = await sup(db, { email, group_key: 'service_operational', metadata: JSON.stringify({ provider: 'sendgrid' }) });
+      ids.push(untouched.id, bumped.id);
+      // Pre-read (what clearSendgridBeforeRelease captures), SendGrid cleared.
+      const pre = await service.releasableUnsubscribes(email);
+      const versionById = Object.fromEntries(pre.map((r) => [r.id, r.row_version]));
+      expect(Object.keys(versionById).sort()).toEqual([untouched.id, bumped.id].sort());
+      // recordEmailSuppressionForEvent's in-place update for a new unsubscribe event.
+      await db('email_suppressions').where({ id: bumped.id }).update({
+        source: 'sendgrid_event_webhook',
+        metadata: db.raw('COALESCE(metadata, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify({ event_type: 'group_unsubscribe' })]),
+        updated_at: new Date(),
+      });
+      const released = await db.transaction((trx) => service.releaseOwnUnsubscribes({
+        email, customerId: 'c-1', actor: 'holder', onlyIds: [untouched.id, bumped.id], versionById,
+      }, { dbh: trx }));
+      expect(released.map((r) => r.id)).toEqual([untouched.id]);
+      expect((await db('email_suppressions').where({ id: bumped.id }).first()).status).toBe('active');
+      expect((await db('email_suppressions').where({ id: untouched.id }).first()).status).toBe('released');
+    } finally {
+      if (ids.length) await db('email_suppressions').whereIn('id', ids).del();
+    }
+  });
+
   test('release skips a row that is not in onlyIds, and releases nothing without onlyIds', async () => {
     await inRolledBackTx(async (trx) => {
       const email = `${uniq()}@example.com`;
       const cleared = await sup(trx, { email });
       const late = await sup(trx, { email, group_key: 'service_operational' });
       expect((await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder' }, { dbh: trx }))).toEqual([]);
-      const released = await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder', onlyIds: [cleared.id] }, { dbh: trx });
+      const released = await service.releaseOwnUnsubscribes({
+        email, customerId: 'c-1', actor: 'holder', onlyIds: [cleared.id], versionById: await versionsOf(trx, [cleared.id]),
+      }, { dbh: trx });
+      // An id with no captured version is not released either.
+      expect(await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder', onlyIds: [cleared.id] }, { dbh: trx })).toEqual([]);
       expect(released.map((r) => r.id)).toEqual([cleared.id]);
       expect((await trx('email_suppressions').where({ id: late.id }).first()).status).toBe('active');
     });
@@ -106,7 +144,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       const bounce = await sup(trx, { email, suppression_type: 'bounce' });
       const note = { ok: true, status: 204, at: new Date().toISOString() };
       const released = await service.releaseOwnUnsubscribes({
-        email, customerId: 'c-1', actor: 'holder', onlyIds: [unsub.id], sendgridClear: { [unsub.id]: note },
+        email, customerId: 'c-1', actor: 'holder', onlyIds: [unsub.id], versionById: await versionsOf(trx, [unsub.id]),
+        sendgridClear: { [unsub.id]: note },
       }, { dbh: trx });
       expect(released.map((r) => r.id)).toEqual([unsub.id]);
       const after = await trx('email_suppressions').where({ id: unsub.id }).first();

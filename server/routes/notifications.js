@@ -524,7 +524,7 @@ async function releaseOwnUnsubscribesOnSwitchOn({ trx, email, pre, customerId, a
   const Resub = require('../services/email-resubscribe');
   if (Resub.normalizeEmail(email) !== Resub.normalizeEmail(pre.email)) return;
   await Resub.releaseOwnUnsubscribes({
-    email, customerId, actor, onlyIds: pre.clearedIds, sendgridClear: pre.clearById,
+    email, customerId, actor, onlyIds: pre.clearedIds, versionById: pre.versionById, sendgridClear: pre.clearById,
     ...(actor === 'contact' ? { contactSlot } : {}),
   }, { dbh: trx });
 }

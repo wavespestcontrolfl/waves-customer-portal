@@ -109,7 +109,7 @@ afterAll((done) => { server.close(done); });
 
 // `blocked` = the set of addresses the service reports a customer-made unsubscribe for.
 let blocked;
-const CLEARED = { clearedIds: ['sup-1'], outcomes: [{ list: 'global', ok: true, status: 204 }], clearById: { 'sup-1': { ok: true, status: 204, at: '2026-11-04T12:00:00.000Z' } } };
+const CLEARED = { clearedIds: ['sup-1'], outcomes: [{ list: 'global', ok: true, status: 204 }], clearById: { 'sup-1': { ok: true, status: 204, at: '2026-11-04T12:00:00.000Z' } }, versionById: { 'sup-1': '555' } };
 const NOT_CLEARED = { clearedIds: [], outcomes: [{ list: 'global', ok: false, status: 500 }], clearById: {} };
 let preClear;
 beforeEach(() => {
@@ -182,7 +182,7 @@ describe('account holder switch', () => {
     expect(Resub.clearSendgridBeforeRelease).toHaveBeenCalledWith('pat@example.com');
     expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith({
       email: 'pat@example.com', customerId: 'cust-1', actor: 'holder',
-      onlyIds: ['sup-1'], sendgridClear: CLEARED.clearById,
+      onlyIds: ['sup-1'], versionById: { 'sup-1': '555' }, sendgridClear: CLEARED.clearById,
     }, { dbh: trx });
     expect(events).toEqual(['sendgrid-clear', 'tx-start', 'release', 'tx-end']);
     expect(storedHolder()).toBe(true);
@@ -261,7 +261,7 @@ describe('additional contact switch', () => {
     expect(Resub.clearSendgridBeforeRelease).toHaveBeenCalledWith('sam@example.com');
     expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith({
       email: 'sam@example.com', customerId: 'cust-1', actor: 'contact', contactSlot: 1,
-      onlyIds: ['sup-1'], sendgridClear: CLEARED.clearById,
+      onlyIds: ['sup-1'], versionById: { 'sup-1': '555' }, sendgridClear: CLEARED.clearById,
     }, { dbh: trx });
     expect(events).toEqual(['sendgrid-clear', 'tx-start', 'release', 'tx-end']);
     expect(storedContact()).toBe(true);

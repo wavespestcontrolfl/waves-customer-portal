@@ -19,11 +19,13 @@ const { releaseOwnUnsubscribes, clearSendgridBeforeRelease } = require('../servi
 // records its patch and resolves (via returning) to the row it targeted.
 function fakeDbh({ selectRows = [] } = {}) {
   const updates = [];
+  const guards = [];
   const dbh = jest.fn(() => {
     const b = {};
     let target = null;
-    ['whereIn', 'whereRaw', 'orderBy'].forEach((m) => { b[m] = () => b; });
+    ['whereIn', 'orderBy', 'select'].forEach((m) => { b[m] = () => b; });
     b.where = (arg) => { if (arg && arg.id) target = arg.id; return b; };
+    b.whereRaw = (sql, bindings) => { if (sql.startsWith('xmin')) guards.push({ id: target, sql, bindings }); return b; };
     b.then = (resolve, reject) => Promise.resolve(selectRows).then(resolve, reject);
     b.update = (patch) => {
       updates.push({ id: target, patch });
@@ -33,14 +35,15 @@ function fakeDbh({ selectRows = [] } = {}) {
   });
   dbh.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   dbh.updates = updates;
+  dbh.guards = guards;
   return dbh;
 }
-const metaOf = (dbh, i = 0) => JSON.parse(dbh.raw.mock.calls[i][1][0]);
+const metaOf = (dbh, i = 0) => JSON.parse(dbh.raw.mock.calls.filter(([, bindings]) => bindings)[i][1][0]);
 
 describe('releaseOwnUnsubscribes', () => {
   const ROWS = [
-    { id: 'a', email: 'pat@example.com', group_key: null },
-    { id: 'b', email: 'pat@example.com', group_key: 'service_operational' },
+    { id: 'a', email: 'pat@example.com', group_key: null, row_version: '100' },
+    { id: 'b', email: 'pat@example.com', group_key: 'service_operational', row_version: '101' },
   ];
   const AT = '2026-11-04T12:00:00.000Z';
 
@@ -48,13 +51,14 @@ describe('releaseOwnUnsubscribes', () => {
     const dbh = fakeDbh({ selectRows: ROWS });
     const released = await releaseOwnUnsubscribes({
       email: ' Pat@Example.com ', customerId: 42, actor: 'contact', contactSlot: 2,
-      onlyIds: ['a'], sendgridClear: { a: { ok: true, status: 204, at: AT } },
+      onlyIds: ['a'], versionById: { a: '100' }, sendgridClear: { a: { ok: true, status: 204, at: AT } },
     }, { dbh });
     expect(lockCustomerEmail).toHaveBeenCalledWith(dbh, 'pat@example.com');
     expect(released.map((r) => r.id)).toEqual(['a']);
     expect(dbh.updates).toHaveLength(1);
     const { id, patch } = dbh.updates[0];
     expect(id).toBe('a');
+    expect(dbh.guards).toEqual([{ id: 'a', sql: 'xmin::text = ?', bindings: ['100'] }]);
     expect(patch).toMatchObject({ status: 'released', consent_source: 'portal_email_switch' });
     for (const key of ['released_at', 'updated_at', 'consent_timestamp']) expect(patch[key]).toBeInstanceOf(Date);
     expect(metaOf(dbh)).toEqual({
@@ -66,6 +70,14 @@ describe('releaseOwnUnsubscribes', () => {
       contact_slot: 2,
       sendgrid_clear: { ok: true, status: 204, at: AT },
     });
+  });
+
+  test('a row updated since the pre-read (version changed, or none captured) is not released', async () => {
+    const dbh = fakeDbh({ selectRows: ROWS });
+    await expect(releaseOwnUnsubscribes({
+      email: 'pat@example.com', customerId: 1, actor: 'holder', onlyIds: ['a', 'b'], versionById: { a: '99' },
+    }, { dbh })).resolves.toEqual([]);
+    expect(dbh.updates).toEqual([]);
   });
 
   test('no onlyIds, no address, or nothing releasable: no lock and no write', async () => {
@@ -83,10 +95,12 @@ describe('releasableUnsubscribes query', () => {
     const calls = [];
     const dbh = () => {
       const b = { then: (resolve) => Promise.resolve([]).then(resolve) };
-      ['where', 'whereIn', 'whereRaw', 'orderBy'].forEach((m) => { b[m] = (...args) => { calls.push([m, ...args]); return b; }; });
+      ['where', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { b[m] = (...args) => { calls.push([m, ...args]); return b; }; });
       return b;
     };
+    dbh.raw = (sql) => ({ sql });
     await releasableUnsubscribes('Pat@Example.com', { dbh });
+    expect(calls).toContainEqual(['select', 'email_suppressions.*', { sql: 'xmin::text AS row_version' }]);
     expect(calls).toContainEqual(['where', { status: 'active', suppression_type: 'unsubscribe' }]);
     expect(calls).toContainEqual(['whereIn', 'source', ['sendgrid_event_webhook', 'sendgrid_asm_backfill', 'sendgrid_dropped_backfill_2026_06_01']]);
     const raw = calls.find(([m]) => m === 'whereRaw');
@@ -104,10 +118,11 @@ describe('clearSendgridBeforeRelease', () => {
     rows = [];
     db.mockImplementation(() => {
       const b = {};
-      ['where', 'whereIn', 'whereRaw', 'orderBy'].forEach((m) => { b[m] = () => b; });
+      ['where', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { b[m] = () => b; });
       b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
       return b;
     });
+    db.raw = (sql) => ({ sql });
     logger.warn.mockClear();
   });
   afterEach(() => {
@@ -119,8 +134,8 @@ describe('clearSendgridBeforeRelease', () => {
 
   test('a global row clears the global list and a service row the service group (address URL-encoded, as stored); both ids are cleared', async () => {
     rows = [
-      { id: 'g', email: 'pat+tag@example.com', group_key: null },
-      { id: 's', email: 'Sam@Example.com', group_key: 'service_operational' },
+      { id: 'g', email: 'pat+tag@example.com', group_key: null, row_version: '10' },
+      { id: 's', email: 'Sam@Example.com', group_key: 'service_operational', row_version: '11' },
     ];
     const out = await clearSendgridBeforeRelease('anything@example.com');
     expect(global.fetch.mock.calls.map(([url, init]) => [init.method, url])).toEqual([
@@ -131,6 +146,7 @@ describe('clearSendgridBeforeRelease', () => {
     expect(global.fetch.mock.calls[0][1].signal).toBeDefined();
     expect(out.clearedIds.sort()).toEqual(['g', 's']);
     expect(out.clearById.g).toMatchObject({ ok: true, status: 204, at: expect.any(String) });
+    expect(out.versionById).toEqual({ g: '10', s: '11' });
   });
 
   test('global and service DELETEs for one address run in parallel (both started before either settles)', async () => {
@@ -177,7 +193,7 @@ describe('clearSendgridBeforeRelease', () => {
 
   test('a failing row read never throws', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
-    await expect(clearSendgridBeforeRelease('pat@example.com')).resolves.toEqual({ clearedIds: [], outcomes: [], clearById: {} });
+    await expect(clearSendgridBeforeRelease('pat@example.com')).resolves.toEqual({ clearedIds: [], outcomes: [], clearById: {}, versionById: {} });
   });
 
   test('no SENDGRID_API_KEY: no request, nothing cleared', async () => {
