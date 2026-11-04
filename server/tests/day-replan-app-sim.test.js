@@ -2,7 +2,7 @@
  * The app's own simulator as the day re-plan's last word (services/day-replan/app-sim.js): co-visit rows are one
  * stay in both the baseline and the plan, and a plan the app simulation rejects is never accepted. Synthetic rows.
  */
-const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('../services/day-replan/app-sim');
+const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict, withHour } = require('../services/day-replan/app-sim');
 
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 
@@ -122,5 +122,12 @@ describe('the final verdict', () => {
   test('a planner reject stays rejected with its own reason, and the app saving is reported', () => {
     const verdict = finalVerdict({ accepted: false, reason: 'saving_below_floor', savedMin: 3 }, { current: sim(100, 600), planned: sim(97, 600) }, 10);
     expect(verdict).toEqual({ accepted: false, reason: 'saving_below_floor', savedMin: 3 });
+  });
+});
+
+describe('withHour', () => {
+  test('keeps a booked width, and keeps a visit with no booked end open-ended', () => {
+    expect(withHour({ window_start: '08:00:00', window_end: '09:30:00' }, 12 * 60)).toMatchObject({ window_start: '12:00:00', window_end: '13:30:00' });
+    expect(withHour({ window_start: '08:00:00', window_end: null }, 12 * 60)).toMatchObject({ window_start: '12:00:00', window_end: null });
   });
 });

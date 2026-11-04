@@ -78,7 +78,9 @@ function world({ visits, changes, hash = 'h1', rowExtra = {}, reminders = [], bl
     origin,
     check: { planned },
     result: { changes: planChanges, best: { order: ordered.map((r) => r.id) } },
-    stops: techRows.map((r) => ({ id: r.id, slotWidthMin: 60, workMin: 30, pref: null })),
+    stops: techRows.map((r) => ({
+      id: r.id, slotWidthMin: r.window_end ? toMin(r.window_end) - toMin(r.window_start) : (Number(r.estimated_duration_minutes) || 60), openEnd: !r.window_end, workMin: 30, pref: null,
+    })),
     rowGroups: techRows.map((r) => [{ ...r }]),
     // The rows as the fresh plan read them (a copy: the live table moves on without them).
     dayContext: { allRows: rows.map((r) => ({ ...r })) },
@@ -118,6 +120,7 @@ describe('writing an accepted plan', () => {
       scheduled_date: DATE,
       window_start: '08:00:00',
       window_end: '09:00:00',
+      estimated_duration_minutes: 60,
       technician_id: TECH,
       visit_id: null,
       recurring_dispatch_due_date: null,
@@ -575,6 +578,7 @@ describe('the validated snapshot pins every step', () => {
 
   test.each([
     ['a window end edited since', (rows) => { rows.find((r) => r.id === 'b').window_end = '10:30:00'; }],
+    ['a duration edited since', (rows) => { rows.find((r) => r.id === 'b').estimated_duration_minutes = 90; }],
     ['a technician changed since', (rows) => { rows.find((r) => r.id === 'b').technician_id = 'tech-9'; }],
     ['a location edited since', (rows) => { rows.find((r) => r.id === 'b').lat += 0.5; }],
     ['a property changed since', (rows) => { rows.find((r) => r.id === 'b').property_id = 'prop-9'; }],
@@ -655,6 +659,7 @@ describe('the accepted route order', () => {
     ['its location was edited', (d) => { d.lat += 0.5; d.raw_lat += 0.5; }],
     ['it was put in a visit record', (d) => { d.visit_id = 'visit-9'; }],
     ['it was edited in a way only its version shows', (d) => { d.updated_at = new Date('2026-11-03T12:30:00Z'); }],
+    ['its duration was edited', (d) => { d.estimated_duration_minutes = 90; }],
     ['it was given a hold', (d) => { d.reservation_expires_at = new Date('2099-01-01T00:00:00Z'); }],
   ])('an unrelated stop of the same day changed at the fence (%s): no route write, the day is rolled back', async (_label, mutate) => {
     const w = plan4();
@@ -667,9 +672,12 @@ describe('the accepted route order', () => {
     expect(w.journal().routePersisted).toBe(false);
   });
 
-  test('so is a visit this writer moved that a person changed after its step', async () => {
+  test.each([
+    ['staff excluded it', (a) => { a.auto_dispatch_excluded = true; }],
+    ['staff edited its duration', (a) => { a.estimated_duration_minutes = 90; }],
+  ])('so is a visit this writer moved that a person changed after its step (%s)', async (_label, mutate) => {
     const w = plan4();
-    w.lockTechDays.mockImplementationOnce(async () => { w.db.rows.find((r) => r.id === 'a').auto_dispatch_excluded = true; });
+    w.lockTechDays.mockImplementationOnce(async () => { mutate(w.db.rows.find((r) => r.id === 'a')); });
     const before = w.db.rows.map((r) => r.route_order);
     // The fence refuses the route write; the rollback then leaves the person's visit alone (and so says failed).
     expect(await w.run()).toMatchObject({ status: 'failed', reason: 'rollback_failed:DIVERGED' });
@@ -702,6 +710,75 @@ describe('the accepted route order', () => {
     w.fresh.check.planned = { ...w.fresh.check.planned, driveMin: w.fresh.check.planned.driveMin + 5 };
     expect((await w.run()).reason).toBe('route_order_not_coherent');
     expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+  });
+});
+
+describe('a visit with no booked end', () => {
+  // a: 08:00, no end, 90 minutes. It moves to 12:00 and must stay open-ended; the plan holds it two hours.
+  const openWorld = (opts = {}) => world({
+    visits: [['a', 8], ['b', 10]], changes: [['a', 8, 12]], rowExtra: { a: { window_end: null, estimated_duration_minutes: 90 } }, ...opts,
+  });
+
+  test('moves with its end left open: the rebooker is asked to clear the end, never given one', async () => {
+    const w = openWorld();
+    expect((await w.run()).status).toBe('applied');
+    const [call] = w.rebooker.calls;
+    expect(call.win).toEqual({ start: '12:00', end: null });
+    expect(call.options.clearWindowEnd).toBe(true);
+    expect(call.options.expect).toMatchObject({ window_end: null, estimated_duration_minutes: 90 });
+    const a = w.db.rows.find((r) => r.id === 'a');
+    expect([a.window_start, a.window_end]).toEqual(['12:00:00', null]);
+    expect(w.journal().steps[0]).toMatchObject({ id: 'a', openEnd: true, widthMin: 90 });
+    // The reminder follows the start.
+    expect(w.syncMovedReminders.mock.calls[0][1].start_time).toBe('12:00');
+  });
+
+  test('is sequenced on the two hours it holds (the planner width), not one', async () => {
+    // b sits on 13:00, inside a's 12:00-13:30 span: no safe sequence.
+    const w = world({
+      visits: [['a', 8], ['b', 13]], changes: [['a', 8, 12]], rowExtra: { a: { window_end: null, estimated_duration_minutes: 90 } },
+    });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'no_safe_sequence', moved: 0 });
+    expect(w.rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('a rollback puts it back with NO end (clearWindowEnd), not an explicit one', async () => {
+    let n = 0;
+    const w = openWorld({ rebookerOpts: { failWhen: () => false } });
+    const original = w.rebooker.reschedule.getMockImplementation();
+    // The write lands; the route write then fails at the fence, so the day goes back.
+    w.lockTechDays.mockImplementationOnce(async () => { n += 1; w.db.rows.find((r) => r.id === 'b').status = 'pending'; });
+    w.rebooker.reschedule.mockImplementation(original);
+    const out = await w.run();
+    expect(n).toBe(1);
+    expect(out).toMatchObject({ status: 'rolled_back' });
+    const a = w.db.rows.find((r) => r.id === 'a');
+    expect([a.window_start, a.window_end]).toEqual(['08:00:00', null]);
+    const undo = w.rebooker.calls.at(-1);
+    expect(undo.win).toEqual({ start: '08:00', end: null });
+    expect(undo.options.clearWindowEnd).toBe(true);
+  });
+
+  test('a visit already back on its open start needs no undo; one given an end by a person is not touched', async () => {
+    const w = openWorld();
+    // Recovery of a hand-built journal: the step landed (a at 12:00, open) and the process stopped.
+    const step = { id: 'a', fromStart: H(8), toStart: H(12), widthMin: 90, openEnd: true, state: 'done' };
+    const original = { ...w.db.rows.find((r) => r.id === 'a') };
+    step.before = applyInternals.fingerprintOf(original, w.deps);
+    step.after = applyInternals.fingerprintOf(applyInternals.afterStep(original, step), w.deps);
+    expect(applyInternals.afterStep(original, step).window_end).toBeNull();
+    Object.assign(w.db.rows.find((r) => r.id === 'a'), { window_start: '12:00:00', window_end: null });
+    w.db.plans[0] = { id: 'plan-1', service_date: DATE, technician_id: TECH, apply_status: null, apply_started_at: '2026-11-04T04:41:00Z', apply_steps: JSON.stringify({ version: 1, routeBefore: {}, routeAfter: {}, complete: false, steps: [step] }) };
+    let out = await recoverInterrupted({ conn: w.conn, deps: w.deps, plans: await findInterrupted(w.conn) });
+    expect(out[0]).toMatchObject({ status: 'rolled_back' });
+    expect(w.rebooker.calls.map((c) => c.win)).toEqual([{ start: '08:00', end: null }]);
+    // Now a person gave the visit at its old start an explicit end: it is theirs.
+    Object.assign(w.db.rows.find((r) => r.id === 'a'), { window_start: '08:00:00', window_end: '09:30:00' });
+    w.db.plans[0] = { ...w.db.plans[0], apply_status: null, apply_steps: JSON.stringify({ version: 1, routeBefore: {}, routeAfter: {}, complete: false, steps: [{ ...step, undo: undefined }] }) };
+    w.rebooker.calls.length = 0;
+    out = await recoverInterrupted({ conn: w.conn, deps: w.deps, plans: await findInterrupted(w.conn) });
+    expect(out[0]).toMatchObject({ status: 'failed', reason: 'rollback_failed:DIVERGED' });
+    expect(w.rebooker.calls).toHaveLength(0);
   });
 });
 

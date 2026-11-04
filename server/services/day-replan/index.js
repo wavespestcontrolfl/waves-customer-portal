@@ -264,13 +264,16 @@ async function attachPrefs(conn, entries) {
 function plannerStop(group) {
   const lead = group[0].row;
   const start = hhmmToMin(lead.window_start);
-  const widthOf = (r) => Math.max(0, (r.window_end ? hhmmToMin(r.window_end) : start + 60) - start);
+  // A booked end is the window; with none, the visit holds its estimated duration (as rowHours and the app's occupancy do), else 60.
+  const widthOf = (r) => Math.max(0, (r.window_end ? hhmmToMin(r.window_end) : start + (Number(r.estimated_duration_minutes) || 60)) - start);
   return {
     id: lead.id,
     lat: Number(lead.lat),
     lng: Number(lead.lng),
     slotStartMin: start,
     slotWidthMin: Math.max(...group.map((e) => widthOf(e.row))),
+    // No booked end: a move keeps it open (the writer clears the end instead of persisting one) and a rollback restores NULL.
+    openEnd: group.length === 1 && !lead.window_end,
     workMin: group.length > 1 ? coVisitMinutes(group.map((e) => e.row)) : workDuration(lead),
     movable: group.every((e) => !e.why),
     pref: group[0].pref || null,
@@ -563,4 +566,4 @@ function applyDeps() {
   };
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, plannerStop, versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };

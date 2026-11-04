@@ -51,6 +51,16 @@ describe('sequenceMoves', () => {
     for (const m of moves) expect(steps.filter((s) => s.id === m.id).at(-1).toStart).toBe(m.toStart);
   });
 
+  test('an open-ended 90-minute visit holds two hours, so no visit is sequenced onto the second one', () => {
+    expect(hoursMask(H(12), 90)).toBe(mask(12, 13));
+    // b may not land on hour 13: a's 90 minutes from 12:00 run into it.
+    expect(sequenceMoves({ moves: [move('a', 8, 12, { widthMin: 90, openEnd: true }), move('b', 9, 13)], heldMask: 0, options })).toBeNull();
+    const moves = [move('a', 8, 12, { widthMin: 90, openEnd: true }), move('b', 9, 14)];
+    const steps = sequenceMoves({ moves, heldMask: 0, options });
+    expect(steps).not.toBeNull();
+    replay(moves, 0, steps);
+  });
+
   test('a three-visit cycle needs one temporary hour', () => {
     const moves = [move('a', 8, 9), move('b', 9, 10), move('c', 10, 8)];
     const steps = sequenceMoves({ moves, heldMask: 0, options });

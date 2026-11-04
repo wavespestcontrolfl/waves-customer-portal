@@ -40,6 +40,12 @@
  * time is synced again through syncMovedReminders (final hours only; never a parking hour, never a stuck visit),
  * which also closes an undo, or a forward step, that committed and stopped before its sync.
  *
+ * A visit with NO booked end (window_end NULL) holds its estimated duration (else 60 minutes) for occupancy, as the
+ * app does, and keeps no end through a move: the rebooker is given `end: null` with `clearWindowEnd` (the journal
+ * step carries `openEnd`), the snapshot's end stays null, and an undo restores NULL the same way, never an explicit
+ * end. The estimated duration is part of every fingerprint and of each move's CAS, so a staff edit of it after the
+ * plan was simulated misses the move, the undo fence and the final fence.
+ *
  * No step touches route_order: every move runs the rebooker with placeInRoute false (forward, temporary and undo
  * alike), because placeInRoute renumbers the day's OTHER stops and a rollback could not restore numbers a step
  * changed. A same-day, same-technician window move leaves route_order alone in the rebooker (it clears it only for a
@@ -131,7 +137,7 @@ async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
 
 const READ_COLUMNS = [
   'customer_id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-  'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed',
+  'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', 'estimated_duration_minutes',
 ];
 
 /** The row the CAS is pinned on: the validated snapshot when there is one, else a fresh read (a rollback or recovery). */
@@ -152,8 +158,8 @@ const time8 = (value) => {
 
 /**
  * What this writer commits to, as a short hash (ids and minutes never leave the row as text): the fields an undo
- * would overwrite or put in a different place - date, window, technician, status, staff locks, visit record and the
- * stored location. Not the customer's confirmation or the due date, which a move leaves alone and an undo does not
+ * would overwrite or put in a different place - date, window, duration, technician, status, staff locks, visit record and
+ * the stored location. Not the customer's confirmation or the due date, which a move leaves alone and an undo does not
  * touch. Read from a snapshot or a fresh row alike, so the journal can say what the visit looked like before a step
  * and what it must look like after it.
  */
@@ -161,6 +167,8 @@ function fingerprintOf(row, deps) {
   const parts = [
     toDateStr(row.scheduled_date), time8(row.window_start), time8(row.window_end), row.technician_id == null ? null : String(row.technician_id),
     row.status, row.auto_dispatch_locked === true, row.auto_dispatch_excluded === true, row.visit_id == null ? null : String(row.visit_id),
+    // The duration the route was simulated with: a staff edit of it after the plan must miss the CAS and the fences.
+    row.estimated_duration_minutes == null ? null : Number(row.estimated_duration_minutes),
     ...deps.locationFields.map((field) => {
       const value = pinned(row, field);
       return value == null ? null : String(value);
@@ -171,7 +179,7 @@ function fingerprintOf(row, deps) {
 
 /** The visit as this writer's step leaves it: the same row, at the step's new window. */
 const afterStep = (row, step) => ({
-  ...row, window_start: `${minToHhmm(step.toStart)}:00`, window_end: `${minToHhmm(step.toStart + step.widthMin)}:00`,
+  ...row, window_start: `${minToHhmm(step.toStart)}:00`, window_end: step.openEnd ? null : `${minToHhmm(step.toStart + step.widthMin)}:00`,
 });
 
 /**
@@ -179,11 +187,12 @@ const afterStep = (row, step) => ({
  * `recheck` is false for a rollback step, which must be able to put a visit back even after the 24-hour reach has
  * moved in. `syncReminder` is false for a temporary hour. A committed step advances the snapshot (and only that).
  */
-async function moveVisit(conn, deps, { id, dateStr, fromStart, toStart, widthMin, recheck, syncReminder = true, snapshot = null }) {
+async function moveVisit(conn, deps, { id, dateStr, fromStart, toStart, widthMin, openEnd = false, recheck, syncReminder = true, snapshot = null }) {
   const row = await pinRow(conn, deps, { id, snapshot });
   if (toDateStr(row.scheduled_date) !== dateStr || norm5(row.window_start) !== minToHhmm(fromStart)) {
     throw coded('CHANGED_SINCE_PLAN', 'the visit is not where the step expects it');
   }
+  // The reminder sync reads the start; an open-ended visit keeps NO end (the rebooker writes null with clearWindowEnd).
   const best = { date: dateStr, start_time: minToHhmm(toStart), end_time: minToHhmm(toStart + widthMin) };
   const options = {
     seriesPolicy: 'single',
@@ -203,18 +212,21 @@ async function moveVisit(conn, deps, { id, dateStr, fromStart, toStart, widthMin
       status: row.status,
       scheduled_date: toDateStr(row.scheduled_date),
       window_start: row.window_start,
-      window_end: row.window_end,
+      window_end: row.window_end ?? null,
       technician_id: row.technician_id,
+      // Pinned like the rest: a duration edited since the plan was simulated misses the CAS (null stays IS NULL).
+      estimated_duration_minutes: row.estimated_duration_minutes ?? null,
       // Null for an ungrouped visit (one grouped meanwhile misses the CAS), or the visit record of a visit that is alone
       // in it (a grouped one never gets here: the recheck refuses it).
       visit_id: row.visit_id ?? null,
       ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', ...deps.locationFields].map((field) => [field, pinned(row, field)])),
     },
+    ...(openEnd ? { clearWindowEnd: true } : {}),
     ...(recheck ? { beforeMove: (trx) => recheckVisit(trx, deps, { id, dateStr, toStart }) } : {}),
   };
-  const result = (await deps.rebooker.reschedule(id, dateStr, { start: best.start_time, end: best.end_time }, REASON_CODE, INITIATOR, options)) || {};
+  const result = (await deps.rebooker.reschedule(id, dateStr, { start: best.start_time, end: openEnd ? null : best.end_time }, REASON_CODE, INITIATOR, options)) || {};
   // From here the move is committed: the snapshot follows it, and a failure below is still rolled back with the rest.
-  if (snapshot) Object.assign(snapshot, { window_start: `${best.start_time}:00`, window_end: `${best.end_time}:00` });
+  if (snapshot) Object.assign(snapshot, { window_start: `${best.start_time}:00`, window_end: openEnd ? null : `${best.end_time}:00` });
   try {
     // A customer text here would break the owner's rule, so stop and put the day back.
     if (result.smsSent === true) throw coded('CUSTOMER_TEXT_SENT', `visit ${id}: the rebooker reported a customer text`);
@@ -266,7 +278,7 @@ async function persistRouteOrder(conn, deps, { dateStr, techId, order, finalStar
       .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
       .forUpdate()
       .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status', 'auto_dispatch_locked', 'auto_dispatch_excluded',
-        'visit_id', 'customer_confirmed', 'reservation_expires_at', 'updated_at', ...deps.locationFields);
+        'visit_id', 'customer_confirmed', 'reservation_expires_at', 'updated_at', 'estimated_duration_minutes', ...deps.locationFields);
     const want = new Set(order.map(String));
     if (rows.length !== want.size || rows.some((r) => !want.has(String(r.id)))) throw coded('ROUTE_CHANGED', 'the technician\'s stops are not the planned ones');
     for (const r of rows) {
@@ -328,8 +340,9 @@ async function undoStep(conn, deps, { dateStr, journal, step, planId }) {
   const row = await conn('scheduled_services').where({ id: step.id }).first(...READ_COLUMNS, ...deps.locationFields);
   if (!row) throw coded('DIVERGED', `visit ${step.id} no longer exists`);
   const now = fingerprintOf(row, deps);
+  // An open-ended visit's old window has NO end: it is back only when the end is null again.
   const onOldWindow = toDateStr(row.scheduled_date) === dateStr && norm5(row.window_start) === minToHhmm(step.fromStart)
-    && norm5(row.window_end) === minToHhmm(step.fromStart + step.widthMin);
+    && norm5(row.window_end) === (step.openEnd ? null : minToHhmm(step.fromStart + step.widthMin));
   // Where the step started: it never landed, or its undo already did (a person may have changed other things since;
   // the window is where we would put it, so there is nothing of ours to touch).
   if (now === step.before || onOldWindow) {
@@ -342,7 +355,7 @@ async function undoStep(conn, deps, { dateStr, journal, step, planId }) {
   // Going back to a temporary hour is not a landing: its reminder is left alone, as it was on the way out.
   const backToTemp = journal.steps.some((s) => s.temp && s.id === step.id && s.toStart === step.fromStart);
   await moveVisit(conn, deps, {
-    id: step.id, dateStr, fromStart: step.toStart, toStart: step.fromStart, widthMin: step.widthMin, recheck: false, syncReminder: !backToTemp, snapshot: row,
+    id: step.id, dateStr, fromStart: step.toStart, toStart: step.fromStart, widthMin: step.widthMin, openEnd: step.openEnd === true, recheck: false, syncReminder: !backToTemp, snapshot: row,
   });
   step.undo = 'done';
   await tryJournal(conn, planId, journal);
@@ -458,7 +471,7 @@ function movesFrom(fresh) {
     const group = groupOf.get(String(change.id));
     if (!stop || !group || group.length !== 1) return null;
     moves.push({
-      id: stop.id, fromStart: change.fromMin, toStart: change.toMin, widthMin: stop.slotWidthMin, workMin: stop.workMin, pref: stop.pref || null,
+      id: stop.id, fromStart: change.fromMin, toStart: change.toMin, widthMin: stop.slotWidthMin, openEnd: stop.openEnd === true, workMin: stop.workMin, pref: stop.pref || null,
     });
   }
   return moves;
@@ -515,14 +528,14 @@ function finalRoute(fresh, env, techId) {
  * completion after it. A crash between the two leaves an intent whose visit is either still as it was or already
  * as the step makes it; both are told apart by the fingerprints.
  */
-async function forwardStep(conn, deps, { dateStr, planId, journal, step, fromStart, widthMin, snapshot }) {
-  const record = { id: step.id, fromStart, toStart: step.toStart, widthMin, temp: step.temp, state: 'intent', before: fingerprintOf(snapshot, deps) };
+async function forwardStep(conn, deps, { dateStr, planId, journal, step, fromStart, widthMin, openEnd = false, snapshot }) {
+  const record = { id: step.id, fromStart, toStart: step.toStart, widthMin, ...(openEnd ? { openEnd: true } : {}), temp: step.temp, state: 'intent', before: fingerprintOf(snapshot, deps) };
   record.after = fingerprintOf(afterStep(snapshot, record), deps);
   journal.steps.push(record);
   await writeJournal(conn, planId, journal);
   try {
     await moveVisit(conn, deps, {
-      id: record.id, dateStr, fromStart, toStart: record.toStart, widthMin, recheck: true, syncReminder: !step.temp, snapshot,
+      id: record.id, dateStr, fromStart, toStart: record.toStart, widthMin, openEnd, recheck: true, syncReminder: !step.temp, snapshot,
     });
   } catch (err) {
     // The rebooker's refusals (a missed CAS, a taken hour, a recheck) commit nothing: the step is marked so an undo
@@ -541,10 +554,11 @@ async function forwardStep(conn, deps, { dateStr, planId, journal, step, fromSta
 /** Writes the steps in order, journaling each (intent before, done after); throws the failing step's error. */
 async function runSteps(conn, deps, { steps, moves, dateStr, planId, journal, snapshots }) {
   const widthOf = new Map(moves.map((m) => [m.id, m.widthMin]));
+  const openEnd = new Map(moves.map((m) => [m.id, m.openEnd === true]));
   const where = new Map(moves.map((m) => [m.id, m.fromStart]));
   for (const step of steps) {
     await forwardStep(conn, deps, {
-      dateStr, planId, journal, step, fromStart: where.get(step.id), widthMin: widthOf.get(step.id), snapshot: snapshots.get(String(step.id)),
+      dateStr, planId, journal, step, fromStart: where.get(step.id), widthMin: widthOf.get(step.id), openEnd: openEnd.get(step.id), snapshot: snapshots.get(String(step.id)),
     });
     where.set(step.id, step.toStart);
   }

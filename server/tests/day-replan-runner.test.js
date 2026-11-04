@@ -332,6 +332,16 @@ describe('shadow run', () => {
     });
   });
 
+  describe('open-ended visits', () => {
+    const stopOf = (extra) => _internals.plannerStop([{ row: { ...zigzagRows()[0], ...extra }, why: null, pref: null }]);
+
+    test('a booked end is the width; a visit with no end holds its estimated duration (else 60) and is marked open-ended', () => {
+      expect(stopOf({})).toMatchObject({ slotWidthMin: 60, openEnd: false });
+      expect(stopOf({ window_end: null, estimated_duration_minutes: 90 })).toMatchObject({ slotWidthMin: 90, openEnd: true });
+      expect(stopOf({ window_end: null, estimated_duration_minutes: null })).toMatchObject({ slotWidthMin: 60, openEnd: true });
+    });
+  });
+
   describe('dry window', () => {
     const info = (extra = {}) => ({ mode: 'true', hours: 4, class: 'long', source: 'service_rule', window_key: 'dry_long', customer_time: false, ...extra });
 

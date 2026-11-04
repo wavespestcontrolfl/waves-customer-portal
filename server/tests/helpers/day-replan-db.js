@@ -130,13 +130,15 @@ function fakeRebooker(db, conn, { failWhen = () => false, textWhen = () => false
       if (String(r[key] ?? null) !== String(value ?? null)) throw Object.assign(new Error('The visit changed'), { code: 'CAS_MISS', statusCode: 409 });
     }
     const start = toMin(win.start);
-    const end = toMin(win.end);
+    // No end given: a kept end stays; clearWindowEnd opens it. Occupancy is judged on the span the row will hold.
+    const end = win.end ? toMin(win.end) : start + (Number(r.estimated_duration_minutes) || 60);
     const clash = db.rows.find((o) => o.id !== id && o.scheduled_date === date && o.window_start
       && (techBlind || o.technician_id == null || o.technician_id === r.technician_id)
-      && toMin(o.window_start) < end && toMin(o.window_end) > start && !['cancelled', 'completed'].includes(o.status));
+      && toMin(o.window_start) < end
+      && (o.window_end ? toMin(o.window_end) : toMin(o.window_start) + (Number(o.estimated_duration_minutes) || 60)) > start && !['cancelled', 'completed'].includes(o.status));
     if (clash) throw Object.assign(new Error('That time is taken'), { code: 'SLOT_TAKEN', statusCode: 409 });
     r.window_start = `${win.start}:00`;
-    r.window_end = `${win.end}:00`;
+    r.window_end = win.end ? `${win.end}:00` : (options.clearWindowEnd === true ? null : r.window_end);
     r.updated_at = new Date();
     return { landedStatus: r.status, smsSent: textWhen(id, win) };
   });
