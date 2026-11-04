@@ -1440,9 +1440,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // idempotent replay of a booking whose bell already landed.
     // relay_hot_lead: keyed per call, so a hit is a reconnect's or the
     // hourly sweep's retry of a page that already landed.
-    // new_lead: only an unknown sender's text thread passes a key (one row
-    // per sender, rewritten by each new text), so a plain hit is the same
-    // text delivered again (a webhook retry), which already pushed.
+    // new_lead, on a thread row only (refreshOnDedupe: an unknown sender's
+    // texts to a website line, one row rewritten by each new text): a plain
+    // hit there is the same text delivered again, which already pushed.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1546,7 +1546,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || triggerKey === 'new_lead')) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

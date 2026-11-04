@@ -688,6 +688,18 @@ describe('triggerNotification bell outcome', () => {
       { dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
     expect(stats).toMatchObject({ bellWritten: true, deduped: true, push: null });
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+
+    // The same for an unknown sender's thread row on a website line (new_lead, refreshed in place); a keyed
+    // new_lead that is not a thread row still pushes on a hit.
+    const sid = `SM${'0123456789abcdef'.repeat(2)}`;
+    const text = { name: 'Unknown sender', twilioSid: sid, phone: '+12025550101', message: 'Second text', source: 'wavespestcontrol.com', textCount: 1 };
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'tracking-row', deduped: true });
+    expect(await triggerNotification('new_lead', text, { dedupeKey: 'sms-tracking-thread:abc', refreshOnDedupe: true, bumpOnRefresh: true }))
+      .toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'keyed-lead-row', deduped: true });
+    await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc' });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalled();
   });
 
   // A second same-day callback on the SAME open promise dedupes to the

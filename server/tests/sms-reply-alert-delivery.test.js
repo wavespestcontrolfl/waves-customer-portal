@@ -305,6 +305,9 @@ describe('tracking-line unknown-sender thread bell', () => {
     // The known thread's count rules, decided under notifyAdmin's lock: a newer text on the open row counts one more.
     const open = { read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-t0', textCount: 1, receivedAtMs: 0 } } };
     expect(await options.refreshPayload(open, open.metadata.payload)).toEqual({ payload: { textCount: 2 }, keepContent: false });
+    // A redelivery of the text already on the row (a webhook retry) keeps the count.
+    const shown = { read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-t1', textCount: 2, receivedAtMs: 0 } } };
+    expect(await options.refreshPayload(shown, shown.metadata.payload)).toEqual({ payload: { textCount: 2 } });
   });
 
   test('a later text from the same number keys the same row; another number keys its own', async () => {
