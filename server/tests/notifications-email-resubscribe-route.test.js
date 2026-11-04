@@ -188,6 +188,21 @@ describe('account holder switch', () => {
     expect(storedHolder()).toBe(true);
   });
 
+  test('gate on: the release address joins the save\'s one sorted address-key lock set (no second, later key lock)', async () => {
+    gateOn();
+    const Lock = require('../utils/customer-comms-lock');
+    const spy = jest.spyOn(Lock, 'lockAssignedCustomerEmails');
+    try {
+      expect((await holderPut({ emailEnabled: true })).status).toBe(200);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(trx, expect.objectContaining({ email: 'pat@example.com' }));
+      expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith(
+        expect.objectContaining({ email: 'pat@example.com' }), { dbh: trx });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('gate on: a failed SendGrid clear releases nothing, still saves ON, and the next GET still shows OFF (retryable)', async () => {
     gateOn();
     preClear = NOT_CLEARED;

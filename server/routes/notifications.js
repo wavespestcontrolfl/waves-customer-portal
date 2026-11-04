@@ -1147,7 +1147,14 @@ router.put('/preferences', async (req, res, next) => {
       // locks, like every customer address writer: a bearer-link handoff
       // that read the address as unowned commits before this claim or
       // re-judges ownership after it.
-      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { ...propertyDbUpdates, ...channelDbUpdates });
+      // GATE_PORTAL_EMAIL_RESUBSCRIBE: the resubscribe release below needs the
+      // holder's own address key too. It joins this ONE sorted key set, never a
+      // second, later acquisition, so two writers cannot take the same keys in
+      // opposite orders; the release's own lockCustomerEmail then re-enters.
+      const resubscribeEmail = preClear ? await holderEmailOnFile(req.customerId, trx) : '';
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, {
+        ...propertyDbUpdates, ...channelDbUpdates, ...(resubscribeEmail ? { email: resubscribeEmail } : {}),
+      });
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });
@@ -1163,7 +1170,7 @@ router.put('/preferences', async (req, res, next) => {
       // customer's own email unsubscribe in the same transaction.
       if (preClear) {
         await releaseOwnUnsubscribesOnSwitchOn({
-          trx, email: await holderEmailOnFile(req.customerId, trx), pre: preClear, customerId: req.customerId, actor: 'holder' });
+          trx, email: resubscribeEmail, pre: preClear, customerId: req.customerId, actor: 'holder' });
       }
     });
     if (billingDeliveryError) return res.status(409).json({ error: billingDeliveryError });
