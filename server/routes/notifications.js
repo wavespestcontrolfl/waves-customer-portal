@@ -503,16 +503,30 @@ async function holderOffSaveIsEcho(customerId, updates, stored) {
     && emailSwitchReflectsUnsubscribe(await holderEmailOnFile(customerId));
 }
 
-// Turning Email messages ON releases the customer's own unsubscribe in the
-// save's transaction; the caller clears SendGrid after the commit.
-async function releaseOwnUnsubscribesOnSwitchOn({ trx, email, customerId, actor, contactSlot }) {
-  if (!email || !portalEmailResubscribeLive()) return [];
-  return require('../services/email-resubscribe').releaseOwnUnsubscribes(
-    { email, customerId, actor, ...(actor === 'contact' ? { contactSlot } : {}) }, { dbh: trx });
+// Turning Email messages ON releases the customer's own unsubscribe, in two
+// steps. First, BEFORE the save's transaction, SendGrid's own list is cleared
+// (a failed clear leaves the local rows active, so the switch keeps reading OFF
+// and the customer can try again). Then, inside the transaction under the
+// address lock, only the rows whose list SendGrid confirmed are released, and
+// only if the address on file is still the one that was cleared. If the save is
+// then refused (removed contact, consent_required, email_unavailable) SendGrid
+// may already be cleared; that is harmless because the still-active local rows
+// keep blocking the send path.
+async function preClearOwnUnsubscribes(switchOn, emailOnFile) {
+  if (!switchOn || !portalEmailResubscribeLive()) return null;
+  const email = await emailOnFile();
+  if (!email) return null;
+  return { email, ...(await require('../services/email-resubscribe').clearSendgridBeforeRelease(email)) };
 }
 
-async function clearReleasedUnsubscribes(released) {
-  if (released.length) await require('../services/email-resubscribe').clearSendgridUnsubscribes(released);
+async function releaseOwnUnsubscribesOnSwitchOn({ trx, email, pre, customerId, actor, contactSlot }) {
+  if (!pre || !pre.clearedIds.length) return;
+  const Resub = require('../services/email-resubscribe');
+  if (Resub.normalizeEmail(email) !== Resub.normalizeEmail(pre.email)) return;
+  await Resub.releaseOwnUnsubscribes({
+    email, customerId, actor, onlyIds: pre.clearedIds, sendgridClear: pre.clearById,
+    ...(actor === 'contact' ? { contactSlot } : {}),
+  }, { dbh: trx });
 }
 
 // Build the account-level preferences payload: per-property toggles/contacts
@@ -864,7 +878,8 @@ router.put('/contact-preferences', async (req, res, next) => {
     // holder turned off never do.
     if (updates.consentAttested === true) patch.consent_attested_at = new Date();
 
-    let releasedUnsubscribes = [];
+    const preClear = await preClearOwnUnsubscribes(
+      patch.email_enabled === true, () => contactEmailOnFile(req.customer, contact.phoneKey));
     const outcome = await withCustomerCommsLock(db, req.customerId, async (trx) => {
       // An attestation confirms this phone's ask and runs the consent
       // follow-up (onRecipientConfirmed), which locks the row of EVERY
@@ -908,8 +923,8 @@ router.put('/contact-preferences', async (req, res, next) => {
       }
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.customerId, contact.phone, patch);
       if (patch.email_enabled === true) {
-        releasedUnsubscribes = await releaseOwnUnsubscribesOnSwitchOn({
-          trx, email: contactEmail, customerId: req.customerId, actor: 'contact', contactSlot: contact.slot });
+        await releaseOwnUnsubscribesOnSwitchOn({
+          trx, email: contactEmail, pre: preClear, customerId: req.customerId, actor: 'contact', contactSlot: contact.slot });
       }
       if (updates.consentAttested !== true) return 'saved';
       // The in-app attestation confirms THIS customer's pending or
@@ -935,8 +950,6 @@ router.put('/contact-preferences', async (req, res, next) => {
     if (outcome === 'consent_required') {
       return res.status(400).json({ error: 'Please confirm the text-message consent statement to receive texts at this number.', code: 'CONSENT_REQUIRED' });
     }
-
-    await clearReleasedUnsubscribes(releasedUnsubscribes);
 
     logger.info(`Contact notification prefs updated for ${req.customerId} (slot ${contact.slot}): ${JSON.stringify({ fields: Object.keys(updates).sort() })}`);
     res.json({ success: true, ...(await contactPreferencePayload(req)) });
@@ -1111,7 +1124,8 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     let billingDeliveryError;
-    let releasedUnsubscribes = [];
+    const preClear = await preClearOwnUnsubscribes(
+      updates.emailEnabled === true, () => holderEmailOnFile(req.customerId));
     await db.transaction(async (trx) => {
       for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
       // Row before key, like every other notification_prefs writer in this
@@ -1163,13 +1177,12 @@ router.put('/preferences', async (req, res, next) => {
       }
       // GATE_PORTAL_EMAIL_RESUBSCRIBE: turning Email messages ON releases the
       // customer's own email unsubscribe in the same transaction.
-      if (updates.emailEnabled === true && portalEmailResubscribeLive()) {
-        releasedUnsubscribes = await releaseOwnUnsubscribesOnSwitchOn({
-          trx, email: await holderEmailOnFile(req.customerId, trx), customerId: req.customerId, actor: 'holder' });
+      if (preClear) {
+        await releaseOwnUnsubscribesOnSwitchOn({
+          trx, email: await holderEmailOnFile(req.customerId, trx), pre: preClear, customerId: req.customerId, actor: 'holder' });
       }
     });
     if (billingDeliveryError) return res.status(409).json({ error: billingDeliveryError });
-    await clearReleasedUnsubscribes(releasedUnsubscribes);
 
     logger.info(`Notification prefs updated for ${req.customerId}: ${JSON.stringify({
       fields: Object.keys(updates).sort(),

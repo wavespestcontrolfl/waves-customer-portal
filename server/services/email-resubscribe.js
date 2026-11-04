@@ -13,21 +13,36 @@
 //   - group_key NULL (blocks every stream) or 'service_operational'.
 //     'marketing_newsletter' is NOT released here: newsletter consent has its
 //     own double opt-in flow;
-//   - created by the customer. The only code path that inserts an
-//     'unsubscribe' row for a customer action is the SendGrid event webhook
-//     (webhooks-sendgrid.js recordEmailSuppressionForEvent, source
-//     'sendgrid_event_webhook'). The admin create route defaults to
-//     'admin_manual' and stays staff-owned.
+//   - made by the customer, not by staff. Two tests, because `source` is
+//     mutable (the SendGrid webhook overwrites an existing active row's source
+//     with 'sendgrid_event_webhook' when the same event arrives later):
+//       1. source is one of the three customer-origin sources that exist in
+//          prod: 'sendgrid_event_webhook' (webhooks-sendgrid.js
+//          recordEmailSuppressionForEvent), and 'sendgrid_asm_backfill' and
+//          'sendgrid_dropped_backfill_2026_06_01'. The two backfill sources are
+//          NOT in the repo: one-off June 2026 prod imports of SendGrid's own
+//          unsubscribe lists (unsubscribes the customers made at SendGrid).
+//          Prod on 2026-11-04: 5 active global webhook unsubscribes, 2 active
+//          service_operational asm-backfill rows, 1 active service_operational
+//          dropped-webhook row, 1 active service group_unsubscribe; no
+//          admin_manual rows; no row carries metadata.created_by.
+//       2. metadata has no 'created_by' key. The admin create route
+//          (admin-email-templates.js POST /suppressions) always writes that
+//          key (value may be null) and the webhook's metadata merge never
+//          writes it, so it survives the source overwrite and marks staff rows.
 //
 // SendGrid keeps its own unsubscribe lists. Left alone, the next send is
-// dropped by SendGrid and the webhook re-creates the local block, so the
-// release also clears SendGrid (after the local transaction commits).
+// dropped by SendGrid and the webhook re-creates the local block. So the order
+// is: clear SendGrid FIRST (clearSendgridBeforeRelease, before the route's
+// transaction), then release locally only the rows whose SendGrid list was
+// confirmed cleared. A failed clear leaves the rows active: the switch keeps
+// reading OFF and the customer can simply try again.
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { suppressionCoversEmail } = require('../utils/email-equivalence');
 
-const RELEASABLE_SOURCES = ['sendgrid_event_webhook'];
+const RELEASABLE_SOURCES = ['sendgrid_event_webhook', 'sendgrid_asm_backfill', 'sendgrid_dropped_backfill_2026_06_01'];
 const SERVICE_GROUP_KEY = 'service_operational';
 const RELEASE_CONSENT_SOURCE = 'portal_email_switch';
 const SENDGRID_TIMEOUT_MS = 8000;
@@ -44,6 +59,7 @@ async function releasableUnsubscribes(email, { dbh = db } = {}) {
     .where(suppressionCoversEmail(normalized))
     .where({ status: 'active', suppression_type: 'unsubscribe' })
     .whereIn('source', RELEASABLE_SOURCES)
+    .whereRaw("(COALESCE(metadata, '{}'::jsonb) -> 'created_by') IS NULL")
     .where(function groupScope() {
       this.whereNull('group_key').orWhere('group_key', SERVICE_GROUP_KEY);
     })
@@ -61,14 +77,18 @@ async function hasReleasableUnsubscribe(email, { dbh = db } = {}) {
   }
 }
 
-// Runs on the caller's transaction. Takes the shared per-address lock the
-// SendGrid webhook writer takes, so a block written right now is either seen
-// here or lands after this release.
-async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = null }, { dbh = db } = {}) {
+// Runs on the caller's transaction, after clearSendgridBeforeRelease. Takes the
+// shared per-address lock the SendGrid webhook writer takes, re-reads the
+// releasable rows for the address as it stands under the lock, and releases
+// only those whose id is in `onlyIds` (SendGrid confirmed that list cleared).
+// `sendgridClear` maps row id -> { ok: true, status, at }, written in the same
+// update. No onlyIds = nothing released.
+async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = null, onlyIds = [], sendgridClear = {} }, { dbh = db } = {}) {
   const normalized = normalizeEmail(email);
-  if (!normalized) return [];
+  if (!normalized || !onlyIds.length) return [];
   await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, normalized);
-  const rows = await releasableUnsubscribes(normalized, { dbh });
+  const allowed = new Set(onlyIds.map(String));
+  const rows = (await releasableUnsubscribes(normalized, { dbh })).filter((row) => allowed.has(String(row.id)));
   const now = new Date();
   const released = [];
   for (const row of rows) {
@@ -79,6 +99,7 @@ async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = 
       released_for_customer_id: customerId == null ? null : String(customerId),
       actor,
       contact_slot: contactSlot,
+      sendgrid_clear: sendgridClear[row.id] || null,
     };
     const [updated] = await dbh('email_suppressions')
       .where({ id: row.id, status: 'active' })
@@ -97,17 +118,40 @@ async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = 
 }
 
 async function sendgridDelete(path) {
-  const res = await fetch(`https://api.sendgrid.com/v3${path}`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${process.env.SENDGRID_API_KEY}` },
-    signal: AbortSignal.timeout(SENDGRID_TIMEOUT_MS),
-  });
-  // 404 = the address was not on that list: already clear.
-  if (res.ok || res.status === 404) return { ok: true, status: res.status };
-  return { ok: false, status: res.status };
+  try {
+    const res = await fetch(`https://api.sendgrid.com/v3${path}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${process.env.SENDGRID_API_KEY}` },
+      signal: AbortSignal.timeout(SENDGRID_TIMEOUT_MS),
+    });
+    // 404 = the address was not on that list: already clear.
+    if (res.ok || res.status === 404) return { ok: true, status: res.status };
+    return { ok: false, status: res.status };
+  } catch (err) {
+    return { ok: false, reason: String(err?.name === 'TimeoutError' ? 'timeout' : err?.message || 'error').slice(0, 200) };
+  }
 }
 
-// Distinct stored addresses with the list(s) their released rows came from.
+// One DELETE per list the address's rows came from, in parallel so the worst
+// case stays one timeout. A list that cannot be attempted is a failure.
+async function clearAddressLists(email, { global, service }) {
+  const encoded = encodeURIComponent(email);
+  const serviceGroup = String(process.env.SENDGRID_ASM_GROUP_SERVICE || '').trim();
+  const attempt = (wanted, path, missing) => {
+    if (!wanted) return Promise.resolve(null);
+    if (missing) return Promise.resolve({ ok: false, reason: missing });
+    return sendgridDelete(path);
+  };
+  const noKey = process.env.SENDGRID_API_KEY ? null : 'no_api_key';
+  const [globalResult, serviceResult] = await Promise.all([
+    attempt(global, `/asm/suppressions/global/${encoded}`, noKey),
+    attempt(service, `/asm/groups/${encodeURIComponent(serviceGroup)}/suppressions/${encoded}`,
+      noKey || (serviceGroup ? null : 'service_group_not_configured')),
+  ]);
+  return { global: globalResult, service: serviceResult };
+}
+
+// Distinct stored addresses with the list(s) their rows came from.
 function sendgridTargets(rows) {
   const byEmail = new Map();
   for (const row of rows) {
@@ -121,62 +165,44 @@ function sendgridTargets(rows) {
   return byEmail;
 }
 
-async function clearAddress(email, { global, service }) {
-  const encoded = encodeURIComponent(email);
-  const serviceGroup = String(process.env.SENDGRID_ASM_GROUP_SERVICE || '').trim();
-  const calls = [];
-  if (global) calls.push(`/asm/suppressions/global/${encoded}`);
-  if (service && serviceGroup) calls.push(`/asm/groups/${encodeURIComponent(serviceGroup)}/suppressions/${encoded}`);
-  if (!calls.length) return { ok: false, reason: 'service_group_not_configured' };
-  let outcome = null;
-  for (const path of calls) {
-    const result = await sendgridDelete(path);
-    if (!outcome || !result.ok) outcome = result;
-  }
-  return outcome;
-}
-
-async function recordOutcome(rows, outcome) {
-  const sendgridClear = JSON.stringify({ sendgrid_clear: { ...outcome, at: new Date().toISOString() } });
-  await db('email_suppressions')
-    .whereIn('id', rows.map((r) => r.id))
-    .update({ metadata: db.raw('COALESCE(metadata, \'{}\'::jsonb) || ?::jsonb', [sendgridClear]) });
-}
-
-// Call AFTER the local transaction commits. Best effort: never throws and
-// never fails the customer's save. Returns the per-address outcomes.
-async function clearSendgridUnsubscribes(releasedRows) {
-  const rows = Array.isArray(releasedRows) ? releasedRows : [];
-  if (!rows.length) return [];
-  const outcomes = [];
+// Call BEFORE the route's transaction. Reads the releasable rows (no lock) and
+// clears SendGrid's list for each (global for a NULL-group row, the service ASM
+// group for a service_operational row; the address exactly as stored). Never
+// throws. `clearedIds` = rows whose list SendGrid confirmed cleared (2xx or
+// 404); `clearById` = the note to stamp on each. Anything else (no key, no
+// service group id, timeout, HTTP error) leaves its rows out and is logged.
+async function clearSendgridBeforeRelease(email) {
+  const result = { clearedIds: [], outcomes: [], clearById: {} };
   try {
-    const targets = sendgridTargets(rows);
-    for (const [email, lists] of targets) {
-      const forAddress = rows.filter((r) => String(r.email || '').trim() === email);
-      let outcome;
-      if (!process.env.SENDGRID_API_KEY) {
-        outcome = { ok: false, reason: 'no_api_key' };
-      } else {
-        try {
-          outcome = await clearAddress(email, lists);
-        } catch (err) {
-          outcome = { ok: false, reason: String(err?.name === 'TimeoutError' ? 'timeout' : err?.message || 'error').slice(0, 200) };
+    const rows = await releasableUnsubscribes(email);
+    for (const [stored, lists] of sendgridTargets(rows)) {
+      const results = await clearAddressLists(stored, lists);
+      const at = new Date().toISOString();
+      for (const [list, outcome] of Object.entries(results)) {
+        if (!outcome) continue;
+        result.outcomes.push({ list, ...outcome });
+        if (!outcome.ok) logger.warn(`[email-resubscribe] SendGrid ${list} clear did not complete (${outcome.status || outcome.reason})`);
+      }
+      for (const row of rows.filter((r) => String(r.email || '').trim() === stored)) {
+        const outcome = row.group_key ? results.service : results.global;
+        if (outcome && outcome.ok) {
+          result.clearedIds.push(row.id);
+          result.clearById[row.id] = { ok: true, status: outcome.status, at };
         }
       }
-      if (!outcome.ok) logger.warn(`[email-resubscribe] SendGrid clear did not complete (${outcome.status || outcome.reason})`);
-      outcomes.push({ ...outcome });
-      await recordOutcome(forAddress, outcome).catch((err) => logger.warn(`[email-resubscribe] outcome note failed: ${err.message}`));
     }
   } catch (err) {
-    logger.warn(`[email-resubscribe] SendGrid clear failed: ${err.message}`);
+    logger.warn(`[email-resubscribe] SendGrid pre-clear failed: ${err.message}`);
+    return { clearedIds: [], outcomes: [], clearById: {} };
   }
-  return outcomes;
+  return result;
 }
 
 module.exports = {
   releasableUnsubscribes,
   hasReleasableUnsubscribe,
   releaseOwnUnsubscribes,
-  clearSendgridUnsubscribes,
+  clearSendgridBeforeRelease,
+  normalizeEmail,
   RELEASABLE_SOURCES,
 };

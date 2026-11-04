@@ -6,7 +6,8 @@
 // Gate off: nothing changes (no read, no release, no SendGrid call). Gate on:
 // a customer-made unsubscribe reads as OFF, an OFF save that only echoes that
 // reading is not stored, and an ON save releases the block inside the save's
-// own transaction, then clears SendGrid after it commits.
+// own transaction, but only after SendGrid's own list was cleared BEFORE that
+// transaction, and only the rows SendGrid confirmed.
 // The service's row rules are proven on real SQL in email-resubscribe-postgres.test.js.
 //
 // Real router + real express; the auth middleware is a stand-in.
@@ -23,7 +24,8 @@ jest.mock('../services/service-contact-events', () => ({ recordServiceContactCha
 jest.mock('../services/email-resubscribe', () => ({
   hasReleasableUnsubscribe: jest.fn(),
   releaseOwnUnsubscribes: jest.fn(),
-  clearSendgridUnsubscribes: jest.fn(),
+  clearSendgridBeforeRelease: jest.fn(),
+  normalizeEmail: (email) => String(email || '').trim().toLowerCase(),
 }));
 const mockSession = { current: null };
 jest.mock('../middleware/auth', () => ({
@@ -38,7 +40,7 @@ const router = require('../routes/notifications');
 
 // ── in-memory db ──────────────────────────────────────────────────────────
 let tables;
-let committed;
+let events;
 function builder(table) {
   const conds = [];
   const b = {};
@@ -77,11 +79,11 @@ function builder(table) {
 }
 let trx;
 function installDb() {
-  committed = false;
+  events = [];
   trx = Object.assign((table) => builder(table), { isTransaction: true, raw: async () => {} });
   trx.transaction = async (fn) => fn(trx);
   db.mockImplementation((table) => builder(table));
-  db.transaction = async (fn) => { const out = await fn(trx); committed = true; return out; };
+  db.transaction = async (fn) => { events.push('tx-start'); const out = await fn(trx); events.push('tx-end'); return out; };
   db.raw = async () => {};
   db.fn = { now: () => new Date() };
 }
@@ -107,7 +109,9 @@ afterAll((done) => { server.close(done); });
 
 // `blocked` = the set of addresses the service reports a customer-made unsubscribe for.
 let blocked;
-let clearedAfterCommit;
+const CLEARED = { clearedIds: ['sup-1'], outcomes: [{ list: 'global', ok: true, status: 204 }], clearById: { 'sup-1': { ok: true, status: 204, at: '2026-11-04T12:00:00.000Z' } } };
+const NOT_CLEARED = { clearedIds: [], outcomes: [{ list: 'global', ok: false, status: 500 }], clearById: {} };
+let preClear;
 beforeEach(() => {
   tables = {
     customers: [{ ...HOLDER }],
@@ -117,10 +121,10 @@ beforeEach(() => {
   };
   installDb();
   blocked = new Set(['pat@example.com', 'sam@example.com']);
-  clearedAfterCommit = null;
+  preClear = CLEARED;
   Resub.hasReleasableUnsubscribe.mockReset().mockImplementation(async (email) => blocked.has(email));
-  Resub.releaseOwnUnsubscribes.mockReset().mockImplementation(async ({ email }) => (blocked.has(email) ? [{ id: 'sup-1', email, group_key: null }] : []));
-  Resub.clearSendgridUnsubscribes.mockReset().mockImplementation(async () => { clearedAfterCommit = committed; return []; });
+  Resub.releaseOwnUnsubscribes.mockReset().mockImplementation(async ({ email }) => { events.push('release'); return blocked.has(email) ? [{ id: 'sup-1', email, group_key: null }] : []; });
+  Resub.clearSendgridBeforeRelease.mockReset().mockImplementation(async () => { events.push('sendgrid-clear'); return preClear; });
   mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
   delete process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE;
   process.env.GATE_CONTACT_LOGIN = 'true';
@@ -151,7 +155,7 @@ describe('account holder switch', () => {
     expect(put.status).toBe(200);
     expect(Resub.hasReleasableUnsubscribe).not.toHaveBeenCalled();
     expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect(Resub.clearSendgridUnsubscribes).not.toHaveBeenCalled();
+    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
     expect(storedHolder()).toBe(true);
   });
 
@@ -171,22 +175,45 @@ describe('account holder switch', () => {
     expect((await holderGet()).body.emailEnabled).toBe(true);
   });
 
-  test('gate on: an ON save releases inside the save transaction, then clears SendGrid after the commit', async () => {
+  test('gate on: an ON save clears SendGrid BEFORE the transaction, then releases the confirmed rows inside it', async () => {
     gateOn();
     const res = await holderPut({ emailEnabled: true });
     expect(res.status).toBe(200);
-    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith(
-      { email: 'pat@example.com', customerId: 'cust-1', actor: 'holder' }, { dbh: trx });
-    expect(Resub.clearSendgridUnsubscribes).toHaveBeenCalledWith([{ id: 'sup-1', email: 'pat@example.com', group_key: null }]);
-    expect(clearedAfterCommit).toBe(true);
+    expect(Resub.clearSendgridBeforeRelease).toHaveBeenCalledWith('pat@example.com');
+    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith({
+      email: 'pat@example.com', customerId: 'cust-1', actor: 'holder',
+      onlyIds: ['sup-1'], sendgridClear: CLEARED.clearById,
+    }, { dbh: trx });
+    expect(events).toEqual(['sendgrid-clear', 'tx-start', 'release', 'tx-end']);
     expect(storedHolder()).toBe(true);
   });
 
-  test('gate on, nothing to release: the ON save is as today and SendGrid is not called', async () => {
+  test('gate on: a failed SendGrid clear releases nothing, still saves ON, and the next GET still shows OFF (retryable)', async () => {
+    gateOn();
+    preClear = NOT_CLEARED;
+    const res = await holderPut({ emailEnabled: true });
+    expect(res.status).toBe(200);
+    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
+    expect(storedHolder()).toBe(true);
+    expect((await holderGet()).body.emailEnabled).toBe(false);
+    preClear = CLEARED;
+    await holderPut({ emailEnabled: true });
+    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on: an address that changed between the clear and the lock releases nothing', async () => {
+    gateOn();
+    Resub.clearSendgridBeforeRelease.mockImplementationOnce(async () => { tables.customers[0].email = 'new@example.com'; return CLEARED; });
+    expect((await holderPut({ emailEnabled: true })).status).toBe(200);
+    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
+  });
+
+  test('gate on, nothing to release: the ON save is as today', async () => {
     gateOn();
     blocked.clear();
+    preClear = { clearedIds: [], outcomes: [], clearById: {} };
     expect((await holderPut({ emailEnabled: true })).status).toBe(200);
-    expect(Resub.clearSendgridUnsubscribes).not.toHaveBeenCalled();
+    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
     expect(storedHolder()).toBe(true);
   });
 
@@ -214,7 +241,7 @@ describe('additional contact switch', () => {
     expect((await contactPut({ emailEnabled: true })).status).toBe(200);
     expect(Resub.hasReleasableUnsubscribe).not.toHaveBeenCalled();
     expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect(Resub.clearSendgridUnsubscribes).not.toHaveBeenCalled();
+    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
   });
 
   test('gate on: GET shows OFF for a blocked address and leaves the other fields alone', async () => {
@@ -227,15 +254,34 @@ describe('additional contact switch', () => {
     expect(storedContact()).toBeUndefined();
   });
 
-  test('gate on: an ON save releases the CONTACT address inside the lock transaction, then clears SendGrid after the commit', async () => {
+  test('gate on: an ON save clears SendGrid for the CONTACT address BEFORE the lock transaction, then releases inside it', async () => {
     gateOn();
     const res = await contactPut({ emailEnabled: true });
     expect(res.status).toBe(200);
-    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith(
-      { email: 'sam@example.com', customerId: 'cust-1', actor: 'contact', contactSlot: 1 }, { dbh: trx });
-    expect(Resub.clearSendgridUnsubscribes).toHaveBeenCalledWith([{ id: 'sup-1', email: 'sam@example.com', group_key: null }]);
-    expect(clearedAfterCommit).toBe(true);
+    expect(Resub.clearSendgridBeforeRelease).toHaveBeenCalledWith('sam@example.com');
+    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith({
+      email: 'sam@example.com', customerId: 'cust-1', actor: 'contact', contactSlot: 1,
+      onlyIds: ['sup-1'], sendgridClear: CLEARED.clearById,
+    }, { dbh: trx });
+    expect(events).toEqual(['sendgrid-clear', 'tx-start', 'release', 'tx-end']);
     expect(storedContact()).toBe(true);
+  });
+
+  test('gate on: a failed SendGrid clear releases nothing, still saves ON, and the next GET still shows OFF', async () => {
+    gateOn();
+    preClear = NOT_CLEARED;
+    expect((await contactPut({ emailEnabled: true })).status).toBe(200);
+    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
+    expect(storedContact()).toBe(true);
+    expect((await contactGet()).body.preferences.emailEnabled).toBe(false);
+  });
+
+  test('gate on: a contact address changed by the holder between the clear and the lock releases nothing', async () => {
+    gateOn();
+    mockSession.current = { ...mockSession.current, customer: { ...HOLDER } };
+    Resub.clearSendgridBeforeRelease.mockImplementationOnce(async () => { tables.customers[0].service_contact_email = 'other@example.com'; return CLEARED; });
+    expect((await contactPut({ emailEnabled: true })).status).toBe(200);
+    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
   });
 
   test('gate on: an OFF save that only echoes the reflected block is not stored', async () => {

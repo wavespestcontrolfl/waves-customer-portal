@@ -45,6 +45,25 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     });
   });
 
+  test('the two June 2026 SendGrid-import sources (customer unsubscribes made at SendGrid) release', async () => {
+    await inRolledBackTx(async (trx) => {
+      const email = `${uniq()}@example.com`;
+      const asm = await sup(trx, { email, group_key: 'service_operational', source: 'sendgrid_asm_backfill' });
+      const dropped = await sup(trx, { email, group_key: 'service_operational', source: 'sendgrid_dropped_backfill_2026_06_01' });
+      const rows = await service.releasableUnsubscribes(email, { dbh: trx });
+      expect(rows.map((r) => r.id).sort()).toEqual([asm.id, dropped.id].sort());
+    });
+  });
+
+  test('a staff-made row stays staff-made after the webhook overwrote its source (metadata.created_by survives, even null)', async () => {
+    await inRolledBackTx(async (trx) => {
+      const email = `${uniq()}@example.com`;
+      await sup(trx, { email, metadata: JSON.stringify({ created_by: 'tech-1', reason: 'asked by phone' }) });
+      await sup(trx, { email, metadata: JSON.stringify({ created_by: null }) });
+      expect(await service.releasableUnsubscribes(email, { dbh: trx })).toEqual([]);
+    });
+  });
+
   test('never releasable: newsletter, bounce, spam complaint, do-not-email, staff-made, already released', async () => {
     await inRolledBackTx(async (trx) => {
       const email = `${uniq()}@example.com`;
@@ -68,12 +87,27 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     });
   });
 
+  test('release skips a row that is not in onlyIds, and releases nothing without onlyIds', async () => {
+    await inRolledBackTx(async (trx) => {
+      const email = `${uniq()}@example.com`;
+      const cleared = await sup(trx, { email });
+      const late = await sup(trx, { email, group_key: 'service_operational' });
+      expect((await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder' }, { dbh: trx }))).toEqual([]);
+      const released = await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder', onlyIds: [cleared.id] }, { dbh: trx });
+      expect(released.map((r) => r.id)).toEqual([cleared.id]);
+      expect((await trx('email_suppressions').where({ id: late.id }).first()).status).toBe('active');
+    });
+  });
+
   test('release stamps the rows, keeps earlier metadata, and leaves other blocks active', async () => {
     await inRolledBackTx(async (trx) => {
       const email = `${uniq()}@example.com`;
       const unsub = await sup(trx, { email, metadata: JSON.stringify({ provider: 'sendgrid' }) });
       const bounce = await sup(trx, { email, suppression_type: 'bounce' });
-      const released = await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder' }, { dbh: trx });
+      const note = { ok: true, status: 204, at: new Date().toISOString() };
+      const released = await service.releaseOwnUnsubscribes({
+        email, customerId: 'c-1', actor: 'holder', onlyIds: [unsub.id], sendgridClear: { [unsub.id]: note },
+      }, { dbh: trx });
       expect(released.map((r) => r.id)).toEqual([unsub.id]);
       const after = await trx('email_suppressions').where({ id: unsub.id }).first();
       expect(after).toMatchObject({ status: 'released', consent_source: 'portal_email_switch' });
@@ -81,7 +115,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       expect(after.consent_timestamp).toBeInstanceOf(Date);
       expect(after.metadata).toMatchObject({
         provider: 'sendgrid', released_via: 'portal_email_switch', released_by: null,
-        released_for_customer_id: 'c-1', actor: 'holder', contact_slot: null,
+        released_for_customer_id: 'c-1', actor: 'holder', contact_slot: null, sendgrid_clear: note,
       });
       expect((await trx('email_suppressions').where({ id: bounce.id }).first()).status).toBe('active');
       expect(await service.releasableUnsubscribes(email, { dbh: trx })).toEqual([]);
