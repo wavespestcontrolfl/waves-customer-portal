@@ -428,6 +428,18 @@ for a `silent` push. A new alert type gets a sound by adding a line to the map a
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
 
+The 8 AM banner (owner 2026-11-03, "ok add", choice C; `GATE_MORNING_BANNER`, dark): once a day at 8:00 AM
+ET, `server/services/morning-banner.js` sends ONE phone banner, "N items wait for you" ("1 item waits for you"),
+with the three busiest areas in the text ("Comms 6 · Schedule 3 · Billing 2"). A tap opens the dashboard with the
+alert list open (`/admin/dashboard?bell=open`, read by `NotificationBell`). It counts the open bell alerts that need
+a person: an alert row not done, severity `needs-you` or `broken`, `who` = person, judged by `needs-me.js`
+`mapAlertRow`. It leaves out Activity-only rows, rows sent to Claude, unsorted rows and the dashboard's standing
+counts (an alert row already echoes most of them). With zero items it sends nothing. It is the `waiting_summary`
+trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner per ET day (the send first takes a
+`sms_send_claims` row `morning_banner:<ET date>`, so a deploy overlap or a restart cannot send a second one; a
+day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
+"Morning summary: items waiting for you") or by unsetting the gate. It sends nothing to a customer.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns

@@ -60,6 +60,11 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
 // bank or card, rings beside payment_failed under the same 09-11 ruling. Read only while the gate is on.
 const GATED_TRIGGER_BELL_ALLOWLIST = new Set(['bill_payment_error']);
 
+// GATE_MORNING_BANNER (owner 2026-11-03, "ok add", choice C: "At 8 AM, one banner tells you how many items wait for you,
+// and it opens your alert list"): the morning summary is the one non-customer phone banner the owner asked for. It is
+// pushOnly, so it never writes a bell row, but the policy still gates the push once per event. Read only while the gate is on.
+const MORNING_BANNER_TRIGGER_BELL_ALLOWLIST = new Set(['waiting_summary']);
+
 
 const TRIGGER_BELL_DENYLIST = new Set([
   'payment_succeeded',
@@ -249,12 +254,21 @@ function ringsAsCustomerAlert({ triggerKey = null, declared = null } = {}) {
   return declared?.contact === true || declared?.promise === true || GATED_TRIGGER_BELL_ALLOWLIST.has(triggerKey);
 }
 
+// A trigger on the always-ringing allowlist, or on the morning banner's while GATE_MORNING_BANNER is on (read at call
+// time; guarded like customerAlertsRingLive: a test that mocks feature-gates without the reader reads it as off).
+function onAllowlist(triggerKey) {
+  if (TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;
+  if (!MORNING_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return false;
+  const gates = require('../config/feature-gates');
+  return typeof gates.morningBannerLive === 'function' && gates.morningBannerLive();
+}
+
 async function bellAllowed({ category, triggerKey, options = {}, declared = null } = {}) {
   if (options.bell === true) return true;
   if (options.bell === false) return false;
   // Step 1b: a customer alert rings whatever the steps below say; a site's explicit `bell: false` above still wins.
   if (ringsAsCustomerAlert({ triggerKey, declared })) return true;
-  if (triggerKey && TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;
+  if (triggerKey && onAllowlist(triggerKey)) return true;
   if (triggerKey && TRIGGER_BELL_DENYLIST.has(triggerKey)) return false;
   const overrides = await loadCategoryOverrides();
   if (category && overrides.has(category)) return overrides.get(category) === true;
@@ -279,6 +293,7 @@ module.exports = {
   _private: {
     TRIGGER_BELL_ALLOWLIST,
     GATED_TRIGGER_BELL_ALLOWLIST,
+    MORNING_BANNER_TRIGGER_BELL_ALLOWLIST,
     TRIGGER_BELL_DENYLIST,
     CATEGORY_BELL_ALLOWLIST,
     loadCategoryOverrides,

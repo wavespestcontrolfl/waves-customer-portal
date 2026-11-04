@@ -5262,6 +5262,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 8AM — Morning banner (GATE_MORNING_BANNER; returns before any read when off). Owner
+  // 2026-11-03 ("ok add", choice C): ONE phone banner says how many items wait for the owner and
+  // opens his alert list. Push only, admin phones only, nothing when zero wait. runExclusive stops
+  // two instances running together; the send itself takes a per-ET-day sms_send_claims row, so a
+  // deploy overlap or a restart after the run cannot send a second banner the same day. Sends
+  // nothing to a customer.
+  // =========================================================================
+  cron.schedule('0 8 * * *', async () => {
+    if (!require('../config/feature-gates').morningBannerLive()) return;
+    try {
+      // runMorningBanner logs its own one line with the count.
+      await runExclusive('morning-banner', () => require('./morning-banner').runMorningBanner());
+    } catch (err) {
+      logger.error(`Morning banner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:23AM — Unbilled visits (GATE_UNBILLED_VISITS_LIST; returns before
   // any read when off). Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,

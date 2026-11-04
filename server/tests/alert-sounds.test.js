@@ -17,6 +17,10 @@ describe('alert sounds map', () => {
     expect(soundForTrigger(undefined)).toBeNull();
   });
 
+  test('the 8 AM count banner plays the soft reminder sound (GATE_MORNING_BANNER)', () => {
+    expect(soundForTrigger('waiting_summary')).toBe('waves-reminder.caf');
+  });
+
   test('the map is frozen', () => {
     expect(Object.isFrozen(ALERT_SOUNDS)).toBe(true);
   });
