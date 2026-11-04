@@ -151,69 +151,72 @@ describe('shadow run', () => {
       expect(c.from).toMatch(/^\d\d:\d\d$/);
       expect(c.to).toMatch(/^\d\d:\d\d$/);
     }
-    expect(JSON.parse(plan.fixed)).toEqual([]);
+    expect(JSON.parse(plan.fixed).stops).toEqual([]);
 
     // Nothing but reads, plus the one plan insert.
     const writes = calls.filter(([, method]) => ['insert', 'update', 'del', 'delete', 'upsert', 'merge'].includes(method));
     expect(writes).toEqual([['day_replan_plans', 'insert']]);
   });
 
-  test('stops sharing an hour keep the order the 04:20 pass saved (route_order, nulls last, then id)', async () => {
-    // Returned in reverse of their saved order; the planner's baseline must visit route_order 1 first.
-    const rows = [
-      row('x', 0.05, 9, { route_order: 2 }),
-      row('y', 0.01, 9, { route_order: 1 }),
-      row('n2', 0.02, 10, { route_order: null }),
-      row('n1', 0.03, 10, { route_order: null }),
-      row('r', 0.04, 10, { route_order: 5 }),
+  describe('the current route savings are measured against', () => {
+    // Two stops share 09:00 and the stored numbers are a real plan (1, 2, 3: whole, no gaps or repeats).
+    const day = (extra = {}) => [
+      row('x', 0.30, 9, { route_order: 2, ...extra.x }),
+      row('y', 0.01, 9, { route_order: 1, ...extra.y }),
+      row('z', 0.02, 10, { route_order: 3, ...extra.z }),
     ];
-    const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
-    await runDayReplanIfEnabled({ now: NOW, conn });
-    expect(planDay.mock.calls[0][0].stops.map((s) => s.id)).toEqual(['y', 'x', 'r', 'n1', 'n2']);
-    expect(planDay.mock.results[0].value.current.order).toEqual(['y', 'x', 'r', 'n1', 'n2']);
-  });
-
-  describe('hours held by rows that are not this technician\'s stops', () => {
-    const OTHER_TECH = '00000000-0000-4000-8000-000000000002';
-    const blockedFor = async (extraRows) => {
-      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: [...zigzagRows(), ...extraRows] } });
+    const run = async (rows) => {
+      jest.clearAllMocks();
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
       await runDayReplanIfEnabled({ now: NOW, conn });
-      const call = planDay.mock.calls.find(([arg]) => arg.stops.length === 4);
-      return { call, inserts };
+      const result = planDay.mock.results[0].value;
+      return { result, fixed: JSON.parse(inserts[0].row.fixed), call: planDay.mock.calls[0][0] };
     };
 
-    test('an unassigned 10:00 row blocks 10:00 for a movable stop and is not a stop', async () => {
-      const { call, inserts } = await blockedFor([row('u', 0.06, 10, { technician_id: null })]);
-      expect(call[0].options.blockedHours).toEqual([10]);
-      expect(call[0].stops.map((s) => s.id).sort()).toEqual(['a', 'b', 'c', 'd']);
-      const result = planDay.mock.results.find((r) => r.value.current.order.length === 4).value;
-      expect(Object.values(result.best.slots)).not.toContain(10 * 60);
-      expect(inserts).toHaveLength(1);
+    test('a real stored order that is cheaper than clock order is the baseline (route_order 1 first)', async () => {
+      // Clock order breaks the 09:00 tie by id (x, far, first); the stored order visits the near stop y first.
+      const { result, fixed, call } = await run(day());
+      expect(result.current.baseline).toBe('stored');
+      expect(result.current.order).toEqual(['y', 'x', 'z']);
+      expect(fixed.baseline).toBe('stored');
+      expect(fixed.stored_order_stale).toEqual([]);
+      expect(fixed.baseline_drive_min.stored).toBeLessThan(fixed.baseline_drive_min.clock);
+      expect(call.options.baselines.map((b) => b.name)).toEqual(['stored', 'clock']);
     });
 
-    test('a 2-hour unassigned row blocks both hours; an untimed one blocks nothing', async () => {
-      const wide = row('u', 0.06, 10, { technician_id: null, window_end: '12:00:00' });
-      expect((await blockedFor([wide])).call[0].options.blockedHours).toEqual([10, 11]);
-      jest.clearAllMocks();
-      const untimed = row('u2', 0.06, 10, { technician_id: null, window_start: null });
-      expect((await blockedFor([untimed])).call[0].options.blockedHours).toEqual([]);
+    test('a stored order that drives more than clock order is not used', async () => {
+      // Clock order breaks the 09:00 tie by id (a, near, first); the stored order sends the van to the far stop b first.
+      const rows = [row('a', 0.01, 9, { route_order: 2 }), row('b', 0.30, 9, { route_order: 1 }), row('z', 0.02, 10, { route_order: 3 })];
+      const { result, fixed } = await run(rows);
+      expect(result.current.baseline).toBe('clock');
+      expect(result.current.order).toEqual(['a', 'b', 'z']);
+      expect(fixed.baseline).toBe('clock');
+      expect(fixed.baseline_drive_min.clock).toBeLessThan(fixed.baseline_drive_min.stored);
     });
 
-    test('another technician\'s 10:00 row blocks it while occupancy is tech-blind, and not once it is tech-scoped', async () => {
-      const other = row('o', 0.06, 10, { technician_id: OTHER_TECH });
-      techScopedConfirmActive.mockReturnValue(false);
-      expect((await blockedFor([other])).call[0].options.blockedHours).toEqual([10]);
-      jest.clearAllMocks();
-      techScopedConfirmActive.mockReturnValue(true);
-      expect((await blockedFor([other])).call[0].options.blockedHours).toEqual([]);
-      jest.clearAllMocks();
-      // Scoped occupancy still blocks for an unassigned row.
-      const unassigned = row('u', 0.06, 10, { technician_id: null });
-      expect((await blockedFor([unassigned])).call[0].options.blockedHours).toEqual([10]);
+    test('leftover numbering (duplicate numbers) is not a candidate: the clock order is the baseline', async () => {
+      const { result, fixed, call } = await run(day({ x: { route_order: 1 }, y: { route_order: 1 } }));
+      expect(fixed.stored_order_stale).toEqual(expect.arrayContaining(['duplicate']));
+      expect(fixed.baseline).toBe('clock');
+      expect(result.current.order).toEqual(['x', 'y', 'z']);
+      expect(call.options.baselines.map((b) => b.name)).toEqual(['clock']);
+      expect(Object.keys(fixed.baseline_drive_min)).toEqual(['clock']);
     });
 
-    test('the technician\'s own stops never block themselves', () => {
-      expect(_internals.blockedHoursFor(zigzagRows(), TECH, true)).toEqual([]);
+    test('missing numbers and gaps are leftover too', async () => {
+      expect((await run(day({ y: { route_order: null } }))).fixed.stored_order_stale).toEqual(expect.arrayContaining(['null']));
+      expect((await run(day({ z: { route_order: 9 } }))).fixed.stored_order_stale).toEqual(expect.arrayContaining(['gap']));
+    });
+
+    test('a tie keeps the stored order, and the choice repeats', async () => {
+      // Both stops at one place: either order drives the same.
+      const rows = [row('x', 0.05, 9, { route_order: 2 }), row('y', 0.05, 9, { route_order: 1 }), row('z', 0.06, 10, { route_order: 3 })];
+      const first = await run(rows);
+      const second = await run(rows);
+      expect(first.result.current.baseline).toBe('stored');
+      expect(first.result.current.order).toEqual(['y', 'x', 'z']);
+      expect(second.result.current.order).toEqual(first.result.current.order);
+      expect(second.result.current.baseline).toBe(first.result.current.baseline);
     });
   });
 
@@ -251,7 +254,7 @@ describe('shadow run', () => {
       const rows = [...zigzagRows(), row('e', 0.04, 12, { auto_dispatch_locked: true, customer_id: 'cust-e' })];
       const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows }, blocks: [blockRow('12:00:00', '13:00:00')] });
       await runDayReplanIfEnabled({ now: NOW, conn });
-      expect(JSON.parse(inserts[0].row.fixed)).toEqual([{ id: 'e', why: 'staff_lock', note: 'overlaps_block_as_booked' }]);
+      expect(JSON.parse(inserts[0].row.fixed).stops).toEqual([{ id: 'e', why: 'staff_lock', note: 'overlaps_block_as_booked' }]);
     });
   });
 
@@ -316,7 +319,7 @@ describe('shadow run', () => {
     const reminders = [{ scheduled_service_id: 'e', reminder_24h_sent: true }];
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows }, reminders });
     await runDayReplanIfEnabled({ now: NOW, conn });
-    const fixed = Object.fromEntries(JSON.parse(inserts[0].row.fixed).map((f) => [f.id, f.why]));
+    const fixed = Object.fromEntries(JSON.parse(inserts[0].row.fixed).stops.map((f) => [f.id, f.why]));
     const moved = JSON.parse(inserts[0].row.changes).map((c) => c.id);
     for (const id of Object.keys(fixed)) expect(moved).not.toContain(id);
     expect(fixed).toEqual({
@@ -334,7 +337,7 @@ describe('shadow run', () => {
     await runDayReplanIfEnabled({ now: NOW, conn });
     const asked = getCustomerSchedulingPreferences.mock.calls.map((c) => c[0]).sort();
     expect(asked).toEqual(['cust-b', 'cust-c', 'cust-d']);
-    expect(JSON.parse(inserts[0].row.fixed)).toEqual(expect.arrayContaining([{ id: 'a', why: 'staff_lock' }, { id: 'c', why: 'pref_unknown' }]));
+    expect(JSON.parse(inserts[0].row.fixed).stops).toEqual(expect.arrayContaining([{ id: 'a', why: 'staff_lock' }, { id: 'c', why: 'pref_unknown' }]));
     const changeToB = JSON.parse(inserts[0].row.changes).find((c) => c.id === 'b');
     if (changeToB) expect(changeToB.to).toBe('11:00');
   });

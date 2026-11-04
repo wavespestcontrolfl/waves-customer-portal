@@ -374,6 +374,45 @@ describe('the day closes with the night pass bound', () => {
   });
 });
 
+describe('current route baselines', () => {
+  // Two stops in the 09:00 hour: n is near the office, f is far.
+  const day = () => [stop('n', 2, 9), stop('f', 40, 9), stop('z', 41, 10)];
+  const baselines = (clock, stored) => [{ name: 'stored', order: stored }, { name: 'clock', order: clock }];
+
+  test('the cheaper of the stored and clock orders is the current plan', () => {
+    const r = planDay(input(day(), { options: { baselines: baselines(['f', 'n', 'z'], ['n', 'f', 'z']) } }));
+    expect(r.current.baseline).toBe('stored');
+    expect(r.current.order).toEqual(['n', 'f', 'z']);
+    expect(r.current.baselineDrives.stored).toBeLessThan(r.current.baselineDrives.clock);
+    expect(r.current.driveMin).toBe(r.current.baselineDrives.stored);
+
+    const flipped = planDay(input(day(), { options: { baselines: baselines(['n', 'f', 'z'], ['f', 'n', 'z']) } }));
+    expect(flipped.current.baseline).toBe('clock');
+    expect(flipped.current.order).toEqual(['n', 'f', 'z']);
+  });
+
+  test('savings are measured against the cheaper route', () => {
+    const cheap = planDay(input(day(), { options: { baselines: baselines(['f', 'n', 'z'], ['n', 'f', 'z']) } }));
+    const dear = planDay(input(day(), { options: { baselines: [{ name: 'clock', order: ['f', 'n', 'z'] }] } }));
+    expect(cheap.savedMin).toBeLessThan(dear.savedMin);
+  });
+
+  test('a tie keeps the first listed, every time', () => {
+    const tied = [stop('a', 10, 9), stop('b', 10, 9)];
+    const opts = { baselines: [{ name: 'stored', order: ['b', 'a'] }, { name: 'clock', order: ['a', 'b'] }] };
+    const r = planDay(input(tied, { options: opts }));
+    expect(r.current.baseline).toBe('stored');
+    expect(r.current.order).toEqual(['b', 'a']);
+    expect(planDay(input(tied, { options: opts }))).toEqual(r);
+  });
+
+  test('an order that does not name every stop once is ignored; with none left the slot order is used', () => {
+    const r = planDay(input(day(), { options: { baselines: [{ name: 'stored', order: ['n', 'f'] }, { name: 'dup', order: ['n', 'n', 'f'] }] } }));
+    expect(r.current.baseline).toBe('slot_order');
+    expect(r.current.order).toEqual(['n', 'f', 'z']);
+  });
+});
+
 describe('the saving floor', () => {
   test('a saving below the floor is not accepted and lists no changes', () => {
     const r = planDay(input(zigzag(), { options: { minSavingMin: 71 } }));

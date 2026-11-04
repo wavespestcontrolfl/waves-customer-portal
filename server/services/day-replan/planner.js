@@ -30,6 +30,10 @@
  * The current plan is every stop at its current slot (all treated fixed), in slot order, with
  * lateness allowed and reported. The search never ends later than the current plan.
  *
+ * options.baselines ([{ name, order: [ids] }]): the orders the app reads the day in (stored route order, clock
+ * order). Each is simulated as the current plan and the one that drives LEAST is used; the result's
+ * current.baseline names it and current.baselineDrives lists all.
+ *
  * options.blocks ([{ startMin, endMin }], the technician's unavailable intervals): a stop's service interval
  * [start, start + workMin) may not overlap one. A movable stop moves to a later legal hour; a fixed stop that
  * already overlapped a block as booked keeps its hour (listed in `grandfathered`) but the plan adds no new
@@ -331,7 +335,7 @@ function currentOrderIndexes(stops) {
 }
 
 function localSearch(ctx) {
-  const starts = [currentOrderIndexes(ctx.stops), nearestNeighbourOrder(ctx)];
+  const starts = [ctx.baseOrder, nearestNeighbourOrder(ctx)];
   let best = null;
   for (const start of starts) {
     const plan = descend(ctx, start);
@@ -341,8 +345,8 @@ function localSearch(ctx) {
 }
 
 /** The day as it stands: every stop fixed at its slot, slot order, lateness allowed and reported. */
-function simulateCurrent(ctx) {
-  const order = currentOrderIndexes(ctx.stops);
+/** The day as it stands, visited in `order` (stop indexes): every stop fixed at its slot, lateness reported. */
+function simulateCurrent(ctx, order) {
   let t = ctx.departureMin;
   let prev = ctx.n;
   let drive = 0;
@@ -365,6 +369,35 @@ function simulateCurrent(ctx) {
     slots: Object.fromEntries(ctx.stops.map((s) => [s.id, s.slotStartMin])),
     late,
   };
+}
+
+/**
+ * The candidate current orders as stop indexes. Callers pass the orders the app itself reads (options.baselines:
+ * [{ name, order: [ids] }], e.g. the stored route order and the clock order); one that does not name every stop
+ * exactly once is ignored. With none left the day is read in slot order (ties by the caller's order).
+ */
+function baselineCandidates(ctx, baselines) {
+  const byId = new Map(ctx.stops.map((s, i) => [String(s.id), i]));
+  const out = [];
+  for (const b of baselines || []) {
+    const order = (b.order || []).map((id) => byId.get(String(id)));
+    if (order.length === ctx.n && order.every((i) => i !== undefined) && new Set(order).size === ctx.n) out.push({ name: b.name, order });
+  }
+  return out.length ? out : [{ name: 'slot_order', order: currentOrderIndexes(ctx.stops) }];
+}
+
+/** Simulates every candidate and keeps the one that drives LEAST (never measure savings against the worse of two
+ *  plausible current routes). A tie keeps the first listed, so the choice is deterministic. */
+function chooseCurrent(ctx, baselines) {
+  let chosen = null;
+  const drives = {};
+  for (const candidate of baselineCandidates(ctx, baselines)) {
+    const sim = simulateCurrent(ctx, candidate.order);
+    drives[candidate.name] = sim.driveMin;
+    if (!chosen || sim.driveMin < chosen.sim.driveMin) chosen = { ...candidate, sim };
+  }
+  ctx.baseOrder = chosen.order;
+  return { ...chosen.sim, baseline: chosen.name, baselineDrives: drives };
 }
 
 function describePlan(ctx, plan) {
@@ -396,7 +429,7 @@ function decide(current, best, minSavingMin) {
  */
 function planDay({ stops, origin, departureMin, legMin, options = {} }) {
   const ctx = buildContext(stops, origin, departureMin, legMin, options);
-  const current = simulateCurrent(ctx);
+  const current = chooseCurrent(ctx, options.baselines);
   ctx.dayEndMin = current.endMin;
   const found = ctx.n <= ctx.opts.exactLimit ? exhaustiveSearch(ctx) : localSearch(ctx);
   const best = found ? describePlan(ctx, found) : null;

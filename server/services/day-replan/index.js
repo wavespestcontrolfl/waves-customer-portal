@@ -35,7 +35,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../../utils/dateti
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
-const { workDuration } = require('../route-reorder-window-fit');
+const { workDuration, currentOrder, promisedWindowOrder, staleOrderReasons } = require('../route-reorder-window-fit');
 const { getCustomerSchedulingPreferences } = require('../auto-dispatch/preferences');
 const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
@@ -93,7 +93,7 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type',
       'scheduled_services.is_recurring', 'scheduled_services.is_callback',
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
-      'scheduled_services.reservation_expires_at', 'scheduled_services.route_order',
+      'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
       ...guardedCoordSelects(conn),
     ],
   }).whereRaw(_internals.LIVE_HOLD_SQL);
@@ -246,7 +246,7 @@ function fixedList(entries, grandfathered) {
   }));
 }
 
-function planRow({ runId, techId, dateStr, entries, result }) {
+function planRow({ runId, techId, dateStr, entries, result, staleReasons }) {
   const best = result.best;
   return {
     run_id: runId,
@@ -262,7 +262,13 @@ function planRow({ runId, techId, dateStr, entries, result }) {
     accepted: result.accepted,
     reason: result.reason,
     changes: JSON.stringify(result.changes.map((c) => ({ id: c.id, from: minToHhmm(c.fromMin), to: minToHhmm(c.toMin) }))),
-    fixed: JSON.stringify(fixedList(entries, result.grandfathered)),
+    // Stops that kept their hour, and which current route the savings were measured against.
+    fixed: JSON.stringify({
+      baseline: result.current.baseline,
+      baseline_drive_min: result.current.baselineDrives,
+      stored_order_stale: staleReasons,
+      stops: fixedList(entries, result.grandfathered),
+    }),
   };
 }
 
@@ -281,6 +287,7 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   }
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
+  const { staleReasons, baselines } = baselinesFor(rows);
   const result = planDay({
     stops: entries.map(plannerStop),
     origin: homeFromMap(env.techHomes, techId),
@@ -289,11 +296,12 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     options: {
       blockedHours: blockedHoursFor(dayContext.allRows, techId, env.techBlind),
       blocks,
+      baselines,
       firstHour: env.openMin / 60,
       closeMin: env.closeMin,
     },
   });
-  await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result }));
+  await conn(PLAN_TABLE).insert(planRow({ runId: env.runId, techId, dateStr, entries, result, staleReasons }));
   summary.days += 1;
   if (result.accepted) {
     summary.accepted += 1;
@@ -303,17 +311,18 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
 }
 
 /**
- * The day's stored order: window start, then the route_order the 04:20 reorder pass saved (nulls last), then id.
- * The planner breaks equal-hour ties by input order, so this makes its baseline the order already saved and
- * never an arbitrary query order (which would book savings the 04:20 pass already made).
+ * The current routes to measure savings against, the way the app reads a day: the STORED order (route_order,
+ * nulls after by window start; route-reorder-window-fit currentOrder) when it is a real plan, and always the
+ * CLOCK order (promised-window order, ignoring stored numbers). Stored numbers with a null, a duplicate, a gap or
+ * a later promise numbered ahead of an earlier one are leftover numbering and not a candidate (the same
+ * staleOrderReasons the app and the 04:20 pass use; arrival-route.js falls back to clock order for them). The
+ * planner simulates each and keeps the one that drives less; a tie keeps the stored order.
  */
-function storedOrder(a, b) {
-  const byStart = (a.window_start ? hhmmToMin(a.window_start) : Infinity) - (b.window_start ? hhmmToMin(b.window_start) : Infinity);
-  if (byStart !== 0 && !Number.isNaN(byStart)) return byStart;
-  const ra = a.route_order == null ? Infinity : Number(a.route_order);
-  const rb = b.route_order == null ? Infinity : Number(b.route_order);
-  if (ra !== rb) return ra < rb ? -1 : 1;
-  return String(a.id) < String(b.id) ? -1 : (String(a.id) > String(b.id) ? 1 : 0);
+function baselinesFor(rows) {
+  const clock = { name: 'clock', order: promisedWindowOrder(rows).map((r) => r.id) };
+  const staleReasons = staleOrderReasons(rows, rows, { futureDay: true });
+  if (staleReasons.length) return { staleReasons, baselines: [clock] };
+  return { staleReasons, baselines: [{ name: 'stored', order: currentOrder(rows).map((r) => r.id) }, clock] };
 }
 
 function groupByTech(rows) {
@@ -323,7 +332,7 @@ function groupByTech(rows) {
     if (!byTech.has(row.technician_id)) byTech.set(row.technician_id, []);
     byTech.get(row.technician_id).push(row);
   }
-  for (const techRows of byTech.values()) techRows.sort(storedOrder);
+  for (const [techId, techRows] of byTech) byTech.set(techId, currentOrder(techRows));
   return [...byTech.entries()].sort(([a], [b]) => String(a).localeCompare(String(b)));
 }
 
@@ -386,4 +395,4 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db } = {}) {
   return summary;
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, storedOrder, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };

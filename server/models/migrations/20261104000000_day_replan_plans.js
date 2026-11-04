@@ -4,8 +4,9 @@
  * reads it to change a visit; PR 2 will write the new hours from the planner, not from this table.
  *
  * Ids and minutes only: no customer name, address or phone number. `changes` holds
- * [{ id, from: 'HH:MM', to: 'HH:MM' }] (empty unless accepted); `fixed` holds [{ id, why }] for every
- * stop that kept its hour. `reason` is accepted | saving_below_floor | no_feasible_order.
+ * [{ id, from: 'HH:MM', to: 'HH:MM' }] (empty unless accepted); `fixed` holds
+ * { baseline: 'stored' | 'clock' | 'slot_order' (the current route the saving was measured against),
+ * baseline_drive_min, stored_order_stale, stops: [{ id, why, note? }] } with one stop entry per stop that kept its hour. `reason` is accepted | saving_below_floor | no_feasible_order.
  * technician_id has no foreign key on purpose: this is a log, and a technician row must never be
  * blocked by it. Additive; down drops the table.
  */
