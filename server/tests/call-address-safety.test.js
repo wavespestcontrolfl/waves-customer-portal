@@ -255,6 +255,40 @@ describe('finding 3 — address fragments and on-file restatements', () => {
     expect(r.failedOpenFlags).toContain('address_unverified');
   });
 
+  // Call 657a96e6 (2026-11-04): a community that names the on-file street is
+  // the caller naming her own street, so it books on the on-file address like
+  // a house-less street restatement.
+  test.each([
+    [{ subdivision_or_community: 'Sample Palm Manor', raw_text: 'Sample Palm Manor, 34219', city: 'Parrish', postal_code: '34219' }, '1234 Sample Palm Manor Dr'],
+    [{ subdivision_or_community: 'Sample Palm' }, '1234 Sample Palm Dr'],
+    [{ subdivision_or_community: 'Sample Palm Drive', city: 'Parrish' }, '1234 Sample Palm Dr'],
+  ])('a community that names the on-file street books on the on-file address: %j', (service_address, addressLine1) => {
+    const knownCustomer = { ...onFile, addressLine1 };
+    const ex = v2({ property: { service_address }, triage_flags: ['address_unverified'] });
+    const opts = { contactPhone: ANI, failOpen: true, knownCustomer, addressValidation: { status: 'missing_component', inServiceArea: true } };
+    expect(statesNewAddress(ex, knownCustomer)).toBe(false);
+    expect(dispatchesToOnFileAddress(ex, opts)).toBe(true);
+    expect(canAutoRoute(ex, opts)).toMatchObject({ allowed: true, usesOnFileAddress: true });
+  });
+
+  // ...but a community naming another place or only part of the street, or
+  // one beside a conflicting component or a missing saved unit, still holds.
+  test.each([
+    [{ subdivision_or_community: 'Sample Palm Estates' }, {}],
+    [{ subdivision_or_community: 'Sample' }, {}],
+    [{ subdivision_or_community: 'Sample Palm', city: 'Sarasota' }, {}],
+    [{ subdivision_or_community: 'Sample Palm', raw_text: '1236 Sample Palm Dr' }, {}],
+    [{ subdivision_or_community: 'Sample Palm', street_line_1: '9876 Other Grove Circle' }, {}],
+    [{ subdivision_or_community: 'Sample Palm' }, { addressLine2: 'Apt 4B' }],
+  ])('a community that does not settle the on-file address still holds: %j', (service_address, extra) => {
+    const knownCustomer = { ...onFile, ...extra };
+    const ex = v2({ property: { service_address }, triage_flags: ['address_unverified'] });
+    const opts = { contactPhone: ANI, failOpen: true, knownCustomer, addressValidation: { status: 'missing_component', inServiceArea: true } };
+    expect(statesNewAddress(ex, knownCustomer)).toBe(true);
+    expect(dispatchesToOnFileAddress(ex, opts)).toBe(false);
+    expect(canAutoRoute(ex, opts).allowed).toBe(false);
+  });
+
   test.each(['same address', 'same as before', 'yes'])('an acknowledgment selects the complete saved address: %s', raw_text => {
     const ex = v2({ property: { service_address: { raw_text } }, triage_flags: ['address_unverified'] });
     for (const addressLine2 of [null, 'Apt 4B']) {
