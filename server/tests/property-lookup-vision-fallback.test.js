@@ -63,9 +63,10 @@ afterEach(() => {
   }
 });
 
-function mockNetwork({ gemini = ANALYSIS, openai = ANALYSIS, onGemini } = {}) {
+function mockNetwork({ gemini = ANALYSIS, openai = ANALYSIS, onGemini, onGeocode } = {}) {
   global.fetch = jest.fn(async (url, options) => {
     const target = String(url);
+    if (target.includes('/geocode/') && onGeocode) onGeocode();
     if (target.includes('/geocode/')) return {
       ok: true,
       json: async () => ({ status: 'OK', results: [{ formatted_address: ADDRESS, types: ['street_address'], geometry: { location: { lat: 27.4, lng: -82.4 }, location_type: 'ROOFTOP' } }] }),
@@ -185,6 +186,35 @@ test('a Gemini timeout leaves time for the Sol fallback within the lookup deadli
   expect(result.aiAnalysis._sources).toEqual(['openai']);
   expect(signals.mock.calls.slice(-2).map(([ms]) => ms)).toEqual([25000, 25000]);
   expect(result.meta.lookupMs).toBeLessThan(result.meta.budgetMs);
+});
+
+test('a background lookup gives each vision provider its full cap after slow earlier steps', async () => {
+  let now = 1000;
+  let spent = false;
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+  const signals = jest.spyOn(AbortSignal, 'timeout');
+  mockNetwork({
+    // The record steps already spent half of the 60 s response budget.
+    onGeocode: () => {
+      if (!spent) now += 30000;
+      spent = true;
+    },
+    // Each Gemini leg runs to its own timeout; then Sol answers.
+    onGemini: () => {
+      now += signals.mock.calls.at(-1)[0];
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    },
+  });
+  const interactive = await lookup({ prioritizeAccuracy: false });
+  expect(interactive.aiAnalysis._sources).toEqual(['openai']);
+  // An interactive caller splits what is left: (60 - 30 - 2.5) s, half each.
+  expect(signals.mock.calls.slice(-2).map(([ms]) => ms)).toEqual([13750, 13750]);
+
+  now = 1000;
+  spent = false;
+  const background = await lookup({ prioritizeAccuracy: false, fullVisionBudget: true });
+  expect(background.aiAnalysis._sources).toEqual(['openai']);
+  expect(signals.mock.calls.slice(-2).map(([ms]) => ms)).toEqual([25000, 25000]);
 });
 
 test('missing Gemini credentials go straight to Sol', async () => {

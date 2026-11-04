@@ -124,8 +124,9 @@ describe('runCallPropertyLookup', () => {
 
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
     expect(res).toEqual({ enriched: true, filled: ['latitude', 'longitude', 'property_type'], complete: true, exitedCandidateSet: true });
-    // The cache warm declares its scope decision (lookup-callers.js: no suite sizing), so the options are the registry's empty set.
-    expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL 34212', {});
+    // The cache warm declares its scope decision (lookup-callers.js: no suite
+    // sizing), and as a background caller it asks for the full vision budget.
+    expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL 34212', { fullVisionBudget: true });
     // Linked visits missing their coordinate pair get the same fill.
     expect(visitsBuilder.update).toHaveBeenCalledWith({ lat: 27.4995, lng: -82.4108 });
 

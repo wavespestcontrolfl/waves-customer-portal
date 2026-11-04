@@ -188,8 +188,11 @@ async function enrichPropertyById(propertyId) {
   // and tests mock it per-case.
   const { performPropertyLookup } = require('../routes/property-lookup-v2');
   // Scope decision: lookup-callers.js (call_cache_warm: the engine opts in itself).
+  // fullVisionBudget: both lanes here run in the background (call-time
+  // setImmediate, nightly sweep), so the satellite read gets each provider's
+  // full cap instead of an interactive caller's leftover response budget.
   const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
-  const result = await performPropertyLookup(address, lookupOptionsFor('call_cache_warm'));
+  const result = await performPropertyLookup(address, lookupOptionsFor('call_cache_warm', { fullVisionBudget: true }));
   const enriched = result?.enriched;
   if (!enriched) {
     logger.info('[call-property-lookup] no profile', { propertyId, elapsedMs: Date.now() - t0 });

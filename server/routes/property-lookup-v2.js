@@ -318,9 +318,11 @@ function lookupCoalesceKey(address, options) {
   try {
     const hash = cacheAddressKey(address)?.hash;
     // Suite sizing changes the response (suite homeSqFt/footprint, stamp),
-    // so opt-in and ordinary callers never join each other's run.
+    // so opt-in and ordinary callers never join each other's run. A
+    // full-vision-budget run (background) can outlast the response budget an
+    // interactive caller expects, so the two never join each other either.
     return hash
-      ? `${hash}${options.prioritizeAccuracy ? ':full-analysis' : ''}${options.commercialSuiteSizing === true ? ':suite-sizing' : ''}${businessIdentityKeySuffix(options)}`
+      ? `${hash}${options.prioritizeAccuracy ? ':full-analysis' : ''}${options.fullVisionBudget === true ? ':full-vision' : ''}${options.commercialSuiteSizing === true ? ':suite-sizing' : ''}${businessIdentityKeySuffix(options)}`
       : null;
   } catch {
     return null;
@@ -971,9 +973,16 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   }
 
   // ── STEP 3: Gemini vision, with Sol only on a failed/invalid read ──
+  // options.fullVisionBudget: a background caller with nobody waiting (the
+  // call-time cache warm and the 3:55 AM backfill) gives each provider its
+  // full cap, as accuracy mode does, instead of half of what is left of the
+  // response budget. On that leftover, a normal ~13 s read timed out on both
+  // providers for about half of the nightly backfill (2026-11-01..04). Only
+  // this step changes; the stories and median steps keep the budget.
+  const fullVisionBudget = options.prioritizeAccuracy || options.fullVisionBudget === true;
   const visionBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
   if (result.satellite?._closeB64 && result.satellite?._wideB64
-      && (options.prioritizeAccuracy || visionBudgetMs >= timing.visionMinRemainingMs)) {
+      && (fullVisionBudget || visionBudgetMs >= timing.visionMinRemainingMs)) {
     const visionContext = buildVisionContext(result.satellite, result.propertyRecord?._parcel);
     const images = [
       result.satellite._microCloseB64,
@@ -986,7 +995,7 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
     // Keep the lookup's response deadline and the existing per-provider cap.
     // Reserve half the available time for Sol so a stalled Gemini request
     // cannot spend the whole budget before its fallback starts.
-    const chainBudgetMs = options.prioritizeAccuracy
+    const chainBudgetMs = fullVisionBudget
       ? timing.visionProviderTimeoutMs * 2
       : Math.min(visionBudgetMs, timing.visionProviderTimeoutMs * 2);
     const outcome = await dispatchWithFallback(policy, {
