@@ -94,7 +94,7 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.customer_id',
       'scheduled_services.visit_id', 'scheduled_services.status',
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
-      'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type',
+      'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type', 'scheduled_services.source_action',
       'scheduled_services.is_recurring', 'scheduled_services.is_callback',
       // Identity and premise fields the co-visit helpers (isCoVisitPair) read, exactly as the 04:20 pass selects them.
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
@@ -158,10 +158,20 @@ function startsMoreThanLockAway(row, dateStr, now) {
 }
 
 /** Why a stop stays fixed at its hour, or null when it may move. */
+/** True for a pending office-review booking (call-booking-source-actions.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS) that
+ *  nobody confirmed yet. */
+function officeReviewPending(row) {
+  const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../call-booking-source-actions');
+  return OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) && row.customer_confirmed !== true;
+}
+
 function fixedReason(row, { dateStr, now, visitCounts, customerCounts, sent24 }) {
   if (!MOVABLE_STATUSES.includes(row.status)) return 'status';
   if (row.reservation_expires_at) return 'hold';
   if (row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return 'staff_lock';
+  // A booking still waiting for the office's review (a voice-agent or legacy outbound-review row, not yet confirmed)
+  // keeps its time: an automatic re-time must never stand in for the office's approval (Codex #7555 P2).
+  if (officeReviewPending(row)) return 'office_review_pending';
   if (row.visit_id != null && visitCounts.get(row.visit_id) > 1) return 'grouped';
   if (row.customer_id != null && customerCounts.get(row.customer_id) > 1) return 'same_customer';
   if (!startsMoreThanLockAway(row, dateStr, now)) return 'within_24h';

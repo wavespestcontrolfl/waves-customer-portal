@@ -33,12 +33,8 @@ async function visitSeam(conn, id) {
   if (row && row.visit_id) await require('../visit-groups').handleChildStopChanged(id);
 }
 
-/** A legacy outbound-review row moved here would otherwise stay unactivated (rebooker.js does this after every move; at-most-once). */
-async function legacyActivation(conn, id) {
-  const { activateLegacyOutboundReviewRowIfNeeded } = require('../outbound-review-confirm');
-  await activateLegacyOutboundReviewRowIfNeeded(conn, id, 'day-replan');
-}
-
+// No legacy outbound-review activation here: an automatic re-time is never the office's approval, and the planner keeps
+// every pending office-review booking at its time (index.js officeReviewPending; Codex #7555 P2).
 /** The rebooker's escalation count: a visit moved this many times is flagged for a person to review. */
 async function escalationCheck(conn, id) {
   const RULES = require('../../config/reschedule-rules');
@@ -62,7 +58,6 @@ async function afterMoveEffects(conn, { dateStr, written }) {
   for (const w of written) {
     await each('self-booking snapshot', w.id, () => syncSelfBooking(conn, w.id));
     await each('visit-group seam', w.id, () => visitSeam(conn, w.id));
-    await each('legacy activation', w.id, () => legacyActivation(conn, w.id));
     await each('escalation check', w.id, () => escalationCheck(conn, w.id));
   }
   if (written.length === 0) return;

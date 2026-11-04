@@ -492,6 +492,15 @@ describe('movable or fixed', () => {
     expect(_internals.fixedReason(stop(), { ...base(), customerCounts: new Map([['c1', 2]]) })).toBe('same_customer');
   });
 
+  test('a booking still waiting for the office review keeps its time; once confirmed it may move', () => {
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+    for (const action of OFFICE_REVIEW_PENDING_SOURCE_ACTIONS) {
+      expect(_internals.fixedReason(stop({ source_action: action, status: 'pending', customer_confirmed: false }), base())).toBe('office_review_pending');
+      expect(_internals.fixedReason(stop({ source_action: action, customer_confirmed: true }), base())).toBeNull();
+    }
+    expect(_internals.fixedReason(stop({ source_action: 'admin_booking' }), base())).toBeNull();
+  });
+
   test('first visits, one-time visits and hand-placed visits are not locked by kind', () => {
     expect(_internals.fixedReason(stop({ service_type: 'One-Time Pest Control Service', is_recurring: false }), base())).toBeNull();
   });
