@@ -18,7 +18,7 @@ const ID_KEYS = ['customer_id', 'property_id', 'estimate_id', 'appointment_id', 
 const pickIds = (pageData) => Object.fromEntries(ID_KEYS.filter((key) => pageData?.[key]).map((key) => [key, pageData[key]]));
 
 // The send button's state for one palette. `onSent` clears the composer (prompt, attachments, paste mark) after a send.
-export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, pageData, route, onSent, onRestore }) {
+export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, dictationUsedRef, pageData, route, onSent, onRestore }) {
   // Whether the box offers the button: asked once per session (kept once answered); a failed ask reads as hidden and is
   // asked again the next time the box opens.
   const [enabled, setEnabled] = useState(false);
@@ -32,6 +32,8 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
   promptRef.current = prompt;
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
+  const attachmentsLoadingRef = useRef(attachmentsLoading);
+  attachmentsLoadingRef.current = attachmentsLoading;
 
   useEffect(() => {
     if (!open || askedRef.current) return;
@@ -61,6 +63,7 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
     // editable while the request runs, so what it holds afterwards can differ.
     const raw = prompt;
     const pasted = pastedRef.current === true;
+    const dictated = dictationUsedRef?.current === true;
     try {
       const out = await adminFetch('/admin/claude-ideas', {
         method: 'POST',
@@ -69,10 +72,11 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
       if (out?.duplicate) {
         setNote({ kind: 'duplicate', text: 'You already sent this idea. Claude has it.' });
       } else if (out?.sent) {
-        // Clear the box only while it still holds exactly what was sent: words or photos added while the request ran stay.
-        if (promptRef.current === raw && !attachmentsRef.current.length) onSent();
+        // Clear the box only while it still holds exactly what was sent: words or photos added while the request ran stay,
+        // including a photo still being converted.
+        if (promptRef.current === raw && !attachmentsRef.current.length && !attachmentsLoadingRef.current) onSent();
         // `raw` and `pasted` are the box as the owner sent it, for an Undo to put back.
-        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true, raw, pasted });
+        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true, raw, pasted, dictated });
         clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => setNote((now) => (now?.kind === 'sent' ? { ...now, undoable: false } : now)), UNDO_MS);
       } else {
@@ -84,7 +88,7 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
       sendingRef.current = false;
       setSending(false);
     }
-  }, [prompt, attachments, attachmentsLoading, dictationPending, pastedRef, pageData, route, onSent]);
+  }, [prompt, attachments, attachmentsLoading, dictationPending, pastedRef, dictationUsedRef, pageData, route, onSent]);
 
   const undo = useCallback(async () => {
     if (!note?.undoable || sendingRef.current) return;
@@ -96,6 +100,7 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
       const restore = !promptRef.current.trim();
       if (restore) {
         pastedRef.current = note.pasted === true;
+        if (dictationUsedRef) dictationUsedRef.current = note.dictated === true;
         onRestore(note.raw);
       }
       setNote({ kind: 'cancelled', text: restore ? 'Cancelled. Your text is back in the box.' : 'Cancelled.' });
@@ -105,7 +110,7 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
     } finally {
       sendingRef.current = false;
     }
-  }, [note, pastedRef, onRestore]);
+  }, [note, pastedRef, dictationUsedRef, onRestore]);
 
   return { enabled, sending, note, send, undo, canSend: Boolean(prompt.trim()) && !sending && !attachmentsLoading && !dictationPending };
 }
