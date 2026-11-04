@@ -800,7 +800,7 @@ async function deliverRestartText(hold, customer, next, nextOn) {
     }, { workflow: 'plan_hold_restart_first_visit', entity_type: 'plan_hold', entity_id: hold.id });
     const smsResult = await sendCustomerMessage({
       to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
-      customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
+      customerId: hold.customer_id, identityTrustLevel: 'phone_matches_customer', entryPoint: 'plan_hold_reminder',
       metadata: { original_message_type: 'plan_hold_restart_first_visit', plan_hold_id: hold.id, visit_id: next.id },
     });
     return !!smsResult.sent;
