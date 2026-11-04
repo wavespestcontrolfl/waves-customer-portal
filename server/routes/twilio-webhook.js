@@ -1265,7 +1265,6 @@ router.post('/sms', async (req, res) => {
           MessageSid,
           source: numberConfig.domain || 'van wrap',
           message: Body,
-          mediaCount: inboundMedia.length,
         });
       } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
     }

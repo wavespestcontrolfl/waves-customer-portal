@@ -184,6 +184,10 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
 
   const ready = current.status === "ready";
   const retry = current.status === "error";
+  // The load button's text and accessible name: a caller's loadLabel is both, and a failure offers a retry.
+  const [buttonText, buttonName] = retry
+    ? ["Retry recording", `Retry ${label.toLowerCase()}`]
+    : [loadLabel || "Load recording", loadLabel || `Load ${label.toLowerCase()}`];
 
   return (
     <div
@@ -201,7 +205,7 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
           ref={audioRef}
           controls={controls}
           preload={preload}
-          src={ready ? current.sourceUrl : undefined}
+          src={current.sourceUrl}
           hidden={!ready}
           aria-label={label}
           title={title}
@@ -228,7 +232,7 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
             type="button"
             onClick={loadRecording}
             disabled={!id}
-            aria-label={retry || !loadLabel ? `${retry ? "Retry" : "Load"} ${label.toLowerCase()}` : loadLabel}
+            aria-label={buttonName}
             title={title}
             style={{
               minHeight: 32,
@@ -244,7 +248,7 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
               ...buttonStyle,
             }}
           >
-            {retry ? "Retry recording" : loadLabel || "Load recording"}
+            {buttonText}
           </button>
         </div>
       )}

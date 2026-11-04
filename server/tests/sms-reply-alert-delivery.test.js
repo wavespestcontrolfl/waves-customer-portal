@@ -288,7 +288,7 @@ describe('known-sender thread bell', () => {
 // number rang two rows): the keyed, refreshed thread row a known sender's texts get, keyed on a hash of the number.
 describe('tracking-line unknown-sender thread bell', () => {
   const ringTracking = (From = input.From, MessageSid = 'SM-t1') => delivery.ringTrackingLineTextBell({
-    From, MessageSid, source: 'wavespestcontrol.com', message: 'Do you treat roaches?', mediaCount: 0,
+    From, MessageSid, source: 'wavespestcontrol.com', message: 'Do you treat roaches?',
   });
 
   test('rings the new_lead bell keyed per sender, never the number in the clear, and refreshed in place', async () => {

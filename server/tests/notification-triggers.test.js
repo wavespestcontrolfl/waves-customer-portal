@@ -147,15 +147,16 @@ describe('notification trigger push tags', () => {
     expect(built.alert.buttons.items[0].args).toEqual({ smsSid: sid });
 
     // The sender's row counts its texts; a long text is cut inside the 110-character why and kept whole for
-    // "Show full text"; a photo with no words says so.
+    // "Show full text"; a text with no words (the webhook rings only for words or a photo) is a photo.
     const long = 'Hi there, I have roaches all over my kitchen and garage and I need someone to come out this week, what do you charge?';
     const second = TRIGGER_REGISTRY.new_lead.build({ ...text, message: long, textCount: 2 });
     expect(second.title).toBe('2 texts from wavespestcontrol.com');
     expect(second.body.length).toBeLessThanOrEqual(110);
     expect(second.body).toMatch(/^“Hi there, I have roaches .*…” — unknown sender \*\*\*0101$/);
     expect(second.detail).toBe(long);
-    expect(TRIGGER_REGISTRY.new_lead.build({ ...text, message: '', mediaCount: 1 }).body).toBe('Sent a photo — unknown sender ***0101');
-    expect(TRIGGER_REGISTRY.new_lead.build({ ...text, message: '', mediaCount: 3 }).body).toBe('Sent 3 photos — unknown sender ***0101');
+    const photo = TRIGGER_REGISTRY.new_lead.build({ ...text, message: '' });
+    expect(photo.body).toBe('Photo message — unknown sender ***0101');
+    expect(photo.detail).toBeUndefined();
   });
 
   test('SMS reply trigger leads with a lead\'s CALL / TEXT choice and is unchanged without it', () => {

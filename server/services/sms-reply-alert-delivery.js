@@ -119,7 +119,7 @@ const trackingThreadBellKey = (From, MessageSid) => {
   return `sms-tracking-thread:${crypto.createHash('sha256').update(sender).digest('hex').slice(0, 32)}`;
 };
 
-async function ringTrackingLineTextBell({ From, MessageSid, source, message, mediaCount = 0 }) {
+async function ringTrackingLineTextBell({ From, MessageSid, source, message }) {
   const { triggerNotification } = require('./notification-triggers');
   const arrivedAtMs = await receivedAtMs(MessageSid);
   return triggerNotification('new_lead', {
@@ -127,7 +127,6 @@ async function ringTrackingLineTextBell({ From, MessageSid, source, message, med
     twilioSid: MessageSid,
     phone: From,
     message: message || '',
-    mediaCount,
     source,
     textCount: 1,
     receivedAtMs: arrivedAtMs,
