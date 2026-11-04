@@ -1867,6 +1867,39 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:40AM — Day RE-PLAN, SHADOW (GATE_DAY_REPLAN, dark; owner ruling
+  // 2026-11-03, PR 1 of 3). After the 4:20 reorder pass it plans each
+  // technician-day from tomorrow out with the free straight-line drive model
+  // and LOGS what it would do to day_replan_plans. It never writes a visit or
+  // a reminder and sends/notifies nobody. Nested inside the 4:10 writer lock
+  // so it never overlaps a night writer. Gate off: returns before any read.
+  // =========================================================================
+  cron.schedule('40 4 * * *', async () => {
+    // Call-time read so a Railway var flip takes effect on the next tick.
+    if (require('../config/feature-gates').dayReplanMode() === 'off') return;
+    logger.info('Running: Day re-plan (shadow)');
+    try {
+      await runExclusive('day-replan-nightly', async () => {
+        const { runDayReplanIfEnabled } = require('./day-replan');
+        // recordHealth:false - this only BORROWS the 4:10 writer lock; the outer
+        // 'day-replan-nightly' job records the health.
+        const inner = await runExclusive('auto-dispatch-recurring', async () => runDayReplanIfEnabled({ now: new Date() }), { recordHealth: false });
+        if (inner && inner.skipped === true) {
+          logger.warn(`[day-replan] tick skipped (${inner.reason}) - another night writer holds the lock`);
+          throw new Error(`day-replan tick skipped (${inner.reason}) - the run lock was held`);
+        }
+        const result = inner || {};
+        // Anything short of a clean run fails job health, so a night with no plans is never read as healthy.
+        if (result.status !== 'off' && result.status !== 'completed') {
+          throw new Error(`day-replan run unhealthy: status=${result.status ?? 'unknown'} failed=${(result.failed || []).length}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Day re-plan run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5:00AM — Auto-Dispatch CATCH-UP (GATE_AUTO_DISPATCH_CATCH_UP, dark;
   // owner 2026-10-26). A deploy that restarts the server during the 4:10 run
   // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
