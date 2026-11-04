@@ -270,7 +270,8 @@ async function ringBell(thread, latestInbound, { trx = null } = {}) {
     refreshOnDedupe: true,
     bumpOnRefresh: true,
     detail: words ? words.slice(0, 1000) : undefined,
-    metadata: { conversationId: thread.id },
+    // triggerKey: the phone banner's type (bell-banners.js, GATE_BELL_BANNERS); the bell row itself is unchanged.
+    metadata: { conversationId: thread.id, triggerKey: 'messenger_reply' },
     // The reconcile's own transaction: the bell write takes no connection of its own.
     ...(trx ? { trx } : {}),
   });

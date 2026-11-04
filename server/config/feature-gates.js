@@ -204,6 +204,7 @@
  *   GATE_SMS_SPAM_TAG=true (owner 2026-11-02, "mark spam, no alerts, never remove customer texts": the Messages inbox "Mark spam" button TAGS the sender instead of blocking it. A tagged sender's later texts are still saved and shown, marked read with a Spam tag, and raise no bell, badge, lead, quote or auto-reply; a customer or an open lead on that number always wins. "Not spam" undoes it and brings the texts back as needing a reply. Calls are not blocked. Read at call time via smsSpamTagLive(); ships DARK; off = today's block button, byte-identical, and the spam-senders routes answer 404)
  *   GATE_TAP_SAVE_CARD=true (owner ruling 2026-11-02, "Book at the Table", PR 2: a technician saves a customer's card for Auto Pay with Tap to Pay on iPhone and NO charge. On, an admin can POST /api/stripe/terminal/save-card-handoff with a texted secure-card token, the consent version the app showed and agreed=true; that creates a card_present SetupIntent for the request's Stripe customer, mints the 60-second wavespay://save-card handoff, and /validate-save-card-handoff and /complete-setup finish it through the same completion tail as the /secure page (card saved, consent recorded under admin_tap_to_pay, Auto Pay enrolled). A save-card terminal token can never reach /payment-intent or /apply-surcharge. Read via isEnabled('tapSaveCard') at boot, strict 'true', dark by default; off = the mint route answers 404 and nothing changes today. Costs no card charge and no extra service.)
  *   GATE_SMS_LIKE=true (owner 2026-11-02, "SMS Like Button" option B: Messages and the customer thread show a like button under the customer's newest text when nothing came after it; a click texts a thumbs-up back through the composer's own send (every consent, opt-out and line check) and marks the text with who liked it and when; customer likes on our texts show as a badge on that text instead of their own bubble. It texts customers, so the owner flips it. Read at call time via smsLikeLive(); off = no button, no badges, POST /messages/:id/like answers 404)
+ *   GATE_BELL_BANNERS=true (owner 2026-11-03, "ok add", choices A and B: two kinds of admin alert that reach only the portal bell also send a phone banner. A: the text follow-up due and the promise to a caller overdue push only between 7:00 AM and 9:00 PM Eastern (outside those hours the bell row stays and no banner is sent). B: the Facebook message bell (new Messenger trigger messenger_reply) pushes at any hour, like a text. Read at call time via bellBannersLive(); ships DARK; off = no banner, today's behavior byte-identical)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
@@ -4717,6 +4718,8 @@ const gates = {
   homeLine: process.env.GATE_HOME_LINE === 'true',
   // GATE_SMS_LIKE: read at CALL time via smsLikeLive(); this entry is for logGateStatus.
   smsLike: process.env.GATE_SMS_LIKE === 'true',
+  // GATE_BELL_BANNERS: read at CALL time via bellBannersLive(); this entry is for logGateStatus.
+  bellBanners: process.env.GATE_BELL_BANNERS === 'true',
   // GATE_PORTAL_ASK_PUSH: read at CALL time via portalAskPushLive(); this entry is for logGateStatus, so the boot
   // log shows the flip.
   portalAskPush: process.env.GATE_PORTAL_ASK_PUSH === 'true',
@@ -7874,6 +7877,13 @@ function smsLikeLive() {
   return process.env.GATE_SMS_LIKE === 'true';
 }
 
+// GATE_BELL_BANNERS read at CALL time — strict `=== 'true'`, dark in every environment. The canonical reader for
+// services/bell-banners.js (phone banners for bell-only alerts); the `bellBanners` gates-map entry above is for
+// logGateStatus only.
+function bellBannersLive() {
+  return process.env.GATE_BELL_BANNERS === 'true';
+}
+
 // GATE_IN_PERSON_CARD read at CALL time — strict `=== 'true'`, dark in every
 // environment. The canonical reader for the in-person card route and the
 // booking window's "Customer saves it here, now" choice.
@@ -10384,3 +10394,5 @@ function geocodeCountyFallbackLive() {
 }
 // GATE_GEOCODE_COUNTY_FALLBACK reader, on its own line so gate PRs never conflict.
 module.exports.geocodeCountyFallbackLive = geocodeCountyFallbackLive;
+// GATE_BELL_BANNERS reader, on its own line so gate PRs never conflict.
+module.exports.bellBannersLive = bellBannersLive;
