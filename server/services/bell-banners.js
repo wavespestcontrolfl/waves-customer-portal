@@ -10,7 +10,9 @@
  *
  * NotificationService.notifyAdmin calls bannerAfterWrite(result, { metadata, trx }) once per write. The banner goes
  * out only after the bell row is durable: a write on the caller's transaction waits for the OUTERMOST commit (a
- * rollback sends nothing). Nothing here changes a bell row, and a failure only logs: it never reaches the caller.
+ * rollback sends nothing), and the COMMITTED row must still be this write's ring (same rungAt stamp, unread, open), so
+ * a savepoint that rolled the write back sends nothing even when the outer transaction commits. The banner carries the
+ * committed row's words. Nothing here changes a bell row, and a failure only logs: it never reaches the caller.
  */
 
 const db = require('../models/db');
@@ -72,33 +74,49 @@ function skipReason(result, metadata) {
   // never pages a phone.
   if (meta.feed === 'activity' || meta.quiet === true) return 'activity_only';
   if (meta.claudeQueue || caller.claudeQueue) return 'claude_queue';
+  // A refresh that rang stamped metadata.rungAt; without it the committed row cannot be matched to this ring.
+  if (row.refreshed && !ringStamp(row)) return 'no_ring_stamp';
   return null;
 }
 
-// The row must still be an open, unread ring when the banner is about to go: the writer's own transaction may have
-// read or closed it after the write (the watchdog marks a promise it already summarised read). Fails open.
-async function rowStillRinging(rowId) {
+// The ring stamp (metadata.rungAt, set by notifyAdmin on every refresh that rings) the write returned, or null. A
+// fresh insert carries none unless a ring gate stamped it; its identity is the new row's id.
+function ringStamp(written) {
+  return metaOf(written.metadata).rungAt || null;
+}
+
+// The COMMITTED row this write rang, or null. The outer commit alone does not prove it: a savepoint inside the
+// transaction may have rolled back this write (knex resolves executionPromise for an explicit rollback() without an
+// error), leaving the older row, or no row, behind. So the stored row must still carry this write's ring stamp (when it
+// has one), be unread and be open. A lookup that fails reads as unverified: no banner (the bell row stays).
+async function committedRing({ id, rungAt }) {
   try {
-    const row = await db('notifications').where({ id: rowId }).first('read_at', 'done_at');
-    return Boolean(row) && !row.read_at && !row.done_at;
-  } catch {
-    return true;
+    const stored = await db('notifications').where({ id }).first('id', 'title', 'body', 'link', 'read_at', 'done_at', 'metadata');
+    if (!stored || stored.read_at || stored.done_at) return null;
+    if (rungAt && metaOf(stored.metadata).rungAt !== rungAt) return null;
+    return stored;
+  } catch (err) {
+    logger.warn(`[bell-banners] committed row check failed: ${err?.code || err?.name || 'error'}`);
+    return null;
   }
 }
 
-async function sendBanner(row, triggerKey, caller) {
+async function sendBanner(ring, triggerKey, caller) {
   try {
     // The hour is judged now, when the banner would go, not when the row was written.
     if (BELL_BANNER_KINDS[triggerKey].nightQuiet && isNightQuiet(new Date())) return null;
+    const stored = await committedRing(ring);
+    if (!stored) return null;
     const { triggerNotification } = require('./notification-triggers');
-    // The row's own words and link; alertRowId tags the banner per row so a refresh ring replaces it.
+    // The committed row's own words and link; alertRowId tags the banner per row so a refresh ring replaces it.
     const payload = {
-      alertRowId: row.id, alertTitle: row.title, alertBody: row.body, alertLink: row.link,
+      alertRowId: stored.id, alertTitle: stored.title, alertBody: stored.body, alertLink: stored.link,
       ...(caller.customerId || caller.customer_id ? { customerId: caller.customerId || caller.customer_id } : {}),
     };
+    // Looked at again just before the send: the row may be read or closed while the push is prepared.
     return await triggerNotification(triggerKey, payload, {
       pushOnly: true, adminOnly: true,
-      beforePush: () => rowStillRinging(row.id),
+      beforePush: async () => Boolean(await committedRing(ring)),
     });
   } catch (err) {
     logger.warn(`[bell-banners] banner failed for ${triggerKey}: ${err?.code || err?.name || 'error'}`);
@@ -124,20 +142,22 @@ function bannerAfterWrite(result, { metadata = null, trx = null } = {}) {
   try {
     if (skipReason(result, metadata)) return null;
     const caller = metaOf(metadata);
-    const row = ringedRow(result);
-    if (!trx || trx === db) return sendBanner(row, caller.triggerKey, caller);
+    const written = ringedRow(result);
+    const ring = { id: written.id, rungAt: ringStamp(written) };
+    if (!trx || trx === db) return sendBanner(ring, caller.triggerKey, caller);
     const scope = outermostTransaction(trx);
     if (!scope?.executionPromise) {
       // Without a commit hook the row's fate is unknown: no banner (the bell row stays), never one for a rollback.
       logger.warn(`[bell-banners] caller transaction has no commit hook, banner skipped for ${caller.triggerKey}`);
       return null;
     }
-    // A rollback rejects executionPromise: the row never existed, so nothing is sent.
-    return scope.executionPromise.then(() => sendBanner(row, caller.triggerKey, caller), () => null);
+    // A rollback usually rejects executionPromise; an explicit rollback() without an error resolves it (knex's
+    // doNotRejectOnRollback default). committedRing is what catches that case and a rolled-back savepoint.
+    return scope.executionPromise.then(() => sendBanner(ring, caller.triggerKey, caller), () => null);
   } catch (err) {
     logger.warn(`[bell-banners] banner scheduling failed: ${err?.code || err?.name || 'error'}`);
     return null;
   }
 }
 
-module.exports = { BELL_BANNER_KINDS, isNightQuiet, bannerAfterWrite, __private: { skipReason, ringedRow, outermostTransaction } };
+module.exports = { BELL_BANNER_KINDS, isNightQuiet, bannerAfterWrite, __private: { skipReason, ringedRow, outermostTransaction, committedRing } };

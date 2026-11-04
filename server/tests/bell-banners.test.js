@@ -14,11 +14,26 @@ const { BELL_BANNER_KINDS, isNightQuiet, bannerAfterWrite } = require('../servic
 // 2026-07-15 noon ET: inside the window for the kinds that observe it.
 const NOON_ET = new Date('2026-07-15T16:00:00Z');
 
-const row = (over = {}) => ({ id: 'n-1', title: 'A promise to a caller is overdue', body: 'Pat S. - call back (due today).', link: '/admin/communications#tab=owed', read_at: null, metadata: {}, deduped: false, ...over });
+// The committed rows the db stand-in serves back (what a read after the commit sees), by id.
+const stored = new Map();
+const row = (over = {}) => {
+  const written = { id: 'n-1', title: 'A promise to a caller is overdue', body: 'Pat S. - call back (due today).', link: '/admin/communications#tab=owed', read_at: null, metadata: {}, deduped: false, ...over };
+  // By default the commit keeps exactly what was written; a test overrides stored.set(...) to say otherwise.
+  stored.set(written.id, { id: written.id, title: written.title, body: written.body, link: written.link, read_at: null, done_at: null, metadata: written.metadata });
+  return written;
+};
 const meta = (triggerKey, over = {}) => ({ triggerKey, ...over });
+// A refresh that rang: notifyAdmin stamps metadata.rungAt on the row it returns and writes.
+const rang = (rungAt = '2026-07-15T16:00:00.000Z', over = {}) => row({ deduped: true, refreshed: true, rung: true, metadata: { rungAt }, ...over });
 
 beforeEach(() => {
   jest.clearAllMocks();
+  stored.clear();
+  db.mockImplementation(() => {
+    let id;
+    const chain = { where: (cond) => { id = cond.id; return chain; }, first: async () => stored.get(id) };
+    return chain;
+  });
   jest.useFakeTimers({ now: NOON_ET });
   process.env.GATE_BELL_BANNERS = 'true';
 });
@@ -81,9 +96,9 @@ describe('bannerAfterWrite: which writes send a banner', () => {
   });
 
   test('a refreshed standing row that rang again sends one; a quiet refresh sends none', async () => {
-    await bannerAfterWrite(row({ deduped: true, refreshed: true, rung: true }), { metadata: meta('messenger_reply') });
+    await bannerAfterWrite(rang(), { metadata: meta('messenger_reply') });
     expect(triggerNotification).toHaveBeenCalledTimes(1);
-    await bannerAfterWrite(row({ deduped: true, refreshed: true, rung: false }), { metadata: meta('messenger_reply') });
+    await bannerAfterWrite(row({ deduped: true, refreshed: true, rung: false, metadata: { rungAt: 'T' } }), { metadata: meta('messenger_reply') });
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
@@ -101,7 +116,8 @@ describe('bannerAfterWrite: which writes send a banner', () => {
     ['no trigger key', () => {}, row(), {}],
     ['no metadata at all', () => {}, row(), undefined],
     ['an identical repeat', () => {}, row({ deduped: true }), meta('messenger_reply')],
-    ['a refresh that did not ring', () => {}, row({ deduped: true, refreshed: true, rung: false }), meta('messenger_reply')],
+    ['a refresh that did not ring', () => {}, row({ deduped: true, refreshed: true, rung: false, metadata: { rungAt: 'T' } }), meta('messenger_reply')],
+    ['a refresh that rang but carries no ring stamp', () => {}, row({ deduped: true, refreshed: true, rung: true }), meta('messenger_reply')],
     ['a withheld bell', () => {}, { id: null, suppressed: true }, meta('messenger_reply')],
     ['a withheld bell with a reason', () => {}, { id: null, suppressed: true, reason: 'bell_policy' }, meta('messenger_reply')],
     ['a relay suppression', () => {}, { suppressed: true, deduped: true }, meta('messenger_reply')],
@@ -246,34 +262,81 @@ describe('bannerAfterWrite: failures stay out of the caller', () => {
   });
 });
 
-describe('the last look before the banner', () => {
-  const lastLook = async () => {
-    await bannerAfterWrite(row({ id: 'n-5' }), { metadata: meta('messenger_reply') });
-    return triggerNotification.mock.calls[0][2].beforePush;
-  };
-  const stubRow = (found) => {
-    const chain = { where: jest.fn(() => chain), first: jest.fn(async () => found) };
-    db.mockImplementation(() => chain);
-    return chain;
-  };
+describe('the committed row decides', () => {
+  const T1 = '2026-07-15T15:59:00.000Z';
+  const T2 = '2026-07-15T16:00:00.000Z';
 
-  test('goes when the row is still open and unread', async () => {
-    const chain = stubRow({ read_at: null, done_at: null });
-    expect(await (await lastLook())()).toBe(true);
-    expect(chain.where).toHaveBeenCalledWith({ id: 'n-5' });
+  test('the banner carries the COMMITTED words, not the ones the write scheduled', async () => {
+    const written = rang(T2, { title: 'Scheduled title', body: 'Scheduled body' });
+    stored.set('n-1', { ...stored.get('n-1'), title: 'Committed title', body: 'Committed body' });
+    await bannerAfterWrite(written, { metadata: meta('messenger_reply') });
+    expect(triggerNotification.mock.calls[0][1]).toMatchObject({ alertRowId: 'n-1', alertTitle: 'Committed title', alertBody: 'Committed body' });
   });
 
   test.each([
-    ['read in the writer\'s own transaction (the watchdog marks a promise it already summarised)', { read_at: new Date(), done_at: null }],
-    ['closed', { read_at: null, done_at: new Date() }],
-    ['gone', undefined],
-  ])('stops when the row is %s', async (_label, found) => {
-    stubRow(found);
-    expect(await (await lastLook())()).toBe(false);
+    ['a savepoint rolled the refresh back: the row keeps its OLD ring stamp', () => stored.set('n-1', { ...stored.get('n-1'), metadata: { rungAt: T1 } })],
+    ['a rolled-back refresh of a row that never had a stamp', () => stored.set('n-1', { ...stored.get('n-1'), metadata: {} })],
+    ['a later ring in the same transaction replaced the stamp (that ring sends its own banner)', () => stored.set('n-1', { ...stored.get('n-1'), metadata: JSON.stringify({ rungAt: '2026-07-15T16:00:01.000Z' }) })],
+    ['the row is gone (a rolled-back insert whose rollback resolved executionPromise)', () => stored.delete('n-1')],
+    ['the row is read by commit time', () => stored.set('n-1', { ...stored.get('n-1'), read_at: new Date() })],
+    ['the row is closed by commit time', () => stored.set('n-1', { ...stored.get('n-1'), done_at: new Date() })],
+  ])('no banner when %s', async (_label, arrange) => {
+    const written = rang(T2);
+    arrange();
+    await bannerAfterWrite(written, { metadata: meta('messenger_reply') });
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('a failed lookup lets the banner go', async () => {
-    db.mockImplementation(() => { throw new Error('lookup down'); });
-    expect(await (await lastLook())()).toBe(true);
+  test('a stamp stored as JSON text still matches', async () => {
+    const written = rang(T2);
+    stored.set('n-1', { ...stored.get('n-1'), metadata: JSON.stringify({ rungAt: T2 }) });
+    await bannerAfterWrite(written, { metadata: meta('messenger_reply') });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('a fresh insert is matched by its row: it goes when the row is there, not when it is gone', async () => {
+    await bannerAfterWrite(row({ id: 'n-8' }), { metadata: meta('messenger_reply') });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    triggerNotification.mockClear();
+    const rolledBack = row({ id: 'n-9' });
+    stored.delete('n-9');
+    await bannerAfterWrite(rolledBack, { metadata: meta('messenger_reply') });
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a failed lookup is unverified: no banner, and the log carries no row text', async () => {
+    db.mockImplementation(() => { throw new Error('lookup down for Pat S.'); });
+    await bannerAfterWrite(row({ body: 'Pat S. 941-555-0100' }), { metadata: meta('messenger_reply') });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/Pat S|941/);
+  });
+
+  describe('the look just before the send', () => {
+    const lastLook = async (written) => {
+      await bannerAfterWrite(written, { metadata: meta('messenger_reply') });
+      return triggerNotification.mock.calls[0][2].beforePush;
+    };
+
+    test('goes while the committed row is still this ring, open and unread', async () => {
+      expect(await (await lastLook(rang(T2)))()).toBe(true);
+    });
+
+    test.each([
+      ['read while the push is prepared (the watchdog marks a promise it already summarised)', { read_at: new Date() }],
+      ['closed', { done_at: new Date() }],
+      ['rung again by a newer write', { metadata: { rungAt: '2026-07-15T16:00:05.000Z' } }],
+    ])('stops when the row is %s', async (_label, change) => {
+      const look = await lastLook(rang(T2));
+      stored.set('n-1', { ...stored.get('n-1'), ...change });
+      expect(await look()).toBe(false);
+    });
+
+    test('stops when the row is gone or the lookup fails', async () => {
+      const look = await lastLook(rang(T2));
+      stored.delete('n-1');
+      expect(await look()).toBe(false);
+      db.mockImplementation(() => { throw new Error('lookup down'); });
+      expect(await look()).toBe(false);
+    });
   });
 });

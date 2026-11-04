@@ -65,12 +65,19 @@ const bell = (opts = {}, body = 'Facebook: can you call me?') => NotificationSer
   metadata: { conversationId: 't-1', triggerKey: 'messenger_reply' }, ...opts,
 });
 
+// Noon Eastern: inside the reminder window whatever time the suite runs. setImmediate stays real so flush() works.
+const NOON_ET = new Date('2026-11-03T17:00:00Z');
+
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'], now: NOON_ET });
   mockRows = { notifications: [] };
   process.env.GATE_BELL_BANNERS = 'true';
 });
-afterEach(() => { delete process.env.GATE_BELL_BANNERS; });
+afterEach(() => {
+  jest.useRealTimers();
+  delete process.env.GATE_BELL_BANNERS;
+});
 
 test('a fresh keyed row sends one pushOnly banner with the row\'s own words, and the caller still gets the row', async () => {
   const result = await bell();
@@ -177,6 +184,56 @@ describe('on the caller\'s transaction', () => {
     outer.commit();
     await flush();
     expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  // What a rollback leaves behind: the table as it was before the rolled-back writes.
+  const snapshot = () => mockRows.notifications.map((r) => ({ ...r }));
+  const restore = (rows) => { mockRows.notifications = rows.map((r) => ({ ...r })); };
+
+  test('a savepoint that refreshed an unread bell and rolled back, under an outer commit, sends nothing', async () => {
+    await bell(); // the standing bell, committed earlier and still unread
+    await flush();
+    triggerNotification.mockClear();
+    const before = snapshot();
+    const outer = callerTrx();
+    const savepoint = callerTrx(outer);
+    jest.setSystemTime(new Date(NOON_ET.getTime() + 60000));
+    const refreshed = await bell({ trx: savepoint, dedupeVersion: 'm2' }, 'Facebook: words from a rolled-back refresh');
+    expect(refreshed).toMatchObject({ deduped: true, refreshed: true, rung: true });
+    // The savepoint rolls back: its writes are undone, and (knex doNotRejectOnRollback) its promise still resolves.
+    restore(before);
+    savepoint.commit();
+    outer.commit();
+    await flush();
+    await flush();
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('an explicit rollback() without an error resolves executionPromise and sends nothing', async () => {
+    const trx = callerTrx();
+    const created = await bell({ trx });
+    expect(created).toMatchObject({ id: 'n-1', deduped: false });
+    restore([]); // the insert is rolled back
+    trx.commit(); // knex resolves executionPromise for rollback() with no error
+    await flush();
+    await flush();
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a normal refresh that rings, committed, sends one banner with the committed words', async () => {
+    await bell();
+    await flush();
+    triggerNotification.mockClear();
+    const trx = callerTrx();
+    jest.setSystemTime(new Date(NOON_ET.getTime() + 60000));
+    await bell({ trx, dedupeVersion: 'm2' }, 'Facebook: are you still coming?');
+    await flush();
+    expect(triggerNotification).not.toHaveBeenCalled();
+    trx.commit();
+    await flush();
+    await flush();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect(triggerNotification.mock.calls[0][1]).toMatchObject({ alertRowId: 'n-1', alertBody: 'Facebook: are you still coming?' });
   });
 
   test('a repeat on the same transaction sends nothing at commit', async () => {
