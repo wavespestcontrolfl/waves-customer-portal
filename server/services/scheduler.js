@@ -5476,6 +5476,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:43AM — Cash forecast low week (GATE_CASH_FORECAST; returns before any
+  // read when off). Owner 2026-11-04 D4 A: one standing owner-only bell when a week
+  // of the next 13 ends below the owner's floor on the expected line. Rings only when
+  // a low week first appears and closes itself when no week is below the floor.
+  // Reads the forecast (Plaid's free /accounts/get, Stripe's balance, the portal's
+  // own data); sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('43 7 * * *', async () => {
+    if (!require('../config/feature-gates').cashForecastLive()) return;
+    try {
+      await runExclusive('cash-forecast-low-week', async () => {
+        const result = await require('./cash-forecast/low-week-bell').runCashForecastLowWeek();
+        logger.info(`Cash forecast low week: ${result.count ?? 0} weeks below the floor (${result.outcome || result.skipped}${result.reason ? `: ${result.reason}` : ''})`);
+      });
+    } catch (err) {
+      logger.error(`Cash forecast low week failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN (offset one minute) — Delayed gratitude replies
   // Independent of the scheduled-SMS sweep: queued operational sends never
   // wait behind courtesy replies, and a stalled scheduled-SMS recovery never
