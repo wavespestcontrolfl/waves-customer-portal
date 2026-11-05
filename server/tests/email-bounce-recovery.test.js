@@ -14,6 +14,11 @@ jest.mock('../services/email-template-library', () => ({
   activeSuppressionFor: jest.fn(),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+// The source-call lookup and the audio re-verification lane live in email-bounce-reverify (own suite).
+jest.mock('../services/email-bounce-reverify', () => ({
+  findSourceCall: jest.fn(async () => null),
+  reverifyBouncedEmailFromCall: jest.fn(async () => ({})),
+}));
 jest.mock('../services/billing-email-provider-replay', () => ({
   isBillingEmailTemplateRetry: jest.fn(() => false),
   isBillingEmailProviderReplay: jest.fn(() => false),
@@ -31,6 +36,7 @@ const NotificationService = require('../services/notification-service');
 const logger = require('../services/logger');
 const billingReplay = require('../services/billing-email-provider-replay');
 const recovery = require('../services/email-bounce-recovery');
+const reverify = require('../services/email-bounce-reverify');
 
 beforeEach(() => {
   billingReplay.isBillingEmailTemplateRetry.mockReturnValue(false);
@@ -1340,5 +1346,224 @@ describe('final ownership send fence', () => {
       'email-ownership:customer-email:synthetic.secret+tag@googlemail.com',
       'email-ownership:customer-mailbox:syntheticsecret@gmail.com',
     ]);
+  });
+});
+
+// GATE_CALL_BOUNCE_OTHER_SPELLING (owner 2026-11-04): a call-saved email whose two extraction passes disagreed
+// until the spelled letters settled it. If the saved address hard-bounces, the same email goes to the other spelling.
+describe('resend to the other spelling the call settled against (GATE_CALL_BOUNCE_OTHER_SPELLING)', () => {
+  const orig = { ...process.env };
+  const settled = (over = {}) => JSON.stringify({
+    first_name: 'Jon',
+    email: 'jondoe@example.com',
+    email_spelling_settled: { email: 'jondoe@example.com', other_spelling: 'jondoh@example.com', ...over },
+  });
+  const callRow = (extraction = settled(), over = {}) => ({ id: 'call1', customer_id: 'c1', ai_extraction: extraction, ...over });
+  const bounced = (over = {}) => ({
+    id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jondoe@example.com',
+    template_key: 'estimate.delivery', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'], ...over,
+  });
+  const newDb = (over = {}) => orderedDb({
+    first: (table) => (table === 'customers' ? { id: 'c1', email: 'jondoe@example.com' } : (over.first ? over.first(table) : null)),
+    returning: (table) => {
+      if (table === 'email_bounce_recoveries') return [{ id: 'rec1' }];
+      if (table === 'email_messages') return [{ id: 'msg1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }];
+      return [];
+    },
+    rows: over.rows,
+  });
+  const ledger = (mockDb) => mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries' && c.data && 'status' in c.data);
+
+  beforeEach(() => {
+    db.mockReset();
+    sendgrid.sendOne.mockReset();
+    emailLib.loadTemplateByKey.mockReset();
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    emailLib.activeSuppressionFor.mockReset();
+    NotificationService.notifyAdmin.mockReset();
+    reverify.findSourceCall.mockReset();
+    reverify.reverifyBouncedEmailFromCall.mockClear();
+    db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    delete process.env.EMAIL_BOUNCE_RECOVERY;
+    delete process.env.EMAIL_RECOVERY_MIN_CONFIDENCE;
+    delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_os' });
+    reverify.findSourceCall.mockResolvedValue(callRow());
+  });
+  afterEach(() => { process.env = { ...orig }; });
+
+  test('gate off: no lookup, no candidate, no resend (today)', async () => {
+    const mockDb = newDb();
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced(), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'no_candidate' });
+    expect(reverify.findSourceCall).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(ledger(mockDb).pop().data).toMatchObject({ status: 'no_candidate', corrected_email: null, correction_rule: null });
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on, settled call: resends the same email to the other spelling and logs the rule', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    const mockDb = newDb();
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced(), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ resent: true, corrected: 'jondoh@example.com', rule: 'call_other_spelling' });
+    expect(reverify.findSourceCall).toHaveBeenCalledWith(expect.objectContaining({ bouncedEmail: 'jondoe@example.com', customerId: 'c1', requireRecording: false, requireSettled: true }));
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: 'jondoh@example.com' }));
+    expect(mockDb._calls.find((c) => c.op === 'insert' && c.table === 'email_messages').data)
+      .toMatchObject({ recipient_email_snapshot: 'jondoh@example.com', idempotency_key: 'bounce_recovery:orig1' });
+    const rows = ledger(mockDb);
+    expect(rows.pop().data).toMatchObject({ status: 'resent', corrected_email: 'jondoh@example.com', correction_rule: 'call_other_spelling', confidence: 'high', customer_id: 'c1' });
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a domain typo still takes the domain path first', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    const mockDb = orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jondoe@gmial.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : (table === 'email_messages' ? [{ id: 'msg1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }] : [])),
+    });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced({ recipient_email_snapshot: 'jondoe@gmial.com' }), { event: 'bounce', type: 'bounce' });
+    expect(res).toMatchObject({ resent: true, corrected: 'jondoe@gmail.com', rule: expect.not.stringMatching(/call_other_spelling/) });
+    expect(reverify.findSourceCall).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['the same Gmail inbox under another dot spelling', 'jon.doe@gmail.com', 'jondoe@gmail.com'],
+    ['the same Gmail inbox on googlemail.com', 'jondoe@googlemail.com', 'jondoe@gmail.com'],
+  ])('%s: no resend', async (_label, other, bouncedAddress) => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    reverify.findSourceCall.mockResolvedValue(callRow(settled({ email: bouncedAddress, other_spelling: other })));
+    const mockDb = newDb({ first: () => null });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced({ recipient_email_snapshot: bouncedAddress }), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'no_candidate' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('the other spelling is suppressed: skip, alert names the call spelling, and the call-audio card still runs', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    emailLib.loadTemplateByKey.mockResolvedValue({ template: { id: 't1' } });
+    emailLib.activeSuppressionFor.mockResolvedValue({ id: 's1' });
+    const mockDb = newDb();
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced(), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'corrected_suppressed' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(ledger(mockDb).pop().data).toMatchObject({ status: 'corrected_suppressed', corrected_email: 'jondoh@example.com', correction_rule: 'call_other_spelling' });
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body).toContain('the other spelling heard on the call (jondoh@example.com) is on the suppression list');
+    expect(body).not.toContain('likely correction');
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledWith({ bouncedEmail: 'jondoe@example.com', customerId: 'c1' });
+  });
+
+  test('the other spelling belongs to another record: skip, alert, and the call-audio card still runs', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    const mockDb = newDb({ rows: (table) => (table === 'customers' ? [{ id: 'other-customer' }] : []) });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced(), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'corrected_owned_by_other' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('the other spelling heard on the call (jondoh@example.com) already belongs to another customer');
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
+  });
+
+  test('a domain candidate that is skipped still does NOT run the call-audio lane (unchanged)', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    db.mockImplementation(orderedDb({
+      first: () => null,
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec4' }] : []),
+    }));
+    const res = await recovery.attemptRecovery(
+      { id: 'orig4', recipient_email_snapshot: 'jane@gmial.com', template_key: 'invoice.sent', suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'], has_attachments: true },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(res).toEqual({ skipped: 'has_attachments' });
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['no JSON at all', 'not json {'],
+    ['null extraction', null],
+    ['no settled block', JSON.stringify({ email: 'jondoe@example.com' })],
+    ['the settled email is a different address', settled({ email: 'someone@example.com' })],
+    ['other_spelling is not email-shaped', settled({ other_spelling: 'jondoh' })],
+    ['other_spelling equals the bounced address', settled({ other_spelling: 'JonDoe@Example.com ' })],
+    ['settled is not an object', JSON.stringify({ email_spelling_settled: 'yes' })],
+  ])('%s: no candidate', async (_label, extraction) => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    reverify.findSourceCall.mockResolvedValue(callRow(extraction));
+    db.mockImplementation(newDb());
+    const res = await recovery.attemptRecovery(bounced(), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'no_candidate' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a lookup error, no source call, or another customer\'s call: no candidate', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    db.mockImplementation(newDb());
+    reverify.findSourceCall.mockRejectedValueOnce(new Error('db down'));
+    expect(await recovery.attemptRecovery(bounced({ id: 'o1' }), { event: 'bounce', type: 'bounce' })).toEqual({ skipped: 'no_candidate' });
+    reverify.findSourceCall.mockResolvedValueOnce(null);
+    expect(await recovery.attemptRecovery(bounced({ id: 'o2' }), { event: 'bounce', type: 'bounce' })).toEqual({ skipped: 'no_candidate' });
+    reverify.findSourceCall.mockResolvedValueOnce(callRow(settled(), { customer_id: 'c-other' }));
+    expect(await recovery.attemptRecovery(bounced({ id: 'o3' }), { event: 'bounce', type: 'bounce' })).toEqual({ skipped: 'no_candidate' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('never twice: an earlier recovery to that spelling already bounced, so a later bounce of the same address sends nothing', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    const mockDb = newDb({ first: (table) => (table === 'email_bounce_recoveries' ? { id: 'earlier' } : null) });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced({ id: 'orig2' }), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'no_candidate' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('never twice: when the other-spelling resend itself bounces, the loop guard runs and no lookup or resend happens', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    const rec = { id: 'rec1', status: 'resent', customer_id: 'c1', bounced_email: 'jondoe@example.com' };
+    const mockDb = orderedDb({ first: (table) => (table === 'email_bounce_recoveries' ? rec : null) });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(
+      { id: 'msg1', recipient_email_snapshot: 'jondoh@example.com', categories: ['email_template', 'bounce_recovery'], template_key: 'estimate.delivery' },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(res).toEqual({ skipped: 'recovery_message_rebounced' });
+    expect(reverify.findSourceCall).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(ledger(mockDb).pop().data).toMatchObject({ status: 'redelivered_bounced' });
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledWith(expect.objectContaining({ bouncedEmail: 'jondoh@example.com', sourceEmail: 'jondoe@example.com' }));
+  });
+
+  test('the success bell says it was the other spelling, not a domain fix', async () => {
+    const mockDb = orderedDb({ first: () => null });
+    db.mockImplementation(mockDb);
+    NotificationService.notifyAdmin.mockClear();
+    // notifyRecoverySuccess is private; drive it through commitRecoveryOnDelivery with a committed-shaped ledger row.
+    const rec = { id: 'rec1', status: 'resent', customer_id: 'c1', customer_email_field: 'email', bounced_email: 'jondoe@example.com', corrected_email: 'jondoh@example.com', correction_rule: 'call_other_spelling', original_message_id: 'orig1' };
+    db.mockImplementation(orderedDb({ first: (table) => (table === 'email_bounce_recoveries' ? rec : (table === 'customers' ? { id: 'c1', email: 'jondoe@example.com' } : null)) }));
+    db.transaction = jest.fn(async () => ({ fields: ['email'] }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg1', recipient_email_snapshot: 'jondoh@example.com' });
+    const call = NotificationService.notifyAdmin.mock.calls.find((c) => c[1] === 'Recovered a bounced email');
+    expect(call[2]).toContain('re-sent to the other spelling heard on the call, jondoh@example.com');
+    expect(call[2]).not.toContain('domain');
+    delete db.transaction;
+  });
+});
+
+describe('settledOtherSpelling', () => {
+  test('returns the lowercased other spelling only for a matching, distinct, non-Gmail-equivalent address', () => {
+    const x = (settled, bouncedEmail = 'jondoe@example.com') => recovery.settledOtherSpelling({ email_spelling_settled: settled }, bouncedEmail);
+    expect(x({ email: 'JonDoe@example.com', other_spelling: 'JonDoh@Example.com' })).toBe('jondoh@example.com');
+    expect(x({ email: 'jondoe@example.com', other_spelling: 'jondoe@example.com' })).toBeNull();
+    expect(x({ email: 'jondoe@example.com', other_spelling: 'jon.doe@example.com' })).toBe('jon.doe@example.com'); // dots matter off Gmail
+    expect(x({ email: 'jondoe@gmail.com', other_spelling: 'jon.doe@gmail.com' }, 'jondoe@gmail.com')).toBeNull();
+    expect(recovery.settledOtherSpelling('{broken', 'jondoe@example.com')).toBeNull();
+    expect(recovery.settledOtherSpelling(undefined, 'jondoe@example.com')).toBeNull();
   });
 });

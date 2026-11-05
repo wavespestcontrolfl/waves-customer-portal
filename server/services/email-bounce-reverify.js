@@ -178,7 +178,9 @@ function mergeCandidates({ bouncedEmail, decoderCandidates = [], nameCandidates 
 
 // ── Orchestration ────────────────────────────────────────────────────────
 
-async function findSourceCall({ bouncedEmail, customerId = null }) {
+// requireRecording=false / requireSettled=true: the other-spelling resend (email-bounce-recovery.js) reads only the
+// stored extraction, so it needs no audio, and it wants only a call whose extraction carries email_spelling_settled.
+async function findSourceCall({ bouncedEmail, customerId = null, requireRecording = true, requireSettled = false }) {
   const bounced = String(bouncedEmail || '').trim().toLowerCase();
   // The extraction must actually CONTAIN the bounced address (text-level —
   // no ::jsonb casts on legacy rows). A bare customer fallback would pick the
@@ -187,7 +189,10 @@ async function findSourceCall({ bouncedEmail, customerId = null }) {
   // unrelated audio that can only yield misleading candidates. No match →
   // no evidence → skip. customerId only ranks among multiple matches.
   const q = db('call_log')
-    .whereNotNull('recording_url')
+    .modify((qb) => {
+      if (requireRecording) qb.whereNotNull('recording_url');
+      if (requireSettled) qb.whereRaw('COALESCE(ai_extraction, \'\') LIKE ?', ['%"email_spelling_settled"%']);
+    })
     .whereRaw(`created_at >= now() - interval '${SOURCE_CALL_LOOKBACK_DAYS} days'`)
     .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) ~ ?', [emailBoundaryRegex(bounced)])
     // twilio_call_sid + recording_sid ride along for the PAN quarantine

@@ -29,8 +29,13 @@ const billingReplay = require('./billing-email-provider-replay');
 const { isSenderRenderedEmail, alertFinalNoticeMissed } = require('./billing-email-no-replay');
 const NotificationService = require('./notification-service');
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
+const { gmailCanonicalMailbox, sameGmailInbox } = require('../utils/email-equivalence');
+const { callBounceOtherSpellingLive } = require('../config/feature-gates');
 
 const RECOVERY_CATEGORY = 'bounce_recovery';
+// Ledger correction_rule for a resend to the other spelling a call's settled-spelling record names.
+const OTHER_SPELLING_RULE = 'call_other_spelling';
+const EMAIL_SHAPE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Customer columns that can hold a sendable address. We overwrite whichever one
 // held the bounced address. Hardcoded constant — safe to interpolate into SQL.
 const CUSTOMER_EMAIL_FIELDS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
@@ -792,6 +797,56 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
 }
 
 /**
+ * Pure: the other spelling a call's extraction names for the bounced address, or null. Reads
+ * ai_extraction.email_spelling_settled ({ email, other_spelling }, both lowercased by the call pipeline) and
+ * returns other_spelling only when `email` is the bounced address, other_spelling is email-shaped, differs from
+ * it, and is not the same Gmail inbox (a dead Gmail inbox is dead for every dot spelling). Bad JSON -> null.
+ */
+function settledOtherSpelling(extraction, bouncedEmail) {
+  let parsed = extraction;
+  if (typeof extraction === 'string') {
+    try { parsed = JSON.parse(extraction); } catch { return null; }
+  }
+  const settled = parsed && typeof parsed === 'object' ? parsed.email_spelling_settled : null;
+  if (!settled || typeof settled !== 'object') return null;
+  const bounced = String(bouncedEmail || '').trim().toLowerCase();
+  const email = String(settled.email || '').trim().toLowerCase();
+  const other = String(settled.other_spelling || '').trim().toLowerCase();
+  if (!bounced || email !== bounced || !EMAIL_SHAPE_RE.test(other) || other === bounced) return null;
+  const canon = gmailCanonicalMailbox(bounced);
+  if (sameGmailInbox([bounced, other]) || (canon && canon === gmailCanonicalMailbox(other))) return null;
+  return other;
+}
+
+/**
+ * GATE_CALL_BOUNCE_OTHER_SPELLING: when the domain corrector has nothing, the call that supplied the bounced
+ * address may name the other spelling its two extraction passes disagreed on until the spelled letters settled it.
+ * That address is a candidate like any domain correction: the caller decides ownership, suppression and
+ * on-file checks, the resend and the commit-on-delivery. Scoped to the bounced message's customer when known.
+ * Never twice: an address this one already bounced to as a recovery is not tried again. Fails closed (any
+ * lookup error -> no candidate, today's behavior).
+ */
+async function otherSpellingCandidate(bouncedEmail, customerId) {
+  try {
+    if (!callBounceOtherSpellingLive()) return null;
+    const { findSourceCall } = require('./email-bounce-reverify');
+    const call = await findSourceCall({ bouncedEmail, customerId: customerId || null, requireRecording: false, requireSettled: true });
+    if (!call) return null;
+    if (customerId && call.customer_id && String(call.customer_id) !== String(customerId)) return null;
+    const other = settledOtherSpelling(call.ai_extraction, bouncedEmail);
+    if (!other) return null;
+    const alreadyBounced = await db('email_bounce_recoveries')
+      .where({ bounced_email: bouncedEmail, corrected_email: other, correction_rule: OTHER_SPELLING_RULE, status: 'redelivered_bounced' })
+      .first('id');
+    if (alreadyBounced) return null;
+    return { corrected: other, rule: OTHER_SPELLING_RULE, confidence: 'high', metadata: { source_call_id: call.id } };
+  } catch (err) {
+    logger.warn(`[bounce-recovery] other-spelling lookup failed closed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Everything after the one-shot ledger row exists: decide, stage the recovery row, send. Shared by
  * the bounce webhook (attemptRecovery) and the held-recovery sweep (retryHeldRecoveries), so a
  * recovery parked behind a collections dispute hold is re-judged from current data - address
@@ -799,8 +854,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
  * which settles a still-pending row as an errored recovery.
  */
 async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resumed = false } = {}) {
-  const candidate = correctEmailDomain(bouncedEmail);
   const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
+  const candidate = correctEmailDomain(bouncedEmail) || await otherSpellingCandidate(bouncedEmail, match?.customerId);
   const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
   const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
   // For no-customer (prospect) recoveries, scope the on-file gate to the actual
@@ -829,6 +884,8 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     customer_id: match?.customerId || null,
     customer_email_field: match?.field || null,
     updated_at: new Date(),
+    // The other-spelling case records the call it came from, so the ledger row alone shows where the address came from.
+    ...(candidate?.metadata ? { metadata: jsonbMerge(candidate.metadata) } : {}),
   };
 
   if (decision.action === 'skip') {
@@ -856,8 +913,11 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
       // the alert above already carries the real suggestion. Deliberately
       // NOT awaited — re-transcription takes tens of seconds and this runs
       // off the bounce webhook; the result is a Needs-Review card, nothing
-      // time-coupled to this handler.
-      if (!candidate) {
+      // time-coupled to this handler. An other-spelling candidate is the
+      // exception: it came from the call itself, not from the bounced
+      // address's domain, so the card still goes to the owner when that
+      // resend is skipped.
+      if (!candidate || candidate.rule === OTHER_SPELLING_RULE) {
         try {
           const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
           reverifyBouncedEmailFromCall({ bouncedEmail, customerId: match?.customerId || null })
@@ -891,7 +951,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     status: 'resent',
     recovery_message_id: built.message.id,
     // A fresh attempt: any marker a parked earlier attempt left is stale (it parked with no provider request).
-    metadata: jsonbMergeClearingDispatchMarker(),
+    metadata: jsonbMergeClearingDispatchMarker(candidate.metadata || {}),
   });
 
   const sendResult = await dispatchRecoveryMessage({
@@ -1461,20 +1521,33 @@ const UNRECOVERABLE_REASONS = {
   no_candidate: 'no safe address correction was possible',
 };
 
+// The owner-facing reason for a skip. An other-spelling candidate is "the other spelling heard on the call", never
+// "the likely correction" (that wording means a domain typo fix).
+function unrecoverableReason(status, candidate) {
+  if (candidate?.rule === OTHER_SPELLING_RULE && candidate.corrected) {
+    if (status === 'corrected_owned_by_other') return `the other spelling heard on the call (${candidate.corrected}) already belongs to another customer`;
+    if (status === 'corrected_suppressed') return `the other spelling heard on the call (${candidate.corrected}) is on the suppression list`;
+  }
+  if (status === 'corrected_owned_by_other' && candidate?.corrected) {
+    return `the likely correction (${candidate.corrected}) already belongs to another customer`;
+  }
+  return UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate;
+}
+
 async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId, status, candidate = null }) {
   // Marketing bounces are noise here — the suppression ledger already handles them.
   const stream = String(bouncedMessage?.suppression_group_key_snapshot || '').toLowerCase();
   if (stream.startsWith('marketing_')) return;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return;
-  const reasonLabel = status === 'corrected_owned_by_other' && candidate?.corrected
-    ? `the likely correction (${candidate.corrected}) already belongs to another customer`
-    : (UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate);
+  const reasonLabel = unrecoverableReason(status, candidate);
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected
     && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed'].includes(status)
-    ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
+    ? (candidate.rule === OTHER_SPELLING_RULE
+      ? ` Other spelling heard on the call: ${candidate.corrected}.`
+      : ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`)
     : '';
   await adminAlertDeduped({
     dedupeKey: `bounce-recovery-unrecoverable:${email}`,
@@ -1546,7 +1619,9 @@ async function notifyRecoverySuccess({ recovery, bouncedEmail, correctedEmail, r
     windowHours: 24,
     category: 'system',
     title: 'Recovered a bounced email',
-    body: `Corrected ${bouncedEmail} → ${correctedEmail} (${recovery.correction_rule || 'domain fix'}) and the re-send delivered.${recordUpdated ? ` Updated ${field} on the customer record.` : ''}`,
+    body: `${recovery.correction_rule === OTHER_SPELLING_RULE
+      ? `${bouncedEmail} bounced, so the same email was re-sent to the other spelling heard on the call, ${correctedEmail}, and the re-send delivered.`
+      : `Corrected ${bouncedEmail} → ${correctedEmail} (${recovery.correction_rule || 'domain fix'}) and the re-send delivered.`}${recordUpdated ? ` Updated ${field} on the customer record.` : ''}`,
     link: recovery.customer_id ? `/admin/customers?customerId=${recovery.customer_id}` : '/admin/communications',
     metadata: { customer_id: recovery.customer_id || null, recovery_id: recovery.id, record_updated: recordUpdated },
   });
@@ -1724,4 +1799,7 @@ module.exports = {
   gmailMailboxOwnedByOther,
   bouncedAddressStillOnFile,
   CUSTOMER_EMAIL_FIELDS,
+  OTHER_SPELLING_RULE,
+  settledOtherSpelling,
+  otherSpellingCandidate,
 };
