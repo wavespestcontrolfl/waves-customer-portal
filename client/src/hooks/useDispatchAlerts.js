@@ -26,7 +26,8 @@
  *
  * Auth: admin JWT from localStorage, same as useDispatchBoard. The
  * socket connection routes through the same socketAuth middleware
- * (PR #279/#284) and joins dispatch:admins automatically.
+ * (PR #279/#284) and joins dispatch:admins automatically (admin sockets;
+ * a technician socket stays out with GATE_TECH_LOGIN_PRIVACY on).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';

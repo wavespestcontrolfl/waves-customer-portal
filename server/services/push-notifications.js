@@ -205,9 +205,11 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
 class PushNotificationService {
   // opts.contactKey: a contact session's own status — only that contact's
   // devices count; a holder's status never counts a contact device.
-  async customerStatus(customerId, database = db, { contactKey = null } = {}) {
+  // opts.withReachable: routing only (GATE_APP_FIRST_ANY_DEVICE) also reads
+  // `reachable`; the customer-facing status routes keep their exact shape.
+  async customerStatus(customerId, database = db, { contactKey = null, withReachable = false } = {}) {
     const context = await customerPushContext(customerId, database);
-    if (!context) return { enabled: false, registered: false, fresh: false };
+    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false } : {}) };
     const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
@@ -218,6 +220,9 @@ class PushNotificationService {
       enabled: context.enabled,
       registered: rows.length > 0,
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
+      // Any active holder device whose provider is configured, however long
+      // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
+      ...(withReachable ? { reachable: rows.some((row) => providers[row.platform]) } : {}),
     };
   }
 

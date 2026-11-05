@@ -12,7 +12,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
-const { techLineContext } = require('./tech-line');
+const { techLineContext, TEXT_CARD_TYPE } = require('./tech-line');
 const { technicianVisitRowInScope } = require('./technician-visit-scope');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
@@ -55,6 +55,23 @@ async function visitCustomer(actor, scheduledServiceId) {
   return { customer, to, visit: svc };
 }
 
+// A Reply from a Today text card (TechNoticeFeed) answers that card's sender.
+// The card stays until "Got it", and /sms texts the visit customer's phone on
+// file as it is NOW, so at send time the card must be this technician's text
+// card for this visit, and that phone must still be the number that texted.
+// Null = the reply may go; otherwise the refusal the route answers.
+async function replyNoticeRefusal(actor, noticeId, target) {
+  if (!UUID_RE.test(String(noticeId || ''))) return { status: 400, error: 'replyToNoticeId is not a notice id' };
+  const notice = await db('tech_notifications')
+    .where({ id: noticeId, technician_id: actor.technicianId, type: TEXT_CARD_TYPE })
+    .first('payload');
+  let p = notice?.payload || null;
+  if (typeof p === 'string') {
+    try { p = JSON.parse(p); } catch { p = null; }
+  }
+  if (p && String(p.reply_visit_id || '') === String(target.visit.id) && toE164(String(p.from || '')) === target.to) return null;
+  return { status: 409, error: 'This customer\'s phone on file is not the number that texted. Open the visit to text them.', code: 'REPLY_SENDER_CHANGED' };
+}
 
 // The atomic cross-process gate both send routes use: sms_send_claims (the
 // table the public estimate route claims through) — a fresh insert, or a
@@ -258,6 +275,7 @@ module.exports = {
   UUID_RE,
   publicLine,
   visitCustomer,
+  replyNoticeRefusal,
   claimSend,
   releaseClaim,
   sendClaimedText,
