@@ -7,7 +7,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { VISIT_CARD_TYPES, hiddenVisitCardSql, refreshVisitCards } = require('../services/tech-visit-notifications');
+const { VISIT_CARD_TYPES, hiddenVisitCardSql, staleVisitCardSql, rankedVisitCards, refreshVisitCards } = require('../services/tech-visit-notifications');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -115,21 +115,19 @@ const SCHEDULE_CHANGE_LIMIT = 300;
 const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 
 // The open schedule-change cards for one tech that still say something true
-// about their visit (hiddenVisitCardSql: one card per visit, none for a past
-// day or a visit the tech already reached), with the visit row joined on its
-// uuid primary key (the payload id is pattern-checked before the cast, so a
-// malformed one joins nothing instead of failing the read). `asOf` is the
-// read the tech sees: its ET day judges "past".
+// about their visit: one card per visit (rankedVisitCards), none for a past
+// day or a visit the tech already reached (staleVisitCardSql). The visit row
+// is joined on its uuid primary key (the payload id is pattern-checked before
+// the cast, so a malformed one joins nothing instead of failing the read).
+// `asOf` is the read the tech sees: its ET day judges "past".
 function openScheduleChanges(technicianId, asOf) {
-  const hidden = hiddenVisitCardSql('n', etDateString(asOf));
-  return db('tech_notifications as n')
+  const stale = staleVisitCardSql('n', etDateString(asOf));
+  return db.from(rankedVisitCards(db, technicianId).as('n'))
     .leftJoin('scheduled_services as s', function joinVisit() {
       this.on('s.id', '=', db.raw(`CASE WHEN n.payload->>'visit_id' ~* '${UUID_PATTERN}' THEN (n.payload->>'visit_id')::uuid END`));
     })
-    .where('n.technician_id', technicianId)
-    .whereNull('n.dismissed_at')
-    .whereIn('n.type', SCHEDULE_CHANGE_TYPES)
-    .whereRaw(`NOT ${hidden.sql}`, hidden.bindings);
+    .where('n.visit_rank', 1)
+    .whereRaw(`NOT ${stale.sql}`, stale.bindings);
 }
 
 // `soon` in SQL: the card's new or previous day, or the visit's day as it is
