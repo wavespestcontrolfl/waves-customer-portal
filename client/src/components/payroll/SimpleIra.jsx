@@ -82,6 +82,7 @@ export function SimpleIraDialog({ call, technician, onClose, onSaved }) {
         <DialogTitle>SIMPLE IRA for {technician.name}</DialogTitle>
         <p className="mt-1 text-ui-caption text-ink-secondary">
           Type what the employee signed. Waves pays 2% of a participant's pay into the IRA; it is not taken from pay.
+          Enter every employee the plan covers, even one who saves nothing: Waves owes the 2% for each of them.
           The employee's own savings come out of each check before income tax. A correction is a new entry.
         </p>
       </DialogHeader>

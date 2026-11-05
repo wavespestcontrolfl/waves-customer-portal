@@ -91,8 +91,10 @@ describe('SIMPLE IRA', () => {
     return screen.findByRole('dialog');
   }
 
-  it('lists earlier entries newest first and asks for no SSN or account number', async () => {
+  it('lists earlier entries newest first, says to enter every covered employee, and asks for no SSN or account number', async () => {
     const dialog = await open();
+    // The 2% is owed for every covered employee, so a missing entry is a missing contribution.
+    expect(dialog).toHaveTextContent('Enter every employee the plan covers, even one who saves nothing');
     const list = await within(dialog).findByRole('list', { name: /SIMPLE IRA history/ });
     const items = within(list).getAllByRole('listitem');
     expect(items[0]).toHaveTextContent('saves 3.5% of each check');
