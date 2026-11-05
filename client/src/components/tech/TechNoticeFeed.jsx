@@ -169,6 +169,9 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       return next;
     });
   }, []);
+  // The poll reads this: a card whose Reply is open or sending stays even when the server feed stops listing it.
+  const replyStatesRef = useRef(replyStates);
+  useEffect(() => { replyStatesRef.current = replyStates; }, [replyStates]);
   const replySending = [...replyStates.values()].some((st) => st.sending);
   useEffect(() => { onReplySending?.(replySending); }, [replySending, onReplySending]);
   useEffect(() => () => onReplySending?.(false), [onReplySending]);
@@ -189,7 +192,9 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       // or aged out by the server: a storm nudge after 6 hours).
       // It is forgotten, so it can come back if the feed lists it again. No
       // /read post: the server already stopped serving it, or another device
-      // handled it.
+      // handled it. A text card whose Reply is open or sending stays until the
+      // compose closes (the next poll then removes it): its draft or send
+      // result must not vanish under the tech.
       const listed = new Set(notifications.map((n) => n.id));
       // A photo card's date is re-read from the live visit on every poll
       // (visit-prep-tech-alert.js refreshPhotoCardDates), so a card already
@@ -199,7 +204,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       // tech-visit-notifications.js refreshVisitCards).
       const refreshedCards = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type) || VISIT_TYPES.has(n.type)).map((n) => [n.id, n]));
       setActive((prev) => {
-        const gone = prev.filter((n) => !listed.has(n.id));
+        const gone = prev.filter((n) => !listed.has(n.id) && !replyStatesRef.current.has(n.id));
         gone.forEach((n) => { seenIds.current.delete(n.id); seenAt.current.delete(n.id); });
         let refreshed = false;
         const kept = prev.filter((n) => !gone.includes(n)).map((n) => {

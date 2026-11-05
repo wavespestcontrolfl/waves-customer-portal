@@ -108,6 +108,29 @@ describe('TechNoticeFeed — tech line text card', () => {
     expect(await screen.findByText('Sent.')).toBeInTheDocument();
   });
 
+  // Pre-push audit P1: the server feed (20 rows, or a dismiss on another device) can stop listing the card.
+  it('a poll that no longer lists the card keeps it while the Reply is open; the next poll after Close removes it', async () => {
+    let feed = [REPLYABLE];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init = {}) => (init.method
+      ? { ok: true, json: async () => ({}) }
+      : { ok: true, json: async () => ({ notifications: feed }) })));
+    render(<TechNoticeFeed techLine={LINE} request={vi.fn()} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(await screen.findByRole('button', { name: 'Reply' }));
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Draft reply' } });
+
+    feed = [];
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId('tech-line-text')).toBeInTheDocument();
+    expect(screen.getByLabelText('Message')).toHaveValue('Draft reply');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('tech-line-text')).not.toBeInTheDocument();
+  });
+
   it.each([
     ['the tech holds no line', REPLYABLE, null],
     ['the line could not be checked', REPLYABLE, { unknown: true }],
