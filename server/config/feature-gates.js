@@ -1413,16 +1413,6 @@ const gates = {
   // the fixed Day-0 ask. Customer-facing generated text → opt-in in EVERY env.
   reviewAskTechVoice: process.env.GATE_REVIEW_ASK_TECH_VOICE === 'true',
 
-  // Same-day review ask = one fixed line (owner 2026-10-22, "fixed line for
-  // all"): while GATE_REVIEW_ASK_TECH_VOICE is on, the SMS day0 / day_after
-  // touch sends "Hi <first>, it's <tech> from Waves. Thanks for having us out
-  // today. A Google review would really help: {review_url}" with no model
-  // call (the writer recited report findings and booking talk). Follow-up
-  // texts keep the tech-voice writer; emails stay fixed as before. Strict opt-in; off =
-  // today's writer. Customer-facing text, so opt-in in EVERY env.
-  // Rollback: unset.
-  reviewAskFixedDay0: process.env.GATE_REVIEW_ASK_FIXED_DAY0 === 'true',
-
   // Exact quotes for the tech-voice fact check (owner 2026-10-05, closing
   // #5893: fix it in the prompts, keep the code checks): the checker is asked
   // for the bare words of one record line (no "Visit report:" frame), the
