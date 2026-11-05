@@ -721,17 +721,18 @@ describe('second-tech-handover — --weekend-move date logic', () => {
   // A series of `count` visits from `first`, spaced as top-up spaces them (its own ordinal weekday), held by OWNER.
   let n = 0;
   const series = (first, { pattern = 'quarterly', count = 3, customer = `C-w${++n}`, window = ['09:00:00', '10:00:00'], parentExtra = {}, visitExtra = {} } = {}) => {
-    const parentRow = { id: `P-w${n}`, customer_id: customer, service_type: 'Quarterly Pest Control', recurring_pattern: pattern, recurring_nth: null, recurring_weekday: null, recurring_interval_days: null, ...parentExtra };
+    // The parent's own date sits on the series' weekday, as for a series top-up grew from its first visit.
+    const parentRow = { id: `P-w${n}`, customer_id: customer, service_type: 'Quarterly Pest Control', recurring_pattern: pattern, recurring_nth: null, recurring_weekday: null, recurring_interval_days: null, scheduled_date: first, ...parentExtra };
     const opts = { ...ord(first), intervalDays: parentExtra.recurring_interval_days };
     const visits = Array.from({ length: count }, (_, i) => ({
       id: `V-w${n}-${i}`, series_id: parentRow.id, recurring_parent_id: parentRow.id, is_recurring: true, scheduled_date: i === 0 ? first : hop(first, pattern, i, opts),
       status: 'confirmed', technician_id: OWNER, window_start: window[0], window_end: window[1], ...visitExtra,
     }));
     const live = visits;
-    return { customer_id: customer, series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
+    return { customer_id: customer, series: [{ parent: parentRow, live, chain: live, rows: live, needsDates: true }] };
   };
   const facts = (over = {}) => ({
-    blackout: null, absentDates: new Set(), prefs: new Map(), neighbors: new Map(), stayStill: new Map(), noWeekends: new Map(), anchors: new Map(), ...over,
+    blackout: null, absentDates: new Set(), prefs: new Map(), neighbors: new Map(), stayStill: new Map(), noWeekends: new Map(), anchors: new Map(), bases: new Map(), ...over,
   });
   const clearFacts = (candidates, over = {}) => {
     const f = facts(over);
@@ -820,7 +821,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
       id: `V-stay-${i}`, series_id: 'P-stay', recurring_parent_id: 'P-stay', is_recurring: true, scheduled_date: d, status: 'confirmed',
       technician_id: OWNER, window_start: '09:00:00', window_end: '10:00:00',
     }));
-    const c = { customer_id: 'C-stay', series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
+    const c = { customer_id: 'C-stay', series: [{ parent: parentRow, live, chain: live, rows: live, needsDates: true }] };
     const out = await run([c]);
     expect(out.kept.get('C-stay')).toBe('cadence_drift');
     expect(out.newDates.size).toBe(0);
@@ -832,7 +833,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     // A drifting series with no visit to re-date keeps its customer too: it moves to --to with the rest.
     const two = series(SAT, { count: 1 });
     const thu = { id: 'V-drift-0', series_id: 'P-drift', recurring_parent_id: 'P-drift', is_recurring: true, scheduled_date: '2099-07-09', status: 'confirmed', technician_id: OWNER, window_start: '13:00:00', window_end: '14:00:00' };
-    two.series.push({ parent: { ...parentRow, id: 'P-drift', customer_id: two.customer_id }, live: [thu], chain: [thu], needsDates: false });
+    two.series.push({ parent: { ...parentRow, id: 'P-drift', customer_id: two.customer_id }, live: [thu], chain: [thu], rows: [thu], needsDates: false });
     const both = await run([two]);
     expect(both.kept.get(two.customer_id)).toBe('cadence_drift');
     expect(both.newDates.size).toBe(0);
@@ -847,7 +848,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
         id: `V-gap-${pattern}-${i}`, series_id: parentRow.id, recurring_parent_id: parentRow.id, is_recurring: true, scheduled_date: d, status: 'confirmed',
         technician_id: OWNER, window_start: '09:00:00', window_end: '10:00:00',
       }));
-      const c = { customer_id: parentRow.customer_id, series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
+      const c = { customer_id: parentRow.customer_id, series: [{ parent: parentRow, live, chain: live, rows: live, needsDates: true }] };
       const out = await run([c]);
       expect(out.kept.size).toBe(0);
       expect(live.map((v) => dow(out.newDates.get(v.id)))).toEqual([4, 4]);
@@ -1003,7 +1004,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
       id: `V-c21-${i}`, series_id: 'P-c21', recurring_parent_id: 'P-c21', is_recurring: true, scheduled_date: d, status: 'confirmed',
       technician_id: OWNER, window_start: '09:00:00', window_end: '10:00:00',
     }));
-    const c = { customer_id: 'C-c21', series: [{ parent: parentC, live: liveC, chain: liveC, needsDates: true }] };
+    const c = { customer_id: 'C-c21', series: [{ parent: parentC, live: liveC, chain: liveC, rows: liveC, needsDates: true }] };
     const d = series('2099-07-12', { count: 1 }); // D's Sunday visit: Mon 07-13 is its nearest day
     const own = new Map([['V-c21-0', { customer_id: 'C-c21', date: '2099-07-13', s: 540, e: 600 }]]);
     const out = await run([d, c], { own, free: async (v, date) => date !== '2099-08-03' });
@@ -1031,6 +1032,96 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     expect(out.kept.get(q.customer_id)).toBe('busy');
     expect(out.kept.get(r.customer_id)).toBe('person_placed');
     expect(out.newDates.size).toBe(1);
+  });
+
+  test('each series a weekend customer hands over must keep growing on a --to work day: a Saturday parent anchor keeps the customer whole (top_up_day_off)', async () => {
+    // W: a Saturday quarterly series to re-date, and a monthly series whose only live visit already sits on Thursday 07-16
+    // while its parent still walks a Saturday (a one-off move): top-up would grow the hire's next monthly visit on a Saturday.
+    const withMonthly = (anchor, extra = {}) => {
+      const w = series(SAT, { count: 1 });
+      const sid = `P-m-${w.customer_id}`;
+      const thu = { id: `V-m-${w.customer_id}`, series_id: sid, recurring_parent_id: sid, is_recurring: true, scheduled_date: '2099-07-16', status: 'confirmed', technician_id: OWNER, window_start: '13:00:00', window_end: '14:00:00' };
+      const monthly = { id: sid, customer_id: w.customer_id, service_type: 'Mosquito', recurring_pattern: 'monthly', recurring_interval_days: null, ...anchor, ...extra };
+      w.series.push({ parent: monthly, live: [thu], chain: [thu], rows: [thu], needsDates: false });
+      return w;
+    };
+    const SAT_2ND = { recurring_nth: 2, recurring_weekday: 6, scheduled_date: '2099-04-09' }; // a stored 2nd Saturday (the Thursday date does not count)
+    for (const anchor of [SAT_2ND, { recurring_nth: null, recurring_weekday: null, scheduled_date: '2099-04-11' }]) { // no stored weekday: the parent's own Saturday
+      const w = withMonthly(anchor);
+      const out = await run([w]);
+      expect(out.kept.get(w.customer_id)).toBe('top_up_day_off');
+      expect(out.newDates.size).toBe(0);
+    }
+    // The control: a parent that walks Thursdays moves with its customer, and the Saturday visit takes Thursday 07-09.
+    const control = withMonthly({ recurring_nth: 3, recurring_weekday: 4, scheduled_date: '2099-04-16' });
+    const moved = await run([control]);
+    expect(moved.kept.size).toBe(0);
+    expect(moved.newDates.get(control.series[0].live[0].id)).toBe('2099-07-09');
+    // Top-up's weekend shift counts: a series that skips weekends grows a Saturday on the Monday after (a work day), or on the
+    // Friday before when it shifts back (a day off). The customer's no-weekend preference shifts like the parent's flag.
+    expect((await run([withMonthly(SAT_2ND, { skip_weekends: true })])).kept.size).toBe(0);
+    const back = withMonthly(SAT_2ND, { skip_weekends: true, weekend_shift: 'back' });
+    expect((await run([back])).kept.get(back.customer_id)).toBe('top_up_day_off');
+    const pref = withMonthly(SAT_2ND);
+    const f = clearFacts([pref]);
+    f.noWeekends.set(pref.customer_id, true);
+    expect((await run([pref], { facts: f })).kept.size).toBe(0);
+  });
+
+  test('a day gap grows from its latest live row\'s cadence slot: an exception\'s or a hand-off\'s Saturday slot, or a past Saturday base, keeps the customer whole', async () => {
+    // W: a Saturday quarterly series to re-date, and a weekly series with no visit on a day off.
+    const withWeekly = (rows, base) => {
+      const w = series(SAT, { count: 1 });
+      const sid = `P-k-${w.customer_id}`;
+      const weekly = { id: sid, customer_id: w.customer_id, service_type: 'Pest', recurring_pattern: 'weekly', recurring_nth: null, recurring_weekday: null, recurring_interval_days: null, scheduled_date: '2099-04-09' };
+      const live = rows.map((r, i) => ({ id: `${sid}-${i}`, series_id: sid, recurring_parent_id: sid, is_recurring: true, status: 'confirmed', technician_id: OWNER, window_start: '13:00:00', window_end: '14:00:00', ...r }));
+      w.series.push({ parent: weekly, live, chain: live, rows: live, needsDates: false });
+      const f = clearFacts([w]);
+      if (base) f.bases.set(sid, base);
+      return { w, f };
+    };
+    const decide = async ({ w, f }) => (await run([w], { facts: f })).kept.get(w.customer_id);
+    // The latest row is a one-off move from Saturday 07-18 to Thursday 07-16: top-up hops a week from its Saturday slot.
+    expect(await decide(withWeekly([{ scheduled_date: '2099-07-09' }, { scheduled_date: '2099-07-16', date_exception: true, date_exception_cadence_date: '2099-07-18' }]))).toBe('top_up_day_off');
+    // A hand-off placed on Thursday 07-16 whose due date is Saturday 07-18: the due date is its slot.
+    expect(await decide(withWeekly([{ scheduled_date: '2099-07-09' }, { scheduled_date: '2099-07-16', recurring_dispatch_due_date: '2099-07-18' }]))).toBe('top_up_day_off');
+    // No live row ahead: top-up grows from the base row the database holds, here a past Saturday.
+    expect(await decide(withWeekly([], { id: 'B-past', scheduled_date: '2099-06-27' }))).toBe('top_up_day_off');
+    // The controls: the same rows on Thursday slots, a past Thursday base, and a series with no live row at all (no growth).
+    expect(await decide(withWeekly([{ scheduled_date: '2099-07-09' }, { scheduled_date: '2099-07-16' }]))).toBeUndefined();
+    expect(await decide(withWeekly([{ scheduled_date: '2099-07-09' }, { scheduled_date: '2099-07-16', recurring_dispatch_due_date: '2099-07-16' }]))).toBeUndefined();
+    expect(await decide(withWeekly([], { id: 'B-past', scheduled_date: '2099-06-25' }))).toBeUndefined();
+    expect(await decide(withWeekly([]))).toBeUndefined();
+  });
+
+  test('the run\'s own new dates count in the next top-up base: a Thursday hand-off due on Saturday moves the series to Monday, its due date cleared', async () => {
+    // A weekly series: Saturday 07-11 and a hand-off placed on Thursday 07-16 whose due date is Saturday 07-18. Thursday 07-09
+    // would leave that due date as top-up's base; Monday 07-13 re-dates the hand-off too, and a re-date clears a timed
+    // row's due date (recurringDispatchDuePatch, as the writer does), so top-up grows Mondays.
+    const handoff = series(SAT, { pattern: 'weekly', count: 2 });
+    Object.assign(handoff.series[0].live[1], { scheduled_date: '2099-07-16', recurring_dispatch_due_date: '2099-07-18', window_start: '13:00:00', window_end: '14:00:00' });
+    const out = await run([handoff]);
+    expect(out.kept.size).toBe(0);
+    expect(handoff.series[0].live.map((v) => out.newDates.get(v.id))).toEqual(['2099-07-13', '2099-07-20']);
+    // The control: the same Thursday visit with no due date keeps its date, and the Saturday takes Thursday 07-09.
+    const plain = series(SAT, { pattern: 'weekly', count: 2 });
+    Object.assign(plain.series[0].live[1], { scheduled_date: '2099-07-16', window_start: '13:00:00', window_end: '14:00:00' });
+    const control = await run([plain]);
+    expect(plain.series[0].live.map((v) => control.newDates.get(v.id))).toEqual(['2099-07-09', undefined]);
+  });
+
+  test('loadTopUpBases reads top-up\'s base row with admin-schedule latestLiveSeriesVisit\'s filter and order', () => {
+    const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    const helper = schedule.slice(schedule.indexOf('function latestLiveSeriesVisit('), schedule.indexOf('async function loadActiveSeriesDates('));
+    const mine = fs.readFileSync(path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover-weekend.js'), 'utf8');
+    const reader = mine.slice(mine.indexOf('async function loadTopUpBases('), mine.indexOf('async function loadBlackout('));
+    expect(helper.length).toBeGreaterThan(0);
+    expect(reader.length).toBeGreaterThan(0);
+    for (const part of [".where('is_recurring', true)", ".whereNotIn('status', ['cancelled', 'rescheduled'])",
+      "COALESCE(date_exception_cadence_date, recurring_dispatch_due_date, scheduled_date)'), 'desc')"]) {
+      expect(helper).toContain(part);
+      expect(reader).toContain(part);
+    }
   });
 
   test('isMonthBased matches rebooker.isMonthBasedRecurrence for every pattern the scheduler places', () => {

@@ -560,7 +560,9 @@ async function loadParents(db) {
   const rows = await db('scheduled_services')
     .where({ is_recurring: true })
     .whereNull('recurring_parent_id')
+    // scheduled_date: a month walk with no stored recurring_weekday lands on the parent's own weekday (--weekend-move).
     .select('id', 'status', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'technician_id',
+      db.raw('scheduled_date::text as scheduled_date'),
       'recurring_technician_id', 'recurring_technician_override', 'recurring_ongoing',
       ...(cols.service_address_zip ? ['service_address_zip'] : []),
       ...['recurring_pattern', 'recurring_nth', 'recurring_weekday', 'recurring_interval_days', 'skip_weekends', 'weekend_shift']
@@ -580,7 +582,8 @@ async function loadVisits(db, parentIds, today) {
         'ss.track_state', 'ss.technician_id', 'ss.visit_id', 'sv.status as group_status',
         // --weekend-move: what the day-60 run needs to move a date (second-tech-handover-weekend.js).
         'ss.is_recurring', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.customer_confirmed',
-        'ss.auto_dispatch_locked', 'ss.auto_dispatch_excluded', 'ss.date_exception', 'ss.recurring_dispatch_due_date', 'ss.auto_dispatch_change_count');
+        'ss.auto_dispatch_locked', 'ss.auto_dispatch_excluded', 'ss.date_exception', 'ss.recurring_dispatch_due_date', 'ss.auto_dispatch_change_count',
+        db.raw('ss.date_exception_cadence_date::text as date_exception_cadence_date'));
     for (const r of rows) out.push({ ...r, series_id: r.recurring_parent_id || r.id });
   }
   return out;

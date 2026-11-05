@@ -26,6 +26,11 @@
 // back onto a --to day off, so no move sticks: a customer with such a series (also one with no visit to
 // re-date) stays whole with --from (cadence_drift). Never a date_exception
 // (top-up would keep landing on the old day). Lawn never moves, so there is no round anchor.
+// Every series of the customer moves to --to, so EACH is checked as the run leaves it, also one with no visit
+// to re-date or none ahead: top-up's next visits must land on a --to work day after its weekend shift. A month
+// walk lands on the parent's anchor weekday (the new one when re-anchored); a day gap keeps the weekday of the
+// latest live row's cadence position (admin-schedule latestLiveSeriesVisit: an exception's cadence date, a
+// hand-off's due date, a past visit too), with this run's new dates. Otherwise the customer stays whole (top_up_day_off).
 //
 // THE PROJECTION. The new anchor is tried on each --to work day on or after --start (the first solo day)
 // inside ±FLEX_TIER_RADIUS_DAYS of the first live visit's date, nearest first, ties the EARLIER date. For a candidate, EVERY live visit of the
@@ -44,6 +49,7 @@
 //     cadence neighbors and the nearest other live occurrence's actual date);
 //   - does not break the customer's portal preference (a preferred day that is not the new day, a
 //     blackout range holding the new day);
+//   - leaves top-up's next visits of the series on a --to work day (top_up_day_off above);
 //   - leaves --to free at the visit's window on the new date (pick-technician technicianFreeAt) and does
 //     not overlap a window this run already gave --to (earlier customers' new dates AND the technician-only
 //     moves of the same run), so two customers cannot land on one hour. A weekend customer's own technician-only
@@ -66,15 +72,18 @@ const { FLEX_TIER_RADIUS_DAYS, loadSeriesNeighbors } = require(path.join(root, '
 const { daysBetween } = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
 const seeder = require(path.join(root, 'services', 'recurring-appointment-seeder'));
 const { clearOfBlackout, isBlackedOut } = require(path.join(root, 'services', 'scheduling', 'blackout-nudge'));
+const { recurringDispatchDuePatch } = require(path.join(root, 'services', 'scheduling', 'recurring-dispatch-due'));
 
 const { nextRecurringDate, recurrenceOrdinalOptions } = seeder._internals;
-const { SEASONAL_FEB_OCT, shiftPastWeekend, clampDateToSeason, schedulerPlacesPattern } = seeder;
+const { SEASONAL_FEB_OCT, shiftPastWeekend, clampDateToSeason, schedulerPlacesPattern, seriesCadencePosition } = seeder;
 
 // Days after today a new date must be (and --start must be): the 73 h reminder freeze, with margin.
 const MIN_DAYS_OUT = 4;
 // Same table as rebooker.js MONTH_RECURRENCE_INTERVALS (pinned to rebooker's isMonthBasedRecurrence by a test).
 const MONTH_PATTERNS = new Set(['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'biannual', 'annual', 'yearly']);
 const DEAD_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+// The rows that do not hold a slot for top-up (admin-schedule latestLiveSeriesVisit): every other status does, completed too.
+const NO_SLOT_STATUSES = new Set(['cancelled', 'rescheduled']);
 const DEFAULT_MINUTES = 60;
 
 /** rebooker.js isMonthBasedRecurrence: the patterns whose dates come from the parent's nth weekday. */
@@ -152,6 +161,56 @@ function projectChain(parent, chain, a0) {
   return { dates, anchor: isMonthBased(pattern) ? { nth: opts.nth, weekday: opts.weekday } : null };
 }
 
+/** Top-up skips weekends for this series: the parent's flag, or the customer's no-weekend preference. */
+const skipsWeekends = (parent, facts) => parent.skip_weekends === true || facts.noWeekends.get(parent.customer_id) === true;
+
+/** A row as the run leaves it after a new date (second-tech-handover-execute: the hand-off due date follows; never a date_exception). */
+const redatedRow = (row, date) => ({ ...row, scheduled_date: date, ...recurringDispatchDuePatch(row, { scheduled_date: date }) });
+/** latestLiveSeriesVisit's order (admin-schedule): COALESCE(date_exception_cadence_date, recurring_dispatch_due_date, scheduled_date). */
+const slotKey = (row) => toDateStr(row.date_exception_cadence_date || row.recurring_dispatch_due_date || row.scheduled_date) || '';
+
+/**
+ * The date top-up grows a day-gap series from after the run (admin-schedule latestLiveSeriesVisit, then seriesExtendAnchor):
+ * the cadence position of its latest live row, with this run's new dates. `rows` = the plan's live rows of the series (dated
+ * today or later); `stored` = the base row the database holds now, which can be a past visit. Null = no live row (no growth).
+ */
+function baseAfterRun(rows, stored, dates) {
+  const all = stored && !rows.some((r) => r.id === stored.id) ? [...rows, stored] : rows;
+  let latest = null;
+  for (const row of all) {
+    const r = dates.has(row.id) ? redatedRow(row, dates.get(row.id)) : row;
+    if (!latest || slotKey(r) > slotKey(latest)) latest = r;
+  }
+  return latest ? seriesCadencePosition(latest) || null : null;
+}
+
+/** The weekday the parent's stored anchor walks to (admin-schedule seriesRecurrenceOptions): recurring_weekday, else its own date's. */
+function storedAnchorWeekday(parent) {
+  if ((parent.recurring_weekday == null || parent.recurring_weekday === '') && !parent.scheduled_date) return null;
+  return recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }).weekday;
+}
+
+/**
+ * Why top-up would grow this series' next visits on a --to day off after the run, or null (header, THE MOVE MUST STICK).
+ * `dates` / `anchor` = the run's new dates and new parent anchor for the series. An unknown weekday fails closed.
+ */
+function topUpDayProblem(series, dates, anchor, ctx) {
+  const { parent } = series;
+  let weekday;
+  if (isMonthBased(parent.recurring_pattern)) {
+    weekday = anchor ? anchor.weekday : storedAnchorWeekday(parent);
+  } else {
+    const base = baseAfterRun(series.rows, ctx.facts.bases.get(parent.id), dates);
+    if (!base) return null;
+    weekday = dayOfWeekOfDate(base);
+  }
+  if (weekday == null) return 'top_up_day_off';
+  // A date on that weekday through top-up's weekend shift (shiftPastWeekend: Sat / Sun -> Mon, or -> Fri when it shifts back).
+  const sample = shiftDateStr(ctx.today, (Number(weekday) - dayOfWeekOfDate(ctx.today) + 7) % 7);
+  const shifted = shiftPastWeekend(sample, skipsWeekends(parent, ctx.facts), parent.weekend_shift === 'back' ? 'back' : 'forward');
+  return ctx.workDays.includes(dayOfWeekOfDate(shifted)) ? null : 'top_up_day_off';
+}
+
 /** The date top-up's own rules (seasonalSafeShift) would give `date` for this series; equal to `date` when it keeps it. */
 function topUpDate(date, parent, skipWeekends, facts) {
   const dir = parent.weekend_shift === 'back' ? 'back' : 'forward';
@@ -213,8 +272,7 @@ async function tryCandidate(series, a0, ctx) {
     const date = projected.dates[i];
     // A visit the projection leaves where it is must already sit on a --to work day: no recurring visit may stay on a day off.
     if (date === v.scheduled_date && ctx.workDays.includes(dayOfWeekOfDate(date))) continue;
-    const skipWeekends = series.parent.skip_weekends === true || ctx.facts.noWeekends.get(series.parent.customer_id) === true;
-    const problem = dateProblem(v, date, { ...ctx, parent: series.parent, skipWeekends });
+    const problem = dateProblem(v, date, { ...ctx, parent: series.parent, skipWeekends: skipsWeekends(series.parent, ctx.facts) });
     if (problem) return { ok: false, reason: problem };
     const still = stayStillReason(v, ctx.from, ctx.facts);
     if (still) return { ok: false, reason: still };
@@ -229,7 +287,16 @@ async function tryCandidate(series, a0, ctx) {
   // A live visit outside the chain (a booster) on a day off cannot be projected: it keeps the customer whole.
   const stranded = live.find((v) => v.is_recurring !== true && !ctx.workDays.includes(dayOfWeekOfDate(v.scheduled_date)));
   if (stranded) return { ok: false, reason: 'booster_visit' };
-  return { ok: true, dates, anchor: dates.size ? projected.anchor : null, spans: added };
+  const anchor = dates.size ? projected.anchor : null;
+  const dayOff = topUpDayProblem(series, dates, anchor, ctx);
+  if (dayOff) return { ok: false, reason: dayOff };
+  return { ok: true, dates, anchor, spans: added };
+}
+
+/** A series with no visit on a day off keeps its dates; it still moves only when top-up keeps growing it on a --to work day. */
+function keepDates(series, ctx) {
+  const reason = topUpDayProblem(series, new Map(), null, ctx);
+  return reason ? { ok: false, reason } : { ok: true, dates: new Map(), anchor: null, spans: [] };
 }
 
 /** The first accepted candidate for a series, or the reason the nearest candidate failed. */
@@ -276,7 +343,7 @@ async function customerTurn(customer, mine, late, ctx) {
   for (const series of customer.series) {
     // Every series of the customer moves to --to, so each must keep its weekday under top-up (header, THE MOVE MUST STICK).
     if (!keepsWeekday(series.parent, ctx.today)) { failure = 'cadence_drift'; break; }
-    const result = series.needsDates ? await resolveSeries(series, ctx) : { ok: true, dates: new Map(), anchor: null, spans: [] };
+    const result = series.needsDates ? await resolveSeries(series, ctx) : keepDates(series, ctx);
     if (!result.ok) { failure = result.reason; break; }
     solved.push({ series, result });
     // The next series of this customer must not take the hour this one just took.
@@ -318,7 +385,7 @@ async function decidePass({ candidates, own, released, seed, ...rest }) {
 }
 
 /**
- * Decide every weekend customer. `candidates` = [{ customer_id, series: [{ parent, live, chain, needsDates }] }]
+ * Decide every weekend customer. `candidates` = [{ customer_id, series: [{ parent, live, chain, rows, needsDates }] }]
  * in a stable order. `start` = --start: no new date before it. `seed` = the windows the run's technician-only moves of
  * other customers hold on --to, Map(date -> [{ s, e }]). `own` = the weekend customers' own technician-only windows,
  * Map(visitId -> { customer_id, date, s, e }): reserved up front, so an earlier customer cannot take a later one's hour.
@@ -363,11 +430,32 @@ async function loadWeekendFacts(db, { to, from, start, today, now = new Date(), 
   const neighbors = (await loadSeriesNeighbors(db, visits.filter((v) => v.recurring_parent_id), { lock: lockNeighbors })) || new Map();
   const routeTiers = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
   const anchorMap = await routeTiers.loadAnchorMap(db, visits.map((v) => v.id));
+  // Only a day gap grows from its base row's weekday; a month walk reads the parent's anchor (topUpDayProblem).
+  const daySeries = candidates.flatMap((c) => c.series.filter((s) => !isMonthBased(s.parent.recurring_pattern)).map((s) => s.parent.id));
   return {
     anchors: new Map(visits.map((v) => [v.id, routeTiers.resolveAnchor(v, anchorMap)])),
     blackout: await loadBlackout(db, lo, hi), absentDates: new Set(absentRows.map((r) => toDateStr(r.absence_date))), prefs, neighbors,
-    stayStill: await loadStayStill(db, visits, now), noWeekends, from,
+    stayStill: await loadStayStill(db, visits, now), noWeekends, from, bases: await loadTopUpBases(db, daySeries),
   };
+}
+
+/**
+ * Top-up's base row of each series now: admin-schedule latestLiveSeriesVisit's filter and order (a parity test pins them). It can
+ * be a past visit the plan does not load, so a series with no live visit ahead is checked too.
+ */
+async function loadTopUpBases(db, seriesIds) {
+  const bases = new Map();
+  for (const id of seriesIds) {
+    const row = await db('scheduled_services')
+      .where(function inSeries() { this.where('recurring_parent_id', id).orWhere('id', id); })
+      .where('is_recurring', true)
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .orderBy(db.raw('COALESCE(date_exception_cadence_date, recurring_dispatch_due_date, scheduled_date)'), 'desc')
+      .first('id', db.raw('scheduled_date::text as scheduled_date'), db.raw('recurring_dispatch_due_date::text as recurring_dispatch_due_date'),
+        'date_exception', db.raw('date_exception_cadence_date::text as date_exception_cadence_date'));
+    if (row) bases.set(id, row);
+  }
+  return bases;
 }
 
 /** Company blackout layers for the span; null (fail open, as the app's series writers do) when unreadable. */
@@ -411,12 +499,14 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
   const visitById = new Map(visits.map((v) => [v.id, v]));
   const live = (id) => visits.filter((v) => v.series_id === id && v.scheduled_date >= start && !DEAD_STATUSES.has(v.status))
     .sort((a, b) => (a.scheduled_date < b.scheduled_date ? -1 : (a.scheduled_date > b.scheduled_date ? 1 : 0)));
+  // The loaded rows that hold a top-up slot (any date from today, completed too): the run's view of top-up's base (baseAfterRun).
+  const slotRows = (id) => visits.filter((v) => v.series_id === id && v.is_recurring === true && !NO_SLOT_STATUSES.has(v.status));
   const candidates = plan.weekend_candidates.map((c) => ({
     customer_id: c.customer_id,
     series: c.series_ids.map((id) => {
       const members = live(id);
       return {
-        parent: parentById.get(id), live: members, chain: members.filter((v) => v.is_recurring === true),
+        parent: parentById.get(id), live: members, chain: members.filter((v) => v.is_recurring === true), rows: slotRows(id),
         needsDates: members.some((v) => !workDays.includes(dayOfWeekOfDate(v.scheduled_date))),
       };
     }),

@@ -78,9 +78,9 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     service_key_snapshot: 'pest_general_quarterly', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, estimated_price: 120,
     recurring_pattern: 'quarterly', is_recurring: true, recurring_ongoing: true, skip_weekends: false, ...o,
   });
-  // A quarterly series: a finished first visit on Saturday 2099-04-04 and three pending Saturdays.
+  // A quarterly series: a finished first visit on Saturday 2099-04-04 (o.parentDate: another day) and three pending Saturdays.
   async function weekendSeries(ownerId, c, o = {}) {
-    const [parent] = await knex('scheduled_services').insert(base(c, ownerId, { scheduled_date: '2099-04-04', status: 'completed' })).returning('*');
+    const [parent] = await knex('scheduled_services').insert(base(c, ownerId, { scheduled_date: o.parentDate || '2099-04-04', status: 'completed' })).returning('*');
     const kids = [];
     for (const date of o.dates || ['2099-07-11', '2099-10-10', '2100-01-09']) {
       const [k] = await knex('scheduled_services').insert(base(c, ownerId, { scheduled_date: date, status: 'pending', recurring_parent_id: parent.id, route_order: 7, ...(o.kidExtra || {}) })).returning('*');
@@ -88,6 +88,8 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     }
     return { parent, kids };
   }
+  // A weekly series with no visit ahead: only its finished first visit, on `date` (before TODAY).
+  const pastWeekly = (ownerId, c, date) => knex('scheduled_services').insert(base(c, ownerId, { scheduled_date: date, status: 'completed', recurring_pattern: 'weekly' }));
   const get = (id) => knex('scheduled_services').where({ id }).first();
   const day = (d) => (d instanceof Date ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : String(d).slice(0, 10));
   const dow = (d) => new Date(`${day(d)}T12:00:00Z`).getUTCDay();
@@ -346,13 +348,43 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     const k = await customer();
     const kSat = await weekendSeries(w.ownerId, k, { dates: ['2099-07-18'] });
     await knex('appointment_reminders').insert({ scheduled_service_id: kSat.kids[0].id, customer_id: k.customerId, appointment_time: '2099-07-18T13:00:00Z', reminder_72h_sent: true, source: 'test' });
-    const kThu = await weekendSeries(w.ownerId, k, { dates: ['2099-07-09'] });
+    const kThu = await weekendSeries(w.ownerId, k, { dates: ['2099-07-09'], parentDate: '2099-04-09' }); // a Thursday series
     // A's Saturday 07-11 09:00: Thursday 07-09 is the nearest work day, and K's Thursday visit no longer holds that hour.
     const a = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });
     const p = await plan(w);
     expect(p.ids.kept).toEqual([{ customer_id: k.customerId, reason: 'reminder_sent' }]);
     expect(p.ids.moves.find((m) => m.visit_id === a.kids[0].id).to_date).toBe('2099-07-09');
     expect(p.ids.moves.some((m) => m.visit_id === kThu.kids[0].id)).toBe(false); // K's Thursday stays with the owner
+  });
+
+  test('a series that walks a Saturday keeps its weekend customer whole, though its visits sit on weekdays; so does a past Saturday base', async () => {
+    const w = await world();
+    const pm = { kidExtra: { window_start: '13:00', window_end: '14:00' } };
+    // A: a Saturday series to re-date, and a quarterly series with one Thursday visit whose parent walks Saturdays (its own date,
+    // no stored weekday): top-up would grow the hire's next visit of it on a Saturday.
+    const a = await customer();
+    const aSat = await weekendSeries(w.ownerId, a, { dates: ['2099-07-11'] });
+    const aThu = await weekendSeries(w.ownerId, a, { dates: ['2099-07-16'], ...pm });
+    // B: a Saturday series, and a weekly series with no visit ahead whose latest row is a finished Saturday (06-27).
+    const b = await customer();
+    const bSat = await weekendSeries(w.ownerId, b, { dates: ['2099-07-18'] });
+    await pastWeekly(w.ownerId, b, '2099-06-27');
+    // The controls: C as A with a parent that walks Thursdays (04-09), D as B with a finished Thursday (06-25).
+    const c = await customer();
+    const cSat = await weekendSeries(w.ownerId, c, { dates: ['2099-07-25'] });
+    await weekendSeries(w.ownerId, c, { dates: ['2099-07-30'], parentDate: '2099-04-09', ...pm });
+    const d = await customer();
+    const dSat = await weekendSeries(w.ownerId, d, { dates: ['2099-08-01'] });
+    await pastWeekly(w.ownerId, d, '2099-06-25');
+    const p = await plan(w);
+    expect(p.ids.kept).toHaveLength(2);
+    expect(p.ids.kept).toEqual(expect.arrayContaining([
+      { customer_id: a.customerId, reason: 'top_up_day_off' }, { customer_id: b.customerId, reason: 'top_up_day_off' },
+    ]));
+    expect(p.skipped.weekend_kept_top_up_day_off.customers).toBe(2);
+    for (const s of [aSat, aThu, bSat]) expect(p.ids.moves.some((m) => m.visit_id === s.kids[0].id)).toBe(false);
+    expect(p.ids.moves.find((m) => m.visit_id === cSat.kids[0].id).to_date).toBe('2099-07-23');
+    expect(p.ids.moves.find((m) => m.visit_id === dSat.kids[0].id).to_date).toBe('2099-07-30');
   });
 
   test('a busy hour keeps the customer whole: the hire already holds 09:00 on every legal day', async () => {
