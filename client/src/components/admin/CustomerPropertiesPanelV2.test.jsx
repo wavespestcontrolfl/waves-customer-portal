@@ -178,7 +178,8 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(screen.getByText('Default')).toBeInTheDocument();
     expect(screen.queryByText('Primary')).not.toBeInTheDocument();
     expect(screen.getByText(/not a residence/)).toBeInTheDocument();
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/customers/c1/properties');
+    // The admin-only Same family section makes its own request, so find the properties call by URL.
+    expect(fetchMock.mock.calls.map(([url]) => url)).toContain('/api/admin/customers/c1/properties');
   });
 
   it('shows server eligibility and refreshes it after an occupancy edit', async () => {
