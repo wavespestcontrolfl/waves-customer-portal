@@ -131,8 +131,11 @@ const emptyOut = () => ({ sources: 0, waiting: 0, sent: 0, deduped: 0, blocked: 
 
 async function run(sc, send) {
   const out = emptyOut();
-  // The production price walk is faked: no extension to price unless a test says so.
-  await processSource(sc.dbh, sc.estimate, { presetId: 'preset-1', today: TODAY, send, nextPrices: sc.nextPrices || (async () => null) }, out);
+  // The production price walk and lane resolver are faked: no extension to price, every home per application,
+  // unless a test says so.
+  await processSource(sc.dbh, sc.estimate, {
+    presetId: 'preset-1', today: TODAY, send, nextPrices: sc.nextPrices || (async () => null), laneOf: sc.laneOf || (async () => 'per_application'),
+  }, out);
   return out;
 }
 
@@ -322,7 +325,7 @@ describe('who gets it, and the greeting', () => {
     const dbh = (name) => (name === 'notification_prefs' ? failing : original(name));
     dbh.raw = original.raw;
     const send = sendOk();
-    await expect(processSource(dbh, sc.estimate, { presetId: 'preset-1', today: TODAY, send, nextPrices: async () => null }, emptyOut())).rejects.toThrow('relation missing');
+    await expect(processSource(dbh, sc.estimate, { presetId: 'preset-1', today: TODAY, send, nextPrices: async () => null, laneOf: async () => 'per_application' }, emptyOut())).rejects.toThrow('relation missing');
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -852,6 +855,72 @@ describe('a sale lists its series only when its discount covered every recurring
     expect(payload.home_1_regular).toBe('');
     expect(payload.home_2_regular).toBe('');
     expect([payload.home_1_price, payload.home_2_price].sort()).toEqual(['$45.00', '$90.00']);
+  });
+});
+
+describe('every listed home is billed after each visit, as the email says', () => {
+  const twoHomes = (laneOf) => ({
+    ...scenario({
+      targets: [target('root-a', 'parents')],
+      ledger: [ledgerRow('root-a', 'applied')],
+      customers: [customer('son'), customer('parents')],
+      visits: { 'root-a': [visit('2026-11-14', '108.00')] },
+    }),
+    laneOf,
+  });
+
+  test.each([
+    ['the new home is on a monthly membership', (_db, { customer: c }) => (c.id === 'son' ? 'monthly_membership' : 'per_application')],
+    ['another home is on an annual prepay', (_db, { customer: c }) => (c.id === 'parents' ? 'annual_prepay' : 'per_application')],
+  ])('%s: the email waits', async (_label, lane) => {
+    const send = sendOk();
+    expect(await run(twoHomes(async (...a) => lane(...a)), send)).toMatchObject({ sent: 0, waiting: 1 });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  test('the legacy per-visit lane (no billing mode) is billed after each visit: sent', async () => {
+    const send = sendOk();
+    expect(await run(twoHomes(async () => 'per_visit'), send)).toMatchObject({ sent: 2 });
+  });
+
+  test('the lane is read for each home with its plan line and cadence', async () => {
+    const laneOf = jest.fn(async () => 'per_application');
+    await run(twoHomes(laneOf), sendOk());
+    expect(laneOf).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      customer: expect.objectContaining({ id: 'parents' }), today: TODAY, facts: expect.objectContaining({ cadence: 'quarterly' }),
+    }));
+  });
+});
+
+describe('the kill switch holds at the provider boundary', () => {
+  const sc = () => scenario({ customers: [customer('son')] });
+
+  test('a gate turned off after the email was composed: refused before the locks', async () => {
+    const send = jest.fn(async (args) => {
+      mockGate.email = false;
+      const verdict = await args.withProviderHandoff(async () => {});
+      return verdict.ok ? { sent: true } : { sent: false, aborted: true };
+    });
+    expect(await run(sc(), send)).toMatchObject({ sent: 0, waiting: 1 });
+  });
+
+  test('a gate turned off during the provider\'s own preparation: the boundary check refuses, nothing is sent', async () => {
+    let requested = false;
+    const send = jest.fn(async (args) => {
+      // The library's dispatch: its boundary check runs after preparation, immediately before the request.
+      const verdict = await args.withProviderHandoff(async (database, providerBoundaryCheck) => {
+        mockGate.discount = false;
+        try {
+          await providerBoundaryCheck({ database });
+          requested = true;
+        } catch (err) {
+          if (!err.providerBoundaryBlocked) throw err;
+        }
+      });
+      return verdict.ok && requested ? { sent: true } : { sent: false, aborted: true };
+    });
+    expect(await run(sc(), send)).toMatchObject({ sent: 0, waiting: 1 });
+    expect(requested).toBe(false);
   });
 });
 

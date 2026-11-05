@@ -152,10 +152,10 @@ function openTargetReason(targets, ledger) {
 
 // The series' upcoming plan visits (pending or confirmed, from today on), oldest first.
 async function loadSeriesFacts(dbh, { customerId, rootId }, today) {
-  const { PLAN_ROW_SQL, CADENCE_SQL } = PLAN_LINE_SQL;
+  const { PLAN_ROW_SQL, CADENCE_SQL, LINE_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(
     `SELECT s.id, s.scheduled_date, s.estimated_price, s.primary_line_price, s.discount_id, s.service_type, s.property_id,
-            s.service_address_line1, s.service_address_line2, ${CADENCE_SQL} AS cadence
+            s.service_address_line1, s.service_address_line2, ${CADENCE_SQL} AS cadence, ${LINE_SQL} AS line
        FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
       WHERE (s.id = ? OR s.recurring_parent_id = ?) AND s.customer_id = ? AND s.scheduled_date >= ?
         AND s.status IN ('pending', 'confirmed') AND ${PLAN_ROW_SQL}
@@ -169,6 +169,7 @@ async function loadSeriesFacts(dbh, { customerId, rootId }, today) {
     first,
     serviceName: clean(first?.service_type),
     cadence: first?.cadence || null,
+    line: first?.line || null,
     flatPriceCents: flat ? first.priceCents : null,
     startsDate: first?.date || null,
   };
@@ -348,6 +349,21 @@ async function targetHomeVerdict(dbh, ctx, facts, rootId) {
   return { prices, stale: !current };
 }
 
+// Lanes whose visits are billed after each one is done, as the email says: per application, or the legacy inferred
+// per-visit lane (no billing mode, no membership). A monthly membership or an annual prepay is not (pre-push audit P1),
+// so a home on one holds the email. The lane is the annual rate review's own resolver (rate-review-apply.js).
+const BILLED_PER_VISIT_LANES = new Set(['per_application', 'per_visit']);
+
+function liveLane(dbh, { customer, facts, today }) {
+  const { resolveLiveLane } = require('./rate-review-apply')._private;
+  return resolveLiveLane(dbh, { customer, familyKey: facts.line, cadence: facts.cadence, today });
+}
+
+async function billedPerVisit(dbh, { customer, facts }, ctx) {
+  if (!customer) return false;
+  return BILLED_PER_VISIT_LANES.has(await (ctx.laneOf || liveLane)(dbh, { customer, facts, today: ctx.today }));
+}
+
 async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx) {
   const facts = await loadSeriesFacts(dbh, { customerId, rootId }, ctx.today);
   // A series of the sale with no upcoming visit (cancelled after it) is neither listed nor judged. It stays in the
@@ -357,11 +373,12 @@ async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx)
   const { prices, stale } = isSource
     ? await sourceHomeVerdict(dbh, ctx, facts, rootId)
     : await targetHomeVerdict(dbh, ctx, facts, rootId);
+  const perVisit = await billedPerVisit(dbh, { customer: profile, facts }, ctx);
   return {
     customerId: String(customerId),
     rootId: String(rootId),
     isSource,
-    stale,
+    stale: stale || !perVisit,
     address: await homeAddress(dbh, { customerId, propertyId, visit: facts.first, profile }),
     service: facts.serviceName,
     ...prices,
@@ -386,7 +403,7 @@ async function buildHomes(dbh, ctx) {
 // email switch, or a payer's AP email either committed first (and is read) or waits until the request is made.
 async function loadCustomers(dbh, ids, { lock = false } = {}) {
   const query = dbh('customers').whereIn('id', ids).whereNull('deleted_at').select(
-    'id', 'first_name', 'last_name', 'email', 'payer_id', 'billing_mode', 'autopay_enabled', 'autopay_paused_until',
+    'id', 'first_name', 'last_name', 'email', 'payer_id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'autopay_paused_until',
     'autopay_payment_method_id', 'ach_status', 'address_line1', 'address_line2',
   );
   const rows = lock ? await query.orderBy('id').forShare() : await query;
@@ -547,7 +564,10 @@ async function earlierAttemptVerdict(dbh, key, holdsEarlier) {
   return (await failedRecently(dbh, key)) ? 'wait' : 'send';
 }
 
+const gatesOn = () => featureGates.multiHomeDiscountEmailLive() && featureGates.multiHomeAllHomesLive();
+
 const REFUSALS = Object.freeze({
+  gate_off: 'a Multi-Home gate was turned off',
   series_busy: 'a listed plan is being changed right now',
   not_ready: 'a home\'s discount or price, or another home of the family, changed',
   homes_changed: 'the family\'s homes changed',
@@ -606,7 +626,7 @@ async function composeSource(conn, estimate, run, { lock = false } = {}) {
   const ledger = await loadLedgerRows(conn, estimate.id);
   if (openTargetReason(targets, ledger)) return { wait: 'target_open', roots, ids };
   const customers = await loadCustomers(conn, ids, { lock });
-  const ctx = { estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh: conn, nextPrices: run.nextPrices };
+  const ctx = { estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh: conn, nextPrices: run.nextPrices, laneOf: run.laneOf };
   const homes = await buildHomes(conn, ctx);
   // Every series of the sale gone (only a visit under way today): nothing to say about the new home yet.
   if (!homes.some((h) => h.isSource)) return { wait: 'no_source_home', roots, ids };
@@ -634,6 +654,8 @@ async function sourceEstimateNow(trx, estimate) {
 function sendTimeHandoff(dbh, run, estimate, composed, one, state) {
   return (dispatch) => dbh.transaction(async (trx) => {
     const refuse = (reason) => { state.refused = reason; return { ok: false, reason }; };
+    // The kill switch: both gates are read live again here and once more at the provider boundary below.
+    if (!gatesOn()) return refuse('gate_off');
     await lockFamilyChangesShared(trx);
     for (const rootId of composed.roots) {
       // Byte-identical key to admin-schedule.js acquireRecurringSeriesMaintenanceLock (a service cannot import a route).
@@ -655,7 +677,13 @@ function sendTimeHandoff(dbh, run, estimate, composed, one, state) {
     const loaded = await library.loadTemplateByKey(TEMPLATE_KEY, trx);
     if (!loaded?.template) return refuse('not_ready');
     if (await library.activeSuppressionFor(loaded.template, one.args.to, null, trx)) return refuse('suppressed');
-    await dispatch(trx);
+    // sendOne's providerBoundaryCheck: after the provider's own preparation, immediately before the request. A refusal
+    // there is the library's definite non-send.
+    await dispatch(trx, async () => {
+      if (gatesOn()) return { ok: true };
+      state.refused = 'gate_off';
+      throw Object.assign(new Error('a Multi-Home gate was turned off before the send'), { providerBoundaryBlocked: true });
+    });
     return { ok: true };
   });
 }

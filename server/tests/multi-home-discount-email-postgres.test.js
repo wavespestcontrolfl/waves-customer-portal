@@ -356,6 +356,28 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     });
   });
 
+  test('the new home on a monthly membership: no email says each visit is billed after it is done', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      await trx('customers').where({ id: f.son }).update({ billing_mode: 'monthly_membership' });
+      expect(await emailRun(trx)).toMatchObject({ sent: 0, waiting: 1, failed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the email gate turned off after the job composed the email: refused at the handoff, nothing sent', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      const gateOff = () => { process.env.GATE_MULTI_HOME_DISCOUNT_EMAIL = 'false'; };
+      expect(await emailRun(trx, { send: sendAfter(gateOff) })).toMatchObject({ sent: 0, waiting: 2, failed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      const rows = await messages(f.estimateId);
+      expect(rows.every((r) => r.status === 'failed' && r.error_message === 'aborted_by_caller_before_dispatch')).toBe(true);
+    });
+  });
+
   test('a held target blocks the send; once it is no longer a target the email goes', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);
