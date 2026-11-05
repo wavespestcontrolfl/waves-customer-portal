@@ -25,6 +25,11 @@ function isUuid(value) {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
+// Postgres returns uuids in lower case; compare and store them the same way.
+function normalizeId(value) {
+  return String(value).toLowerCase();
+}
+
 function displayName(row) {
   const name = [row.first_name, row.last_name].map((part) => String(part || '').trim()).filter(Boolean).join(' ');
   return name || row.company_name || 'Unnamed customer';
@@ -40,7 +45,8 @@ function displayAddress(row) {
  * The family a customer is in, with every live member profile.
  * Soft-deleted profiles are left out. Not linked: { familyId: null, members: [] }.
  */
-async function familyMembers(conn, customerId) {
+async function familyMembers(conn, rawCustomerId) {
+  const customerId = normalizeId(rawCustomerId);
   const own = await conn(TABLE).where({ customer_id: customerId }).first('family_id');
   if (!own) return { familyId: null, members: [] };
   const rows = await conn(TABLE)
@@ -68,19 +74,30 @@ async function familyMembers(conn, customerId) {
  * both active and not soft-deleted. Fails closed: any error (including a
  * missing table before the migration ran) answers false.
  */
+async function liveFamilySize(conn, customerId) {
+  const own = await conn(TABLE).where({ customer_id: customerId }).first('family_id');
+  if (!own) return 0;
+  const row = await conn(TABLE)
+    .join('customers', 'customers.id', `${TABLE}.customer_id`)
+    .where(`${TABLE}.family_id`, own.family_id)
+    .where('customers.active', true)
+    .whereNull('customers.deleted_at')
+    .count('* as cnt')
+    .first();
+  return Number(row?.cnt || 0);
+}
+
 async function familyMultiHomeEligible(conn, customerId) {
   if (!customerId) return false;
+  const id = normalizeId(customerId);
   try {
-    const own = await conn(TABLE).where({ customer_id: customerId }).first('family_id');
-    if (!own) return false;
-    const row = await conn(TABLE)
-      .join('customers', 'customers.id', `${TABLE}.customer_id`)
-      .where(`${TABLE}.family_id`, own.family_id)
-      .where('customers.active', true)
-      .whereNull('customers.deleted_at')
-      .count('* as cnt')
-      .first();
-    return Number(row?.cnt || 0) >= 2;
+    // Inside a caller's transaction (a locked recheck), read under a
+    // savepoint: a failed lookup then rolls back only the savepoint and the
+    // caller's transaction stays usable for its own refusal.
+    const size = conn && conn.isTransaction
+      ? await conn.transaction((sp) => liveFamilySize(sp, id))
+      : await liveFamilySize(conn, id);
+    return size >= 2;
   } catch (err) {
     if (err && err.code === '42P01') return false;
     logger.warn(`[multi-home-family] eligibility lookup failed, treating as not linked: ${err.message}`);
@@ -129,7 +146,10 @@ async function linkInTransaction(trx, { customerId, otherCustomerId, actorId }) 
   await lockCustomers(trx, [customerId, otherCustomerId]);
   await loadLinkable(trx, customerId, 'first');
   await loadLinkable(trx, otherCustomerId, 'other');
-  const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).select('customer_id', 'family_id');
+  // FOR UPDATE: an unlink running at the same time locks these rows too, so it
+  // either sees the profile this link adds or finishes first (and this read
+  // then skips the row it deleted) — never a one-profile family left behind.
+  const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).forUpdate().select('customer_id', 'family_id');
   const mineRow = rows.find((row) => row.customer_id === customerId);
   const otherRow = rows.find((row) => row.customer_id === otherCustomerId);
   const plan = planLink(mineRow, otherRow, customerId, otherCustomerId);
@@ -142,14 +162,16 @@ async function linkInTransaction(trx, { customerId, otherCustomerId, actorId }) 
  */
 async function linkFamily(conn, { customerId, otherCustomerId, actorId = null } = {}) {
   if (!isUuid(customerId) || !isUuid(otherCustomerId)) throw familyError('Both profile ids must be valid.', 400);
-  if (customerId === otherCustomerId) throw familyError('A profile cannot be linked to itself.', 400);
+  const mine = normalizeId(customerId);
+  const other = normalizeId(otherCustomerId);
+  if (mine === other) throw familyError('A profile cannot be linked to itself.', 400);
   try {
-    await conn.transaction((trx) => linkInTransaction(trx, { customerId, otherCustomerId, actorId }));
+    await conn.transaction((trx) => linkInTransaction(trx, { customerId: mine, otherCustomerId: other, actorId }));
   } catch (err) {
     if (err && err.code === '23505') throw familyError('One of these profiles was linked by someone else just now. Reload and try again.', 409);
     throw err;
   }
-  return familyMembers(conn, customerId);
+  return familyMembers(conn, mine);
 }
 
 async function unlinkInTransaction(trx, { customerId, actorId }) {
@@ -182,8 +204,9 @@ async function unlinkInTransaction(trx, { customerId, actorId }) {
  */
 async function unlinkFamily(conn, { customerId, actorId = null } = {}) {
   if (!isUuid(customerId)) throw familyError('The profile id must be valid.', 400);
-  await conn.transaction((trx) => unlinkInTransaction(trx, { customerId, actorId }));
-  return familyMembers(conn, customerId);
+  const mine = normalizeId(customerId);
+  await conn.transaction((trx) => unlinkInTransaction(trx, { customerId: mine, actorId }));
+  return familyMembers(conn, mine);
 }
 
 module.exports = {
