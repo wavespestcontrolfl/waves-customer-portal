@@ -9,6 +9,11 @@
 // every series of the customer that has a visit on a day off gets a NEW DATE for each of its live
 // visits dated >= --start, or the whole customer stays with --from, listed with the reason.
 //
+// THE DRIFT BUDGET. The flex tier measures its ±5 days from a visit's durable original date (route-tiers resolveAnchor). This run
+// reads that budget (a visit auto-dispatch already moved can only go ±5 of where it started) but does not charge the move to it: a
+// re-date made on purpose starts a fresh budget at the new day, as route-tiers does for a person's re-date, because the new weekday
+// IS the series' new rhythm (the parent anchor below). The audit row and the rollback file record the move.
+//
 // THE MOVE MUST STICK (lead ruling 2026-11-04). Recurring top-up extends a series from the latest live
 // visit's date; for the month-based patterns (monthly ... annual, monthly_nth_weekday, seasonal Feb-Oct)
 // it hops with addETMonthsByWeekday on the PARENT row's recurring_nth / recurring_weekday (else the
@@ -78,6 +83,14 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 /** "Sat -> Thu": the weekday change of one move. */
 const changeLabel = (from, to) => `${WEEKDAYS[dayOfWeekOfDate(from)]} -> ${WEEKDAYS[dayOfWeekOfDate(to)]}`;
 
+const hhmm = (minute) => `${String(Math.floor(minute / 60) % 24).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+
+/** The end of a visit's window for the occupancy probe: its own end, else its start plus its duration (the probe returns nothing without an end). */
+function effectiveWindowEnd(v) {
+  const span = spanOf(v);
+  return span ? hhmm(span.e) : null;
+}
+
 /** The window of a visit as [start, end) minutes, or null for a windowless visit (it holds no hour). */
 function spanOf(v) {
   const s = minutes(v.window_start);
@@ -136,6 +149,14 @@ function topUpDate(date, parent, skipWeekends, facts) {
   return clampDateToSeason(parent.recurring_pattern, shifted, { skipWeekends, blackoutDates: facts.blackout });
 }
 
+/** The customer's portal preference (a preferred weekday, a blackout range) against a date, or null. */
+function preferenceProblem(prefs, date) {
+  if (!prefs) return null;
+  const days = prefs.preferred_day_indexes;
+  if (days && days.length && !days.includes(dayOfWeekOfDate(date))) return 'preferred_day';
+  return prefs.blackout && date >= prefs.blackout.start && date <= prefs.blackout.end ? 'customer_blackout' : null;
+}
+
 /** Why one projected date is not allowed for a visit, or null. Sync: reads only `facts`. */
 function dateProblem(v, date, ctx) {
   const { facts, parent, workDays, today, skipWeekends } = ctx;
@@ -149,11 +170,8 @@ function dateProblem(v, date, ctx) {
   if (isBlackedOut(date, facts.blackout)) return 'company_blackout';
   if (facts.absentDates.has(date)) return 'absence';
   if (topUpDate(date, parent, skipWeekends, facts) !== date) return 'projection';
-  const prefs = facts.prefs.get(parent.customer_id);
-  if (prefs) {
-    if (prefs.preferred_day_indexes && prefs.preferred_day_indexes.length && !prefs.preferred_day_indexes.includes(dayOfWeekOfDate(date))) return 'preferred_day';
-    if (prefs.blackout && date >= prefs.blackout.start && date <= prefs.blackout.end) return 'customer_blackout';
-  }
+  const preference = preferenceProblem(facts.prefs.get(parent.customer_id), date);
+  if (preference) return preference;
   const bounds = facts.neighbors.get(v.id);
   if (!bounds) return 'neighbor';
   if ((bounds.prev && date <= bounds.prev) || (bounds.next && date >= bounds.next)) return 'neighbor';
@@ -356,12 +374,12 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
   }
   const { technicianFreeAt } = require(path.join(root, 'services', 'scheduling', 'pick-technician'));
   const free = (v, date) => technicianFreeAt({
-    conn: db, technicianId: to, date, windowStart: v.window_start, windowEnd: v.window_end,
+    conn: db, technicianId: to, date, windowStart: v.window_start, windowEnd: effectiveWindowEnd(v),
     durationMinutes: Number(v.estimated_duration_minutes) > 0 ? Number(v.estimated_duration_minutes) : undefined, excludeServiceIds: [v.id],
   });
   return resolveWeekendMoves({ candidates, from, workDays, today, facts, free, seed });
 }
 
 module.exports = {
-  decideWeekend, MIN_DAYS_OUT, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange, dayDiff,
+  decideWeekend, MIN_DAYS_OUT, effectiveWindowEnd, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange, dayDiff,
 };

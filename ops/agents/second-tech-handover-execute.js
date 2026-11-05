@@ -107,6 +107,7 @@ const { technicianFreeAt } = require(path.join(root, 'services', 'scheduling', '
 const { loadReminderFreeze } = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
 const { shiftDateStr } = require(path.join(root, 'services', 'auto-dispatch', 'dates'));
 const { ownScheduleFrozen } = require(path.join(root, 'services', 'auto-dispatch', 'flex-tier'));
+const { effectiveWindowEnd } = require('./second-tech-handover-weekend');
 const { sendTechNotification } = require(path.join(root, 'services', 'tech-notify'));
 const auditLog = require(path.join(root, 'services', 'audit-log'));
 const { etParts, etDateString } = require(path.join(root, 'utils', 'datetime-et'));
@@ -498,7 +499,7 @@ async function restoreDateBlocked(trx, v, now) {
   const freeze = await loadReminderFreeze(trx, [v.id], now);
   if (freeze.failed || freeze.frozen.has(v.id)) return true;
   return !(await technicianFreeAt({
-    conn: trx, technicianId: v.technician_id, date: v.date, windowStart: v.window_start, windowEnd: v.window_end, excludeServiceIds: [v.id],
+    conn: trx, technicianId: v.technician_id, date: v.date, windowStart: v.window_start, windowEnd: effectiveWindowEnd({ ...row, window_start: v.window_start, window_end: v.window_end }), excludeServiceIds: [v.id],
   }));
 }
 

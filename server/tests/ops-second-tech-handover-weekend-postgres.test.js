@@ -83,7 +83,7 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     const [parent] = await knex('scheduled_services').insert(base(c, ownerId, { scheduled_date: '2099-04-04', status: 'completed' })).returning('*');
     const kids = [];
     for (const date of o.dates || ['2099-07-11', '2099-10-10', '2100-01-09']) {
-      const [k] = await knex('scheduled_services').insert(base(c, ownerId, { scheduled_date: date, status: 'pending', recurring_parent_id: parent.id, route_order: 7 })).returning('*');
+      const [k] = await knex('scheduled_services').insert(base(c, ownerId, { scheduled_date: date, status: 'pending', recurring_parent_id: parent.id, route_order: 7, ...(o.kidExtra || {}) })).returning('*');
       kids.push(k);
     }
     return { parent, kids };
@@ -351,6 +351,17 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     const p = await plan(w);
     expect(p.ids.kept).toEqual([{ customer_id: c.customerId, reason: 'busy' }]);
     expect(p.ids.retemplate).toEqual([]);
+  });
+
+  test('a visit with a start but no end still meets the occupancy probe: the hire\'s 09:30 visit blocks a 09:00 start with a 60-minute duration', async () => {
+    const w = await world();
+    const c = await customer();
+    await weekendSeries(w.ownerId, c, { dates: ['2099-07-11'], kidExtra: { window_end: null } });
+    const other = await customer();
+    for (const date of ['2099-07-06', '2099-07-07', '2099-07-08', '2099-07-09', '2099-07-13', '2099-07-14', '2099-07-15', '2099-07-16']) {
+      await knex('scheduled_services').insert(base(other, w.hireId, { scheduled_date: date, status: 'confirmed', recurring_pattern: null, is_recurring: false, window_start: '09:30', window_end: '10:30' }));
+    }
+    expect((await plan(w)).ids.kept).toEqual([{ customer_id: c.customerId, reason: 'busy' }]);
   });
 
   test('two weekend customers on one hour do not land on the same day and hour; --start under 4 days out is refused', async () => {
