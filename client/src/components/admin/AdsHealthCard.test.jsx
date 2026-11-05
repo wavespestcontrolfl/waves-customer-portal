@@ -89,12 +89,31 @@ describe('AdsHealthCard', () => {
     expect(screen.getByText('Paused')).toBeInTheDocument();
     expect(screen.getByText('Campaign paused')).toBeInTheDocument();
     expect(screen.getByText('$5.00/day')).toBeInTheDocument();
-    expect(screen.getByText('No ads disapproved.')).toBeInTheDocument();
+    expect(screen.getByText('All ads approved.')).toBeInTheDocument();
     expect(screen.getByText(/Google: 104 sent, 7 pending,/)).toBeInTheDocument();
     expect(screen.queryByText(/partly refused/)).not.toBeInTheDocument();
     expect(screen.getByText(/Google accepted 25 in the last 7 upload days/)).toBeInTheDocument();
     expect(screen.getByText('Change number 1')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Show all/ })).not.toBeInTheDocument();
+  });
+
+  it('shows each ad\'s approval status and marks only a disapproved ad as an alert', async () => {
+    const body = payload();
+    body.google.disapprovals = {
+      total: 2,
+      truncated: false,
+      ads: [
+        { campaign: 'Test Search Campaign', adGroup: 'Pests', adId: '1', status: 'ENABLED', approvalStatus: 'APPROVED_LIMITED', topics: [] },
+        { campaign: 'Test Search Campaign', adGroup: 'Lawn', adId: '2', status: 'ENABLED', approvalStatus: 'DISAPPROVED', topics: ['DESTINATION_NOT_WORKING'] },
+      ],
+    };
+    reply(body);
+    render(<AdsHealthCard />);
+    const limited = await screen.findByText('Test Search Campaign, Pests: Approved limited');
+    expect(limited).not.toHaveClass('text-alert-fg');
+    const disapproved = screen.getByText('Test Search Campaign, Lawn: Disapproved (Landing page not working)');
+    expect(disapproved).toHaveClass('text-alert-fg');
+    expect(screen.queryByText('All ads approved.')).not.toBeInTheDocument();
   });
 
   it('shows rows in a batch Google partly refused', async () => {
@@ -111,7 +130,7 @@ describe('AdsHealthCard', () => {
     reply(body);
     render(<AdsHealthCard />);
     expect(await screen.findByText('Google serving check failed')).toBeInTheDocument();
-    expect(screen.getByText('No ads disapproved.')).toBeInTheDocument();
+    expect(screen.getByText('All ads approved.')).toBeInTheDocument();
     expect(screen.getByText('Change number 1')).toBeInTheDocument();
   });
 

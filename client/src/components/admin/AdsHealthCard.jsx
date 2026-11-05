@@ -115,17 +115,23 @@ function Serving({ data }) {
   );
 }
 
+// The server lists every ad Google has not fully approved (limited, area of
+// interest only, not yet reviewed). Only a disapproved ad is an alert.
 function Approvals({ data }) {
   const ads = data?.ads || [];
   return (
     <Section title="Ad approvals" data={data}>
       {ads.length === 0 ? (
-        <div className="text-ui-body text-zinc-900">No ads disapproved.</div>
+        <div className="text-ui-body text-zinc-900">All ads approved.</div>
       ) : (
         <ul className="list-none [margin:0] [padding:0]">
           {ads.map((ad, i) => (
-            <li key={ad.adId || i} className="text-ui-body text-alert-fg [padding:4px_0]">
-              {ad.campaign}, {ad.adGroup}: {(ad.topics || []).map(word).join(", ") || "Disapproved"}
+            <li
+              key={ad.adId || i}
+              className={`text-ui-body [padding:4px_0] ${ad.approvalStatus === "DISAPPROVED" ? "text-alert-fg" : "text-zinc-900"}`}
+            >
+              {ad.campaign}, {ad.adGroup}: {word(ad.approvalStatus) || "Not approved"}
+              {(ad.topics || []).length > 0 && ` (${ad.topics.map(word).join(", ")})`}
             </li>
           ))}
           {data.truncated && <Muted>Showing the first {ads.length} of {data.total}.</Muted>}
