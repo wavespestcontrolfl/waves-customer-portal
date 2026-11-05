@@ -36,11 +36,30 @@ router.get('/stacking', async (_req, res) => {
   res.json({ enabled: discountStackingLive() });
 });
 
+// A technician reads the catalog for the checkout and appointment discount
+// pickers: name, amount and the rules the pickers apply. The business-wide
+// totals (times_applied, total_discount_given) and every promo-code field
+// (the code, its use cap, uses so far and expiry) are the office's, the same
+// figures GET /stats keeps closed (technician visibility audit A7).
+const DISCOUNT_OWNER_ONLY_FIELDS = [
+  'times_applied', 'total_discount_given',
+  'promo_code', 'promo_code_max_uses', 'promo_code_current_uses', 'promo_code_expiry',
+];
+function stripDiscountOwnerFields(row) {
+  const out = { ...row };
+  for (const field of Object.keys(out)) {
+    if (DISCOUNT_OWNER_ONLY_FIELDS.includes(field) || field.startsWith('promo_code')) delete out[field];
+  }
+  return out;
+}
+
 // GET /api/admin/discounts — list all discounts
 router.get('/', async (req, res, next) => {
   try {
     const discounts = await db('discounts').orderBy('sort_order', 'asc').orderBy('created_at', 'asc');
-    res.json(discounts.map(attachDiscountCatalogClassification));
+    // Classified on the full row (a promo code makes a discount an invoice promo), stripped after.
+    const classified = discounts.map(attachDiscountCatalogClassification);
+    res.json(req.techRole === 'admin' ? classified : classified.map(stripDiscountOwnerFields));
   } catch (err) { next(err); }
 });
 

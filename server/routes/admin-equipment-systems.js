@@ -356,9 +356,10 @@ router.get('/', async (req, res, next) => {
 });
 
 // =========================================================================
-// GET /reconciliation — operational/tax/system linkage report
+// GET /reconciliation — operational/tax/system linkage report. Admin only:
+// it names the tax register's purchase cost and book value per asset.
 // =========================================================================
-router.get('/reconciliation', async (req, res, next) => {
+router.get('/reconciliation', requireAdmin, async (req, res, next) => {
   try {
     const [systems, equipment, taxRegister, calibrations] = await Promise.all([
       db('equipment_systems')

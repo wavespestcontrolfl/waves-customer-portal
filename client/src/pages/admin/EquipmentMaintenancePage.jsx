@@ -193,6 +193,9 @@ export default function EquipmentMaintenancePage({
   initialTab = "fleet",
   // A technician reads the fleet; resolving alerts, recording maintenance and
   // logging mileage are owner-only writes (staff allow-list, 2026-10-02).
+  // Read-only is the technician view, which also carries no money: no cost,
+  // spend, fuel or IRS figures and no mileage log (owner 2026-10-03 and
+  // 2026-11-04; the server strips the same fields).
   readOnly = false
 }) {
   const actionRef = useRef(false);
@@ -472,10 +475,10 @@ function FleetTab({
           {" "}
           <StatCard label="Total Assets" value={overview.total_assets} />{" "}
           <StatCard label="Overdue Maintenance" value={overview.overdue_maintenance} color={overview.overdue_maintenance > 0 ? "#C8312F" : "#18181B"} />{" "}
-          <StatCard label="YTD Maintenance" value={fmt(overview.ytd_maintenance_spend)} />{" "}
+          {!readOnly && <StatCard label="YTD Maintenance" value={fmt(overview.ytd_maintenance_spend)} />}{" "}
           <StatCard label="YTD Mileage" value={fmtN(Math.round(overview.ytd_total_miles))} sub="miles" />{" "}
-          <StatCard label="YTD Fuel" value={fmt(overview.ytd_fuel_cost)} />{" "}
-          <StatCard label="YTD IRS Deduction" value={fmt(overview.ytd_irs_deduction)} color={"#18181B"} />{" "}
+          {!readOnly && <StatCard label="YTD Fuel" value={fmt(overview.ytd_fuel_cost)} />}{" "}
+          {!readOnly && <StatCard label="YTD IRS Deduction" value={fmt(overview.ytd_irs_deduction)} color={"#18181B"} />}{" "}
         </div>}
 
       {/* Filters */}
@@ -515,7 +518,7 @@ function FleetTab({
             {" "}
             <option value="name">Sort: Name</option>{" "}
             <option value="condition">Sort: Condition</option>{" "}
-            <option value="cost">Sort: Cost</option>{" "}
+            {!readOnly && <option value="cost">Sort: Cost</option>}{" "}
           </Select>{" "}
       </div>
       {/* Equipment Grid */}
@@ -560,12 +563,14 @@ function EquipmentCard({
   const toggleForm = name => setOpenForm(current => current === name ? null : name);
   useEffect(() => {
     if (isExpanded && !detail) {
-      Promise.all([af(`/admin/equipment-maintenance/${eq.id}`), eq.category === "vehicle" ? af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`) : Promise.resolve(null)]).then(([d, m]) => {
+      // The mileage log (personal miles, fuel cost, IRS deduction) is the
+      // office's: a technician never asks for it.
+      Promise.all([af(`/admin/equipment-maintenance/${eq.id}`), eq.category === "vehicle" && !readOnly ? af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`) : Promise.resolve(null)]).then(([d, m]) => {
         setDetail(d);
         setMileage(m);
       }).catch(console.error);
     }
-  }, [isExpanded, eq.id, eq.category, detail]);
+  }, [isExpanded, eq.id, eq.category, detail, readOnly]);
   const nm = eq.next_maintenance;
   const overdue = nm && nm.is_overdue;
   return <Card style={{
@@ -679,11 +684,11 @@ function EquipmentCard({
             <InfoRow label="Serial" value={detail.equipment.serial_number} />{" "}
             <InfoRow label="VIN" value={detail.equipment.vin} />{" "}
             <InfoRow label="Purchase Date" value={detail.equipment.purchase_date ? formatETDateOnly(detail.equipment.purchase_date) : null} />{" "}
-            <InfoRow label="Purchase Price" value={detail.equipment.purchase_price ? fmt(detail.equipment.purchase_price) : null} />{" "}
+            {!readOnly && <InfoRow label="Purchase Price" value={detail.equipment.purchase_price ? fmt(detail.equipment.purchase_price) : null} />}{" "}
             <InfoRow label="Warranty" value={detail.equipment.warranty_expiration ? `Expires ${formatETDateOnly(detail.equipment.warranty_expiration)}` : null} />{" "}
             <InfoRow label="Engine" value={detail.equipment.engine_type} />{" "}
             <InfoRow label="Location" value={detail.equipment.location} />{" "}
-            <InfoRow label="Depreciation" value={detail.equipment.depreciation_method} />{" "}
+            {!readOnly && <InfoRow label="Depreciation" value={detail.equipment.depreciation_method} />}{" "}
           </div>
           {/* Maintenance Schedules */}
           <div style={{
@@ -731,12 +736,12 @@ function EquipmentCard({
                 }}>
                       Priority
                     </TH>
-                    <TH style={{
+                    {!readOnly && <TH style={{
                   textAlign: "right",
                   color: "#71717A"
                 }}>
                       Est Cost
-                    </TH>
+                    </TH>}
                   </TR>
                 </THead>
                 <TBody>
@@ -771,12 +776,12 @@ function EquipmentCard({
                         <TD>
                           <Badge tone={SEVERITY_TONES[s.priority] || "neutral"}>{s.priority}</Badge>
                         </TD>
-                        <TD className="whitespace-nowrap" style={{
+                        {!readOnly && <TD className="whitespace-nowrap" style={{
                     color: "#27272A",
                     textAlign: "right"
                   }}>
                           {s.estimated_cost ? fmt(s.estimated_cost) : "--"}
-                        </TD>
+                        </TD>}
                       </TR>;
               })}
                 </TBody>
@@ -861,12 +866,12 @@ function EquipmentCard({
                 }}>
                         By
                       </TH>
-                      <TH style={{
+                      {!readOnly && <TH style={{
                   textAlign: "right",
                   color: "#71717A"
                 }}>
                         Cost
-                      </TH>
+                      </TH>}
                     </TR>
                   </THead>
                   <TBody>
@@ -891,12 +896,12 @@ function EquipmentCard({
                 }}>
                           {r.performed_by || r.vendor_name || "--"}
                         </TD>
-                        <TD className="whitespace-nowrap" style={{
+                        {!readOnly && <TD className="whitespace-nowrap" style={{
                   color: "#27272A",
                   textAlign: "right"
                 }}>
                           {fmt(r.total_cost)}
-                        </TD>
+                        </TD>}
                       </TR>)}
                   </TBody>
                 </Table>{" "}
@@ -904,7 +909,7 @@ function EquipmentCard({
             </div>}
 
           {/* Cost of Ownership */}
-          {detail.costOfOwnership && <Card className="p-4 mb-3">
+          {!readOnly && detail.costOfOwnership && <Card className="p-4 mb-3">
               {" "}
               <div style={{
           fontSize: 14,
@@ -1029,7 +1034,7 @@ function EquipmentCard({
             </Card>}
 
           {/* Vehicle Mileage Section */}
-          {mileage && mileage.logs && mileage.logs.length > 0 && <div style={{
+          {!readOnly && mileage && mileage.logs && mileage.logs.length > 0 && <div style={{
         marginTop: 12
       }}>
               {" "}
