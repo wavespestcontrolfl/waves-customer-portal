@@ -297,6 +297,22 @@ const SEGMENT_PUNCTUATION = /[.,;:!?]/;
 // "OR" → "[Oo][Rr]": a case-insensitive literal inside a case-sensitive regex.
 const anyCase = (token) => token.split('').map((c) => `[${c.toUpperCase()}${c.toLowerCase()}]`).join('');
 const TRAILING_COUNTRY = /\s*(?:usa|u\.s\.a\.?|u\.s\.|us|united states(?: of america)?)\s*[.,;:!?]?\s*$/i;
+// A full state name that names a street ("and it's Oregon Street", "1200
+// Virginia Ave") is not geography. Call 68356d3d (2026-11-04) read a spoken
+// "Oregon Street" as Oregon, which marked a served Bradenton address out of
+// the service area and dropped a hot lead. Those uses are removed before the
+// full-name match, so the state still reads when it is named again ("Oregon
+// Street, Portland, Oregon"). Only thoroughfare words count, not place words
+// that also name towns ("Virginia Beach"), and punctuation between the two
+// keeps the state ("Georgia, Court Street").
+const STREET_TYPE_WORDS = [
+  'street', 'st', 'avenue', 'ave', 'road', 'rd', 'drive', 'dr', 'boulevard', 'blvd', 'lane', 'ln',
+  'court', 'ct', 'circle', 'cir', 'way', 'place', 'pl', 'terrace', 'ter', 'trail', 'trl',
+  'parkway', 'pkwy', 'highway', 'hwy', 'loop', 'lp',
+];
+function withoutStateNamedStreets(base, tok) {
+  return base.replace(new RegExp(`\\b${tok.replace(/ /g, '\\s+')}\\s+(?:${STREET_TYPE_WORDS.join('|')})\\b`, 'gi'), ' ');
+}
 function findState(value) {
   // Country first, before any punctuation rewrite ("U.S.A." must still
   // match its own dotted form — codex r5 P1).
@@ -304,13 +320,13 @@ function findState(value) {
   if (!base) return { raw: '', state: '' };
   // Full names match with punctuation removed ("North, Carolina" is still
   // North Carolina); codes see the punctuation, which marks segment starts.
-  const plain = base.replace(/[.,;:!?]/g, ' ').replace(/\s+/g, ' ').trim();
+  const plainOf = (text) => text.replace(/[.,;:!?]/g, ' ').replace(/\s+/g, ' ').trim();
   const segmented = base.replace(/\s*([.,;:!?])\s*/g, '$1 ').trim();
   for (const token of STATE_TOKENS) {
     const tok = escapeRegExp(token);
     let match = null;
     if (token.length > 2) {
-      match = plain.match(new RegExp(`\\b(${tok})\\b`, 'i'));
+      match = plainOf(withoutStateNamedStreets(base, tok)).match(new RegExp(`\\b(${tok})\\b`, 'i'));
     } else if (!FILLER_STATE_CODES.has(token)) {
       match = segmented.match(new RegExp(`\\b(${tok})\\b`, 'i'));
     } else {
