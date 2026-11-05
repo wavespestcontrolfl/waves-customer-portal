@@ -58,7 +58,10 @@ jest.mock('../services/appointment-email', () => ({
   sendAppointmentCancelledEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
-jest.mock('../services/reschedule-link', () => ({ buildRescheduleLink: jest.fn(async () => ({ url: 'https://example.invalid/r/1' })) }));
+jest.mock('../services/reschedule-link', () => ({
+  buildRescheduleLink: jest.fn(async () => ({ url: 'https://example.invalid/r/1' })),
+  rescheduledTextLine: jest.fn(async () => 'Need a different time? Reschedule here: https://example.invalid/r/1'),
+}));
 jest.mock('../services/visit-groups', () => ({ ...jest.requireActual('../services/visit-groups'), appointmentSendHeld: jest.fn(async () => false) }));
 jest.mock('../services/cancel-generation-fence', () => ({ ...jest.requireActual('../services/cancel-generation-fence'), countRestorations: jest.fn(async () => 0) }));
 jest.mock('../services/property-notification-prefs', () => ({ ...jest.requireActual('../services/property-notification-prefs'), prefsForVisit: jest.fn(async (prefs) => prefs) }));
@@ -495,6 +498,13 @@ describe('handleReschedule: the reschedule text reached nobody', () => {
       rendered_slot_ms: Date.parse('2099-11-04T21:00:00.000Z'), move_notice_slot_ms: Date.parse('2099-11-04T21:00:00.000Z'),
     }));
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).not.toHaveBeenCalled();
+    // The text closes on the visit's reschedule link (owner 2026-11-04).
+    const { rescheduledTextLine } = require('../services/reschedule-link');
+    expect(rescheduledTextLine).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
+    const { getTemplate } = require('../routes/admin-sms-templates');
+    expect(getTemplate).toHaveBeenCalledWith('appointment_rescheduled', expect.objectContaining({
+      different_time_line: 'Need a different time? Reschedule here: https://example.invalid/r/1',
+    }), expect.anything(), expect.anything());
   });
 
   test('a delivered windowless text records no promised slot but keeps its quoted slot for its email version', async () => {

@@ -622,7 +622,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'suppressed', new Date(), claim.token);
       return;
     }
-    const plainBody = `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
+    const plainBody = `Waves: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
     let link = billingLink;
     let linkStale = false;
     let body = plainBody;

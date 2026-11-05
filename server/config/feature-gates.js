@@ -494,6 +494,7 @@
  *   GATE_MONDAY_REVIEW_BELL=true (owner 2026-11-02, "build all", B2: one needs-you bell every Monday 9:20 AM ET for the work that sits, built from the 2026-09-30 rule item 6. Lines, each only when its count is above zero: needs-you alerts unread 14+ days (before the 30-day retention sweep expires them), overdue promises to callers, completed visits whose only invoice is an unsent draft, past-dated visits still open. One row per Monday (dedupeKey monday-review:<ET date>) with a detail line and page for each list; last week's row closes first, and an all-zero week raises nothing. Admin only: sends nothing to a customer, no paid API, writes only admin notifications. Read at call time via mondayReviewBellLive(), strict 'true', dark by default; off = the Monday cron returns before any read. Rollback = unset.)
  *   GATE_MORNING_BANNER=true (owner 2026-11-03, "ok add", choice C: at 8:00 AM ET each day ONE phone banner tells the owner how many items wait for him and opens his alert list. It counts the open bell alerts that need a person (needs-you or broken, not done, not Activity-only, not sent to Claude) and replaces a banner for each of his other action items. Zero items = no banner. Push only, no bell row, admin phones only, with the per-admin Push Settings switch for the waiting_summary type; sends nothing to a customer, no paid API. At most one banner per ET day (sms_send_claims row morning_banner:<ET date>). Read at call time via morningBannerLive(), strict 'true', dark by default; off = the 8 AM job returns before any read and the waiting_summary type stays silent in the bell policy.)
  *   GATE_OWNER_NUDGE_BANNER=true (owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge (services/tech-open-visit-nudge.js) reaches him as a Waves Admin phone banner instead of a text. Push only, no bell row, owner only, same words as the text, a tap opens /tech, reminder sound. The banner counts only when a phone accepted it; otherwise the same text goes out as today, so the nudge is never lost. Never both. Still needs GATE_TECH_OPEN_VISIT_NUDGE. Sends nothing to a customer, no paid API (it saves the text's Twilio cost). Read at call time via ownerNudgeBannerLive(), strict 'true', dark by default; off = the owner still gets the text, byte-identical, and the open_visits_nudge type stays silent in the bell policy. Rollback = unset.)
+ *   GATE_RING_NEW_CONTACTS=true (owner 2026-11-04, reply "ring new": two kinds of incoming contact never put a banner on the owner's phone. (1) A text from a number with no customer record to a customer-facing office line (a location line or a Google Business Profile tracking line; not the AI assistant line, not a tech line, not a staff phone, not a reaction or courtesy closer) wrote only a quiet Activity row. On, it rings the same one-row-per-sender new-lead bell the website and van tracking lines ring (sms-reply-alert-delivery.js ringTrackingLineTextBell): the latest text quoted, a running count, the name on file, a phone banner on every text; the quiet Activity row is then skipped, and kept if the ring fails. (2) A new-lead email (a lead created from an email, or a follow-up email that completed a quote request) wrote a bell row without a banner. On, it also sends ONE phone banner with the New lead sound at any hour, once per email id (the bell row is keyed on the email), with no second bell row (bell-banners.js kind new_lead_email). Known-customer texts, tracking lines, the AI line, tech lines, staff senders and the possible-lead review rows are unchanged. Sends nothing to a customer, no paid API. Read at call time via ringNewContactsLive(), strict 'true', dark by default; off = byte-identical, rollback = unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -5687,6 +5688,9 @@ const gates = {
   // GATE_OWNER_NUDGE_BANNER: read at CALL time via ownerNudgeBannerLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   ownerNudgeBanner: process.env.GATE_OWNER_NUDGE_BANNER === 'true',
+  // GATE_RING_NEW_CONTACTS: read at CALL time via ringNewContactsLive(); this entry is for logGateStatus, so the boot log
+  // shows the flip.
+  ringNewContacts: process.env.GATE_RING_NEW_CONTACTS === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -10426,6 +10430,15 @@ function morningBannerLive() {
 }
 // GATE_MORNING_BANNER reader, on its own line so gate PRs never conflict.
 module.exports.morningBannerLive = morningBannerLive;
+
+// GATE_RING_NEW_CONTACTS read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-04 "ring new": an unknown sender's text to an office line and a new-lead email ring the owner's phone
+// (twilio-webhook.js ringUnknownOfficeText, bell-banners.js new_lead_email). Off = both behave exactly as before.
+function ringNewContactsLive() {
+  return process.env.GATE_RING_NEW_CONTACTS === 'true';
+}
+// GATE_RING_NEW_CONTACTS reader, on its own line so gate PRs never conflict.
+module.exports.ringNewContactsLive = ringNewContactsLive;
 
 // GATE_DAY_REPLAN read at CALL time (so a flip needs no redeploy): exactly 'shadow' or 'true', anything else
 // (unset is the kill) is 'off'. Owner 2026-11-03. PR 1: 'true' behaves as 'shadow' (services/day-replan/index.js).

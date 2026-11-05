@@ -90,6 +90,9 @@ describe('notification trigger push tags', () => {
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 1, areas: [{ area: 'Billing', count: 1 }] }).title).toBe('1 item waits for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 2, areas: [{ area: 'Billing', count: 2 }] }).title).toBe('2 items wait for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 3, areas: [] }).body).toBeNull();
+    // Owner 2026-11-04 "fix count": read items still open show as "N open in all" after the unread areas.
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 39, total: 334, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2 \u00b7 334 open in all');
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 12, total: 12, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2');
     expect(TRIGGER_REGISTRY.waiting_summary).toMatchObject({ label: 'Morning summary: items waiting for you', category: 'alert', priority: 'normal', group: 'Alerts' });
     expect(TRIGGER_REGISTRY.waiting_summary.techVisible).toBeUndefined();
   });
@@ -1414,6 +1417,18 @@ describe('bell banner triggers', () => {
     // It sits right after sms_reply.
     const keys = Object.keys(TRIGGER_REGISTRY);
     expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
+  });
+
+  test('new_lead_email (GATE_RING_NEW_CONTACTS) builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+    const lead = TRIGGER_REGISTRY.new_lead_email;
+    expect(lead).toEqual(expect.objectContaining({ category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
+    expect(lead.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });
+    expect(lead.build(bannerPayload)).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(lead.build({}).link).toBe('/admin/email');
+    await triggerNotification('new_lead_email', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    const sent = PushService.sendToAdminUsers.mock.calls.at(-1)[1]('admin-1');
+    expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_email-n-42', sound: 'waves-lead.caf' });
   });
 
   test('the banner is tagged by its row, so a refresh ring replaces it, and a second row never does', () => {
