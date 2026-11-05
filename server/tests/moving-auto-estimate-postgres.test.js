@@ -356,6 +356,32 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     }
   });
 
+  test('an add-on on the plan\'s coming visits goes to the office before any lookup', async () => {
+    const s = await seed();
+    const next = (await trx('scheduled_services').insert({
+      customer_id: customerId, status: 'pending', service_type: 'Monthly Pest Control Service', scheduled_date: day(12),
+      recurring_parent_id: s.root, recurring_pattern: 'monthly', recurring_ongoing: true, property_id: oldHouseId,
+    }).returning('id'))[0].id;
+    await trx('scheduled_service_addons').insert({ scheduled_service_id: next, service_name: 'Mosquito Control', estimated_price: 35 });
+    expect(await Auto.runMoveAutoEstimateJob()).toEqual({ drafted: 0, office: 1, skipped: 0, failed: 0 });
+    expect(Lookup.performPropertyLookup).not.toHaveBeenCalled();
+    expect((await moveRow(s.move.id)).auto_estimate_note).toContain('add-on service');
+  });
+
+  test('a customer who sends another address during the lookup gets a new attempt, not an office mark', async () => {
+    const s = await seed();
+    // The resubmit lands while the lookup runs (it keeps an unfinished claim); the save then refuses the old address.
+    Lookup.performPropertyLookup.mockImplementationOnce(async () => {
+      await trx('customer_moves').where({ id: s.move.id }).update({
+        typed_address: '12 Other Road, Venice, FL 34285', normalized_address: JSON.stringify({ ...NEW_HOUSE, line1: '12 Other Road' }),
+      });
+      return countyLookup();
+    });
+    expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ drafted: 0, office: 0, skipped: 1 });
+    expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_at: null, auto_estimate_state: null, estimate_id: null });
+    expect(officeItems()).toHaveLength(0);
+  });
+
   test('a unit address goes to the office before any lookup', async () => {
     const s = await seed({ move: { typed_address: '40 Sample Road Apt 4, Venice, FL 34285', normalized_address: JSON.stringify({ ...NEW_HOUSE, line2: 'Apt 4' }) } });
     expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ office: 1 });

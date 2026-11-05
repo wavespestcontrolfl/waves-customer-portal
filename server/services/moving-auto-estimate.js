@@ -58,6 +58,7 @@ const NOTES = {
   no_source: 'There is no earlier estimate to copy the services from.',
   discount: 'The earlier estimate had a discount. Decide whether it carries over, then price the new home.',
   not_pest_only: 'The app prices only a plan of one pest service for now.',
+  addon: 'The plan has an add-on service on its coming visits, which the new-home estimate would drop.',
   cadence: 'The app could not read the plan\'s visit schedule.',
   no_price: 'The app could not read the current visit price.',
   unit: 'The new address has a unit number, so the county record cannot size the home.',
@@ -129,14 +130,24 @@ function pestServiceFor(cadence) {
 
 // One ringing office item and the move's 'office' state, together, once.
 // `note` replaces the code's fixed note (a refusal's own message, a price).
+// Under the move's row lock, only while the move still shows this attempt's
+// claim: a customer who sent another address meanwhile (a resubmit keeps an
+// unfinished claim) gets the claim cleared instead, so the new address gets
+// its own attempt.
 async function leaveToOffice(move, code, { now, note: given = null }) {
   const note = given || NOTES[code] || NOTES.engine;
+  const Moves = require('./customer-moves');
+  const line = (row) => Moves._private.addressLine(parseJson(row.normalized_address));
   return db.transaction(async (trx) => {
-    const updated = await trx('customer_moves')
-      .where({ id: move.id })
-      .whereNull('auto_estimate_state')
+    const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
+    if (!locked || locked.auto_estimate_state || !locked.auto_estimate_at
+      || new Date(locked.auto_estimate_at).getTime() !== new Date(move.auto_estimate_at).getTime()) return 'skipped';
+    if (line(locked) !== line(move)) {
+      await trx('customer_moves').where({ id: move.id }).update({ auto_estimate_at: null, updated_at: now });
+      return 'skipped';
+    }
+    await trx('customer_moves').where({ id: move.id })
       .update({ auto_estimate_state: 'office', auto_estimate_note: note.slice(0, 300), updated_at: now });
-    if (!updated) return 'skipped';
     await trx('activity_log').insert({
       customer_id: move.customer_id,
       action: 'moving_auto_estimate_office',
@@ -190,8 +201,33 @@ async function claimMove(moveId, now) {
   });
 }
 
+// Any add-on (scheduled_service_addons) on the plan's visits from today on: a
+// recurring add-on rides every coming visit, and the new-home estimate would
+// drop it, so the office prices the move.
+async function hasComingAddon(rootId, today) {
+  const row = await db('scheduled_service_addons as a')
+    .join('scheduled_services as s', 's.id', 'a.scheduled_service_id')
+    .where((q) => q.where('s.id', rootId).orWhere('s.recurring_parent_id', rootId))
+    .where('s.scheduled_date', '>=', today)
+    .first('a.id');
+  return !!row;
+}
+
+// The plan the move takes along, as the facts the price needs (its visit
+// schedule and current visit price), or a refusal code.
+async function planFacts(move, today) {
+  const plan = await movingPestPlan(move);
+  if (!plan) return { code: 'not_pest_only' };
+  if (await hasComingAddon(plan.id, today)) return { code: 'addon' };
+  const cadence = PEST_CADENCES[String(plan.recurring_pattern || '').trim().toLowerCase()];
+  if (!cadence) return { code: 'cadence' };
+  const currentPrice = Number(plan.estimated_price);
+  if (!(currentPrice > 0)) return { code: 'no_price' };
+  return { cadence, currentPrice };
+}
+
 // The free checks, in order: a refusal code, or the facts the pricing needs.
-async function freeChecks(move) {
+async function freeChecks(move, today = require('../utils/datetime-et').etDateString()) {
   const Moves = require('./customer-moves');
   const customer = await db('customers').where({ id: move.customer_id }).first('contact_role');
   if (String((customer && customer.contact_role) || '').trim().toLowerCase() === 'tenant') return { code: 'tenant' };
@@ -210,12 +246,9 @@ async function freeChecks(move) {
   if (hadDiscount(inputs)) return { code: 'discount' };
   const kept = KEPT_SERVICE_FLAGS.filter((flag) => inputs[flag] === true);
   if (kept.length !== 1 || kept[0] !== 'svcPest') return { code: 'not_pest_only' };
-  const plan = await movingPestPlan(move);
-  if (!plan) return { code: 'not_pest_only' };
-  const cadence = PEST_CADENCES[String(plan.recurring_pattern || '').trim().toLowerCase()];
-  if (!cadence) return { code: 'cadence' };
-  const currentPrice = Number(plan.estimated_price);
-  if (!(currentPrice > 0)) return { code: 'no_price' };
+  const plan = await planFacts(move, today);
+  if (plan.code) return plan;
+  const { cadence, currentPrice } = plan;
   const pest = pestServiceFor(cadence);
   if (!pest) return { code: 'engine' };
   const { _private: { wholeHomeAddress } } = require('./lead-draft-measurements');
@@ -339,7 +372,7 @@ function bandNote(visitPrice, currentPrice) {
 async function autoEstimateMove(moveId, { now }) {
   const move = await claimMove(moveId, now);
   if (!move) return 'skipped';
-  const facts = await freeChecks(move);
+  const facts = await freeChecks(move, require('../utils/datetime-et').etDateString(now));
   if (facts.code === 'exists') {
     await db('customer_moves').where({ id: move.id }).whereNull('auto_estimate_state').update({ auto_estimate_state: 'office', auto_estimate_note: 'The office made the estimate.', updated_at: now });
     return 'skipped';

@@ -2364,7 +2364,7 @@ module.exports = {
   autoApplyAcceptedMoves,
   runMovePauseJob,
   PAUSE_DAYS,
-  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse, pauseLane,
+  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse, pauseLane, addressLine,
     // The visit notes the pause and the old-house stop write for a move (the app-made estimate reads a stopped plan by them).
     moveJobVisitNotes: (moveId) => [pauseVisitNote(moveId), firstPauseVisitNote(moveId)] },
 };
