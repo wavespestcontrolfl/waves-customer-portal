@@ -25427,12 +25427,14 @@ function prepaySwitchMatchesExpected(live, expected) {
     && supersedeKeysMatch(live.supersedes, expected);
 }
 
+// Every caller passes visitId, acknowledgeNoticedAmount, actor and auditSource;
+// switchLane and expected are the bar's alone.
 async function runPrepaySwitch({
-  visitId, acknowledgeNoticedAmount = false, actor = {}, switchLane, expected = null, auditSource = 'on-site switch',
+  visitId, acknowledgeNoticedAmount, actor, switchLane, expected, auditSource,
 }) {
   // Server-derived eligibility + pricing — the same computation the sheet
   // previewed, re-run fresh so nothing stale or client-shaped is minted.
-  const previewOpts = switchLane === true ? { switchLane: true } : {};
+  const previewOpts = { switchLane: switchLane === true };
   const p = await computeAnnualPrepayPreview({ scheduledServiceId: visitId }, db, previewOpts);
   if (p.httpStatus) return { httpStatus: p.httpStatus, httpBody: p.httpBody };
   if (!p.eligible) return { httpStatus: 409, httpBody: { error: `This visit ${p.blockReason}` } };
@@ -25801,7 +25803,7 @@ async function runPrepaySwitch({
   } catch (err) {
     if (err && err.annualPrepayOverlap) return { httpStatus: 409, httpBody: err.annualPrepayOverlap };
     if (err && err.noticedRenewalAmount) return { httpStatus: 409, httpBody: err.noticedRenewalAmount, noticedRenewalAmount: true };
-    if (err && err.switchConflict) return { httpStatus: 409, httpBody: { error: err.message }, ...(err.switchDrift ? { drift: true } : {}) };
+    if (err && err.switchConflict) return { httpStatus: 409, httpBody: { error: err.message }, drift: err.switchDrift === true };
     throw err;
   }
 
@@ -25844,6 +25846,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
       visitId: req.params.id,
       acknowledgeNoticedAmount: req.body?.acknowledgeNoticedAmount === true,
       actor: { id: req.technicianId || null, name: req.technician?.name || null },
+      auditSource: 'on-site switch',
     });
     if (out.httpStatus) return res.status(out.httpStatus).json(out.httpBody);
     res.status(201).json({ invoice: out.invoice, voided: out.voided });

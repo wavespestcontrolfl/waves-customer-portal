@@ -69,28 +69,24 @@ function dayOf(value) {
 }
 
 function customerName(c) {
-  return [c?.first_name, c?.last_name].filter(Boolean).join(' ') || c?.company_name || null;
+  return [c?.first_name, c?.last_name].filter(Boolean).join(' ') || c?.company_name || 'This customer';
 }
 
 function schedule() {
   return require('../../routes/admin-schedule');
 }
 
-// Everything the card approves: a change in any of it is drift.
-function versionOf({ visit, customer, mint, supersedes }) {
+// What the switch re-checks under its locks (runPrepaySwitch `expected`).
+function expectedOf(visit, mint, supersedes) {
   return {
-    visit_id: visit.id,
-    visit_status: visit.status || null,
-    visit_date: dayOf(visit.scheduled_date),
-    customer_id: visit.customer_id,
-    billing_mode: customer?.billing_mode || null,
-    amount: cents(mint.amount),
-    setup_fee: cents(mint.setupFeeAmount),
-    visit_count: Number(mint.visitCount) || 0,
-    cadence: mint.coverageCadence || null,
-    service: mint.serviceType || null,
-    term_start: mint.termStart || null,
-    supersedes: supersedes.map((inv) => schedule().prepaySwitchSupersedeKey(inv)).sort(),
+    customerId: String(visit.customer_id),
+    amount: mint.amount,
+    setupFeeAmount: Number(mint.setupFeeAmount) || 0,
+    visitCount: mint.visitCount,
+    coverageCadence: mint.coverageCadence,
+    serviceType: mint.serviceType,
+    termStart: mint.termStart,
+    supersedeKeys: supersedes.map((inv) => schedule().prepaySwitchSupersedeKey(inv)).sort(),
   };
 }
 
@@ -100,26 +96,28 @@ async function buildPlan(input) {
   const visit = await db('scheduled_services').where({ id: visitId })
     .first('id', 'customer_id', 'status', 'scheduled_date', 'service_type');
   if (!visit) return refusal('Visit not found', 'not_found');
+  // customer_id is a foreign key: the row exists.
   const customer = await db('customers').where({ id: visit.customer_id })
     .first('id', 'first_name', 'last_name', 'company_name', 'billing_mode');
-  if (!customer) return refusal('The visit\'s customer was not found', 'not_found');
   const name = customerName(customer);
 
   const p = await schedule().computeAnnualPrepayPreview({ scheduledServiceId: visitId }, db, { switchLane: true });
-  if (p.httpStatus) return refusal(`Nothing was proposed: ${p.httpBody?.error || 'the switch is not available for this visit'}.`, 'not_available', { appointment_id: visitId });
-  if (!p.eligible) return refusal(`${name || 'This customer'} can't be switched to annual prepay from this visit: it ${p.blockReason}. Nothing was proposed.`, 'not_eligible', { appointment_id: visitId, reason: p.blockReason });
+  if (p.httpStatus) return refusal(`Nothing was proposed: ${p.httpBody.error}.`, 'not_available', { appointment_id: visitId });
+  if (!p.eligible) return refusal(`${name} can't be switched to annual prepay from this visit: it ${p.blockReason}. Nothing was proposed.`, 'not_eligible', { appointment_id: visitId, reason: p.blockReason });
 
-  const mint = p.mintPayload;
-  const supersedes = Array.isArray(p.supersedes) ? p.supersedes : [];
-  const setupFee = Number(mint.setupFeeAmount) > 0 ? Number(mint.setupFeeAmount) : 0;
+  // An eligible preview always carries the mint payload and the supersedes array.
+  const { mintPayload: mint, supersedes } = p;
+  const expected = expectedOf(visit, mint, supersedes);
+  const setupFee = expected.setupFeeAmount;
   const total = (cents(mint.amount) + cents(setupFee)) / 100;
-  const cadence = CADENCE_WORDS[mint.coverageCadence] || String(mint.coverageCadence || '').replace(/_/g, ' ');
+  const cadence = CADENCE_WORDS[mint.coverageCadence] || mint.coverageCadence;
+  const visitDate = dayOf(visit.scheduled_date);
   const effects = [
-    { kind: 'billing', text: `Creates an UNPAID annual prepay invoice: ${mint.serviceType}, ${mint.visitCount} visit${Number(mint.visitCount) === 1 ? '' : 's'} (${cadence}) for ${money(mint.amount)}${p.discountLabel ? ` (${p.discountLabel} prepay discount off ${money(p.annualBase)})` : ''}, term starting ${mint.termStart}.` },
+    { kind: 'billing', text: `Creates an UNPAID annual prepay invoice: ${mint.serviceType}, ${mint.visitCount} visit(s) (${cadence}) for ${money(mint.amount)}${p.discountLabel ? ` (${p.discountLabel} prepay discount off ${money(p.annualBase)})` : ''}, term starting ${mint.termStart}.` },
     ...(setupFee > 0 ? [{ kind: 'billing', text: `The bait-station setup bills on the same invoice as its own line: ${money(setupFee)}.` }] : []),
     { kind: 'billing', text: `Invoice total: ${money(total)}. Collect it from the invoice afterwards (charge their card or record the payment).` },
     ...supersedes.map((inv) => ({ kind: 'billing', text: `Voids the unsent per-application invoice ${inv.invoiceNumber || inv.id} (${money(inv.total)}).` })),
-    ...(p.setupFee?.amount > 0 ? [{ kind: 'billing', text: `The ${money(p.setupFee.amount)} setup fee on it is waived with the prepay.` }] : []),
+    ...(p.setupFee ? [{ kind: 'billing', text: `The ${money(p.setupFee.amount)} setup fee on it is waived with the prepay.` }] : []),
     { kind: 'billing', text: 'The customer moves to annual prepay only when this invoice is paid; their visits are then marked prepaid for the year. Until then they are not covered.' },
     { kind: 'billing', text: 'If it is not collected, void the prepay invoice from Invoices: the per-application invoice comes back.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer. No card is charged.' },
@@ -130,33 +128,32 @@ async function buildPlan(input) {
     appointment_id: visit.id,
     customer_id: visit.customer_id,
     customer_name: name,
-    visit_date: dayOf(visit.scheduled_date),
-    visit_status: visit.status || null,
+    visit_date: visitDate,
+    visit_status: visit.status,
     service: mint.serviceType,
     billing_before: customer.billing_mode || 'not set',
     prepay_amount: money(mint.amount),
     setup_fee: setupFee > 0 ? money(setupFee) : null,
     invoice_total: money(total),
-    visits_covered: Number(mint.visitCount) || 0,
+    visits_covered: mint.visitCount,
     cadence,
     term_start: mint.termStart,
-    voids: supersedes.map((inv) => ({ invoice_number: inv.invoiceNumber || null, amount: money(inv.total) })),
+    voids: supersedes.map((inv) => ({ invoice_number: inv.invoiceNumber || inv.id, amount: money(inv.total) })),
     effects,
     sends_to_customer: false,
-    _version: versionOf({ visit, customer, mint, supersedes }),
-    _expected: {
-      customerId: String(visit.customer_id),
-      amount: mint.amount,
-      setupFeeAmount: setupFee,
-      visitCount: mint.visitCount,
-      coverageCadence: mint.coverageCadence,
-      serviceType: mint.serviceType,
-      termStart: mint.termStart,
-      supersedeKeys: supersedes.map((inv) => schedule().prepaySwitchSupersedeKey(inv)),
-    },
+    // Everything the card approves: the visit, the billing type the card names, and every figure the switch re-checks.
+    _version: { visit_id: visit.id, visit_status: visit.status, visit_date: visitDate, billing_mode: customer.billing_mode, ...expected },
+    _expected: expected,
     note: 'PREVIEW ONLY — nothing was changed. Confirm makes exactly this switch; if anything changed it refuses.',
   };
 }
+
+// A refusal from the switch, by kind: the code the bar records and what the operator does next.
+const SWITCH_REFUSALS = {
+  noticed: { code: 'noticed_renewal_amount', next: ' Use the visit\'s Switch to annual prepay sheet, where staff can confirm the amount.' },
+  drift: { code: 'preview_changed', next: ' Ask again for a fresh confirmation card.', preview_changed: true },
+  refused: { code: 'switch_refused', next: '' },
+};
 
 async function commitSwitch(input, actionContext) {
   const pinned = input._verified_prepay_switch_version;
@@ -174,34 +171,32 @@ async function commitSwitch(input, actionContext) {
       switchLane: true,
       expected: plan._expected,
       acknowledgeNoticedAmount: false,
-      actor: { id: actionContext?.technicianId || null, name: null, source: 'ib_prepay_switch' },
+      actor: { id: actionContext.technicianId, name: null, source: 'ib_prepay_switch' },
       auditSource: 'Intelligence Bar switch',
     });
   } catch (err) {
-    // One transaction: it committed or it did not. Read back whether a prepay term now exists for the customer.
-    logger.error(`[intelligence-bar:prepay-switch] switch failed (${err.code || err.name || 'error'})`);
+    // One transaction: it committed or it did not, and this caller cannot tell which.
+    logger.error(`[intelligence-bar:prepay-switch] switch failed (${err.code || err.name})`);
     return { ...base, outcome_unknown: true, code: 'execution_interrupted',
       error: 'The switch was interrupted — it may or may not have happened. Check the customer\'s invoices before trying again.' };
   }
   if (out.httpStatus) {
-    if (out.noticedRenewalAmount) {
-      return { ...base, failed: true, code: 'noticed_renewal_amount',
-        error: `Nothing was switched: ${out.httpBody?.error || 'the customer was already told a different renewal amount'}. Use the visit's Switch to annual prepay sheet, where staff can confirm the amount.` };
-    }
-    const message = out.httpBody?.error || out.httpBody?.message || 'the switch was refused';
-    return { ...base, failed: true, code: out.drift ? 'preview_changed' : 'switch_refused', error: `Nothing was switched: ${message}`,
-      ...(out.drift ? { preview_changed: true } : {}) };
+    const kind = SWITCH_REFUSALS[out.noticedRenewalAmount ? 'noticed' : out.drift ? 'drift' : 'refused'];
+    // Every refusal body the switch returns carries `error`.
+    const { next, ...fields } = kind;
+    return { ...base, failed: true, ...fields, error: `Nothing was switched: ${String(out.httpBody.error).replace(/\.$/, '')}.${next}` };
   }
-  logger.info(`[intelligence-bar:prepay-switch] switched visit ${plan.appointment_id}: minted ${out.invoice?.invoice_number}`);
+  const { invoice } = out;
+  logger.info(`[intelligence-bar:prepay-switch] switched visit ${plan.appointment_id}: minted ${invoice.invoice_number}`);
   return {
     ...base,
     success: true,
-    invoice_id: out.invoice?.id || null,
-    invoice_number: out.invoice?.invoice_number || null,
-    invoice_total: money(out.invoice?.total),
-    voided: (out.voided || []).map((v) => v.invoiceNumber || v.id),
+    invoice_id: invoice.id,
+    invoice_number: invoice.invoice_number,
+    invoice_total: money(invoice.total),
+    voided: out.voided.map((v) => v.invoiceNumber || v.id),
     sent_to_customer: false,
-    note: `Annual prepay invoice ${out.invoice?.invoice_number || ''} (${money(out.invoice?.total)}) is created and UNPAID. ${plan.customer_name || 'The customer'} moves to annual prepay when it is paid: collect it from the invoice. Nothing was sent to anyone.`.replace(/\s+/g, ' '),
+    note: `Annual prepay invoice ${invoice.invoice_number} (${money(invoice.total)}) is created and UNPAID. ${plan.customer_name} moves to annual prepay when it is paid: collect it from the invoice. Nothing was sent to anyone.`,
   };
 }
 
