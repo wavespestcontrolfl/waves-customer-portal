@@ -75,6 +75,35 @@ describe('TechNoticeFeed — tech line text card', () => {
     expect(screen.getByRole('button', { name: 'Got it' })).not.toBeDisabled();
   });
 
+  // Pre-push audit P1: the feed shows two kept cards; newer cards must not unmount an open Reply.
+  it('newer cards keep an open Reply on screen with its draft and its send in flight', async () => {
+    let feed = [REPLYABLE];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init = {}) => (init.method
+      ? { ok: true, json: async () => ({}) }
+      : { ok: true, json: async () => ({ notifications: feed }) })));
+    let finishSend;
+    const request = vi.fn(() => new Promise((resolve) => { finishSend = resolve; }));
+    render(<TechNoticeFeed techLine={LINE} request={request} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(await screen.findByRole('button', { name: 'Reply' }));
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Draft reply' } });
+
+    const newer = (id, minute) => ({ ...TEXT, id, created_at: `2026-09-08T18:${minute}:00Z`, payload: { ...TEXT.payload, body: `Newer ${id}` } });
+    feed = [newer('n-2', 50), newer('n-3', 51), REPLYABLE];
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getAllByTestId('tech-line-text')).toHaveLength(3);
+    expect(screen.getByLabelText('Message')).toHaveValue('Draft reply');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    feed = [newer('n-4', 52), newer('n-2', 50), newer('n-3', 51), REPLYABLE];
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole('button', { name: 'Sending…' })).toBeInTheDocument();
+    await act(async () => { finishSend({ ok: true }); });
+    expect(await screen.findByText('Sent.')).toBeInTheDocument();
+  });
+
   it.each([
     ['the tech holds no line', REPLYABLE, null],
     ['the line could not be checked', REPLYABLE, { unknown: true }],
