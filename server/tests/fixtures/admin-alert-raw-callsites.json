@@ -15,6 +15,7 @@
   "routes/service-preferences.js": 1,
   "routes/stripe-webhook.js": 25,
   "routes/twilio-webhook.js": 2,
+  "services/admin-alert-copy-to-claude.js": 1,
   "services/admin-alert-episodes.js": 1,
   "services/admin-cancellation.js": 2,
   "services/admin-claude-ideas.js": 1,

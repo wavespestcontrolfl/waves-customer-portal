@@ -39,6 +39,8 @@ jest.mock('../models/db', () => {
           conds.push((r) => metaOf(r).dedupeKey === key);
         } else if (/feed/.test(sql)) {
           conds.push((r) => metaOf(r).feed !== 'activity');
+        } else if (/ownerOnly/.test(sql)) {
+          conds.push((r) => String(metaOf(r).ownerOnly ?? '') !== 'true');
         } else {
           throw new Error(`unmocked whereRaw: ${sql}`);
         }

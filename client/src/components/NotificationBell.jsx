@@ -385,7 +385,12 @@ function customerNameFor(n, type) {
 // closing the whole bell).
 const NOTE_MAX = 500;
 const SENT_NOTE = 'Sent to Claude.';
-function SendToClaude({ n, color, marginTop, onSend }) {
+// "Send a copy to Claude (read-only)" (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3): the same two-step panel on a
+// row step 1 refuses (customer contact, words our own code did not write). The alert STAYS in the bell.
+const COPY_SENT_NOTE = 'Copy sent to Claude.';
+const COPY_LABEL = 'Send a copy to Claude (read-only)';
+const COPY_HINT = 'Your alert stays in your bell. A locked Claude tab reads a copy and writes a plan for you. It changes nothing.';
+function SendToClaude({ n, color, marginTop, onSend, copy = false }) {
   const [panel, setPanel] = useState(false);
   const [note, setNote] = useState('');
   const [state, setState] = useState(null); // null | 'sending' | 'failed'
@@ -406,7 +411,7 @@ function SendToClaude({ n, color, marginTop, onSend }) {
   return (
     <div onClick={(e) => e.stopPropagation()} onKeyDown={onKeyDown} data-modal-escape-owned="true" style={{ marginTop: marginTop ?? 8 }}>
       {!panel ? (
-        <button type="button" onClick={() => setPanel(true)} style={{ ...button, cursor: 'pointer' }}>Send to Claude</button>
+        <button type="button" onClick={() => setPanel(true)} style={{ ...button, cursor: 'pointer' }}>{copy ? COPY_LABEL : 'Send to Claude'}</button>
       ) : (
         <div>
           <label htmlFor={noteId} style={{ ...text, fontWeight: 600, display: 'block' }}>Note for Claude (optional)</label>
@@ -420,7 +425,7 @@ function SendToClaude({ n, color, marginTop, onSend }) {
             </button>
             <button type="button" onClick={close} disabled={state === 'sending'} style={{ ...button, cursor: 'pointer' }}>Cancel</button>
           </div>
-          <div style={{ ...text, marginTop: 4 }}>Moves it out of your bell. A Claude tab opens on the Mac within about 10 minutes.</div>
+          <div style={{ ...text, marginTop: 4 }}>{copy ? COPY_HINT : 'Moves it out of your bell. A Claude tab opens on the Mac within about 10 minutes.'}</div>
           {state === 'failed' && <div role="alert" style={{ ...text, marginTop: 4 }}>Couldn&apos;t send it. Try again.</div>}
         </div>
       )}
@@ -517,17 +522,19 @@ function CustomerLine({ n, type, color, marginTop }) {
 // detail (fullTextFor), else nothing. Below it, "Send to Claude" on a row the server marked `sendToClaude`.
 // The panel is keyed on the row's content version: an alert whose text changed (a refreshed list) starts a fresh panel,
 // so a summary of the old text never stays on screen.
-function MoreText({ n, type, color, marginTop, onExplain, onSend }) {
+function MoreText({ n, type, color, marginTop, onExplain, onSend, onSendCopy }) {
   const explainable = type === 'admin' && n.explainable;
   const fullText = explainable ? null : fullTextFor(n, type);
   const more = explainable
     ? <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} />
     : (fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null);
-  if (!(type === 'admin' && n.sendToClaude && onSend)) return more;
+  const copy = type === 'admin' && !n.sendToClaude && n.sendCopyToClaude && onSendCopy;
+  if (!(type === 'admin' && ((n.sendToClaude && onSend) || copy))) return more;
   return (
     <>
       {more}
-      <SendToClaude key={`send-${n.version}`} n={n} color={color} marginTop={more ? 6 : marginTop} onSend={onSend} />
+      <SendToClaude key={`send-${n.version}`} n={n} color={color} marginTop={more ? 6 : marginTop}
+        onSend={copy ? onSendCopy : onSend} copy={Boolean(copy)} />
     </>
   );
 }
@@ -947,21 +954,50 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     return 'sent';
   };
 
-  // The Undo beside "Sent to Claude.": puts the row back while no Claude tab has started on it. The offer ends after
-  // 10 seconds (the effect below) or on any other note.
+  // "Send a copy to Claude (read-only)" (SendToClaude with `copy`): same content fence, plus the optional note. Success keeps
+  // the row in the bell (a reply may be owed), says "Copy sent to Claude." and offers Undo for 10 seconds on the COPY's id
+  // (undoSend); a copy already with Claude says so; a row that changed or can no longer be copied re-reads the list with a
+  // note; any other failure keeps the panel with an inline error. Resolves 'sent' | 'refreshed' | 'failed'.
+  const sendRowCopyToClaude = async (n, note) => {
+    setActionNote(null);
+    setUndoOffer(null);
+    let d;
+    try {
+      d = await requestJson(`${basePath}/${encodeURIComponent(n.id)}/send-copy-to-claude`, {
+        method: 'POST', body: JSON.stringify({ version: n.version, ...(note ? { note } : {}) }),
+      });
+    } catch (err) {
+      if (err?.status !== 409 && err?.status !== 422 && err?.status !== 404) return 'failed';
+      loadNotifications();
+      setActionNote(err.data?.error === 'changed' ? CHANGED_NOTE : 'That alert was already handled or can\u2019t be copied to Claude.');
+      return 'refreshed';
+    }
+    if (d?.duplicate === true) {
+      setActionNote('A copy of this alert is already with Claude.');
+      return 'sent';
+    }
+    if (d?.sent !== true) return 'failed';
+    setActionNote(COPY_SENT_NOTE);
+    if (typeof d.at === 'string' && d.at && typeof d.id === 'string' && d.id) setUndoOffer({ id: d.id, at: d.at, copy: true });
+    return 'sent';
+  };
+
+  // The Undo beside "Sent to Claude." / "Copy sent to Claude.": puts the row back (a send) or cancels the copy (a copy) while
+  // no Claude tab has started on it. The offer ends after 10 seconds (the effect above) or on any other note.
   const undoSend = async () => {
     const offer = undoOffer;
     if (!offer) return;
     setUndoOffer(null);
+    const path = offer.copy ? 'cancel-copy' : 'unsend-from-claude';
     try {
-      await requestJson(`${basePath}/${encodeURIComponent(offer.id)}/unsend-from-claude`, { method: 'POST', body: JSON.stringify({ at: offer.at }) });
+      await requestJson(`${basePath}/${encodeURIComponent(offer.id)}/${path}`, { method: 'POST', body: JSON.stringify({ at: offer.at }) });
     } catch (err) {
       setActionNote(err?.status === 409 && err.data?.error === 'started' ? 'Claude already started on it.' : 'Couldn\'t undo. It stays with Claude.');
       return;
     }
     loadNotifications();
     fetchCount();
-    setActionNote('Back in your bell.');
+    setActionNote(offer.copy ? 'Copy cancelled.' : 'Back in your bell.');
   };
 
   // A row button the server set on this row (RowActions): same content fence
@@ -1170,7 +1206,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   const actionNoteEl = type === 'admin' && actionNote && (
     <div role="status" style={{ padding: '10px 20px', fontSize: 14, lineHeight: 1.4, color: colors.text, borderBottom: `1px solid ${colors.border}` }}>
       {actionNote}
-      {undoOffer && actionNote === SENT_NOTE && (
+      {undoOffer && (actionNote === SENT_NOTE || actionNote === COPY_SENT_NOTE) && (
         <>
           {' '}
           <button type="button" onClick={undoSend}
@@ -1471,7 +1507,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                           color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
                         }}>Full report</button>
                     )}
-                    <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} onSend={sendRowToClaude} />
+                    <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} onSend={sendRowToClaude} onSendCopy={sendRowCopyToClaude} />
                     {voicemail && <VoicemailListen tall recordingId={voicemail} marginTop={8} />}
                     {actions.length > 0 && <RowActions tall marginTop={8} actions={actions} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onRun={(e, a) => runAction(e, n, a)} />}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
@@ -1645,7 +1681,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                               fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
                             }}>Full report</button>
                         )}
-                        <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} onSend={sendRowToClaude} />
+                        <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} onSend={sendRowToClaude} onSendCopy={sendRowCopyToClaude} />
                         {voicemail && <VoicemailListen recordingId={voicemail} marginTop={6} />}
                         {actions.length > 0 && <RowActions marginTop={6} actions={actions} color={colors.text} onRun={(e, a) => runAction(e, n, a)} />}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
