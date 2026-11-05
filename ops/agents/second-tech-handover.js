@@ -663,19 +663,19 @@ function assertRunFlags({ lines, zips, weekendMove, start, today }) {
 }
 
 /** buildPlan, and for --weekend-move the second pass that gives each weekend customer its new dates (or keeps it whole). */
-async function planWithWeekend(db, input, { weekendMove, now }) {
+async function planWithWeekend(db, input, { weekendMove, now, lockNeighbors }) {
   const plan = buildPlan({ ...input, weekendMove });
   if (!weekendMove) return plan;
   const toId = input.to.id;
   const decisions = await weekendMoves.decideWeekend(db, {
     plan, parents: input.parents, visits: input.visits, from: input.from, to: toId, workDays: targetWorkDays(input.to).workDays,
-    start: input.start, today: input.today, now,
+    start: input.start, today: input.today, now, lockNeighbors,
   });
   return buildPlan({ ...input, weekendMove, weekend: decisions });
 }
 
 async function planHandover(db, {
-  from, to = null, start, today = etDateString(), lines = MOVABLE_LINES, zips, weekendMove, now,
+  from, to = null, start, today = etDateString(), lines = MOVABLE_LINES, zips, weekendMove, now, lockNeighbors,
 }) {
   assertRunFlags({ lines, zips, weekendMove, start, today });
   const fromRow = await loadTechnician(db, from);
@@ -710,7 +710,7 @@ async function planHandover(db, {
   const plan = await planWithWeekend(db, {
     from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits,
     liveSeriesIds, baitAddonSeriesIds, zips, territory,
-  }, { weekendMove, now });
+  }, { weekendMove, now, lockNeighbors });
   // A line the hire is Off for cannot be handed to the hire.
   await assertTargetTakesLines(db, to, plan);
   // The overlay follows GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, as in the app.

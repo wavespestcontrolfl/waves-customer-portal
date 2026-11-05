@@ -288,7 +288,7 @@ async function resolveWeekendMoves({ candidates, from, workDays, today, facts, f
  * Everything resolveWeekendMoves reads, for the candidate customers' live visits: company blackout layers, --to's
  * absence dates, each customer's portal preferences, the series neighbors, and the "stays still" reason of each visit.
  */
-async function loadWeekendFacts(db, { to, from, start, today, now = new Date(), candidates }) {
+async function loadWeekendFacts(db, { to, from, start, today, now = new Date(), candidates, lockNeighbors = false }) {
   const visits = candidates.flatMap((c) => c.series.flatMap((s) => s.live));
   const dates = visits.map((v) => v.scheduled_date).sort();
   const lo = shiftDateStr(dates[0] || start, -FLEX_TIER_RADIUS_DAYS - 31);
@@ -304,7 +304,7 @@ async function loadWeekendFacts(db, { to, from, start, today, now = new Date(), 
     noWeekends.set(c.customer_id, await seeder.customerPrefersNoWeekends(db, c.customer_id));
   }
   // null = unreadable: no entry for any visit = 'neighbor' (fail closed).
-  const neighbors = (await loadSeriesNeighbors(db, visits.filter((v) => v.recurring_parent_id))) || new Map();
+  const neighbors = (await loadSeriesNeighbors(db, visits.filter((v) => v.recurring_parent_id), { lock: lockNeighbors })) || new Map();
   const routeTiers = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
   const anchorMap = await routeTiers.loadAnchorMap(db, visits.map((v) => v.id));
   return {
@@ -350,7 +350,7 @@ async function loadStayStill(db, visits, now) {
  * The day-60 decisions for a first read of the plan (`plan.weekend_candidates`): reads the facts, resolves every weekend
  * customer. Resolves to { kept, newDates, anchors } for buildPlan's second pass. Reads only.
  */
-async function decideWeekend(db, { plan, parents, visits, from, to, workDays, start, today, now }) {
+async function decideWeekend(db, { plan, parents, visits, from, to, workDays, start, today, now, lockNeighbors }) {
   const parentById = new Map(parents.map((p) => [p.id, p]));
   const visitById = new Map(visits.map((v) => [v.id, v]));
   const live = (id) => visits.filter((v) => v.series_id === id && v.scheduled_date >= start && !DEAD_STATUSES.has(v.status))
@@ -366,7 +366,7 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
     }),
   }));
   if (!candidates.length) return { kept: new Map(), newDates: new Map(), anchors: [] };
-  const facts = await loadWeekendFacts(db, { to, from, start, today, now, candidates });
+  const facts = await loadWeekendFacts(db, { to, from, start, today, now, candidates, lockNeighbors });
   // The hours the run's technician-only moves already give --to.
   const seed = new Map();
   for (const m of plan.ids.moves.filter((x) => !('to_date' in x))) {

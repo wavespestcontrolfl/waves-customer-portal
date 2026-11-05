@@ -359,7 +359,9 @@ async function executeHandover(db, opts) {
       // assignment writer takes, for every day the moves touch. Both hold through commit.
       await lockSeriesMaintenance(trx, first.ids.retemplate);
       await lockDays(trx, first.ids.moves, from, to);
-      const plan = await planOrRefuse(trx, { from, to, start, today, lines, zips, weekendMove, now });
+      // The authoritative read, under the locks: the series' neighbor occurrences are row-locked (FOR SHARE NOWAIT) so a concurrent
+      // single-visit edit cannot slip between a visit's old and new day; a neighbor being edited refuses the plan (PLAN_MISMATCH).
+      const plan = await planOrRefuse(trx, { from, to, start, today, lines, zips, weekendMove, now, lockNeighbors: true });
       if (plan.planId !== planId) throw mismatch(plan.planId);
 
       // The app's save-time check, once per destination day (absence rows refuse the run).
