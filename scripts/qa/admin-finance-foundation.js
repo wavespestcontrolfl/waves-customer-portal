@@ -523,6 +523,14 @@ async function install(page, server, state) {
         contentType: "application/json",
         body: '{"error":"Not found"}',
       });
+    // Cash forecast tab (same gate): the page asks once whether to list the
+    // tab; the gate-off route answers 404 and the tab stays hidden.
+    if (key === "GET /api/admin/banking/cash-forecast/inputs")
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: '{"error":"Not found"}',
+      });
     if (!handlers.has(key)) {
       state.unmatched.push(key);
       return route.fulfill({

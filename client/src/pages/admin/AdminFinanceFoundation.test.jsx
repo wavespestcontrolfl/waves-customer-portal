@@ -851,3 +851,29 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
     expect(screen.queryByText("Cash today")).not.toBeInTheDocument();
   });
 });
+
+describe("Banking: Cash forecast tab (GATE_CASH_FORECAST)", () => {
+  const nav = () => within(screen.getByRole("navigation", { name: "Banking section" }));
+  const inputsKey = "GET /api/admin/banking/cash-forecast/inputs";
+
+  it("lists the tab when the forecast inputs read answers, and opens it", async () => {
+    overrides.set(inputsKey, () => response({ items: [], settings: { floor_cents: null, last_year_receipts: {}, updated_at: null }, kinds: ["other"], cadences: ["once"] }));
+    overrides.set("GET /api/admin/banking/cash-forecast", () => response({
+      fetched_at: "2026-11-05T15:00:00.000Z", today: "2026-11-05", window_end: "2027-01-31",
+      opening: { bank_usd: 4321, partial: false, card_owed_usd: 0 }, expected_available: false, weeks: [],
+      lowest: { booked: null, expected: null, booked_with_hire: null, expected_with_hire: null }, method: {}, missing: [],
+    }));
+    open(BankingPage);
+    fireEvent.click(await nav().findByRole("button", { name: "Cash forecast" }));
+    expect(await screen.findByText("Cash today (both checking accounts)")).toBeInTheDocument();
+    expect(screen.getByText("$4,321")).toBeInTheDocument();
+  });
+
+  it.each([403, 404])("keeps the tab hidden when the inputs read answers %i", async (status) => {
+    overrides.set(inputsKey, () => response({ error: "no" }, status));
+    open(BankingPage);
+    await waitFor(() => expect(requests.some((r) => r.key === inputsKey)).toBe(true));
+    await screen.findByText("MTD Deposited");
+    expect(nav().queryByRole("button", { name: "Cash forecast" })).not.toBeInTheDocument();
+  });
+});
