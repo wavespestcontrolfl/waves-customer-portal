@@ -154,6 +154,14 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
+// Access codes and free-text access notes. The visit card (schedule feed) is the only place a technician sees
+// them (owner 2026-10-05, 2026-11-04); Customer 360 reaches any customer with a visit from 7 days back to any
+// future date, so it never carries them to a technician.
+const TECH_360_STRIPPED_PREFERENCE_FIELDS = [
+  'property_gate_code', 'neighborhood_gate_code', 'garage_code', 'lockbox_code',
+  'side_gate_access', 'parking_notes', 'access_notes',
+];
+
 // Technician Customer 360 is a field-context view, not a raw database-row
 // export. Keep the service-history fields its three live consumers render and
 // exclude report credentials plus the job-cost columns on service_records.
@@ -288,7 +296,10 @@ function techSafe360Payload(payload) {
   // Away Watch (GATE_AWAY_WATCH): the leave and back days say when a home stands empty. The assigned visit's job card
   // carries what the tech needs ("member away until ..."), so the 360 view never shows the window to a technician.
   delete out.awayWatchEnabled;
-  if (payload.preferences) out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
+  if (payload.preferences) {
+    out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
+    for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) delete out.preferences[field];
+  }
   out.services = (payload.services || []).map(techSafeServiceRecord);
   out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
   out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
@@ -7137,6 +7148,7 @@ router._private = {
   TECH_LIST_STRIPPED_FIELDS,
   TECH_360_STRIPPED_KEYS,
   TECH_360_STRIPPED_CUSTOMER_FIELDS,
+  TECH_360_STRIPPED_PREFERENCE_FIELDS,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,

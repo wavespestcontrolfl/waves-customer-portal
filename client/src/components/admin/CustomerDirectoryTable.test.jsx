@@ -144,3 +144,16 @@ it("omits hidden record columns and spans inline rows across the visible columns
   expect(screen.getByTestId("did-you-mean").closest("td")).toHaveAttribute("colspan", "3");
   expect(screen.getByText("Edit fixture").closest("td")).toHaveAttribute("colspan", "3");
 });
+
+// A technician's Messages link names the customer (the server refuses a technician's text with no customer); an
+// admin's link is unchanged.
+it("names the customer in the Messages link only when the viewer cannot edit", () => {
+  const customer = { id: "fixture-d", firstName: "Drew", lastName: "Sample", phone: "+15555550102" };
+  const tech = render(<CustomerDirectoryTable customers={[customer]} />);
+  const techHref = screen.getByRole("link", { name: /Messages/ }).getAttribute("href");
+  expect(techHref).toContain("customerId=fixture-d");
+  expect(techHref).toContain("thread=fixture-d");
+  tech.unmount();
+  render(<CustomerDirectoryTable customers={[customer]} canEdit />);
+  expect(screen.getByRole("link", { name: /Messages/ }).getAttribute("href")).toBe("/admin/communications?phone=%2B15555550102");
+});

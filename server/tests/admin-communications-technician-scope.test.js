@@ -38,6 +38,12 @@ jest.mock('../services/prep-guide-sender', () => ({ ...jest.requireActual('../se
 const mockMarkRead = jest.fn(async () => ({ updated: 1, notificationsCleared: 0 }));
 jest.mock('../services/inbound-sms-read', () => ({ markInboundSmsRead: (...a) => mockMarkRead(...a), countUnreadInboundSms: jest.fn() }));
 
+const mockLoadPending = jest.fn();
+jest.mock('../services/sms-pending-conversations', () => ({
+  ...jest.requireActual('../services/sms-pending-conversations'),
+  loadPendingSmsConversations: (...a) => mockLoadPending(...a),
+}));
+
 const express = require('express');
 const db = require('../models/db');
 const scope = require('../services/technician-visit-scope');
@@ -131,6 +137,45 @@ describe('routes', () => {
     expect(mockMarkRead).toHaveBeenCalledTimes(1);
     db.mockImplementation(() => { throw new Error('db must not be reached'); });
     expect((await call('POST', '/api/admin/communications/messages/read', 'admin', { messageIds: ['m1'] })).status).toBe(200);
+  });
+
+  describe('GET /unread-count', () => {
+    const OWN = '99999999-2222-4333-8444-555555555555';
+    const pendingRows = [
+      { id: 'a', peer: '9415550101', customer_id: OWN },
+      { id: 'b', peer: '9415550101', customer_id: OWN },
+      { id: 'c', peer: '9415550102', customer_id: CUSTOMER },
+      { id: 'd', peer: '9415550103', customer_id: null },
+    ];
+    function ownedRows(rows) {
+      const q = chain();
+      q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      return q;
+    }
+    beforeEach(() => {
+      mockLoadPending.mockResolvedValue(pendingRows);
+      scope.technicianCustomerIdsSubquery.mockImplementation(() => ownedRows([{ customer_id: OWN }]));
+    });
+
+    test('a technician counts only texts from its own customers; unknown senders and other customers stay out', async () => {
+      const res = await call('GET', '/api/admin/communications/unread-count', 'tech');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ conversations: 1, messages: 2 });
+    });
+
+    test('a technician asking for a customer off its route gets 404 and no count', async () => {
+      const res = await call('GET', `/api/admin/communications/unread-count?customerId=${CUSTOMER}`, 'tech');
+      expect(res.status).toBe(404);
+      expect(mockLoadPending).not.toHaveBeenCalled();
+    });
+
+    test('an admin still gets the shared count from the unscoped reader', async () => {
+      const read = require('../services/inbound-sms-read');
+      read.countUnreadInboundSms.mockResolvedValue({ conversations: 7, messages: 9 });
+      const res = await call('GET', '/api/admin/communications/unread-count', 'admin');
+      expect(res.body).toEqual({ conversations: 7, messages: 9 });
+      expect(mockLoadPending).not.toHaveBeenCalled();
+    });
   });
 
   test('GET /agent-draft for a technician requires an on-route customer', async () => {

@@ -130,8 +130,11 @@ export function adminEstimateHref(estimateId) {
 }
 
 export function CustomerActionBar({ customer, standalone }) {
-  // The call bridge is owner-only: a technician login gets no Call action.
-  const canCall = useCanAccessCalls();
+  // The call bridge is owner-only: a technician login gets no Call action. Invoices, estimates and booking are
+  // office pages too, so the same login gets no Invoice, Estimate or Book (they lead to a bounce or a 403). The
+  // role is the shell's; unknown (a unit test) counts as the office, as useCanAccessCalls does.
+  const isOffice = useCanAccessCalls();
+  const canCall = isOffice;
   const phone = customer?.phone;
   const customerId = customer?.id || customer?.customerId;
 
@@ -155,8 +158,9 @@ export function CustomerActionBar({ customer, standalone }) {
           key: "text",
           icon: MessageSquare,
           label: "Text",
+          // A technician's text names the customer: the server refuses a technician's text with no customer.
           href: phone
-            ? `/admin/communications?phone=${encodeURIComponent(phone)}&action=sms`
+            ? `/admin/communications?phone=${encodeURIComponent(phone)}&action=sms${!isOffice && customerId ? `&customerId=${encodeURIComponent(customerId)}&thread=${encodeURIComponent(customerId)}` : ""}`
             : undefined,
           disabled: !phone,
         },
@@ -167,31 +171,33 @@ export function CustomerActionBar({ customer, standalone }) {
           onClick: phone ? () => callViaBridge(phone, fullName, undefined, customerId) : undefined,
           disabled: !phone,
         }] : []),
-        {
-          key: "estimate",
-          icon: FilePlus2,
-          label: "Estimate",
-          href: estimateHref,
-        },
-        {
-          key: "book",
-          icon: Calendar,
-          label: "Book",
-          href: customerId
-            ? `/admin/schedule?customer=${customerId}`
-            : undefined,
-          primary: true,
-          disabled: !customerId,
-        },
-        {
-          key: "invoice",
-          icon: FileText,
-          label: "Invoice",
-          href: customerId
-            ? `/admin/invoices?customer=${customerId}`
-            : undefined,
-          disabled: !customerId,
-        },
+        ...(isOffice ? [
+          {
+            key: "estimate",
+            icon: FilePlus2,
+            label: "Estimate",
+            href: estimateHref,
+          },
+          {
+            key: "book",
+            icon: Calendar,
+            label: "Book",
+            href: customerId
+              ? `/admin/schedule?customer=${customerId}`
+              : undefined,
+            primary: true,
+            disabled: !customerId,
+          },
+          {
+            key: "invoice",
+            icon: FileText,
+            label: "Invoice",
+            href: customerId
+              ? `/admin/invoices?customer=${customerId}`
+              : undefined,
+            disabled: !customerId,
+          },
+        ] : []),
       ]}
     />
   );
