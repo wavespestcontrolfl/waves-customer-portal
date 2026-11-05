@@ -320,7 +320,7 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
 // zero (was lingering because live alerts have no persisted read_at).
 router.put('/read-all', async (req, res, next) => {
   try {
-    await NotificationService.markAllReadAdmin({ role: req.techRole, technicianId: req.technicianId });
+    await NotificationService.markAllReadAdmin({ role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) });
     // Live-alert dismissal is admin-only: the overlay never renders for
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
@@ -454,7 +454,7 @@ router.put('/:id/read', async (req, res, next) => {
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
-    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole, technicianId: req.technicianId });
+    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) });
     // No badge-ordering stamp — see /read-all.
     res.json({ success: true, updated });
   } catch (err) { next(err); }

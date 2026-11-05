@@ -1183,13 +1183,16 @@ const NotificationService = {
   // Mark a single admin notification read — scoped to recipient_type 'admin' so
   // the admin endpoint can't clear a customer's notification by supplying its id
   // (admin notifications are the shared admin queue; customer rows are off-limits).
-  async markReadAdmin(notificationId, { role, technicianId = null } = {}) {
+  async markReadAdmin(notificationId, { role, technicianId = null, fullAccess = false } = {}) {
     // Same role predicate as the reads: a technician must not be able to
-    // mark a hidden adminRoleOnly row read before the owner sees it.
-    const updated = await scopeAdminFeedToRole(
+    // mark a hidden adminRoleOnly row read before the owner sees it. Likewise
+    // an owner-only row (metadata.ownerOnly) is the owner login's alone.
+    const query = scopeAdminFeedToRole(
       db('notifications').where({ id: notificationId, recipient_type: 'admin' }),
       role, technicianId,
-    ).update({ read_at: new Date() });
+    );
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    const updated = await query.update({ read_at: new Date() });
     return updated > 0;
   },
 
@@ -1242,11 +1245,15 @@ const NotificationService = {
   },
 
   // Mark all read for admin
-  async markAllReadAdmin({ role, technicianId = null } = {}) {
-    await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // An owner-only row (metadata.ownerOnly) is read only by the owner login (`fullAccess`): another login's "Mark all
+  // read" never clears the owner's unread Claude plans.
+  async markAllReadAdmin({ role, technicianId = null, fullAccess = false } = {}) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }),
       role, technicianId,
-    )).whereNull('read_at').update({ read_at: new Date() });
+    )).whereNull('read_at');
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    await query.update({ read_at: new Date() });
   },
 
   // Mark a customer's inbound_sms admin bells read — the ONE writer for

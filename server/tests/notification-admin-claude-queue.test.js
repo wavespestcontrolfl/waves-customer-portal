@@ -87,6 +87,27 @@ describe('getAdminUnreadCount owner-only rows', () => {
   });
 });
 
+describe('mark-read writers skip owner-only rows for any other login', () => {
+  const ownerOnlySql = "COALESCE(metadata->>'ownerOnly', '') <> 'true'";
+  test('markAllReadAdmin: the default leaves owner-only rows unread; the owner login reads them', async () => {
+    await NotificationService.markAllReadAdmin({ role: 'admin' });
+    expect(rawTexts()).toEqual(expect.arrayContaining([ownerOnlySql]));
+    expect(updates()).toHaveLength(1);
+    mockState.calls = [];
+    await NotificationService.markAllReadAdmin({ role: 'admin', fullAccess: true });
+    expect(rawTexts()).not.toEqual(expect.arrayContaining([ownerOnlySql]));
+  });
+  test('markReadAdmin: an owner-only row is not marked read by another login', async () => {
+    mockState.update = 0;
+    expect(await NotificationService.markReadAdmin(ID, { role: 'admin' })).toBe(false);
+    expect(rawTexts()).toEqual(expect.arrayContaining([ownerOnlySql]));
+    mockState.calls = [];
+    mockState.update = 1;
+    expect(await NotificationService.markReadAdmin(ID, { role: 'admin', fullAccess: true })).toBe(true);
+    expect(rawTexts()).not.toEqual(expect.arrayContaining([ownerOnlySql]));
+  });
+});
+
 describe('saveAdminExplainer', () => {
   test('writes the summary only at the version it was written for', async () => {
     mockState.update = 0;
