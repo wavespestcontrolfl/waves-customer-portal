@@ -130,52 +130,66 @@ function useThread() {
 
 // Marks the thread read through the newest Waves message the page showed: once
 // per message, never while the page is hidden, and again when it comes back.
+// One mark at a time; a newer answer that came while one was out is marked when
+// it finishes, and a failed mark tries again on the next refresh tick.
 function useMarkRead(messages, ready, onUnread) {
   const markedRef = useRef(null);
+  const wantedRef = useRef(null);
   const inFlight = useRef(false);
+  const liveRef = useRef(true);
   const onUnreadRef = useRef(onUnread);
   onUnreadRef.current = onUnread;
   const throughId = ready ? newestWavesId(messages) : null;
+  wantedRef.current = throughId;
 
+  const mark = useCallback(() => {
+    const want = wantedRef.current;
+    if (want == null || !isVisible() || inFlight.current || markedRef.current === want) return;
+    inFlight.current = true;
+    let marked = false;
+    api.markPortalMessagesRead(want)
+      .then((res) => {
+        marked = true;
+        markedRef.current = want;
+        if (liveRef.current && Number.isFinite(res?.unread)) onUnreadRef.current?.(res.unread);
+      })
+      .catch(() => {})
+      .finally(() => {
+        inFlight.current = false;
+        if (marked && liveRef.current) mark();
+      });
+  }, []);
+
+  useEffect(() => { mark(); }, [throughId, mark]);
   useEffect(() => {
-    if (throughId == null) return undefined;
-    let live = true;
-    const mark = () => {
-      if (!isVisible() || inFlight.current || markedRef.current === throughId) return;
-      inFlight.current = true;
-      api.markPortalMessagesRead(throughId)
-        .then((res) => {
-          markedRef.current = throughId;
-          if (live && Number.isFinite(res?.unread)) onUnreadRef.current?.(res.unread);
-        })
-        .catch(() => {})
-        .finally(() => { inFlight.current = false; });
-    };
-    mark();
+    liveRef.current = true;
+    const timer = setInterval(mark, REFRESH_MS);
     document.addEventListener('visibilitychange', mark);
-    return () => { live = false; document.removeEventListener('visibilitychange', mark); };
-  }, [throughId]);
+    return () => { liveRef.current = false; clearInterval(timer); document.removeEventListener('visibilitychange', mark); };
+  }, [mark]);
 }
 
-// The draft and its send. One requestId per draft: a failed send keeps both the
-// text and the id, so Try again can never save the message twice.
+// The draft and its send. A requestId belongs to the exact text it was made
+// for: a failed send keeps both, so Try again with the same text can never save
+// the message twice, and changed text gets a new id (the first try may have been
+// saved). The draft is read-only while it sends, so nothing typed then is lost.
 function useComposer(onSent) {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  const requestIdRef = useRef(null);
+  const requestRef = useRef(null);
 
   const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
-    if (!requestIdRef.current) requestIdRef.current = makeRequestId();
+    if (requestRef.current?.text !== text) requestRef.current = { id: makeRequestId(), text };
     setSending(true);
     setError('');
     try {
-      const res = await api.sendPortalMessage(text, requestIdRef.current);
+      const res = await api.sendPortalMessage(text, requestRef.current.id);
       if (res?.message) onSent(res.message);
       setDraft('');
-      requestIdRef.current = null;
+      requestRef.current = null;
     } catch (err) {
       setError(sendErrorText(err));
     } finally {
@@ -301,6 +315,7 @@ function Composer({ composer, composerRef }) {
       <textarea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
+        readOnly={sending}
         maxLength={MAX_MESSAGE_LENGTH}
         rows={3}
         placeholder={MESSAGES_COPY.placeholder}

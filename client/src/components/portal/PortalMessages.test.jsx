@@ -107,6 +107,35 @@ describe('PortalMessages read marker', () => {
     expect(api.markPortalMessagesRead).toHaveBeenCalledTimes(1);
   });
 
+  it('marks a newer answer that came while a mark was out, once that mark finishes', async () => {
+    let finish;
+    api.markPortalMessagesRead.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<PortalMessages />);
+    await waitFor(() => expect(api.markPortalMessagesRead).toHaveBeenCalledWith('m2'));
+    const newer = { id: 'm5', from: 'waves', body: 'We can come at 9.', createdAt: '2026-11-03T18:00:00.000Z' };
+    api.getPortalMessages.mockResolvedValue({ messages: [...thread, newer], hasMore: false, unread: 2 });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    await screen.findByText('We can come at 9.');
+    expect(api.markPortalMessagesRead).toHaveBeenCalledTimes(1);
+    await act(async () => { finish({ unread: 1 }); });
+    await waitFor(() => expect(api.markPortalMessagesRead).toHaveBeenLastCalledWith('m5'));
+    expect(api.markPortalMessagesRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('tries a failed mark again on the next refresh tick while the page stays open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      api.markPortalMessagesRead.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      render(<PortalMessages />);
+      await waitFor(() => expect(api.markPortalMessagesRead).toHaveBeenCalledTimes(1));
+      await act(async () => { vi.advanceTimersByTime(60 * 1000); });
+      await waitFor(() => expect(api.markPortalMessagesRead).toHaveBeenCalledTimes(2));
+      expect(api.markPortalMessagesRead).toHaveBeenLastCalledWith('m2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('waits while the page is hidden and marks when it comes back', async () => {
     setVisibility('hidden');
     render(<PortalMessages />);
@@ -156,6 +185,34 @@ describe('PortalMessages composer', () => {
     expect(api.sendPortalMessage.mock.calls[1][1]).toBe(api.sendPortalMessage.mock.calls[0][1]);
     expect(screen.getAllByText('Please call me')).toHaveLength(1);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('gives changed text a new requestId after a failure (the first try may have been saved)', async () => {
+    api.sendPortalMessage.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    fireEvent.change(composer(), { target: { value: 'Please call me' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('alert');
+    api.sendPortalMessage.mockResolvedValueOnce({ message: { id: 'm3', from: 'you', body: 'Please call me today', createdAt: '2026-11-03T17:00:00.000Z' } });
+    fireEvent.change(composer(), { target: { value: 'Please call me today' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(composer()).toHaveValue(''));
+    expect(api.sendPortalMessage.mock.calls[1]).toEqual(['Please call me today', expect.any(String)]);
+    expect(api.sendPortalMessage.mock.calls[1][1]).not.toBe(api.sendPortalMessage.mock.calls[0][1]);
+  });
+
+  it('keeps the draft read-only while it sends, so nothing typed then is lost', async () => {
+    let finish;
+    api.sendPortalMessage.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    fireEvent.change(composer(), { target: { value: 'Hi there' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(composer()).toHaveAttribute('readonly'));
+    await act(async () => { finish({ message: { id: 'm3', from: 'you', body: 'Hi there', createdAt: '2026-11-03T17:00:00.000Z' } }); });
+    await waitFor(() => expect(composer()).not.toHaveAttribute('readonly'));
+    expect(composer()).toHaveValue('');
   });
 
   it('shows the server text for a 400 and the wait text for a 429', async () => {
