@@ -126,6 +126,47 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     expect((await get(event.id)).done_by).toBe('quiet-72h');
   });
 
+  test('payroll-mercury-key-send (an event entry listed first) falls off; payroll-mercury-key (periodic) stays', async () => {
+    const send = await bell({ metadata: { dedupeKey: 'payroll-mercury-key-send:fixture' } });
+    const poll = await bell({ metadata: { dedupeKey: 'payroll-mercury-key:fixture' } });
+    expect((await run('true')).closed).toBe(1);
+    expect((await get(send.id)).done_by).toBe('quiet-72h');
+    expect((await get(poll.id)).done_at).toBeNull();
+  });
+
+  test('for every registry prefix the fall-off holds a row exactly when retention\'s own matcher calls it periodic', async () => {
+    const retention = require('../services/admin-alert-retention');
+    const made = [];
+    for (const entry of retention.RERING) {
+      for (const prefix of entry.prefixes) {
+        const dedupeKey = `${prefix}fixture`;
+        made.push({ dedupeKey, row: await bell({ metadata: { dedupeKey } }) });
+      }
+    }
+    await run('true');
+    for (const { dedupeKey, row } of made) {
+      const held = retention.ringRiskFor({ metadata: { dedupeKey } })?.kind === 'periodic';
+      expect([dedupeKey, (await get(row.id)).done_at === null]).toEqual([dedupeKey, held]);
+    }
+  });
+
+  test('a generic registry with an event entry before an overlapping periodic prefix: the earlier entry wins', async () => {
+    const registry = [
+      { emitter: 'a-event', prefixes: ['zz-key-send'], kind: 'event' },
+      { emitter: 'a-periodic', prefixes: ['zz-key'], kind: 'periodic' },
+      { emitter: 'b-periodic-first', prefixes: ['yy-key'], kind: 'periodic' },
+      { emitter: 'b-event-later', prefixes: ['yy-key-send'], kind: 'event' },
+    ];
+    const keys = { 'zz-key-send:1': false, 'zz-key:1': true, 'yy-key:1': true, 'yy-key-send:1': true, 'other:1': false };
+    const rows = {};
+    for (const key of Object.keys(keys)) rows[key] = await bell({ metadata: { dedupeKey: key } });
+    const hold = fallOff.periodicHoldSql(registry);
+    const mayClose = await scope(db('notifications').whereRaw(hold.sql, hold.bindings).select('id'));
+    const mayCloseIds = new Set(mayClose.map((r) => r.id));
+    // The hold SQL is TRUE for rows the rule may close; a held row is one it does not return.
+    for (const [key, held] of Object.entries(keys)) expect([key, !mayCloseIds.has(rows[key].id)]).toEqual([key, held]);
+  });
+
   test('a row that is already done, and a customer row, are untouched', async () => {
     const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
     const done = await bell({ done_at: ago(2), done_by: person, resolution: 'Called them' });

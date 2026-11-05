@@ -144,11 +144,17 @@ describe('the scope the read and the write share', () => {
     expect(compiled().bindings).toContainEqual(['billing', 'payment']);
   });
 
-  test('emitters that re-raise a fresh row by themselves stay open', () => {
-    const prefixes = fallOff.periodicPrefixes();
-    expect(prefixes).toEqual(expect.arrayContaining(['sms-draft-canary:', 'payroll-mercury-key', 'sms-commitment:']));
-    expect(prefixes).not.toContain('stock-shortfall:');
-    expect(compiled().bindings).toContainEqual(prefixes);
+  test('a row stays open only when its FIRST registry match is periodic: the SQL is built from the ordered registry', () => {
+    const { RERING } = require('../services/admin-alert-retention');
+    const { bindings } = compiled();
+    const [prefixes, kinds] = bindings.filter((b) => Array.isArray(b) && b.length > 2).slice(-2);
+    expect(prefixes).toEqual(RERING.flatMap((e) => e.prefixes));
+    expect(kinds).toEqual(RERING.flatMap((e) => e.prefixes.map(() => e.kind)));
+    // The event entry for the send key is listed before the periodic prefix it overlaps.
+    expect(prefixes.indexOf('payroll-mercury-key-send')).toBeLessThan(prefixes.indexOf('payroll-mercury-key'));
+    const { sql } = fallOff.periodicHoldSql();
+    expect(sql).toContain('WITH ORDINALITY');
+    expect(sql).toContain('ORDER BY t.ord LIMIT 1');
   });
 
   test('last activity is created_at and the four stamps, a junk stamp cannot throw, and the cutoff is 72 hours back', () => {

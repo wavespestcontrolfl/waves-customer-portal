@@ -19,9 +19,11 @@
  *     emptying the list is the only change needed).
  *   - Claude's queue is never touched (metadata.claudeQueue / sentToClaude): a Mac launcher opens a terminal
  *     tab per row and that tab closes it. The bell filter already excludes those rows; this guards it twice.
- *   - A row an emitter re-raises by itself while its condition holds (admin-alert-retention.js RERING, kind
- *     'periodic': a dedupeOpenOnly emitter whose next sweep would raise a FRESH row, and ring or text, the minute
- *     we close this one) is left open: closing it would only churn. The 30-day retention rule still reaches it.
+ *   - A row an emitter re-raises by itself while its condition holds is left open: a dedupeOpenOnly emitter whose
+ *     next sweep would raise a FRESH row, and ring or text, the minute we close this one, so closing it would only
+ *     churn. The emitter is found as admin-alert-retention.js RERING finds it (the FIRST entry in registry order
+ *     with a matching prefix) and only a 'periodic' first match holds the row. The 30-day retention rule still
+ *     reaches it.
  *
  * DONE STATE. done_by 'quiet-72h', resolution "No new activity for 3 days", read state per doneColumns with
  * keepExisting (an unread row is read at the close; a person's read stands). Never deleted.
@@ -86,21 +88,30 @@ function lastActivity(now) {
   };
 }
 
-// dedupeKey prefixes of the emitters that re-raise a fresh row by themselves (admin-alert-retention.js RERING,
-// kind 'periodic').
-function periodicPrefixes() {
-  return RERING.filter((entry) => entry.kind === 'periodic').flatMap((entry) => entry.prefixes);
+// Keeps open a row whose emitter re-raises a fresh row by itself while its condition holds. The row's registry entry
+// is the FIRST entry (registry order) with a prefix its dedupeKey starts with, exactly as admin-alert-retention.js
+// ringRiskFor finds it, and only a 'periodic' first match holds: an earlier 'event' entry wins over a later periodic
+// prefix (payroll-mercury-key-send is an event entry that also starts with the periodic payroll-mercury-key). The
+// ordered registry is flattened into parallel arrays; WITH ORDINALITY keeps its order for the first-match pick.
+function periodicHoldSql(registry = RERING) {
+  const flat = registry.flatMap((entry) => entry.prefixes.map((prefix) => ({ prefix, kind: entry.kind })));
+  return {
+    sql: `NOT COALESCE((SELECT t.kind = 'periodic' FROM unnest(?::text[], ?::text[]) WITH ORDINALITY AS t(prefix, kind, ord)
+      WHERE starts_with(COALESCE(metadata->>'dedupeKey', ''), t.prefix) ORDER BY t.ord LIMIT 1), false)`,
+    bindings: [flat.map((f) => f.prefix), flat.map((f) => f.kind)],
+  };
 }
 
 // The ONE definition of "falls off", used by the read and again by the write.
 function applyFallOffScope(query, { cutoff, now }) {
   const { excludeActivityOnlyFromBell } = notificationPrivate();
   const activity = lastActivity(now);
+  const hold = periodicHoldSql();
   return excludeActivityOnlyFromBell(query.where({ recipient_type: 'admin' }).whereNull('done_at'))
     .whereRaw("metadata->'claudeQueue' IS NULL")
     .whereRaw("metadata->'sentToClaude' IS NULL")
     .whereRaw('NOT (COALESCE(category, \'\') = ANY(?::text[]))', [KEEP_UNTIL_SETTLED_CATEGORIES])
-    .whereRaw("NOT EXISTS (SELECT 1 FROM unnest(?::text[]) AS p(prefix) WHERE starts_with(COALESCE(metadata->>'dedupeKey', ''), p.prefix))", [periodicPrefixes()])
+    .whereRaw(hold.sql, hold.bindings)
     .whereRaw(`${activity.sql} < ?::timestamptz`, [...activity.bindings, cutoff.toISOString()]);
 }
 
@@ -220,7 +231,7 @@ module.exports = {
   closeBatch,
   applyFallOffScope,
   lastActivity,
-  periodicPrefixes,
+  periodicHoldSql,
   KEEP_UNTIL_SETTLED_CATEGORIES,
   QUIET_HOURS,
   RESOLUTION,
