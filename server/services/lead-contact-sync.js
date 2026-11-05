@@ -98,9 +98,18 @@ function candidateLeadsQuery(dbi, now) {
 }
 
 // ---- Witness reads: one bulk query per kind for the whole batch ----------
+// Every loader returns WITNESSES in one shape, so the judging below is one loop
+// over a table of kinds with no per-kind branches:
+//   { type, id, at, startedAt, scope, key, customerId, originOf }
+// `key` is `<scope>:<value>` (phone, email or customer), the identity the
+// contact names; `customerId` is the customer the contact row itself carries.
+const ms = (value) => asDate(value).getTime();
+const witness = (type, scope, value, row, extra = {}) => ({
+  type, id: String(row.id), at: ms(row.at), startedAt: ms(row.at), scope, key: `${scope}:${value}`,
+  customerId: row.customer_id == null ? null : String(row.customer_id), originOf: [], ...extra,
+});
 
 async function staffTexts(dbi, peers, since) {
-  if (!peers.length) return [];
   const peer = phoneIdentitySql('os.to_phone');
   const rows = await excludeUnresolvedSendReservations(dbi('sms_log as os').where('os.direction', 'outbound'), 'os')
     .whereRaw(operatorReplySql('os'))
@@ -110,15 +119,14 @@ async function staffTexts(dbi, peers, since) {
     .orderBy('os.created_at', 'asc')
     .limit(ROW_CAP)
     .select('os.id', 'os.customer_id', 'os.created_at as at', dbi.raw(`${peer} as peer`));
-  if (rows.length >= ROW_CAP) logger.warn('[lead-contact-sync] staff text read hit its row cap');
-  return rows;
+  return rows.map((row) => witness('staff_text', 'phone', row.peer, row));
 }
 
 // Completed calls on a lead phone that reached a person or the call agent.
 // Judged by when the call ENDED (callEndedAtSql, the Messages reader's
-// definition): a row with no trustworthy end counts for nothing.
+// definition): a row with no trustworthy end counts for nothing. The call
+// that created a lead (metadata lead_id / relay_lead_id) is never its evidence.
 async function connectedCalls(dbi, peers, since) {
-  if (!peers.length) return [];
   const ended = callEndedAtSql('cl');
   const peerSql = `(CASE WHEN cl.direction = 'inbound' THEN ${phoneIdentitySql('cl.from_phone')} ELSE ${phoneIdentitySql('cl.to_phone')} END)`;
   const rows = await whereNotSandboxCall(dbi('call_log as cl'), 'cl.source')
@@ -146,14 +154,15 @@ async function connectedCalls(dbi, peers, since) {
       dbi.raw("cl.metadata->>'lead_id' as origin_lead_id"),
       dbi.raw("cl.metadata->>'relay_lead_id' as relay_lead_id"),
     );
-  if (rows.length >= ROW_CAP) logger.warn('[lead-contact-sync] connected call read hit its row cap');
-  return rows;
+  return rows.map((row) => witness('live_conversation', 'phone', row.peer, row, {
+    startedAt: ms(row.created_at), originOf: [String(row.origin_lead_id), String(row.relay_lead_id)],
+  }));
 }
 
 // Gmail SENT rows whose To/Cc/Bcc text carries one of the lead addresses.
-// The text match is a prefilter; the parsed address list decides.
+// The text match is a prefilter; the parsed address list decides. One witness
+// per lead address named, carrying the customer the send links to.
 async function staffEmails(dbi, addresses, since) {
-  if (!addresses.length) return [];
   const recipientText = "LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address))";
   const rows = await dbi('emails as er')
     .whereRaw(personSentFilter('er'))
@@ -162,15 +171,20 @@ async function staffEmails(dbi, addresses, since) {
     .orderBy('er.received_at', 'asc')
     .limit(ROW_CAP)
     .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at as at');
-  if (rows.length >= ROW_CAP) logger.warn('[lead-contact-sync] staff email read hit its row cap');
-  return rows;
+  const named = await Promise.all(rows.map(async (row) => {
+    const recipients = extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(','));
+    const linked = await resolveEmailCustomerLink(dbi, row);
+    return recipients.filter((addr) => addresses.includes(addr))
+      .map((addr) => witness('staff_email', 'email', addr, { ...row, customer_id: linked }));
+  }));
+  return named.flat();
 }
 
 // A booking someone made that is still on the books: not a visit that never
-// ran, never a child the system generated on its own.
+// ran, never a child the system generated on its own. The customer is the
+// lead's own by construction, so the witness carries no customer of its own.
 async function bookedVisits(dbi, customerIds, since) {
-  if (!customerIds.length) return [];
-  return dbi('scheduled_services as ss')
+  const rows = await dbi('scheduled_services as ss')
     .whereIn('ss.customer_id', customerIds)
     .where('ss.created_at', '>', since)
     .where((live) => live.whereNull('ss.status').orWhereNotIn('ss.status', VISIT_NEVER_RAN_STATUSES))
@@ -179,28 +193,32 @@ async function bookedVisits(dbi, customerIds, since) {
     .orderBy('ss.created_at', 'asc')
     .limit(ROW_CAP)
     .select('ss.id', 'ss.customer_id', 'ss.created_at as at');
+  return rows.map((row) => witness('visit_booked', 'customer', row.customer_id, { ...row, customer_id: null }));
 }
 
-// Open leads sharing identity with the batch: by phone, email or customer.
-async function openLeadsSharing(dbi, { peers, emails, customerIds }) {
-  if (!peers.length && !emails.length && !customerIds.length) return [];
+// Open leads sharing identity with the batch, as Map(key -> Set(lead ids)).
+async function openLeadIdentities(dbi, { peers, emails, customerIds }) {
   const peerSql = phoneIdentitySql('leads.phone');
-  return dbi('leads')
+  const rows = await dbi('leads')
     .whereIn('status', OPEN_LEAD_STATUSES)
     .whereNull('converted_at')
     .whereNull('deleted_at')
-    .where((same) => {
-      if (peers.length) same.orWhereRaw(`${peerSql} = ANY(?)`, [peers]);
-      if (emails.length) same.orWhereRaw('LOWER(TRIM(leads.email)) = ANY(?)', [emails]);
-      if (customerIds.length) same.orWhereIn('leads.customer_id', customerIds);
-    })
+    .where((same) => same
+      .orWhereRaw(`${peerSql} = ANY(?)`, [peers])
+      .orWhereRaw('LOWER(TRIM(leads.email)) = ANY(?)', [emails])
+      .orWhereIn('leads.customer_id', customerIds))
     .select('id', 'customer_id', 'email', dbi.raw(`${peerSql} as peer`));
+  const owners = new Map();
+  for (const row of rows) {
+    const keys = [`phone:${row.peer}`, `email:${leadEmail(row.email)}`, `customer:${row.customer_id}`];
+    for (const key of keys) owners.set(key, (owners.get(key) || new Set()).add(String(row.id)));
+  }
+  return owners;
 }
 
 // Leads a person already returned to 'new' by hand. The history row the Leads
 // page writes reads 'Status: <from> -> new' (with the arrow); that undo stands.
 async function reopenedLeadIds(dbi, leadIds) {
-  if (!leadIds.length) return new Set();
   const rows = await dbi('lead_activities')
     .whereIn('lead_id', leadIds)
     .where('activity_type', 'status_change')
@@ -211,150 +229,105 @@ async function reopenedLeadIds(dbi, leadIds) {
 
 // ---- Judging --------------------------------------------------------------
 
-const sameCustomer = (leadCustomer, rowCustomer) => String(leadCustomer || '') === String(rowCustomer || '');
+// What a skipped lead is reported as, by the scope its ambiguous contact named.
+const SHARED_REASON = { phone: 'shared_phone', email: 'shared_email', customer: 'multiple_open_leads_for_customer' };
 
 /**
- * Judge a batch of 'new' leads. Read-only: returns, per lead, either the
- * earliest positive contact ({ evidenceType, evidenceId, at }) or a skip
- * reason. `since` is the earliest first_contact_at in the batch; each lead is
- * then judged only on contact after its OWN first_contact_at.
+ * Judge a batch of 'new' leads. Read-only: returns Map(lead id -> verdict),
+ * every lead with one: the earliest positive contact
+ * ({ evidenceType, evidenceId, at }) or { skip: reason }. Each lead is judged
+ * only on contact after its OWN first_contact_at.
  */
 async function judgeLeads(dbi, leads) {
   const verdicts = new Map();
   if (!leads.length) return verdicts;
-  const since = new Date(Math.min(...leads.map((l) => asDate(l.first_contact_at).getTime())));
-  const idents = leads.map((lead) => ({
-    lead,
-    firstAt: asDate(lead.first_contact_at),
-    peer: usablePhoneKey(lead.phone),
-    email: leadEmail(lead.email),
-    customerId: lead.customer_id ? String(lead.customer_id) : null,
-  }));
-  const peers = uniq(idents.map((i) => i.peer));
-  const emails = uniq(idents.map((i) => i.email));
-  const customerIds = uniq(idents.map((i) => i.customerId));
+  const since = new Date(Math.min(...leads.map((l) => ms(l.first_contact_at))));
+  const idents = leads.map((lead) => {
+    const customerId = lead.customer_id ?? null;
+    const keys = [`phone:${usablePhoneKey(lead.phone)}`, `email:${leadEmail(lead.email)}`, `customer:${customerId}`];
+    return { id: String(lead.id), firstAt: ms(lead.first_contact_at), customerId: customerId && String(customerId), keys };
+  });
+  const peers = uniq(leads.map((l) => usablePhoneKey(l.phone)));
+  const emails = uniq(leads.map((l) => leadEmail(l.email)));
+  const customerIds = uniq(leads.map((l) => l.customer_id));
 
-  const [texts, calls, mails, visits, sharing, reopened] = await Promise.all([
+  const [texts, calls, mails, visits, owners, reopened] = await Promise.all([
     staffTexts(dbi, peers, since),
     connectedCalls(dbi, peers, since),
     staffEmails(dbi, emails, since),
     bookedVisits(dbi, customerIds, since),
-    openLeadsSharing(dbi, { peers, emails, customerIds }),
-    reopenedLeadIds(dbi, leads.map((l) => l.id)),
+    openLeadIdentities(dbi, { peers, emails, customerIds }),
+    reopenedLeadIds(dbi, idents.map((i) => i.id)),
   ]);
+  const byKey = new Map();
+  for (const w of [...texts, ...calls, ...mails, ...visits]) byKey.set(w.key, [...(byKey.get(w.key) || []), w]);
 
-  const others = (ident, matches) => sharing.filter((row) => String(row.id) !== String(ident.lead.id) && matches(row));
-  const emailLink = new Map();
-  const linkOf = async (row) => {
-    const key = String(row.id);
-    if (!emailLink.has(key)) emailLink.set(key, await resolveEmailCustomerLink(dbi, row));
-    return emailLink.get(key);
-  };
-
-  for (const ident of idents) {
-    const { lead, firstAt, peer, email, customerId } = ident;
-    const id = String(lead.id);
-    if (reopened.has(id)) { verdicts.set(id, { skip: 'reopened_by_person' }); continue; }
-    const afterFirst = (row) => asDate(row.at) && asDate(row.at).getTime() > firstAt.getTime();
-    const candidates = [];
-    let mismatch = false;
-    let sharedPhone = false;
-    let sharedEmail = false;
-    let sharedCustomer = false;
-
-    if (peer) {
-      const phoneShared = others(ident, (row) => row.peer === peer).length > 0;
-      for (const row of texts.filter((r) => r.peer === peer && afterFirst(r))) {
-        if (row.customer_id && !sameCustomer(customerId, row.customer_id)) { mismatch = true; continue; }
-        if (phoneShared) { sharedPhone = true; continue; }
-        candidates.push({ evidenceType: 'staff_text', evidenceId: String(row.id), at: asDate(row.at) });
-      }
-      for (const row of calls.filter((r) => r.peer === peer && afterFirst(r) && asDate(r.created_at).getTime() > firstAt.getTime())) {
-        if (String(row.origin_lead_id || '') === id || String(row.relay_lead_id || '') === id) continue;
-        if (row.customer_id && !sameCustomer(customerId, row.customer_id)) { mismatch = true; continue; }
-        if (phoneShared) { sharedPhone = true; continue; }
-        candidates.push({ evidenceType: 'live_conversation', evidenceId: String(row.id), at: asDate(row.at) });
-      }
+  for (const { id, firstAt, customerId, keys } of idents) {
+    const mine = keys.flatMap((key) => byKey.get(key) || [])
+      .filter((w) => w.at > firstAt && w.startedAt > firstAt && !w.originOf.includes(id))
+      .sort((a, b) => a.at - b.at);
+    const skips = [];
+    const usable = [];
+    for (const w of mine) {
+      if (w.customerId && w.customerId !== customerId) skips.push('customer_mismatch');
+      else if ((owners.get(w.key)?.size || 0) > 1) skips.push(SHARED_REASON[w.scope]);
+      else usable.push(w);
     }
-
-    if (email) {
-      const emailShared = others(ident, (row) => leadEmail(row.email) === email).length > 0;
-      for (const row of mails.filter(afterFirst)) {
-        const recipients = extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(','));
-        if (!recipients.includes(email)) continue;
-        const linked = await linkOf(row);
-        if (linked && !sameCustomer(customerId, linked)) { mismatch = true; continue; }
-        if (emailShared) { sharedEmail = true; continue; }
-        candidates.push({ evidenceType: 'staff_email', evidenceId: String(row.id), at: asDate(row.at) });
-      }
-    }
-
-    if (customerId) {
-      const customerShared = others(ident, (row) => row.customer_id && sameCustomer(customerId, row.customer_id)).length > 0;
-      for (const row of visits.filter((r) => String(r.customer_id) === customerId && afterFirst(r))) {
-        if (customerShared) { sharedCustomer = true; continue; }
-        candidates.push({ evidenceType: 'visit_booked', evidenceId: String(row.id), at: asDate(row.at) });
-      }
-    }
-
-    candidates.sort((a, b) => a.at.getTime() - b.at.getTime());
-    if (candidates.length) verdicts.set(id, candidates[0]);
-    else if (mismatch) verdicts.set(id, { skip: 'customer_mismatch' });
-    else if (sharedPhone) verdicts.set(id, { skip: 'shared_phone' });
-    else if (sharedEmail) verdicts.set(id, { skip: 'shared_email' });
-    else if (sharedCustomer) verdicts.set(id, { skip: 'multiple_open_leads_for_customer' });
-    else verdicts.set(id, { skip: 'no_contact_evidence' });
+    const first = usable[0];
+    const evidence = first && { evidenceType: first.type, evidenceId: first.id, at: new Date(first.at) };
+    verdicts.set(id, reopened.has(id) ? { skip: 'reopened_by_person' } : evidence || { skip: skips[0] || 'no_contact_evidence' });
   }
   return verdicts;
 }
+
+// What a verdict does in each mode. Shadow logs and reports success without a
+// write; true moves the lead through the one writer that owns the transition.
+const APPLY = {
+  shadow: async (dbi, lead, verdict) => {
+    logger.info(`[lead-contact-sync] shadow: lead ${lead.id} would move to contacted (${verdict.evidenceType})`);
+    return { contacted: true };
+  },
+  true: (dbi, lead, verdict) => require('./lead-estimate-link').markLeadContactedFromEvidence({
+    database: dbi,
+    leadId: lead.id,
+    customerId: lead.customer_id ?? null,
+    evidenceType: verdict.evidenceType,
+    evidenceId: verdict.evidenceId,
+    performedBy: PERFORMED_BY,
+    respondedAt: verdict.at,
+  }),
+};
+
+const tally = (counts, key) => { counts[key] = (counts[key] || 0) + 1; };
 
 /**
  * The sweep. `mode` defaults to the gate: 'off' does nothing, 'shadow' judges
  * and logs what would move (counts by evidence type), 'true' writes.
  */
-async function runLeadContactSync({ dbi = db, now = new Date(), mode = leadStatusFollowsContactMode(), scanCap = SCAN_CAP, writeCap = WRITE_CAP } = {}) {
-  if (mode === 'off') return { skipped: 'gate_off' };
+async function runLeadContactSync(options = {}) {
+  const { dbi, now, mode, scanCap, writeCap } = {
+    dbi: db, now: new Date(), mode: leadStatusFollowsContactMode(), scanCap: SCAN_CAP, writeCap: WRITE_CAP, ...options,
+  };
+  if (!APPLY[mode]) return { skipped: 'gate_off' };
 
   const results = { mode, scanned: 0, candidates: 0, moved: 0, byEvidence: {}, skipped: {}, errors: 0, moves: [] };
   const leads = await candidateLeadsQuery(dbi, now)
     .orderBy('first_contact_at', 'desc').orderBy('id', 'desc').limit(scanCap)
-    .select('id', 'customer_id', 'phone', 'email', 'first_contact_at', 'response_time_minutes');
+    .select('id', 'customer_id', 'phone', 'email', 'first_contact_at');
   results.scanned = leads.length;
   const verdicts = await judgeLeads(dbi, leads);
 
   for (const lead of leads) {
     const verdict = verdicts.get(String(lead.id));
-    if (!verdict || verdict.skip) {
-      const reason = verdict?.skip || 'no_contact_evidence';
-      results.skipped[reason] = (results.skipped[reason] || 0) + 1;
-      if (reason !== 'no_contact_evidence') logger.info(`[lead-contact-sync] lead ${lead.id} left new: ${reason}`);
-      continue;
-    }
+    if (verdict.skip) { tally(results.skipped, verdict.skip); continue; }
     results.candidates += 1;
-    if (results.moved >= writeCap) { results.skipped.write_cap = (results.skipped.write_cap || 0) + 1; continue; }
-    if (mode === 'shadow') {
-      results.moved += 1;
-      results.byEvidence[verdict.evidenceType] = (results.byEvidence[verdict.evidenceType] || 0) + 1;
-      logger.info(`[lead-contact-sync] shadow: lead ${lead.id} would move to contacted (${verdict.evidenceType})`);
-      continue;
-    }
+    if (results.moved >= writeCap) { tally(results.skipped, 'write_cap'); continue; }
     try {
-      const outcome = await require('./lead-estimate-link').markLeadContactedFromEvidence({
-        database: dbi,
-        leadId: lead.id,
-        customerId: lead.customer_id ?? null,
-        evidenceType: verdict.evidenceType,
-        evidenceId: verdict.evidenceId,
-        performedBy: PERFORMED_BY,
-        respondedAt: verdict.at,
-      });
-      if (outcome.contacted) {
-        results.moved += 1;
-        results.byEvidence[verdict.evidenceType] = (results.byEvidence[verdict.evidenceType] || 0) + 1;
-        results.moves.push({ leadId: lead.id, evidenceType: verdict.evidenceType });
-      } else {
-        results.skipped[outcome.reason] = (results.skipped[outcome.reason] || 0) + 1;
-      }
+      const outcome = await APPLY[mode](dbi, lead, verdict);
+      if (!outcome.contacted) { tally(results.skipped, outcome.reason); continue; }
+      results.moved += 1;
+      tally(results.byEvidence, verdict.evidenceType);
+      results.moves.push({ leadId: lead.id, evidenceType: verdict.evidenceType });
     } catch (err) {
       results.errors += 1;
       logger.warn(`[lead-contact-sync] lead ${lead.id} left new: ${err.code || err.name || 'error'}`);
