@@ -30,6 +30,12 @@ const ENDPOINT = 'portal';
 const BODY_MAX = 2000;
 const PAGE_SIZE = 50;
 const PREVIEW_MAX = 140;
+// A first attempt still sending its notice is never raced: a retry or the sweep resumes a pending notice only
+// after this long. The sweep looks back one day.
+const PENDING_GRACE_MS = 2 * 60 * 1000;
+const SWEEP_MIN_AGE_MS = 5 * 60 * 1000;
+const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SWEEP_LIMIT = 50;
 const MESSAGES_LINK = '/?tab=messages';
 const NOTICE_TITLE = 'New message from Waves';
 const ANSWERED_NOTE = 'Answered in the portal';
@@ -163,8 +169,11 @@ async function closeItemBells(kind, id, actor) {
   }
 }
 
-// The one notice for a saved answer: the customer's in-app bell plus a push to the Waves app; an email with
-// the whole answer when no app device took the push. The outcome is kept on the message. Never throws.
+// The one notice for a saved answer: the customer's in-app bell plus a push to the Waves app (app devices
+// only: a browser subscription is not the app); an email with the whole answer when no app device took the
+// push. The outcome replaces the answer's pending marker. Never throws. Safe to run again for the same answer:
+// the bell dedupes on its key, an accepted push is not sent twice (push-notifications.js claims by bell), and
+// the email carries its own idempotency key.
 async function noticeCustomer(customerId, message) {
   const notice = { bell: false, pushAccepted: 0, email: 'not_needed' };
   try {
@@ -172,6 +181,7 @@ async function noticeCustomer(customerId, message) {
       link: MESSAGES_LINK,
       dedupeKey: `portal-reply:${message.id}`,
       awaitPush: true,
+      pushOptions: { nativeOnly: true },
       metadata: { portalMessageId: message.id },
     });
     notice.bell = Boolean(bell?.id) && !bell.suppressed;
@@ -197,6 +207,30 @@ async function noticeCustomer(customerId, message) {
   return notice;
 }
 
+// Whether a retried send should finish the answer's notice: one still pending past the grace time (the
+// process stopped between the commit and the send), or one that reached nobody (no app push, no email).
+function resumeDue(notice, createdAt, now = Date.now()) {
+  if (!notice || notice.pending) return now - new Date(createdAt).getTime() >= PENDING_GRACE_MS;
+  return !(Number(notice.pushAccepted) > 0 || notice.email === 'sent');
+}
+
+// Every 10 minutes (scheduler.js): finish the notices a stopped process left pending, for answers 5 minutes to
+// one day old. It only completes a send a staff member pressed. Gate off: nothing. Returns how many it ran.
+async function resumePendingNotices(now = new Date()) {
+  if (!live()) return 0;
+  const rows = await db('messages as m').join('conversations as cv', 'cv.id', 'm.conversation_id')
+    .where({ 'm.channel': CHANNEL, 'm.direction': 'outbound', 'cv.channel': CHANNEL })
+    .whereRaw("m.metadata->'notice'->>'pending' = 'true'")
+    .where('m.created_at', '<=', new Date(now.getTime() - SWEEP_MIN_AGE_MS))
+    .where('m.created_at', '>', new Date(now.getTime() - SWEEP_MAX_AGE_MS))
+    .orderBy('m.created_at', 'asc')
+    .limit(SWEEP_LIMIT)
+    .select('m.id', 'm.body', 'cv.customer_id');
+  for (const row of rows) await noticeCustomer(row.customer_id, row);
+  if (rows.length) logger.info(`[portal-messages] finished ${rows.length} pending answer notice(s)`);
+  return rows.length;
+}
+
 /**
  * The office answers an open Portal-tab item inside the portal.
  * @param {{ kind: 'chat'|'request', id: string, body: string, clientRequestId?: string,
@@ -211,7 +245,7 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
     const customerId = await itemCustomerWith(trx, kind, id);
     const thread = await threadWith(trx, customerId);
     const prior = await priorSend(trx, thread.id, clientRequestId);
-    if (prior) return { replay: true, message: prior };
+    if (prior) return { replay: true, message: prior, customerId };
     const message = await Conversations.appendMessage({
       conn: trx,
       conversationId: thread.id,
@@ -222,13 +256,20 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
       body: text,
       deliveryStatus: 'sent',
       messageType: 'portal_reply',
-      metadata: { portalItem: { kind, id }, ...(clientRequestId ? { clientRequestId } : {}) },
+      // pending until noticeCustomer records how the customer was told (a stopped process leaves it for the sweep)
+      metadata: { portalItem: { kind, id }, notice: { pending: true }, ...(clientRequestId ? { clientRequestId } : {}) },
     });
     const closed = await closeItemWith(trx, kind, id, customerId);
     return { message, closed, customerId };
   });
   if (saved.replay) {
-    return { message: staffView(saved.message), closed: false, notice: metaOf(saved.message).notice || null, replay: true };
+    const { notice } = metaOf(saved.message);
+    return {
+      message: staffView(saved.message),
+      closed: false,
+      notice: resumeDue(notice, saved.message.created_at) ? await noticeCustomer(saved.customerId, saved.message) : (notice || null),
+      replay: true,
+    };
   }
   await closeItemBells(kind, id, actor);
   const notice = await noticeCustomer(saved.customerId, saved.message);
@@ -296,5 +337,6 @@ module.exports = {
   customerThread,
   customerUnread,
   markRead,
-  __private: { preview, noticeCustomer, closeItemWith, itemCustomerWith },
+  resumePendingNotices,
+  __private: { preview, noticeCustomer, closeItemWith, itemCustomerWith, resumeDue },
 };

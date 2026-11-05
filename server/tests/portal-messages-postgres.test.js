@@ -116,6 +116,8 @@ maybeDescribe('portal messages (live Postgres)', () => {
     const bell = await db('notifications').where({ recipient_type: 'customer', recipient_id: pat.id }).whereRaw("metadata->>'portalMessageId' = ?", [result.message.id]).first();
     expect(bell).toMatchObject({ title: 'New message from Waves', link: '/?tab=messages' });
     expect(PushService.sendToCustomer).toHaveBeenCalledTimes(1);
+    // App devices only: a browser subscription must never stand in for the app and skip the email.
+    expect(PushService.sendToCustomer.mock.calls[0][2]).toMatchObject({ nativeOnly: true });
     expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledWith({ customerId: pat.id, messageId: result.message.id, body: 'Yes, we can bundle them.\n\nWe will call Tuesday.' });
     expect(result.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
     const saved = await db('messages').where({ id: result.message.id }).first('metadata', 'author_type', 'channel');
@@ -168,6 +170,61 @@ maybeDescribe('portal messages (live Postgres)', () => {
     expect(again).toMatchObject({ replay: true, message: { id: first.message.id }, notice: first.notice });
     expect(await db('messages').whereIn('conversation_id', thread(pat.id).select('id'))).toHaveLength(1);
     expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
+  });
+
+  test('a notice a stopped process left pending is finished by a retry after the grace time, and by the sweep', async () => {
+    const pat = await customer();
+    const { escalationId } = await chat(pat.id, { alert: false });
+    const clientRequestId = randomUUID();
+    const first = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We will call today.', clientRequestId, actor });
+    // As if the process stopped after the commit: the notice is still pending.
+    const pend = (minutesAgo) => db('messages').where({ id: first.message.id }).update({
+      metadata: db.raw("jsonb_set(metadata, '{notice}', '{\"pending\": true}')"),
+      created_at: db.raw(`now() - interval '${minutesAgo} minutes'`),
+    });
+    jest.clearAllMocks();
+    await pend(0);
+    // A retry right away does not race a first attempt that may still be sending.
+    let again = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We will call today.', clientRequestId, actor });
+    expect(again.notice).toEqual({ pending: true });
+    expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+    // After the grace time the retry finishes it, once.
+    await pend(3);
+    again = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We will call today.', clientRequestId, actor });
+    expect(again.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
+    // The sweep: too fresh (2 min) is left alone; 10 minutes old is finished; gate off does nothing.
+    jest.clearAllMocks();
+    await pend(2);
+    expect(await PortalMessages.resumePendingNotices()).toBe(0);
+    await pend(10);
+    process.env.GATE_PORTAL_MESSAGES = 'false';
+    expect(await PortalMessages.resumePendingNotices()).toBe(0);
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    expect(await PortalMessages.resumePendingNotices()).toBeGreaterThanOrEqual(1);
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledWith(expect.objectContaining({ messageId: first.message.id }));
+    expect((await db('messages').where({ id: first.message.id }).first('metadata')).metadata.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
+    // Finished: the next sweep has nothing of this answer's.
+    jest.clearAllMocks();
+    await PortalMessages.resumePendingNotices();
+    expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: first.message.id }));
+  });
+
+  test('a retry of an answer whose notice reached nobody tries the notice again; a delivered one is not sent twice', async () => {
+    const pat = await customer();
+    const { escalationId } = await chat(pat.id, { alert: false });
+    const clientRequestId = randomUUID();
+    AccountMembershipEmail.sendPortalReply.mockResolvedValueOnce({ ok: false, reason: 'prefs_unavailable' });
+    const first = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor });
+    expect(first.notice).toEqual({ bell: true, pushAccepted: 0, email: 'prefs_unavailable' });
+    const retried = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor });
+    expect(retried.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(2);
+    const third = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor });
+    expect(third.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(2);
+    // One bell for the answer however often its notice ran.
+    expect(await db('notifications').where({ recipient_type: 'customer', recipient_id: pat.id }).whereRaw("metadata->>'portalMessageId' = ?", [first.message.id])).toHaveLength(1);
   });
 
   test('gate off: every entry point refuses and nothing is written', async () => {
