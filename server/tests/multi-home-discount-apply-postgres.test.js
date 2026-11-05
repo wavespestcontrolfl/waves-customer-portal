@@ -278,6 +278,26 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
     });
   });
 
+  test('a source whose plan visits were all cancelled after selection hands its targets nothing', async () => {
+    await inRollback(async (trx) => {
+      const son = await customer(trx);
+      const home1 = await property(trx, son);
+      const home2 = await property(trx, son, { is_primary: false });
+      await trx('customers').where({ id: son }).update({ has_multi_home: true });
+      const estimateId = await estimate(trx, son, home1);
+      const own = await series(trx, { customerId: son, propertyId: home1, price: 90, sourceEstimateId: estimateId });
+      const otherHome = await series(trx, { customerId: son, propertyId: home2, price: 117 });
+      const source = { estimateId, customerId: son, propertyId: home1, roots: new Set([own.rootId]) };
+      const target = { customerId: son, rootId: otherHome.rootId, propertyId: home2, line: 'pest_control', cadence: 'quarterly', serviceType: 'Quarterly Pest Control Service' };
+      // After selection, the source plan is cancelled: its rows remain, every one cancelled.
+      await trx('scheduled_services').whereIn('id', own.ids).update({ status: 'cancelled' });
+      expect(await apply.applyTargetSeries(source, target, { now: NOW, dbh: trx })).toEqual({ skipped: true, dropped: true });
+      expect((await visitRows(trx, otherHome.ids)).every((r) => Number(r.estimated_price) === 117 && r.discount_id === null)).toBe(true);
+      // And the scan no longer treats it as a source at all.
+      expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ sources: 0, applied: 0 });
+    });
+  });
+
   test('no source without the Same family link or the multi-home flag', async () => {
     await inRollback(async (trx) => {
       const parents = await customer(trx);

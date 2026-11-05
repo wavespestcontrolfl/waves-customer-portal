@@ -87,6 +87,20 @@ describe('source detection', () => {
     expect(apply.otherManualDiscount({ summary: { manualDiscount: md() } })).toBeNull();
   });
 
+  test('describeSource: a plan with no live visit left (first visit done, the rest cancelled) is not booking evidence', async () => {
+    const estimate = { id: 'est-1', customer_id: 'son', property_id: 'home-s', estimate_data: { summary: { manualDiscount: md() } } };
+    // A completed first visit and every later visit cancelled, skipped or no-show: a cancelled plan.
+    const dead = ['completed', 'cancelled', 'skipped', 'no_show'].map((status, i) => ({ id: `v${i}`, recurring_parent_id: i ? 'v0' : null, property_id: 'home-s', status }));
+    const dbh = jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'son', active: true, deleted_at: null, has_multi_home: true }) }) }));
+    dbh.raw = jest.fn(async () => ({ rows: dead }));
+    expect(await describeSource(dbh, estimate, null)).toBeNull();
+    dbh.raw = jest.fn(async () => ({ rows: [...dead, { id: 'v9', recurring_parent_id: 'v0', property_id: 'home-s', status: 'confirmed' }] }));
+    const source = await describeSource(dbh, estimate, null);
+    // Booked by one live visit; the roots still include the cancelled root.
+    expect(source).toMatchObject({ estimateId: 'est-1' });
+    expect([...source.roots]).toEqual(['v0']);
+  });
+
   test('describeSource: needs the profile to be multi-home by flag or by family, and booked plan visits', async () => {
     const estimate = { id: 'est-1', customer_id: 'son', property_id: 'home-s', estimate_data: { summary: { manualDiscount: md() } } };
     const fakeDb = ({ customer, rows }) => {
@@ -94,7 +108,7 @@ describe('source detection', () => {
       dbh.raw = jest.fn(async () => ({ rows }));
       return dbh;
     };
-    const visits = [{ id: 'v1', recurring_parent_id: null, property_id: 'home-s' }, { id: 'v2', recurring_parent_id: 'v1', property_id: 'home-s' }];
+    const visits = [{ id: 'v1', recurring_parent_id: null, property_id: 'home-s', status: 'completed' }, { id: 'v2', recurring_parent_id: 'v1', property_id: 'home-s', status: 'pending' }];
     const active = { id: 'son', active: true, deleted_at: null, has_multi_home: false };
 
     mockEligible.mockResolvedValue(true);

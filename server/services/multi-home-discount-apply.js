@@ -69,6 +69,10 @@ const PRESET_KEY = 'multi_home';
 const SOURCE_WINDOW_DAYS = 14;
 const MAX_SOURCES = 200;
 const UPCOMING_STATUSES = ['pending', 'confirmed'];
+// Booking evidence for a source plan: at least one LIVE plan visit still to come or under way (an allow-list). A plan
+// whose remaining visits were all cancelled, skipped or no-show is a cancelled plan, even when its first visit was
+// completed, so 'completed' is not evidence on its own.
+const LIVE_PLAN_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
 const AUDIT_ACTION = 'customer.multi_home_discount_applied';
 const ACTIVITY_APPLIED = 'multi_home_discount_applied';
 const DONE_WHEN = 'multi_home_discount_applied';
@@ -261,10 +265,12 @@ async function describeSource(dbh, estimate, presetId) {
   if (!(await require('./discount-engine').customerMeetsMultiHome(customer, dbh))) return null;
   const { PLAN_ROW_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(
-    `SELECT s.id, s.recurring_parent_id, s.property_id FROM scheduled_services s WHERE s.source_estimate_id = ? AND ${PLAN_ROW_SQL}`,
+    `SELECT s.id, s.recurring_parent_id, s.property_id, s.status FROM scheduled_services s WHERE s.source_estimate_id = ? AND ${PLAN_ROW_SQL}`,
     [estimate.id],
   );
-  if (!rows.length) return null;
+  // Booked: a live plan visit still to come or under way. The roots still come from every plan row, so none of the
+  // source's own series can ever be another home's target.
+  if (!rows.some((r) => LIVE_PLAN_STATUSES.includes(String(r.status)))) return null;
   const roots = new Set(rows.map((r) => String(r.recurring_parent_id || r.id)));
   // The house the accept linked the estimate to, else the one the app agrees its first series is at.
   const propertyId = estimate.property_id || await seriesAgreedPropertyId([...roots][0], customer.id, dbh);
@@ -652,10 +658,11 @@ async function sameLiveFamily(trx, { source, target }) {
   return familyMultiHomeEligible(trx, source.customerId);
 }
 
-// The source estimate still has booked plan visits (the same plan-row test describeSource uses).
+// The source estimate still has a live plan visit (the same plan-row test and allow-list describeSource uses).
 async function sourceStillBooked(trx, estimateId) {
   const { PLAN_ROW_SQL } = PLAN_LINE_SQL;
-  const row = await trx('scheduled_services as s').where('s.source_estimate_id', estimateId).whereRaw(PLAN_ROW_SQL).first('s.id');
+  const row = await trx('scheduled_services as s').where('s.source_estimate_id', estimateId).whereRaw(PLAN_ROW_SQL)
+    .whereIn('s.status', LIVE_PLAN_STATUSES).first('s.id');
   return !!row;
 }
 
