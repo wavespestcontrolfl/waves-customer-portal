@@ -260,8 +260,9 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
 // is read on that technician's day alone, the only technician candidate
 // admission lets it move to (or, on a day he is off or absent, the line's
 // cover technician's day): a closer route it may not take must not set the
-// bar a legal move has to beat. An owner who is not assignable, or two owners
-// in one unit (no candidate survives either way), keeps the full list.
+// bar a legal move has to beat. An owner who is not assignable leaves the
+// cover's day (admission's only other technician); with no assignable cover,
+// or two owners in one unit (no candidate survives either way), the full list.
 const CURRENT_DAY_TECH_UNRESOLVED = 'CURRENT_DAY_TECH_UNRESOLVED';
 async function currentDayTechs(service, ctx, dateStr, category) {
   if (service.technician_id) return [service.technician_id];
@@ -280,6 +281,9 @@ async function currentDayTechs(service, ctx, dateStr, category) {
       // only other technician admission lets the visit move to that day).
       const ownAway = cover.length ? await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: own }) : null;
       ids = ownAway && ownAway.has(`${own[0]}:${dateStr}`) ? cover : own;
+    } else if (cover.length) {
+      // The territory technician cannot take work: the cover is the only technician admission leaves.
+      ids = cover;
     }
     if (ids.length > 1) away = await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: ids });
   } catch (err) {

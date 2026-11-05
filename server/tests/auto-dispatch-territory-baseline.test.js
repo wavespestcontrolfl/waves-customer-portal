@@ -52,7 +52,7 @@ const dayRow = (id, technicianId, geo) => ({
 });
 
 // t1 (the territory technician) runs far from the visit; t2 passes next door.
-function fakeDb({ absent = [] } = {}) {
+function fakeDb({ absent = [], techs = ['t1', 't2'] } = {}) {
   const dayRows = [dayRow('far', 't1', FAR), dayRow('near', 't2', NEAR)];
   const db = (table) => {
     let techIds = null;
@@ -62,7 +62,7 @@ function fakeDb({ absent = [] } = {}) {
     q.where = (arg) => { if (typeof arg === 'function') arg(q); return q; };
     q.whereIn = (column, ids) => { if (/technician_id$/.test(column)) techIds = ids.map(String); return q; };
     q.select = async () => {
-      if (table === 'technicians') return [{ id: 't1' }, { id: 't2' }];
+      if (table === 'technicians') return techs.map((id) => ({ id }));
       if (table === 'technician_absences') return absent.map((technician_id) => ({ technician_id, absence_date: DATE }));
       if (table === 'scheduled_services') return dayRows.filter((row) => row.technician_id == null || (techIds || []).includes(row.technician_id));
       return [];
@@ -169,4 +169,19 @@ test('absent with no cover on the unit: still his day alone, as before the cover
   const current = await computeCurrentPlacement(UNASSIGNED, PREFS, noCover);
 
   expect(current.day_technician_id).toBe('t1');
+});
+
+test('the territory technician can no longer take work: the bar is the cover\'s day, never a closer route it may not use', async () => {
+  // t9 owns the ZIP but is not assignable; t1 (the cover) runs far, t2 next door may not take the visit.
+  const gone = { db: fakeDb(), capabilityFor: () => 'qualified', territoryTechId: 't9', territoryCoverId: 't1' };
+  const current = await computeCurrentPlacement(UNASSIGNED, PREFS, gone);
+
+  expect(current.day_technician_id).toBe('t1');
+});
+
+test('the territory technician can no longer take work and the line has no cover: every technician\'s day, as before', async () => {
+  const gone = { db: fakeDb(), capabilityFor: () => 'qualified', territoryTechId: 't9', territoryCoverId: null };
+  const current = await computeCurrentPlacement(UNASSIGNED, PREFS, gone);
+
+  expect(current.day_technician_id).toBe('t2');
 });
