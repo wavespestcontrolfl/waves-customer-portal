@@ -261,6 +261,55 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
   };
 }
 
+// A technician's forecast (technician visibility audit A2 / C1, owner
+// 2026-11-04: "product totals only, names only on the technician's own
+// visits"). The product totals are computed over every visit and stay as
+// they are. Per-visit rows keep customerName / customerId / city /
+// waveguardTier only for visits assigned to the caller (the same
+// current-assignment rule every technician visit read uses); every other
+// visit loses those fields. A skipped-non-program visit does not enter any
+// total, so a foreign one drops out of the list. A foreign plan error stays,
+// without the name, so the tab can still say the forecast is incomplete.
+const FORECAST_CUSTOMER_FIELDS = ['customerName', 'customerId', 'city', 'waveguardTier'];
+
+function withoutCustomerFields(row) {
+  const out = { ...row };
+  for (const field of FORECAST_CUSTOMER_FIELDS) delete out[field];
+  return out;
+}
+
+async function ownForecastServiceIds(forecast, actor, knex) {
+  const ids = new Set();
+  for (const row of forecast.products || []) {
+    for (const appointment of [...(row.appointments || []), ...(row.mismatchAppointments || [])]) ids.add(appointment.serviceId);
+  }
+  for (const entry of [...(forecast.errors || []), ...(forecast.skippedNonProgram || [])]) ids.add(entry.serviceId);
+  ids.delete(undefined);
+  ids.delete(null);
+  if (!ids.size) return new Set();
+  const { technicianCurrentVisitFilter } = require('./technician-visit-scope');
+  const rows = await technicianCurrentVisitFilter(
+    { techRole: 'technician', technicianId: actor.technicianId },
+    knex('scheduled_services').whereIn('scheduled_services.id', [...ids]),
+  ).select('scheduled_services.id');
+  return new Set(rows.map((row) => String(row.id)));
+}
+
+async function forecastForTechnician(forecast, actor, knex = db) {
+  const own = await ownForecastServiceIds(forecast, actor, knex);
+  const project = (entry) => (own.has(String(entry.serviceId)) ? entry : withoutCustomerFields(entry));
+  return {
+    ...forecast,
+    products: (forecast.products || []).map((row) => ({
+      ...row,
+      appointments: (row.appointments || []).map(project),
+      mismatchAppointments: (row.mismatchAppointments || []).map(project),
+    })),
+    errors: (forecast.errors || []).map(project),
+    skippedNonProgram: (forecast.skippedNonProgram || []).filter((entry) => own.has(String(entry.serviceId))),
+  };
+}
+
 async function syncForecastAlert(knex, forecast) {
   if (!(await knex.schema.hasTable('admin_alerts'))) return null;
   const short = Number(forecast.statusCounts?.short || 0);
@@ -383,6 +432,7 @@ async function runWaveGuardInventoryForecastCheck(options = {}) {
 module.exports = {
   DEFAULT_FORECAST_DAYS,
   buildWaveGuardInventoryForecast,
+  forecastForTechnician,
   runWaveGuardInventoryForecastCheck,
   syncForecastAlert,
 };

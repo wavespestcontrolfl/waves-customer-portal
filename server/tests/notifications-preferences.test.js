@@ -3,6 +3,7 @@ jest.mock('express', () => ({
     use: jest.fn(),
     get: jest.fn(),
     put: jest.fn(),
+    post: jest.fn(),
   }),
 }));
 jest.mock('joi', () => ({}));

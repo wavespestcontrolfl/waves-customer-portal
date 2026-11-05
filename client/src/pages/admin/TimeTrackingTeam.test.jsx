@@ -178,14 +178,13 @@ describe('TimeTrackingPage pay stubs deep-link resolution (GATE_TECH_PAY_STUBS)'
 });
 
 describe('TimeTrackingPage office-only leaves', () => {
-  it('opens Dashboard for a technician link to Timesheet, Entries, Approvals or Analytics and leaves an admin where it asked', () => {
-    for (const leaf of ['timesheet', 'entries', 'approvals', 'analytics']) {
+  it('opens Dashboard for a technician link to Timesheet, Entries, Approvals, Analytics or Documents and leaves an admin where it asked', () => {
+    for (const leaf of ['timesheet', 'entries', 'approvals', 'analytics', 'documents']) {
       expect(resolveStaffTab(leaf, false, 'technician')).toBe('dashboard');
       expect(resolveStaffTab(leaf, false, null)).toBe('dashboard');
       expect(resolveStaffTab(leaf, false, 'admin')).toBe(leaf);
     }
     expect(resolveStaffTab('team', false, 'technician')).toBe('team');
-    expect(resolveStaffTab('documents', false, 'technician')).toBe('documents');
   });
 });
 

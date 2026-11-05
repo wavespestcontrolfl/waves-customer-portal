@@ -71,6 +71,10 @@ export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
   const [detailAttempt, setDetailAttempt] = useState(0);
   const reconciliationSequence = useRef(0);
   const loadReconciliation = useCallback(async ({ background = false } = {}) => {
+    // The reconciliation report names the tax register's purchase cost and
+    // book value, so the server answers the office only: a technician never
+    // asks (owner 2026-11-04).
+    if (readOnly) return;
     const seq = ++reconciliationSequence.current;
     if (!background) setReconciliationLoading(true);
     setReconciliationError("");
@@ -82,7 +86,7 @@ export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
     } finally {
       if (!background) setReconciliationLoading(false);
     }
-  }, []);
+  }, [readOnly]);
   const loadSystems = useCallback(async () => {
     setSystemsLoading(true);
     setSystemsError("");
@@ -100,7 +104,7 @@ export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
     loadReconciliation();
   }, [loadSystems, loadReconciliation]);
   useVisiblePageRefresh(() => loadReconciliation({ background: true }), {
-    intervalMs: 0, enabled: !busy && !reconciliationLoading,
+    intervalMs: 0, enabled: !readOnly && !busy && !reconciliationLoading,
   });
   // When the tech picks a system, fetch its current active calibration
   // so they can see what they're about to supersede.
@@ -550,7 +554,7 @@ export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
         })}
           </div>}
       </Card>)}{" "}
-      <ReconciliationPanel report={reconciliation} loading={reconciliationLoading} />
+      {!readOnly && <ReconciliationPanel report={reconciliation} loading={reconciliationLoading} />}
     </div>;
 }
 function assetName(asset) {

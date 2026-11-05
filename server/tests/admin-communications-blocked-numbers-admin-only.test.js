@@ -101,3 +101,17 @@ describe('reading the block list stays staff-wide', () => {
     });
   });
 });
+
+describe('the block list read shows a technician that a number is blocked, not why (B15)', () => {
+  const ROW = { id: 'b1', number: '+19415550100', block_type: 'spam', reason: 'Typed by an admin', auto_blocked: false, blocked_at: '2026-10-01T00:00:00Z' };
+
+  test('a technician gets the number, type and time without the reason; an admin keeps the reason', async () => {
+    db.mockImplementation(() => ({ orderBy: jest.fn(async () => [ROW]) }));
+    await withServer(async (base) => {
+      const tech = (await (await call(base, 'tech', 'GET', '/blocked-numbers')).json()).numbers[0];
+      expect(tech).toEqual({ number: '+19415550100', blockType: 'spam', autoBlocked: false, blockedAt: ROW.blocked_at });
+      const admin = (await (await call(base, 'admin', 'GET', '/blocked-numbers')).json()).numbers[0];
+      expect(admin.reason).toBe('Typed by an admin');
+    });
+  });
+});

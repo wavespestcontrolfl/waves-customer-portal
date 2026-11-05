@@ -132,12 +132,91 @@ function getProtocol({ service_type: serviceType, lawn_track: lawnTrack } = {}) 
   };
 }
 
+// Owner-only cost keys and priced-line text, stripped for a technician viewer
+// (moved here from routes/admin-protocols.js so the REST routes and the
+// Intelligence Bar get_protocol tool share one copy).
+// codex round 1 P1: the structured cost fields were stripped, but item.raw
+// (and visit.primary/secondary, which item.raw lines are parsed FROM) still
+// carry the protocol's own priced-line convention verbatim — e.g. "K-Flow
+// 0-0-25 ($2.18)" — which ProtocolReferenceTabV2.jsx renders unconditionally.
+// Strip every dollar-figure token: the parenthesized "($x.xx)" / "($x+$y)" /
+// "($x est)" cost-tag convention (isPricedProtocolLine's own pattern), and
+// any bare "$N" left over (e.g. "OPTIONAL if requested — $15",
+// ">$60 YTD = reprice flag").
+function stripPriceTokensFromText(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/\s*\([^)]*\$[^)]*\)/g, '')
+    .replace(/[<>]?\$\s?\d[\d,.]*/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+(\n|$)/g, '$1')
+    .trim();
+}
+
+// Deep, whole-payload backstop for the same rule: any string anywhere in
+// the lawn-mix response (visit.primary/secondary, an unmatched-line
+// warning message, a mixingOrder instruction that falls back to item.raw
+// when the catalog product has no mixing_instructions, …) gets every
+// dollar-figure token stripped for a non-admin viewer. Field-level
+// stripping above (stripLawnMixItemPricing, materialCostSummary: null)
+// stays the primary mechanism; this closes every path that copies raw
+// protocol-line text into the response instead of a structured field.
+function deepStripPriceTokens(value) {
+  if (typeof value === 'string') return stripPriceTokensFromText(value);
+  if (Array.isArray(value)) return value.map(deepStripPriceTokens);
+  // codex-review P1: a Date (equipment.expiresAt, product.labelVerifiedAt)
+  // has no OWN enumerable properties, so recursing into it like a plain
+  // object produced {} — ProtocolTankSheet then rendered a quantity/expiry
+  // as missing. Only recurse into an actual plain object; every other
+  // object type (Date, RegExp, Buffer, …) passes through untouched.
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) out[key] = deepStripPriceTokens(val);
+    return out;
+  }
+  return value;
+}
+
+// codex round 4 P1 (PR #4673): the raw protocols.json catalog routes below
+// (/programs, /programs/:track/visit/:num, /match, /completion-actions) are
+// technician-reachable (router-level requireTechOrAdmin) and hand back the
+// track/program/visit objects verbatim — each visit carries the owner-only
+// per-visit cost figures (material_cost / conditional_cost / labor_cost, a
+// program's costing_assumptions and minimum_price_per_palm) AND the same
+// "($2.18)" priced-line convention in primary/secondary that lawn-mix
+// already strips. ProtocolReferenceTabV2's "View full calendar" table and
+// SchedulePage's protocol panels render them straight from these payloads.
+// Same rule as lawn-mix: the recipe stays, every cost figure goes, and the
+// response is tagged viewerRole so the client hides the cost columns
+// instead of rendering "—" placeholders. Only plain objects are recursed
+// (the Date-passthrough rule deepStripPriceTokens documents above).
+const OWNER_ONLY_PROTOCOL_COST_KEYS = new Set([
+  'material_cost', 'conditional_cost', 'labor_cost', 'costing_assumptions', 'minimum_price_per_palm',
+]);
+function stripKeysDeep(value, keys) {
+  if (Array.isArray(value)) return value.map((item) => stripKeysDeep(item, keys));
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (keys.has(key)) continue;
+      out[key] = stripKeysDeep(val, keys);
+    }
+    return out;
+  }
+  return value;
+}
+const stripOwnerOnlyProtocolCostFields = (value) => stripKeysDeep(value, OWNER_ONLY_PROTOCOL_COST_KEYS);
+
 module.exports = {
   LAWN_TRACK_ALIASES,
   PROTOCOL_KEY_ALIASES,
   availableLawnTracks,
   availablePrograms,
   getProtocol,
+  stripPriceTokensFromText,
+  deepStripPriceTokens,
+  stripOwnerOnlyProtocolCostFields,
+  stripKeysDeep,
   normalizeLawnTrack,
   normalizeProtocolKey,
 };

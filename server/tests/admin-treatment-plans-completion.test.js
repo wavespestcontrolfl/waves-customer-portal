@@ -91,3 +91,43 @@ test.each([
   if (advisory) expect(res.body.plan.stockAdvisory).toBe(true);
   else expect(res.body.plan).not.toHaveProperty('stockAdvisory');
 });
+
+// Technician visibility audit A3: a technician gets no vendor price or job cost, at every depth the plan repeats a product or a mix.
+const costedPlan = () => ({
+  serviceId: 'visit',
+  propertyGate: { service: 'Lawn Care', billingMode: 'one_time' },
+  protocol: {
+    base: [{ raw: 'K-Flow 0-0-25 ($2.18)', product: { name: 'K-Flow', bestPrice: 41.5, costPerUnit: 0.2, costUnit: 'oz', needsPricing: false, labelRate: '2 oz' }, mix: { amount: 2, materialCost: 0.4, materialCostSource: 'cost_per_unit', materialCostDetail: { costPerUnit: 0.2 } } }],
+    conditional: [{ raw: 'Optional - $15', product: { name: 'Fungicide', bestPrice: 90 }, mix: { materialCost: 3 } }],
+  },
+  mixCalculator: {
+    materialCostSummary: { total: 3.4, pricedCount: 2 },
+    items: [{ product: { name: 'K-Flow', bestPrice: 41.5, costPerUnit: 0.2, costUnit: 'oz', needsPricing: true }, mix: { materialCost: 0.4, materialCostSource: 'cost_per_unit', materialCostDetail: { bestPrice: 41.5 }, amount: 2 } }],
+    conditionalOptions: [{ product: { name: 'Fungicide', bestPrice: 90 }, mix: { materialCost: 3 } }],
+  },
+});
+const OWNER_ONLY = /bestPrice|costPerUnit|costUnit|needsPricing|materialCost/;
+
+test('a technician plan has no vendor price, unit cost or material cost anywhere, and keeps the recipe', async () => {
+  buildPlanForService.mockResolvedValue(costedPlan());
+  for (const post of [false, true]) {
+    const res = await run({ tech: true, post, body: post ? {} : {}, query: {} });
+    const json = JSON.stringify(res.body.plan);
+    expect(json).not.toMatch(OWNER_ONLY);
+    expect(json).not.toMatch(/\$\d/);
+    expect(res.body.plan.protocol.base[0].product.name).toBe('K-Flow');
+    expect(res.body.plan.protocol.base[0].product.labelRate).toBe('2 oz');
+    expect(res.body.plan.mixCalculator.items[0].mix.amount).toBe(2);
+    expect(res.body.plan.protocol.base[0].raw).toBe('K-Flow 0-0-25');
+  }
+});
+
+test('an admin plan keeps every price and cost field', async () => {
+  buildPlanForService.mockResolvedValue(costedPlan());
+  const res = await run({ query: {} });
+  const json = JSON.stringify(res.body.plan);
+  for (const key of ['bestPrice', 'costPerUnit', 'costUnit', 'needsPricing', 'materialCost', 'materialCostSource', 'materialCostDetail', 'materialCostSummary']) {
+    expect(json).toContain(`"${key}"`);
+  }
+  expect(res.body.plan.protocol.base[0].raw).toBe('K-Flow 0-0-25 ($2.18)');
+});

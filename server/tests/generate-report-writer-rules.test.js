@@ -38,7 +38,7 @@ jest.mock('../models/db', () => {
     // The visit's own product lookup filters the catalog by id or name
     // (a callback where); the prompt scan reads every row.
     let match = null;
-    for (const name of ['whereIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
+    for (const name of ['whereIn', 'whereNotIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
     chain.where = (arg) => {
       if (typeof arg === 'function') {
         const sets = [];
@@ -462,6 +462,21 @@ test('gate off: customer messages keep the legacy block and options', async () =
   expect(mockComms).toHaveBeenCalledTimes(1);
   expect(mockCustomerWords).not.toHaveBeenCalled();
   expect(mockProvider.mock.calls[0][0].text).toContain('RECENT CUSTOMER COMMUNICATIONS\nhint\nText Sep 28 (inbound): ants are back');
+});
+
+// Owner ruling D1 A (2026-11-04), audit A14: a technician's report draft is grounded on no call
+// summaries or transcripts. The route asks the context builders to leave the call channel out.
+test('a technician draft asks for no call channel (gate off and gate on); an admin draft does not', async () => {
+  for (const [gate, mock] of [[undefined, mockComms], ['true', mockCustomerWords]]) {
+    if (gate) process.env.GATE_REPORT_WRITER_RULES = gate; else delete process.env.GATE_REPORT_WRITER_RULES;
+    mock.mockClear();
+    mockBooked = { technician_id: 'tech-1' };
+    await handler({ ...mkReq({ serviceNotes: 'Ants on the slider track (technician comms case).', includeCustomerComms: true }), techRole: 'technician', technicianId: 'tech-1' }, mkRes());
+    expect(mock).toHaveBeenCalledWith(expect.objectContaining({ excludeCalls: true }));
+    mock.mockClear();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (admin comms case).', includeCustomerComms: true }), mkRes());
+    expect(mock).toHaveBeenCalledWith(expect.objectContaining({ excludeCalls: false }));
+  }
 });
 
 describe('typed product application record', () => {

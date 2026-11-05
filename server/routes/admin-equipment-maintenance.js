@@ -12,11 +12,16 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const techProjection = require('../services/equipment-tech-projection');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // These reports feed the owner-only Costs workspace. The shared fleet
 // overview, equipment details, and operational record writers remain staff tools.
 router.use(['/analytics/costs', '/analytics/reliability', '/mileage/summary'], requireAdmin);
+// One truck's mileage log: personal miles, fuel cost and the IRS deduction
+// (owner ruling D5 A, 2026-11-04). The guard sits here, ahead of the table
+// bootstrap below, so a refused request does no work; the handler repeats it.
+router.get('/:id([0-9a-fA-F-]{36})/mileage', requireAdmin);
 
 // Last-resort table bootstrap for local/dev environments where migrations have
 // not run yet. Keep this schema aligned with 20260401000097_equipment_maintenance.
@@ -158,7 +163,9 @@ router.get('/', async (req, res, next) => {
       };
     }));
 
-    res.json({ equipment: enriched });
+    // A technician gets operational columns only (no purchase, book, tax or
+    // maintenance-cost figures).
+    res.json({ equipment: techProjection.isTechnicianCaller(req) ? enriched.map(techProjection.stripEquipmentRow) : enriched });
   } catch (err) {
     next(err);
   }
@@ -184,6 +191,17 @@ router.get('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
       .where('equipment_id', req.params.id)
       .orderBy('performed_at', 'desc')
       .limit(20);
+
+    if (techProjection.isTechnicianCaller(req)) {
+      // No cost of ownership at all for a technician: it is purchase price,
+      // maintenance and fuel spend summed.
+      return res.json({
+        equipment: techProjection.stripEquipmentRow(equipment),
+        schedules: techProjection.mapRows(schedules, techProjection.stripSchedule),
+        recentRecords: techProjection.mapRows(recentRecords, techProjection.stripMaintenanceRecord),
+        costOfOwnership: null,
+      });
+    }
 
     let costData = null;
     try {
@@ -303,7 +321,7 @@ router.get('/:id([0-9a-fA-F-]{36})/schedules', async (req, res, next) => {
       .where('is_active', true)
       .orderByRaw('CASE WHEN is_overdue THEN 0 ELSE 1 END, next_due_at ASC NULLS LAST');
 
-    res.json({ schedules });
+    res.json({ schedules: techProjection.isTechnicianCaller(req) ? techProjection.mapRows(schedules, techProjection.stripSchedule) : schedules });
   } catch (err) {
     next(err);
   }
@@ -368,7 +386,7 @@ router.get('/schedules/due', async (req, res, next) => {
       )
       .orderByRaw('CASE WHEN is_overdue THEN 0 ELSE 1 END, next_due_at ASC NULLS LAST');
 
-    res.json({ schedules });
+    res.json({ schedules: techProjection.isTechnicianCaller(req) ? techProjection.mapRows(schedules, techProjection.stripSchedule) : schedules });
   } catch (err) {
     next(err);
   }
@@ -393,7 +411,7 @@ router.get('/:id([0-9a-fA-F-]{36})/records', async (req, res, next) => {
       .count('id as count')
       .first();
 
-    res.json({ records, total: parseInt(total.count) });
+    res.json({ records: techProjection.isTechnicianCaller(req) ? techProjection.mapRows(records, techProjection.stripMaintenanceRecord) : records, total: parseInt(total.count) });
   } catch (err) {
     next(err);
   }
@@ -406,7 +424,7 @@ router.post('/:id([0-9a-fA-F-]{36})/records', async (req, res, next) => {
       equipmentId: req.params.id,
       ...req.body,
     });
-    res.status(201).json({ record });
+    res.status(201).json({ record: techProjection.isTechnicianCaller(req) ? techProjection.stripMaintenanceRecord(record) : record });
   } catch (err) {
     next(err);
   }
@@ -427,7 +445,7 @@ router.get('/records/recent', async (req, res, next) => {
       .orderBy('maintenance_records.performed_at', 'desc')
       .limit(parseInt(limit));
 
-    res.json({ records });
+    res.json({ records: techProjection.isTechnicianCaller(req) ? techProjection.mapRows(records, techProjection.stripMaintenanceRecord) : records });
   } catch (err) {
     next(err);
   }
@@ -437,8 +455,10 @@ router.get('/records/recent', async (req, res, next) => {
 // VEHICLE MILEAGE
 // ═══════════════════════════════════════════════════════════════════
 
-// GET /:id/mileage — vehicle mileage log
-router.get('/:id([0-9a-fA-F-]{36})/mileage', async (req, res, next) => {
+// GET /:id/mileage — vehicle mileage log. Admin only (owner ruling D5 A,
+// 2026-11-04): the log holds personal miles, fuel cost and the IRS
+// deduction, for any truck.
+router.get('/:id([0-9a-fA-F-]{36})/mileage', requireAdmin, async (req, res, next) => {
   try {
     const { start_date, end_date, limit = 90 } = req.query;
 
@@ -639,7 +659,7 @@ router.get('/downtime/active', async (req, res, next) => {
       )
       .orderBy('equipment_downtime_log.started_at', 'desc');
 
-    res.json({ downtime: active });
+    res.json({ downtime: techProjection.isTechnicianCaller(req) ? techProjection.mapRows(active, techProjection.stripDowntime) : active });
   } catch (err) {
     next(err);
   }
@@ -653,7 +673,7 @@ router.get('/downtime/active', async (req, res, next) => {
 router.get('/analytics/overview', async (req, res, next) => {
   try {
     const overview = await equipmentService.getFleetOverview();
-    res.json(overview);
+    res.json(techProjection.isTechnicianCaller(req) ? techProjection.stripFleetOverview(overview) : overview);
   } catch (err) {
     next(err);
   }

@@ -4,7 +4,7 @@
 // once the account holder has the phone app; a save that echoes the shown App stores
 // nothing.
 
-jest.mock('express', () => ({ Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn() }) }));
+jest.mock('express', () => ({ Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn(), post: jest.fn() }) }));
 jest.mock('joi', () => ({}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/auth', () => ({ authenticate: jest.fn() }));

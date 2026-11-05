@@ -209,6 +209,7 @@ describe('TimeGridDay drag-drop confirm: a tapped time', () => {
   const writes = [];
   beforeEach(() => {
     writes.length = 0;
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     global.fetch = vi.fn(async (url, opts = {}) => {
       if (opts.method === 'POST' || opts.method === 'PUT') writes.push({ url, method: opts.method, body: JSON.parse(opts.body) });
       return { ok: true, json: async () => ({}) };
@@ -241,6 +242,39 @@ describe('TimeGridDay drag-drop confirm: a tapped time', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({ method: 'PUT', body: { technicianId: 'tech-2' } });
     expect(writes[0].url).toContain('/admin/schedule/svc-1/assign');
+  });
+});
+
+// Audit C13: PUT /admin/schedule/:id/assign is office-only. A technician can move a visit in
+// time inside its own lane and cannot drop it in another lane.
+describe('TimeGridDay drag across lanes by role', () => {
+  const TECHS = [{ id: 'tech-1', name: 'Alex Tech' }, { id: 'tech-2', name: 'Blair Tech' }];
+  afterEach(() => localStorage.removeItem('waves_admin_user'));
+  const drop = async (techId) => {
+    render(<TimeGridDay date="2026-07-15" services={SERVICES} technicians={TECHS} onChange={vi.fn()} />);
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service: SERVICES[0] } } },
+      over: { data: { current: { techId, slotMin: 9 * 60 } } },
+    }));
+  };
+
+  it('a technician dropping a visit in another lane opens no confirm and writes nothing', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    await drop('tech-2');
+    expect(modal.props.open).toBeFalsy();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('a technician dropping a visit later in its own lane still opens the confirm', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    await drop('tech-1');
+    expect(modal.props.open).toBeTruthy();
+  });
+
+  it('an admin dropping a visit in another lane opens the confirm', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    await drop('tech-2');
+    expect(modal.props.open).toBeTruthy();
   });
 });
 

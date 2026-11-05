@@ -4,6 +4,9 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const WikiCompiler = require('../services/knowledge/wiki-compiler');
 const WikiQA = require('../services/knowledge/wiki-qa');
+const {
+  TECHNICIAN_KNOWLEDGE_CATEGORIES, knowledgeAudience, technicianKnowledgeRow, technicianKnowledgeRows,
+} = require('../services/knowledge/technician-categories');
 const { withoutSavedGaps } = require('../services/knowledge/knowledge-gaps-weekly');
 const WikiLinter = require('../services/knowledge/wiki-linter');
 const logger = require('../services/logger');
@@ -21,8 +24,11 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 router.get('/', async (req, res, next) => {
   try {
     const { category, search, active = 'true' } = req.query;
+    // A technician lists field categories only, vendor prices removed.
+    const technician = Boolean(knowledgeAudience(req));
 
     let query = db('knowledge_base');
+    if (technician) query = query.whereIn('category', TECHNICIAN_KNOWLEDGE_CATEGORIES);
     if (active === 'true') query = query.where('active', true);
     if (category) query = query.where('category', category);
     if (search) {
@@ -33,19 +39,22 @@ router.get('/', async (req, res, next) => {
       });
     }
 
-    const articles = await query
+    let articles = await query
       .whereNot('path', 'like', 'wiki/_%')
       .orderBy('category')
       .orderBy('title')
       .select('id', 'path', 'title', 'category', 'summary', 'tags', 'word_count', 'last_compiled', 'last_verified', 'version');
 
     // Category counts
-    const counts = await db('knowledge_base')
+    const countQuery = db('knowledge_base')
       .where('active', true)
-      .whereNot('path', 'like', 'wiki/_%')
+      .whereNot('path', 'like', 'wiki/_%');
+    if (technician) countQuery.whereIn('category', TECHNICIAN_KNOWLEDGE_CATEGORIES);
+    const counts = await countQuery
       .select('category')
       .count('* as count')
       .groupBy('category');
+    if (technician) articles = technicianKnowledgeRows(articles);
 
     const categoryCounts = {};
     counts.forEach(c => { categoryCounts[c.category] = parseInt(c.count); });
@@ -59,13 +68,15 @@ router.get('/article/:id', async (req, res, next) => {
   try {
     const article = await db('knowledge_base').where('id', req.params.id).first();
     if (!article) return res.status(404).json({ error: 'Article not found' });
+    // wiki/_summaries.md and every non-field category stay out of a technician's reach.
+    if (knowledgeAudience(req) && !technicianKnowledgeRow(article)) return res.status(404).json({ error: 'Article not found' });
 
     // Parse JSON fields
     if (typeof article.tags === 'string') article.tags = JSON.parse(article.tags);
     if (typeof article.backlinks === 'string') article.backlinks = JSON.parse(article.backlinks);
     if (typeof article.source_documents === 'string') article.source_documents = JSON.parse(article.source_documents);
 
-    res.json({ article });
+    res.json({ article: knowledgeAudience(req) ? technicianKnowledgeRow(article) : article });
   } catch (err) { next(err); }
 });
 
@@ -102,7 +113,7 @@ router.post('/query', async (req, res, next) => {
     const { question, source } = req.body;
     if (!question) return res.status(400).json({ error: 'Question required' });
 
-    const result = await WikiQA.query(question, { source: source || 'admin_manual' });
+    const result = await WikiQA.query(question, { source: source || 'admin_manual', ...(knowledgeAudience(req) || {}) });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -141,7 +152,7 @@ router.post('/file-back', requireAdmin, async (req, res, next) => {
 // GET /api/admin/knowledge/search?q=term
 router.get('/search', async (req, res, next) => {
   try {
-    const results = await WikiQA.search(req.query.q || '', parseInt(req.query.limit || 20));
+    const results = await WikiQA.search(req.query.q || '', parseInt(req.query.limit || 20), knowledgeAudience(req));
     res.json({ results });
   } catch (err) { next(err); }
 });
