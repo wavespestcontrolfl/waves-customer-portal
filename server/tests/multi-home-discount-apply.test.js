@@ -512,6 +512,20 @@ describe('every source in the window is visited, and a source that stops qualify
     expect(out).toEqual({ sources: 0, dropped: 1 });
   });
 
+  test('a held row whose accepted, in-window source no longer carries the Multi-Home Discount is cleared', async () => {
+    const now = new Date('2026-11-06T15:00:00Z');
+    const acceptedAt = new Date('2026-11-05T15:00:00Z');
+    const withPreset = { summary: { manualDiscount: { presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40 } } };
+    const rows = [
+      { id: 'keep', source_estimate_id: 'est-a', series_root_id: 'rootA', estimate_status: 'accepted', accepted_at: acceptedAt, estimate_data: withPreset },
+      { id: 'gone', source_estimate_id: 'est-b', series_root_id: 'rootB', estimate_status: 'accepted', accepted_at: acceptedAt, estimate_data: {} },
+    ];
+    const joined = fakeTrx({ 'multi_home_discount_applications as m': rows, multi_home_discount_applications: rows });
+    const out = { dropped: 0 };
+    await pruneOutOfScopeHeld(joined, now, out, 'preset-1');
+    expect(out.dropped).toBe(1);
+  });
+
   test('held rows whose source left the window or stopped being accepted are cleared in one pass', async () => {
     const trx = fakeTrx({ multi_home_discount_applications: [] });
     const rows = [{ id: 'l1', source_estimate_id: 'old-1', series_root_id: 'rootA' }];

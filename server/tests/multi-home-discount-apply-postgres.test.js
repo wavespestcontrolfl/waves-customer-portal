@@ -666,6 +666,17 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
       });
     });
 
+    test('an accepted estimate revised to drop the Multi-Home Discount: its held rows are cleared', async () => {
+      await inRollback(async (trx) => {
+        jest.spyOn(episodes(), 'closeAdminAlertKeys').mockResolvedValue(1);
+        const f = await heldFamily(trx);
+        // The revise removes the discount, so the source scan's prefilter no longer reads this estimate at all.
+        await trx('estimates').where({ id: f.estimateId }).update({ estimate_data: trx.raw("'{}'::jsonb") });
+        expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ dropped: 1 });
+        expect(await ledger(trx, f.estimateId)).toHaveLength(0);
+      });
+    });
+
     test('every source in the window is read by keyset, including rows with the same accepted_at', async () => {
       await inRollback(async (trx) => {
         const ids = [];

@@ -886,13 +886,27 @@ async function dropHeldForSource(dbh, estimateId, out) {
 }
 
 // One pass over held rows whose source estimate left the 14-day window or stopped being 'accepted'.
-async function pruneOutOfScopeHeld(dbh, now, out) {
+// A held row's source still counts only while it is accepted, inside the window, and still carries the Multi-Home
+// Discount's recurring slice. A revise can remove the discount; the source scan's text prefilter then never reads that
+// estimate again, so this pass is the only place its held rows (and bells) can be cleared.
+function heldSourceStillQualifies(row, cutoff, presetId) {
+  if (row.estimate_status !== 'accepted' || !row.accepted_at) return false;
+  if (new Date(row.accepted_at).getTime() < cutoff.getTime()) return false;
+  return !!multiHomeSourceDiscount(row.estimate_data, presetId);
+}
+
+async function pruneOutOfScopeHeld(dbh, now, out, presetId = null) {
   const rows = await dbh(`${TABLE} as m`)
     .join('estimates as e', 'e.id', 'm.source_estimate_id')
     .where('m.status', STATUS_HELD)
-    .whereRaw("NOT COALESCE(e.status = 'accepted' AND e.accepted_at >= ?, false)", [sourceCutoff(now)])
-    .select('m.id', 'm.source_estimate_id', 'm.series_root_id');
-  await dropHeldRows(dbh, rows, out);
+    .select('m.id', 'm.source_estimate_id', 'm.series_root_id', 'e.status as estimate_status', 'e.accepted_at', 'e.estimate_data');
+  const cutoff = sourceCutoff(now);
+  const gone = rows
+    .filter((row) => !heldSourceStillQualifies(row, cutoff, presetId))
+    .map(({ id, source_estimate_id: sourceEstimateId, series_root_id: seriesRootId }) => ({
+      id, source_estimate_id: sourceEstimateId, series_root_id: seriesRootId,
+    }));
+  await dropHeldRows(dbh, gone, out);
 }
 
 async function processSource(dbh, estimate, presetId, { now, today }, out) {
@@ -926,7 +940,7 @@ async function runMultiHomeAllHomes({ now = new Date(), dbh = db } = {}) {
     }
   }, MAX_SOURCES, presetId);
   try {
-    await pruneOutOfScopeHeld(dbh, now, out);
+    await pruneOutOfScopeHeld(dbh, now, out, presetId);
   } catch (err) {
     logger.error(`[multi-home-discount] out-of-window cleanup failed: ${err.message}`);
   }
