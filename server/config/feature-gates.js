@@ -503,6 +503,7 @@
  *   GATE_RING_NEW_CONTACTS=true (owner 2026-11-04, reply "ring new": two kinds of incoming contact never put a banner on the owner's phone. (1) A text from a number with no customer record to a customer-facing office line (a location line or a Google Business Profile tracking line; not the AI assistant line, not a tech line, not a staff phone, not a reaction or courtesy closer) wrote only a quiet Activity row. On, it rings the same one-row-per-sender new-lead bell the website and van tracking lines ring (sms-reply-alert-delivery.js ringTrackingLineTextBell): the latest text quoted, a running count, the name on file, a phone banner on every text; the quiet Activity row is then skipped, and kept if the ring fails. (2) A new-lead email (a lead created from an email, or a follow-up email that completed a quote request) wrote a bell row without a banner. On, it also sends ONE phone banner with the New lead sound at any hour, once per email id (the bell row is keyed on the email), with no second bell row (bell-banners.js kind new_lead_email). Known-customer texts, tracking lines, the AI line, tech lines, staff senders and the possible-lead review rows are unchanged. Sends nothing to a customer, no paid API. Read at call time via ringNewContactsLive(), strict 'true', dark by default; off = byte-identical, rollback = unset.)
  *   GATE_MILEAGE_TRIP_COORDS=true (owner 2026-11-04, "do all" on the audit item "link each GPS trip to its stop": every mileage_log row since May 2026 has NULL start and end coordinates, because Bouncie's trip-start and trip-end webhooks carry no location; GPS points arrive only in trip-data events in bouncie_webhook_log. On: the daily 1:00 AM Bouncie cron, before its summary, copies the first and last trip-data point of the same transactionId into the row's NULL start and end coordinates (last 3 days; only trips whose trip-end event is logged and 2+ hours old, with a trip-start event, and only when the trail reaches the start and end times within 3 minutes), so the home base and the trip link can see them. Fills NULL coordinates only; never touches is_business, purpose, deduction or classification. Read at call time via mileageTripCoordsLive(), strict 'true', dark by default; off = nothing is written, byte for byte today's; rollback = unset.)
  *   GATE_NIGHT_PASS_WAIT=true (owner 2026-11-04, "do all": the 4:20 AM route re-order pass and the 4:40 AM day re-plan pass each borrow the 4:10 auto-dispatch writer lock; today a busy lock skips the 4:20 tick (ledgered) and fails the 4:40 tick. On, each of the two WAITS for that lock, retrying every 15 seconds for up to 25 minutes (the 4:10 road check can run 20 minutes), so the three night tools run one after another. A wait that runs out ends exactly as a skip does today. Only those two cron calls pass the wait; every other lock caller is unchanged. Strict `=== 'true'`, read at call time via nightPassWaitLive() so a flip needs no redeploy; dark by default. No customer contact, no spend. Rollback: unset it.)
+ *   GATE_ESTIMATE_UPDATED_WORDING=true (owner 2026-11-04, "updated": a corrected estimate says so. A send of an estimate the customer already received, whose priced lines, address or totals changed since that delivery, goes out as the estimate_updated text and the estimate.updated_delivery email ("your updated Waves estimate is ready"), both seeded by migration 20261105040000 from the live copy; each channel falls back to its normal template when its updated one is off or missing; read at call time via estimateUpdatedWordingLive(), services/estimate-updated-wording.js)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -5711,6 +5712,9 @@ const gates = {
   // GATE_NIGHT_PASS_WAIT: read at CALL time via nightPassWaitLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   nightPassWait: process.env.GATE_NIGHT_PASS_WAIT === 'true',
+  // GATE_ESTIMATE_UPDATED_WORDING: read at CALL time via estimateUpdatedWordingLive(); this entry is for logGateStatus,
+  // so the boot log shows the flip.
+  estimateUpdatedWording: process.env.GATE_ESTIMATE_UPDATED_WORDING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -10559,3 +10563,14 @@ function nightPassWaitLive() {
 }
 // GATE_NIGHT_PASS_WAIT reader, on its own line so gate PRs never conflict.
 module.exports.nightPassWaitLive = nightPassWaitLive;
+
+// GATE_ESTIMATE_UPDATED_WORDING read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-04 "updated": an estimate the customer already received, sent again after its services, address or
+// totals changed, goes out as the "updated estimate" text (sms_templates estimate_updated) and email
+// (estimate.updated_delivery). Off = the estimate_sent text and the estimate.delivery email, as today
+// (services/estimate-updated-wording.js).
+function estimateUpdatedWordingLive() {
+  return process.env.GATE_ESTIMATE_UPDATED_WORDING === 'true';
+}
+// GATE_ESTIMATE_UPDATED_WORDING reader, on its own line so gate PRs never conflict.
+module.exports.estimateUpdatedWordingLive = estimateUpdatedWordingLive;

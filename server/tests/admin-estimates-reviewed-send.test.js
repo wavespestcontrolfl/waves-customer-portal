@@ -2801,3 +2801,111 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
     });
   });
 });
+
+describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING)', () => {
+  const gates = require('../config/feature-gates');
+  const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
+  const smsTemplates = require('../routes/admin-sms-templates');
+  const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
+  const baseSms = async (key, vars) => `Synthetic estimate: ${vars.estimate_url.replace(/^https:\/\//, '')}`;
+  const DELIVERED_SCOPE = { lines: [{ name: 'Synthetic pest service', cadence: 'quarterly' }], address: 'Synthetic service property', property: null };
+  const CORRECTED_SCOPE = { lines: [...DELIVERED_SCOPE.lines, { name: 'Synthetic lawn service', cadence: 'monthly' }], address: 'Synthetic service property', property: null };
+  const DELIVERED_TOTALS = { monthly: '100.00', annual: '1200.00', onetime: '0.00' };
+  let liveScope;
+
+  beforeEach(() => {
+    gates.estimateUpdatedWordingLive = jest.fn(() => true);
+    liveScope = CORRECTED_SCOPE;
+    deliveredEstimateScope.mockImplementation(() => structuredClone(liveScope));
+    smsTemplates.getTemplate.mockImplementation(async (key, vars) => (key === 'estimate_updated'
+      ? `Updated estimate: ${vars.estimate_url.replace(/^https:\/\//, '')}` : baseSms(key, vars)));
+    Object.assign(row, {
+      status: 'sent', sent_at: new Date('2026-01-01T12:00:00.000Z'),
+      // JSONB returns the stamp's keys in its own order: the check must not read that as a change.
+      estimate_data: { sendSnapshot: { totals: DELIVERED_TOTALS, scope: { property: null, address: 'Synthetic service property', lines: DELIVERED_SCOPE.lines } } },
+    });
+  });
+  afterEach(() => {
+    delete gates.estimateUpdatedWordingLive;
+    deliveredEstimateScope.mockImplementation(() => ({ lines: [] }));
+    smsTemplates.getTemplate.mockImplementation(baseSms);
+    smtpFallbackAllowed.mockReturnValue(false);
+  });
+
+  const loadedKeys = () => email.loadTemplateByKey.mock.calls.map(([key]) => key);
+  const smsKeys = () => smsTemplates.getTemplate.mock.calls.map(([key]) => key);
+
+  test('the review shows the updated text and email, the reviewed send delivers them, and the send stamps its totals', async () => {
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.sms).toMatch(/^Updated estimate: /);
+    expect(preview.body.messages.email).toMatchObject({ provider: 'sendgrid', versionId: 'synthetic-email-version', updated: true });
+    expect(loadedKeys()).toEqual(['estimate.updated_delivery']);
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'both', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe('Updated estimate: portal.wavespestcontrol.com/s/synthetic-sms');
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(email.sendTemplate.mock.calls[0][0]).toMatchObject({ templateKey: 'estimate.updated_delivery', versionId: 'synthetic-email-version' });
+    expect(dataOf().sendSnapshot.scope).toEqual(CORRECTED_SCOPE);
+    expect(dataOf().sendSnapshot.totals).toEqual(DELIVERED_TOTALS);
+  });
+
+  test('a totals-only correction is an update too', async () => {
+    liveScope = DELIVERED_SCOPE;
+    row.annual_total = '1080';
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.sms).toMatch(/^Updated estimate: /);
+    expect(preview.body.messages.email.updated).toBe(true);
+  });
+
+  test.each([
+    ['the same quote sent again', (r) => { liveScope = DELIVERED_SCOPE; return r; }],
+    ['a first send (no delivery stamp)', (r) => { r.estimate_data = {}; return r; }],
+    ['a delivery stamped before totals existed, same scope, new totals', (r) => {
+      liveScope = DELIVERED_SCOPE; r.annual_total = '999'; r.estimate_data = { sendSnapshot: { scope: DELIVERED_SCOPE } }; return r;
+    }],
+    ['the gate off', (r) => { gates.estimateUpdatedWordingLive.mockReturnValue(false); return r; }],
+  ])('%s keeps the normal text and email', async (_name, arrange) => {
+    arrange(row);
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.sms).toMatch(/^Synthetic estimate: /);
+    expect(preview.body.messages.email).not.toHaveProperty('updated');
+    expect(loadedKeys()).toEqual(['estimate.delivery']);
+    expect(smsKeys()).not.toContain('estimate_updated');
+  });
+
+  test('an updated template that is off sends that channel the normal way', async () => {
+    smsTemplates.getTemplate.mockImplementation(async (key, vars) => (key === 'estimate_updated' ? null : baseSms(key, vars)));
+    email.loadTemplateByKey.mockImplementation(async (key) => ({
+      template: { template_key: key, ...(key === 'estimate.updated_delivery' ? { status: 'disabled' } : {}) },
+      activeVersion: { id: key === 'estimate.updated_delivery' ? 'synthetic-updated-version' : 'synthetic-email-version' },
+    }));
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.sms).toMatch(/^Synthetic estimate: /);
+    expect(preview.body.messages.email).toMatchObject({ versionId: 'synthetic-email-version' });
+    expect(preview.body.messages.email).not.toHaveProperty('updated');
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'both', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(email.sendTemplate.mock.calls[0][0]).toMatchObject({ templateKey: 'estimate.delivery', versionId: 'synthetic-email-version' });
+  });
+
+  test('an unreviewed send (auto-send, a schedule with no review) decides from the row it delivers', async () => {
+    row.status = 'sending';
+    const result = await router.sendEstimateNow(structuredClone(row), 'both', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe('Updated estimate: portal.wavespestcontrol.com/s/synthetic-sms');
+    expect(email.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.updated_delivery');
+    expect(email.sendTemplate.mock.calls[0][0]).not.toHaveProperty('versionId');
+  });
+
+  test('the SMTP copy says updated when SendGrid is not configured', async () => {
+    sendgrid.isConfigured.mockReturnValue(false);
+    smtpFallbackAllowed.mockReturnValue(true);
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.email).toMatchObject({ provider: 'smtp', subject: 'Your Updated Waves Pest Control Estimate is Ready', updated: true });
+    expect(preview.body.messages.email.text).toContain('Your updated service estimate is ready for review. It replaces the one we sent before.');
+  });
+});
