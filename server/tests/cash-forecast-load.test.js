@@ -147,6 +147,8 @@ describe('loadForecastInput', () => {
         [/FROM scheduled_services ss/, [
           visit({ id: 'c1', status: 'completed', scheduled_day: '2026-10-20', completed_day: '2026-10-20' }),
           visit({ id: 'c2', status: 'completed', scheduled_day: '2026-09-01', completed_day: '2026-09-01', effective_price: 50 }),
+          // covered by a combined invoice on another visit: billed, so not listed (its cash sits on the anchor)
+          visit({ id: 'c4', status: 'completed', scheduled_day: '2026-10-22', completed_day: '2026-10-22', effective_price: 30, has_invoice: true }),
           visit({ id: 'c3', status: 'completed', scheduled_day: '2026-10-21', completed_day: '2026-10-21', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 50, autopay_active: true, is_recurring: true }),
           visit({ id: 'b1', scheduled_day: '2026-11-05' }),
           visit({ id: 'b3', scheduled_day: '2026-11-06', has_invoice: true }),
@@ -172,9 +174,10 @@ describe('loadForecastInput', () => {
     expect(input.visitCohort).toEqual([
       { value: 100, ageDays: 16, paid: [{ lagDays: 2, amount: 100 }] },
       { value: 50, ageDays: 65, paid: [] },
+      { value: 30, ageDays: 14, paid: [] },
     ]);
     // trailing Sep 7 - Nov 1: c1 and c3 (the member visit counts as a visit, not as cash work); c2 is before it
-    expect(input.trailing).toMatchObject({ visits: 2, workValueUsd: 100 });
+    expect(input.trailing).toMatchObject({ visits: 3, workValueUsd: 130 });
     // b3 is already invoiced: its cash comes once, as its invoice, but it is still booked work
     expect(input.booked).toEqual([
       { day: '2026-11-05', value: 100, work: 100 }, { day: '2026-11-06', value: 0, work: 100 }, { day: '2026-11-12', value: 0, work: 0 },

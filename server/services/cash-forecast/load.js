@@ -316,7 +316,7 @@ function splitVisits(visits, d) {
   const trailing = completed.filter((v) => v.doneDay >= d.trailingFrom && v.doneDay <= d.trailingTo);
   const open = rows.filter((v) => v.status !== 'completed' && v.scheduled_day >= d.today && v.scheduled_day <= d.windowEnd);
   return {
-    cohort: completed.filter((v) => v.value > 0).map((v) => ({ id: v.id, day: v.doneDay, value: v.value })),
+    cohort: completed.filter((v) => v.value > 0).map((v) => ({ id: v.id, day: v.doneDay, value: v.value, invoiced: !!v.has_invoice })),
     booked: open.map((v) => ({ day: v.scheduled_day, value: v.has_invoice ? 0 : v.value, work: v.value })),
     payerBilled: open.filter((v) => v.payer_billed).length,
     trailingVisits: trailing.length,
@@ -325,13 +325,14 @@ function splitVisits(visits, d) {
 }
 
 // The cohort with each visit's payments by days after the visit; visits with no invoice at all in the
-// last 90 days are listed as not billed.
+// last 90 days are listed as not billed. A combined invoice's cash sits on its anchor visit; the curve is
+// total cash over total value, so where that cash sits barely changes it, and a covered visit is billed.
 function cohortFrom(cohort, pays, today) {
   const gap = engine.dayDiff;
   const paidLines = (v) => pays
     .filter((p) => p.visit_id === v.id && p.paid_day && usd(p.paid_amount) > 0)
     .map((p) => ({ lagDays: Math.max(0, gap(v.day, p.paid_day)), amount: usd(p.paid_amount) }));
-  const unbilled = cohort.filter((v) => !pays.some((p) => p.visit_id === v.id) && gap(v.day, today) <= 90);
+  const unbilled = cohort.filter((v) => !v.invoiced && !pays.some((p) => p.visit_id === v.id) && gap(v.day, today) <= 90);
   return {
     visitCohort: cohort.map((v) => ({ value: v.value, ageDays: gap(v.day, today), paid: paidLines(v) })),
     unbilled: { count: unbilled.length, usd: Math.round(unbilled.reduce((s, v) => s + v.value, 0) * 100) / 100 },
