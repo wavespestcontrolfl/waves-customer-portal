@@ -28,6 +28,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const MODELS = require('../config/models');
 const { llmCostTrackingLive, gateEnvValue } = require('../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -102,11 +103,11 @@ const samePrice = (a, b) => sameRates(a, b)
 
 // A call served at fast speed is ledgered as "<model>-fast"
 // (llm-dispatch-metrics anthropicServedModel). Anthropic's fast mode list rate
-// is a multiple of the model's standard rate; only a model on this exact map
-// is priced. Any other "-fast" key is unpriced (fail closed), never billed at
-// the standard rate.
+// is a multiple of the model's standard rate; only a model on the registry's
+// exact map is priced. Any other "-fast" key is unpriced (fail closed), never
+// billed at the standard rate.
 const FAST_SUFFIX = '-fast';
-const FAST_MODE_MULTIPLIER = Object.freeze({ 'claude-opus-5-5': 2, 'claude-opus-5': 2 });
+const FAST_MODE_MULTIPLIER = MODELS.ANTHROPIC_FAST_MODE_PRICE_MULTIPLIER || {};
 
 const scaleRates = (r, m) => Object.fromEntries(RATE_KEYS.map((k) => [k, r[k] == null ? r[k] : r[k] * m]));
 

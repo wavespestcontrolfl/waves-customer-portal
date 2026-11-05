@@ -174,6 +174,13 @@ function anthropicSupportsFastMode(model) {
   return ANTHROPIC_FAST_MODE.has(String(model || ''));
 }
 
+// Fast mode's list price as a multiple of the model's standard per-token rates
+// (Anthropic's published fast-mode rates are exactly 2x for these two). The
+// cost report (llm-cost priceFor) prices a "<model>-fast" ledger row with it;
+// a fast-capable model missing here (Opus 4.8) is left unpriced, never billed
+// at the standard rate.
+const ANTHROPIC_FAST_MODE_PRICE_MULTIPLIER = Object.freeze({ 'claude-opus-5-5': 2, 'claude-opus-5': 2 });
+
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
@@ -876,6 +883,7 @@ module.exports = {
   anthropicSupportsToolSearch,
   anthropicSupportsMidConversationTools,
   anthropicSupportsFastMode,
+  ANTHROPIC_FAST_MODE_PRICE_MULTIPLIER,
   ANTHROPIC_THINKING_REQUIRED_RE,
   anthropicThinkingAlwaysOn,
   DEEP,
