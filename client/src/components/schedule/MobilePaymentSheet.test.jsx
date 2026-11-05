@@ -5,6 +5,12 @@
 // rendering a tender that could only 403. The Card on File tender renders
 // for admin-role users only; technician, corrupt, and missing profiles all
 // fail closed to hidden.
+//
+// Owner 2026-11-04 (technician visibility audit D4 A): a technician takes
+// cards only. Cash, Check and Invoice are office tenders; Card on File shows
+// to a technician only when GET /admin/invoices/:id marks the invoice
+// tech_card_on_file (GATE_TECH_CARD_ON_FILE, its own visit today). A missing
+// or corrupt profile gets the technician's list.
 
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -21,6 +27,13 @@ function stubLocalStorage(entries) {
   });
 }
 
+// The technician sheet reads the invoice once to learn whether to show Card on File.
+function stubInvoiceRead(invoice) {
+  const fetchMock = vi.fn(async () => ({ ok: true, json: async () => invoice }));
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
 function renderSheet() {
   render(
     <MobilePaymentSheet
@@ -32,45 +45,73 @@ function renderSheet() {
   );
 }
 
-describe('MobilePaymentSheet Card on File role gate', () => {
+describe('MobilePaymentSheet tenders by role', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
   });
 
-  it('renders the Card on File tender for an admin-role user', () => {
+  it('renders every tender for an admin-role user, with no invoice read', () => {
     stubLocalStorage({
       waves_admin_token: 'test-token',
       waves_admin_user: JSON.stringify({ id: 'u1', role: 'admin' }),
     });
+    const fetchMock = stubInvoiceRead({ id: 'inv-1' });
     renderSheet();
-    expect(screen.getByText('Cash')).toBeInTheDocument();
-    expect(screen.getByText('Card on File')).toBeInTheDocument();
+    for (const label of ['Cash', 'Check', 'Manual Credit Card Entry', 'Card on File', 'Invoice']) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    expect(screen.queryByText('Cash or check: the office records it.')).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('hides the tender for a technician-role user (server would 403)', () => {
+  it('a technician takes cards only: no Cash, Check or Invoice, and the office line shows', async () => {
     stubLocalStorage({
       waves_admin_token: 'test-token',
       waves_admin_user: JSON.stringify({ id: 'u2', role: 'technician' }),
     });
+    const fetchMock = stubInvoiceRead({ id: 'inv-1', tech_card_on_file: false });
     renderSheet();
-    expect(screen.getByText('Cash')).toBeInTheDocument();
-    expect(screen.queryByText('Card on File')).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/admin\/invoices\/inv-1$/);
+    expect(screen.getByText('Tap to Pay on iPhone')).toBeInTheDocument();
+    expect(screen.getByText('Manual Credit Card Entry')).toBeInTheDocument();
+    for (const label of ['Cash', 'Check', 'Invoice', 'Card on File']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+    expect(screen.getByText('Cash or check: the office records it.')).toBeInTheDocument();
   });
 
-  it('fails closed when the stored profile is missing or corrupt', () => {
-    stubLocalStorage({ waves_admin_token: 'test-token' });
+  it('a technician sees Card on File when the server marks the invoice chargeable for it', async () => {
+    stubLocalStorage({
+      waves_admin_token: 'test-token',
+      waves_admin_user: JSON.stringify({ id: 'u2', role: 'technician' }),
+    });
+    stubInvoiceRead({ id: 'inv-1', tech_card_on_file: true });
     renderSheet();
+    expect(await screen.findByText('Card on File')).toBeInTheDocument();
+    expect(screen.queryByText('Cash')).not.toBeInTheDocument();
+  });
+
+  it('fails closed to the technician list when the stored profile is missing or corrupt', async () => {
+    stubLocalStorage({ waves_admin_token: 'test-token' });
+    const first = stubInvoiceRead({ id: 'inv-1' });
+    renderSheet();
+    await waitFor(() => expect(first).toHaveBeenCalled());
     expect(screen.queryByText('Card on File')).not.toBeInTheDocument();
+    expect(screen.queryByText('Cash')).not.toBeInTheDocument();
     cleanup();
 
     stubLocalStorage({
       waves_admin_token: 'test-token',
       waves_admin_user: 'not-json{',
     });
+    const second = stubInvoiceRead({ id: 'inv-1' });
     renderSheet();
-    expect(screen.getByText('Cash')).toBeInTheDocument();
+    await waitFor(() => expect(second).toHaveBeenCalled());
+    expect(screen.queryByText('Cash')).not.toBeInTheDocument();
     expect(screen.queryByText('Card on File')).not.toBeInTheDocument();
+    expect(screen.getByText('Manual Credit Card Entry')).toBeInTheDocument();
   });
 });
 
@@ -146,6 +187,7 @@ describe('MobilePaymentSheet Tap to Pay inside the Waves Admin app', () => {
       waves_admin_token: 'test-token',
       waves_admin_user: JSON.stringify({ id: 'u2', role: 'technician' }),
     });
+    stubInvoiceRead({ id: 'inv-1', tech_card_on_file: false });
     const onChargeSuccess = vi.fn();
     const onClose = vi.fn();
     render(

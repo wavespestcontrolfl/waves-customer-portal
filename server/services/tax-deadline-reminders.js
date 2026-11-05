@@ -34,6 +34,7 @@ const LINK = '/admin/tax?tab=filings';
 const STAGE_ORDER = ['d14', 'd3', 'd1', 'overdue'];
 const DONE_STATUSES = ['filed', 'paid'];
 const DAY_MS = 24 * 60 * 60 * 1000;
+const PAY_TYPES = new Set(['payroll_941_deposit', 'payroll_futa_alert', 'payroll_simple_deposit', 'payroll_simple_employer']);
 const FLORIDA_TYPES = new Set(['payroll_rt6', 'payroll_new_hire']);
 
 const isPayroll = (row) => String(row.source_key || '').startsWith('payroll:');
@@ -114,7 +115,7 @@ function whyFor(row, stage, today) {
 
 function verbFor(row, stage) {
   if (stage === 'd14' || stage === 'd3') return 'prepare';
-  if (row.filing_type === 'payroll_941_deposit' || row.filing_type === 'payroll_futa_alert') return 'pay';
+  if (PAY_TYPES.has(row.filing_type)) return 'pay';
   return row.filing_type === 'payroll_rt6' ? 'file and pay' : 'file';
 }
 

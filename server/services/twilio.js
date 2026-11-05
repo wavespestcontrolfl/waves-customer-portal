@@ -1010,6 +1010,7 @@ const TwilioService = {
         // IB send_sms / comms composer stamp adminUserId without the
         // operatorInitiated flag — admin attribution is operator provenance.
         adminAttributed: Boolean(options.adminUserId),
+        bundledReview: Boolean(options.bundledReviewRequestId),
       });
       // Companion push starts only after the locked Twilio leg is accepted.
       if (typeof options.withSmsHandoff === 'function' && pushRoute === 'push_first') {

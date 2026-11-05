@@ -14,7 +14,7 @@ const W2_CHECK_COLUMNS = [
   'employee_name', 'regular_minutes', 'overtime_minutes',
   'gross_cents', 'federal_income_tax_cents', 'social_security_cents', 'medicare_cents',
   'additional_medicare_cents', 'employer_social_security_cents', 'employer_medicare_cents',
-  'futa_cents', 'fl_reemployment_cents', 'net_cents',
+  'futa_cents', 'fl_reemployment_cents', 'net_cents', 'simple_deferral_cents',
 ];
 
 // Narrows a time_entry_daily_summary query (joined as `t` to technicians) to

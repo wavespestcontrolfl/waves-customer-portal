@@ -145,6 +145,20 @@ describe('w2PayrollToCSV', () => {
   });
 });
 
+describe('w2PayrollToCSV with SIMPLE IRA savings', () => {
+  test('a last column appears only when a check has savings: the savings are in gross and out of net, so net still foots', () => {
+    const saver = { ...CHECK, simple_deferral_cents: 5000, net_cents: 78000 };
+    const lines = csv.w2PayrollToCSV([saver, CHECK]).split('\n');
+    expect(lines[0].endsWith(',Net Pay,SIMPLE IRA Savings (not income tax wages)')).toBe(true);
+    expect(lines[1].endsWith(',780.00,50.00')).toBe(true);
+    expect(lines[2].endsWith(',833.00,0.00')).toBe(true);
+    expect(lines[3].endsWith(',1613.00,50.00')).toBe(true);
+    // No check with savings (null from the database or absent): the file is what it was.
+    expect(csv.w2PayrollToCSV([{ ...CHECK, simple_deferral_cents: null }]).split('\n')[0]).toBe(csv.w2PayrollToCSV([CHECK]).split('\n')[0]);
+    expect(csv.w2PayrollToCSV([{ ...CHECK, simple_deferral_cents: null }])).toBe(csv.w2PayrollToCSV([CHECK]));
+  });
+});
+
 describe('w2PayrollToCSV with paid time off (GATE_PAYROLL_TIME_OFF)', () => {
   const second = { ...CHECK, employee_name: 'Sample Second', week_start: '2026-09-21', pay_date: '2026-10-02', regular_minutes: '1200.00', overtime_minutes: '0.00' };
   const withOff = (check, pto, holiday) => ({ ...check, pto_minutes: pto, holiday_minutes: holiday });
