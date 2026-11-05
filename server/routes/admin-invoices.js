@@ -10,7 +10,7 @@ const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 const db = require('../models/db');
 const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
 const { undoManualPayment, describeManualPaymentUndo } = require('../services/invoice-manual-payment-undo');
-const { undoManualPaymentLive, partialPaymentsLive } = require('../config/feature-gates');
+const { undoManualPaymentLive, partialPaymentsLive, techCardOnFileLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -21,25 +21,29 @@ const { generateInvoiceSummary, generateThankYouMessage } = require('../services
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-const { technicianServicesCustomer, isTechnicianRequest } = require('../services/technician-visit-scope');
+const { technicianServicesCustomer, isTechnicianRequest, technicianCurrentVisitFilter, technicianMayChargeCardOnFile } = require('../services/technician-visit-scope');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-// 2026-08-25 role lockdown: the invoice workspace is owner-only, with ONE
-// staff exemption — the single-invoice GET (/:id exactly). The technician
+// 2026-08-25 role lockdown: the invoice workspace is owner-only, with two
+// staff exemptions. (1) The single-invoice GET (/:id exactly). The technician
 // tap-to-pay checkout on the Dispatch surface reads it after tender to
 // confirm settlement (PrepaySwitchSheet/AnnualPrepayLauncher); without it
-// the flow false-fails into recovery. Named GET siblings (/stats, list,
-// search, recipients, attachments, credit-context, followup) and every
-// mutation require the admin role.
-const SINGLE_INVOICE_GET_RE = /^\/[A-Za-z0-9-]+$/;
-const NAMED_INVOICE_GETS = new Set(['/stats', '/customers', '/payment-notices']);
-router.use((req, res, next) => (
-  req.method === 'GET'
-    && SINGLE_INVOICE_GET_RE.test(req.path)
-    && !NAMED_INVOICE_GETS.has(req.path)
-    ? next()
-    : requireAdmin(req, res, next)
-));
+// the flow false-fails into recovery. (2) Card on file at the visit
+// (charge-card-quote and charge-card), only while GATE_TECH_CARD_ON_FILE is
+// on; each handler pins a technician to its own visit today. Named GET
+// siblings (/stats, list, search, recipients, attachments, credit-context,
+// followup) and every other mutation require the admin role.
+// The id must be a UUID, in any letter case: Express matches routes without
+// regard to case, so a name test let "/Stats" reach GET /stats (technician
+// visibility audit H8, 2026-11-04).
+const INVOICE_ID_SEGMENT = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const SINGLE_INVOICE_GET_RE = new RegExp(`^/${INVOICE_ID_SEGMENT}$`, 'i');
+const CARD_ON_FILE_POST_RE = new RegExp(`^/${INVOICE_ID_SEGMENT}/(charge-card|charge-card-quote)$`, 'i');
+function staffInvoiceExemption(req) {
+  if (req.method === 'GET') return SINGLE_INVOICE_GET_RE.test(req.path);
+  return req.method === 'POST' && CARD_ON_FILE_POST_RE.test(req.path) && techCardOnFileLive();
+}
+router.use((req, res, next) => (staffInvoiceExemption(req) ? next() : requireAdmin(req, res, next)));
 
 const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 
@@ -921,17 +925,34 @@ router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// What a technician may read with GET /:id (technician visibility audit A10,
+// 2026-11-04): an invoice bound to one of its own current visits, or the
+// prepay invoice of an annual prepay term for a customer it serves (the
+// prepay switch mints that invoice with no visit link, then re-reads it after
+// tender). Not the customer's other invoices. Admins read any invoice.
+async function technicianMayReadInvoice(req, invoice) {
+  if (!isTechnicianRequest(req)) return true;
+  if (invoice.scheduled_service_id) {
+    const visit = await technicianCurrentVisitFilter(
+      req,
+      db('scheduled_services').where({ 'scheduled_services.id': invoice.scheduled_service_id, customer_id: invoice.customer_id }),
+    ).first('scheduled_services.id');
+    return !!visit;
+  }
+  const prepayTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id');
+  return !!prepayTerm && technicianServicesCustomer(req, invoice.customer_id);
+}
+
 // GET /:id — single invoice with full details. The router's GET exemption
 // above lets a technician token reach this handler for their own tap-to-pay
 // checkout (PrepaySwitchSheet / AnnualPrepayLauncher re-reading after
-// tender) — so a technician request must be scoped here to an invoice on a
-// customer they currently service, same predicate as
-// admin-customers.js's /:id/cards. Admin requests are unscoped (ADMIN-BUG-R05).
+// tender) — so a technician request is scoped here by
+// technicianMayReadInvoice. Admin requests are unscoped (ADMIN-BUG-R05).
 router.get('/:id', async (req, res, next) => {
   try {
     const invoice = await InvoiceService.getById(req.params.id);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
-    if (!(await technicianServicesCustomer(req, invoice.customer_id))) {
+    if (!(await technicianMayReadInvoice(req, invoice))) {
       return res.status(404).json({ error: 'Not found' });
     }
     // A technician is authorised per customer by an assignment at ONE
@@ -940,6 +961,9 @@ router.get('/:id', async (req, res, next) => {
     // like accountProperties on the technician Customer 360 payload.
     if (isTechnicianRequest(req)) {
       invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
+      // The visit payment sheet shows Card on File to a technician only when
+      // this invoice is one it may charge (GATE_TECH_CARD_ON_FILE).
+      invoice.tech_card_on_file = techCardOnFileLive() && await technicianMayChargeCardOnFile(req, invoice);
     }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
     // service, not the invoice title). Modal-only; safe to attach for all GETs.
@@ -2046,10 +2070,23 @@ router.post('/:id/schedule-send', requireAdmin, invoiceScheduleSendHandler);
 
 // POST /:id/charge-card-quote — exact saved-card amount, including the
 // funding-aware card fee and projected account credit. No money moves here.
+// Card on file at the visit (GATE_TECH_CARD_ON_FILE, owner 2026-11-04 D4 A):
+// the router admits a technician to the two card-on-file routes only while
+// the gate is on; here the invoice must be bound to the technician's own
+// visit today, On Site or completed. 404, so an invoice id seen elsewhere
+// confirms nothing. Admins pass.
+async function technicianCardOnFileInvoice(req) {
+  if (!isTechnicianRequest(req)) return { ok: true, invoice: null };
+  const invoice = await db('invoices').where({ id: req.params.id })
+    .first('id', 'customer_id', 'scheduled_service_id');
+  return { ok: !!invoice && techCardOnFileLive() && await technicianMayChargeCardOnFile(req, invoice), invoice };
+}
+
 router.post('/:id/charge-card-quote', async (req, res) => {
   try {
     const { paymentMethodId } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+    if (!(await technicianCardOnFileInvoice(req)).ok) return res.status(404).json({ error: 'Invoice not found' });
     const StripeService = require('../services/stripe');
     const quote = await StripeService.quoteInvoiceSavedCardCharge(req.params.id, paymentMethodId);
     return res.json({ quote });
@@ -2063,10 +2100,16 @@ router.post('/:id/charge-card-quote', async (req, res) => {
 // Body: { paymentMethodId } (our internal payment_methods.id).
 // The card must belong to the invoice customer. Succeeds by calling
 // Stripe off-session with confirm:true; webhook marks the invoice paid.
-router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
+router.post('/:id/charge-card', async (req, res, next) => {
   try {
     const { paymentMethodId, expectedTotal } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+    const techCharge = await technicianCardOnFileInvoice(req);
+    if (!techCharge.ok) return res.status(404).json({ error: 'Invoice not found' });
+    // A technician charges only the total it was quoted.
+    if (techCharge.invoice && (expectedTotal == null || expectedTotal === '')) {
+      return res.status(400).json({ error: 'expectedTotal required' });
+    }
 
     // Account credit is auto-applied INSIDE chargeInvoiceWithSavedCard — after it
     // validates the saved card + triages a stale PI, all in the same locked
@@ -2078,18 +2121,29 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     const result = await StripeService.chargeInvoiceWithSavedCard(
       req.params.id,
       paymentMethodId,
-      // Staff ordered this charge explicitly: exempt from the default
-      // collections dispute-hold guard (an operator may override a hold).
-      // The override is recorded at the charge boundary (stripe.js) when a
-      // dispute hold is active, naming this admin.
-      {
-        expectedTotal,
-        operatorOverride: true,
-        overrideTrail: {
-          actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
-          route: 'admin_invoice_charge_card', invoiceId: req.params.id,
+      techCharge.invoice
+        // A technician never overrides a collections hold or a stopped
+        // collection; the visit is judged again under the charge's own lock,
+        // and a payer-billed visit refuses there too.
+        ? {
+          expectedTotal,
+          refuseWhenDunningStopped: true,
+          requireSelfPayScheduledServiceId: techCharge.invoice.scheduled_service_id,
+          requireInvoiceScheduledServiceBinding: true,
+          requireTechnicianCardOnFileFor: { techRole: req.techRole, technicianId: req.technicianId },
+        }
+        // An admin ordered this charge explicitly: exempt from the default
+        // collections dispute-hold guard (an operator may override a hold).
+        // The override is recorded at the charge boundary (stripe.js) when a
+        // dispute hold is active, naming this admin.
+        : {
+          expectedTotal,
+          operatorOverride: true,
+          overrideTrail: {
+            actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
+            route: 'admin_invoice_charge_card', invoiceId: req.params.id,
+          },
         },
-      },
     );
     res.json({ success: true, ...result });
   } catch (err) {

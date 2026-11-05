@@ -131,4 +131,31 @@ function technicianVisitRowInScope(actor, row) {
     && dateOnly(row.scheduled_date) >= techAccessCutoff();
 }
 
-module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit };
+// Card on file at the visit (GATE_TECH_CARD_ON_FILE, owner 2026-11-04 D4 A): the visit an invoice is
+// bound to must be the technician's own, scheduled today (ET), and On Site or completed. Tighter than
+// the read window on purpose: a saved-card charge needs no customer at the door, so a past visit, or
+// one the technician has not reached yet, never qualifies. Judged on a row in hand; the charge judges
+// it again on the visit row it holds locked. Administrators are unscoped.
+const TECH_CARD_ON_FILE_STATUSES = ['on_site', 'completed'];
+function technicianCardOnFileVisitOk(actor, row) {
+  if (!isTechnicianRequest(actor)) return true;
+  const { dateOnly } = require('./visit-groups');
+  return !!row && !!actor.technicianId
+    && String(row.technician_id || '') === String(actor.technicianId)
+    && TECH_CARD_ON_FILE_STATUSES.includes(String(row.status || ''))
+    && dateOnly(row.scheduled_date) === etDateString();
+}
+
+// The unlocked check the card-on-file routes run first: the invoice is bound to a visit of its own
+// customer, and that visit passes technicianCardOnFileVisitOk.
+async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
+  if (!isTechnicianRequest(req)) return true;
+  if (!invoice?.scheduled_service_id) return false;
+  const database = conn || require('../models/db');
+  const row = await database('scheduled_services').where({ id: invoice.scheduled_service_id })
+    .first('customer_id', 'technician_id', 'status', 'scheduled_date');
+  return !!row && String(row.customer_id) === String(invoice.customer_id)
+    && technicianCardOnFileVisitOk(req, row);
+}
+
+module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile };

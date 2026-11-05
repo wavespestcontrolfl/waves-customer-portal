@@ -182,4 +182,45 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
     });
   });
+
+  // requireTechnicianCardOnFileFor (GATE_TECH_CARD_ON_FILE, owner 2026-11-04 D4 A): a technician's
+  // card-on-file charge re-judges the visit on the row the charge holds locked. A visit that moved to
+  // another technician, to another day, or that the technician has not reached refuses before Stripe.
+  describe('requireTechnicianCardOnFileFor', () => {
+    const { etDateString, addETDays } = jest.requireActual('../utils/datetime-et');
+    const tech = { techRole: 'technician', technicianId: 'tech-1' };
+    const visitToday = (fields = {}) => ({
+      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'on_site', scheduled_date: etDateString(), ...fields,
+    });
+    const guards = { requireSelfPayScheduledServiceId: 'svc-1', requireTechnicianCardOnFileFor: tech };
+
+    test.each([
+      ['the visit moved to another technician', visitToday({ technician_id: 'tech-2' })],
+      ['the visit is on another day', visitToday({ scheduled_date: etDateString(addETDays(new Date(), -1)) })],
+      ['the technician has not reached the visit', visitToday({ status: 'en_route' })],
+      ['the visit was cancelled', visitToday({ status: 'cancelled' })],
+    ])('%s: the charge refuses before Stripe', async (_label, visit) => {
+      const { StripeService, stripeClient } = load({ visit, contract: null });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', guards))
+        .rejects.toMatchObject({ code: 'TECH_VISIT_NOT_CHARGEABLE' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['On Site', visitToday()],
+      ['completed', visitToday({ status: 'completed' })],
+    ])('its own visit today, %s: the charge proceeds to Stripe', async (_label, visit) => {
+      const { StripeService, stripeClient } = load({ visit, contract: null });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', guards))
+        .rejects.not.toMatchObject({ code: 'TECH_VISIT_NOT_CHARGEABLE' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    test('the option without the visit lock is a caller error', async () => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireTechnicianCardOnFileFor: tech }))
+        .rejects.toThrow('requireTechnicianCardOnFileFor needs requireSelfPayScheduledServiceId.');
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+  });
 });

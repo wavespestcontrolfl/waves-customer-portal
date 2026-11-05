@@ -159,6 +159,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/inventory/waveguard-forecast` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/waveguard-forecast/:productId/restock-request` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/:id` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/invoices/:id/charge-card` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/invoices/:id/charge-card-quote` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/stats` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/kb` | admin-kb |
