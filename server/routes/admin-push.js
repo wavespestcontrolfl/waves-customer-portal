@@ -15,7 +15,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { listTriggers } = require('../services/notification-triggers');
+const { listTriggers, TRIGGER_REGISTRY } = require('../services/notification-triggers');
 const {
   OVERRIDABLE_CATEGORY_SET, DEFAULT_ON_CATEGORIES,
   clearOverrideCache,
@@ -276,10 +276,15 @@ router.get('/subscription-status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// A technician receives (and so can mute) only the alert types the registry
+// marks techVisible; the Push Settings page lists nothing else for a technician
+// login (owner 2026-11-04). An admin sees every type, as before.
+const techMayMute = (key) => TRIGGER_REGISTRY?.[key]?.techVisible === true;
+
 router.get('/preferences', async (req, res, next) => {
   try {
     const adminUserId = req.technicianId;
-    const triggers = listTriggers();
+    const triggers = req.techRole === 'admin' ? listTriggers() : listTriggers().filter((t) => techMayMute(t.key));
 
     const rows = await db('notification_preferences').where({ admin_user_id: adminUserId });
 
@@ -348,6 +353,8 @@ router.put('/preferences', async (req, res, next) => {
     let touchedCategoryKey = false;
     for (const u of updates) {
       if (!u.key) continue;
+      // A technician mutes only the types it can receive; any other key is skipped.
+      if (req.techRole !== 'admin' && !techMayMute(u.key)) continue;
       const isCategoryKey = typeof u.key === 'string' && u.key.startsWith('category:');
       // Category rows only carry bell_enabled (push/sound are meaningless
       // for the bell policy) — store the other flags as true so the

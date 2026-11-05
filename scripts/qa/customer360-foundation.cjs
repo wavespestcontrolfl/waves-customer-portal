@@ -236,6 +236,8 @@ const detail = {
             body = { timeline: [], missingSources: [] };
           else if (url.pathname.endsWith("/properties"))
             body = { properties: [] };
+          else if (url.pathname.endsWith("/multi-home-family"))
+            body = { familyId: null, members: [] };
           else if (url.pathname.endsWith("/unread-count"))
             body = { conversations: 0 };
           else if (url.pathname.endsWith("/feature-flags"))

@@ -638,6 +638,12 @@ export class ApiClient {
     });
   }
 
+  // GATE_PORTAL_EMAIL_RESUBSCRIBE: asks for ONE "Turn Waves emails back on?" email to the
+  // account holder's own address. Answers { state: 'sent' | 'not_paused' | 'failed', maskedEmail?, sentAt? }.
+  requestEmailResubscribe() {
+    return this.request('/notifications/email-resubscribe', { method: 'POST' });
+  }
+
   getPropertyNotificationPrefs() {
     return this.request('/notifications/property-preferences');
   }
@@ -671,6 +677,32 @@ export class ApiClient {
 
   getRequests(requestId) {
     return this.request(requestId ? `/requests?requestId=${encodeURIComponent(requestId)}` : '/requests');
+  }
+
+  // ---- Portal messages (dark behind a server gate; every route is 404 while off) ----
+  // `before` is an ISO time: the 50 messages sent before it ("Show earlier messages").
+  getPortalMessages(before) {
+    return this.request(before ? `/portal-messages?before=${encodeURIComponent(before)}` : '/portal-messages');
+  }
+
+  getPortalMessagesUnread() {
+    return this.request('/portal-messages/unread-count');
+  }
+
+  // requestId is made once per draft; a retry with it returns the same saved message.
+  sendPortalMessage(body, requestId) {
+    return this.request('/portal-messages', {
+      method: 'POST',
+      body: JSON.stringify({ body, requestId }),
+    });
+  }
+
+  // throughId = the newest Waves message the page actually showed.
+  markPortalMessagesRead(throughId) {
+    return this.request('/portal-messages/read', {
+      method: 'POST',
+      body: JSON.stringify({ throughId }),
+    });
   }
 
   // ---- Photo ID (GATE_CUSTOMER_PHOTO_ID) ----

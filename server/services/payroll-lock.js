@@ -4,7 +4,8 @@
  * entry writers (time-tracking.js) can share it without loading the pay run
  * code (and without any chance of a require cycle).
  *
- * Exclusive: finalize and void of a pay run, and every payroll time-off write.
+ * Exclusive: finalize and void of a pay run, every payroll time-off write and every SIMPLE IRA
+ * election write (payroll-simple.js: finalize reads the election and freezes the checks).
  * Shared: a time entry edit or void (assertEntryMutable), so a finalize cannot
  * interleave with an entry moving into the week it pays, while entry edits do
  * not block each other. Same idiom as payment-method-lock.js:

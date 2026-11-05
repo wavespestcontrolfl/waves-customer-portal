@@ -1205,6 +1205,27 @@ rounds a year and a customer move stays inside the round the visit sits in:
     and the call reschedule apply use the same rule; the office "Reschedule
     series" action (`scope: 'series'`) always re-anchors.
 
+Public self-serve reschedule keeps the visit's technician (owner 2026-10-25,
+"each visit stays with its own technician"; no gate). Its one picker
+(`buildAvailabilityForService`, behind the GET slot list, `POST
+/:token/find-slots`, the commit's anti-forgery rebuild and the texting AI's
+offers) asks `buildBookingAvailability` for the visit's own technician's days
+only (`technicianId`, find-time's own filter) while that technician can take
+work (`technician-eligibility isAssignable`: employment active and field
+dispatchable). So `days[].slots` and `slots` name that technician only, and
+`POST /:token` (which sends a date and start, never a technician) saves the
+technician of the rebuilt slot, so it can only keep the visit's own; a start that
+technician no longer has answers the existing `409 SLOT_TAKEN`. Both movers' guard
+then re-reads the visit's technician on the locked row (missed visits too): a staff
+reassignment since the request's read answers `409 { error: "Cannot reschedule —
+appointment changed concurrently", code: 'SLOT_TAKEN' }` (the rebooker's own
+concurrent-change answer) and writes nothing. A visit with no technician, or whose
+technician can no longer take work, passes the visit's service line instead
+(`serviceLines`, `line-technician liveServiceLine`: catalog row first; a Waves
+Assessment has none), which ranks only while `GATE_SERVICE_LINE_MAP=live`
+(home technician first, then the gap technician, territory included). With one
+assignable technician every response is unchanged.
+
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
 SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
@@ -7174,6 +7195,18 @@ move-pause job (not a route) closes a paused move with still no address 60
 days after its move-out date (`closed_reason` `pause_expired`); from then on
 its token is the generic 404, like any closed move. Gate off: the plain
 no-address sentence, and no move closes this way.
+Old-house stop (owner 2026-11-04, "YES app cancel those old-house visits"):
+while `GATE_MOVING_STOP_AT_MOVE_OUT` is also on (strict `'true'`, read per
+request, needs `GATE_MOVING_PAUSE`), a submit with a checked address on file
+and a move-out date reads the same lane. A customer billed per visit in the
+service area (or with an address we could not confirm) reads "Your plan at
+the new home starts when you approve it. We cancel the visits booked at your
+old home after <move-out date>." in place of "Nothing changes until you
+approve it."; the could-not-confirm sentence still follows. Everyone else, an
+out-of-area address, and a submit with no move-out date read the sentences
+from before. The move job (not a route) never closes such a move: its link
+keeps opening until the move is applied or closed some other way. Gate off:
+the receipt is unchanged.
 New-home estimates on the estimate routes (moving PR B1, owner 2026-11-02):
 `/estimate/:token` and its data, accept and decline routes,
 `/api/public/estimates/:token/find-slots`, `/available-slots`, `/reserve`,
@@ -8712,3 +8745,4 @@ Pre-treat certificate Bora-Care record (owner 2026-10-24, no gate): the certific
 Lawn protocol card, December potassium bag (GATE_LAWN_DEC_LARGE_PATCH_K, dark, owner 2026-10-23): the `/api/reports/:token/data` lawn payload (and the PDF and report-email renders that share `buildReportV1Data`) carries `dynamicContext.lawnProtocol.products`, the products of the visit's protocol window. The staged December row for LESCO Black Out 0-0-24 AM Spar-TECH (a non-default row that exists for every v13 window) is listed in it ONLY when all of these hold: the swap gate is live (strict `true`, read at call time; it also needs `GATE_LAWN_TROUBLE_AREAS` and its prerequisites, and `GATE_LAWN_SPOT_TARGET`), AND the visit's `service_products` shows that product was applied on this record. With the gate off, with any prerequisite gate off, for a lawn whose visit did not apply it, or when the `service_products` read fails (the read fails closed: the row is dropped), the payload lists exactly the products it listed before the row existed (byte-identical). The row is identified by its stored trigger (`gates.trigger = active_large_patch_mapped`) or name, never by free text. No new key, route, token, privacy or rate-limit surface; every other product, and a window with no such row, is returned untouched. The same row is also left out of the technician pre-visit brief unless the gate is live (a technician surface, not public).
 
 Misting system card (GATE_MOSQUITO_MISTING, dark, owner 2026-10-30): `GET /api/misting-system` feeds the small card on the app's Home tab for a customer with an automatic mosquito misting system. It is behind the customer JWT (`authenticate`), not public, and it is listed here because it is a new customer-facing read. With the gate off (read at call time via `mosquitoMistingLive()`) the answer is `{ system: null }` and nothing is read from the database. A household-contact login (`req.contactSession`) also gets `{ system: null }` with no read: v1 shows the card to the account holder only. Otherwise the answer is `{ propertyScope, system }`. `propertyScope` is the resolved saved-property scope, echoed like `/api/schedule/next` so Home drops a card served under another house than it shows. `system` is `null` when the selected house has no current calibration or no upcoming misting service-plan visit (a cancelled plan has none, so the card disappears by itself); otherwise it is `{ installedOn, lastRefillOn, nextCheckOn, nextMistAt, mistTimes }`: `installedOn`, `lastRefillOn` (or `null`) and `nextCheckOn` are ET calendar dates (`YYYY-MM-DD`), `nextMistAt` is an ISO instant built from the calibration's ET wall-clock mist times (later today, else the first time tomorrow), and `mistTimes` is the stored sorted list of `HH:MM` strings. `nextCheckOn` is the next plan visit (catalog key `mosquito_misting_service`, never the service label) under the same rules as `/api/schedule/next`: pending or confirmed, today or later, the same saved-property predicate, and no unreviewed dispatch-owned follow-up. The payload holds no ids, no product or chemistry data, no prices and no staff names. No new token, public surface, write or rate-limit change.
+`/api/public/email-resubscribe/:token` (GET, and `POST /:token`; the "Turn Waves emails back on?" page an account holder reaches from the email the app's **Turn emails back on** button sends to their own address on file). Dark behind `GATE_PORTAL_EMAIL_RESUBSCRIBE` (strict `'true'`, read per request): off, both routes answer the same 404 "Link expired." page as an unknown token. The privacy headers and that gate check run in `preParserGuard`, which `server/index.js` mounts BEFORE the global `/api/` limiter and the body parsers (the router runs it again), so a dark route never answers a 429 or a parser 400, and every answer, those included, carries the privacy headers. The token is 32 random bytes as base64url (43 characters, `^[A-Za-z0-9_-]{43}$`, checked before any query) and only its sha256 is stored (`email_resubscribe_requests.token_hash`); the token exists only in the emailed link and the request log redacts it (40+ base64url characters). A malformed, unknown, never-sent or expired (7 days) token is the same 404 page ("This link has expired or was already used."). Privacy headers (`Cache-Control: no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`) on every answer. Router limit 20 req/min per IP. **GET is read-only** (mail scanners fetch every link; a test asserts no insert or update): an open link whose address still has a customer unsubscribe renders the address (HTML-escaped) and a POST form button; a used link, or an address with nothing left to release, renders "You're all set."; nothing is written. **POST is the state change.** It re-validates the token, then in one transaction takes the request row `FOR UPDATE` (a concurrent or late second POST waits, then finds `used_at` set and answers "You're all set." with no SendGrid call and no release; a request that expired meanwhile is the expired page), takes the address lock and re-checks hard blocks (a bounce, spam complaint or do-not-email on the address, added after the link was issued, means no SendGrid call, no release, the request invalidated with `outcome {refused:'hard_block'}`, and the generic 404 expired page / JSON `expired`; GET renders that same expired page and never the button), then clears SendGrid's own unsubscribe list for the address's releasable rows FIRST while holding both locks (request row, then address key) (8 s bound; 2xx or 404 counts as cleared; error codes only are logged), then in one transaction under the per-address email lock releases only the rows SendGrid confirmed (row version `xmin` unchanged since the pre-read; consent source `email_confirm_link`) and marks the request `used_at` only when no releasable row is left. A failed clear or a row that changed leaves the link usable and answers 503 "We couldn't finish that." Responses: an HTML page for a form submit, JSON `{ success, state }` (`done` | `already` | `retry` | `expired`) otherwise. Releasable rows are active, customer-made `unsubscribe` rows only (global or `service_operational`; never newsletter, bounce, spam complaint, do-not-email or staff-made rows). The payload shows only the address the holder already owns; it never reveals why an address is blocked. The page and the email are the only customer-visible surface, and sending the email is a customer click in the app (`POST /api/notifications/email-resubscribe`, customer JWT, holder sessions only, at most one email per address per 24 hours: a still-usable link answers `sent`, a used or expired one answers `wait` with `nextAt`; 6 requests per 10 minutes per customer), not a staff or cron send.

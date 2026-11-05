@@ -72,6 +72,7 @@ import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
+import TechMyHoursCard from '../../components/tech/TechMyHoursCard';
 import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
 import TechTruckCheckCard from '../../components/tech/TechTruckCheckCard';
 import useTruckKit from '../../components/tech/useTruckKit';
@@ -100,6 +101,19 @@ import { recordlessVisitNeedsCloseout, shortAddress } from './visitBrief';
 const ProjectDetail = lazy(() =>
   import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
 );
+
+// The visit job card (product checks, mix amounts, label limits, Order more)
+// is the Schedule's ProtocolPanel, opened here from the Today visit (owner
+// 2026-11-04). It reads the same technician-scoped job-card route. Lazy so the
+// Schedule page stays out of the Today bundle until first use.
+const ProtocolPanel = lazy(() =>
+  import('../admin/SchedulePage').then((m) => ({ default: m.ProtocolPanel })),
+);
+
+function JobCardOverlay({ service, onClose }) {
+  if (!service) return null;
+  return <Suspense fallback={null}><ProtocolPanel service={service} onClose={onClose} /></Suspense>;
+}
 
 // The Waves Admin field palette (tech-field.css values) for the inline-styled
 // timecard card, Quick Move sheet and project picker below.
@@ -386,6 +400,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
+  const [jobCardService, setJobCardService] = useState(null); // service object → job card open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   const [handoffs, setHandoffs] = useState([]); // stops handed to the customer to pick a day
   // The banner-clear timers (en route, on site, rain-out). Cleared on unmount,
@@ -906,7 +921,7 @@ export default function TechHomePage({ section = 'today' }) {
           handoffCards={handoffs.length > 0 ? <HandoffCards cards={handoffs} onDismiss={(id) => setHandoffs((prev) => prev.filter((h) => h.id !== id))} /> : null}
           scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
           heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
-          timeClock={<TechTimeTrackingCard nextStop={fieldNextStop?.primary} />}
+          timeClock={<><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TechMyHoursCard /></>}
           truckCheck={<TechTruckCheckCard kit={truckKit.data} base={base} visitSearch={visitSearch} />}
           toolGaps={toolGapsOf(truckKit.data)}
           onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
@@ -915,6 +930,7 @@ export default function TechHomePage({ section = 'today' }) {
             <div className="tf-existing"><TechIntelligenceBar /></div>
             {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/documents${visitSearch}`}>Staff documents</Link></div>}
             {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
+            <AlertSettings />
           </>}
           visit={selectedVisitKey && section === 'today' ? (
             <TechFieldVisit
@@ -923,6 +939,7 @@ export default function TechHomePage({ section = 'today' }) {
               enRouteState={enRouteState} onSiteState={onSiteState}
               onEnRoute={handleEnRoute} onSite={handleOnSite} onSync={handleSyncStop}
               onMove={setRainOutService}
+              onJobCard={setJobCardService}
             >
               {selectedVisit && <div className="tf-existing"><VisitBriefPanel
                 stop={selectedVisit} detail={stopDetail[selectedVisit.primary.id]}
@@ -1304,6 +1321,8 @@ export default function TechHomePage({ section = 'today' }) {
         />
       )}
 
+      <JobCardOverlay service={jobCardService} onClose={() => setJobCardService(null)} />
+
       {rainOutService && (
         <RainOutSheet
           service={rainOutService}
@@ -1418,6 +1437,25 @@ function ProjectServicePicker({ services, recoveryServiceIds, onClose, onSelect 
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// Alert settings on More (owner 2026-11-04): the Push Settings page, which for a
+// technician login lists only the alert types a technician can receive and
+// saves a mute per type. The bell's "Notification settings" link lands here
+// (#notifications). Lazy and closed until opened, so nothing is read before.
+const PushSettingsV2 = lazy(() => import('../../components/admin/PushSettingsV2'));
+function AlertSettings() {
+  const [open, setOpen] = useState(() => typeof window !== 'undefined' && window.location.hash === '#notifications');
+  return (
+    <div id="alert-settings">
+      <div className="tf-actions">
+        <button type="button" className="tf-button" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+          {open ? 'Hide alert settings' : 'Alert settings'}
+        </button>
+      </div>
+      {open && <div className="tf-existing"><Suspense fallback={<p role="status">Loading alert settings…</p>}><PushSettingsV2 /></Suspense></div>}
     </div>
   );
 }

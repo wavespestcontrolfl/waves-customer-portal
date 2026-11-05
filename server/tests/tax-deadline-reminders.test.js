@@ -132,6 +132,8 @@ describe('specFor', () => {
     ['rt6 d1', rt6(), 'd1', '2027-01-29'],
     ['rt6 overdue one day', rt6(), 'overdue', '2027-02-02'],
     ['941 d1 before a weekend gap', { ...deposit({ source_key: 'payroll:941:2026-Q4', filing_type: 'payroll_941', title: 'Form 941 — Q4 2026', due_date: '2027-02-16', amount_due: null }) }, 'd1', '2027-02-12'],
+    ['simple deposit d1', { ...deposit({ source_key: 'payroll:simple_deposit:2027-01', filing_type: 'payroll_simple_deposit', title: 'SIMPLE IRA savings to Schwab — Jan 2027', due_date: '2027-03-02', amount_due: '120.00' }) }, 'd1', '2027-03-01'],
+    ['simple employer d1', { ...deposit({ source_key: 'payroll:simple_employer:2027', filing_type: 'payroll_simple_employer', title: 'SIMPLE IRA 2% from Waves — Tax Year 2027', due_date: '2028-04-17', amount_due: '1840.00' }) }, 'd1', '2028-04-14'],
     ['sales tax d14', salesTax(), 'd14', '2026-12-10'],
     ['long title', salesTax({ title: 'Federal Tax Return (Schedule C) — Tax Year 2025 with a very long suffix' }), 'd14', '2026-12-10'],
   ];
@@ -142,6 +144,12 @@ describe('specFor', () => {
     expect(composed.headline.length).toBeLessThanOrEqual(60);
     expect(composed.link).toBe('/admin/tax?tab=filings');
     expect(composed.metadata).toMatchObject({ severity: 'needs-you', who: 'person', doneWhen: 'filing_marked_done', area: 'Billing' });
+  });
+
+  test('SIMPLE IRA rows say pay on the last day, like a deposit', () => {
+    const row = deposit({ source_key: 'payroll:simple_deposit:2027-01', filing_type: 'payroll_simple_deposit', title: 'SIMPLE IRA savings to Schwab — Jan 2027', due_date: '2027-03-02' });
+    expect(specFor(row, 'd1', '2027-03-01').action).toMatch(/^[Pp]ay /);
+    expect(specFor(row, 'd14', '2027-02-16').action).toMatch(/^[Pp]repare /);
   });
 
   test('d1 wording by row type', () => {

@@ -71,7 +71,7 @@ afterEach(() => {
 });
 
 describe('NotificationBell panel', () => {
-  it('links admin-role staff to the notification settings tab, and never technicians or customers', async () => {
+  it('links admin-role staff to the notification settings tab, technicians to their own list, and never customers', async () => {
     const staffToken = (role) => `h.${btoa(JSON.stringify({ role })).replace(/=+$/, '')}.s`;
     try {
       localStorage.setItem('waves_admin_token', staffToken('admin'));
@@ -87,8 +87,9 @@ describe('NotificationBell panel', () => {
       localStorage.setItem('waves_admin_token', staffToken('technician'));
       render(<NotificationBell type="admin" />);
       fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
-      await screen.findByRole('dialog');
-      expect(screen.queryByRole('link', { name: /notification settings/i })).toBeNull();
+      // That tab is hidden from technicians; their own list (only the alert
+      // types they can receive) is on Today, More (owner 2026-11-04).
+      expect(await screen.findByRole('link', { name: /notification settings/i })).toHaveAttribute('href', '/admin/today/more#notifications');
       cleanup();
       render(<NotificationBell type="customer" customerId="cust-1" />);
       fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
