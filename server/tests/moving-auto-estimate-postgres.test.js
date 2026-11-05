@@ -171,6 +171,10 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     expect(data.move).toMatchObject({ moveId: s.move.id, estimateId: estimate.id });
     expect(data.operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true });
     expect(data.engineInputs).toMatchObject({ homeSqFt: 1850, services: { pest: { frequency: 'monthly' } } });
+    // A reopen in the estimator shows the facts it was priced on, in the form's own keys.
+    expect(data.inputs).toMatchObject({
+      customerId, address: NEW_ADDRESS, propertyType: 'Single Family', homeSqFt: '1850', lotSqFt: '9200', stories: '1', svcPest: true, pestFreq: '12',
+    });
     expect(data.automation.moveAutoEstimate).toMatchObject({ moveId: s.move.id, sourceEstimateId: s.sourceId, cadence: 'monthly', currentVisitPrice: price, homeSqFt: 1850, lotSqFt: 9200 });
     expect(Number(estimate.annual_total)).toBeCloseTo(price * 12, 0);
     expect(officeItems()).toHaveLength(0);
@@ -231,6 +235,29 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     expect(facts.code).toBeUndefined();
     expect(facts).toMatchObject({ cadence: { frequency: 'monthly', visits: 12 }, currentPrice: 50 });
     expect(facts.pest).toMatchObject({ frequency: 'monthly' });
+  });
+
+  test('a pest plan kept at another house makes two plans, so the office prices the move', async () => {
+    const s = await seed();
+    const [{ id: otherHouseId }] = await trx('customer_properties').insert({
+      customer_id: customerId, is_primary: false, active: true, address_line1: '9 Other Lane', city: 'Sarasota', state: 'FL', zip: '34232',
+    }).returning('id');
+    await trx('scheduled_services').insert({
+      customer_id: customerId, status: 'pending', service_type: 'Quarterly Pest Control Service', scheduled_date: day(5),
+      is_recurring: true, recurring_pattern: 'quarterly', recurring_ongoing: true, property_id: otherHouseId, estimated_price: 120,
+    });
+    expect(await Auto._private.freeChecks(s.move)).toEqual({ code: 'not_pest_only' });
+    // Also after the old-house stop: the stopped plan and the kept one are still two.
+    await trx('scheduled_services').where({ id: s.root }).update({ recurring_ongoing: false });
+    const child = (await trx('scheduled_services').insert({
+      customer_id: customerId, status: 'cancelled', service_type: 'Monthly Pest Control Service', scheduled_date: day(30),
+      recurring_parent_id: s.root, recurring_pattern: 'monthly', property_id: oldHouseId,
+    }).returning('id'))[0].id;
+    await trx('job_status_history').insert({
+      job_id: child, from_status: 'pending', to_status: 'cancelled', transitioned_at: new Date(),
+      notes: `Customer moved out; plan stopped after the move-out date (moving flow, move pause ${s.move.id})`,
+    });
+    expect(await Auto._private.freeChecks(s.move)).toEqual({ code: 'not_pest_only' });
   });
 
   test('a new address after a finished attempt clears it, so the new address gets its own; the same address does not', async () => {

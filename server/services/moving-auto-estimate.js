@@ -79,11 +79,13 @@ function hadDiscount(inputs) {
     || (Array.isArray(inputs.serviceSpecificDiscountKeys) && inputs.serviceSpecificDiscountKeys.length > 0);
 }
 
-// The pest plan the move takes along, with its root row: the live series, or,
-// once the old-house stop ran, the series it stopped for this move (found by
-// the stop's visit note). Each root reads as its current template (a scoped
-// service or price edit lives in recurring_template_overrides, the completed
-// root stays historical). Null unless it is exactly one pest plan.
+// The pest plan the move takes along, with its root row. The account's live
+// series and the series the old-house stop stopped for this move (found by
+// the stop's visit note) are read together, so a plan kept at another house
+// makes two and the office prices the move. Each root reads as its current
+// template (a scoped service or price edit lives in
+// recurring_template_overrides; the completed root stays historical). Null
+// unless the account has exactly one such plan, and it is a pest plan.
 async function movingPestPlan(move) {
   const Moves = require('./customer-moves');
   const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
@@ -91,44 +93,38 @@ async function movingPestPlan(move) {
   const columns = ['id', 'service_type', 'recurring_pattern', 'estimated_price', 'is_callback',
     ...(cols.recurring_template_overrides ? ['recurring_template_overrides'] : [])];
   const notCallback = function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); };
-  let roots = await db('scheduled_services')
+  const live = await db('scheduled_services')
     .where({ customer_id: move.customer_id, recurring_ongoing: true })
     .whereNull('recurring_parent_id')
     .where(notCallback)
     .whereNotNull('service_type')
     .select(columns);
-  if (!roots.length) {
-    const stopped = db('job_status_history')
-      .where({ to_status: 'cancelled' })
-      .whereIn('notes', Moves._private.moveJobVisitNotes(move.id))
-      .select('job_id');
-    const cancelled = await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', stopped)
-      .select(db.raw('COALESCE(recurring_parent_id, id) AS root_id'));
-    const rootIds = [...new Set(cancelled.map((r) => String(r.root_id)))];
-    roots = rootIds.length
-      ? await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', rootIds).where(notCallback).select(columns)
-      : [];
-  }
-  const current = roots.map((root) => overlayRecurringTemplateOverrides(root, cols)).filter((root) => root.is_callback !== true);
+  const stopped = db('job_status_history')
+    .where({ to_status: 'cancelled' })
+    .whereIn('notes', Moves._private.moveJobVisitNotes(move.id))
+    .select('job_id');
+  const cancelled = await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', stopped)
+    .select(db.raw('COALESCE(recurring_parent_id, id) AS root_id'));
+  const liveIds = new Set(live.map((r) => String(r.id)));
+  const stoppedIds = [...new Set(cancelled.map((r) => String(r.root_id)))].filter((id) => !liveIds.has(id));
+  const stoppedRoots = stoppedIds.length
+    ? await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', stoppedIds).where(notCallback).select(columns)
+    : [];
+  const current = [...live, ...stoppedRoots].map((root) => overlayRecurringTemplateOverrides(root, cols)).filter((root) => root.is_callback !== true);
   if (current.length !== 1) return null;
   const [root] = current;
   const name = String(root.service_type || '');
   return PEST_PLAN.test(name) && !NOT_PEST_PLAN.test(name) ? root : null;
 }
 
-// The old estimate's pest settings (roach type and the rest), with the visit
-// schedule set to the live plan's: the services half of what the office's
-// estimator would send for the same customer.
-function pestServiceFrom(sourceData, cadence) {
-  const request = sourceData && sourceData.engineRequest;
-  const visits = String(cadence.visits);
-  if (request && request.profile && typeof request.profile === 'object') {
-    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
-    const v1 = translateV2CallToV1Input(request.profile, ['PEST'], { ...(request.options || {}), pestFreq: visits });
-    if (v1 && v1.services && v1.services.pest) return { ...v1.services.pest, frequency: cadence.frequency };
-  }
-  const saved = sourceData && sourceData.engineInputs && sourceData.engineInputs.services && sourceData.engineInputs.services.pest;
-  return saved ? { ...saved, frequency: cadence.frequency } : null;
+// The pest service the office's estimate starts from: the builder's defaults
+// with the live plan's visit schedule. The office prefill (client
+// moveEstimateForm.js) copies only the schedule; the roach condition and every
+// other setting describe the old house, so they start fresh here too.
+function pestServiceFor(cadence) {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const v1 = translateV2CallToV1Input({}, ['PEST'], { pestFreq: String(cadence.visits) });
+  return v1 && v1.services && v1.services.pest ? { ...v1.services.pest, frequency: cadence.frequency } : null;
 }
 
 // One ringing office item and the move's 'office' state, together, once.
@@ -210,9 +206,8 @@ async function freeChecks(move) {
   if (!cadence) return { code: 'cadence' };
   const currentPrice = Number(plan.estimated_price);
   if (!(currentPrice > 0)) return { code: 'no_price' };
-  const sourceRow = await db('estimates').where({ id: source.source.estimateId }).first('estimate_data');
-  const pest = pestServiceFrom(parseJson(sourceRow && sourceRow.estimate_data), cadence);
-  if (!pest) return { code: 'no_source' };
+  const pest = pestServiceFor(cadence);
+  if (!pest) return { code: 'engine' };
   const { _private: { wholeHomeAddress } } = require('./lead-draft-measurements');
   if (!wholeHomeAddress(source.move.address)) return { code: 'unit' };
   return { source, cadence, currentPrice, pest };
@@ -222,6 +217,9 @@ async function freeChecks(move) {
 // the move (its stamp and $99 waiver come from the save), and the engine input.
 function estimateBody(move, facts, engineInputs, measured) {
   const { source, cadence, currentPrice } = facts;
+  // The estimator form's own keys (EstimateToolViewV2 buildDefaultEstimateForm),
+  // so a reopened draft shows the facts it was priced on.
+  const stories = Number(engineInputs.stories) > 0 ? String(engineInputs.stories) : '1';
   return {
     customerId: move.customer_id,
     address: source.move.address,
@@ -234,7 +232,16 @@ function estimateBody(move, facts, engineInputs, measured) {
     estimateData: {
       engineInputs,
       // What the estimator reopens with if the office edits it.
-      inputs: { customerId: move.customer_id, address: source.move.address, svcPest: true, pestFreq: String(cadence.visits) },
+      inputs: {
+        customerId: move.customer_id,
+        address: source.move.address,
+        propertyType: 'Single Family',
+        homeSqFt: String(measured.homeSqFt),
+        lotSqFt: String(measured.lotSqFt),
+        stories,
+        svcPest: true,
+        pestFreq: String(cadence.visits),
+      },
       automation: {
         moveAutoEstimate: {
           moveId: move.id,
@@ -384,4 +391,4 @@ async function runMoveAutoEstimateJob({ now = new Date() } = {}) {
   return out;
 }
 
-module.exports = { runMoveAutoEstimateJob, _private: { hadDiscount, pestServiceFrom, movingPestPlan, freeChecks, NOTES } };
+module.exports = { runMoveAutoEstimateJob, _private: { hadDiscount, pestServiceFor, movingPestPlan, freeChecks, NOTES } };
