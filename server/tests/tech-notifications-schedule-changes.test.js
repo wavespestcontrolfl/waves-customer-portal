@@ -35,6 +35,12 @@ function stubDb(results) {
           const on = { on: jest.fn((...o) => { calls.on = o; return on; }) };
           args[1].call(on);
         }
+        // A grouped where (dismiss-batch): record its whereIn / orWhereIn.
+        if (m === 'where' && typeof args[0] === 'function') {
+          const group = {};
+          for (const g of ['whereIn', 'orWhereIn']) group[g] = jest.fn((...a) => { (calls[`group_${g}`] ||= []).push(a); return group; });
+          args[0].call(group);
+        }
         return chain;
       });
     }
@@ -69,13 +75,21 @@ describe('GET /schedule-changes', () => {
       // Joined on the uuid primary key, the payload id pattern-checked first.
       expect(q.on[0]).toBe('s.id');
       expect(q.on[2].sql).toMatch(/CASE WHEN n\.payload->>'visit_id' ~\* '.+' THEN \(n\.payload->>'visit_id'\)::uuid END/);
+      // Every read (and so the count) leaves out the cards the feeds hide,
+      // judged on the read's ET day (the real rules: the Postgres suite).
+      expect(q.whereRaw[0][0]).toMatch(/^NOT \(n\.type IN \(/);
+      expect(q.whereRaw[0][1]).toEqual([today, today]);
     }
-    expect(soonQ.whereRaw[0][0]).toMatch(/^COALESCE\(/);
+    expect(soonQ.whereRaw[1][0]).toMatch(/^COALESCE\(/);
     // An old assignment card that never recorded the slot it left stays its own card.
-    expect(soonQ.whereRaw[0][0]).toContain("n.payload->>'prior_day_unknown' = 'true'");
-    expect(soonQ.whereRaw[0][1]).toEqual([today, tomorrow, today, tomorrow, today, tomorrow]);
-    expect(laterQ.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);
-    expect(countQ.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);
+    expect(soonQ.whereRaw[1][0]).toContain("n.payload->>'prior_day_unknown' = 'true'");
+    // The visit's day as it is now counts too, not only the card's own days.
+    expect(soonQ.whereRaw[1][0]).toContain("OR to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)");
+    expect(soonQ.whereRaw[1][1]).toEqual([today, tomorrow, today, tomorrow, today, tomorrow]);
+    expect(laterQ.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
+    expect(countQ.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
+    // Soon cards in visit order: today's stops lead tomorrow's.
+    expect(soonQ.orderByRaw[0][0]).toBe('s.scheduled_date ASC NULLS LAST, s.window_start ASC NULLS LAST');
     expect(soonQ.limit[0]).toEqual([300]);
     expect(laterQ.limit[0]).toEqual([300]);
 
@@ -86,17 +100,27 @@ describe('GET /schedule-changes', () => {
 });
 
 describe('POST /dismiss-batch', () => {
-  test('clears every open non-soon card of this tech written by as_of, in one update', async () => {
+  test('clears every open non-soon card of this tech written by as_of, with the older cards of the same visits, in one update', async () => {
     const chains = stubDb([37]);
     const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
-    await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: '2026-10-03T10:00:00.000Z' } }, res, (e) => { throw e; });
+    const asOf = new Date('2026-10-03T10:00:00.000Z');
+    await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: asOf.toISOString() } }, res, (e) => { throw e; });
 
-    const [scope, update] = chains;
-    expect(scope.where).toEqual([['n.technician_id', 't-1'], ['n.created_at', '<=', new Date('2026-10-03T10:00:00.000Z')]]);
-    expect(scope.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);
-    expect(scope.select[0]).toEqual(['n.id']);
+    const [update, shownIds, shownVisits] = chains;
     expect(update.table).toBe('tech_notifications');
+    expect(update.where.slice(0, 2)).toEqual([['technician_id', 't-1'], ['created_at', '<=', asOf]]);
+    expect(update.whereIn[0]).toEqual(['type', ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']]);
     expect(update.whereNull[0]).toEqual(['dismissed_at']);
+    // The cards the read showed, or any open card of one of their visits.
+    expect(update.group_whereIn[0][0]).toBe('id');
+    expect(update.group_orWhereIn[0][0].sql).toBe("payload->>'visit_id'");
+    for (const shown of [shownIds, shownVisits]) {
+      expect(shown.where).toEqual([['n.technician_id', 't-1'], ['n.created_at', '<=', asOf]]);
+      expect(shown.whereRaw[0][0]).toMatch(/^NOT \(n\.type IN \(/);
+      expect(shown.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
+    }
+    expect(shownIds.select[0]).toEqual(['n.id']);
+    expect(shownVisits.select[0][0].sql).toBe("n.payload->>'visit_id'");
     expect(update.update).toMatchObject({ read: true, dismissed_at: expect.any(Date) });
     expect(res.json).toHaveBeenCalledWith({ success: true, dismissed: 37 });
   });
@@ -106,7 +130,9 @@ describe('POST /dismiss-batch', () => {
     const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
     // 11:59 PM ET Oct 3 read; the tap lands after midnight.
     await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: '2026-10-04T03:59:00.000Z' } }, res, (e) => { throw e; });
-    expect(chains[0].whereRaw[0][1]).toEqual(['2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04']);
+    // The hide rules judge "past" on the read's day too.
+    expect(chains[1].whereRaw[0][1]).toEqual(['2026-10-03', '2026-10-03']);
+    expect(chains[1].whereRaw[1][1]).toEqual(['2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04']);
   });
 
   test.each([

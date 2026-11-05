@@ -509,6 +509,7 @@ function VisitCard({ n, onDismiss }) {
   const lines = [];
   if (n.type === 'visit_rescheduled') {
     if (p.service_type) lines.push(p.service_type);
+    if (p.address) lines.push(p.address);
     if (p.previous_when) lines.push({ text: `Was ${p.previous_when}`, struck: true });
     if (p.when) lines.push(`Now ${p.when}`);
   } else {
@@ -517,9 +518,13 @@ function VisitCard({ n, onDismiss }) {
     // `ended`: the visit finished (cancelled / completed …) before this card landed — name that, not a holder.
     if (n.type === 'visit_unassigned') lines.push(p.ended ? `Now ${p.ended}` : (p.now_with ? `Now with ${p.now_with}` : 'Now unassigned'));
   }
-  if (p.actor) {
+  // The server reads the card against its visit as it is now
+  // (tech-visit-notifications.js refreshVisitCards): how a new visit came in,
+  // or the last mover of a visit that changed after the card was written.
+  if (p.actor_line) lines.push(p.actor_line);
+  else if (p.actor) {
     const verb = { visit_assigned: 'Assigned', visit_unassigned: 'Reassigned', visit_rescheduled: 'Moved', visit_cancelled: 'Cancelled' }[n.type];
-    lines.push(`${verb} ${p.actor}`);
+    lines.push(`${p.changed_again ? 'Changed again' : verb} ${p.actor}`);
   }
   return (
     <div style={cardStyle(VISIT_ACCENT[n.type] || COLORS.ink)} data-testid="visit-notice">

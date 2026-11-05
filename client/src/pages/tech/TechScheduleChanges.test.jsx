@@ -44,9 +44,55 @@ async function renderChanges(props = {}) {
 
 describe('TechScheduleChanges', () => {
   beforeEach(() => { localStorage.setItem('waves_admin_token', 'tech-token'); });
-  afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
+  afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+  // The cards name days relative to now ("today 9:49 AM", the year, the next
+  // 2 weeks): a test that reads them pins "now" to the fixtures' own day,
+  // Sat Oct 3 2026, 10 AM ET (Date only; the polling tests own the timers).
+  const pinNow = () => { vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-03T14:00:00Z')); };
+
+  it('a moved card names its address and the day of the change', async () => {
+    pinNow();
+    stubApi([{ ...SOON, created_at: '2026-09-30T08:13:44Z', payload: { ...SOON.payload, actor: 'by auto-dispatch', address: '12 Palm Ave, Bradenton' } }]);
+    await renderChanges();
+    const soon = await screen.findByTestId('schedule-change-soon');
+    expect(soon).toHaveTextContent('12 Palm Ave, Bradenton');
+    expect(soon).toHaveTextContent('Moved by auto-dispatch · Sep 30');
+  });
+
+  it('a card whose visit changed after it was written says so, with who and when', async () => {
+    pinNow();
+    stubApi([{ ...SOON, created_at: '2026-09-02T08:11:00Z', payload: { ...SOON.payload, actor: 'by the customer', changed_again: true, changed_at: '2026-10-03T13:49:00Z' } }]);
+    await renderChanges();
+    const soon = await screen.findByTestId('schedule-change-soon');
+    expect(soon).toHaveTextContent('Changed again by the customer · today 9:49 AM');
+    expect(soon).not.toHaveTextContent('Moved by the customer');
+  });
+
+  it('a new visit names how it came in, in place of the generic actor', async () => {
+    pinNow();
+    stubApi([{
+      id: '00000000-0000-4000-8000-00000000000d', type: 'visit_assigned', soon: true, created_at: '2026-10-03T12:30:00Z',
+      payload: { visit_id: 'visit-Diaz', headline: 'New visit on your route', customer_name: 'Diaz', service_type: SVC, when: 'Sun Oct 4, 4–5 PM', date: '2026-10-04', address: '12 Palm Ave, Bradenton', actor: 'by the customer online', actor_line: 'Customer accepted the estimate online' },
+    }]);
+    await renderChanges();
+    const soon = await screen.findByTestId('schedule-change-soon');
+    expect(soon).toHaveTextContent('Customer accepted the estimate online · today 8:30 AM');
+    expect(soon).not.toHaveTextContent('Assigned by the customer online');
+  });
+
+  it('the summary names years when its days leave this year, and counts the next 2 weeks', async () => {
+    pinNow();
+    stubApi([
+      move('00000000-0000-4000-8000-00000000000e', 'Near', { previous_when: 'Fri Oct 9, 9–10 AM', when: 'Sat Oct 10, 9–10 AM', previous_date: '2026-10-09', date: '2026-10-10' }),
+      move('00000000-0000-4000-8000-00000000000f', 'Far', { previous_when: 'Thu Jan 14, 9–10 AM', when: 'Fri Jan 15, 9–10 AM', previous_date: '2027-01-14', date: '2027-01-15' }),
+    ]);
+    await renderChanges();
+    const summary = await screen.findByTestId('schedule-changes-summary');
+    expect(summary).toHaveTextContent('1 in the next 2 weeks · Oct 10, 2026 – Jan 15, 2027 · 2 later');
+  });
 
   it('keeps a today/tomorrow change as its own card and folds the rest into one summary', async () => {
+    pinNow();
     stubApi([SOON, FAR_A, FAR_B]);
     await renderChanges();
 
