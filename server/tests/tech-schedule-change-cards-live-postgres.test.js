@@ -235,13 +235,17 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
     // Still with the holder the card names: as written.
     const same = await makeVisit(second, 'Sameholder', farOut, '10:00', '11:00');
     await card(tech, same, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '10:00', '11:00'), headline: 'Moved off your route', now_with: second.name, actor: 'by Virginia', customer_name: 'Sameholder' }, daysAgo(2));
+    // Ended on the other route, as the card recorded: stays "Now cancelled".
+    const endedAway = await makeVisit(second, 'Endedaway', tomorrow, '14:00', '15:00', { status: 'cancelled', cancelled_at: daysAgo(1) });
+    await card(tech, endedAway, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '14:00', '15:00'), headline: 'Moved off your route', now_with: null, ended: 'cancelled', actor: 'by the office', customer_name: 'Endedaway' }, daysAgo(1));
     // Back on this route and already reached: nothing left to say.
     const reached = await makeVisit(tech, 'Reachedback', today, '09:00', '10:00', { status: 'on_site', arrived_at: new Date() });
     await card(tech, reached, 'visit_unassigned', { date: today, when: formatWhen(today, '09:00', '10:00'), headline: 'Moved off your route', now_with: first.name, actor: 'by the office', customer_name: 'Reachedback' }, daysAgo(2));
 
     const body = await call('/schedule-changes', 'get', { technicianId: tech.id });
     const byName = new Map(body.changes.map((c) => [c.payload.customer_name, c]));
-    expect([...byName.keys()].sort()).toEqual(['Cameback', 'Sameholder', 'Stillaway']);
+    expect([...byName.keys()].sort()).toEqual(['Cameback', 'Endedaway', 'Sameholder', 'Stillaway']);
+    expect(byName.get('Endedaway')).toMatchObject({ type: 'visit_unassigned', payload: { ended: 'cancelled', actor: 'by the office' } });
     expect(byName.get('Cameback')).toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route', now_with: null } });
     expect(byName.get('Stillaway')).toMatchObject({
       type: 'visit_unassigned', soon: true,

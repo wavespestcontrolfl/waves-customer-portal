@@ -1317,13 +1317,18 @@ function moveSince(row, mover) {
 // The visit sits on another route now (or on none). The former holder reads
 // nothing of it as it is now (Codex security review, #7569): no new time, no
 // later mover, no new holder's name. A moved-off card stays as written while
-// it still names the holder; otherwise the card says only that the visit
-// left, with its own time.
+// what it recorded still holds (the same holder, or the same end: "Now
+// cancelled"); otherwise the card says only that the visit left, with its
+// own time.
 function movedOffCard(row, live) {
   const payload = row.payload || {};
-  // The writer names the holder by technicians.name (composeCard now_with).
+  // The writer names the holder by technicians.name (composeCard now_with),
+  // and an ended visit by ENDED_LABELS (cardStands).
   const holder = live.technician_id ? (live.holder_name || null) : null;
-  if (row.type === 'visit_unassigned' && !payload.ended && (payload.now_with || null) === holder) return row;
+  const status = String(live.status);
+  const ended = TERMINAL_VISIT_STATUSES.has(status) ? (ENDED_LABELS[status] || status.replace(/_/g, ' ')) : null;
+  const asWritten = payload.ended ? payload.ended === ended : (payload.now_with || null) === holder;
+  if (row.type === 'visit_unassigned' && asWritten) return row;
   return {
     ...row,
     type: 'visit_unassigned',

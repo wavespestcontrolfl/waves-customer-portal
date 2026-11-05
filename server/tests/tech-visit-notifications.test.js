@@ -1465,6 +1465,11 @@ describe('an open card read against its visit as it is now (owner 2026-11-04)', 
     expect(liveCard(offCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample' }), null)).toBe(offCard);
     expect(liveCard(offCard, live({ technician_id: 'tech-4', holder_name: 'Kim Other' }), null))
       .toMatchObject({ type: 'visit_unassigned', payload: { now_with: null, now_elsewhere: true, actor: null, when: 'Thu Nov 5, 8–9 AM' } });
+    // A recorded end ("Now cancelled") stays while the visit is still ended that way.
+    const endedCard = cardRow('visit_unassigned', { when: 'Thu Nov 5, 8–9 AM', headline: 'Moved off your route', now_with: null, ended: 'cancelled', actor: 'by Virginia' });
+    expect(liveCard(endedCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample', status: 'cancelled' }), null)).toBe(endedCard);
+    expect(liveCard(endedCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample', status: 'confirmed' }), null))
+      .toMatchObject({ payload: { ended: null, now_with: null, now_elsewhere: true } });
     expect(liveCard(offCard, live(), { initiated_by: 'admin', created_at: '2026-11-03T21:50:00Z' }))
       .toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route', when: 'Thu Nov 5, 8–9 AM', actor: 'by the office', changed_again: true, now_with: null } });
   });
