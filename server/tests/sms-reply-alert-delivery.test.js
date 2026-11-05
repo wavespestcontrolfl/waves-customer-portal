@@ -376,7 +376,6 @@ describe('unknown-sender text to an office line (GATE_RING_NEW_CONTACTS)', () =>
     ['a staff sender', { staffSender: true }],
     ['a reaction', { smsReaction: true }],
     ['a courtesy closer', { courtesyOnly: true }],
-    ['a text a spam screen judged a sales pitch', { spamVerdict: { solicitation: true, enforced: false } }],
     ['the AI assistant line', { isAiNumber: true, numberConfig: { ...numbers.tollFree, type: 'location' }, To: numbers.tollFree.number }],
     ['a tech line', { numberConfig: { ...numbers.fieldTech[0], type: 'location' }, To: numbers.fieldTech[0].number }],
     ['a website tracking line', { numberConfig: { ...numbers.domainTracking[0], type: 'domain_tracking' } }],

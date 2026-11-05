@@ -152,11 +152,12 @@ function officeLineWords(numberConfig) {
   return `the ${numberConfig.label || 'office'} line`;
 }
 
-// Who is not rung: a known customer, a staff sender, a reaction, a courtesy closer, a text a spam screen judged a sales
-// pitch, a text with no words and no photo, and any line but a location or Google profile line (not the AI line, a tech
-// line or the internal alert line).
-function isRingableUnknownText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, spamVerdict, numberConfig, To, message, mediaCount }) {
-  if (customer || staffSender || smsReaction || courtesyOnly || isAiNumber || spamVerdict?.solicitation === true) return false;
+// Who is not rung: a known customer, a staff sender, a reaction, a courtesy closer, a text with no words and no photo,
+// and any line but a location or Google profile line (not the AI line, a tech line or the internal alert line). A text
+// the spam screen silenced never gets here (the route returns first); one it judged but did not silence (a failed
+// verdict write, a spam tag undone in flight) was let through on purpose and rings like any other.
+function isRingableUnknownText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, message, mediaCount }) {
+  if (customer || staffSender || smsReaction || courtesyOnly || isAiNumber) return false;
   if (!(message || mediaCount) || !OFFICE_LINE_TYPES.has(numberConfig?.type)) return false;
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   return !TWILIO_NUMBERS.isTechLine(To) && TWILIO_NUMBERS.internalAlertLine?.()?.number !== To;

@@ -1370,7 +1370,7 @@ router.post('/sms', async (req, res) => {
     // or Google profile line rings the same one-row-per-sender bell as a tracking line, and it too counts as
     // delivered here, so the quiet Activity row below is skipped. Ring failed, gate off or not eligible: false, as before.
     let knownInboundNotified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({
-      customer, staffSender, smsReaction, courtesyOnly, isAiNumber, spamVerdict: solicitation, numberConfig, To, From, MessageSid, message: Body, mediaCount: inboundMedia.length,
+      customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, mediaCount: inboundMedia.length,
     });
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly) {
       try {
