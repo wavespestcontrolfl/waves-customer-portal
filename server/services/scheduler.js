@@ -791,6 +791,16 @@ async function runAutonomousOpportunityMining({
   return result;
 }
 
+// The 4:20 route re-order and 4:40 day re-plan crons only BORROW the 4:10 writer lock
+// ('auto-dispatch-recurring'; recordHealth:false so no health row is stamped under that
+// name). With GATE_NIGHT_PASS_WAIT on (read at call time) they wait for it, bounded, instead
+// of skipping while the 4:10 run (road check up to 20 min) still holds it. Off: unchanged.
+const NIGHT_PASS_LOCK_WAIT_MS = 25 * 60 * 1000;
+function nightPassLockOptions() {
+  if (!require('../config/feature-gates').nightPassWaitLive()) return { recordHealth: false };
+  return { recordHealth: false, waitForLockMs: NIGHT_PASS_LOCK_WAIT_MS };
+}
+
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
@@ -1819,13 +1829,15 @@ function initScheduledJobs() {
       // is 5 days out, band is 1–6), and SERIALIZABLE isolation alone cannot
       // fence a concurrent writer running at weaker isolation. If the 4:10
       // run is still holding the lock, tonight's reorder tick is skipped
-      // (advisory lock is non-blocking) and picked up tomorrow.
+      // (advisory lock is non-blocking) and picked up tomorrow - unless
+      // GATE_NIGHT_PASS_WAIT is on, when it waits up to 25 min for the lock
+      // (nightPassLockOptions) and only a wait that runs out is skipped.
       await runExclusive('route-tiers-nightly', async () => {
         const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
         // recordHealth:false — this invocation only BORROWS the writer lock;
         // recording it would stamp a fresh 4:20 success under the 4:10 job's
         // name, clearing real failures and falsifying last_success_at.
-        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), { recordHealth: false });
+        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), nightPassLockOptions());
         // STRICT boolean — a completed run returns skipped as a NUMERIC
         // count of skipped tech-days (frozen days are routine), and a
         // truthy check would ledger a false skipped tick + fail job health
@@ -1885,7 +1897,7 @@ function initScheduledJobs() {
         const { runDayReplanIfEnabled } = require('./day-replan');
         // recordHealth:false - this only BORROWS the 4:10 writer lock; the outer
         // 'day-replan-nightly' job records the health.
-        const inner = await runExclusive('auto-dispatch-recurring', async () => runDayReplanIfEnabled({ now: new Date() }), { recordHealth: false });
+        const inner = await runExclusive('auto-dispatch-recurring', async () => runDayReplanIfEnabled({ now: new Date() }), nightPassLockOptions());
         if (inner && inner.skipped === true) {
           logger.warn(`[day-replan] tick skipped (${inner.reason}) - another night writer holds the lock`);
           throw new Error(`day-replan tick skipped (${inner.reason}) - the run lock was held`);
