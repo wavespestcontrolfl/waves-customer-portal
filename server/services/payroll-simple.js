@@ -21,6 +21,9 @@ const {
 } = require('./payroll-w4');
 
 const MAX_DOLLARS_PER_CHECK = 1000000;
+// The first day of the Schwab plan (owner 2026-11-04). No election may start before it, so a form signed
+// earlier (the plan is set up in advance) waits until then and no check before it is touched.
+const PLAN_START = '2027-01-01';
 
 // "3", "3.5" or "3.25" (a percent of gross pay, at most 100) -> basis points; blank -> null.
 const percentToBp = (label) => Joi.any().custom((value, helpers) => {
@@ -136,8 +139,9 @@ async function recordSimple(technicianId, input, actor, conn = db) {
   if (!v.participant && (v.deferralPercent != null || v.deferralDollars != null)) {
     throw new PayrollError(400, 'An employee who does not take part cannot save from pay');
   }
-  const effectiveOn = v.effectiveOn || v.signedOn;
+  const effectiveOn = v.effectiveOn || (v.signedOn > PLAN_START ? v.signedOn : PLAN_START);
   if (effectiveOn < v.signedOn) throw new PayrollError(400, 'First pay date cannot be before the date signed');
+  if (effectiveOn < PLAN_START) throw new PayrollError(400, 'First pay date cannot be before the plan starts (January 1, 2027)');
   const actorId = (actor && typeof actor === 'object' ? actor.id : actor) || null;
   return conn.transaction(async (trx) => {
     await lockW2Technician(trx, technicianId, 'SIMPLE IRA');
@@ -189,4 +193,4 @@ async function simpleYtdBefore(conn, technicianIds, payDate, weekStart) {
   return byTech;
 }
 
-module.exports = { currentSimpleFor, simpleInputFor, withCurrentSimple, listSimple, recordSimple, simpleYtdBefore };
+module.exports = { PLAN_START, currentSimpleFor, simpleInputFor, withCurrentSimple, listSimple, recordSimple, simpleYtdBefore };

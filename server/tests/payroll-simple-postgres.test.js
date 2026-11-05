@@ -165,6 +165,7 @@ postgres('payroll SIMPLE IRA elections and pay runs', () => {
       expect(await payrollSimple.currentSimpleFor(id, '2026-08-31', trx)).toBeNull();
       expect(await payrollSimple.currentSimpleFor(id, '2026-09-25', trx)).toMatchObject({ deferralBp: 300, participant: true });
       expect(await payrollSimple.currentSimpleFor(id, '2026-10-02', trx)).toMatchObject({ deferralBp: 500 });
+      expect((await payrollSimple.withCurrentSimple([{ id, name: 'Sample Employee' }], trx))[0].currentSimple).toMatchObject({ participant: true });
       // now() is the transaction start in a test, so the correction gets a later created_at by hand.
       await election(id, { participant: false, effective_on: '2026-10-01', created_at: new Date(Date.now() + 60000) });
       expect(await payrollSimple.currentSimpleFor(id, '2026-10-02', trx)).toMatchObject({ participant: false, deferralBp: null });
@@ -176,18 +177,25 @@ postgres('payroll SIMPLE IRA elections and pay runs', () => {
     it('records an election as a new row, lists newest first, and refuses bad input and non-employees', async () => {
       const id = await technician();
       const created = await api('POST', `/technicians/${id}/simple-ira`, {
-        body: { participant: true, deferralPercent: '3.5', signedOn: '2026-09-01', effectiveOn: '2026-09-15', note: 'Typed from the signed form' },
+        body: { participant: true, deferralPercent: '3.5', signedOn: '2026-09-01', effectiveOn: '2027-01-04', note: 'Typed from the signed form' },
       });
       expect(created.status).toBe(201);
-      expect(created.body.election).toMatchObject({ participant: true, deferralBp: 350, deferralCents: null, signedOn: '2026-09-01', effectiveOn: '2026-09-15' });
+      expect(created.body.election).toMatchObject({ participant: true, deferralBp: 350, deferralCents: null, signedOn: '2026-09-01', effectiveOn: '2027-01-04' });
+      // A form signed before the plan starts waits for the plan start unless a later date is typed.
       const fixed = await api('POST', `/technicians/${id}/simple-ira`, {
-        body: { participant: true, deferralDollars: '25.50', signedOn: '2026-09-02', effectiveOn: '2026-09-20' },
+        body: { participant: true, deferralDollars: '25.50', signedOn: '2026-09-02' },
       });
-      expect(fixed.body.election).toMatchObject({ deferralBp: null, deferralCents: 2550 });
+      expect(fixed.body.election).toMatchObject({ deferralBp: null, deferralCents: 2550, effectiveOn: '2027-01-01' });
+      const early = await api('POST', `/technicians/${id}/simple-ira`, {
+        body: { participant: true, deferralDollars: '10', signedOn: '2026-09-02', effectiveOn: '2026-12-31' },
+      });
+      expect(early.status).toBe(400);
+      expect(early.body.error).toMatch(/plan starts/);
+      // Neither applies today, so the Payroll tab shows no election yet.
       const rows = (await api('GET', '/technicians')).body.technicians;
-      expect(rows.find((t) => t.id === id).currentSimple).toMatchObject({ deferralCents: 2550 });
+      expect(rows.find((t) => t.id === id).currentSimple).toBeNull();
       const listed = await api('GET', `/technicians/${id}/simple-ira`);
-      expect(listed.body.elections.map((e) => e.effectiveOn)).toEqual(['2026-09-20', '2026-09-15']);
+      expect(listed.body.elections.map((e) => e.effectiveOn)).toEqual(['2027-01-04', '2027-01-01']);
       const audit = await trx('audit_log').where({ action: 'payroll.simple_ira_recorded' });
       expect(audit).toHaveLength(2);
       expect(JSON.stringify(audit[0].metadata)).not.toMatch(/350|Typed/);
