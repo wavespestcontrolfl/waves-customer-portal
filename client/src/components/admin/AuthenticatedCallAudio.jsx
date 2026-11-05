@@ -11,6 +11,13 @@ import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// Ask an <audio> to play; a browser that refuses (no source yet, or no tap to
+// allow sound) rejects the promise, which is ignored here.
+function playQuietly(el) {
+  const played = el?.play?.();
+  if (played && typeof played.catch === "function") played.catch(() => {});
+}
+
 /**
  * Call-recording player backed by an authenticated, user-initiated fetch.
  * Media tags cannot attach a Bearer header themselves, so the response is
@@ -27,6 +34,16 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
  *   mounts — it does not try to play then: that would run after the fetch,
  *   outside any user gesture, and browsers reject audible autoplay there.
  *   The controls are visible at the seeked position; one press plays.
+ *
+ * Optional one-tap listening (the bell's voicemail row):
+ * - `loadLabel` names the load button (its visible text and accessible name);
+ *   `buttonStyle` is merged over the button's own style.
+ * - `playOnLoad` plays the recording as soon as the load the button started
+ *   finishes. The <audio> stays mounted (hidden) from the start, and the tap
+ *   that loads it also asks it to play: iOS WebKit lets an element start
+ *   playing after the fetch only when that same element was asked to play
+ *   during the tap. A browser that still refuses leaves the controls shown,
+ *   and one press plays.
  */
 const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
   {
@@ -37,6 +54,9 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
     className,
     style,
     onTimeUpdate,
+    loadLabel,
+    buttonStyle,
+    playOnLoad = false,
     ...audioProps
   },
   ref,
@@ -59,19 +79,19 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
 
   const loadRecording = useCallback(() => {
     if (!id || current.status === "loading" || current.status === "ready") return;
+    // Inside the tap, on the element that will play (see playOnLoad above). It
+    // has no source yet, so this request itself is refused and ignored.
+    if (playOnLoad) playQuietly(audioRef.current);
     setLoaded({ id, sourceUrl: null, status: "loading" });
     requestNumberRef.current += 1;
     setRequest({ id, number: requestNumberRef.current });
-  }, [current.status, id]);
+  }, [current.status, id, playOnLoad]);
 
   const applySeek = useCallback((seconds, { play } = { play: true }) => {
     const el = audioRef.current;
     if (!el) return false;
     el.currentTime = Math.max(0, seconds);
-    if (play) {
-      const played = el.play?.();
-      if (played && typeof played.catch === "function") played.catch(() => {});
-    }
+    if (play) playQuietly(el);
     return true;
   }, []);
 
@@ -94,6 +114,11 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
     pendingSeekRef.current = null;
     applySeek(target, { play: false });
   }, [applySeek, current.status]);
+
+  // playOnLoad: the recording the tap asked for is here, so it plays now.
+  useEffect(() => {
+    if (playOnLoad && current.status === "ready") playQuietly(audioRef.current);
+  }, [current.status, playOnLoad]);
 
   useEffect(() => {
     if (!request || request.id !== id) return undefined;
@@ -157,6 +182,13 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
   // audio proxy would refuse the fetch).
   if (!canAccessCalls) return null;
 
+  const ready = current.status === "ready";
+  const retry = current.status === "error";
+  // The load button's text and accessible name: a caller's loadLabel is both, and a failure offers a retry.
+  const [buttonText, buttonName] = retry
+    ? ["Retry recording", `Retry ${label.toLowerCase()}`]
+    : [loadLabel || "Load recording", loadLabel || `Load ${label.toLowerCase()}`];
+
   return (
     <div
       className={className}
@@ -164,13 +196,17 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
       data-audio-state={current.status}
       aria-busy={current.status === "loading"}
     >
-      {current.status === "ready" ? (
+      {/* playOnLoad keeps this one element mounted (hidden, no source) from
+          the start, in the same place, so the tap's play request carries over
+          to the recording. Otherwise it mounts once the recording is ready. */}
+      {(ready || playOnLoad) && (
         <audio
           {...audioProps}
           ref={audioRef}
           controls={controls}
           preload={preload}
           src={current.sourceUrl}
+          hidden={!ready}
           aria-label={label}
           title={title}
           onTimeUpdate={
@@ -180,13 +216,14 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
           }
           style={{ width: "100%", height: "100%" }}
         />
-      ) : current.status === "loading" ? (
+      )}
+      {ready ? null : current.status === "loading" ? (
         <div role="status" aria-live="polite" style={{ fontSize: 13 }}>
           Loading recording…
         </div>
       ) : (
         <div>
-          {current.status === "error" && (
+          {retry && (
             <span role="alert" style={{ fontSize: 13, marginRight: 8 }}>
               Recording unavailable.
             </span>
@@ -195,7 +232,7 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
             type="button"
             onClick={loadRecording}
             disabled={!id}
-            aria-label={`${current.status === "error" ? "Retry" : "Load"} ${label.toLowerCase()}`}
+            aria-label={buttonName}
             title={title}
             style={{
               minHeight: 32,
@@ -208,9 +245,10 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
               fontSize: 13,
               fontWeight: 500,
               cursor: id ? "pointer" : "not-allowed",
+              ...buttonStyle,
             }}
           >
-            {current.status === "error" ? "Retry recording" : "Load recording"}
+            {buttonText}
           </button>
         </div>
       )}

@@ -1185,6 +1185,9 @@ describe('customer-contact classes', () => {
     metadata: { triggerKey: 'sms_reply', dedupeKey: `sms-thread:${CUST}`, payload: { twilioSid: SID, threadId: CUST } }, ...over });
   const smsUnknown = () => note({ category: 'inbound_sms', link: `/admin/communications?message=${SID}`,
     metadata: { triggerKey: 'sms_reply', dedupeKey: `sms-reply:${SID}`, payload: { twilioSid: SID, threadId: null } } });
+  // A number with no customer record texting a website line (new_lead, no lead record): the row names its text.
+  const trackingText = (over = {}) => note({ category: 'new_lead', link: `/admin/communications?message=${SID}`,
+    metadata: { triggerKey: 'new_lead', dedupeKey: 'sms-tracking-thread:0123456789abcdef0123456789abcdef', payload: { twilioSid: SID, name: 'Unknown sender', phone: '***0101' } }, ...over });
   const voicemail = () => note({ category: 'voicemail_callback', metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: CALL, customerId: CUST, phone: '+15555550101' } } });
   const missed = () => note({ category: 'missed_call', metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: CALL, customerId: CUST, phone: '+15555550101' } } });
   const email = () => note({ category: 'inbound_email', metadata: { triggerKey: 'customer_email_received', payload: { emailId: EMAIL, customerId: CUST } } });
@@ -1205,13 +1208,18 @@ describe('customer-contact classes', () => {
   });
 
   test('the classes exist only while the gate is shadow or true, and match by the emitter\'s trigger (a missed-call bell has no class here: missed-call-bell.js owns it; the promise chaser keeps its own)', () => {
-    const rows = { sms: smsThread(), voicemail: voicemail(), email: email() };
+    const rows = { sms: smsThread(), voicemail: voicemail(), email: email(), tracking: trackingText() };
     for (const row of Object.values(rows)) expect(classify(row)).toBeNull();
     for (const mode of ['shadow', 'true']) {
       gate(mode);
       expect(Object.fromEntries(Object.entries(rows).map(([k, row]) => [k, classify(row)?.key])))
-        .toEqual({ sms: 'inbound_sms', voicemail: 'voicemail_callback', email: 'inbound_email' });
+        .toEqual({ sms: 'inbound_sms', voicemail: 'voicemail_callback', email: 'inbound_email', tracking: 'tracking_text' });
     }
+    // A tracking-line row from before one-row-per-sender (no dedupe key) is the same class; a lead's own bell keeps
+    // the new_lead class, and a new_lead row that names no text and no lead has none.
+    expect(classify(trackingText({ metadata: { triggerKey: 'new_lead', payload: { twilioSid: SID } } })).key).toBe('tracking_text');
+    expect(classify(leadNote()).key).toBe('new_lead');
+    expect(classify(note({ category: 'new_lead', link: '/admin/leads', metadata: { triggerKey: 'new_lead', payload: { name: 'Unknown prospect' } } }))).toBeNull();
     gate('true');
     for (const other of [
       missed(),
@@ -1235,7 +1243,7 @@ describe('customer-contact classes', () => {
   });
 
   test('the loader gets each row\'s own references (a known sender\'s text sid and customer, a call, an email, a lead\'s phone), never an unknown sender\'s text, and is not called with the gate off', async () => {
-    const rows = [smsThread(), smsUnknown(), voicemail(), email(), { ...leadNote(), id: uid(77) }];
+    const rows = [smsThread(), smsUnknown(), voicemail(), email(), { ...leadNote(), id: uid(77) }, trackingText()];
     mockTables.leads = [lead({ phone: '+15555550102' })];
     await loadSubjects(rows);
     expect(mockLoadContactBundles).not.toHaveBeenCalled();
@@ -1247,6 +1255,8 @@ describe('customer-contact classes', () => {
       ['voice', { callLogId: CALL, customerId: CUST, phone: '+15555550101' }],
       ['email', { emailId: EMAIL, customerId: CUST }],
       ['lead', { customerId: CUST, phone: '+15555550102' }],
+      // A tracking-line text: its text names the sender (no customer on file).
+      ['sms', { sid: SID, customerId: null }],
     ]);
     // A bad id parses to null, never throws.
     mockLoadContactBundles.mockClear();
@@ -1275,6 +1285,13 @@ describe('customer-contact classes', () => {
       expect((await verdictFor(smsThread(), { pending: false, textAt: at(-30), backAt: at(-30) })).reason).toBe('Answered, or no reply needed');
       // An unknown sender's text bell is never judged (no references, so no bundle), whatever was sent to the number.
       expect((await verdictFor(smsUnknown(), { pending: false, textAt: at(5) })).reason).toBeNull();
+      // A tracking-line text from a number with no customer record is judged by the same rule (owner 2026-11-04, "D").
+      expect((await verdictFor(trackingText(), { pending: true })).reason).toBeNull();
+      expect((await verdictFor(trackingText())).reason).toBeNull();
+      expect((await verdictFor(trackingText(), { pending: false, textAt: at(10) })).reason).toBe('Answered by text');
+      expect((await verdictFor(trackingText(), { pending: false, backAt: at(10) })).reason).toBe('Answered by a call');
+      expect((await verdictFor(trackingText(), { pending: false })).reason).toBe('Answered, or no reply needed');
+      expect((await verdictFor(trackingText(), { shared: true, pending: false })).reason).toBeNull();
     });
 
     test.each([['voicemail', voicemail]])('a %s: a person\'s call back, a call in a person answered, a person\'s text, a booked visit or a quote after the call closes it; nothing, or only earlier contact, keeps it', async (_name, make) => {

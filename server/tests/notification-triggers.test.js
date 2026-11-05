@@ -129,25 +129,39 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/leads?lead=lead-123');
   });
 
-  test('new lead trigger without a lead record points at the SMS inbox', () => {
-    // Tracking-line texts from unknown numbers no longer mint a customer
-    // row (twilio-webhook.js domain/van branch), so the bell must not send
-    // the owner to a lead that does not exist.
-    const built = TRIGGER_REGISTRY.new_lead.build({
-      title: 'New text from wavespestcontrol.com',
-      name: 'Unknown sender',
-      source: 'wavespestcontrol.com',
-      area: 'Bradenton',
-      phone: '+12025550101',
-      message: 'Please quote service for the garden shed.',
-      link: '/admin/communications',
-    });
+  test('an unknown sender\'s text to a tracking line says what they wrote, masked, and opens the SMS inbox (owner 2026-11-04)', () => {
+    // Tracking-line texts from unknown numbers mint no customer row
+    // (twilio-webhook.js domain/van branch), so the bell must not send the
+    // owner to a lead that does not exist. It used to say only "Message in
+    // the SMS inbox"; it quotes the text the way every bell body is masked.
+    const sid = `SM${'0123456789abcdef'.repeat(2)}`;
+    const text = { name: null, twilioSid: sid, source: 'wavespestcontrol.com', phone: '+12025550101', link: `/admin/communications?message=${sid}` };
+    const built = TRIGGER_REGISTRY.new_lead.build({ ...text, message: 'Please quote ants at 1000 Riverside Drive, call 941-555-0123', textCount: 1 });
 
     expect(built.title).toBe('New text from wavespestcontrol.com');
-    expect(built.body).toContain('Unknown sender via wavespestcontrol.com (Bradenton)');
-    expect(built.body).toContain('Message in the SMS inbox');
-    expect(built.body).not.toContain('swimming pool');
-    expect(built.link).toBe('/admin/communications');
+    expect(built.body).toBe('“Please quote ants at [address], call ***0123” — unknown sender ***0101');
+    expect(built.body).not.toContain('Message in the SMS inbox');
+    expect(built.detail).toBeUndefined();
+    expect(built.link).toBe(`/admin/communications?message=${sid}`);
+    // Call: the Communications thread's Call back for the sender, named by the text.
+    expect(built.alert.buttons.items[0].args).toEqual({ smsSid: sid });
+
+    // The sender's row counts its texts; a long text is cut inside the 110-character why and kept whole for
+    // "Show full text"; a text with no words (the webhook rings only for words or a photo) is a photo.
+    const long = 'Hi there, I have roaches all over my kitchen and garage and I need someone to come out this week, what do you charge?';
+    const second = TRIGGER_REGISTRY.new_lead.build({ ...text, message: long, textCount: 2 });
+    expect(second.title).toBe('2 texts from wavespestcontrol.com');
+    expect(second.body.length).toBeLessThanOrEqual(110);
+    expect(second.body).toMatch(/^“Hi there, I have roaches .*…” — unknown sender \*\*\*0101$/);
+    expect(second.detail).toBe(long);
+    const photo = TRIGGER_REGISTRY.new_lead.build({ ...text, message: '' });
+    expect(photo.body).toBe('Photo message — unknown sender ***0101');
+    expect(photo.detail).toBeUndefined();
+
+    // A name on file for the number leads instead of the bare number (owner 2026-11-04), with the line they texted.
+    const named = TRIGGER_REGISTRY.new_lead.build({ ...text, name: 'Jane Fixture', message: 'Do you treat roaches?', textCount: 2 });
+    expect(named.title).toBe('2 texts from Jane Fixture');
+    expect(named.body).toBe('“Do you treat roaches?” — via wavespestcontrol.com');
   });
 
   test('SMS reply trigger leads with a lead\'s CALL / TEXT choice and is unchanged without it', () => {
@@ -260,16 +274,17 @@ describe('notification trigger push tags', () => {
     expect(built.body).not.toContain('calling in now');
   });
 
-  test('promise-chaser headline leads with the caller name; with no name it leads with the formatted number (owner 2026-10-21)', () => {
+  test('promise-chaser headline and body lead with the caller name; with no name, the formatted number in both (owner 2026-10-21, 2026-11-04)', () => {
     const named = TRIGGER_REGISTRY.promise_chaser.build({
-      name: 'Martin Fixtureson', phone: '+19415550199', what: 'quote', when: 'Oct 19, 3:50 PM', calledAtLabel: '12:31 PM',
+      name: 'Martin Fixtureson', phone: '+19415550199', what: 'quote', when: 'Sun, Oct 19 at 3:50 PM', calledAtLabel: '12:31 PM',
     });
     expect(named.title).toBe('Martin Fixtureson called back — we still owe a quote');
     const unnamed = TRIGGER_REGISTRY.promise_chaser.build({
-      name: null, phone: '+19415550199', what: 'quote', when: 'Oct 19, 3:50 PM', calledAtLabel: '12:31 PM',
+      name: null, phone: '+19415550199', what: 'quote', when: 'Sun, Oct 19 at 3:50 PM', calledAtLabel: '12:31 PM',
     });
     expect(unnamed.title).toBe('(941) 555-0199 called back — we still owe a quote');
-    expect(unnamed.body).toBe('+19415550199 called at 12:31 PM. We still owe them a quote promised Oct 19, 3:50 PM.');
+    // The body names the caller the way the headline does, never the raw +1 number.
+    expect(unnamed.body).toBe('(941) 555-0199 called at 12:31 PM. We still owe them a quote promised Sun, Oct 19 at 3:50 PM.');
     expect(TRIGGER_REGISTRY.promise_chaser.build({ what: 'callback' }).title).toBe('A lead called back — we still owe a callback');
   });
 
@@ -679,6 +694,25 @@ describe('triggerNotification bell outcome', () => {
       { dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
     expect(stats).toMatchObject({ bellWritten: true, deduped: true, push: null });
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+
+    // The same for an unknown sender's thread row on a website line (new_lead, refreshed in place); a keyed
+    // new_lead that is not a thread row still pushes on a hit.
+    const sid = `SM${'0123456789abcdef'.repeat(2)}`;
+    const text = { name: 'Jane Fixture', twilioSid: sid, phone: '+12025550101', message: 'Second text', source: 'wavespestcontrol.com', textCount: 1 };
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'tracking-row', deduped: true });
+    expect(await triggerNotification('new_lead', text, { dedupeKey: 'sms-tracking-thread:abc', refreshOnDedupe: true, bumpOnRefresh: true }))
+      .toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    // At rest the row's payload masks the sender's number (new_lead carries no contact details); the name on file stays.
+    expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.payload).toMatchObject({ phone: '***0101', name: 'Jane Fixture' });
+    // The sender's next text rewrites the row (a refresh, even after a close): that one pushes.
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'tracking-row', deduped: true, refreshed: true, rung: true });
+    await triggerNotification('new_lead', { ...text, twilioSid: `SM${'fedcba9876543210'.repeat(2)}`, message: 'Third text' },
+      { dedupeKey: 'sms-tracking-thread:abc', refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'keyed-lead-row', deduped: true });
+    await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc' });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
   });
 
   // A second same-day callback on the SAME open promise dedupes to the

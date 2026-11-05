@@ -12943,7 +12943,10 @@ const CallRecordingProcessor = {
                 .filter(Boolean).join(' ') || null;
               await triggerNotification('customer_voicemail_callback', {
                 ...alertPlan,
-                name: alertPlan.name || vmCustomerName,
+                // Last, the name on file for the number (owner 2026-11-04: estimates and leads too); a failed
+                // lookup keeps the number.
+                name: alertPlan.name || vmCustomerName
+                  || await require('./admin-alert-names').nameOnFileForPhone(db, vmAlertPhone).catch(() => null),
                 customerId: vmAlertCustomer?.id || null,
                 callLogId: call.id,
               });

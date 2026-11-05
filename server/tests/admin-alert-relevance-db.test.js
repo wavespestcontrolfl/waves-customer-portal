@@ -339,6 +339,52 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect((await get(unknown.row.id)).done_at).toBeNull();
     });
 
+    test('a tracking-line text from a number with no customer record (owner 2026-11-04, "D"): a person\'s text or call back to that number closes its row; an unanswered one and a reply from before the text keep theirs', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -240);
+      // The new_lead row a text to a website line rings: no lead or customer behind it, and it names its text.
+      const trackingText = async (phone) => {
+        const messageSid = sid('SMT');
+        await insert('sms_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: null, message_body: 'Do you treat roaches?',
+          message_type: 'domain_lead', status: 'received', twilio_sid: messageSid, created_at: t0 });
+        return bell({ category: 'new_lead', created_at: mins(t0, 1), link: `/admin/communications?message=${messageSid}`,
+          metadata: { triggerKey: 'new_lead', dedupeKey: `sms-tracking-thread:${messageSid}`, payload: { twilioSid: messageSid, name: 'Unknown sender', phone: `***${phone.slice(-4)}` } } });
+      };
+      const texted = await trackingText('+15555557301');
+      const called = await trackingText('+15555557302');
+      const unanswered = await trackingText('+15555557303');
+      const earlier = await trackingText('+15555557304');
+      await staffText(null, '+15555557301', mins(t0, 10));
+      await staffCall(null, '+15555557302', mins(t0, 10));
+      await staffText(null, '+15555557304', mins(t0, -30));
+      await sweep();
+      expect(await get(texted.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      expect(await get(called.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by a call' });
+      for (const open of [unanswered, earlier]) expect((await get(open.id)).done_at).toBeNull();
+
+      // The sender's next text rewrites the closed row (the emitter's own refresh, sms-reply-alert-delivery.js
+      // ringTrackingLineTextBell): it rings again, unread and open, and the sweep judges it from that text.
+      const NotificationService = require('../services/notification-service');
+      const textedMeta = (await get(texted.id)).metadata;
+      const nextSid = sid('SMT');
+      await insert('sms_log', { direction: 'inbound', from_phone: '+15555557301', to_phone: BIZ, customer_id: null, message_body: 'Also the garage?',
+        message_type: 'domain_lead', status: 'received', twilio_sid: nextSid, created_at: mins(t0, 60) });
+      const refreshed = await NotificationService.notifyAdmin('new_lead', '2 texts from wavespestcontrol.com', '“Also the garage?” — unknown sender ***7301', {
+        link: `/admin/communications?message=${nextSid}`,
+        metadata: { triggerKey: 'new_lead', payload: { twilioSid: nextSid, textCount: 1 } },
+        dedupeKey: textedMeta.dedupeKey, refreshOnDedupe: true, bumpOnRefresh: true,
+      });
+      expect(refreshed.id).toBe(texted.id);
+      const rung = await get(texted.id);
+      expect([rung.read_at, rung.done_at, rung.done_by, rung.resolution]).toEqual([null, null, null, null]);
+      expect(rung.metadata.retired).toBeUndefined();
+      await sweep();
+      expect((await get(texted.id)).done_at).toBeNull();
+      await staffText(null, '+15555557301', mins(t0, 70));
+      await sweep();
+      expect(await get(texted.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+    });
+
     test('a new text after a close rings the sender\'s thread bell again', async () => {
       gate('true');
       const NotificationService = require('../services/notification-service');
