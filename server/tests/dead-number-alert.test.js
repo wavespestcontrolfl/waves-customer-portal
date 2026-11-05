@@ -141,6 +141,14 @@ describe('dead number alert: when it rings', () => {
     expect(mockRows.size).toBe(1);
   });
 
+  test('a 30003 failure says the phone is out of reach, not that the number is gone', async () => {
+    mockState.failedRows = failedAt('06-29', '11-04');
+    expect(await fail({ ErrorCode: '30003' })).toBe(200);
+    const [, , body, opts] = mockNotify.mock.calls[0];
+    expect(body).toBe("2 texts to …0142 failed since Jun 29: the carrier can't reach the phone.");
+    expect(opts.detail).toBe(`${body} Check the number with the customer.`);
+  });
+
   test.each([
     ['30003 (unreachable handset)', '30003', true],
     ['30006 landline', '30006', false],

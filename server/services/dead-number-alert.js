@@ -54,11 +54,19 @@ function actionFor(customer) {
   return fitAction('Customers', name, [(who) => `${withDot(who)}'s phone can't get texts`]);
 }
 
-function copyFor({ count, key, since }) {
+// What this failure's code says, and the next step. 30005 = the number is unknown to the carrier;
+// 30003 = the phone is off or out of reach, so the number may still be good.
+const CARRIER_SAYS = {
+  30005: { says: 'the carrier says the number does not exist', next: 'Get a new number from the customer.' },
+  30003: { says: "the carrier can't reach the phone", next: 'Check the number with the customer.' },
+};
+
+function copyFor({ count, key, since, errorCode }) {
   const { shortDateET } = require('./admin-alert-names');
   const when = shortDateET(since);
-  const why = `${count} texts to …${key.slice(-4)} failed${when ? ` since ${when}` : ''}: the carrier says the number does not exist.`;
-  return { why, detail: `${why} Get a new number from the customer.` };
+  const { says, next } = CARRIER_SAYS[String(errorCode)] || CARRIER_SAYS[30005];
+  const why = `${count} texts to …${key.slice(-4)} failed${when ? ` since ${when}` : ''}: ${says}.`;
+  return { why, detail: `${why} ${next}` };
 }
 
 // The outbound text behind a callback, or null: { customer_id, to_phone } for a text sent to a customer.
@@ -103,7 +111,7 @@ async function handleDeadNumberFailure({ sid, status, errorCode, to } = {}) {
 
     const since = failed.reduce((a, b) => (b < a ? b : a));
     const { raiseAdminAlert } = require('./admin-alert-compose');
-    const { why, detail } = copyFor({ count: failed.length, key, since });
+    const { why, detail } = copyFor({ count: failed.length, key, since, errorCode });
     return await raiseAdminAlert('customer', {
       area: 'Customers',
       action: actionFor(customer),
