@@ -262,4 +262,6 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
-module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };
+module.exports = {
+  // the shared open-self-pay definition (also the cash forecast's open invoices)
+  applyOpenSelfPayPredicates, openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };

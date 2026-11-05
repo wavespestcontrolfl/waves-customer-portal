@@ -7,6 +7,9 @@ const logger = require('../services/logger');
 const StripeBanking = require('../services/stripe-banking');
 const BankingExport = require('../services/banking-export');
 const plaidSync = require('../services/plaid-sync');
+const CashForecastInputs = require('../services/cash-forecast/inputs');
+const { loadForecastInput } = require('../services/cash-forecast/load');
+const { computeForecast } = require('../services/cash-forecast/engine');
 const featureGates = require('../config/feature-gates');
 const { parseETDateTime, etWeekStart, etMonthStart, etDateString } = require('../utils/datetime-et');
 
@@ -484,5 +487,61 @@ router.get('/cash-today', requireFullAccess, async (req, res) => {
     res.status(500).json({ error: 'the cash read failed' });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// /cash-forecast — owner-only 13-week cash forecast (GATE_CASH_FORECAST, step 2)
+// ═══════════════════════════════════════════════════════════════
+// Owner 2026-11-04 "A A A A" (Banking decision page). The read works only from data the portal already
+// has (services/cash-forecast/load.js reads; engine.js computes; the free Plaid /accounts/get and
+// Stripe's balance read). The input routes store what the owner types: planned items, and the settings
+// (floor, last year's receipts by month). Owner only; 404 while the gate is off.
+function cashForecastGate(req, res, next) {
+  if (!featureGates.cashForecastLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+
+router.get('/cash-forecast', requireFullAccess, cashForecastGate, async (req, res) => {
+  try {
+    const input = await loadForecastInput();
+    res.json({ fetched_at: new Date().toISOString(), ...computeForecast(input) });
+  } catch (err) {
+    logger.error('[banking] Cash forecast failed:', err);
+    res.status(500).json({ error: 'the forecast read failed' });
+  }
+});
+
+router.get('/cash-forecast/inputs', requireFullAccess, cashForecastGate, async (req, res) => {
+  try {
+    const [items, settings] = await Promise.all([CashForecastInputs.listItems(db), CashForecastInputs.getSettings(db)]);
+    res.json({ items, settings, kinds: CashForecastInputs.KINDS, cadences: CashForecastInputs.CADENCES });
+  } catch (err) {
+    logger.error('[banking] Cash forecast inputs read failed:', err);
+    res.status(500).json({ error: 'the forecast inputs read failed' });
+  }
+});
+
+// A plain 400 for input the owner can fix, 404 for an unknown item, else a plain 500 (no SQL text).
+function cashForecastWrite(handler, { created = false } = {}) {
+  return async (req, res) => {
+    try {
+      const out = await handler(req);
+      if (out === null) return res.status(404).json({ error: 'No planned item has that id' });
+      return res.status(created ? 201 : 200).json(out);
+    } catch (err) {
+      if (err.status === 400) return res.status(400).json({ error: err.message });
+      logger.error('[banking] Cash forecast input write failed:', err);
+      return res.status(500).json({ error: 'the forecast inputs write failed' });
+    }
+  };
+}
+
+router.post('/cash-forecast/items', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.createItem(db, req.body, req.technicianId), { created: true }));
+router.patch('/cash-forecast/items/:id', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.updateItem(db, req.params.id, req.body, req.technicianId)));
+router.delete('/cash-forecast/items/:id', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.deactivateItem(db, req.params.id, req.technicianId)));
+router.put('/cash-forecast/settings', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.saveSettings(db, req.body, req.technicianId)));
 
 module.exports = router;

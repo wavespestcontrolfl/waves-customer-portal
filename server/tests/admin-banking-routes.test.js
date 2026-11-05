@@ -17,6 +17,17 @@ jest.mock('../services/stripe-banking', () => ({
 jest.mock('../services/plaid-sync', () => ({
   readCashBalances: jest.fn(),
 }));
+jest.mock('../services/cash-forecast/load', () => ({ loadForecastInput: jest.fn() }));
+jest.mock('../services/cash-forecast/inputs', () => ({
+  KINDS: ['insurance', 'hire'],
+  CADENCES: ['once', 'monthly'],
+  listItems: jest.fn(),
+  getSettings: jest.fn(),
+  createItem: jest.fn(),
+  updateItem: jest.fn(),
+  deactivateItem: jest.fn(),
+  saveSettings: jest.fn(),
+}));
 jest.mock('../services/banking-export', () => ({
   generateCSV: jest.fn(() => ({ content: 'csv', filename: 'test.csv', content_type: 'text/csv' })),
   generateOFX: jest.fn(() => ({ content: 'ofx', filename: 'test.ofx', content_type: 'application/x-ofx' })),
@@ -50,6 +61,8 @@ const express = require('express');
 const db = require('../models/db');
 const StripeBanking = require('../services/stripe-banking');
 const PlaidSync = require('../services/plaid-sync');
+const { loadForecastInput } = require('../services/cash-forecast/load');
+const CashForecastInputs = require('../services/cash-forecast/inputs');
 const bankingRouter = require('../routes/admin-banking');
 
 function appServer() {
@@ -486,6 +499,92 @@ describe('admin banking routes', () => {
       const { status, body } = await getCash('admin');
       expect(status).toBe(500);
       expect(body).toEqual({ error: 'the cash read failed' });
+    });
+  });
+
+  describe('/cash-forecast (GATE_CASH_FORECAST, step 2)', () => {
+    const savedGate = process.env.GATE_CASH_FORECAST;
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_CASH_FORECAST;
+      else process.env.GATE_CASH_FORECAST = savedGate;
+    });
+
+    async function call(method, path, { token = 'admin', body } = {}) {
+      return withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        return { status: res.status, body: await res.json() };
+      });
+    }
+
+    // the smallest input the real engine takes: today, an opening balance, nothing booked
+    const minimalInput = () => ({
+      today: '2026-11-05',
+      opening: { bankUsd: 1000, cardOwedUsd: 0, partial: false },
+      stripe: { availableUsd: 0, pendingUsd: 0, payouts: [] },
+      settings: { last_year_receipts: {} },
+    });
+
+    test('gate off: every forecast route is 404 and nothing is read or written', async () => {
+      delete process.env.GATE_CASH_FORECAST;
+      for (const [method, path] of [['GET', '/cash-forecast'], ['GET', '/cash-forecast/inputs'], ['POST', '/cash-forecast/items'],
+        ['PATCH', '/cash-forecast/items/x'], ['DELETE', '/cash-forecast/items/x'], ['PUT', '/cash-forecast/settings']]) {
+        const { status, body } = await call(method, path, { body: method === 'GET' || method === 'DELETE' ? undefined : {} });
+        expect([method, path, status, body]).toEqual([method, path, 404, { error: 'Not found' }]);
+      }
+      expect(loadForecastInput).not.toHaveBeenCalled();
+      expect(CashForecastInputs.createItem).not.toHaveBeenCalled();
+      expect(CashForecastInputs.saveSettings).not.toHaveBeenCalled();
+    });
+
+    test('a non-owner admin gets 403 on the read and the writes, gate on', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      expect((await call('GET', '/cash-forecast', { token: 'admin2' })).status).toBe(403);
+      expect((await call('PUT', '/cash-forecast/settings', { token: 'admin2', body: { floor_cents: 1 } })).status).toBe(403);
+      expect(loadForecastInput).not.toHaveBeenCalled();
+      expect(CashForecastInputs.saveSettings).not.toHaveBeenCalled();
+    });
+
+    test('the owner gets 13 weeks from the engine; a failed read is a plain 500', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      loadForecastInput.mockResolvedValueOnce(minimalInput());
+      const ok = await call('GET', '/cash-forecast');
+      expect(ok.status).toBe(200);
+      expect(ok.body.weeks).toHaveLength(13);
+      expect(ok.body).toMatchObject({ today: '2026-11-05', expected_available: false, opening: { bank_usd: 1000 } });
+      expect(typeof ok.body.fetched_at).toBe('string');
+      loadForecastInput.mockRejectedValueOnce(new Error('relation "x" does not exist'));
+      const bad = await call('GET', '/cash-forecast');
+      expect(bad).toEqual({ status: 500, body: { error: 'the forecast read failed' } });
+    });
+
+    test('inputs read returns items, settings and the allowed values', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      CashForecastInputs.listItems.mockResolvedValueOnce([{ id: 'i1' }]);
+      CashForecastInputs.getSettings.mockResolvedValueOnce({ floor_cents: null, last_year_receipts: {}, updated_at: null });
+      const { status, body } = await call('GET', '/cash-forecast/inputs');
+      expect(status).toBe(200);
+      expect(body).toEqual({ items: [{ id: 'i1' }], settings: { floor_cents: null, last_year_receipts: {}, updated_at: null }, kinds: ['insurance', 'hire'], cadences: ['once', 'monthly'] });
+    });
+
+    test('writes pass the body and the owner id; 201 on create, 400 with the reason, 404 for an unknown item, plain 500', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      CashForecastInputs.createItem.mockResolvedValueOnce({ id: 'i1' });
+      expect(await call('POST', '/cash-forecast/items', { body: { label: 'Policy' } })).toEqual({ status: 201, body: { id: 'i1' } });
+      expect(CashForecastInputs.createItem).toHaveBeenCalledWith(db, { label: 'Policy' }, 'admin-1');
+
+      CashForecastInputs.updateItem.mockRejectedValueOnce(Object.assign(new Error('label must be 1 to 120 characters'), { status: 400 }));
+      expect(await call('PATCH', '/cash-forecast/items/i1', { body: { label: '' } })).toEqual({ status: 400, body: { error: 'label must be 1 to 120 characters' } });
+
+      CashForecastInputs.deactivateItem.mockResolvedValueOnce(null);
+      expect(await call('DELETE', '/cash-forecast/items/i9')).toEqual({ status: 404, body: { error: 'No planned item has that id' } });
+      expect(CashForecastInputs.deactivateItem).toHaveBeenCalledWith(db, 'i9', 'admin-1');
+
+      CashForecastInputs.saveSettings.mockRejectedValueOnce(new Error('connection reset'));
+      expect(await call('PUT', '/cash-forecast/settings', { body: { floor_cents: 5 } })).toEqual({ status: 500, body: { error: 'the forecast inputs write failed' } });
     });
   });
 });
