@@ -184,13 +184,15 @@ async function nameFor(database, call, lead) {
 
 // Why this promise needs no bell, as { key, record }: a SETTLED key, or null while it is still owed, and for `called`
 // and `texted` the earliest inbound row that settled it ({ type, id, at }). Evidence counts only after the call
-// ended. A lookup that throws propagates: the caller treats it as unverified.
+// ended, and it is judged BEFORE the lead's state: a caller who called back and booked has a won lead by then, and
+// that promise was kept (closing it as "lead closed" would leave it open for good). `lead` may be null (a call
+// with no linked lead): the evidence still counts by the call's number and customer, and no evidence is `gone`.
+// A lookup that throws propagates: the caller treats it as unverified.
 async function judgeSettled(database, { promise, call, lead, base }) {
   if (promise.status !== 'open' || promise.human_state) return { key: 'promiseClosed' };
-  if (lead.deleted_at || !isOpenLeadRow(lead)) return { key: 'leadClosed' };
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-  const customerId = call.customer_id || lead.customer_id || null;
-  const phones = [call.from_phone, lead.phone].filter((p) => commitments.phoneDigits(p));
+  const customerId = call.customer_id || lead?.customer_id || null;
+  const phones = [call.from_phone, lead?.phone].filter((p) => commitments.phoneDigits(p));
   if (phones.length) {
     const inbound = (table) => database(table).where('created_at', '>', base).whereRaw("direction LIKE 'inbound%'")
       .modify((b) => commitments.phoneWhereAny(b, 'from_phone', phones));
@@ -205,7 +207,9 @@ async function judgeSettled(database, { promise, call, lead, base }) {
     due_at: null, due_type: null, call_ended_at: base,
   };
   // followedUpIds returns the promise ids only, not the record that followed up: no record to cite.
-  return { key: (await followedUpIds(database, [asPromise])).has(promise.id) ? 'followedUp' : null };
+  if ((await followedUpIds(database, [asPromise])).has(promise.id)) return { key: 'followedUp' };
+  if (!lead) return { key: 'gone' };
+  return { key: lead.deleted_at || !isOpenLeadRow(lead) ? 'leadClosed' : null };
 }
 
 // The SETTLED key alone (the part the bell needs).
@@ -287,7 +291,8 @@ async function handleCandidate(database, item, { now, calendar, promiseClose }) 
   const inWindow = Boolean(due.at) && due.at <= now && due.at > new Date(now.getTime() - DAY_MS);
   if (!inWindow && !promiseClose) return none;
   const lead = await loadLead(database, item.call, null);
-  if (!lead || isInternalTestCustomerId(lead.customer_id)) return none;
+  // No lead: never a bell; with the promise close on, a kept promise still closes (judged by the call alone).
+  if ((!lead && !promiseClose) || (lead && isInternalTestCustomerId(lead.customer_id))) return none;
   const verdict = await judgeSettled(database, { ...item, lead });
   if (verdict.key) return { raised: 0, promisesClosed: promiseClose ? await keepPromise(database, item.promise, verdict, now) : 0 };
   if (!inWindow) return none;

@@ -300,17 +300,38 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
       expect(row.fulfillment).toMatchObject({ record_id: callId, basis: 'caller_called' });
     });
 
-    test('a lead that was lost, or evidence from before the call ended, never writes the promise', async () => {
+    test('a lost lead with no word from the caller, or evidence from before the call ended, never writes the promise', async () => {
       const lost = await caller({ leadStatus: 'lost' });
-      await inboundCall(lost.phone, '2026-11-04T16:00:00Z');
       const earlier = await caller();
       await inboundText(earlier.phone, '2026-11-04T14:00:00Z');
       const raised = await caller();
       await run();
       await db('leads').where({ id: raised.leadId }).update({ status: 'lost' });
-      await inboundCall(raised.phone, '2026-11-04T17:30:00Z');
       await runClosing(new Date('2026-11-04T18:15:00Z'));
       for (const c of [lost, earlier, raised]) expect((await promiseRow(c.promiseId)).status).toBe('open');
+      const [bell] = await rowsFor(raised.promiseId);
+      expect(bell.resolution).toBe('The lead is closed');
+    });
+
+    test('a caller who called back kept the promise even when the lead closed since (booked, or said no on that call)', async () => {
+      const won = await caller({ leadStatus: 'won', withCustomer: true });
+      const callId = await inboundCall(won.phone, '2026-11-04T16:00:00Z');
+      await runClosing(EARLY);
+      const row = await promiseRow(won.promiseId);
+      expect(row.status).toBe('fulfilled');
+      expect(row.fulfillment).toMatchObject({ record_id: callId, basis: 'caller_called' });
+      expect(await rowsFor(won.promiseId)).toHaveLength(0);
+    });
+
+    test('a call with no linked lead never rings, but a kept promise on it still closes', async () => {
+      const kept = await caller();
+      const quiet = await caller();
+      await db('leads').whereIn('id', [kept.leadId, quiet.leadId]).del();
+      const callId = await inboundCall(kept.phone, '2026-11-04T16:00:00Z');
+      await runClosing(NOW);
+      expect((await promiseRow(kept.promiseId)).fulfillment).toMatchObject({ record_id: callId, basis: 'caller_called' });
+      expect((await promiseRow(quiet.promiseId)).status).toBe('open');
+      for (const c of [kept, quiet]) expect(await rowsFor(c.promiseId)).toHaveLength(0);
     });
 
     test('a promise a person touched or edited between the read and the write is not overwritten', async () => {
