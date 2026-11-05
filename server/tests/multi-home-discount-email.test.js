@@ -113,6 +113,9 @@ function scenario({ targets = [], ledger = [], customers = [], payers = [], pref
     notification_prefs: prefs,
     customer_properties: [{ id: 'prop-son', customer_id: 'son', address_line1: '10 New Home Lane', address_line2: null }, ...properties],
     estimates: [{ ...estimate, status: 'accepted' }],
+    email_templates: [{ id: 'tpl-1', template_key: 'customer.multi_home_discount_on', active_version_id: null,
+      send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }],
+    email_suppressions: [],
   };
   const allVisits = { 'root-son': [visit('2026-11-14', '90.00')], ...visits };
   const dbh = fakeDb({ tables, visits: allVisits });
@@ -758,6 +761,18 @@ describe('the provider handoff composes the whole email again under the locks', 
     const send = sendThrough((args) => { if (args.to === 'parents@example.invalid') edit(sc); });
     expect(await run(sc, send)).toMatchObject({ sent: 1, waiting: 1, failed: 0 });
     expect(refusedLog()).toHaveLength(1);
+  });
+
+  test('the parents\' address goes on the suppression list after composing: that email is refused as blocked', async () => {
+    const sc = twoHomes();
+    const send = sendThrough((args) => {
+      if (args.to === 'parents@example.invalid') {
+        sc.tables.email_suppressions.push({ email: 'parents@example.invalid', suppression_type: 'bounce', group_key: null, status: 'active' });
+      }
+    });
+    expect(await run(sc, send)).toMatchObject({ sent: 1, blocked: 1, waiting: 0, failed: 0 });
+    expect(sc.dbh.locks.filter((k) => k.startsWith('customer-email:'))).toEqual(['customer-email:son@example.invalid', 'customer-email:parents@example.invalid']);
+    expect(refusedLog()[0]).toContain('suppression list');
   });
 
   test('a Bill-To payer group: an inactive payer, a new AP email or a new display name refuses', async () => {

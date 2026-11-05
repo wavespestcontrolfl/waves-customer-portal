@@ -305,6 +305,23 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     });
   });
 
+  test('an address suppressed after the library\'s own check: refused under the address lock, nothing sent to it', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      const son = await trx('customers').where({ id: f.son }).first('email');
+      // sendTemplate has already checked the suppression list (on its own pool) when the bounce lands.
+      const bounce = (args) => (args.to === son.email
+        ? trx('email_suppressions').insert({ email: son.email, suppression_type: 'bounce', group_key: null, status: 'active' })
+        : null);
+      expect(await emailRun(trx, { send: sendAfter(bounce) })).toMatchObject({ sent: 1, blocked: 1, waiting: 0, failed: 0 });
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      const rows = await messages(f.estimateId);
+      expect(rows.find((r) => r.recipient_id === f.son)).toMatchObject({ status: 'failed', error_message: 'aborted_by_caller_before_dispatch' });
+      expect(rows.find((r) => r.recipient_id === f.parents)).toMatchObject({ status: 'sent' });
+    });
+  });
+
   test('a held target blocks the send; once it is no longer a target the email goes', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);

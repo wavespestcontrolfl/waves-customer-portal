@@ -33,9 +33,11 @@
  * AT THE PROVIDER HANDOFF (sendTemplate's withProviderHandoff), in PR 2's lock order (the family lock, each listed
  * series' maintenance lock as a try, each profile's customer-comms lock), the whole email is composed again from fresh
  * reads (the routing rows FOR SHARE; no visit or invoice row is locked). It goes only when the same homes, the same
- * series and exactly this send come out; then the address key is taken and every lock is held through the request.
+ * series and exactly this send come out; then the address key is taken, the suppression list is read again on that
+ * transaction, and every lock is held through the request.
  * Anything else (a price or discount changed, a target added or held, a family change, a new address, payer, switch
- * or greeting, a series being changed right now) refuses before the request: counted as waiting, a later run checks again.
+ * or greeting, a series being changed right now) refuses before the request: counted as waiting (a new suppression as
+ * blocked), and a later run checks again.
  *
  * CELLS (per home; a cell that cannot be read from a stored record is left out, never guessed; the template drops the
  * row):
@@ -526,6 +528,7 @@ const REFUSALS = Object.freeze({
   not_ready: 'a home\'s discount or price, or another home of the family, changed',
   homes_changed: 'the family\'s homes changed',
   content_changed: 'what this email states, or who it goes to, changed',
+  suppressed: 'the address went on the suppression list',
 });
 
 async function sendGroups(dbh, run, estimate, composed, out) {
@@ -554,7 +557,8 @@ async function sendGroups(dbh, run, estimate, composed, out) {
       });
       if (state.refused) {
         logger.info(`[multi-home-discount-email] estimate ${estimate.id}: ${REFUSALS[state.refused]} just before the send; nothing sent, the next run checks again`);
-        out.waiting += 1;
+        if (state.refused === 'suppressed') out.blocked += 1;
+        else out.waiting += 1;
         continue;
       }
       tally(out, result);
@@ -619,6 +623,12 @@ function sendTimeHandoff(dbh, run, estimate, composed, one, state) {
     const now = fresh.sends.find((s) => s.key === one.key);
     if (!now || now.skip || !isDeepStrictEqual(now.args, one.args)) return refuse('content_changed');
     await lockCustomerEmail(trx, one.args.to);
+    // The suppression list again, on this transaction after the address key (suppression writers take it): sendTemplate
+    // read it before this handoff, so a bounce or opt-out that committed while these locks were awaited refuses here.
+    const library = require('./email-template-library');
+    const loaded = await library.loadTemplateByKey(TEMPLATE_KEY, trx);
+    if (!loaded?.template) return refuse('not_ready');
+    if (await library.activeSuppressionFor(loaded.template, one.args.to, null, trx)) return refuse('suppressed');
     await dispatch(trx);
     return { ok: true };
   });
