@@ -706,3 +706,264 @@ describe('second-tech-handover — termite / WDO by territory', () => {
     expect(await offCapabilityLines(db, HIRE, [])).toEqual([]);
   });
 });
+
+// The day-60 second run (--weekend-move, owner 2026-10-28 question 1 = C): weekend customers move to the hire, each live
+// visit on a day off to the nearest hire work day within ±5 days, the series re-anchored so top-up keeps the new weekday.
+describe('second-tech-handover — --weekend-move date logic', () => {
+  const weekend = require('../../ops/agents/second-tech-handover-weekend.js');
+  const seeder = require('../services/recurring-appointment-seeder');
+  const { measureRecurringSeries } = require('../services/recurring-schedule-audit');
+  const hop = (date, pattern, n, opts) => seeder._internals.nextRecurringDate(date, pattern, n, opts);
+  const ord = (date) => seeder._internals.recurrenceOrdinalOptions(date, {});
+  const MON_THU = [1, 2, 3, 4];
+
+  // A series of `count` visits from `first`, spaced as top-up spaces them (its own ordinal weekday), held by OWNER.
+  let n = 0;
+  const series = (first, { pattern = 'quarterly', count = 3, customer = `C-w${++n}`, window = ['09:00:00', '10:00:00'], parentExtra = {}, visitExtra = {} } = {}) => {
+    const parentRow = { id: `P-w${n}`, customer_id: customer, service_type: 'Quarterly Pest Control', recurring_pattern: pattern, recurring_nth: null, recurring_weekday: null, recurring_interval_days: null, ...parentExtra };
+    const opts = { ...ord(first), intervalDays: parentExtra.recurring_interval_days };
+    const visits = Array.from({ length: count }, (_, i) => ({
+      id: `V-w${n}-${i}`, series_id: parentRow.id, recurring_parent_id: parentRow.id, is_recurring: true, scheduled_date: i === 0 ? first : hop(first, pattern, i, opts),
+      status: 'confirmed', technician_id: OWNER, window_start: window[0], window_end: window[1], ...visitExtra,
+    }));
+    const live = visits;
+    return { customer_id: customer, series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
+  };
+  const facts = (over = {}) => ({
+    blackout: null, absentDates: new Set(), prefs: new Map(), neighbors: new Map(), stayStill: new Map(), noWeekends: new Map(), ...over,
+  });
+  const clearFacts = (candidates, over = {}) => {
+    const f = facts(over);
+    for (const c of candidates) {
+      f.prefs.set(c.customer_id, { preferred_day_indexes: [], blackout: null });
+      for (const s of c.series) for (const v of s.live) { f.neighbors.set(v.id, { prev: null, next: null }); f.stayStill.set(v.id, null); }
+    }
+    return f;
+  };
+  const run = (candidates, o = {}) => weekend.resolveWeekendMoves({
+    candidates, from: OWNER, workDays: MON_THU, today: TODAY, facts: o.facts || clearFacts(candidates), free: o.free || (async () => true), seed: o.seed,
+  });
+  const dow = (d) => new Date(`${d}T12:00:00Z`).getUTCDay();
+
+  test('candidate days: --to work days within ±5 days, nearest first, a tie takes the earlier date', () => {
+    expect(weekend.candidateDates(SAT, MON_THU, TODAY)).toEqual(['2099-07-09', '2099-07-13', '2099-07-08', '2099-07-14', '2099-07-07', '2099-07-15', '2099-07-06', '2099-07-16']);
+    // Nothing inside the 73 h freeze margin (today + 4 days).
+    expect(weekend.candidateDates('2099-07-02', MON_THU, '2099-06-30')).toEqual(['2099-07-06', '2099-07-07']);
+  });
+
+  test('Sat -> Thu (-2), Sun -> Mon (+1), Fri -> Thu (-1): the first visit and every later one, re-anchored on the new weekday', async () => {
+    for (const [first, expected, label] of [[SAT, '2099-07-09', 'Sat -> Thu'], ['2099-07-12', '2099-07-13', 'Sun -> Mon'], [FRI, '2099-07-09', 'Fri -> Thu']]) {
+      // Three quarterly visits; the Friday series has two (a third would sit 6 days from its Thursday projection, so the Wednesday wins).
+      const c = series(first, { count: first === FRI ? 2 : 3 });
+      const { kept, newDates, anchors } = await run([c]);
+      expect(kept.size).toBe(0);
+      expect(newDates.get(c.series[0].live[0].id)).toBe(expected);
+      expect(weekend.changeLabel(first, expected)).toBe(label);
+      const toDay = dow(expected);
+      for (const v of c.series[0].live) {
+        const d = newDates.get(v.id);
+        expect(dow(d)).toBe(toDay);
+        expect(Math.abs(weekend.dayDiff(v.scheduled_date, d))).toBeLessThanOrEqual(5);
+      }
+      expect(anchors).toEqual([expect.objectContaining({ weekday: toDay, old_nth: null, old_weekday: null })]);
+    }
+  });
+
+  test('the next top-up child lands on the new weekday, and the recurring audit reads the moved visits as on cadence', async () => {
+    const c = series(SAT);
+    const { newDates, anchors } = await run([c]);
+    const [a] = anchors;
+    const moved = c.series[0].live.map((v) => ({ ...v, scheduled_date: newDates.get(v.id) }));
+    const parentAfter = { ...c.series[0].parent, recurring_nth: a.nth, recurring_weekday: a.weekday };
+    // Top-up hops from the latest live visit with the parent's stamped nth / weekday (admin-schedule seriesRecurrenceOptions).
+    const latest = moved[moved.length - 1].scheduled_date;
+    const topUp = hop(latest, 'quarterly', 1, seeder._internals.recurrenceOrdinalOptions('2099-04-04', { nth: parentAfter.recurring_nth, weekday: parentAfter.recurring_weekday }));
+    expect(dow(topUp)).toBe(dow(newDates.get(c.series[0].live[0].id)));
+    // The control: without the stamp the same hop returns to the parent's Saturday (the reason for the re-anchor).
+    expect(dow(hop(latest, 'quarterly', 1, seeder._internals.recurrenceOrdinalOptions('2099-04-04', {})))).toBe(6);
+    // The audit measures every interval against the stamped template: no drift.
+    const template = { ...parentAfter, id: 'P', scheduled_date: '2099-04-04', is_recurring: true, status: 'completed', recurring_ongoing: true };
+    const rows = [template, ...moved.map((v) => ({ ...v, date_exception: false }))];
+    const measured = measureRecurringSeries(template, rows, { todayET: TODAY });
+    expect(measured.intervals.map((i) => i.driftDays)).toEqual([0, 0, 0]);
+  });
+
+  test('a day-gap series (every 6 weeks, custom) keeps the new weekday with no anchor write', async () => {
+    for (const [pattern, extra] of [['every_6_weeks', {}], ['custom', { recurring_interval_days: 21 }]]) {
+      const c = series(SAT, { pattern, parentExtra: extra });
+      const { newDates, anchors } = await run([c]);
+      const days = c.series[0].live.map((v) => newDates.get(v.id));
+      expect(anchors).toEqual([]);
+      expect(days.map(dow)).toEqual([4, 4, 4]);
+      // Top-up adds the fixed gap to the latest visit: the new weekday carries on.
+      expect(dow(hop(days[2], pattern, 1, { intervalDays: extra.recurring_interval_days }))).toBe(4);
+    }
+  });
+
+  test('month boundary: a 1st Saturday moved two days earlier lands in the previous month, projects wrong, so the next day is tried', async () => {
+    let first = null;
+    for (let m = 1; m <= 12 && !first; m += 1) {
+      const d = `2099-${String(m).padStart(2, '0')}-01`;
+      if (dow(d) === 6) first = d;
+    }
+    const c = series(first);
+    const { kept, newDates, anchors } = await run([c]);
+    expect(kept.size).toBe(0);
+    const firstNew = newDates.get(c.series[0].live[0].id);
+    // Not the Thursday before (the 5th / last Thursday of the previous month): the Monday after, in the same month.
+    expect(firstNew).toBe(`${first.slice(0, 8)}03`);
+    expect(anchors[0]).toMatchObject({ nth: 1, weekday: 1 });
+    for (const v of c.series[0].live) expect(Math.abs(weekend.dayDiff(v.scheduled_date, newDates.get(v.id)))).toBeLessThanOrEqual(5);
+  });
+
+  test('a visit never reaches or crosses its adjacent occurrence (the flex-tier neighbor bound)', async () => {
+    const c = series(SAT, { count: 1 });
+    const f = clearFacts([c]);
+    f.neighbors.set(c.series[0].live[0].id, { prev: '2099-07-09', next: null });
+    expect((await run([c], { facts: f })).newDates.get(c.series[0].live[0].id)).toBe('2099-07-13');
+    f.neighbors.set(c.series[0].live[0].id, null);
+    expect((await run([c], { facts: f })).kept.get(c.customer_id)).toBe('neighbor');
+  });
+
+  test('blackout, absence and the freeze margin push a date to the next candidate; every candidate gone keeps the customer whole', async () => {
+    const c = series(SAT, { count: 1 });
+    const layers = { dates: new Set(['2099-07-09']), weeklyDaysOff: new Set(), closedHolidays: new Set() };
+    expect((await run([c], { facts: clearFacts([c], { blackout: layers }) })).newDates.get(c.series[0].live[0].id)).toBe('2099-07-13');
+    const absent = new Set(['2099-07-09', '2099-07-13']);
+    expect((await run([c], { facts: clearFacts([c], { absentDates: absent }) })).newDates.get(c.series[0].live[0].id)).toBe('2099-07-08');
+    const all = new Set(weekend.candidateDates(SAT, MON_THU, TODAY));
+    expect((await run([c], { facts: clearFacts([c], { absentDates: all }) })).kept.get(c.customer_id)).toBe('absence');
+    expect((await run([series('2099-07-02', { count: 1 })], {})).newDates.size).toBe(1); // 07-06 is 6 days out: fine
+    const tooSoon = series('2099-07-04', { count: 1 }); // Sat; Mon 07-06 is the only legal day and 07-02 is under the margin
+    expect([...(await run([tooSoon])).newDates.values()]).toEqual(['2099-07-06']);
+  });
+
+  test("a customer whose portal preference names a day off or a blocked date stays whole", async () => {
+    const pref = series(SAT);
+    const f = clearFacts([pref]);
+    f.prefs.set(pref.customer_id, { preferred_day_indexes: [6], blackout: null });
+    expect((await run([pref], { facts: f })).kept.get(pref.customer_id)).toBe('preferred_day');
+    const away = series(SAT);
+    const g = clearFacts([away]);
+    g.prefs.set(away.customer_id, { preferred_day_indexes: [], blackout: { start: '2099-07-01', end: '2099-07-10' } });
+    // Thu 07-09 is blocked, Mon 07-13 is not: the next candidate carries the move.
+    expect((await run([away], { facts: g })).newDates.get(away.series[0].live[0].id)).toBe('2099-07-13');
+    g.prefs.set(away.customer_id, { preferred_day_indexes: [], blackout: { start: '2099-07-01', end: '2099-07-31' } });
+    expect((await run([away], { facts: g })).kept.get(away.customer_id)).toBe('customer_blackout');
+  });
+
+  test('a visit the app keeps still keeps the customer whole: confirmed, reminder sent, person-placed, grouped, exception, hand-off, other technician, first visit', async () => {
+    for (const reason of ['held', 'reminder_sent', 'person_placed', 'grouped', 'date_exception', 'dispatch_handoff', 'not_open']) {
+      const c = series(SAT, { count: 1 });
+      const f = clearFacts([c]);
+      f.stayStill.set(c.series[0].live[0].id, reason);
+      expect((await run([c], { facts: f })).kept.get(c.customer_id)).toBe(reason);
+    }
+    const other = series(SAT, { count: 1, visitExtra: { technician_id: OTHER } });
+    expect((await run([other])).kept.get(other.customer_id)).toBe('other_technician');
+    const first = series(SAT, { count: 1 });
+    first.series[0].live[0].recurring_parent_id = null;
+    expect((await run([first])).kept.get(first.customer_id)).toBe('first_visit');
+    // A confirmed visit already on a work day still moves its technician only: nothing to decide here.
+    const workday = series(MON, { count: 1 });
+    workday.series[0].needsDates = false;
+    const f = clearFacts([workday]);
+    f.stayStill.set(workday.series[0].live[0].id, 'held');
+    const out = await run([workday], { facts: f });
+    expect(out.kept.size).toBe(0);
+    expect(out.newDates.size).toBe(0);
+  });
+
+  test('--to busy at the window keeps the customer whole when no candidate is free; two customers onto one hour do not share it', async () => {
+    const busy = series(SAT, { count: 1 });
+    expect((await run([busy], { free: async () => false })).kept.get(busy.customer_id)).toBe('busy');
+    const a = series(SAT, { count: 1 });
+    const b = series(SAT, { count: 1 });
+    const out = await run([a, b]);
+    const first = out.newDates.get(a.series[0].live[0].id);
+    const second = out.newDates.get(b.series[0].live[0].id);
+    expect(first).toBe('2099-07-09');
+    expect(second).not.toBe(first); // the second customer takes the next free day, never the same hour
+    // When every candidate day already holds the hour, the customer stays whole.
+    const seed = new Map(weekend.candidateDates(SAT, MON_THU, TODAY).map((d) => [d, [{ s: 540, e: 600 }]]));
+    expect((await run([series(SAT, { count: 1 })], { seed })).kept.size).toBe(1);
+    // A technician-only move of the same run holds its hour too.
+    const half = new Map([['2099-07-09', [{ s: 570, e: 630 }]]]);
+    expect((await run([series(SAT, { count: 1 })], { seed: half })).newDates.values().next().value).toBe('2099-07-13');
+  });
+
+  test('a customer is kept WHOLE when one of its series cannot move; the hours its other series took are given back', async () => {
+    const ok = series(SAT, { count: 1 });
+    const bad = series(SAT, { count: 1 });
+    const customer = ok.customer_id;
+    bad.customer_id = customer;
+    bad.series[0].parent.customer_id = customer;
+    const f = clearFacts([ok, bad], {});
+    f.stayStill.set(bad.series[0].live[0].id, 'held');
+    const joined = { customer_id: customer, series: [...ok.series, ...bad.series] };
+    const next = series(SAT, { count: 1 });
+    const out = await run([joined, next], { facts: (() => { for (const c of [next]) { f.prefs.set(c.customer_id, { preferred_day_indexes: [], blackout: null }); f.neighbors.set(next.series[0].live[0].id, { prev: null, next: null }); f.stayStill.set(next.series[0].live[0].id, null); } f.prefs.set(customer, { preferred_day_indexes: [], blackout: null }); return f; })() });
+    expect(out.kept.get(customer)).toBe('held');
+    expect(out.newDates.has(ok.series[0].live[0].id)).toBe(false);
+    // The Thursday the first series briefly took is free again for the next customer.
+    expect(out.newDates.get(next.series[0].live[0].id)).toBe('2099-07-09');
+  });
+
+  test('isMonthBased matches rebooker.isMonthBasedRecurrence for every pattern the scheduler places', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+      const { isMonthBasedRecurrence } = require('../services/rebooker');
+      for (const p of ['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'biannual', 'annual', 'yearly', 'monthly_nth_weekday', 'seasonal_feb_oct',
+        'weekly', 'biweekly', 'every_6_weeks', 'custom', 'daily', 'lawn_rounds_9', null]) {
+        expect(weekend.isMonthBased(p)).toBe(isMonthBasedRecurrence(p));
+      }
+    });
+  });
+
+  test('--weekend-move arguments: needs --to; START_TOO_SOON under 4 days; the plan id covers new dates and anchors', () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    expect(parseArgs(['--from', OWNER, '--to', HIRE, '--weekend-move']).weekendMove).toBe(true);
+    expect(parseArgs(['--from', OWNER, '--to', HIRE]).weekendMove).toBe(false);
+    expect(() => parseArgs(['--from', OWNER, '--weekend-move'])).toThrow('exit 2');
+    exit.mockRestore(); err.mockRestore();
+    const { assertRunFlags, planIdOf } = require(script);
+    expect(() => assertRunFlags({ lines: ['general'], zips: null, weekendMove: true, start: '2099-07-03', today: '2099-06-30' })).toThrow(expect.objectContaining({ code: 'START_TOO_SOON' }));
+    expect(() => assertRunFlags({ lines: ['general'], zips: null, weekendMove: true, start: '2099-07-04', today: '2099-06-30' })).not.toThrow();
+    expect(() => assertRunFlags({ lines: ['general'], zips: null, weekendMove: false, start: '2099-07-01', today: '2099-06-30' })).not.toThrow();
+    const base = { from: OWNER, to: HIRE, start: START, lines: ['general'], retemplate: ['S-a'], weekendMove: true };
+    const move = { series_id: 'S-a', visit_id: 'V-a', date: SAT, to_date: '2099-07-09' };
+    const id = planIdOf({ ...base, moves: [move] });
+    expect(planIdOf({ ...base, moves: [{ ...move, to_date: '2099-07-13' }] })).not.toBe(id);
+    expect(planIdOf({ ...base, moves: [{ ...move, to_date: null }] })).not.toBe(id);
+    const anchor = { series_id: 'S-a', nth: 2, weekday: 4, old_nth: null, old_weekday: null };
+    expect(planIdOf({ ...base, moves: [move], anchors: [anchor] })).not.toBe(id);
+    expect(planIdOf({ ...base, moves: [move], anchors: [{ ...anchor, weekday: 1 }] })).not.toBe(planIdOf({ ...base, moves: [move], anchors: [anchor] }));
+    // Without the flag the id is exactly what it was.
+    expect(planIdOf({ ...base, weekendMove: false, moves: [{ series_id: 'S-a', visit_id: 'V-a', date: SAT }] }))
+      .toBe(planIdOf({ from: OWNER, to: HIRE, start: START, lines: ['general'], retemplate: ['S-a'], moves: [{ series_id: 'S-a', visit_id: 'V-a', date: SAT }] }));
+  });
+
+  test('buildPlan in --weekend-move mode plans weekend customers (no off_day_customer skip) and lists the day changes by weekday', () => {
+    const wk = parent({ customer_id: 'C-wk' });
+    const sat = visit(wk, SAT, { is_recurring: true });
+    const mon = visit(wk, MON, { is_recurring: true });
+    const draft = plan([wk], [sat, mon], { weekendMove: true });
+    expect(draft.skipped.off_day_customer).toBeUndefined();
+    expect(draft.weekend_candidates).toEqual([{ customer_id: 'C-wk', series_ids: [wk.id] }]);
+    expect(draft.ids.moves.find((m) => m.visit_id === sat.id)).toMatchObject({ date: SAT, to_date: null });
+    expect(draft.ids.moves.find((m) => m.visit_id === mon.id).to_date).toBeUndefined();
+    const kept = plan([wk], [sat, mon], { weekendMove: true, weekend: { kept: new Map([['C-wk', 'busy']]), newDates: new Map(), anchors: [] } });
+    expect(kept.series.retemplate).toBe(0);
+    expect(kept.skipped.weekend_kept_busy).toEqual({ series: 1, visits: 2, customers: 1 });
+    expect(kept.ids.kept).toEqual([{ customer_id: 'C-wk', reason: 'busy' }]);
+    const moved = plan([wk], [sat, mon], { weekendMove: true, weekend: { kept: new Map(), newDates: new Map([[sat.id, '2099-07-09']]), anchors: [{ series_id: wk.id, nth: 2, weekday: 4, old_nth: null, old_weekday: null }] } });
+    expect(moved.date_changes).toEqual({ visits: 1, customers: 1, by_change: { 'Sat -> Thu': 1 } });
+    expect(moved.ids.moves.find((m) => m.visit_id === sat.id)).toMatchObject({ to_date: '2099-07-09' });
+    expect(moved.would_change.visits).toBe(2);
+    expect(moved.ids.anchors).toHaveLength(1);
+    expect(moved.planId).not.toBe(draft.planId);
+    // Not in this mode, the owner's first-run rule is unchanged.
+    expect(plan([wk], [sat, mon]).skipped.off_day_customer).toMatchObject({ series: 1, customers: 1 });
+  });
+});
