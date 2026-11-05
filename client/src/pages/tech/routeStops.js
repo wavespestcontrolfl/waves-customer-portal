@@ -2,6 +2,8 @@
 // The schedule feed attaches a shared `visit` summary to every row that
 // belongs to a visit group; rows without one are their own stop. Pure —
 // unit-tested without React.
+import { onSiteTimeOf } from '../../lib/on-site-time';
+
 // Client copy of server/services/visit-context/statuses.js
 // TERMINAL_ROW_STATUSES — keep the two in sync.
 export const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
@@ -41,6 +43,54 @@ export function groupServicesIntoStops(services) {
 /** First stop with any non-terminal member — the tech's next stop. */
 export function nextStopOf(stops) {
   return (stops || []).find((st) => st.liveCount > 0) || null;
+}
+
+// Stops with any on_site member. A tech often starts the next stop before
+// finishing the last one in the app, so more than one stop can be on site.
+export function onSiteStopsOf(stops) {
+  return (stops || []).filter((st) => st.services.some((s) => s.status === 'on_site'));
+}
+
+/**
+ * When the tech arrived at a stop (ms since epoch), or null when no on-site
+ * member carries a readable time: the earliest on-site member's check-in
+ * (the day feed's `checkInTime`; onSiteTimeOf also reads a status log).
+ */
+export function stopArrivalMs(stop) {
+  const times = (stop?.services || [])
+    .filter((s) => s.status === 'on_site')
+    .map((s) => onSiteTimeOf(s))
+    .filter(Boolean)
+    .map((at) => new Date(at).getTime())
+    .filter((ms) => Number.isFinite(ms));
+  return times.length ? Math.min(...times) : null;
+}
+
+/**
+ * The stop the tech is at: of the stops on site, the one arrived at LAST
+ * (equal or missing times keep route order); else the en_route stop; else
+ * the next stop. The old rule took the first on-site stop, which stayed
+ * "current" while the tech worked a later one.
+ */
+export function currentStopOf(stops) {
+  let best = null;
+  let bestMs = null;
+  onSiteStopsOf(stops).forEach((st) => {
+    const ms = stopArrivalMs(st);
+    if (!best || (ms !== null && (bestMs === null || ms > bestMs))) { best = st; bestMs = ms; }
+  });
+  return best
+    || (stops || []).find((st) => st.services.some((s) => s.status === 'en_route'))
+    || nextStopOf(stops);
+}
+
+/** On-site stops other than `current`, oldest arrival first (no time last). */
+export function stillOpenStopsOf(stops, current) {
+  return onSiteStopsOf(stops)
+    .filter((st) => st.key !== current?.key)
+    .map((st) => ({ st, ms: stopArrivalMs(st) }))
+    .sort((a, b) => (a.ms ?? Infinity) - (b.ms ?? Infinity))
+    .map(({ st }) => st);
 }
 
 /** Preserve mixed member state instead of presenting a partial stop as done. */

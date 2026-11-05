@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import TechFieldHome from './TechFieldHome';
-import { groupServicesIntoStops, nextStopOf, serviceWindowLabel, stopStatusLabel } from './routeStops';
+import { currentStopOf, groupServicesIntoStops, nextStopOf, serviceWindowLabel, stopStatusLabel } from './routeStops';
 afterEach(cleanup);
 const row = (id, status, visit) => ({ id, status, visit, customerName: 'Fixture Customer', address: '100 Example Lane', serviceType: 'Lawn care', windowStart: '09:00', windowEnd: '10:00' });
 
@@ -62,4 +62,41 @@ it('names the tools a stop needs that are not on the truck, and only on that sto
   cleanup();
   render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={vi.fn()} />);
   expect(screen.queryByText(/Not on your truck/)).not.toBeInTheDocument();
+});
+
+// Several stops can be on site (the tech starts the next one before finishing
+// the last in the app): the latest arrival is current, the others are listed.
+it('lists earlier on-site stops under the current visit, flags them in the header and the bar, and opens one on tap', () => {
+  const timed = (id, name, checkInTime, status = 'on_site') => ({ ...row(id, status), customerName: name, checkInTime });
+  const stops = groupServicesIntoStops([
+    timed('a', 'Done Customer', '2026-11-04T15:00:00Z', 'completed'),
+    timed('b', 'Older Customer', '2026-11-04T17:02:00Z'),
+    timed('c', 'Middle Customer', '2026-11-04T18:33:00Z'),
+    timed('d', 'Latest Customer', '2026-11-04T19:07:00Z'),
+    timed('e', 'Later Customer', null, 'confirmed'),
+  ]);
+  const onOpen = vi.fn();
+  const { container } = render(<TechFieldHome section="today" stops={stops} nextStop={currentStopOf(stops)} onOpen={onOpen} />);
+  expect(screen.getByText(/1 of 5 stops complete · 3 still open · 5 services/)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Latest Customer' })).toBeInTheDocument();
+  const rows = screen.getAllByRole('button', { name: /arrived/ });
+  expect(rows.map((r) => r.textContent)).toEqual(['Older Customer · arrived 12:02 PM', 'Middle Customer · arrived 1:33 PM']);
+  // The list sits in the same area as the current visit, in the page flow.
+  expect(container.querySelector('.tf-area-next')).toContainElement(rows[0]);
+  expect(Array.from(container.querySelectorAll('.tf-progress span')).map((s) => s.className)).toEqual(['done', 'open', 'open', 'current', '']);
+  fireEvent.click(rows[0]);
+  expect(onOpen).toHaveBeenCalledWith(stops[1]);
+});
+
+it('shows no still-open list or count when only the current stop is on site', () => {
+  const stops = groupServicesIntoStops([row('a', 'completed'), row('b', 'on_site'), row('c', 'confirmed')]);
+  render(<TechFieldHome section="today" stops={stops} nextStop={currentStopOf(stops)} onOpen={vi.fn()} />);
+  expect(screen.queryByText('Still open from earlier')).not.toBeInTheDocument();
+  expect(screen.getByText(/1 of 3 stops complete · 1 still open · 3 services/)).toBeInTheDocument();
+});
+
+it('shows neither the count nor the list when nothing is on site', () => {
+  const stops = groupServicesIntoStops([row('a', 'completed'), row('b', 'confirmed')]);
+  render(<TechFieldHome section="today" stops={stops} nextStop={currentStopOf(stops)} onOpen={vi.fn()} />);
+  expect(screen.queryByText(/still open/)).not.toBeInTheDocument();
 });

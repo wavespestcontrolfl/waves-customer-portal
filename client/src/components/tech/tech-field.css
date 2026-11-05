@@ -63,6 +63,12 @@
 .tf-progress span { height: 4px; flex: 1; background: var(--tf-line); border-radius: 3px; }
 .tf-progress .done { background: var(--tf-ink); }
 .tf-progress .current { background: var(--tf-faint); }
+.tf-progress .open { background: var(--tfx-amber); }
+.tf-open { margin-top: 12px; }
+.tf-open-row { display: block; width: 100%; min-height: 44px; padding: 8px 14px; border: 0.5px solid var(--tf-line); border-left: 3px solid var(--tfx-amber); border-radius: 6px; background: var(--tf-surface); color: inherit; font: inherit; font-size: 14px; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.tf-open-row + .tf-open-row { margin-top: 6px; }
+.tf-open-row:hover { background: var(--tf-subtle); }
+.tf-open-row:disabled { opacity: .5; cursor: not-allowed; }
 .tf-card { border: 0.5px solid var(--tf-line); border-radius: 6px; background: var(--tf-surface); overflow: hidden; }
 .tf-card-top { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 0.5px solid var(--tf-line); color: var(--tf-muted); font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; }
 .tf-card-top svg { width: 14px; height: 14px; }
