@@ -169,6 +169,14 @@ describe('visit value: what completing it bills (billing-lane predictCompletionB
     expect(Object.fromEntries(await valueVisits(database, [visit({ id: 'u1', ...stamp }), visit({ id: 'p1' })]))).toEqual({ u1: 0, p1: 100 });
   });
 
+  test('a month the dues run is projected to charge covers that member\'s visits: never counted twice', async () => {
+    const noAutopay = { ...member, customer_id: 'm1', autopay_active: false, estimated_price: null };
+    const rows = [visit({ ...noAutopay, id: 'j1', scheduled_day: '2027-01-08' }), visit({ ...noAutopay, id: 'f1', scheduled_day: '2027-02-02' })];
+    // Auto Pay resumes before January's run, so January's dues come from the run, not from j1
+    const values = await valueVisits(fakeDb(), rows, { duesMonths: new Set(['m1|2027-01']) });
+    expect(Object.fromEntries(values)).toEqual({ j1: 0, f1: 80 });
+  });
+
   test('a failed read never counts money it cannot place: unread dues count the month as paid', async () => {
     monthlyDuesCollected.mockRejectedValue(new Error('read failed'));
     const values = await valueVisits(fakeDb(), [visit({ ...member, id: 'f1', customer_id: 'm2', autopay_active: false, estimated_price: null })]);
@@ -335,8 +343,8 @@ describe('loadForecastInput', () => {
     ] } });
     const input = await loadForecastInput({ database, now: NOW, readCashBalances: cashOk, readStripeBalance: async () => ({}) });
     expect(input.dues).toEqual([
-      { day: '2026-12-01', amountUsd: 80 }, { day: '2027-01-01', amountUsd: 80 },
-      { day: '2026-12-31', amountUsd: 60 }, { day: '2027-01-31', amountUsd: 60 },
+      { day: '2026-12-01', amountUsd: 80, customerId: 'm1' }, { day: '2027-01-01', amountUsd: 80, customerId: 'm1' },
+      { day: '2026-12-31', amountUsd: 60, customerId: 'm2' }, { day: '2027-01-31', amountUsd: 60, customerId: 'm2' },
     ]);
   });
 
@@ -355,8 +363,8 @@ describe('loadForecastInput', () => {
       ] } });
       const input = await loadForecastInput({ database, now: NOW, readCashBalances: cashOk, readStripeBalance: async () => ({}) });
       expect(input.dues).toEqual([
-        { day: '2026-12-01', amountUsd: 80 }, { day: '2027-01-15', amountUsd: 60 },
-        { day: '2026-11-10', amountUsd: 40 }, { day: '2027-01-10', amountUsd: 40 },
+        { day: '2026-12-01', amountUsd: 80, customerId: 'm1' }, { day: '2027-01-15', amountUsd: 60, customerId: 'm2' },
+        { day: '2026-11-10', amountUsd: 40, customerId: 'm3' }, { day: '2027-01-10', amountUsd: 40, customerId: 'm3' },
       ]);
       // each run is judged on its own morning, Eastern time
       expect(monthlyDuesVerdict.mock.calls.map((c) => [c[1], c[2].now.toISOString()])).toEqual(expect.arrayContaining([

@@ -111,11 +111,11 @@ async function duesMonthPaid(database, customerId, day, opts = {}) {
   }
 }
 
-// Each visit's value, by id. Completion bills a member's dues once per ET month: one dues invoice covers
-// the month's other visits. So when the prediction turns on the month's dues, the database answers for
-// that month; in a month it has no answer for, the first such visit (by date) bills and the rest are
-// covered.
-async function valueVisits(database, rows) {
+// Each visit's value, by id. A member pays dues once per ET month: one dues charge or invoice covers the
+// month's other visits. So when the prediction turns on the month's dues, a month the dues run is
+// projected to charge (`duesMonths`, from readDues) is covered; else the database answers for the month;
+// in a month it has no answer for, the first such visit (by date) bills and the rest are covered.
+async function valueVisits(database, rows, { duesMonths = new Set() } = {}) {
   const annual = await annualVerdicts(database, rows);
   const values = new Map();
   const billedMonths = new Set();
@@ -126,7 +126,7 @@ async function valueVisits(database, rows) {
     const duesDecide = billed > 0 && predictedCash(row, { annualCoverage, duesCollected: true }) !== billed;
     const month = `${row.customer_id}|${row.scheduled_day.slice(0, 7)}`;
     // leaving out the visit's own invoice
-    const paid = duesDecide && (billedMonths.has(month)
+    const paid = duesDecide && (billedMonths.has(month) || duesMonths.has(month)
       || await duesMonthPaid(database, row.customer_id, row.scheduled_day, { excludeScheduledServiceId: row.id }));
     if (duesDecide && !paid) billedMonths.add(month);
     values.set(String(row.id), paid ? 0 : billed);
@@ -270,7 +270,7 @@ async function readDues(database, { today, to }) {
       const runDay = new Date(`${due}T12:00:00Z`); // the run's morning, Eastern time
       if (autopayGuard(c, runDay) || await duesMonthPaid(database, c.id, due)) continue;
       const verdict = await monthlyDuesVerdict(database, c.id, { now: runDay });
-      if (verdict.eligible) out.push({ day: due, amountUsd: usd(c.monthly_rate) });
+      if (verdict.eligible) out.push({ day: due, amountUsd: usd(c.monthly_rate), customerId: c.id });
     }
   }
   return out;
@@ -523,7 +523,8 @@ async function loadForecastInput({
     readOverduePaychecks(database, { today: d.today }),
     readTaxRows(database, { today: d.today, to: d.windowEnd }),
   ]);
-  const visits = splitVisits(visitRows, d, await valueVisits(database, visitRows));
+  const duesMonths = new Set(dues.map((x) => `${x.customerId}|${x.day.slice(0, 7)}`));
+  const visits = splitVisits(visitRows, d, await valueVisits(database, visitRows, { duesMonths }));
   const visitInvoices = await readVisitInvoices(database, visits.cohort.map((v) => v.id));
   const parts = groupBy(await readPartPayments(database, [...visitInvoices, ...sent].map((i) => i.id)), 'invoice_id');
   const { visitCohort, unbilled } = cohortFrom(visits.cohort, visitInvoices, parts, d.today);
