@@ -15,6 +15,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
   let fallOff;
   let NotificationService;
   const made = [];
+  const fixtures = { customers: [], scheduled_services: [] };
   const now = new Date();
   const ago = (hours, from = now) => new Date(from.getTime() - hours * HOUR);
   const scope = (q) => q.where('title', TITLE);
@@ -26,6 +27,9 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
   });
   afterAll(async () => {
     await db('notifications').where({ title: TITLE }).del();
+    for (const table of ['scheduled_services', 'customers']) {
+      if (fixtures[table].length) await db(table).whereIn('id', fixtures[table]).del();
+    }
     await db.destroy();
   });
   beforeEach(() => db('notifications').where({ title: TITLE }).del());
@@ -174,7 +178,8 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       const taken = await NotificationService._private.openToCloser(db('notifications').where({ id: quiet.id }), 'dispatch')
         .update(NotificationService._private.doneColumns({ by: 'dispatch', resolution: 'Visit moved', keepExisting: true }));
       expect(taken).toBe(1);
-      expect((await get(quiet.id)).done_by).toBe('dispatch');
+      const row = await get(quiet.id);
+      expect([row.done_by, row.resolution]).toEqual(['dispatch', 'Visit moved']);
     });
 
     test('the undo function reopens only quiet-72h rows closed since the time given, and stamps the hold', async () => {
@@ -234,6 +239,36 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       expect(second.id).not.toBe(first.id);
       expect((await get(second.id)).done_at).toBeNull();
     });
+  });
+
+  test('a relevance put-back is news: the row older than 72 hours is not closed again until 72 hours after the put-back', async () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const relevance = require('../services/admin-alert-relevance');
+    const [customer] = await db('customers').insert({ first_name: 'Putback', phone: '+15555557011' }).returning('id');
+    fixtures.customers.push(customer.id);
+    const [visit] = await db('scheduled_services').insert({
+      customer_id: customer.id, scheduled_date: etDateString(ago(72)), service_type: 'General Pest Control', status: 'on_site',
+    }).returning('id');
+    fixtures.scheduled_services.push(visit.id);
+    const retiredAt = ago(1);
+    // As the relevance sweep wrote it an hour ago; the alert itself is 4 days old and the visit is stuck again.
+    const bellRow = await bell({
+      read_at: retiredAt, done_at: retiredAt, done_by: 'relevance', resolution: 'Visit is no longer in progress',
+      metadata: {
+        dedupeKey: `stale-visit:${visit.id}:putback`, scheduled_service_id: visit.id,
+        retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: retiredAt.toISOString() },
+      },
+    });
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    const back = await get(bellRow.id);
+    expect([back.done_at, back.done_by]).toEqual([null, null]);
+    expect(meta(back).retired).toBeUndefined();
+    expect(meta(back).quietHoldFrom).toEqual(expect.any(String));
+
+    expect((await run('true', { now: ago(-71, now) })).closed).toBe(0);
+    expect((await get(bellRow.id)).done_at).toBeNull();
+    expect((await run('true', { now: ago(-73, now) })).closed).toBe(1);
+    expect((await get(bellRow.id)).done_by).toBe('quiet-72h');
   });
 
   test('the relevance sweep does not re-arm or re-judge a quiet-72h row, and the row carries no retired stamp', async () => {

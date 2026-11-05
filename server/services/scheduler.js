@@ -4855,8 +4855,8 @@ function initScheduledJobs() {
   // log, write nothing, `true` = close. runExclusive: a deploy overlap must not run two passes over the same page.
   // =========================================================================
   cron.schedule('6,16,26,36,46,56 * * * *', async () => {
-    if (require('../config/feature-gates').alertQuietFallOffMode() === 'off') return;
     try {
+      if (require('../config/feature-gates').alertQuietFallOffMode() === 'off') return;
       await runExclusive('admin-alert-quiet-fall-off', () => require('./admin-alert-quiet-fall-off').runAdminAlertQuietFallOff());
     } catch (err) {
       logger.error(`[alert-quiet-fall-off] tick failed: ${err.message}`);

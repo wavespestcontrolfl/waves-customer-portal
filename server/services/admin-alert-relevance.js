@@ -1465,7 +1465,10 @@ function putBack(row) {
   if (Number.isNaN(ourDone.getTime())) return 0;
   return sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row)
     .where({ done_at: ourDone })
-    .update(undone(ourDone));
+    // A re-arm is news: it also stamps the quiet fall-off's hold (admin-alert-quiet-fall-off.js), so a row older than
+    // 72 hours is not closed again 10 minutes after the put-back. The retire's own after-write put-back (above) is
+    // not: that restores the bell exactly as it was.
+    .update({ ...undone(ourDone), metadata: db.raw("(metadata - 'retired') || ?::jsonb", [JSON.stringify({ [doneState().QUIET_HOLD_KEY]: new Date().toISOString() })]) });
 }
 
 // The emitters in the table are one-shot: a booking cancelled or a visit or

@@ -82,7 +82,7 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(sql).toMatch(/^update "notifications" set "done_at" = COALESCE\(done_at, \$1::timestamptz\), "done_by" = \$2/);
     expect(bindings).toEqual(expect.arrayContaining(['supersede', 'Replaced by a newer reminder for the same promise', 'admin', 'sms-commitment:commit-1', 'n-new']));
     // The newest row is excluded; the older ones are selected by the system closer's rule.
-    expect(sql).toContain('and not "id" = $7');
+    expect(sql).toContain('and not "id" = $8');
     // Open rows, OR rows a PERSON (or the quiet fall-off) marked done (taken over, so their Reopen cannot
     // bring an obsolete duplicate back). A row a system component closed matches
     // neither arm, so it is left alone.

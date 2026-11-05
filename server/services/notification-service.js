@@ -173,7 +173,8 @@ function doneColumns({ by, resolution = null, at = new Date(), keepExisting = fa
     // reopen could restore), so PERSON_DONE_BY_SQL refuses its reopen. The
     // first done_at, the person's resolution and their read still stand.
     done_by: columns.done_by,
-    resolution: conn.raw('COALESCE(resolution, ?)', [columns.resolution]),
+    // A quiet fall-off row taken over by a real close carries the new closer's words, not "No new activity".
+    resolution: conn.raw(`CASE WHEN done_by = '${QUIET_FALL_OFF_DONE_BY}' THEN ?::text ELSE COALESCE(resolution, ?::text) END`, [columns.resolution, columns.resolution]),
     read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [columns.done_at]),
   };
 }

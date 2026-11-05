@@ -60,13 +60,13 @@ describe('markAdminDone', () => {
     // keepExisting: the first done (a person's own included) and an earlier read stand; an unread row is read at the done instant.
     expect(patch).toMatchObject({
       done_at: 'COALESCE(done_at, ?::timestamptz)', done_by: 'claude',
-      resolution: 'COALESCE(resolution, ?)', read_at: 'COALESCE(read_at, ?::timestamptz)',
+      resolution: "CASE WHEN done_by = 'quiet-72h' THEN ?::text ELSE COALESCE(resolution, ?::text) END", read_at: 'COALESCE(read_at, ?::timestamptz)',
     });
     const bound = Object.fromEntries(db.raw.mock.calls.map(([sql, bindings]) => [sql, bindings]));
     expect(bound['COALESCE(done_by, ?)']).toBeUndefined(); // done_by is the plain latest closer
     expect(bound['COALESCE(done_at, ?::timestamptz)'][0]).toBeInstanceOf(Date);
     expect(bound['COALESCE(read_at, ?::timestamptz)']).toEqual(bound['COALESCE(done_at, ?::timestamptz)']);
-    const resolution = bound['COALESCE(resolution, ?)'][0];
+    const resolution = bound["CASE WHEN done_by = 'quiet-72h' THEN ?::text ELSE COALESCE(resolution, ?::text) END"][0];
     expect(resolution).toMatch(/^Fixed in PR word word.*…$/);
     expect(resolution.length).toBeLessThanOrEqual(200);
   });
@@ -75,7 +75,8 @@ describe('markAdminDone', () => {
     const cols = NotificationService._private.doneColumns({ by: 'ops-crons', resolution: 'Check ran clean', keepExisting: true });
     expect(cols.done_by).toBe('ops-crons');
     expect(cols.done_at).toBe('COALESCE(done_at, ?::timestamptz)'); // this suite's db.raw mock returns the SQL
-    expect(cols.resolution).toBe('COALESCE(resolution, ?)');
+    // A quiet fall-off close taken over by a real close carries the new closer's words; any other done_by keeps its resolution.
+    expect(cols.resolution).toBe("CASE WHEN done_by = 'quiet-72h' THEN ?::text ELSE COALESCE(resolution, ?::text) END");
     // PERSON_DONE_BY_SQL (the reopen gate) does not accept a system component.
     const re = /done_by ~ '\^\[0-9\]\+\$'/;
     expect(NotificationService._private.PERSON_DONE_BY_SQL).toMatch(re);

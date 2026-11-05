@@ -136,7 +136,12 @@ async function closeBatch(conn, ids, { cutoff, now, scope = null }) {
 }
 
 const bump = (map, key) => { map[key] = (map[key] || 0) + 1; };
-const byCategoryText = (map) => Object.entries(map).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(', ');
+
+// What a pass does with a page of candidates, per mode. `field` is the summary count it fills.
+const MODES = {
+  shadow: { verb: 'would close', field: 'wouldClose', act: async (_conn, rows) => rows },
+  true: { verb: 'closed', field: 'closed', act: (conn, rows, ctx) => closeBatch(conn, rows.map((r) => r.id), ctx) },
+};
 
 /**
  * One pass. Returns { skipped: true, reason: 'gate_off' } or the summary
@@ -146,34 +151,28 @@ async function runAdminAlertQuietFallOff({
   now = new Date(), mode = alertQuietFallOffMode(), conn = db, scope = null,
   pageSize = PAGE_SIZE, cap = TICK_CAP, maxPages = MAX_PAGES,
 } = {}) {
-  if (mode !== 'shadow' && mode !== 'true') return { skipped: true, reason: 'gate_off' };
+  const handler = MODES[mode];
+  if (!handler) return { skipped: true, reason: 'gate_off' };
   const cutoff = new Date(now.getTime() - QUIET_HOURS * HOUR_MS);
+  // Live: never read more rows than the tick may still close, so every row read is attempted.
+  const budget = { shadow: pageSize * maxPages, true: cap }[mode];
   const byCategory = {};
   let scanned = 0;
-  let closed = 0;
-  let wouldClose = 0;
+  let counted = 0;
   let cursor = null;
   for (let page = 0; page < maxPages; page += 1) {
-    // Live: never read more rows than the tick may still close, so every row read is attempted.
-    const limit = mode === 'true' ? Math.min(pageSize, cap - closed) : pageSize;
-    if (limit <= 0) break;
-    const rows = await selectCandidates(conn, { cutoff, now, cursor, limit, scope });
+    const limit = Math.min(pageSize, budget - counted);
+    const rows = limit > 0 ? await selectCandidates(conn, { cutoff, now, cursor, limit, scope }) : [];
     if (!rows.length) break;
     cursor = rows[rows.length - 1].id;
     scanned += rows.length;
-    if (mode === 'shadow') {
-      wouldClose += rows.length;
-      rows.forEach((r) => bump(byCategory, r.category || 'unknown'));
-    } else {
-      const landed = await closeBatch(conn, rows.map((r) => r.id), { cutoff, now, scope });
-      closed += landed.length;
-      landed.forEach((r) => bump(byCategory, r.category || 'unknown'));
-    }
+    const landed = await handler.act(conn, rows, { cutoff, now, scope });
+    counted += landed.length;
+    landed.forEach((r) => bump(byCategory, r.category));
     if (rows.length < limit) break;
   }
-  const summary = { mode, scanned, closed, wouldClose, byCategory };
-  const result = mode === 'true' ? `closed ${closed} of ${scanned} candidate(s)` : `would close ${wouldClose}`;
-  logger.info(`[alert-quiet-fall-off] ${mode}: ${result}${Object.keys(byCategory).length ? ` (${byCategoryText(byCategory)})` : ''}`);
+  const summary = { mode, scanned, closed: 0, wouldClose: 0, byCategory, [handler.field]: counted };
+  logger.info(`[alert-quiet-fall-off] ${mode}: ${handler.verb} ${counted} of ${scanned} candidate(s), by category ${JSON.stringify(byCategory)}`);
   return summary;
 }
 

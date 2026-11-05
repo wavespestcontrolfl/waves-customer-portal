@@ -78,7 +78,7 @@ describe('GATE_ALERT_QUIET_FALL_OFF', () => {
     expect(out).toMatchObject({ mode: 'shadow', scanned: 3, wouldClose: 3, closed: 0, byCategory: { alert: 2, schedule: 1 } });
     expect(calls.transactions).toBe(0);
     expect(calls.updates).toEqual([]);
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shadow: would close 3 (alert 2, schedule 1)'));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shadow: would close 3 of 3 candidate(s), by category {"alert":2,"schedule":1}'));
   });
 });
 
@@ -93,7 +93,7 @@ describe('the closing write', () => {
     expect(patch.done_by).toBe('quiet-72h');
     expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
     expect(patch.done_at.bindings).toEqual([now]);
-    expect(patch.resolution.bindings).toEqual(['No new activity for 3 days']);
+    expect(patch.resolution.bindings).toEqual(['No new activity for 3 days', 'No new activity for 3 days']);
     expect(patch.read_at.sql).toContain('COALESCE(read_at');
   });
 
