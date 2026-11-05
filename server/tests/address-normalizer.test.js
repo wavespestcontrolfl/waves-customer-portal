@@ -757,6 +757,18 @@ describe('parseRawAddress — conversational words that are also state codes', (
     expect(parseRawAddress('Louisville, Kentucky')).toMatchObject({ state: 'KY' });
     expect(parseRawAddress("213 6th Avenue Southwest, Ruskin, Florida")).toMatchObject({ state: 'FL' });
   });
+  // Call 68356d3d (2026-11-04): a spoken street named after a state read as
+  // that state and marked a served address out of the service area.
+  test('a full state name that names a street is not a state', () => {
+    expect(parseRawAddress("It's 1234, and it's Oregon Street.")).toMatchObject({ state: '' });
+    expect(parseRawAddress("It's 1200, Virginia Avenue")).toMatchObject({ state: '' });
+    expect(parseRawAddress('It is 55, North Carolina Ave')).toMatchObject({ state: '' });
+  });
+  test('the state still reads when it is named outside the street', () => {
+    expect(parseRawAddress('1234 Oregon Street, Portland, Oregon')).toMatchObject({ state: 'OR' });
+    expect(parseRawAddress('100 Main St, Atlanta, Georgia, Court St')).toMatchObject({ state: 'GA' });
+    expect(parseRawAddress('100 Main St, Virginia Beach')).toMatchObject({ state: 'VA' });
+  });
 });
 
 describe('leadAddressFields', () => {
