@@ -826,6 +826,50 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     expect(body.error).toMatch(/handled by the linked quote/i);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
+
+  // The Intelligence Bar card (switch_visit_to_annual_prepay) runs this same switch with the figures it showed as
+  // `expected`; under the locks a recomputed year that differs refuses before anything is voided or minted.
+  function expectedFrom(preview) {
+    return {
+      amount: preview.mintPayload.amount,
+      setupFeeAmount: preview.mintPayload.setupFeeAmount || 0,
+      visitCount: preview.mintPayload.visitCount,
+      coverageCadence: preview.mintPayload.coverageCadence,
+      serviceType: preview.mintPayload.serviceType,
+      termStart: preview.mintPayload.termStart,
+      supersedeIds: preview.supersedes.map((inv) => inv.id),
+    };
+  }
+
+  test('runPrepaySwitch with the figures the card showed switches exactly like the route', async () => {
+    const preview = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, { switchLane: true });
+    stubTables();
+    const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected: expectedFrom(preview), auditSource: 'Intelligence Bar switch' });
+    expect(out.httpStatus).toBeUndefined();
+    expect(out.invoice).toMatchObject({ id: 'inv-prepay' });
+    expect(out.voided).toEqual([{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', total: 227 }]);
+    expect(stubTables.casCalls.length).toBe(1);
+    expect(mockSendInvoice).not.toHaveBeenCalled();
+  });
+
+  test('runPrepaySwitch refuses as drift when the recomputed year differs from what the card showed', async () => {
+    const preview = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, { switchLane: true });
+    stubTables();
+    const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected: { ...expectedFrom(preview), amount: preview.mintPayload.amount - 1 } });
+    expect(out).toMatchObject({ httpStatus: 409, drift: true });
+    expect(out.httpBody.error).toMatch(/figures changed/i);
+    expect(stubTables.casCalls.length).toBe(0);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+    expect(termSpy).not.toHaveBeenCalled();
+  });
+
+  test('runPrepaySwitch refuses as drift when the invoice it would void is not the one the card named', async () => {
+    const preview = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, { switchLane: true });
+    stubTables();
+    const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected: { ...expectedFrom(preview), supersedeIds: [] } });
+    expect(out).toMatchObject({ httpStatus: 409, drift: true });
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
 });
 
 describe('on-site prepay switch — undo (put the invoice back)', () => {
