@@ -29,8 +29,10 @@
  *     with bumpOnRefresh);
  *   - an ops-crons digest repeat stamps metadata.observedAt;
  *   - the Intelligence Bar model-failure bell stamps metadata.lastFailureAt on
- *     every failure.
- * Last activity = the latest of created_at and those three stamps (a stamp that
+ *     every failure;
+ *   - a Reopen of a done row stamps metadata.quietHoldFrom (notification-service
+ *     reopenAdminDone), so the row is not expired again by the next nightly sweep.
+ * Last activity = the latest of created_at and those four stamps (a stamp that
  * does not parse, or lies more than a day ahead, is ignored). NO signal exists
  * for a refresh that does not ring: a quiet refresh (ringOnRefresh false) or a
  * repeat with identical content writes nothing, and a plain deduped repeat
@@ -87,7 +89,10 @@ const RING_RISK_CAP = 10;
 const LOCK_TIMEOUT_MS = 2000;
 const STATEMENT_TIMEOUT_MS = 20000;
 const FUTURE_SLACK_MS = DAY_MS;
-const ACTIVITY_STAMP_KEYS = ['rungAt', 'observedAt', 'lastFailureAt'];
+// The one list of what counts as a sign of life. admin-alert-quiet-fall-off.js reads this same list, so the two
+// sweeps cannot drift. quietHoldFrom is a Reopen's stamp (notification-service QUIET_HOLD_KEY): a reopened row
+// is news, so neither sweep may close it again at once.
+const ACTIVITY_STAMP_KEYS = ['rungAt', 'observedAt', 'lastFailureAt', 'quietHoldFrom'];
 const RESOLUTIONS = {
   age30: 'Expired: no action in 30 days',
   fyi7: 'FYI expired after 7 days',
@@ -525,6 +530,7 @@ module.exports = {
   listRetentionRuns,
   judgeRow,
   lastActivityMs,
+  ACTIVITY_STAMP_KEYS,
   ringRiskFor,
   expireBatch,
   loadPage,

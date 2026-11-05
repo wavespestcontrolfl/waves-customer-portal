@@ -10,8 +10,8 @@
  *
  * WHAT FALLS OFF. Open rows (done_at IS NULL) that are in the bell (not Activity-only: the same
  * excludeActivityOnlyFromBell every bell reader uses) and whose last activity is older than 72 hours.
- *   - LAST ACTIVITY = the latest of created_at and the stamps the code leaves behind (the same set
- *     admin-alert-retention.js reads): metadata.rungAt (a ringing refresh; bumpOnRefresh also moves created_at),
+ *   - LAST ACTIVITY = the latest of created_at and the stamps the code leaves behind (the very list
+ *     admin-alert-retention.js reads, imported from it): metadata.rungAt (a ringing refresh; bumpOnRefresh also moves created_at),
  *     observedAt (an ops-crons digest repeat), lastFailureAt (the model-failure bell), and quietHoldFrom
  *     (a Reopen, below). A QUIET refresh stamps nothing, so it is not news and does not keep a row. A stamp that
  *     does not look like a timestamp, or lies more than a day ahead, is ignored.
@@ -50,6 +50,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { alertQuietFallOffMode } = require('../config/feature-gates');
+// The activity stamps and the re-raise registry are admin-alert-retention.js's: one definition for both sweeps.
+const { ACTIVITY_STAMP_KEYS, RERING } = require('./admin-alert-retention');
 
 const HOUR_MS = 60 * 60 * 1000;
 const QUIET_HOURS = 72;
@@ -62,15 +64,17 @@ const FUTURE_SLACK_MS = 24 * HOUR_MS;
 const RESOLUTION = 'No new activity for 3 days';
 // Money alerts stay until the money settles. One line to change.
 const KEEP_UNTIL_SETTLED_CATEGORIES = ['billing', 'payment'];
-const ACTIVITY_STAMP_KEYS = ['rungAt', 'observedAt', 'lastFailureAt', 'quietHoldFrom'];
 const TIMESTAMP_RE = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$';
 
 const notificationPrivate = () => require('./notification-service')._private;
 
-// A metadata stamp as a timestamptz, or NULL when it is missing, not shaped like an ISO time, or more than a day
-// ahead. Nested CASE: Postgres evaluates the cast only after the shape test passed.
+// A metadata stamp as a timestamptz, or NULL when it is missing, not shaped like an ISO time, not a real time
+// (pg_input_is_valid: Postgres 16+, so '2026-13-99T15:00:00Z' is ignored, never a throw), or more than a day ahead.
+// The shape test also keeps 'now', 'today' and 'infinity' from counting. Nested CASE: the cast runs only after both
+// tests passed.
 function stampSql(key) {
-  return `CASE WHEN metadata->>'${key}' ~ ? THEN CASE WHEN (metadata->>'${key}')::timestamptz <= ?::timestamptz THEN (metadata->>'${key}')::timestamptz END END`;
+  const text = `metadata->>'${key}'`;
+  return `CASE WHEN (${text} ~ ? AND pg_input_is_valid(${text}, 'timestamptz')) THEN CASE WHEN (${text})::timestamptz <= ?::timestamptz THEN (${text})::timestamptz END END`;
 }
 
 // created_at and every activity stamp, the latest wins (GREATEST ignores the NULLs).
@@ -83,9 +87,8 @@ function lastActivity(now) {
 }
 
 // dedupeKey prefixes of the emitters that re-raise a fresh row by themselves (admin-alert-retention.js RERING,
-// kind 'periodic'). Read lazily: that module needs this one's gate, not the reverse.
+// kind 'periodic').
 function periodicPrefixes() {
-  const { RERING } = require('./admin-alert-retention');
   return RERING.filter((entry) => entry.kind === 'periodic').flatMap((entry) => entry.prefixes);
 }
 

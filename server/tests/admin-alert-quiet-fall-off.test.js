@@ -154,11 +154,33 @@ describe('the scope the read and the write share', () => {
   test('last activity is created_at and the four stamps, a junk stamp cannot throw, and the cutoff is 72 hours back', () => {
     const { sql, bindings } = compiled();
     const expr = sql.match(/GREATEST\(created_at,.*\) < \$\d+::timestamptz/s)[0];
-    for (const key of ['rungAt', 'observedAt', 'lastFailureAt', 'quietHoldFrom']) expect(expr).toContain(`metadata->>'${key}'`);
+    for (const key of ['rungAt', 'observedAt', 'lastFailureAt', 'quietHoldFrom']) {
+      expect(expr).toContain(`metadata->>'${key}'`);
+      // An ISO-shaped but impossible time ('2026-13-99T15:00:00Z') is rejected before any cast.
+      expect(expr).toContain(`pg_input_is_valid(metadata->>'${key}', 'timestamptz')`);
+    }
     expect(expr.match(/CASE WHEN/g)).toHaveLength(8); // shape test, then future test, per stamp
     expect(bindings.filter((b) => typeof b === 'string' && b.startsWith('^[0-9]{4}-'))).toHaveLength(4);
     expect(bindings).toContain(cutoff.toISOString());
     expect(bindings).toContain(new Date(now.getTime() + 24 * HOUR).toISOString());
+  });
+});
+
+describe('one definition of "a sign of life" for both sweeps', () => {
+  test('the fall-off reads the retention sweep\'s own list, and it includes the Reopen hold stamp', () => {
+    const retention = require('../services/admin-alert-retention');
+    expect(retention.ACTIVITY_STAMP_KEYS).toEqual(['rungAt', 'observedAt', 'lastFailureAt', NotificationService._private.QUIET_HOLD_KEY]);
+    const { sql } = fallOff.lastActivity(now);
+    for (const key of retention.ACTIVITY_STAMP_KEYS) expect(sql).toContain(`metadata->>'${key}'`);
+  });
+
+  test('retention counts a Reopen\'s hold as activity and ignores an impossible time', () => {
+    const { lastActivityMs } = require('../services/admin-alert-retention');
+    const created = new Date('2026-09-01T00:00:00Z');
+    const hold = '2026-11-05T10:00:00.000Z';
+    const nowMs = new Date('2026-11-05T15:00:00Z').getTime();
+    expect(lastActivityMs({ created_at: created }, { quietHoldFrom: hold }, nowMs)).toBe(Date.parse(hold));
+    expect(lastActivityMs({ created_at: created }, { quietHoldFrom: '2026-13-99T15:00:00Z' }, nowMs)).toBe(created.getTime());
   });
 });
 

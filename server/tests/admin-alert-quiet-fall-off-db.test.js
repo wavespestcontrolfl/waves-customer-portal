@@ -19,6 +19,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
   const now = new Date();
   const ago = (hours, from = now) => new Date(from.getTime() - hours * HOUR);
   const scope = (q) => q.where('title', TITLE);
+  const runIds = [];
 
   beforeAll(() => {
     db = require('../models/db');
@@ -27,12 +28,15 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
   });
   afterAll(async () => {
     await db('notifications').where({ title: TITLE }).del();
+    await clearRetentionCursors();
+    if (runIds.length) await db('audit_log').whereRaw("metadata->>'runId' = ANY(?::text[])", [runIds]).del();
     for (const table of ['scheduled_services', 'customers']) {
       if (fixtures[table].length) await db(table).whereIn('id', fixtures[table]).del();
     }
     await db.destroy();
   });
-  beforeEach(() => db('notifications').where({ title: TITLE }).del());
+  const clearRetentionCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_shadow', 'admin_alert_retention_cursor_true']).del();
+  beforeEach(async () => { await db('notifications').where({ title: TITLE }).del(); await clearRetentionCursors(); });
 
   const bell = async (row) => {
     const [r] = await db('notifications').insert({
@@ -60,6 +64,22 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     const read = await bell({ read_at: readAt });
     await run('true');
     expect((await get(read.id)).read_at.getTime()).toBe(readAt.getTime());
+  });
+
+  test('an ISO-shaped impossible time in a stamp is ignored: the tick does not throw and the row is judged by its other stamps', async () => {
+    const BAD = '2026-13-99T15:00:00Z';
+    const badRung = await bell({ metadata: { rungAt: BAD } });
+    const badRungFresh = await bell({ metadata: { rungAt: BAD, observedAt: ago(10).toISOString() } });
+    const badHold = await bell({ metadata: { quietHoldFrom: BAD } });
+    const badHoldFresh = await bell({ metadata: { quietHoldFrom: BAD, lastFailureAt: ago(10).toISOString() } });
+    const out = await run('true');
+    expect(out.closed).toBe(2);
+    for (const r of [badRung, badHold]) expect((await get(r.id)).done_by).toBe('quiet-72h');
+    for (const r of [badRungFresh, badHoldFresh]) expect((await get(r.id)).done_at).toBeNull();
+    // 'now' and 'infinity' parse in Postgres but are not stamps this code writes: they never keep a row alive.
+    const words = await bell({ metadata: { rungAt: 'now', observedAt: 'infinity' } });
+    expect((await run('true')).closed).toBe(1);
+    expect((await get(words.id)).done_by).toBe('quiet-72h');
   });
 
   test('a recently rung row, a recently bumped created_at, a fresh observedAt and a fresh lastFailureAt stay', async () => {
@@ -162,6 +182,28 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       expect((await get(quiet.id)).done_at).toBeNull();
       expect((await run('true', { now: ago(-73, now) })).closed).toBe(1);
       expect((await get(quiet.id)).done_by).toBe('quiet-72h');
+    });
+
+    test('a 31-day-old row that is reopened survives both the nightly retention pass and the fall-off pass, then falls only after the hold', async () => {
+      const retention = require('../services/admin-alert-retention');
+      const old = await bell({ created_at: ago(31 * 24) });
+      await run('true');
+      expect((await get(old.id)).done_by).toBe('quiet-72h');
+      expect(await reopen(old.id)).toBe('reopened');
+
+      const retained = await retention.runAdminAlertRetention({ now, mode: 'true', scope });
+      runIds.push(retained.runId);
+      expect(retained.expire.total).toBe(0);
+      expect((await run('true')).closed).toBe(0);
+      expect((await get(old.id)).done_at).toBeNull();
+
+      // 73 hours on: the fall-off closes it again; retention still sees a 3-day-old sign of life and does not.
+      const later = ago(-73, now);
+      const retainedLater = await retention.runAdminAlertRetention({ now: later, mode: 'true', scope });
+      runIds.push(retainedLater.runId);
+      expect(retainedLater.expire.total).toBe(0);
+      expect((await run('true', { now: later })).closed).toBe(1);
+      expect((await get(old.id)).done_by).toBe('quiet-72h');
     });
 
     test('a system close other than quiet-72h still has no Reopen', async () => {
