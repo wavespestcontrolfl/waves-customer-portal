@@ -55,7 +55,7 @@ function item(over = {}) {
 function stored(over = {}) {
   return {
     plaid_item_id: 'item-1', account_id: 'acc-1', name: 'Synthetic Checking', mask: '1111',
-    account_label: 'Synthetic Checking', account_type: 'bank', enabled: true, ...over,
+    account_label: 'Synthetic Checking', account_type: 'bank', plaid_type: 'depository', enabled: true, ...over,
   };
 }
 
@@ -96,7 +96,7 @@ describe('readCashBalances', () => {
     mockState.accounts = [
       stored(),
       stored({ account_id: 'acc-off', mask: '2222', enabled: false }),
-      stored({ account_id: 'acc-card', mask: '3333', name: 'Synthetic Card', account_label: 'Synthetic Card', account_type: 'card' }),
+      stored({ account_id: 'acc-card', mask: '3333', name: 'Synthetic Card', account_label: 'Synthetic Card', account_type: 'card', plaid_type: 'credit' }),
       stored({ account_id: 'acc-missing', mask: '4444' }),
       stored({ plaid_item_id: 'other-item', account_id: 'acc-other', mask: '5555' }),
     ];
@@ -119,6 +119,29 @@ describe('readCashBalances', () => {
     }]);
     expect(out.cards).toHaveLength(1);
     expect(out.cards[0]).toMatchObject({ mask: '3333', account_type: 'card', current: 250.75, currency: 'USD', balance_as_of: null });
+  });
+
+  test("Plaid's account type decides: a loan or investment enabled as 'bank' is neither cash nor owed", async () => {
+    mockState.items = [item()];
+    mockState.accounts = [
+      stored(),
+      stored({ account_id: 'acc-loan', mask: '6666', name: 'Synthetic Van Loan', plaid_type: 'loan' }),
+      stored({ account_id: 'acc-invest', mask: '7777', name: 'Synthetic Brokerage', plaid_type: 'investment' }),
+      stored({ account_id: 'acc-card-as-bank', mask: '8888', name: 'Synthetic Credit', plaid_type: 'credit' }),
+    ];
+    plaid.getAccounts.mockResolvedValue({
+      accounts: [
+        { account_id: 'acc-1', type: 'depository', balances: { available: 10, current: 10 } },
+        { account_id: 'acc-loan', type: 'loan', balances: { available: null, current: 17000 } },
+        { account_id: 'acc-invest', type: 'investment', balances: { available: 900, current: 900 } },
+        // the live type wins over a stale stored one
+        { account_id: 'acc-card-as-bank', type: 'credit', balances: { available: 800, current: 200 } },
+      ],
+    });
+    const out = await plaidSync.readCashBalances();
+    expect(out.accounts.map(a => a.mask)).toEqual(['1111']);
+    expect(out.cards.map(c => c.mask)).toEqual(['8888']);
+    expect(out.unavailable).toEqual([]);
   });
 
   test('a null available balance stays null so the caller can fall back to current', async () => {

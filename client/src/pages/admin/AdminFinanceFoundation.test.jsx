@@ -819,6 +819,19 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
+  it("reads the card again after a payout succeeds, so the new payout shows as on the way", async () => {
+    const cashKey = "GET /api/admin/banking/cash-today";
+    overrides.set(cashKey, () => response(cashToday));
+    overrides.set("POST /api/admin/banking/payouts/standard", () =>
+      response({ id: "po_example", amount: 100, status: "pending" }),
+    );
+    const dialog = await bankDialog();
+    await waitFor(() => expect(requests.filter((r) => r.key === cashKey)).toHaveLength(1));
+    fireEvent.change(dialog.getByLabelText("Payout Amount"), { target: { value: "100" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Confirm Standard" }));
+    await waitFor(() => expect(requests.filter((r) => r.key === cashKey)).toHaveLength(2));
+  });
+
   it.each([403, 404, 500])("renders nothing when the card read answers %i", async (status) => {
     overrides.set("GET /api/admin/banking/cash-today", () => response({ error: "no" }, status));
     open(BankingPage);

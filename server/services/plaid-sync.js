@@ -1012,6 +1012,18 @@ function cashBalanceEntry(stored, live) {
   };
 }
 
+// Plaid's own account type decides what the card counts, never the import
+// classification (account_type 'bank' | 'card' is an editable transaction-import
+// setting; setupItem lets a loan or investment account be enabled as 'bank').
+// A depository account (checking, savings) holds cash; a credit account is money
+// owed; a loan, investment or other account is neither and is left off the card.
+function cashKind(stored, live) {
+  const type = String((live && live.type) || stored.plaid_type || '').toLowerCase();
+  if (type === 'depository') return 'cash';
+  if (type === 'credit') return 'owed';
+  return null;
+}
+
 // One connection's balances from Plaid's FREE /accounts/get read. Never throws
 // for a single connection; never calls /accounts/balance/get (paid per call).
 async function readItemCashBalances(item) {
@@ -1033,15 +1045,22 @@ async function readItemCashBalances(item) {
   }
   const liveById = new Map((live || []).map(a => [a.account_id, a]));
   const stored = await db('plaid_accounts').where({ plaid_item_id: item.id, enabled: true });
-  const entries = [];
+  const cash = [];
+  const owed = [];
   const notShared = [];
   for (const a of stored) {
-    if (liveById.has(a.account_id)) entries.push(cashBalanceEntry(a, liveById.get(a.account_id)));
+    const l = liveById.get(a.account_id);
     // An enabled account the bank no longer lists would drop out of the total
     // without a word; name it so the card says why the total is short.
-    else notShared.push({ institution_name: item.institution_name || null, reason: 'not_shared', mask: a.mask || null, account_type: a.account_type });
+    if (!l) {
+      notShared.push({ institution_name: item.institution_name || null, reason: 'not_shared', mask: a.mask || null, account_type: a.account_type });
+      continue;
+    }
+    const kind = cashKind(a, l);
+    if (kind === 'cash') cash.push(cashBalanceEntry(a, l));
+    else if (kind === 'owed') owed.push(cashBalanceEntry(a, l));
   }
-  return { entries, notShared };
+  return { cash, owed, notShared };
 }
 
 // Balances for the owner's Cash today card. READ-ONLY: writes nothing (no
@@ -1061,7 +1080,8 @@ async function readCashBalances() {
     }
     if (r.unavailable) unavailable.push(r.unavailable);
     for (const u of r.notShared || []) unavailable.push(u);
-    for (const e of r.entries || []) (e.account_type === 'card' ? cards : accounts).push(e);
+    accounts.push(...(r.cash || []));
+    cards.push(...(r.owed || []));
   }
   return { accounts, cards, unavailable };
 }

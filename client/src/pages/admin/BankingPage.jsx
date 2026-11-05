@@ -1901,7 +1901,7 @@ function cashUnavailableText(u) {
   return `${who} balance is unavailable right now`;
 }
 
-function CashTodayCard({ balance, balanceError }) {
+function CashTodayCard({ balance, balanceError, refreshKey }) {
   const [data, setData] = useState(null);
   useEffect(() => {
     let cancelled = false;
@@ -1915,7 +1915,9 @@ function CashTodayCard({ balance, balanceError }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // refreshKey changes after a payout, so the new payout joins "on the way"
+    // when the Stripe balance it left is read again.
+  }, [refreshKey]);
   if (!data || !data.totals) return null;
 
   const { stripeOk, stripePart, transitFailed, transitTotal, total, totalLabel } =
@@ -2047,10 +2049,12 @@ export default function BankingPage() {
   const pending = balance?.total_pending ?? 0;
   const instantAvailable = balance?.total_instant_available ?? null;
   const instantPayoutAvailable = instantAvailable > 0;
+  const [cashRefresh, setCashRefresh] = useState(0);
   const handlePayoutSuccess = () => {
     setPayoutModalMethod(null);
     loadBalance();
     loadStats();
+    setCashRefresh((n) => n + 1);
   };
   return (
     <UiSurface
@@ -2193,7 +2197,7 @@ export default function BankingPage() {
           </Button>{" "}
         </div>{" "}
       </div>
-      <CashTodayCard balance={balance} balanceError={balanceError} />
+      <CashTodayCard balance={balance} balanceError={balanceError} refreshKey={cashRefresh} />
       {/* Secondary metrics */}
       <div
         style={{
