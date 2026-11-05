@@ -90,8 +90,12 @@ describe('withTerritory (a territory over a service line)', () => {
     expect(withTerritory({ homeId: 'hire', gapId: null }, 'rodent', 'third')).toEqual({ homeId: 'third', gapId: 'hire' });
   });
 
-  test('a line with nobody set takes the territory technician alone', () => {
-    expect(withTerritory(null, 'mosquito', 'owner')).toEqual({ homeId: 'owner', gapId: null });
+  test('a line with nobody set, or a card naming only the territory technician, has no cover: the entry unchanged (no rule)', () => {
+    expect(withTerritory(null, 'mosquito', 'owner')).toBeNull();
+    const onlyOwner = { homeId: 'owner', gapId: null };
+    expect(withTerritory(onlyOwner, 'mosquito', 'owner')).toBe(onlyOwner);
+    const both = { homeId: 'owner', gapId: 'owner' };
+    expect(withTerritory(both, 'rodent', 'owner')).toBe(both);
   });
 
   test('lawn, or no territory technician: the line map unchanged', () => {
