@@ -36,8 +36,10 @@ function staffRole() {
 }
 
 // Sources (add / compile) is owner-only too: a technician reads the wiki
-// (staff allow-list, 2026-10-02) but cannot ingest or compile sources.
-const OWNER_ONLY_WIKI_TABS = ["health", "sources"];
+// (staff allow-list, 2026-10-02) but cannot ingest or compile sources. The
+// Queries log (everyone's raw questions) is requireAdmin on the server, so a
+// technician's tab would only fail with "Admin access required".
+const OWNER_ONLY_WIKI_TABS = ["health", "sources", "queries"];
 
 export default function KnowledgePage({ embedded = false }) {
   const [searchParams, setSearchParams] = useSearchParams();

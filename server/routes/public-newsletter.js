@@ -763,4 +763,6 @@ router.get('/posts/:id', async (req, res) => {
 module.exports = router;
 module.exports.EMAIL_RE = EMAIL_RE;
 module.exports.escapeHtml = escapeHtml;
+// Shared with public-email-resubscribe.js so both confirm pages render in one shell.
+module.exports.renderConfirmPage = renderConfirmPage;
 module.exports._test = { maybeEnrollConfirmedQuoteLead };

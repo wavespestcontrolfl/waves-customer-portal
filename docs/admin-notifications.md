@@ -258,6 +258,12 @@ customer's message by this rule.
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
+   A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
+   `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
+   30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,
+   "Customers — Jane D.'s phone can't get texts" (`dedupeKey` `dead-number:<customerId>:<last10>`, open-only,
+   done-when `phone_replaced`). It closes at the customer's next delivered text when that text went to the dead
+   number and was sent after its last failure, or the number is no longer their phone or secondary phone.
    A standing backlog (overdue promises past five) is a count on its page, never a bell:
    its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
    Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
@@ -406,7 +412,7 @@ series price guard, an unbilled visit, first-application invoices that disagree)
 new class joins only after the same read. Never offered, whatever else the row says: the customer-contact categories,
 `review`, `internal_admin_alert`, and a row whose metadata or registry rule declares `contact: true` or `promise: true`.
 Everything else stays with the owner. The list route marks each such row `sendToClaude: true` for the admin role
-(`withSendToClaudeFields`). One tap and an optional note (`POST /api/admin/notifications/:id/send-to-claude`, admin only,
+(`withSendToClaudeFields`). One tap and an optional note (`POST /api/admin/notifications/:id/send-to-claude`, owner login only (ib-access `ibFullAccess`; Codex security review on #7548),
 fenced on the version the bell served like Done) moves the row into Claude's queue: Activity-only, `who = 'claude'`, `claudeQueue` =
 `sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp that holds
 trusted facts only (Codex security reviews): when, who sent it, the alert's `kind` (its trigger key or dedupe-key class),
@@ -424,6 +430,38 @@ notif-dispatch launcher opens one Claude tab per sent row (its own kind, not cou
 gets the stamp's ids only; it never texts, emails or calls a customer,
 never moves money, and closes the row with what fixed it when the fix is live. `needs-me` marks a sent row `sent: true`,
 so the queue tab leaves it to its own tab.
+
+**Send an idea to Claude from the Intelligence Bar box** (owner 2026-11-03: "it should be for any issue, even ones that dont
+have an issue mid day, but ideas"; `GATE_IB_SEND_TO_CLAUDE`). The owner types or dictates an idea in the Cmd+K / mobile
+box and taps the free **Send to Claude** button beside Ask (no model call; Ask stays the paid path). `POST /api/admin/claude-ideas`
+(`server/services/admin-claude-ideas.js`) writes one row through `notifyAdmin`, not `raiseAdminAlert`: it is not an alert,
+it carries the owner's own words. Shape: category `system`, title `Idea for Claude`, body `An idea from the owner.`, no
+`detail`, link `/admin`, Activity-only (`feed` `activity`, `who` `claude`, `severity` `needs-you`, `claudeQueue`
+`sent-to-claude`), **`ownerOnly: true`**, and a `sentToClaude` stamp with `kind` `owner-idea`, `idea` (the full cleaned idea,
+4,000 characters at most; the words live here and nowhere else), `at`, `by`, `records` (UUID-shaped ids),
+`page.route` (a plain `/admin/...` path or null), `viewedDate`, `pasted` and `was`. The dedupe key is `owner-idea:<16 hex of
+sha1 of the lowercased, whitespace-collapsed idea>`, so the same idea while its row is open answers `duplicate` and writes
+nothing. The 10-second Undo (`POST /api/admin/claude-ideas/:id/cancel`, `markAdminIdeaCancelled`) closes the row as done by the
+admin ("Cancelled by the owner.") under the same dedupe lock unless `sentToClaude.startedAt` is set. An `ownerOnly` row (metadata) is for the owner login alone
+(`ibFullAccess`; Codex security review round 4): the Recently done list (`getAdminDoneNotifications`, `fullAccess`) and the
+Activity feed (`getActivity`, `fullAccess`, focus included) leave it out for any other login, and `PUT /:id/done` and
+`PUT /:id/reopen` answer such a login 404 `not_found`, as for an unknown row. The Mac's `markAdminDone` is not affected. The Mac launcher opens a
+Claude tab that scopes the idea and asks the owner.
+
+**Send a copy to Claude (step 3)** (owner 2026-11-03, decision 1 = A: "customer alerts = a COPY, read-only until approval";
+`GATE_ALERT_SEND_TO_CLAUDE_COPY`). "Send to Claude" refuses a bell row that is customer contact or whose words our own code did
+not write (`customer_contact`, `not_system_written`). For those rows only, the owner login gets **Send a copy to Claude
+(read-only)** (`sendCopyToClaude: true` on the bell row; `POST /api/admin/notifications/:id/send-copy-to-claude`,
+`server/services/admin-alert-copy-to-claude.js`). The tap writes ONE new row through `notifyAdmin` with title `Copy for Claude`
+and a fixed body, Activity-only, `ownerOnly: true`, `claudeQueue` `sent-to-claude`, dedupe key `claude-copy:<parent id>`, and a
+`sentToClaude` stamp: `kind` `guarded-copy`, `guarded: true`, `parentId`, `parentKind`, `parentCategory`, `records` (UUID-shaped
+ids) and the owner's optional note. No customer word is in the row; the locked Mac tab (launcher v2b, outside this repo)
+reads the parent alert itself, as data. The parent STAYS in the bell, because a reply may be owed. A step 1 row still uses step 1;
+an alert that step 1 can send gets no copy button. The 10-second Undo (`POST /:id/cancel-copy`, on the copy's id)
+closes the copy under the same dedupe lock unless a Mac tab started. The tab writes a plan that comes back as an owner-only
+bell (the bell list, `getAdminNotifications` with `fullAccess`, hides `ownerOnly` rows from every other login, and the alert
+button route refuses them). The owner acts with his own words: step 1 for a system alert, step 2 (Intelligence Bar) for the rest.
+Nothing here sends anything to a customer or makes a model call.
 
 ## 6. What is enforced today
 

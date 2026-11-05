@@ -36,6 +36,9 @@
 //      tech-day locks, once after) and must equal --plan, or nothing is written.
 //   5. The hire must be assignable on every date a visit moves to (the app's
 //      assertAssignableTechnician: a technician_absences row for that date refuses the run).
+//      The planner also refuses, as a Refusal and before any write: LINES_NEED_ZIPS (termite named
+//      without --zips: termite / WDO series move only in a territory run, owner 2026-10-30) and
+//      TARGET_CAPABILITY_OFF (--to's technician_capabilities row is Off for a line that has a series to move).
 //   6. The rollback file is written and synced BEFORE the first update. Ids and counts only.
 //      It carries a run id that the execute audit row records in the same transaction, so a
 //      file left by a run that failed is refused by --rollback (RUN_NOT_COMMITTED).
@@ -76,6 +79,7 @@ const { lockTechDays } = require(path.join(root, 'services', 'scheduling', 'tech
 const { sendTechNotification } = require(path.join(root, 'services', 'tech-notify'));
 const auditLog = require(path.join(root, 'services', 'audit-log'));
 const { etParts, etDateString } = require(path.join(root, 'utils', 'datetime-et'));
+const { lacksCoverLines } = require(path.join(root, 'services', 'territory'));
 
 const { OPEN_STATUSES, STOPPED_TRACK_STATES } = planner;
 const AUTO_DISPATCH_LOCK = 'cron:auto-dispatch-recurring';
@@ -134,6 +138,17 @@ function checkTarget(row) {
 }
 
 /**
+ * --zips makes --to a territory technician: every territory line needs a cover technician for his days off
+ * (territory.lacksCoverLines: named on the line's card row, assignable, not switched Off). Without --zips: no check.
+ */
+async function checkCover(trx, to, zips) {
+  const uncovered = zips ? await lacksCoverLines(trx, to) : [];
+  if (uncovered.length) {
+    throw new Refusal('NO_COVER_TECH', `--zips: --to has no assignable cover technician on ${uncovered.join(', ')}: set a home or gap technician besides --to on the Service lines card first. Nothing was written.`);
+  }
+}
+
+/**
  * Take the auto-dispatch writer lock on a dedicated session. Returns { release }.
  * Refuses when anything else (the night run, catch-up, route reorder) holds it.
  */
@@ -174,6 +189,16 @@ function writeRollbackFile(outDir, record) {
   return file;
 }
 
+/** The planner's own refusals (termite without --zips, --to Off for a line) read as the writer's Refusal, before any write. */
+async function planOrRefuse(db, args) {
+  try {
+    return await planner.planHandover(db, args);
+  } catch (err) {
+    if (err instanceof planner.PlanError) throw new Refusal(err.code, err.message);
+    throw err;
+  }
+}
+
 // Post-commit, best-effort: the app's own refresh for the dates a batch touched. It reports
 // its own failures; the batch is already committed.
 async function flushDates(db, dates, refresh) {
@@ -195,8 +220,9 @@ async function flushDates(db, dates, refresh) {
  */
 async function executeHandover(db, opts) {
   const { from, to, start, planId } = opts;
-  const lines = opts.lines || planner.MOVABLE_LINES;
   const zips = opts.zips || null;
+  // A territory run also hands over termite / WDO (owner 2026-10-30); the planner's CLI passes the same default.
+  const lines = opts.lines || (zips ? planner.TERRITORY_MOVABLE_LINES : planner.MOVABLE_LINES);
   const now = opts.now || new Date();
   const today = opts.today || etDateString(now);
   const outDir = opts.outDir || path.join(os.homedir(), 'handover-runs');
@@ -214,16 +240,17 @@ async function executeHandover(db, opts) {
     committed = await db.transaction(async (trx) => {
       const toRow = await trx('technicians').where({ id: to }).forShare().first('id', 'employment_status', 'field_dispatchable', 'work_days');
       checkTarget(toRow);
+      await checkCover(trx, to, zips);
       const mismatch = (got) => new Refusal('PLAN_MISMATCH', `the plan changed since the dry run: this run's PLAN ID is ${got}, --plan is ${planId}. Nothing was written. Run the dry run again and read it.`);
 
-      const first = await planner.planHandover(trx, { from, to, start, today, lines, zips });
+      const first = await planOrRefuse(trx, { from, to, start, today, lines, zips });
       if (first.planId !== planId) throw mismatch(first.planId);
 
       // Fence recurring maintenance for every planned series, then the tech-day fence every
       // assignment writer takes, for every day the moves touch. Both hold through commit.
       await lockSeriesMaintenance(trx, first.ids.retemplate);
       await lockTechDays(trx, first.ids.moves.flatMap((m) => [{ techId: from, date: m.date }, { techId: to, date: m.date }]));
-      const plan = await planner.planHandover(trx, { from, to, start, today, lines, zips });
+      const plan = await planOrRefuse(trx, { from, to, start, today, lines, zips });
       if (plan.planId !== planId) throw mismatch(plan.planId);
 
       // The app's save-time check, once per destination day (absence rows refuse the run).

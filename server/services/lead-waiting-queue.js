@@ -37,6 +37,12 @@ function applyLeadsAwaitingContactFilter(query, database) {
   if (SPEED_TO_LEAD_FRESH_START) {
     query.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
   }
+  return excludeInternalTestLeads(query, database);
+}
+
+// Internal / test leads never count (shared with the lead contact sync, which
+// judges the same population). Column names unqualified.
+function excludeInternalTestLeads(query, database) {
   if (INTERNAL_TEST_CUSTOMERS.length) {
     query.whereNotIn(
       database.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
@@ -68,5 +74,6 @@ function countWaitingPeople(rows) {
 module.exports = {
   LEAD_RESPONSE_SLA_MINUTES,
   applyLeadsAwaitingContactFilter,
+  excludeInternalTestLeads,
   countWaitingPeople,
 };

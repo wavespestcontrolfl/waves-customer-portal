@@ -134,7 +134,8 @@ export default function AdminLayoutV2() {
   // Global Messages badge: conversations needing a reply. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
   // destination is the inbox, never a particular customer.
-  const unreadConversations = useUnreadConversations(sessionReady && ["admin", "owner"].includes(user?.role));
+  // A technician's count covers its own customers only (the server scopes it).
+  const unreadConversations = useUnreadConversations(sessionReady && ["admin", "owner", "technician"].includes(user?.role));
 
   // Safari bookmark identity lives in App (AdminSafariShell) so /admin/login
   // is covered. The layout only owns chrome geometry.

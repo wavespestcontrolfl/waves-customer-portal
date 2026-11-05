@@ -122,6 +122,32 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   };
 }
 
+// A technician's copy of a tech-visible alert whose trigger names `techOmit` payload keys (call content a technician
+// never sees): the trigger is built again from its payload without those keys. The push to a technician and the bell
+// list a technician reads both use it; an admin's copy is unchanged. Null = the trigger names no techOmit keys.
+function technicianCopy(triggerKey, payload) {
+  const trigger = TRIGGER_REGISTRY[triggerKey];
+  if (!trigger?.techOmit?.length) return null;
+  const techPayload = { ...(payload || {}) };
+  for (const key of trigger.techOmit) delete techPayload[key];
+  const built = sanitizeBuiltNotification(trigger.build(techPayload), trigger);
+  return { title: built.title, body: built.body, payload: techPayload };
+}
+
+// The stored bell row as a technician reads it (NotificationService.getAdminNotifications). A row whose trigger
+// names techOmit keys is rebuilt from its stored payload; one with no stored payload keeps its title and loses its
+// body (fail closed). Every other row is returned as stored.
+function technicianRowCopy(row) {
+  let meta = row?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  if (!TRIGGER_REGISTRY[meta?.triggerKey]?.techOmit?.length) return row;
+  if (!meta.payload) return { ...row, body: null };
+  const copy = technicianCopy(meta.triggerKey, meta.payload);
+  return { ...row, title: copy.title, body: copy.body, metadata: { ...meta, payload: copy.payload } };
+}
+
 // A call alert opens the call it is about: the Calls tab reads
 // #tab=calls&call=<call_log id> (CallLogTabV2 pins a call outside its loaded
 // window). No id in the payload keeps the bare tab.
@@ -557,6 +583,9 @@ const TRIGGER_REGISTRY = {
   customer_voicemail_callback: {
     // Tech-visible: links to a day-to-day surface (comms) a field tech works in.
     techVisible: true,
+    // What the caller asked about is call content: a technician's copy leaves it out (owner 2026-11-04, technician
+    // visibility D1 A: no call words on technician screens). See technicianCopy.
+    techOmit: ['service'],
     label: 'Voicemail needs callback',
     category: 'voicemail_callback',
     priority: 'high',
@@ -810,7 +839,7 @@ const TRIGGER_REGISTRY = {
     rule: { area: 'System', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: 'Service report link unavailable — completion text withheld',
-      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the tech portal.`,
+      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the visit on Today.`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -830,7 +859,7 @@ const TRIGGER_REGISTRY = {
       title: 'Completion text not delivered',
       body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
         ? 'The closeout finalized without it; retrying the closeout will not re-send — fix the cause first (a bad number on file, an inactive template).'
-        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the tech portal.'}`,
+        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the visit on Today.'}`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -1454,9 +1483,12 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
       // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
       // for a customer on its own route (technicianServicesCustomer, the rule the
-      // Communications routes use). No customer on the event = today's routing.
+      // Communications routes use). An event with no customer is the office's
+      // (owner 2026-11-04; the bell's scopeAdminFeedToRole rule): no technician.
       const scopeCid = demoCid || payload?.scopeCustomerId;
-      if (require('../config/feature-gates').techLoginPrivacyLive?.() && scopeCid && activeAdmins.some((u) => u.role === 'technician')) {
+      if (require('../config/feature-gates').techLoginPrivacyLive?.() && !scopeCid) {
+        activeAdmins = activeAdmins.filter((u) => u.role !== 'technician');
+      } else if (require('../config/feature-gates').techLoginPrivacyLive?.() && activeAdmins.some((u) => u.role === 'technician')) {
         const { technicianServicesCustomer } = require('./technician-visit-scope');
         const own = await Promise.all(activeAdmins.map(async (u) => {
           if (u.role !== 'technician') return true;
@@ -1715,14 +1747,17 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           })
           : null;
         const adminRoleIds = new Set(activeAdmins.filter((u) => u.role === 'admin').map((u) => u.id));
+        const techCopy = technicianCopy(triggerKey, payload);
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
             const wantsSound = wantsSoundByUser.get(adminUserId);
             const badgeInfo = badgeByUser.get(adminUserId);
+            // A technician recipient gets its own copy when the trigger names techOmit keys.
+            const shown = techCopy && !adminRoleIds.has(adminUserId) ? techCopy : built;
             return {
-              title: built.title,
-              body: built.body,
+              title: shown.title,
+              body: shown.body,
               url: built.link || '/admin',
               // promise_chaser: the push tag IS the bell's own dedupeKey
               // (already 'waves-promise_chaser-<commitment>-<ET day>') so a
@@ -1782,6 +1817,8 @@ module.exports = {
   listTriggers,
   defaultPreference,
   TRIGGER_REGISTRY,
+  technicianCopy,
+  technicianRowCopy,
   __private: {
     maskEmail,
     maskPhone,

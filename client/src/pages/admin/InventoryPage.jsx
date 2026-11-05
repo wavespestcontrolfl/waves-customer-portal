@@ -389,6 +389,8 @@ export default function InventoryPage() {
               label: "Priced",
               value: stats.products?.priced,
               filter: "priced",
+              // The priced flag is owner-only; the server sends a technician null.
+              adminOnly: true,
             },
             {
               label: "Needs Price",
@@ -396,6 +398,7 @@ export default function InventoryPage() {
               // Main: unconditional amber (routine, not a failure state).
               tone: "warn",
               filter: "needs_price",
+              adminOnly: true,
             },
             {
               label: "Low Stock",
@@ -1976,8 +1979,9 @@ function WaveGuardForecastTab({
                         key={`${product.productId}-${appt.serviceId}`}
                         className="mb-[4px]"
                       >
-                        <strong>{appt.scheduledDate}</strong> ·{" "}
-                        {appt.customerName}
+                        <strong>{appt.scheduledDate}</strong>
+                        {/* A technician's forecast names only the customers on their own visits. */}
+                        {appt.customerName ? ` · ${appt.customerName}` : ""}
                         <div className="text-ink-secondary text-ui-body">
                           {appt.amount} {appt.unit}
                           {appt.inventoryAmount != null &&
@@ -2032,7 +2036,8 @@ function WaveGuardForecastTab({
               key={err.serviceId}
               className="text-ink-secondary text-ui-body mt-[4px]"
             >
-              {err.scheduledDate} · {err.customerName}: {err.message}
+              {err.scheduledDate}
+              {err.customerName ? ` · ${err.customerName}` : ""}: {err.message}
             </div>
           ))}
         </div>
@@ -2427,16 +2432,20 @@ export function ProductsTab({
           {
             key: "priced",
             label: "Priced",
+            ownerOnly: true,
           },
           {
             key: "needs_price",
             label: "Needs Price",
+            ownerOnly: true,
           },
           {
             key: "low_stock",
             label: "Low Stock",
           },
-        ].map((f) => (
+        ]
+          .filter((f) => canAuthor || !f.ownerOnly)
+          .map((f) => (
           <Button
             key={f.key}
             onClick={() => {
@@ -2654,10 +2663,10 @@ export function ProductsTab({
                 "MOA",
                 "Size",
                 "Stock",
-                "Best Price",
-                "Unit Cost",
-                "Vendor",
-                "Status",
+                // Prices, vendor and the priced flag are the owner's: the
+                // server sends a technician none of them (owner 2026-10-03,
+                // audit A17 / C27), so the columns go too.
+                ...(canAuthor ? ["Best Price", "Unit Cost", "Vendor", "Status"] : []),
                 "",
               ].map((h) => (
                 <TH key={h}>{h}</TH>
@@ -2822,22 +2831,26 @@ export function ProductsTab({
                       </span>
                     )}
                   </TD>
-                  <TD nums>{formatMoney(p.bestPrice)}</TD>
-                  <TD nums>
-                    {formatUnitPriceList(p.unitPrices) ||
-                      formatUnitCost(p.costPerUnit, p.costUnit)}
-                  </TD>
-                  <TD>{p.bestVendor || "—"}</TD>
-                  <TD>
-                    {/* Main painted these amber vs green; both sides neutral
-                        erased the at-a-glance signal. The kit has no success
-                        tone, so Priced keeps neutral and Needs Price is warn. */}
-                    {p.needsPricing ? (
-                      <Badge tone="warn">Needs Price</Badge>
-                    ) : (
-                      <Badge tone="neutral">Priced</Badge>
-                    )}
-                  </TD>
+                  {canAuthor && (
+                    <>
+                      <TD nums>{formatMoney(p.bestPrice)}</TD>
+                      <TD nums>
+                        {formatUnitPriceList(p.unitPrices) ||
+                          formatUnitCost(p.costPerUnit, p.costUnit)}
+                      </TD>
+                      <TD>{p.bestVendor || "—"}</TD>
+                      <TD>
+                        {/* Main painted these amber vs green; both sides neutral
+                            erased the at-a-glance signal. The kit has no success
+                            tone, so Priced keeps neutral and Needs Price is warn. */}
+                        {p.needsPricing ? (
+                          <Badge tone="warn">Needs Price</Badge>
+                        ) : (
+                          <Badge tone="neutral">Priced</Badge>
+                        )}
+                      </TD>
+                    </>
+                  )}
                   <TD className="min-w-[128px]">
                     {" "}
                     <div

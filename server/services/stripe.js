@@ -2203,11 +2203,15 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, requireTechnicianCardOnFileFor = null, requireCardMethod = false, requireBookedVisitLinesOnly = false, requireGeneralChargeConsent = false, refuseWhenActivePaymentPlan = false, refuseWhenAutopayOptedOut = false } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
       throw new Error('requireCompletedVisit needs requireSelfPayScheduledServiceId.');
+    }
+    // The technician card-on-file check runs under the same visit lock.
+    if (requireTechnicianCardOnFileFor != null && requireSelfPayScheduledServiceId == null) {
+      throw new Error('requireTechnicianCardOnFileFor needs requireSelfPayScheduledServiceId.');
     }
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
@@ -2247,6 +2251,17 @@ const StripeService = {
     }
     if (!card.stripe_payment_method_id) {
       throw new Error('Payment method has no Stripe id');
+    }
+    // Opt-in (a technician's card on file at the visit, GATE_TECH_CARD_ON_FILE):
+    // a saved card only, never a saved bank account under any of its aliases.
+    if (requireCardMethod && String(card.method_type || '').toLowerCase() !== 'card') {
+      throw Object.assign(new Error('This charge takes a saved card, not a bank account.'), { code: 'CARD_METHOD_REQUIRED' });
+    }
+    // Opt-in (a technician's card on file): the card's recorded consent must authorize charges for
+    // visits and invoices; a card saved only for one estimate's card hold does not (hasEnrollmentScopedConsent).
+    if (requireGeneralChargeConsent
+      && !(await require('./payment-method-consents').hasEnrollmentScopedConsent(invoice.customer_id, card.stripe_payment_method_id))) {
+      throw Object.assign(new Error('This card was not saved for visit charges. Take the payment another way.'), { code: 'CARD_CONSENT_REQUIRED' });
     }
 
     const stripeCustomerId = await this.ensureStripeCustomer(invoice.customer_id);
@@ -2311,6 +2326,19 @@ const StripeService = {
         // assertInvoiceCollectible right below.)
         assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
+        // Opt-in (a technician's card on file at the visit, GATE_TECH_CARD_ON_FILE): the LOCKED
+        // invoice bills the booked visit only; a checkout extra needs the customer at the door.
+        if (requireBookedVisitLinesOnly
+          && !require('./technician-visit-scope').invoiceChargesBookedVisitOnly(lockedInvoice)) {
+          throw Object.assign(new Error('Card on file covers the booked visit only. Take the extras by Tap to Pay or manual card with the customer.'), { code: 'TECH_CHARGE_EXTRAS' });
+        }
+        // Opt-in (the same technician charge): an ACTIVE payment plan owns this invoice's collection. Plan creation
+        // holds this invoice lock, and a plan may have no reminder sequence for refuseWhenDunningStopped to see
+        // (the visit-completion charge's own check, visit-completion-payment.js).
+        if (refuseWhenActivePaymentPlan
+          && await trx('payment_plans').where({ invoice_id: lockedInvoice.id, status: 'active' }).first('id')) {
+          throw Object.assign(new Error('This invoice is on a payment plan. The office collects it.'), { code: 'ACTIVE_PAYMENT_PLAN' });
+        }
         // Opt-in (the Auto Pay hold charge mode): a bank debit before the invoice's authorized debit date refuses here,
         // before any credit apply or Stripe call.
         if (requireBankDebitDue) assertBankDebitDue(card, lockedInvoice);
@@ -2426,6 +2454,16 @@ const StripeService = {
             throw new Error('The saved Auto Pay method changed before the charge. Review before charging.');
           }
         }
+        // Opt-in (a technician's card on file at the visit): a customer who turned Auto Pay off is not charged
+        // off-session, even on a card whose consent predates the opt-out (the latest toggle decides, as in
+        // findConsentedChargeableCard). FOR UPDATE on the customer row, at the Auto Pay lock's place in the lock
+        // order, orders this read against the disable path, which locks that row first and logs the toggle inside.
+        if (refuseWhenAutopayOptedOut) {
+          await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');
+          if (await require('./payment-method-consents').autopayOptedOut(lockedInvoice.customer_id, { dbh: trx })) {
+            throw Object.assign(new Error('This customer turned Auto Pay off. Take the payment by Tap to Pay or manual card.'), { code: 'AUTOPAY_OPTED_OUT' });
+          }
+        }
         // Opt-in (the termite annual plan's agreement-authorized charges):
         // the signed agreement IS the authorization, so it must still be
         // signed at the moment money moves. FOR UPDATE orders this charge
@@ -2450,8 +2488,16 @@ const StripeService = {
           const lockedSvc = await trx('scheduled_services')
             .where({ id: requireSelfPayScheduledServiceId })
             .forUpdate()
-            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status', 'estimated_price', 'is_callback', 'prepaid_method', 'prepaid_amount', 'service_type');
+            .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status', 'estimated_price', 'is_callback', 'prepaid_method', 'prepaid_amount', 'service_type', 'technician_id', 'scheduled_date');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
+          // Opt-in (a technician's card on file at the visit, GATE_TECH_CARD_ON_FILE): the visit must
+          // still be that technician's, today, and completed, judged on the row this
+          // transaction holds locked. A reassignment, reschedule or cancel that landed after the
+          // route's own check refuses here, before any credit apply or Stripe call.
+          if (requireTechnicianCardOnFileFor != null
+            && !require('./technician-visit-scope').technicianCardOnFileVisitOk(requireTechnicianCardOnFileFor, lockedSvc)) {
+            throw Object.assign(new Error('This visit is no longer yours to charge today. Ask the office to charge the card.'), { code: 'TECH_VISIT_NOT_CHARGEABLE' });
+          }
           // Completed-one-time eligibility under the SAME lock (hold-rail
           // pre-push r9 P0): a completion charge is only authorized for a
           // visit that IS completed and still one-time at the moment of

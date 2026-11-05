@@ -62,18 +62,20 @@ function scopeAdminFeedToRole(query, role, technicianId = null) {
     `COALESCE(metadata->>'triggerKey', '') IN (${keys.map(() => '?').join(', ')})`,
     keys,
   );
-  // GATE_TECH_LOGIN_PRIVACY: a technician login also sees a customer's row only
-  // for a customer on its own route (the Communications routes' rule). A row
-  // with no customer stays visible, as today. Callers that pass no technicianId
-  // keep the key-only scope.
-  if (role === 'technician' && technicianId && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+  // GATE_TECH_LOGIN_PRIVACY: a technician login sees an alert only for a
+  // customer on its own route (owner 2026-10-25, the Communications routes'
+  // rule). An alert with no customer is the office's (owner 2026-11-04): an
+  // unknown caller's voicemail, a phone failure to a number no one customer
+  // owns, the one-hour pager's list and the overdue watchdog's summary. That
+  // holds whether or not the caller names a technician; a caller that passes
+  // no technicianId keeps the key-only scope for customer rows.
+  if (role === 'technician' && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+    const customerRows = scoped.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NOT NULL`);
+    if (!technicianId) return customerRows;
     const { technicianCustomerIdsSubquery } = require('./technician-visit-scope');
     const ownCustomers = technicianCustomerIdsSubquery({ techRole: 'technician', technicianId }, db)
       .clearSelect().select(db.raw('scheduled_services.customer_id::text'));
-    return scoped.where(function customerlessOrOwn() {
-      this.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL`)
-        .orWhereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
-    });
+    return customerRows.whereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
   }
   return scoped;
 }
@@ -991,16 +993,22 @@ const NotificationService = {
   // and offset included) so the route can build a cursor that never rounds
   // away the sub-millisecond part: the ::timestamptz it round-trips through
   // is exact, so rows sharing a millisecond are never skipped or repeated.
-  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null } = {}) {
+  // An owner-only row (metadata.ownerOnly: a Claude plan or copy) is listed for the owner login only (`fullAccess`).
+  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ));
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
-    return query
+    const rows = await query
       .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'))
       .orderByRaw('created_at DESC, id DESC')
       .limit(limit).offset(offset);
+    if (!role || role === 'admin') return rows;
+    // A non-admin reads a technician's copy of a row whose trigger names techOmit keys (call content, owner
+    // 2026-11-04 D1 A). Lazy require, as in scopeAdminFeedToRole.
+    return rows.map(require('./notification-triggers').technicianRowCopy);
   },
 
   // The current content version of one admin row (see NOTIFICATION_VERSION_SQL),
@@ -1079,6 +1087,35 @@ const NotificationService = {
     });
   },
 
+  // The 10-second Undo of an idea sent from the Intelligence Bar box (admin-claude-ideas.js), or of a guarded copy
+  // (`kind` 'guarded-copy', admin-alert-copy-to-claude.js): closes the row as done by the admin. Same dedupe lock as the
+  // send; the row is locked and the fence re-checked inside the transaction: open, still in Claude's queue, a send of
+  // that `kind` stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the rows written, 0 or 1.
+  async markAdminIdeaCancelled(id, at, by, resolution, kind = 'owner-idea') {
+    return db.transaction(async (trx) => {
+      const row = await trx('notifications').where({ id, recipient_type: 'admin' }).first(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+      if (!row) return 0;
+      if (row.dedupe_key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${row.dedupe_key}`]);
+      const fenced = () => trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
+        .whereRaw("metadata->>'claudeQueue' = ?", [SENT_TO_CLAUDE_CLASS])
+        .whereRaw("metadata->'sentToClaude'->>'kind' = ?", [kind])
+        .whereRaw("metadata->'sentToClaude'->>'at' = ?", [at])
+        .whereRaw("metadata->'sentToClaude'->>'startedAt' IS NULL");
+      if (!(await fenced().forUpdate().first('id'))) return 0;
+      return fenced().update(doneColumns({ by, resolution, keepExisting: true, conn: trx }));
+    });
+  },
+
+  // Is this admin row owner-only (metadata.ownerOnly: an idea sent to Claude)? Role-scoped like the others; false when the
+  // row is gone, out of scope or not owner-only.
+  async isAdminOwnerOnly(id, { role, technicianId = null } = {}) {
+    const row = await scopeAdminFeedToRole(
+      db('notifications').where({ id, recipient_type: 'admin' }),
+      role, technicianId,
+    ).first(db.raw("COALESCE(metadata->>'ownerOnly', '') = 'true' AS owner_only"));
+    return row?.owner_only === true;
+  },
+
   // Recently done admin rows (the "Recently done" list, so an accidental Done
   // can be reopened). Role-scoped like the bell list, but Activity-only rows
   // are INCLUDED: Activity has its own Done and this is the one recovery
@@ -1088,12 +1125,14 @@ const NotificationService = {
   // window stays reachable however many closed after it. done_at_token is
   // done_at::text at full precision: the cursor source, and the fence a
   // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
-  async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null } = {}) {
+  async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null, fullAccess = false } = {}) {
     const query = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
       role, technicianId,
     )
       .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
+    // An owner-only row (an idea sent to Claude) is listed for the owner login only.
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     if (before) query.whereRaw('(done_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     return query
       .select(
@@ -1110,13 +1149,15 @@ const NotificationService = {
   // badge ordering section (admin-unread.js) computes counts inside its
   // advisory-lock transaction and must not borrow a second pool
   // connection while holding one.
-  async getAdminUnreadCount({ role, technicianId = null } = {}, trx = null) {
-    const [{ count }] = await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // An owner-only row (metadata.ownerOnly) counts for the owner login only (`fullAccess`), as getAdminNotifications lists it.
+  async getAdminUnreadCount({ role, technicianId = null, fullAccess = false } = {}, trx = null) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       (trx || db)('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ))
-      .whereNull('read_at')
-      .count('* as count');
+      .whereNull('read_at');
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    const [{ count }] = await query.count('* as count');
     return parseInt(count);
   },
 
@@ -1148,13 +1189,16 @@ const NotificationService = {
   // Mark a single admin notification read — scoped to recipient_type 'admin' so
   // the admin endpoint can't clear a customer's notification by supplying its id
   // (admin notifications are the shared admin queue; customer rows are off-limits).
-  async markReadAdmin(notificationId, { role, technicianId = null } = {}) {
+  async markReadAdmin(notificationId, { role, technicianId = null, fullAccess = false } = {}) {
     // Same role predicate as the reads: a technician must not be able to
-    // mark a hidden adminRoleOnly row read before the owner sees it.
-    const updated = await scopeAdminFeedToRole(
+    // mark a hidden adminRoleOnly row read before the owner sees it. Likewise
+    // an owner-only row (metadata.ownerOnly) is the owner login's alone.
+    const query = scopeAdminFeedToRole(
       db('notifications').where({ id: notificationId, recipient_type: 'admin' }),
       role, technicianId,
-    ).update({ read_at: new Date() });
+    );
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    const updated = await query.update({ read_at: new Date() });
     return updated > 0;
   },
 
@@ -1207,11 +1251,15 @@ const NotificationService = {
   },
 
   // Mark all read for admin
-  async markAllReadAdmin({ role, technicianId = null } = {}) {
-    await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // An owner-only row (metadata.ownerOnly) is read only by the owner login (`fullAccess`): another login's "Mark all
+  // read" never clears the owner's unread Claude plans.
+  async markAllReadAdmin({ role, technicianId = null, fullAccess = false } = {}) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }),
       role, technicianId,
-    )).whereNull('read_at').update({ read_at: new Date() });
+    )).whereNull('read_at');
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    await query.update({ read_at: new Date() });
   },
 
   // Mark a customer's inbound_sms admin bells read — the ONE writer for

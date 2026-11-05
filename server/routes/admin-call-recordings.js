@@ -10,6 +10,7 @@ const {
 } = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+const { redactTechnicianCallWords } = require('../middleware/staff-call-recording-privacy');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -23,6 +24,12 @@ function techPrivacyOn(req) {
 // Subquery of the technician's own customer ids, or null when unscoped.
 function ownCustomerScope(req) {
   return techPrivacyOn(req) ? require('../services/technician-visit-scope').technicianCustomerIdsSubquery(req, db) : null;
+}
+// A technician reads a promise in plain words, with no transcript quote, no
+// phone number and no call SID (owner 2026-11-04, D1 A). By role, no gate.
+// Fails closed: anything that is not an admin login gets the redacted body.
+function forStaffRole(req, body) {
+  return req.techRole === 'admin' ? body : redactTechnicianCallWords(body);
 }
 async function ownsCustomer(req, customerId) {
   if (!techPrivacyOn(req)) return true;
@@ -315,7 +322,7 @@ router.get('/proposals', async (req, res, next) => {
     if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
     const proposals = require('../services/call-reschedule-proposals');
     const rows = await proposals.listProposals(db, { limit: 101, offset, customerScope: ownCustomerScope(req) });
-    res.json({ proposals_enabled: proposals.enabled(), proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 });
+    res.json(forStaffRole(req, { proposals_enabled: proposals.enabled(), proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 }));
   } catch (err) { next(err); }
 });
 
@@ -330,11 +337,11 @@ router.post('/proposals/:id/preview', async (req, res, next) => {
     const p = await require('../services/call-reschedule-proposals').previewProposal(db, req.params.id, { visitId: req.body?.visit_id });
     // Render the identity covered by this hash, not a potentially older list row.
     const { id, status, scheduled_date, current_window, service_name, property } = p.selected;
-    res.json({ preview_hash: p.preview_hash, visit_id: p.selected.id, series: p.series, overlap: p.overlap,
+    res.json(forStaffRole(req, { preview_hash: p.preview_hash, visit_id: p.selected.id, series: p.series, overlap: p.overlap,
       selected: { id, status, scheduled_date, current_window, service_name, property, display_address: p.displayAddress },
       customer: { id: p.customer.id, first_name: p.customer.first_name, last_name: p.customer.last_name },
       quote: p.card.payload.reschedule_proposal.quote,
-      from: p.plan.from || null, new_date: p.plan.newDate, new_window: p.plan.newWindow });
+      from: p.plan.from || null, new_date: p.plan.newDate, new_window: p.plan.newWindow }));
   } catch (err) {
     if (err.status || err.statusCode) return res.status(err.status || err.statusCode).json({ error: err.message });
     next(err);
@@ -430,7 +437,7 @@ router.get('/commitments/open', async (req, res, next) => {
     }
     const hasMore = rows.length > pageLimit;
     const cards = require('../services/callback-cards');
-    res.json({
+    res.json(forStaffRole(req, {
       commitments: await cards.decorateCallbackRows(db, hasMore ? rows.slice(0, pageLimit) : rows),
       has_more: hasMore,
       next_offset: hasMore ? pageOffset + pageLimit : null,
@@ -439,7 +446,7 @@ router.get('/commitments/open', async (req, res, next) => {
       callbacks_enabled: cards.enabled(),
       actor_id: req.technicianId,
       enabled,
-    });
+    }));
   } catch (err) { next(err); }
 });
 
@@ -463,8 +470,8 @@ router.get('/commitments/auto-closed', async (req, res, next) => {
     }
     const { listAutoClosedCommitments } = require('../services/call-commitments');
     const page = await listAutoClosedCommitments(db, { days, before, customerScope: ownCustomerScope(req) });
-    res.json({ commitments: page.commitments, days, has_more: Boolean(page.next),
-      next: page.next ? { before_at: page.next.at, before_id: page.next.id } : null });
+    res.json(forStaffRole(req, { commitments: page.commitments, days, has_more: Boolean(page.next),
+      next: page.next ? { before_at: page.next.at, before_id: page.next.id } : null }));
   } catch (err) { next(err); }
 });
 
@@ -484,7 +491,7 @@ router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res
       channel: req.body?.channel ?? null,
       reviewedBy: req.technicianId || null,
     });
-    res.status(201).json({ commitment: row });
+    res.status(201).json(forStaffRole(req, { commitment: row }));
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
@@ -520,7 +527,7 @@ router.patch('/commitments/:id', async (req, res, next) => {
       const row = await applySmsCommitmentUpdate(db, req.params.id, {
         customerId: req.body.customer_id, action: req.body.action, note: req.body.note, reviewedBy: req.technicianId || null,
       });
-      return res.json({ commitment: row });
+      return res.json(forStaffRole(req, { commitment: row }));
     }
     if (!isEnabled('callCommitments')) return res.status(409).json({ error: 'Call commitments are disabled', code: 'COMMITMENTS_DISABLED' });
     const callbacks = require('../services/callback-cards');
@@ -529,7 +536,7 @@ router.patch('/commitments/:id', async (req, res, next) => {
         action: req.body?.action, actorId: req.technicianId, expectedAt: req.body?.expected_at,
         description: req.body?.description, due_at: req.body?.due_at, note: req.body?.note, snooze: req.body?.snooze,
       });
-      return res.json({ commitment });
+      return res.json(forStaffRole(req, { commitment }));
     }
     const { applyHumanUpdate } = require('../services/call-commitments');
     const row = await applyHumanUpdate(db, req.params.id, {
@@ -542,7 +549,7 @@ router.patch('/commitments/:id', async (req, res, next) => {
       // closed-automatically list): a newer verdict answers 409.
       ...(req.body?.action === 'reopen' && req.body?.expected_at ? { expectedAt: req.body.expected_at } : {}),
     });
-    res.json({ commitment: row });
+    res.json(forStaffRole(req, { commitment: row }));
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
@@ -1043,12 +1050,15 @@ router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
 router.get('/blocked', async (req, res, next) => {
   try {
     const rows = await db('blocked_numbers').orderBy('blocked_at', 'desc');
+    // A technician learns that a number is blocked, not why: the reason an
+    // admin typed is office-only.
+    const reasonVisible = req.techRole === 'admin';
     res.json({
       numbers: rows.map(r => ({
         id: r.id,
         phone: r.number,
         block_type: r.block_type,
-        reason: r.reason,
+        ...(reasonVisible ? { reason: r.reason } : {}),
         blocked_at: r.blocked_at,
         auto_blocked: r.auto_blocked,
       })),

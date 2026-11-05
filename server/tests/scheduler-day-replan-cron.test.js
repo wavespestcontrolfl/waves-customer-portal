@@ -20,6 +20,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
   recurringSeriesTopUpLive: jest.fn(() => false), dayReplanMode: jest.fn(() => 'off'),
+  nightPassWaitLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -36,7 +37,7 @@ jest.mock('../services/day-replan', () => ({ runDayReplanIfEnabled: jest.fn() })
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, dayReplanMode } = require('../config/feature-gates');
+const { isEnabled, dayReplanMode, nightPassWaitLive } = require('../config/feature-gates');
 const { runDayReplanIfEnabled } = require('../services/day-replan');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -53,6 +54,7 @@ function registration() {
 beforeEach(() => {
   jest.clearAllMocks();
   dayReplanMode.mockReturnValue('off');
+  nightPassWaitLive.mockReturnValue(false);
   runDayReplanIfEnabled.mockResolvedValue({ status: 'completed', days: 1, failed: [] });
 });
 
@@ -77,6 +79,14 @@ test.each(['shadow', 'apply'])('gate %s: runs under day-replan-nightly, nested i
   expect(runExclusive.mock.calls[1][2]).toEqual({ recordHealth: false });
   expect(runDayReplanIfEnabled).toHaveBeenCalledTimes(1);
   expect(logger.error).not.toHaveBeenCalled();
+});
+
+test('GATE_NIGHT_PASS_WAIT on: the inner writer-lock call waits up to 25 minutes; off: no wait option', async () => {
+  dayReplanMode.mockReturnValue('shadow');
+  nightPassWaitLive.mockReturnValue(true);
+  await registration()[1]();
+  expect(runExclusive.mock.calls[0][2]).toBeUndefined();
+  expect(runExclusive.mock.calls[1][2]).toEqual({ recordHealth: false, waitForLockMs: 25 * 60 * 1000 });
 });
 
 test('a run that is not clean is logged, never thrown out of the tick', async () => {

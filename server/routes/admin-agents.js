@@ -12,6 +12,7 @@ const runIndex = require('../services/agent-control/run-index');
 const agentRuns = require('../services/agent-control/runs');
 const modelDiscovery = require('../services/model-discovery');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -1050,7 +1051,7 @@ function uuidOrNull(value) {
 // an invalid/non-UUID value is silently ignored rather than erroring.
 router.get('/activity', async (req, res, next) => {
   try {
-    const feed = await agentActivity.getActivity({ windowHours: req.query.hours, focus: uuidOrNull(req.query.focus) });
+    const feed = await agentActivity.getActivity({ windowHours: req.query.hours, focus: uuidOrNull(req.query.focus), fullAccess: ibFullAccess(req) });
     res.json(feed);
   } catch (err) {
     next(err);

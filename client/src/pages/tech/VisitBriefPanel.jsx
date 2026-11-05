@@ -963,15 +963,16 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
   );
 }
 
-// "Text from my line": a compose box under the action row. The server
-// texts the VISIT's customer (never a number the client picks) from the
-// tech's line; the office sees the thread in /admin/communications.
+// "Text from my line": a compose box under the action row (and under Reply on
+// Today's text card, TechNoticeFeed). The server texts the VISIT's customer
+// (never a number the client picks) from the tech's line; the office sees the
+// thread in /admin/communications.
 const LINE_TEXT_MAX = 600;
 // While a send is in flight the compose cannot be closed (nor collapsed
 // from the Text toggle — onBusyChange tells the panel): unmounting it
 // would drop the pending state and invite a second POST on a slow
 // connection, and the server has no idempotency key (codex #4072 r5 P2).
-function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
+export function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
   const [body, setBody] = useState('');
   const [state, setState] = useState({ busy: false, error: '', sent: false });
   async function send() {

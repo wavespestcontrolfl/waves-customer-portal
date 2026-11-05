@@ -31,10 +31,35 @@ describe("CustomerActionBar call action", () => {
     expect(screen.getByRole("link", { name: /Text/ })).toBeInTheDocument();
   });
 
-  it("is not offered to a technician, who keeps Text and Book", () => {
+  it("is not offered to a technician, who keeps Text", () => {
     renderBar("technician");
     expect(screen.queryByRole("button", { name: /Call/ })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Text/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Book/ })).toBeInTheDocument();
+  });
+});
+
+describe("CustomerActionBar office pages", () => {
+  it("offers an admin Estimate, Book and Invoice", () => {
+    renderBar("admin");
+    for (const name of [/Estimate/, /Book/, /Invoice/]) expect(screen.getByRole("link", { name })).toBeInTheDocument();
+  });
+
+  it("offers a technician no Estimate, Book or Invoice, which lead nowhere", () => {
+    renderBar("technician");
+    for (const name of [/Estimate/, /Book/, /Invoice/]) expect(screen.queryByRole("link", { name })).not.toBeInTheDocument();
+  });
+});
+
+describe("CustomerActionBar Text link", () => {
+  it("names the customer for a technician, so the composer can send", () => {
+    renderBar("technician");
+    const href = screen.getByRole("link", { name: /Text/ }).getAttribute("href");
+    expect(href).toContain("customerId=fixture-1");
+    expect(href).toContain("thread=fixture-1");
+  });
+
+  it("is unchanged for an admin", () => {
+    renderBar("admin");
+    expect(screen.getByRole("link", { name: /Text/ }).getAttribute("href")).toBe("/admin/communications?phone=%2B15555550102&action=sms");
   });
 });

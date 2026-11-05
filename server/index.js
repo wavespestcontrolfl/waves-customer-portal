@@ -483,6 +483,10 @@ app.use('/api/public/secure-card', (req, res, next) => {
 // (same reasoning as secure-card above), and POST /:token/view's malformed-
 // token 404 + body-ignore decided before the shared body parsers.
 app.use('/api/public/track', require('./middleware/track-public-preparser').trackPublicPreparser);
+// Email resubscribe confirm link (GATE_PORTAL_EMAIL_RESUBSCRIBE): privacy headers on every
+// outcome, the GLOBAL /api limiter's 429s and the body parsers' 400s included, and while dark
+// the generic 404 page before either of them (same reasoning as secure-card above).
+app.use('/api/public/email-resubscribe', require('./routes/public-email-resubscribe').preParserGuard);
 // The public agent surfaces (MCP + A2A) carry the same unobservable-when-
 // dark contract as the funnels above: while their gates are off they must
 // read 404 even for an IP that already exhausted the global /api/ limiter
@@ -933,6 +937,7 @@ app.use('/api/admin/email-templates', require('./routes/admin-email-templates'))
 app.use('/api/admin/notification-events', require('./routes/admin-notification-events'));
 app.use('/api/admin/newsletter', require('./routes/admin-newsletter'));
 app.use('/api/public/newsletter', require('./routes/public-newsletter'));
+app.use('/api/public/email-resubscribe', require('./routes/public-email-resubscribe'));
 app.use('/api/public/ui-flags', require('./routes/public-ui-flags'));
 app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
@@ -1048,7 +1053,9 @@ app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthen
       .applyAssignable(require('./models/db')('technicians'))
       .select('id', 'name', 'role', 'phone', 'active')
       .orderBy('name');
-    res.json({ technicians: techs });
+    // A technician gets its own phone and coworkers' names only (owner
+    // 2026-11-04, "Own number only"); an admin response is unchanged.
+    res.json({ technicians: require('./services/technician-picker-rows').technicianPickerRows(techs, req) });
   } catch (err) { next(err); }
 });
 app.use('/api/admin/data-hygiene', require('./routes/admin-data-hygiene'));
@@ -1115,6 +1122,7 @@ app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
+app.use('/api/admin/claude-ideas', require('./routes/admin-claude-ideas'));
 app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 // GATE_PORTAL_MESSAGES: the customer's Messages page (their portal thread with the office); 404 while dark.

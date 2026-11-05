@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
+import { getAdminUser } from '../../lib/adminAuth';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
 import { TIMEZONE } from '../../lib/timezone';
@@ -108,6 +109,9 @@ export default function ScheduleCustomerSidebar({
   const [notificationType, setNotificationType] = useState('text');
   const [notificationMessage, setNotificationMessage] = useState('');
   const [cancelling, setCancelling] = useState(false);
+  // Book next, Edit and Take payment are office-only: their routes refuse a
+  // technician, and /admin/invoices bounces one to Today.
+  const officeActions = getAdminUser()?.role === 'admin';
 
   useEffect(() => {
     setNote(service?.notes || '');
@@ -304,20 +308,24 @@ export default function ScheduleCustomerSidebar({
       >
         <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 px-5 py-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => onBookNext?.(service)}
-              className="h-9 px-3 rounded-sm bg-zinc-900 text-white text-12 font-medium uppercase tracking-label u-focus-ring"
-            >
-              Book next
-            </button>
-            <button
-              type="button"
-              onClick={() => onEdit?.(service)}
-              className="h-9 px-3 rounded-sm bg-white border-hairline border-zinc-300 text-zinc-900 text-12 font-medium uppercase tracking-label u-focus-ring"
-            >
-              Edit
-            </button>
+            {officeActions && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onBookNext?.(service)}
+                  className="h-9 px-3 rounded-sm bg-zinc-900 text-white text-12 font-medium uppercase tracking-label u-focus-ring"
+                >
+                  Book next
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onEdit?.(service)}
+                  className="h-9 px-3 rounded-sm bg-white border-hairline border-zinc-300 text-zinc-900 text-12 font-medium uppercase tracking-label u-focus-ring"
+                >
+                  Edit
+                </button>
+              </>
+            )}
           </div>
           <div className="relative flex items-center gap-2">
             {canCancelAppointment && (
@@ -469,12 +477,14 @@ export default function ScheduleCustomerSidebar({
             {siblingCoverage && !siblingCoverage.collectible && (
               <div className="text-14 text-ink-secondary mt-1">{siblingCoverage.detail}</div>
             )}
-            <a
-              href={`/admin/invoices?customer=${encodeURIComponent(service.customerId)}`}
-              className="mt-4 inline-flex h-10 w-full items-center justify-center rounded-sm bg-zinc-900 px-4 text-13 font-medium uppercase tracking-label text-white no-underline u-focus-ring"
-            >
-              Take payment
-            </a>
+            {officeActions && (
+              <a
+                href={`/admin/invoices?customer=${encodeURIComponent(service.customerId)}`}
+                className="mt-4 inline-flex h-10 w-full items-center justify-center rounded-sm bg-zinc-900 px-4 text-13 font-medium uppercase tracking-label text-white no-underline u-focus-ring"
+              >
+                Take payment
+              </a>
+            )}
           </Section>
 
           <Section title="Client notes">

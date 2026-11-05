@@ -4,6 +4,7 @@ import { Button, buttonStyles } from "../../../components/ui/Button";
 import { Field } from "../../../components/ui/Field";
 import { ActionFeedback } from "../../../components/ui/ActionFeedback";
 import { Input } from "../../../components/ui/Input";
+import { Select } from "../../../components/ui/Select";
 import { cn } from "../../../components/ui/cn";
 import EmailReply from "./EmailReply";
 import { autoActionNote } from "./emailAutoAction";
@@ -137,7 +138,7 @@ function EmailMessageRow({ email, mailbox, editor, onOpen, conversationOpen }) {
 }
 
 function EmailConversation({ active, mailbox, editor, onBack }) {
-  const { selectedEmail: email, thread, threadState, loadThread, removeEmail, handleReclassify, handleDownloadAttachment, pendingAction } = mailbox;
+  const { selectedEmail: email, thread, threadState, loadThread, removeEmail, handleReclassify, reclassifyLabels, handleDownloadAttachment, pendingAction } = mailbox;
   const headingRef = useRef(null), historyRef = useRef(null);
   const previousThreadRef = useRef(null), followLatestRef = useRef(true);
   useEffect(() => { headingRef.current?.focus({ preventScroll: true }); }, [email.id]);
@@ -161,6 +162,12 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
         <Button variant="secondary" onClick={() => removeEmail(email.id, "archive")} disabled={Boolean(pendingAction)} loading={pendingAction === `archive:${email.id}`} className="gap-2"><Archive size={16} aria-hidden />Archive</Button>
         <Button variant="secondary" onClick={() => removeEmail(email.id, "trash")} disabled={Boolean(pendingAction)} loading={pendingAction === `trash:${email.id}`} className="gap-2"><Trash2 size={16} aria-hidden />Trash</Button>
         <Button variant="secondary" onClick={() => handleReclassify(email.id)} disabled={Boolean(pendingAction)} loading={pendingAction === `reclassify:${email.id}`} className="gap-2"><Sparkles size={16} aria-hidden />Reclassify</Button>
+        {reclassifyLabels?.length > 0 && <div className="w-full sm:w-48">
+          <Select aria-label="Set email label" value="" onChange={(event) => { if (event.target.value) handleReclassify(email.id, event.target.value); }} disabled={Boolean(pendingAction)}>
+            <option value="">Set label…</option>
+            {reclassifyLabels.map((label) => <option key={label} value={label}>{CATEGORY_LABELS[label] || label}</option>)}
+          </Select>
+        </div>}
       </div>
       {extractedData && <div className="flex flex-wrap gap-x-4 gap-y-2 rounded-md border-hairline border-zinc-200 bg-white p-4 text-ui-body">
         <span className="text-ink-secondary">AI classification:</span><span className="font-medium">{categoryLabel || category}</span>

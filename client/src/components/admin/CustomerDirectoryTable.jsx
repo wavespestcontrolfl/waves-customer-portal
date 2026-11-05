@@ -5,6 +5,13 @@ import { ArrowDown, ArrowUp, MoreHorizontal, Phone, MessageSquare, PenLine, Tras
 import { Button, buttonStyles, Table, THead, TBody, TR, TH, TD } from "../ui";
 import { formatETDateOnly } from "../../lib/timezone";
 
+// A technician's Messages link names the customer: the server refuses a technician's text with no customer.
+// An admin's link is unchanged.
+const messagesHref = (customer, canEdit) => {
+  const base = `/admin/communications?phone=${encodeURIComponent(customer.phone)}`;
+  return canEdit ? base : `${base}&customerId=${encodeURIComponent(customer.id)}&thread=${encodeURIComponent(customer.id)}`;
+};
+
 export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDelete, onCall, canEdit, sortBy, sortDir, onSort, editingId, editor, visibleColumns = ["customer", "property", "tier", "nextService", "attention", "actions"] }) {
   const root = useRef(null);
   const visible = new Set(visibleColumns);
@@ -90,7 +97,7 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
                 }}>
                   {customer.phone && <>
                     {onCall && <Button variant="ghost" className="ui-menu-action" onClick={() => onCall(customer)}><Phone size={16} />Call via Waves</Button>}
-                    <a href={`/admin/communications?phone=${encodeURIComponent(customer.phone)}`} className={buttonStyles({ variant: "ghost", density: "comfortable", className: "ui-menu-action" })}><MessageSquare size={16} />Messages</a>
+                    <a href={messagesHref(customer, canEdit)} className={buttonStyles({ variant: "ghost", density: "comfortable", className: "ui-menu-action" })}><MessageSquare size={16} />Messages</a>
                   </>}
                   {canEdit && <>
                     <Button variant="ghost" className="ui-menu-action" onClick={() => onEdit(customer)}><PenLine size={16} />Edit customer</Button>

@@ -69,6 +69,34 @@ describe('MobileAppointmentDetailSheet billing-lane card', () => {
     expect(screen.queryByText(/Membership autopay is not active/i)).not.toBeInTheDocument();
   });
 
+  // Owner ruling D2 A (2026-11-04): a technician's feed keeps the balance due and the
+  // dues-paid flag, and drops the monthly rate (billingLane and the row).
+  it('a technician payload with no monthlyRate keeps the balance line and shows no rate, "$undefined" or "NaN"', () => {
+    const { container } = render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          billingLane: {
+            mode: 'monthly_membership',
+            source: 'explicit',
+            autopayActive: true,
+            openBalance: 96.6,
+            openInvoiceCount: 2,
+            hasOverdue: false,
+            duesPaidThisMonth: false,
+            prediction: { kind: 'covered_membership', amount: null, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Monthly membership/)).toBeInTheDocument();
+    expect(screen.getByText(/Open balance: \$96\.60 across 2 unpaid invoices\./i)).toBeInTheDocument();
+    expect(screen.getByText(/This month's dues: not collected yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/\/mo dues/)).not.toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/undefined|NaN/);
+  });
+
   it('warns when a member has autopay off and dues uncollected', () => {
     render(
       <MobileAppointmentDetailSheet

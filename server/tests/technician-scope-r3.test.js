@@ -81,13 +81,42 @@ describe('lawn diagnostics', () => {
 
 describe('drafts', () => {
   const router = require('../routes/admin-drafts');
+  const DRAFT_1 = 'aaaaaaaa-1111-4333-8444-000000000001';
+  const DRAFT_2 = 'aaaaaaaa-1111-4333-8444-000000000002';
   test('GET /:id refuses a draft for a customer off the route (404) and a customerless draft (403)', async () => {
-    mockRow = { id: 'd-1', customer_id: CUSTOMER, flags: null };
+    mockRow = { id: DRAFT_1, customer_id: CUSTOMER, flags: null };
     const { base, close } = serve('/api/admin/drafts', router);
     try {
-      expect((await fetch(`${base}/d-1`)).status).toBe(404);
-      mockRow = { id: 'd-2', customer_id: null, flags: null };
-      expect((await fetch(`${base}/d-2`)).status).toBe(403);
+      expect((await fetch(`${base}/${DRAFT_1}`)).status).toBe(404);
+      mockRow = { id: DRAFT_2, customer_id: null, flags: null };
+      expect((await fetch(`${base}/${DRAFT_2}`)).status).toBe(403);
+    } finally { await close(); }
+  });
+  // Technician visibility audit H8 (2026-11-04): Express matches routes without regard to letter case, so the
+  // exemption takes a UUID only and /Stats can no longer reach GET /stats.
+  test.each(['stats', 'Stats', 'STATS'])('GET /%s stays admin-only for a technician (403)', async (name) => {
+    mockRow = { avg_seconds: 60, total: 1 };
+    const { base, close } = serve('/api/admin/drafts', router);
+    try {
+      expect((await fetch(`${base}/${name}`)).status).toBe(403);
+    } finally { await close(); }
+  });
+  // Technician visibility audit A11: the pipeline stage and the CRM context summary are office facts.
+  test('a servicing technician gets the draft without stage or contextSummary; an admin gets both', async () => {
+    mockServices = true;
+    mockRow = { id: DRAFT_1, customer_id: CUSTOMER, flags: null, first_name: 'Pat', last_name: 'Example', pipeline_stage: 'active_customer', context_summary: 'Dues $0. Open complaint.' };
+    const { base, close } = serve('/api/admin/drafts', router);
+    try {
+      const tech = await fetch(`${base}/${DRAFT_1}`);
+      expect(tech.status).toBe(200);
+      const techBody = await tech.json();
+      expect(techBody.customerName).toBe('Pat Example');
+      expect(techBody).not.toHaveProperty('stage');
+      expect(techBody).not.toHaveProperty('contextSummary');
+      mockRole = 'admin';
+      const admin = await (await fetch(`${base}/${DRAFT_1}`)).json();
+      expect(admin.stage).toBe('active_customer');
+      expect(admin.contextSummary).toBe('Dues $0. Open complaint.');
     } finally { await close(); }
   });
 });
