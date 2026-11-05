@@ -29,6 +29,7 @@ const TOKEN = 'B'.repeat(43);
 const NOW = Date.now();
 let request;
 let suppressions;
+let hardBlock;
 let calls;
 
 // Records every builder call. Reads resolve to `request` (first) or `suppressions` (thenable).
@@ -42,7 +43,10 @@ function installDb() {
         }
         return (...args) => {
           calls.push([table, String(method), ...args]);
-          if (method === 'first') return Promise.resolve(table === 'email_resubscribe_requests' ? request : undefined);
+          if (method === 'first') {
+            if (table === 'email_resubscribe_requests') return Promise.resolve(request);
+            return Promise.resolve(table === 'email_suppressions' && hardBlock ? { id: 'block-1' } : undefined);
+          }
           return builder;
         };
       },
@@ -65,6 +69,7 @@ beforeEach((done) => {
     expires_at: new Date(NOW + 3600000), used_at: null,
   };
   suppressions = [{ id: 'sup-1', email: 'pat@example.com', group_key: null }];
+  hardBlock = false;
   installDb();
   process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE = 'true';
   const app = express();
@@ -102,6 +107,19 @@ describe('GET /:token is read-only', () => {
     expect(writes()).toEqual([]);
     expect(db.transaction).not.toHaveBeenCalled();
     expect(complete).not.toHaveBeenCalled();
+  });
+
+  test('an open link whose address now has a hard block shows the generic expired page: no button, no write', async () => {
+    hardBlock = true;
+    const res = await get();
+    const html = await res.text();
+    expect(res.status).toBe(404);
+    expectPrivacy(res);
+    expect(html).toContain('This link has expired or was already used.');
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('pat@example.com');
+    expect(writes()).toEqual([]);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test("a used link, or an address with nothing left to release, says You're all set and writes nothing", async () => {

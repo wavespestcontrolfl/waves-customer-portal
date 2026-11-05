@@ -74,7 +74,11 @@ router.get('/:token', async (req, res) => {
   try {
     const { status, request } = await Resub.findRequest(req.params.token);
     if (status === 'unknown' || status === 'expired') return expired(req, res);
-    if (status === 'used' || !(await Resub.releasableUnsubscribes(request.email)).length) {
+    if (status === 'used') return page(res, 200, PAGE.doneHeading, para(PAGE.doneAlreadyBody));
+    // A hard block (bounce / spam complaint / do-not-email) added after the link was issued: the
+    // button is never offered, and the page is the generic expired one (a read, no write).
+    if (await Resub.hasHardBlock(request.email)) return expired(req, res);
+    if (!(await Resub.releasableUnsubscribes(request.email)).length) {
       return page(res, 200, PAGE.doneHeading, para(PAGE.doneAlreadyBody));
     }
     return page(res, 200, PAGE.confirmHeading, `

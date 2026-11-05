@@ -468,7 +468,8 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
         global.fetch = jest.fn(async (url) => { order.push(`fetch:${url.includes('/groups/') ? 'service' : 'global'}`); return { ok: true, status: 204 }; });
         const globalRow = await sup(db, { email });
         const serviceRow = await sup(db, { email, group_key: 'service_operational' });
-        const bounce = await sup(db, { email, suppression_type: 'bounce' });
+        // A newsletter-group unsubscribe is another stream: never released by this link.
+        const newsletter = await sup(db, { email, group_key: 'marketing_newsletter' });
         const request = await openRequest(email);
         expect(await service.completeResubscribe(request)).toBe('done');
         expect(order.sort()).toEqual(['fetch:global', 'fetch:service']);
@@ -477,7 +478,7 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
           expect(after).toMatchObject({ status: 'released', consent_source: 'email_confirm_link' });
           expect(after.metadata).toMatchObject({ released_via: 'email_confirm_link', request_id: request.id, sendgrid_clear: { ok: true, status: 204 } });
         }
-        expect((await db('email_suppressions').where({ id: bounce.id }).first()).status).toBe('active');
+        expect((await db('email_suppressions').where({ id: newsletter.id }).first()).status).toBe('active');
         const used = await db('email_resubscribe_requests').where({ id: request.id }).first();
         expect(used.used_at).toBeInstanceOf(Date);
         expect(used.outcome.released_ids.sort()).toEqual([globalRow.id, serviceRow.id].sort());
@@ -551,6 +552,29 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
         expect(results.sort()).toEqual(['already', 'done']);
         expect(global.fetch).toHaveBeenCalledTimes(1);
         expect((await db('email_suppressions').where({ id: row.id }).first()).status).toBe('released');
+      });
+    });
+
+    test.each([
+      ['do_not_email', { suppression_type: 'do_not_email', source: 'admin_manual', metadata: JSON.stringify({ created_by: 'tech-1' }) }],
+      ['bounce', { suppression_type: 'bounce', source: 'sendgrid_event_webhook' }],
+      ['spam_complaint', { suppression_type: 'spam_complaint', source: 'sendgrid_event_webhook', group_key: 'service_operational' }],
+    ])('a %s added after the link was issued but before the press: no SendGrid call, nothing released, the link is invalidated, the answer is expired', async (_name, block) => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      await withCommitted(async (email) => {
+        global.fetch = jest.fn(async () => ({ ok: true, status: 204 }));
+        const unsub = await sup(db, { email });
+        const request = await openRequest(email);
+        await sup(db, { email, ...block });
+        expect(await service.completeResubscribe(request)).toBe('expired');
+        expect(global.fetch).not.toHaveBeenCalled();
+        expect((await db('email_suppressions').where({ id: unsub.id }).first()).status).toBe('active');
+        const after = await db('email_resubscribe_requests').where({ id: request.id }).first();
+        expect(after.used_at).toBeInstanceOf(Date);
+        expect(after.outcome).toEqual({ refused: 'hard_block' });
+        // A second press finds the link used and still makes no call.
+        expect(await service.completeResubscribe(request)).toBe('already');
+        expect(global.fetch).not.toHaveBeenCalled();
       });
     });
 

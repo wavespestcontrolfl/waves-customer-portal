@@ -405,22 +405,32 @@ async function findRequest(token, { dbh = db, now = new Date() } = {}) {
 // The click. Serialized per request and re-validated before any side effect: one transaction
 // takes the request row FOR UPDATE first, so a concurrent or late second POST waits, then sees
 // used_at and answers 'already' with no SendGrid call and no release (it can never clear a NEW
-// unsubscribe after the first POST consumed the token). While the row lock is held (and NOT the
-// address lock) SendGrid is cleared for the releasable rows, then the address lock is taken and
-// only the rows SendGrid confirmed are released. Lock order is request row -> address key;
-// requestResubscribeEmail takes the address key and then inserts a different, new row, so the
-// two never take each other's locks in opposite orders. The request is marked used ONLY when no
-// releasable row is left; a failed clear or a row that changed in between leaves it open so the
-// button works again. Returns 'done' (rows released), 'already' (used, or nothing left to
-// release), 'expired' or 'retry'.
+// unsubscribe after the first POST consumed the token). Then it takes the address lock and
+// re-checks hard blocks (bounce / spam complaint / do-not-email): staff may have added one after
+// the link was issued, and clearing SendGrid's list for a hard-blocked address could let a sender
+// that checks only SendGrid mail it. A hard block means NO SendGrid call and NO release; the link
+// is invalidated (used_at set, outcome { refused: 'hard_block' }) and the answer is 'expired',
+// which the route renders as the generic expired page, so nothing reveals why. Otherwise
+// SendGrid is cleared for the releasable rows (bounded to 8 s, now under both locks), and only
+// the rows SendGrid confirmed are released. Lock order is request row -> address key everywhere
+// (the send transaction takes them in the same order; requestResubscribeEmail's first
+// transaction takes the address key and then inserts a different, new row). The request is marked
+// used ONLY when no releasable row is left; a failed clear or a row that changed in between leaves
+// it open so the button works again. Returns 'done' (rows released), 'already' (used, or nothing
+// left to release), 'expired' (expired, or refused for a hard block) or 'retry'.
 async function completeResubscribe(request, { dbh = db, now = new Date() } = {}) {
   return dbh.transaction(async (trx) => {
     const locked = await trx('email_resubscribe_requests').where({ id: request.id }).forUpdate().first();
     if (!locked || !locked.sent_at) return 'expired';
     if (locked.used_at) return 'already';
     if (new Date(locked.expires_at) <= now) return 'expired';
-    const pre = await clearSendgridBeforeRelease(locked.email, { dbh: trx });
     await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalizeEmail(locked.email));
+    if (await hasHardBlock(locked.email, { dbh: trx })) {
+      await trx('email_resubscribe_requests').where({ id: locked.id })
+        .update({ used_at: now, updated_at: now, outcome: JSON.stringify({ refused: 'hard_block' }) });
+      return 'expired';
+    }
+    const pre = await clearSendgridBeforeRelease(locked.email, { dbh: trx });
     const released = await releaseOwnUnsubscribes({
       email: locked.email, customerId: locked.customer_id, requestId: locked.id,
       onlyIds: pre.clearedIds, versionById: pre.versionById, sendgridClear: pre.clearById,

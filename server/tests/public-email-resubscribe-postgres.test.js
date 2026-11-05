@@ -109,6 +109,29 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     });
   });
 
+  test('a do_not_email added after the email was sent: GET shows the expired page, POST makes no SendGrid call and releases nothing', async () => {
+    process.env.SENDGRID_API_KEY = 'SG.test';
+    await scenario(async ({ email, token, sup }) => {
+      await db('email_suppressions').insert({
+        email, status: 'active', group_key: null, suppression_type: 'do_not_email', source: 'admin_manual', metadata: JSON.stringify({ created_by: 'tech-1' }),
+      });
+      const before = await snapshot(email);
+      const page = await nativeFetch(url(token));
+      expect(page.status).toBe(404);
+      const html = await page.text();
+      expect(html).toContain('This link has expired or was already used.');
+      expect(html).not.toContain('<form');
+      expect(await snapshot(email)).toBe(before);
+      const sendgrid = jest.fn(async () => ({ ok: true, status: 204 }));
+      global.fetch = (u, init) => (String(u).startsWith('https://api.sendgrid.com') ? sendgrid(u, init) : realFetch(u, init));
+      const press = await form(token);
+      expect(press.status).toBe(404);
+      expect(await press.text()).toContain('This link has expired or was already used.');
+      expect(sendgrid).not.toHaveBeenCalled();
+      expect((await db('email_suppressions').where({ id: sup.id }).first()).status).toBe('active');
+    });
+  });
+
   test('an expired or unknown token releases nothing', async () => {
     await scenario(async ({ email, token, request }) => {
       await db('email_resubscribe_requests').where({ id: request.id }).update({ expires_at: new Date(Date.now() - 1000) });
