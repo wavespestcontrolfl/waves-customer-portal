@@ -220,23 +220,26 @@ async function holdLifts(since) {
   }));
 }
 
-// One row per action, minute, campaign and person, so a batch (the 16-word starter list) reads as one line. The
-// actor columns hold staff ids; a label such as 'starter-list' passes through as it is.
+// One row per action, minute, campaign and person, so a batch (the 16-word starter list) reads as one line.
+// A person is named only where the row proves it, because these tables keep no history of who did what:
+// - decided_by is the advisor word's Add or Decline until an Undo writes the undoer over it (undoNegative), so it
+//   names the person who blocked a word only while removed_at is empty, and the undoer once it is set.
+// - Owner list rows are never undone (undoNegative refuses them) and the list writes no decided_by, so their blocks
+//   and removals read 'Owner word list'.
 const NEGATIVE_EVENTS_SQL = `
   WITH ev AS (
     SELECT 'blocked' AS kind, k.pushed_at AS at, k.text, k.campaign_id,
-           CASE WHEN k.source = 'advisor' THEN k.decided_by ELSE w.added_by END AS actor
+           CASE WHEN k.source = 'owner_list' THEN 'Owner word list' WHEN k.removed_at IS NULL THEN k.decided_by END AS actor
       FROM ad_negative_keywords k
-      LEFT JOIN ad_negative_words w ON w.text = k.text AND w.match_type = k.match_type
      WHERE k.pushed_at >= ?
     UNION ALL
     SELECT 'declined', k.decided_at, k.text, k.campaign_id, k.decided_by
       FROM ad_negative_keywords k
      WHERE k.state = 'declined' AND k.decided_at >= ?
     UNION ALL
-    SELECT 'unblocked', k.removed_at, k.text, k.campaign_id, COALESCE(k.decided_by, w.removed_by)
+    SELECT 'unblocked', k.removed_at, k.text, k.campaign_id,
+           CASE WHEN k.source = 'owner_list' THEN 'Owner word list' ELSE k.decided_by END
       FROM ad_negative_keywords k
-      LEFT JOIN ad_negative_words w ON w.text = k.text AND w.match_type = k.match_type
      WHERE k.removed_at >= ?
   )
   SELECT ev.kind, date_trunc('minute', ev.at) AS at, c.campaign_name, COALESCE(t.name, ev.actor) AS who,

@@ -273,7 +273,7 @@ describe('buildAdsHealth', () => {
   test('negative keyword decisions and lifted holds join the timeline, one line per batch', async () => {
     mockGetCustomer.mockReturnValue(null);
     mockNegativeRows = [
-      { kind: 'blocked', at: new Date('2026-11-02T17:41:00.000Z'), campaign_name: 'Test Search', who: 'starter-list', n: 16, words: 'ant bait, cheap' },
+      { kind: 'blocked', at: new Date('2026-11-02T17:41:00.000Z'), campaign_name: 'Test Search', who: 'Owner word list', n: 16, words: 'ant bait, cheap' },
       { kind: 'declined', at: new Date('2026-11-03T13:05:00.000Z'), campaign_name: 'Test Search', who: 'Pat Owner', n: 1, words: 'free' },
     ];
     mockTables['ad_campaigns as c'] = [{
@@ -293,10 +293,15 @@ describe('buildAdsHealth', () => {
         what: 'Declined negative keyword', detail: 'free',
       },
       {
-        at: '2026-11-02T17:41:00.000Z', source: 'waves', who: 'starter-list', via: 'Waves portal', campaign: 'Test Search',
+        at: '2026-11-02T17:41:00.000Z', source: 'waves', who: 'Owner word list', via: 'Waves portal', campaign: 'Test Search',
         what: 'Blocked 16 negative keywords', detail: 'ant bait, cheap',
       },
     ]);
+    // A person is named only where the row proves it: an Undo writes the undoer over decided_by, so a block names
+    // decided_by only while removed_at is empty, and owner list rows (never undone, no decided_by) name the list.
+    const [sql] = mockDb.raw.mock.calls.find(([, bindings]) => bindings);
+    expect(sql).toContain("CASE WHEN k.source = 'owner_list' THEN 'Owner word list' WHEN k.removed_at IS NULL THEN k.decided_by END");
+    expect(sql).toContain("CASE WHEN k.source = 'owner_list' THEN 'Owner word list' ELSE k.decided_by END");
     const holdQuery = callsFor('ad_campaigns as c')[0];
     expect(holdQuery).toContainEqual(['where', 'c.platform', 'google_ads']);
     expect(holdQuery).toContainEqual(['whereRaw', expect.stringContaining("'budget_hold_cleared' ->> 'at'"), [SINCE]]);
