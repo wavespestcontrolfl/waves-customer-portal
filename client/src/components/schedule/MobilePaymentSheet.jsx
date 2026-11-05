@@ -10,6 +10,12 @@
 //   Card on File         → MobileCardOnFileSheet  (saved cards + Charge)
 //   Invoice              → send SMS + email pay link (no sheet)
 //
+// A technician takes cards only (owner 2026-11-04, technician visibility
+// audit D4 A): Tap to Pay, manual card entry, and Card on File when the
+// server marks this invoice chargeable for it (GATE_TECH_CARD_ON_FILE: its
+// own visit today, completed). Cash, Check and Invoice are office
+// work for a technician; the sheet says the office records cash and checks.
+//
 // Cash App Pay was removed per operator request.
 //
 // Audit focus:
@@ -29,7 +35,7 @@
 
 import { createPortal } from 'react-dom';
 import { X, ChevronRight } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
 import { getAdminUser } from '../../lib/adminAuth';
 import MobileManualCardSheet from './MobileManualCardSheet';
@@ -56,8 +62,24 @@ export default function MobilePaymentSheet({
   const [showCheck, setShowCheck] = useState(false);
   const [showCardOnFile, setShowCardOnFile] = useState(false);
   const [error, setError] = useState(null);
+  const [techCardOnFile, setTechCardOnFile] = useState(false);
 
   const API_BASE = import.meta.env.VITE_API_URL || '/api';
+  // Missing or unknown role fails closed to the technician's card-only list:
+  // the server refuses the office tenders to anyone but an admin.
+  const isAdmin = getAdminUser()?.role === 'admin';
+
+  useEffect(() => {
+    if (isAdmin || !invoiceId) return undefined;
+    let live = true;
+    fetch(`${API_BASE}/admin/invoices/${encodeURIComponent(invoiceId)}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((inv) => { if (live) setTechCardOnFile(inv?.tech_card_on_file === true); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [API_BASE, invoiceId, isAdmin]);
 
   if (!service || !invoiceId) return null;
 
@@ -128,22 +150,23 @@ export default function MobilePaymentSheet({
   }
 
   const methods = [
-    { key: 'cash', label: 'Cash', onClick: () => setShowCash(true) },
-    { key: 'check', label: 'Check', onClick: () => setShowCheck(true) },
+    ...(isAdmin ? [
+      { key: 'cash', label: 'Cash', onClick: () => setShowCash(true) },
+      { key: 'check', label: 'Check', onClick: () => setShowCheck(true) },
+    ] : []),
     { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => setShowManualCard(true) },
-    // Card on File posts /admin/invoices/:id/charge-card, which is
-    // requireAdmin on the server (off-session charge of a saved card) — a
-    // technician token gets 403, so the tender only renders for admins.
-    // Missing/unknown role fails closed to hidden.
-    ...(getAdminUser()?.role === 'admin'
+    // Card on File posts /admin/invoices/:id/charge-card (an off-session
+    // charge of a saved card): an admin always, a technician only on an
+    // invoice the server marked tech_card_on_file.
+    ...(isAdmin || techCardOnFile
       ? [{ key: 'card_on_file', label: 'Card on File', onClick: () => setShowCardOnFile(true) }]
       : []),
     // The Invoice (send pay-link) tender is suppressed for the charge-in-person
     // annual-prepay flow: that path means "collect now", and hiding the send option
     // keeps closing-the-sheet unambiguously an abort (so the caller can void the
     // uncollected invoice + cancel its pending term). Sending instead is the modal's
-    // separate "Create & send invoice" action.
-    ...(hideInvoiceTender ? [] : [{
+    // separate "Create & send invoice" action. A technician never sends it.
+    ...(hideInvoiceTender || !isAdmin ? [] : [{
       key: 'invoice',
       label: 'Invoice',
       subtitle: sendingInvoice ? 'Sending…' : 'Send SMS + email',
@@ -255,6 +278,11 @@ export default function MobilePaymentSheet({
               </button>
             ))}
           </div>
+          {!isAdmin && (
+            <div className="text-ink-tertiary" style={{ fontSize: 14, marginTop: 12 }}>
+              Cash or check: the office records it.
+            </div>
+          )}
         </div>
       </div>
 

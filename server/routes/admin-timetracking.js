@@ -1760,6 +1760,29 @@ router.get('/service-lines', requireAdmin, async (req, res, next) => {
   }
 });
 
+const COVER_LINE_LABELS = { general: 'General pest', mosquito: 'Mosquito', rodent: 'Rodent', termite: 'Termite / WDO' };
+
+// The card as it will read after this save (stored rows with the request's entries laid over), and the refusal
+// text when a territory technician (a technician who owns ZIPs) would have no cover on a territory line; null
+// when every one has a cover or nobody owns a ZIP (territory.lacksCoverLines). The error names the lines, not ids.
+async function territoryCoverRefusal(trx, entries, stored) {
+  const territory = require('../services/territory');
+  const owners = await territory.territoryTechnicianIds(trx);
+  if (!owners.length) return null;
+  const after = new Map(stored);
+  for (const entry of entries) after.set(entry.service_category, entry);
+  const rows = [...after.values()];
+  for (const ownerId of owners) {
+    const lacking = await territory.lacksCoverLines(trx, ownerId, rows);
+    if (!lacking.length) continue;
+    const owner = await trx('technicians').where({ id: ownerId }).first('name');
+    const lines = lacking.map((line) => COVER_LINE_LABELS[line] || line);
+    const list = lines.length > 1 ? `${lines.slice(0, -1).join(', ')} and ${lines[lines.length - 1]}` : lines[0];
+    return `${list} ${lines.length > 1 ? 'need' : 'needs'} a cover technician besides ${(owner && owner.name) || 'the territory technician'}: set a home or gap technician`;
+  }
+  return null;
+}
+
 router.put('/service-lines', requireAdmin, async (req, res, next) => {
   try {
     if (serviceLinesOff(res)) return undefined;
@@ -1785,6 +1808,9 @@ router.put('/service-lines', requireAdmin, async (req, res, next) => {
           if (tech.employment_status === 'inactive' && !unchanged) return { error: 'That technician is no longer active' };
         }
       }
+      // GATE_TERRITORY_ROUTING (owner 2026-10-30): a technician who owns ZIPs needs a cover on every territory line.
+      const coverError = await territoryCoverRefusal(trx, entries, stored);
+      if (coverError) return { error: coverError };
       for (const entry of entries) {
         await trx('service_line_techs')
           .insert({ ...entry, updated_by: req.technicianId || null, updated_at: trx.fn.now() })

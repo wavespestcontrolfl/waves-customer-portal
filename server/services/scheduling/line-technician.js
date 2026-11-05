@@ -27,7 +27,9 @@
  * TERRITORY (GATE_TERRITORY_ROUTING, owner 2026-10-30): each technician owns a ZIP
  * list (territory_zips, services/territory.js). On, a pest, mosquito, rodent or
  * termite line's home technician is the one who owns the visit's ZIP, and the line's
- * own home (else gap) technician covers gaps; lawn keeps the map. It rides the
+ * own home (else gap) technician covers gaps; lawn keeps the map. A territory line with
+ * no cover (no card row, or a card naming only the territory technician) keeps the map
+ * as it is: a territory adds no rule there. It rides the
  * map's own modes: shadow rows record it, live picks follow it. Off, or a ZIP with
  * no territory technician: the map exactly as before.
  *
@@ -83,14 +85,17 @@ async function territoryTechnicianOf(db, place) {
 
 /**
  * A line's { homeId, gapId } with the territory laid over it. On a territory line the
- * territory technician is the home, and the gap is the line's own home, else its gap,
- * when that is someone else. Any other line, or no territory technician: `entry`
- * unchanged (null = the line has no technician set).
+ * territory technician is the home, and the gap is the line's cover: its own home, else
+ * its gap, when that is someone else (territory.coverTechnicianId). A territory line with
+ * NO cover (no card row, or a card that names only the territory technician), any other
+ * line, or no territory technician: `entry` unchanged (null = the line has no technician
+ * set). So a territory never drops every other technician's slots (owner 2026-10-30; the
+ * Service lines save and the handover run refuse a territory technician with no cover).
  */
 function withTerritory(entry, line, territoryTechId) {
   if (!territoryTechId || !territory.TERRITORY_LINES.includes(line)) return entry;
-  const cover = entry ? [entry.homeId, entry.gapId].find((id) => id && !sameId(id, territoryTechId)) : null;
-  return { homeId: territoryTechId, gapId: cover || null };
+  const cover = territory.coverTechnicianId(entry, territoryTechId);
+  return cover ? { homeId: territoryTechId, gapId: cover } : entry;
 }
 
 const clean = (value, max = 200) => {

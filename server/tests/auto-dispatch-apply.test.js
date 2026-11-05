@@ -715,6 +715,38 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     }
   });
 
+  test('move guard: the line\'s cover technician may take an unassigned territory visit; a third technician may not (GATE_TERRITORY_NIGHT_RUN)', async () => {
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const candidateSlots = require('../services/auto-dispatch/candidate-slots');
+    const prior = process.env.GATE_TERRITORY_NIGHT_RUN;
+    const own = jest.spyOn(candidateSlots, 'territoryTechnicianForVisit').mockResolvedValue('t9');
+    const cover = jest.spyOn(candidateSlots, 'territoryCoverForVisit');
+    try {
+      process.env.GATE_TERRITORY_NIGHT_RUN = 'true';
+      const unassigned = { ...SERVICE, technician_id: null, service_type: 'General Pest Control', service_address_zip: '34293' };
+      const guardFor = (techId) => makeMoveGuard({ service: unassigned, best: { ...BEST, technician_id: techId } });
+      // t9 owns the ZIP; t2 is the line's cover: accepted. t3 is neither: refused.
+      cover.mockResolvedValue('t2');
+      await expect(guardFor('t2')({ trx: fakeTrx(), technicianId: 't2' })).resolves.toBeUndefined();
+      expect(cover).toHaveBeenCalledWith(expect.objectContaining({ id: 's1', service_address_zip: '34293' }), null);
+      await expect(guardFor('t3')({ trx: fakeTrx(), technicianId: 't3' })).rejects.toMatchObject({
+        code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('belongs to another technician\'s territory'),
+      });
+      // No cover on the line: only the territory technician.
+      cover.mockResolvedValue(null);
+      await expect(guardFor('t2')({ trx: fakeTrx(), technicianId: 't2' })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+      // The territory technician himself never reads the cover.
+      cover.mockClear();
+      own.mockResolvedValue('t2');
+      await expect(guardFor('t2')({ trx: fakeTrx(), technicianId: 't2' })).resolves.toBeUndefined();
+      expect(cover).not.toHaveBeenCalled();
+    } finally {
+      own.mockRestore();
+      cover.mockRestore();
+      if (prior === undefined) delete process.env.GATE_TERRITORY_NIGHT_RUN; else process.env.GATE_TERRITORY_NIGHT_RUN = prior;
+    }
+  });
+
   describe('move guard: the start points the move was scored from (GATE_TECH_START_POINTS)', () => {
     const { makeMoveGuard } = require('../services/auto-dispatch/apply');
     const ORIGINAL = process.env.GATE_TECH_START_POINTS;
