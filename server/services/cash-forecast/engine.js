@@ -290,12 +290,14 @@ function hireCosts(item, days, before = []) {
 
 // ── Money sources (each returns flows) ──────────────────────────────────────────────────────────────
 // Stripe: money already charged, not yet in the bank. arrivalDay is Stripe's UTC calendar-day marker,
-// compared as a day (never converted to ET); a day that has passed has landed in the live balance.
+// compared as a day (never converted to ET). A payout counts on its arrival day; one past its day that
+// Stripe still shows on the way is listed by runFacts, not counted (it may already be in the balance).
 function stripeFlows(i, c) {
+  const upcoming = i.stripe.payouts.filter((p) => p.arrivalDay >= c.today);
   return [
     flow(addBusinessDays(c.today, 1), 'stripe', i.stripe.availableUsd),
     flow(addBusinessDays(c.today, SETTLE_BUSINESS_DAYS), 'stripe', i.stripe.pendingUsd),
-    ...i.stripe.payouts.filter((p) => p.arrivalDay >= c.today).map((p) => flow(p.arrivalDay, 'stripe', p.amountUsd)),
+    ...upcoming.map((p) => flow(p.arrivalDay, 'stripe', p.amountUsd)),
   ];
 }
 
