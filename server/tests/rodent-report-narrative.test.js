@@ -27,7 +27,7 @@ const {
   nextVisitProblems, isVisitClaim, splitSentences, withoutTimedVisitClaims,
 } = require('../services/service-report/next-visit-claims');
 
-const RECAP = 'Today we completed your Rodent Trapping Service. We treated the accessible service areas. - Waves';
+const RECAP = 'Today we completed your Rodent Trapping Service. - Waves';
 
 let seq = 0;
 function input(overrides = {}) {
