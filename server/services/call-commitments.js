@@ -1153,16 +1153,16 @@ function parseSegments(transcriptStructured) {
   } catch { return null; }
 }
 
-/**
- * The processor's one entry point: derive seeds, run the model pass, anchor
- * evidence, upsert under the claim fence. Never throws — a failure here
- * must not fail the call; it is logged and reported in the return value.
- */
 // Kinds whose open Waves row a live worker acts on by messaging the caller. Today only
 // send_reschedule_link (reschedule-link-promises.js stages it into the outbox and texts the caller).
 // A call held from automation stores these through asThirdPartyPromise: kind 'other', no due_at.
 const AUTOMATION_HOLD_KINDS = Object.freeze(new Set(['send_reschedule_link']));
 
+/**
+ * The processor's one entry point: derive seeds, run the model pass, anchor
+ * evidence, upsert under the claim fence. Never throws — a failure here
+ * must not fail the call; it is logged and reported in the return value.
+ */
 async function recordCallCommitments({
   conn,
   call,
