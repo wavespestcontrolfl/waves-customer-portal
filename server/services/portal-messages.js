@@ -414,6 +414,9 @@ async function ringOffice(customer, threadId, message) {
         trx,
         bell: true,
         dedupeKey: `portal-message:${threadId}`,
+        // Each message is news, even with the same words as the last ("Hello?" twice): the version refreshes and
+        // re-rings the standing bell.
+        dedupeVersion: message.id,
         dedupeOpenOnly: true,
         refreshOnDedupe: true,
         bumpOnRefresh: true,

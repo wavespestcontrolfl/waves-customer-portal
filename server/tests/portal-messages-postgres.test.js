@@ -441,10 +441,18 @@ maybeDescribe('portal messages (live Postgres)', () => {
     expect(bells[0].detail).toBe('Also, can you come Friday? I work Thursday.');
     expect(portalAskPush.pushPortalAsk).toHaveBeenCalledTimes(2);
 
+    // The same words again are a new message: the bell is rewritten to it and rings again.
+    const third = await PortalMessages.customerPost({ customer: pat, body: 'Also, can you come Friday? I work Thursday.' });
+    bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].metadata.portalMessageId).toBe(third.id);
+    expect(bells[0].read_at).toBeNull();
+    expect(portalAskPush.pushPortalAsk).toHaveBeenCalledTimes(3);
+
     await db('notifications').whereIn('id', bells.map((b) => b.id)).update({ done_at: new Date() });
     await PortalMessages.customerPost({ customer: pat, body: 'Hello again' });
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
-    expect((await thread(pat.id))[0].message_count).toBe(3);
+    expect((await thread(pat.id))[0].message_count).toBe(4);
   });
 
   test('the Portal tab lists an unanswered portal message; an answer, Mark handled or Close all older closes it', async () => {
