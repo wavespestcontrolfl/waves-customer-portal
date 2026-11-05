@@ -19,11 +19,11 @@ import {
   MAX_REVIEW_DELAY_MS,
   completionReportTextExpected,
   completionReviewHint,
-  FIRST_ASK_OPT_OUT_PROMPT,
   completionReviewSuppressionReason,
   completionWillReview,
   formatReentryStepperMinutes,
   nextReviewChoice,
+  pickFirstAskOptOutReason,
   reviewBoxLabel,
 } from '../../lib/completion-review-timing';
 import {
@@ -75,18 +75,22 @@ export function useWrapUp({ gate, submission, service, request, base, applicatio
   }, []);
 
   const billing = wrapUpBilling(service);
-  const suppression = completionReviewSuppressionReason({ customerConcernInteraction: customerConcern });
-  const willReview = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: suppression });
+  const concern = completionReviewSuppressionReason({ customerConcernInteraction: customerConcern });
   const stepper = useReentrySteppers({ enabled, serviceId: service?.id, base, requestRef, applicationsRecorded });
   const nextVisit = useNextVisit({ enabled, customerId: service?.customerId || service?.routedCustomerId, requestRef });
-  const review = useReviewPreview({ enabled, willReview, firstAskOpen: !suppression, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
+  // The preview follows the tech's choice; once it says the customer is marked as already reviewed
+  // (GATE_REVIEW_ALREADY_REVIEWED), the box shows that mark and no review goes out.
+  const askable = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: concern });
+  const review = useReviewPreview({ enabled, willReview: askable, firstAskOpen: !concern, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
+  const suppression = completionReviewSuppressionReason({ customerConcernInteraction: customerConcern, alreadyReviewed: !!review.alreadyReviewed });
+  const willReview = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: suppression });
   // A first ask stays on: a late verdict turns the box back on unless the one reason was confirmed.
   const firstAsk = review.firstAsk;
   useEffect(() => {
     if (firstAsk && !choice.requestReview && !choice.reviewOptOutReason) setChoice((prev) => ({ ...prev, requestReview: true }));
   }, [firstAsk, choice.requestReview, choice.reviewOptOutReason]);
   const setReview = (checked) => {
-    const next = nextReviewChoice({ checked, firstAsk, confirmOptOut: () => window.confirm(FIRST_ASK_OPT_OUT_PROMPT) });
+    const next = nextReviewChoice({ checked, firstAsk, pickOptOutReason: () => pickFirstAskOptOutReason(review.optOutReasons, (text) => window.confirm(text)) });
     setChoice((prev) => ({ ...prev, requestReview: next.requestReview, reviewOptOutReason: next.reviewOptOutReason }));
   };
   const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment, customerPhone: service?.customerPhone }).text;
@@ -143,7 +147,7 @@ export function useWrapUp({ gate, submission, service, request, base, applicatio
       choice,
       set: (key) => (value) => setChoice((prev) => ({ ...prev, [key]: value })),
       setReview,
-      reviewLabel: reviewBoxLabel({ reviewSuppressionReason: suppression, firstAsk }),
+      reviewLabel: reviewBoxLabel({ reviewSuppressionReason: suppression, firstAsk, reviewedOn: review.alreadyReviewed?.reviewedOn }),
       stepper,
       nextVisit,
       willReview,

@@ -120,6 +120,52 @@ describe.each([[1024, 'desktop'], [390, 'phone']])('the review box at %i px (%s)
   });
 });
 
+// GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): a customer marked as already reviewed sees the box off and
+// greyed out with the date; a first ask gets a second off reason, "Already left a review", asked first.
+const BOTH_REASONS = ['complaint_on_site', 'already_left_review'];
+describe.each([[1024, 'desktop'], [390, 'phone']])('GATE_REVIEW_ALREADY_REVIEWED at %i px (%s)', (width) => {
+  beforeEach(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: width }); });
+
+  it('a customer marked as reviewed sees "Already left a Google review" with the date, off and greyed; the submit asks for nothing', async () => {
+    stubFetch({ ...PREVIEW, firstReviewAsk: false, alreadyReviewed: { reviewedOn: '2025-01-01' }, firstAskReasons: BOTH_REASONS });
+    const onSubmit = await renderPanel();
+    const box = await screen.findByRole('checkbox', { name: 'Already left a Google review (Jan 1, 2025)' });
+    expect(box.checked).toBe(false);
+    expect(box.disabled).toBe(true);
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(false);
+    expect(body).not.toHaveProperty('reviewOptOutReason');
+  });
+
+  it('a first ask turned off asks "already reviewed" first; OK posts that reason', async () => {
+    stubFetch({ ...PREVIEW, firstReviewAsk: true, alreadyReviewed: null, firstAskReasons: BOTH_REASONS });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const onSubmit = await renderPanel();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'First review ask' }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toMatch(/already leave a Google review/);
+    expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(false);
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(false);
+    expect(body.reviewOptOutReason).toBe('already_left_review');
+  });
+
+  it('Cancel on "already reviewed", then OK on the complaint, posts the complaint; Cancel on both keeps the ask on', async () => {
+    stubFetch({ ...PREVIEW, firstReviewAsk: true, alreadyReviewed: null, firstAskReasons: BOTH_REASONS });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(false);
+    const onSubmit = await renderPanel();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'First review ask' }));
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(true);
+    confirm.mockReturnValueOnce(false).mockReturnValueOnce(true);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'First review ask' }));
+    expect(confirm.mock.calls[3][0]).toMatch(/complaint on site/);
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(false);
+    expect(body.reviewOptOutReason).toBe('complaint_on_site');
+  });
+});
+
 describe('a saved draft (autosave and restore)', () => {
   const draftKey = `waves_completion_draft_${service.id}`;
   const restore = async () => {
@@ -142,6 +188,27 @@ describe('a saved draft (autosave and restore)', () => {
     const body = await submit(onSubmit);
     expect(body.requestReview).toBe(false);
     expect(body.reviewOptOutReason).toBe('complaint_on_site');
+  });
+
+  it('a saved "Already left a review" reason is restored and posted', async () => {
+    localStorage.setItem(draftKey, JSON.stringify({ serviceId: service.id, notes: 'Older draft', requestReview: false, reviewOptOutReason: 'already_left_review' }));
+    stubFetch({ ...PREVIEW, firstReviewAsk: true, alreadyReviewed: null, firstAskReasons: BOTH_REASONS });
+    const onSubmit = await restore();
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('send-time-preview'))).toBe(true));
+    expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(false);
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(false);
+    expect(body.reviewOptOutReason).toBe('already_left_review');
+  });
+
+  it('an unknown saved reason is dropped: the first ask re-arms on', async () => {
+    localStorage.setItem(draftKey, JSON.stringify({ serviceId: service.id, notes: 'Older draft', requestReview: false, reviewOptOutReason: 'made_up' }));
+    stubFetch({ ...PREVIEW, firstReviewAsk: true });
+    const onSubmit = await restore();
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(true));
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(true);
+    expect(body).not.toHaveProperty('reviewOptOutReason');
   });
 
   it('a draft restored with the box off and no reason reads the verdict, shows "First review ask" and re-arms it on', async () => {
