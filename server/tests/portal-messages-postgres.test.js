@@ -414,9 +414,13 @@ maybeDescribe('portal messages (live Postgres)', () => {
 
   test('an answer to a portal message closes its bell, and the customer sees both sides in order', async () => {
     const pat = await customer();
-    const asked = await PortalMessages.customerPost({ customer: pat, body: 'When is my next visit?' });
+    // A request id is matched on its own side of the thread: the same id from the office is a new answer.
+    const clientRequestId = randomUUID();
+    const asked = await PortalMessages.customerPost({ customer: pat, body: 'When is my next visit?', clientRequestId });
     const [row] = await thread(pat.id);
-    const answer = await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Thursday morning.', actor });
+    const answer = await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Thursday morning.', clientRequestId, actor });
+    expect(answer.replay).toBeUndefined();
+    expect(await PortalMessages.customerPost({ customer: pat, body: 'When is my next visit?', clientRequestId })).toMatchObject({ id: asked.id });
     expect(answer.closed).toBe(true);
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
     const view = await PortalMessages.customerThread(pat.id);

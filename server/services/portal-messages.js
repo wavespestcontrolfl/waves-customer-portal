@@ -108,10 +108,11 @@ async function threadWith(trx, customerId) {
   return Conversations.findOrCreateThreadWith(trx, { customerId, channel: CHANNEL, ourEndpointId: ENDPOINT });
 }
 
-// A retried send (same client request id) returns the row the first try saved, under the thread lock.
-function priorSend(trx, threadId, clientRequestId) {
+// A retried send (same client request id, same side of the thread) returns the row the first try saved,
+// under the thread lock.
+function priorSend(trx, threadId, direction, clientRequestId) {
   if (!clientRequestId) return null;
-  return trx('messages').where({ conversation_id: threadId, channel: CHANNEL })
+  return trx('messages').where({ conversation_id: threadId, channel: CHANNEL, direction })
     .whereRaw("metadata->>'clientRequestId' = ?", [clientRequestId]).first();
 }
 
@@ -327,7 +328,7 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
   const saved = await db.transaction(async (trx) => {
     const customerId = await itemCustomerWith(trx, kind, id);
     const thread = await threadWith(trx, customerId);
-    const prior = await priorSend(trx, thread.id, clientRequestId);
+    const prior = await priorSend(trx, thread.id, 'outbound', clientRequestId);
     if (prior) return { replay: true, message: prior, customerId };
     const message = await Conversations.appendMessage({
       conn: trx,
@@ -413,7 +414,7 @@ async function customerPost({ customer, body, clientRequestId = null }) {
   const text = checkedBody(body);
   const saved = await db.transaction(async (trx) => {
     const thread = await threadWith(trx, customer.id);
-    const prior = await priorSend(trx, thread.id, clientRequestId);
+    const prior = await priorSend(trx, thread.id, 'inbound', clientRequestId);
     if (prior) return { replay: true, message: prior };
     const message = await Conversations.appendMessage({
       conn: trx,
