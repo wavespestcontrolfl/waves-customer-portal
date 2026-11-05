@@ -476,6 +476,24 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=messenger',
     }),
   },
+  // The phone banner for a new-lead email (GATE_RING_NEW_CONTACTS, bell-banners.js kind new_lead_email, owner 2026-11-04
+  // "ring new"). The bell row is the plain 'new_lead' category row email-actions.js already writes, which carries no
+  // triggerKey of its own (the writer names this kind with notifyAdmin's bannerKind), so no sweep closes it and its
+  // rule is the retention expiry. `build` takes the written row's own words as alertTitle/alertBody/alertLink.
+  // Admin-only like the lead bell.
+  new_lead_email: {
+    label: 'New lead email banner',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'New lead from email',
+      body: p.alertBody || 'Open the email to read it and reply.',
+      link: p.alertLink || '/admin/email',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a
@@ -1207,11 +1225,14 @@ const TRIGGER_REGISTRY = {
     group: 'Alerts',
     rule: { area: 'System', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => {
+      // count = unread waiting items (owner 2026-11-04 "fix count"); total = every waiting item, read or not.
       const count = Number(p.count) || 0;
+      const total = Number(p.total) || 0;
       const areas = (Array.isArray(p.areas) ? p.areas : []).slice(0, 3);
+      const parts = [...areas.map((a) => `${a.area} ${a.count}`), ...(total > count ? [`${total} open in all`] : [])];
       return {
         title: count === 1 ? '1 item waits for you' : `${count} items wait for you`,
-        body: areas.map((a) => `${a.area} ${a.count}`).join(' \u00b7 ') || null,
+        body: parts.join(' \u00b7 ') || null,
         link: '/admin/dashboard?bell=open',
       };
     },

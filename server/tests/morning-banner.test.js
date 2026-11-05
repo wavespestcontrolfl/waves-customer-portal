@@ -71,6 +71,7 @@ describe('what counts as waiting', () => {
     expect(mockTrigger).toHaveBeenCalledTimes(1);
     expect(mockTrigger).toHaveBeenCalledWith('waiting_summary', {
       count: 7,
+      total: 7,
       areas: [{ area: 'Comms', count: 3 }, { area: 'Billing', count: 2 }, { area: 'Schedule', count: 1 }, { area: 'Estimates', count: 1 }],
       day: '2026-11-03',
     }, { pushOnly: true });
@@ -97,9 +98,22 @@ describe('what counts as waiting', () => {
   test('summarize ties break in the catalog area order, and the dashboard standing counts are not counted', () => {
     const alert = (area) => ({ kind: 'alert', area, who: 'person', severity: 'needs-you' });
     expect(summarize([alert('Billing'), alert('Comms'), alert('Schedule'), alert('Billing')])).toEqual({
-      count: 4, areas: [{ area: 'Billing', count: 2 }, { area: 'Comms', count: 1 }, { area: 'Schedule', count: 1 }],
+      count: 4, total: 4, areas: [{ area: 'Billing', count: 2 }, { area: 'Comms', count: 1 }, { area: 'Schedule', count: 1 }],
     });
-    expect(summarize([{ kind: 'standing', area: 'Billing', who: 'person', severity: 'needs-you', count: 12 }])).toEqual({ count: 0, areas: [] });
+    expect(summarize([{ kind: 'standing', area: 'Billing', who: 'person', severity: 'needs-you', count: 12 }])).toEqual({ count: 0, total: 0, areas: [] });
+  });
+
+  // Owner 2026-11-04 "fix count": the title counts what nobody has read; read items only add to "open in all".
+  test('read items count toward the total, not the title or the areas', async () => {
+    mockOpenRows.mockResolvedValue([
+      ...many(3, { area: 'Comms' }),
+      row({ area: 'Billing' }, { read_at: '2026-10-20T12:00:00Z' }),
+      row({ area: 'Billing' }, { read_at: '2026-10-21T12:00:00Z' }),
+    ]);
+    const result = await runMorningBanner({ now: MORNING });
+    expect(result).toMatchObject({ count: 3, sent: true });
+    expect(mockTrigger.mock.calls[0][1]).toEqual({ count: 3, total: 5, areas: [{ area: 'Comms', count: 3 }], day: '2026-11-03' });
+    expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 3 unread of 5 waiting, banner sent');
   });
 });
 
@@ -110,7 +124,16 @@ describe('when it sends nothing', () => {
     expect(result).toEqual({ count: 0, sent: false, skipped: 'nothing_waiting' });
     expect(mockTrigger).not.toHaveBeenCalled();
     expect(mockDb.raw).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 0 items waiting, no banner');
+    expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 0 unread of 0 waiting, no banner');
+  });
+
+  test('everything waiting was already read: no banner and no claim', async () => {
+    mockOpenRows.mockResolvedValue([row({ area: 'Comms' }, { read_at: '2026-10-20T12:00:00Z' }), row({ area: 'Billing' }, { read_at: '2026-10-21T12:00:00Z' })]);
+    const result = await runMorningBanner({ now: MORNING });
+    expect(result).toEqual({ count: 0, sent: false, skipped: 'nothing_waiting' });
+    expect(mockTrigger).not.toHaveBeenCalled();
+    expect(mockDb.raw).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 0 unread of 2 waiting, no banner');
   });
 
   test('gate off: returns before any read', async () => {
@@ -174,7 +197,7 @@ describe('once per ET day', () => {
   test('the log line carries the count and no customer data', async () => {
     mockOpenRows.mockResolvedValue(many(4));
     await runMorningBanner({ now: MORNING });
-    expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 4 item(s) waiting, banner sent');
+    expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 4 unread of 4 waiting, banner sent');
     for (const [line] of [...logger.info.mock.calls, ...logger.error.mock.calls]) expect(line).not.toMatch(/Synthetic item/);
   });
 });

@@ -240,3 +240,40 @@ describe('confirmation + 24h reminder bodies carry the guard\'s clause, not a UR
     expect(body).toContain('Reschedule here: https://portal.test/l/fresh12345');
   });
 });
+
+// appointment_rescheduled's {different_time_line} (owner 2026-11-04): the
+// link when the builder makes one, the old reply line on every refusal.
+describe('rescheduledTextLine', () => {
+  const { rescheduledTextLine, RESCHEDULED_REPLY_LINE } = require('../services/reschedule-link');
+
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(NOW);
+    mockShortenOrPassthrough.mockClear();
+    mockExistingShortUrlFor.mockResolvedValue(null);
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('a visit outside the move window: "Need a different time?" with the link, minted for the customer', async () => {
+    mockSvc(svcRow({ scheduled_date: '2026-05-07', window_start: '10:00:00' }));
+    await expect(rescheduledTextLine('svc-1', { customerId: 'cust-9' }))
+      .resolves.toBe('Need a different time? Reschedule here: https://portal.test/l/fresh12345');
+    expect(mockShortenOrPassthrough).toHaveBeenCalledWith(
+      expect.stringMatching(/\/reschedule\/a{64}$/),
+      expect.objectContaining({ kind: 'reschedule', entityId: 'svc-1', customerId: 'cust-9' }),
+    );
+  });
+
+  test('inside the move window: the reply line the text always had, not the builder\'s own clause', async () => {
+    mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '10:00:00' }));
+    await expect(rescheduledTextLine('svc-1')).resolves.toBe('Need a different time? Reply here.');
+    expect(RESCHEDULED_REPLY_LINE).toBe('Need a different time? Reply here.');
+    expect(mockShortenOrPassthrough).not.toHaveBeenCalled();
+  });
+
+  test('a row with no token, or a failed read: the reply line', async () => {
+    mockSvc(svcRow({ reschedule_token: null, scheduled_date: '2026-05-07', window_start: '10:00:00' }));
+    await expect(rescheduledTextLine('svc-1')).resolves.toBe(RESCHEDULED_REPLY_LINE);
+    mockDb.mockImplementation(() => { throw new Error('db down'); });
+    await expect(rescheduledTextLine('svc-1')).resolves.toBe(RESCHEDULED_REPLY_LINE);
+  });
+});

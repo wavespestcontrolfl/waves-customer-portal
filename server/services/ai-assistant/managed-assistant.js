@@ -129,7 +129,7 @@ class ManagedAssistant {
     if (!ANTHROPIC_API_KEY || !MANAGED_AGENT_ID) {
       logger.warn('[managed-assistant] Missing ANTHROPIC_API_KEY or MANAGED_AGENT_ID');
       return {
-        reply: "Thanks for reaching out! One of our team members will get back to you shortly. — Waves Pest Control",
+        reply: "Thanks for reaching out! One of our team members will get back to you shortly.",
         escalated: false,
       };
     }
@@ -223,7 +223,7 @@ class ManagedAssistant {
       failure = failure || err;
       logger.error(`[managed-assistant] Error: ${err.message}`);
       return {
-        reply: "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control",
+        reply: "I'm having trouble right now. Let me connect you with our team.",
         escalated: false,
       };
     } finally {
@@ -340,7 +340,7 @@ class ManagedAssistant {
         logger.error(`[managed-assistant] Agent error: ${JSON.stringify(data)}`);
         failure = 'session_error_event';
         if (!finalReply) {
-          finalReply = "I'm having trouble right now. Let me connect you with our team. — Waves Pest Control";
+          finalReply = "I'm having trouble right now. Let me connect you with our team.";
         }
         break;
       }
@@ -353,7 +353,7 @@ class ManagedAssistant {
       failure = 'session_stream_eof';
     }
 
-    return { reply: finalReply || "I'm here to help! Could you tell me a bit more about what you need? — Waves Pest Control", failure };
+    return { reply: finalReply || "I'm here to help! Could you tell me a bit more about what you need?", failure };
   }
 
   /**
