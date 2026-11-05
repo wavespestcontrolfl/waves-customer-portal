@@ -1816,8 +1816,8 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test.each([
-    ['backfill members mint the card silently and earn no referral', { backfill: true }, { card: { suppressIssuedEmail: true }, referral: false }],
-    ['an internal-only report posture keeps both the card and the referral', { typedReportDelivery: 'internal_only' }, { card: { suppressIssuedEmail: false }, referral: true }],
+    ['backfill members mint the card silently and earn no referral', { backfill: true }, { card: {}, referral: false }],
+    ['an internal-only report posture keeps both the card and the referral', { typedReportDelivery: 'internal_only' }, { card: {}, referral: true }],
     ['an internal-only consultation mints no card but keeps the referral', { internalOnlyCompletion: true, typedReportDelivery: 'disabled' }, { card: null, referral: true }],
   ])('%s', async (_label, notes, expected) => {
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ is_recurring: true });

@@ -2491,19 +2491,15 @@ describe('completion route wiring (source contracts)', () => {
     expect(laneSource).toMatch(/reason: 'no_cost_visit'/);
   });
 
-  test('backfill mints the digital card quietly — card.issued email suppressed', () => {
-    // The mint call passes the quiet flag straight off the completion's
-    // backfill state…
-    expect(source).toMatch(/ensureCardForCompletion\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*serviceRecordId: record\.id,\s*\n\s*scheduledServiceId: svc\.id,\s*\n\s*suppressIssuedEmail: isBackfillCompletion,/);
-    // …with the backdated first-visit instant so the public card's "First
+  test('backfill mints the digital card with the backdated first-visit instant', () => {
+    expect(source).toMatch(/ensureCardForCompletion\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*serviceRecordId: record\.id,\s*\n\s*scheduledServiceId: svc\.id,/);
+    // The mint passes the backdated first-visit instant so the public card's "First
     // visit" date shows the day the visit happened, not office-entry day.
     expect(source).toMatch(/firstVisitAt: \(isBackfillCompletion \|\| serviceDateOnly\(record\.service_date\) < etDateString\(\)\)\s*\n\s*\? toETNoonServiceDate\(record\.service_date\) : null,/);
-    // …and the service honors it: the email leg is gated, everything before
-    // it (card row / promoter enroll / short link) still runs, and both
-    // first_visit_completed_at stamp sites use the caller's instant.
+    // …and the service honors it: both first_visit_completed_at stamp sites
+    // use the caller's instant.
     const cardSource = fs.readFileSync(path.join(__dirname, '../services/customer-card.js'), 'utf8');
-    expect(cardSource).toMatch(/async function ensureCardForCompletion\(\{ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false, firstVisitAt = null \}\)/);
-    expect(cardSource).toMatch(/if \(!suppressIssuedEmail\) \{\s*\n\s*await maybeSendCardEmail\(card, customer\);\s*\n\s*\}/);
+    expect(cardSource).toMatch(/async function ensureCardForCompletion\(\{ customerId, serviceRecordId = null, scheduledServiceId = null, firstVisitAt = null \}\)/);
     expect((cardSource.match(/first_visit_completed_at: firstVisitStamp\(\)/g) || []).length).toBe(1);
     expect(cardSource).toMatch(/first_visit_completed_at: stamp,/);
     expect(cardSource).not.toMatch(/first_visit_completed_at: new Date\(\)/);
@@ -2872,8 +2868,6 @@ describe('completion route wiring (source contracts)', () => {
       'let apptCardOneTimeCharge = false;',
       // card-hold charge
       '} else if (isBackfillCompletion) {',
-      // digital-business-card issued email
-      'suppressIssuedEmail: isBackfillCompletion,',
       // payment-decline notice SMS
       "} else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)",
       // payer AP invoice email

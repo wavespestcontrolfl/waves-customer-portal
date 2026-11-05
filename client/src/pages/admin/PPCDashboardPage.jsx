@@ -11,6 +11,7 @@ import {
   TR,
   UiSurface,
 } from "../../components/ui";
+import AdsHealthCard from "../../components/admin/AdsHealthCard";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
@@ -548,6 +549,7 @@ export default function WavesPPCDashboard() {
         </div>{" "}
       </div>
       <SyncHealthNotice loadErrors={loadErrors} syncs={syncStatus} />
+      <AdsHealthCard />
       {/* Tab Switcher */}
       <div className="ppc-tab-bar mx-auto flex max-w-full max-sm:w-full [justify-content:safe_center] [&_button]:shrink-0 [gap:4px] [margin-bottom:24px] bg-zinc-100 rounded-md [padding:4px] [width:fit-content] overflow-x-auto">
         {[

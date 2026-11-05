@@ -127,6 +127,15 @@ describe('GET reservice-asks', () => {
     const res = await invoke('get', ASKS, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ enabled: true, lane: 'pest', window: BODY.window, items: BODY.items });
+    // Owner ruling D1 A: a technician's read leaves out the call channel.
+    expect(gatherReserviceAsks).toHaveBeenCalledWith(VISIT, { skipCalls: true });
+  });
+
+  test('gate on: an admin read keeps the call channel (the gatherer gets no options)', async () => {
+    process.env.GATE_RESERVICE_ASKS = 'true';
+    mockDbCurrent = dbWithOwner('tech-2');
+    gatherReserviceAsks.mockResolvedValue(BODY);
+    await invoke('get', ASKS, { params });
     expect(gatherReserviceAsks).toHaveBeenCalledWith(VISIT);
   });
 
