@@ -146,7 +146,7 @@ async function apiGet(path) {
   return res.ok ? res.json() : Promise.reject(new Error(`${res.status}`));
 }
 
-export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false, techLine = null, request = null }) {
+export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false, techLine = null, request = null, onReplySending = null }) {
   const elsewhere = placement === 'elsewhere';
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
@@ -154,16 +154,24 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
   // been seen and its auto-dismiss clock has not started.
   const seenAt = useRef(new Map());
   const [seenTick, setSeenTick] = useState(0);
-  // Text cards with an open Reply (TextCard): kept on screen past the card cap below.
-  const [replyingIds, setReplyingIds] = useState(() => new Set());
-  const setReplying = useCallback((id, on) => {
-    setReplyingIds((prev) => {
-      if (prev.has(id) === on) return prev;
-      const next = new Set(prev);
-      if (on) next.add(id); else next.delete(id);
+  // Text cards whose Reply is open or sending (TextCardActions), id -> { open, sending }: kept on screen past the
+  // card cap below. A send in flight also holds the page's navigation (onReplySending -> Today's navigationBusy),
+  // like the visit's own text, so opening a stop or another section cannot unmount the compose box mid-send.
+  const [replyStates, setReplyStates] = useState(() => new Map());
+  const setReplyState = useCallback((id, state) => {
+    setReplyStates((prev) => {
+      const cur = prev.get(id);
+      const active = state.open || state.sending;
+      if (!active && !cur) return prev;
+      if (cur && active && cur.open === state.open && cur.sending === state.sending) return prev;
+      const next = new Map(prev);
+      if (active) next.set(id, state); else next.delete(id);
       return next;
     });
   }, []);
+  const replySending = [...replyStates.values()].some((st) => st.sending);
+  useEffect(() => { onReplySending?.(replySending); }, [replySending, onReplySending]);
+  useEffect(() => () => onReplySending?.(false), [onReplySending]);
   const markSeen = useCallback((id) => {
     if (seenAt.current.has(id)) return;
     seenAt.current.set(id, Date.now());
@@ -261,7 +269,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
     // A text card with an open Reply stays on screen beside the capped cards:
     // newer cards must not unmount its compose box and lose the draft or a
     // send in flight (pre-push audit P1).
-    const replying = visitsRanked.slice(MAX_VISIT_CARDS).filter((n) => replyingIds.has(n.id));
+    const replying = visitsRanked.slice(MAX_VISIT_CARDS).filter((n) => replyStates.has(n.id));
     // Order: storm warnings (on a timer that marks them read), then the
     // persistent visit cards — nothing that can expire unseen ever sits below
     // something that waits for a tap.
@@ -271,7 +279,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       hiddenVisitCount: visitsRanked.length - shownVisits.length - replying.length,
       waitingCount: 0,
     };
-  }, [active, inlineScheduleChanges, elsewhere, replyingIds]);
+  }, [active, inlineScheduleChanges, elsewhere, replyStates]);
 
   // Superseded same-stop storm alerts are duplicates of information the tech
   // IS seeing (the newest card for that stop) — mark them read immediately so
@@ -348,7 +356,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
             <VisitCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
           {TEXT_TYPES.has(n.type) && (
-            <TextCard n={n} onDismiss={() => dismissVisitCard(n.id)} techLine={techLine} request={request} onReplying={setReplying} />
+            <TextCard n={n} onDismiss={() => dismissVisitCard(n.id)} techLine={techLine} request={request} onReplyState={setReplyState} />
           )}
           {TRACKING_TYPES.has(n.type) && (
             <TrackingCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
@@ -601,7 +609,7 @@ function PhotoCard({ n, onDismiss }) {
 // the office relayed to the visit's tech (visit-tech-relay.js). The office
 // sees the same thread in /admin/communications; this card is the tech's copy,
 // kept until "Got it" like a visit card.
-function TextCard({ n, onDismiss, techLine = null, request = null, onReplying = null }) {
+function TextCard({ n, onDismiss, techLine = null, request = null, onReplyState = null }) {
   const p = n.payload || {};
   const media = Number(p.media_count || 0);
   return (
@@ -615,7 +623,7 @@ function TextCard({ n, onDismiss, techLine = null, request = null, onReplying = 
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {p.body || (media > 0 ? `${media} photo${media === 1 ? '' : 's'}` : '(empty message)')}
       </div>
-      <TextCardActions n={n} onDismiss={onDismiss} techLine={techLine} request={request} onReplying={onReplying} />
+      <TextCardActions n={n} onDismiss={onDismiss} techLine={techLine} request={request} onReplyState={onReplyState} />
     </div>
   );
 }
@@ -626,18 +634,19 @@ function TextCard({ n, onDismiss, techLine = null, request = null, onReplying = 
 // texted, so a tech without a line, or a card without the visit, gets no
 // Reply; the send names this card (replyToNoticeId), and the server refuses it
 // if the phone on file has changed since. While the compose is open or
-// sending, the feed keeps the card on screen, and "Got it" waits for a send in
-// flight.
-function TextCardActions({ n, onDismiss, techLine, request, onReplying }) {
+// sending, the feed keeps the card on screen; a send in flight holds the
+// page's navigation and "Got it".
+function TextCardActions({ n, onDismiss, techLine, request, onReplyState }) {
   const visitId = n.payload?.reply_visit_id;
   const canReply = Boolean(visitId && techLine?.line && request);
   const [replyOpen, setReplyOpen] = useState(false);
   const [sending, setSending] = useState(false);
-  const replying = canReply && (replyOpen || sending);
+  const open = canReply && replyOpen;
+  const pending = canReply && sending;
   useEffect(() => {
-    onReplying?.(n.id, replying);
-  }, [n.id, replying, onReplying]);
-  useEffect(() => () => onReplying?.(n.id, false), [n.id, onReplying]);
+    onReplyState?.(n.id, { open, sending: pending });
+  }, [n.id, open, pending, onReplyState]);
+  useEffect(() => () => onReplyState?.(n.id, { open: false, sending: false }), [n.id, onReplyState]);
   return (
     <>
       {canReply && replyOpen && (

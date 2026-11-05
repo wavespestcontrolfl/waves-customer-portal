@@ -56,11 +56,12 @@ describe('TechNoticeFeed — tech line text card', () => {
   const LINE = { line: { number: '+19413529161', formatted: '(941) 352-9161', label: 'Tech line' } };
   const REPLYABLE = { ...TEXT, payload: { ...TEXT.payload, reply_visit_id: 'svc-1' } };
 
-  it('Reply texts back from the tech\'s line through the visit the card names; Got it waits for the send', async () => {
+  it('Reply texts back from the tech\'s line through the visit the card names; Got it and the page wait for the send', async () => {
     stubFeed([REPLYABLE]);
     let finishSend;
     const request = vi.fn(() => new Promise((resolve) => { finishSend = resolve; }));
-    render(<TechNoticeFeed techLine={LINE} request={request} />);
+    const onReplySending = vi.fn();
+    render(<TechNoticeFeed techLine={LINE} request={request} onReplySending={onReplySending} />);
     await act(async () => { await Promise.resolve(); });
     fireEvent.click(await screen.findByRole('button', { name: 'Reply' }));
     expect(screen.getByTestId('line-text-compose')).toHaveTextContent('Text from your line (941) 352-9161');
@@ -70,9 +71,12 @@ describe('TechNoticeFeed — tech line text card', () => {
       method: 'POST', body: JSON.stringify({ scheduledServiceId: 'svc-1', body: 'Be there in 10', replyToNoticeId: 'n-text' }),
     });
     expect(screen.getByRole('button', { name: 'Got it' })).toBeDisabled();
+    expect(onReplySending).toHaveBeenLastCalledWith(true);
     await act(async () => { finishSend({ ok: true }); });
     expect(await screen.findByText('Sent.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Got it' })).not.toBeDisabled();
+    // An open compose with no send in flight does not hold the page.
+    expect(onReplySending).toHaveBeenLastCalledWith(false);
   });
 
   // Pre-push audit P1: the feed shows two kept cards; newer cards must not unmount an open Reply.
