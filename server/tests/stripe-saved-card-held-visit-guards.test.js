@@ -196,7 +196,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
     const { etDateString, addETDays } = jest.requireActual('../utils/datetime-et');
     const tech = { techRole: 'technician', technicianId: 'tech-1' };
     const visitToday = (fields = {}) => ({
-      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'on_site', scheduled_date: etDateString(), ...fields,
+      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'completed', scheduled_date: etDateString(), ...fields,
     });
     const guards = { requireSelfPayScheduledServiceId: 'svc-1', requireTechnicianCardOnFileFor: tech };
 
@@ -204,6 +204,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       ['the visit moved to another technician', visitToday({ technician_id: 'tech-2' })],
       ['the visit is on another day', visitToday({ scheduled_date: etDateString(addETDays(new Date(), -1)) })],
       ['the technician has not reached the visit', visitToday({ status: 'en_route' })],
+      ['the visit is On Site but not completed', visitToday({ status: 'on_site' })],
       ['the visit was cancelled', visitToday({ status: 'cancelled' })],
     ])('%s: the charge refuses before Stripe', async (_label, visit) => {
       const { StripeService, stripeClient } = load({ visit, contract: null });
@@ -213,8 +214,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
     });
 
     test.each([
-      ['On Site', visitToday()],
-      ['completed', visitToday({ status: 'completed' })],
+      ['completed', visitToday()],
     ])('its own visit today, %s: the charge proceeds to Stripe', async (_label, visit) => {
       const { StripeService, stripeClient } = load({ visit, contract: null });
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', guards))

@@ -2074,7 +2074,7 @@ router.post('/:id/schedule-send', requireAdmin, invoiceScheduleSendHandler);
 // Card on file at the visit (GATE_TECH_CARD_ON_FILE, owner 2026-11-04 D4 A):
 // the router admits a technician to the two card-on-file routes only while
 // the gate is on; here the invoice must be bound to the technician's own
-// visit today, On Site or completed. 404, so an invoice id seen elsewhere
+// visit today, completed. 404, so an invoice id seen elsewhere
 // confirms nothing. Admins pass.
 async function technicianCardOnFileInvoice(req) {
   if (!isTechnicianRequest(req)) return { ok: true, invoice: null };

@@ -2474,7 +2474,7 @@ const StripeService = {
             .first('id', 'customer_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'status', 'estimated_price', 'is_callback', 'prepaid_method', 'prepaid_amount', 'service_type', 'technician_id', 'scheduled_date');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
           // Opt-in (a technician's card on file at the visit, GATE_TECH_CARD_ON_FILE): the visit must
-          // still be that technician's, today, On Site or completed, judged on the row this
+          // still be that technician's, today, and completed, judged on the row this
           // transaction holds locked. A reassignment, reschedule or cancel that landed after the
           // route's own check refuses here, before any credit apply or Stripe call.
           if (requireTechnicianCardOnFileFor != null

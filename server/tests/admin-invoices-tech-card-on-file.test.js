@@ -5,7 +5,7 @@
  * Off: POST /:id/charge-card and /:id/charge-card-quote stay admin only (the
  * router's requireAdmin refuses a technician before any lookup). On: a
  * technician may quote and charge a saved card only for an invoice bound to
- * its own visit scheduled today (ET), On Site or completed; anything else
+ * its own visit scheduled today (ET) and completed; anything else
  * answers 404 before Stripe. The technician charge never overrides a
  * collections hold or a stopped collection, needs the quoted total, and asks
  * the charge to judge the visit again under its own lock. An admin's charge
@@ -75,7 +75,7 @@ const BOOKED_LINES = [
 ];
 const invoiceRow = (fields = {}) => ({ id: INVOICE_ID, customer_id: 'cust-1', scheduled_service_id: VISIT_ID, line_items: JSON.stringify(BOOKED_LINES), ...fields });
 const visitRow = (fields = {}) => ({
-  id: VISIT_ID, customer_id: 'cust-1', technician_id: 'tech-1', status: 'on_site', scheduled_date: etDateString(), ...fields,
+  id: VISIT_ID, customer_id: 'cust-1', technician_id: 'tech-1', status: 'completed', scheduled_date: etDateString(), ...fields,
 });
 
 async function withServer(fn) {
@@ -124,7 +124,7 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
     expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
-  test('gate on, its own visit today and On Site: the quote answers and the charge carries the technician guards', async () => {
+  test('gate on, its own visit today and completed: the quote answers and the charge carries the technician guards', async () => {
     await withServer(async (baseUrl) => {
       const quote = await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-1' });
       expect(quote.status).toBe(200);
@@ -214,18 +214,22 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
     expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
-  test('gate on, a completed visit today still qualifies', async () => {
-    mockRows.scheduled_services = visitRow({ status: 'completed' });
+  // Codex security #7587 r3: never before the visit is done (owner 2026-09-26); an after-visit consent
+  // authorizes the charge only once the visit is completed.
+  test('gate on, its visit today but only On Site: both routes answer 404 before Stripe', async () => {
+    mockRows.scheduled_services = visitRow({ status: 'on_site' });
     await withServer(async (baseUrl) => {
-      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 102.9 })).status).toBe(200);
+      expect((await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-1' })).status).toBe(404);
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 102.9 })).status).toBe(404);
     });
-    expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalled();
+    expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   test.each([
     ['another technician\'s visit', () => { mockRows.scheduled_services = visitRow({ technician_id: 'tech-2' }); }],
     ['its visit yesterday', () => { mockRows.scheduled_services = visitRow({ scheduled_date: etDateString(addETDays(new Date(), -1)) }); }],
-    ['its visit today, not yet On Site', () => { mockRows.scheduled_services = visitRow({ status: 'confirmed' }); }],
+    ['its visit today, not yet started', () => { mockRows.scheduled_services = visitRow({ status: 'confirmed' }); }],
     ['an invoice bound to no visit', () => { mockRows.invoices = invoiceRow({ scheduled_service_id: null }); }],
     ['a visit of another customer', () => { mockRows.scheduled_services = visitRow({ customer_id: 'cust-2' }); }],
     ['an invoice that does not exist', () => { delete mockRows.invoices; }],
@@ -283,11 +287,11 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       expect((await read()).body.tech_card_on_file).toBe(false);
     });
 
-    test('gate off, or a visit not On Site: tech_card_on_file is false', async () => {
+    test('gate off, or a visit not completed: tech_card_on_file is false', async () => {
       delete process.env.GATE_TECH_CARD_ON_FILE;
       expect((await read()).body.tech_card_on_file).toBe(false);
       process.env.GATE_TECH_CARD_ON_FILE = 'true';
-      mockRows.scheduled_services = visitRow({ status: 'en_route' });
+      mockRows.scheduled_services = visitRow({ status: 'on_site' });
       expect((await read()).body.tech_card_on_file).toBe(false);
     });
 

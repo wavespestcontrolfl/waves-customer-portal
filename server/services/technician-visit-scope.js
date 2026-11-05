@@ -132,11 +132,13 @@ function technicianVisitRowInScope(actor, row) {
 }
 
 // Card on file at the visit (GATE_TECH_CARD_ON_FILE, owner 2026-11-04 D4 A): the visit an invoice is
-// bound to must be the technician's own, scheduled today (ET), and On Site or completed. Tighter than
-// the read window on purpose: a saved-card charge needs no customer at the door, so a past visit, or
-// one the technician has not reached yet, never qualifies. Judged on a row in hand; the charge judges
-// it again on the visit row it holds locked. Administrators are unscoped.
-const TECH_CARD_ON_FILE_STATUSES = ['on_site', 'completed'];
+// bound to must be the technician's own, scheduled today (ET), and completed. Tighter than the read
+// window on purpose: a saved-card charge needs no customer at the door, so a past visit, or one not yet
+// done, never qualifies. Completed, not On Site: the owner's 2026-09-26 rule is never to charge before
+// the visit, and an after-visit card consent authorizes the charge only once the visit is completed
+// (Codex security #7587 r3). Judged on a row in hand; the charge judges it again on the visit row it
+// holds locked. Administrators are unscoped.
+const TECH_CARD_ON_FILE_STATUSES = ['completed'];
 function technicianCardOnFileVisitOk(actor, row) {
   if (!isTechnicianRequest(actor)) return true;
   const { dateOnly } = require('./visit-groups');

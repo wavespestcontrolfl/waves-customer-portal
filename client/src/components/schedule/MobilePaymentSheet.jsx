@@ -13,7 +13,7 @@
 // A technician takes cards only (owner 2026-11-04, technician visibility
 // audit D4 A): Tap to Pay, manual card entry, and Card on File when the
 // server marks this invoice chargeable for it (GATE_TECH_CARD_ON_FILE: its
-// own visit today, On Site or completed). Cash, Check and Invoice are office
+// own visit today, completed). Cash, Check and Invoice are office
 // work for a technician; the sheet says the office records cash and checks.
 //
 // Cash App Pay was removed per operator request.
