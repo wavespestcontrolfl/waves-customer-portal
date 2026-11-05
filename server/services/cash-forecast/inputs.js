@@ -38,95 +38,79 @@ function fail(error) {
   return { ok: false, error };
 }
 
-function validateItemInput(input, { partial = false } = {}) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return fail('Input must be an object');
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+const ok = (value) => ({ value });
+const bad = (error) => ({ error });
+const oneOf = (list, name) => (v) => (list.includes(v) ? ok(v) : bad(`${name} must be one of: ${list.join(', ')}`));
+const wholeCents = (min, max, message) => (v) => {
+  const n = toInt(v);
+  return n !== null && n >= min && n <= max ? ok(n) : bad(message);
+};
+const realDate = (name, { nullable = false } = {}) => (v) => {
+  if (nullable && v === null) return ok(null);
+  return isRealDate(v) ? ok(v) : bad(`${name} must be a real date as YYYY-MM-DD`);
+};
+
+// One check per field: { value } or { error }. Unknown keys are ignored (never written).
+const ITEM_FIELDS = {
+  kind: oneOf(KINDS, 'kind'),
+  label: (v) => {
+    const label = typeof v === 'string' ? v.trim() : '';
+    return label.length >= 1 && label.length <= 120 ? ok(label) : bad('label must be 1 to 120 characters');
+  },
+  amount_cents: wholeCents(1, MAX_AMOUNT_CENTS, `amount_cents must be a whole number of cents from 1 to ${MAX_AMOUNT_CENTS}`),
+  cadence: oneOf(CADENCES, 'cadence'),
+  first_date: realDate('first_date'),
+  last_date: realDate('last_date', { nullable: true }), // an explicit null clears it on update
+  active: (v) => (typeof v === 'boolean' ? ok(v) : bad('active must be true or false')),
+};
+const ITEM_REQUIRED = ['kind', 'label', 'amount_cents', 'cadence', 'first_date'];
+
+function checkReceipts(r) {
+  if (!isPlainObject(r)) return bad('last_year_receipts must be an object of month to cents');
+  const keys = Object.keys(r);
+  if (keys.length > MAX_RECEIPT_MONTHS) return bad(`last_year_receipts can hold at most ${MAX_RECEIPT_MONTHS} months`);
+  const badKey = keys.find((k) => !MONTH_KEY.test(k));
+  if (badKey) return bad(`last_year_receipts key "${badKey}" must look like YYYY-MM`);
+  const badValue = keys.find((k) => wholeCents(0, MAX_RECEIPT_CENTS, '')(r[k]).error !== undefined);
+  if (badValue) return bad(`last_year_receipts value for ${badValue} must be a whole number of cents from 0 to ${MAX_RECEIPT_CENTS}`);
+  return ok(Object.fromEntries(keys.map((k) => [k, toInt(r[k])])));
+}
+
+const SETTINGS_FIELDS = {
+  floor_cents: (v) => (v === null ? ok(null)
+    : wholeCents(0, MAX_FLOOR_CENTS, `floor_cents must be empty or a whole number of cents from 0 to ${MAX_FLOOR_CENTS}`)(v)),
+  last_year_receipts: checkReceipts,
+};
+
+// Runs each given field's check; reports the first error. `required` fields must be present.
+function checkFields(input, fields, required) {
+  if (!isPlainObject(input)) return fail('Input must be an object');
+  const missing = required.find((k) => !has(input, k));
+  if (missing) return fail(`${missing} is required`);
   const value = {};
-
-  if (has(input, 'kind')) {
-    if (!KINDS.includes(input.kind)) return fail(`kind must be one of: ${KINDS.join(', ')}`);
-    value.kind = input.kind;
-  } else if (!partial) return fail('kind is required');
-
-  if (has(input, 'label')) {
-    const label = typeof input.label === 'string' ? input.label.trim() : '';
-    if (label.length < 1 || label.length > 120) return fail('label must be 1 to 120 characters');
-    value.label = label;
-  } else if (!partial) return fail('label is required');
-
-  if (has(input, 'amount_cents')) {
-    const n = toInt(input.amount_cents);
-    if (n === null || n < 1 || n > MAX_AMOUNT_CENTS) {
-      return fail(`amount_cents must be a whole number of cents from 1 to ${MAX_AMOUNT_CENTS}`);
-    }
-    value.amount_cents = n;
-  } else if (!partial) return fail('amount_cents is required');
-
-  if (has(input, 'cadence')) {
-    if (!CADENCES.includes(input.cadence)) return fail(`cadence must be one of: ${CADENCES.join(', ')}`);
-    value.cadence = input.cadence;
-  } else if (!partial) return fail('cadence is required');
-
-  if (has(input, 'first_date')) {
-    if (!isRealDate(input.first_date)) return fail('first_date must be a real date as YYYY-MM-DD');
-    value.first_date = input.first_date;
-  } else if (!partial) return fail('first_date is required');
-
-  if (has(input, 'last_date') && input.last_date !== null) {
-    if (!isRealDate(input.last_date)) return fail('last_date must be a real date as YYYY-MM-DD');
-    value.last_date = input.last_date;
-  } else if (has(input, 'last_date') || !partial) {
-    value.last_date = null; // an explicit null clears it on update; a create without it stores NULL
-  }
-
-  if (has(input, 'active')) {
-    if (typeof input.active !== 'boolean') return fail('active must be true or false');
-    value.active = input.active;
-  }
-
-  if (value.first_date && value.last_date && value.last_date < value.first_date) {
-    return fail('last_date must not be before first_date');
+  for (const [key, check] of Object.entries(fields).filter(([k]) => has(input, k))) {
+    const r = check(input[key]);
+    if (r.error !== undefined) return fail(r.error);
+    value[key] = r.value;
   }
   return { ok: true, value };
 }
 
-function validateSettingsInput(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return fail('Input must be an object');
-  const value = {};
-
-  if (has(input, 'floor_cents')) {
-    if (input.floor_cents === null) {
-      value.floor_cents = null;
-    } else {
-      const n = toInt(input.floor_cents);
-      if (n === null || n < 0 || n > MAX_FLOOR_CENTS) {
-        return fail(`floor_cents must be empty or a whole number of cents from 0 to ${MAX_FLOOR_CENTS}`);
-      }
-      value.floor_cents = n;
-    }
-  }
-
-  if (has(input, 'last_year_receipts')) {
-    const r = input.last_year_receipts;
-    const proto = r && typeof r === 'object' ? Object.getPrototypeOf(r) : undefined;
-    if (!r || typeof r !== 'object' || Array.isArray(r) || (proto !== Object.prototype && proto !== null)) {
-      return fail('last_year_receipts must be an object of month to cents');
-    }
-    const keys = Object.keys(r);
-    if (keys.length > MAX_RECEIPT_MONTHS) return fail(`last_year_receipts can hold at most ${MAX_RECEIPT_MONTHS} months`);
-    const clean = {};
-    for (const k of keys) {
-      if (!MONTH_KEY.test(k)) return fail(`last_year_receipts key "${k}" must look like YYYY-MM`);
-      const n = toInt(r[k]);
-      if (n === null || n < 0 || n > MAX_RECEIPT_CENTS) {
-        return fail(`last_year_receipts value for ${k} must be a whole number of cents from 0 to ${MAX_RECEIPT_CENTS}`);
-      }
-      clean[k] = n;
-    }
-    value.last_year_receipts = clean;
-  }
-
-  if (!Object.keys(value).length) return fail('Give floor_cents or last_year_receipts');
+function validateItemInput(input, { partial = false } = {}) {
+  const r = checkFields(input, ITEM_FIELDS, partial ? [] : ITEM_REQUIRED);
+  if (!r.ok) return r;
+  // a create without last_date stores NULL
+  const value = partial ? r.value : { last_date: null, ...r.value };
+  if (value.first_date && value.last_date && value.last_date < value.first_date) return fail('last_date must not be before first_date');
   return { ok: true, value };
+}
+
+function validateSettingsInput(input) {
+  const r = checkFields(input, SETTINGS_FIELDS, []);
+  if (r.ok && !Object.keys(r.value).length) return fail('Give floor_cents or last_year_receipts');
+  return r;
 }
 
 function badRequest(message) {

@@ -53,7 +53,8 @@ const cashOk = async () => ({
     { account_label: 'chk-b', currency: 'USD', available: null, current: 300 },
     { account_label: 'eur', currency: 'EUR', available: 50, current: 50 },
   ],
-  cards: [{ account_label: 'card-f', currency: 'USD', current: 120 }],
+  // a card in credit (-40) owes nothing and never offsets another card
+  cards: [{ account_label: 'card-f', currency: 'USD', current: 120 }, { account_label: 'card-g', currency: 'USD', current: -40 }],
   unavailable: [],
 });
 
@@ -63,8 +64,13 @@ describe('visit value (cash lanes, self-pay, less prepaid)', () => {
     expect(visitValue(visit({}))).toBe(100);
     expect(visitValue(visit({ billing_mode: 'per_application' }))).toBe(100);
     expect(visitValue(visit({ billing_mode: 'one_time', prepaid_amount: 30 }))).toBe(70);
-    expect(visitValue(visit({ billing_mode: 'monthly_membership' }))).toBe(0);
-    expect(visitValue(visit({ billing_mode: null, waveguard_tier: 'Bronze', monthly_rate: 50 }))).toBe(0); // inferred member
+    // a member's recurring visit, dues on autopay: the dues pay for it
+    const member = { billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 50, autopay_active: true, is_recurring: true };
+    expect(visitValue(visit(member))).toBe(0);
+    expect(visitValue(visit({ ...member, billing_mode: null }))).toBe(0); // inferred member
+    // the dues run cannot collect without autopay, and a priced one-time visit is billed on its own
+    expect(visitValue(visit({ ...member, autopay_active: false }))).toBe(100);
+    expect(visitValue(visit({ ...member, is_recurring: false, estimated_price: 200, effective_price: 200 }))).toBe(200);
     expect(visitValue(visit({ annual_prepay_term_id: 't1' }))).toBe(0);
     expect(visitValue(visit({ payer_billed: true }))).toBe(0);
     expect(visitValue(visit({ is_callback: true }))).toBe(0);
@@ -92,9 +98,10 @@ describe('loadForecastInput', () => {
     const input = await loadForecastInput({ database, now: NOW, readCashBalances: cashOk, readStripeBalance: async () => ({}) });
     expect(input.today).toBe('2026-11-05');
     const visits = database.calls.find((c) => /FROM scheduled_services ss/.test(c.sql));
-    expect(visits.bindings.slice(3, 5)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
+    expect(visits.bindings[0]).toBe('2026-11-05'); // the autopay check's ET day
+    expect(visits.bindings.slice(5, 7)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
     const bank = database.calls.find((c) => /FROM bank_transactions bt/.test(c.sql));
-    expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f'], '2026-08-28', '2026-11-11']); // trailing Sep 7 - Nov 1 +- 10 days; USD only
+    expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f', 'card-g'], '2026-08-28', '2026-11-11']); // trailing Sep 7 - Nov 1 +- 10 days; USD only
     for (const c of database.calls) expect(c.sql).not.toMatch(/current_date|now\(\)/i);
     // open invoices include 'overdue'; a pay run's net goes out on the pay date and the 941 return is never a payment
     expect(database.calls.find((c) => /i\.credit_applied, i\.amount_paid/.test(c.sql)).bindings).toEqual([['sent', 'viewed', 'overdue', 'processing']]);
@@ -110,7 +117,7 @@ describe('loadForecastInput', () => {
     expect(input.opening).toEqual({ bankUsd: 1200, cardOwedUsd: 120, partial: true });
     expect(input.stripe).toMatchObject({ availableUsd: 10, pendingUsd: 20 });
     expect(input.poolAccounts).toEqual(['chk-a', 'chk-b']);
-    expect(input.feedCards).toEqual(['card-f']);
+    expect(input.feedCards).toEqual(['card-f', 'card-g']);
 
     const dollars = async () => ({ accounts: [{ account_label: 'chk-a', currency: 'USD', available: 900, current: 1000 }], cards: [], unavailable: [] });
     const whole = await loadForecastInput({ database: fakeDb(), now: NOW, readCashBalances: dollars, readStripeBalance: async () => ({}) });
@@ -140,7 +147,7 @@ describe('loadForecastInput', () => {
         [/FROM scheduled_services ss/, [
           visit({ id: 'c1', status: 'completed', scheduled_day: '2026-10-20', completed_day: '2026-10-20' }),
           visit({ id: 'c2', status: 'completed', scheduled_day: '2026-09-01', completed_day: '2026-09-01', effective_price: 50 }),
-          visit({ id: 'c3', status: 'completed', scheduled_day: '2026-10-21', completed_day: '2026-10-21', billing_mode: 'monthly_membership' }),
+          visit({ id: 'c3', status: 'completed', scheduled_day: '2026-10-21', completed_day: '2026-10-21', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 50, autopay_active: true, is_recurring: true }),
           visit({ id: 'b1', scheduled_day: '2026-11-05' }),
           visit({ id: 'b3', scheduled_day: '2026-11-06', has_invoice: true }),
           visit({ id: 'b2', scheduled_day: '2026-11-12', payer_billed: true }),

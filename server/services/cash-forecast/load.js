@@ -9,7 +9,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const plaidSync = require('../plaid-sync');
 const StripeBanking = require('../stripe-banking');
-const { resolveBillingLane, stampedZeroFreeLive } = require('../billing-lane');
+const { resolveBillingLane, stampedZeroFreeLive, membershipDuesCoverVisit } = require('../billing-lane');
+const { autopayActivePredicate } = require('../autopay-eligibility');
 const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX } = require('../no-cost-visit-types');
 const { DUES_COHORT_COLUMNS, applyDuesCohort, autopayGuard, laneGuard, monthlyDuesVerdict } = require('../monthly-dues-eligibility');
 const InvoiceService = require('../invoice');
@@ -40,35 +41,56 @@ function effectivePriceSql() {
     : "COALESCE(NULLIF(ss.estimated_price, 0), CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)";
 }
 
-// A visit's cash value: cash lanes only (dues lane = dues; annual prepay = paid ahead), self-pay only
-// (payer-billed is listed apart), no callbacks, no always-free types, no unpriced consultations,
-// less what was prepaid.
-function visitValue(row) {
-  if (row.payer_billed || row.is_callback || row.free_type || row.unpriced_consultation) return 0;
-  if (row.annual_prepay_term_id) return 0;
-  if (!CASH_LANES.has(resolveBillingLane(row).mode)) return 0;
-  return Math.max(0, usd(row.effective_price) - usd(row.prepaid_amount));
+// Is this visit paid by the monthly dues? The completion path's own verdict (billing-lane
+// membershipDuesCoverVisit): a member's recurring or unpriced visit is; a priced one-time visit is billed.
+function duesCover(row, lane) {
+  return lane === 'monthly_membership' && membershipDuesCoverVisit({
+    visitIsPayerBilled: !!row.payer_billed,
+    perApplicationBilling: false,
+    annualPrepayBilling: false,
+    customerAutopayActive: !!row.autopay_active,
+    hasVisitPrice: Number(row.estimated_price) > 0,
+    isRecurring: !!row.is_recurring,
+    waveguardTier: row.waveguard_tier,
+    monthlyRate: row.monthly_rate,
+    billingMode: row.billing_mode,
+  });
 }
 
-async function readVisits(database, { from, to }) {
+// A visit's cash value: self-pay only (payer-billed is listed apart), no callbacks, no always-free types,
+// no unpriced consultations, nothing on an annual prepay term, nothing the dues pay for; less what was
+// prepaid. Cash lanes bill per visit; a member's visit the dues do not cover is billed too.
+function visitValue(row) {
+  const excluded = row.payer_billed || row.is_callback || row.free_type || row.unpriced_consultation || row.annual_prepay_term_id;
+  const lane = resolveBillingLane(row).mode;
+  const billed = CASH_LANES.has(lane) || (lane === 'monthly_membership' && !duesCover(row, lane));
+  return !excluded && billed ? Math.max(0, usd(row.effective_price) - usd(row.prepaid_amount)) : 0;
+}
+
+async function readVisits(database, { from, to, now }) {
+  const autopay = autopayActivePredicate(now);
   return database.raw(`
     SELECT ss.id, ss.status, ${DAY('ss.scheduled_date')} AS scheduled_day,
       CASE WHEN ss.completed_at IS NULL THEN NULL ELSE ${ET_DAY('ss.completed_at')} END AS completed_day,
-      ss.prepaid_amount, ss.annual_prepay_term_id,
+      ss.prepaid_amount, ss.annual_prepay_term_id, ss.estimated_price, COALESCE(ss.is_recurring, false) AS is_recurring,
+      ${autopay.sql} AS autopay_active,
       ${effectivePriceSql()} AS effective_price,
       (COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END) IS NOT NULL) AS payer_billed,
       (COALESCE(ss.is_callback, false) OR EXISTS (
         SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND COALESCE(sr.is_callback, false))) AS is_callback,
       (COALESCE(ss.service_type, '') ~* ?) AS free_type,
-      EXISTS (SELECT 1 FROM invoices i LEFT JOIN service_records sr2 ON sr2.id = i.service_record_id
-        WHERE COALESCE(i.scheduled_service_id, sr2.scheduled_service_id) = ss.id AND i.status <> ALL(?::text[])) AS has_invoice,
+      -- its own live invoice, or a combined first-application invoice that covers it (the stamp
+      -- estimate-converter's stampCombinedFirstApplicationInvoiceCoverage writes on every member)
+      (EXISTS (SELECT 1 FROM invoices i LEFT JOIN service_records sr2 ON sr2.id = i.service_record_id
+          WHERE COALESCE(i.scheduled_service_id, sr2.scheduled_service_id) = ss.id AND i.status <> ALL(?::text[]))
+        OR EXISTS (SELECT 1 FROM invoices fi WHERE fi.id = ss.first_application_invoice_id AND fi.status <> ALL(?::text[]))) AS has_invoice,
       (COALESCE(ss.service_type, '') ~* ? AND COALESCE(ss.estimated_price, 0) <= 0) AS unpriced_consultation,
       c.billing_mode, c.waveguard_tier, c.monthly_rate
     FROM scheduled_services ss
     JOIN customers c ON c.id = ss.customer_id
     WHERE ss.scheduled_date BETWEEN ?::date AND ?::date
       AND (ss.status = 'completed' OR ss.status <> ALL(?::text[]))`,
-  [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, DEAD_INVOICE_STATUSES, CONSULTATION_SERVICE_TYPE_SQL_REGEX, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
+  [autopay.binding, ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, DEAD_INVOICE_STATUSES, DEAD_INVOICE_STATUSES, CONSULTATION_SERVICE_TYPE_SQL_REGEX, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
 }
 
 // Invoices behind completed visits (linked by the visit or by its service record), live ones only.
@@ -244,23 +266,101 @@ async function readInTransit(database) {
     .map((r) => ({ amountUsd: usd(r.amount), arrivalDay: new Date(r.arrival_date).toISOString().slice(0, 10) }));
 }
 
+// Every day the reads are bound to, from the app clock in ET (the engine's own windows).
+function windowFor(now) {
+  const today = etDateString(now);
+  const weeks = engine.buildWeeks(today);
+  return {
+    today,
+    windowEnd: weeks[weeks.length - 1].end,
+    cohortFrom: engine.addDays(today, -COHORT_DAYS),
+    yesterday: engine.addDays(today, -1),
+    // the 8 complete weeks before this week's Monday
+    trailingFrom: engine.addDays(weeks[0].start, -7 * engine.TRAILING_WEEKS),
+    trailingTo: engine.addDays(weeks[0].start, -1),
+  };
+}
+
+const usdOnly = (a) => String(a.currency || 'USD').toUpperCase() === 'USD';
+const balanceOf = (a) => [a.available, a.current].find(Number.isFinite);
+
+// The opening pool (decision 2 A: every dollar checking account in the feed) and what it leaves out.
+// Dollar accounts only: a line in another currency must never be added to dollar spending.
+function poolFrom(cash) {
+  const read = { accounts: [], cards: [], unavailable: [], ...cash };
+  const counted = read.accounts.filter((a) => usdOnly(a) && balanceOf(a) !== undefined);
+  const cards = read.cards.filter(usdOnly);
+  return {
+    opening: {
+      bankUsd: counted.length ? counted.reduce((s, a) => s + balanceOf(a), 0) : null,
+      // a card in credit owes nothing; its credit is never cash for another card or the pool
+      cardOwedUsd: cards.reduce((s, c) => s + Math.max(0, Number.isFinite(c.current) ? c.current : 0), 0),
+      partial: !cash || read.unavailable.length > 0 || counted.length < read.accounts.length,
+    },
+    poolAccounts: read.accounts.filter(usdOnly).map((a) => a.account_label).filter(Boolean),
+    feedCards: cards.map((c) => c.account_label).filter(Boolean),
+    facts: [
+      ...read.unavailable.map((u) => ({ kind: 'account_unavailable', institution: u.institution_name || null, reason: u.reason, mask: u.mask || null })),
+      ...(cash ? [] : [{ kind: 'balance_unavailable' }]),
+      ...(cards.some((c) => !Number.isFinite(c.current)) ? [{ kind: 'card_balance_unavailable' }] : []),
+    ],
+  };
+}
+
+// Completed visits in the cohort window are the collection cohort; open visits in the forecast window
+// are booked work. A visit already invoiced brings its cash once, as its invoice (or a draft, listed
+// apart), but it is still booked work when the expected line compares work to last year's pace.
+function splitVisits(visits, d) {
+  const rows = visits.map((v) => ({ ...v, value: visitValue(v), doneDay: v.completed_day || v.scheduled_day }));
+  const completed = rows.filter((v) => v.status === 'completed' && v.doneDay >= d.cohortFrom && v.doneDay <= d.yesterday);
+  const trailing = completed.filter((v) => v.doneDay >= d.trailingFrom && v.doneDay <= d.trailingTo);
+  const open = rows.filter((v) => v.status !== 'completed' && v.scheduled_day >= d.today && v.scheduled_day <= d.windowEnd);
+  return {
+    cohort: completed.filter((v) => v.value > 0).map((v) => ({ id: v.id, day: v.doneDay, value: v.value })),
+    booked: open.map((v) => ({ day: v.scheduled_day, value: v.has_invoice ? 0 : v.value, work: v.value })),
+    payerBilled: open.filter((v) => v.payer_billed).length,
+    trailingVisits: trailing.length,
+    trailingWorkUsd: trailing.reduce((s, v) => s + v.value, 0),
+  };
+}
+
+// The cohort with each visit's payments by days after the visit; visits with no invoice at all in the
+// last 90 days are listed as not billed.
+function cohortFrom(cohort, pays, today) {
+  const gap = engine.dayDiff;
+  const paidLines = (v) => pays
+    .filter((p) => p.visit_id === v.id && p.paid_day && usd(p.paid_amount) > 0)
+    .map((p) => ({ lagDays: Math.max(0, gap(v.day, p.paid_day)), amount: usd(p.paid_amount) }));
+  const unbilled = cohort.filter((v) => !pays.some((p) => p.visit_id === v.id) && gap(v.day, today) <= 90);
+  return {
+    visitCohort: cohort.map((v) => ({ value: v.value, ageDays: gap(v.day, today), paid: paidLines(v) })),
+    unbilled: { count: unbilled.length, usd: Math.round(unbilled.reduce((s, v) => s + v.value, 0) * 100) / 100 },
+  };
+}
+
+// What the loader knows the forecast cannot see. Each entry shows only when it applies.
+function loaderFacts({ pool, visits, unbilled, drafts, taxRows, offFeed, stripeOk }) {
+  const noAmount = taxRows.filter((t) => t.amount_due === null || t.amount_due === undefined).length;
+  return [
+    ...pool.facts,
+    ...offFeed.map((c) => ({ kind: 'card_not_in_feed', account: c.account_label, last_day: c.last_day, debits_30d_usd: usd(c.debits_30d) })),
+    ...[
+      { when: !stripeOk, fact: { kind: 'stripe_balance_unavailable' } },
+      { when: visits.payerBilled > 0, fact: { kind: 'payer_billed_visits', count: visits.payerBilled } },
+      { when: unbilled.count > 0, fact: { kind: 'completed_visits_not_billed', ...unbilled } },
+      { when: Number(drafts.n) > 0, fact: { kind: 'draft_invoices', count: Number(drafts.n), usd: usd(drafts.total) } },
+      { when: noAmount > 0, fact: { kind: 'tax_rows_without_amount', count: noAmount } },
+    ].filter((f) => f.when).map((f) => f.fact),
+  ];
+}
+
 async function loadForecastInput({
   database = db,
   now = new Date(),
   readCashBalances = plaidSync.readCashBalances,
   readStripeBalance = StripeBanking.getBalance,
 } = {}) {
-  const today = etDateString(now);
-  const weeks = engine.buildWeeks(today);
-  const windowEnd = weeks[weeks.length - 1].end;
-  const day = (offset) => engine.addDays(today, offset);
-  const cohortFrom = day(-COHORT_DAYS);
-  const yesterday = day(-1);
-  // The engine's trailing window: the 8 complete weeks before this week's Monday.
-  const trailingFrom = engine.addDays(weeks[0].start, -7 * engine.TRAILING_WEEKS);
-  const trailingTo = engine.addDays(weeks[0].start, -1);
-  const missing = [];
-
+  const d = windowFor(now);
   const [cash, stripeBalance, payouts, settings, items] = await Promise.all([
     readCash(readCashBalances),
     readStripe(readStripeBalance),
@@ -268,121 +368,52 @@ async function loadForecastInput({
     inputs.getSettings(database),
     inputs.listItems(database),
   ]);
-
-  // Opening pool and the accounts it covers (decision 2 A: every checking account in the feed).
-  const accounts = cash?.accounts || [];
-  const cards = cash?.cards || [];
-  const usdOnly = (a) => String(a.currency || 'USD').toUpperCase() === 'USD';
-  const balanceOf = (a) => (Number.isFinite(a.available) ? a.available : Number.isFinite(a.current) ? a.current : null);
-  const counted = accounts.filter((a) => usdOnly(a) && balanceOf(a) !== null);
-  const bankUsd = counted.length ? counted.reduce((s, a) => s + balanceOf(a), 0) : null;
-  const cardOwedUsd = cards.filter(usdOnly).reduce((s, c) => s + (Number.isFinite(c.current) ? c.current : 0), 0);
-  for (const u of cash?.unavailable || []) missing.push({ kind: 'account_unavailable', institution: u.institution_name || null, reason: u.reason, mask: u.mask || null });
-  if (!cash) missing.push({ kind: 'balance_unavailable' });
-  if (cards.some((c) => usdOnly(c) && !Number.isFinite(c.current))) missing.push({ kind: 'card_balance_unavailable' });
-  if (!stripeBalance.ok) missing.push({ kind: 'stripe_balance_unavailable' });
-  // Dollar accounts only: a line in another currency must never be added to dollar spending.
-  const poolAccounts = accounts.filter(usdOnly).map((a) => a.account_label).filter(Boolean);
-  const feedCards = cards.filter(usdOnly).map((c) => c.account_label).filter(Boolean);
-
-  const [visits, sent, open, drafts, dues, prepaySalesUsd3m, bankLines, offFeed, payroll, taxRows] = await Promise.all([
-    readVisits(database, { from: cohortFrom, to: windowEnd }),
-    readSentInvoices(database, { from: cohortFrom, to: yesterday }),
+  const pool = poolFrom(cash);
+  const [visitRows, sent, open, drafts, dues, prepaySalesUsd3m, bankLines, offFeed, payroll, taxRows] = await Promise.all([
+    readVisits(database, { from: d.cohortFrom, to: d.windowEnd, now }),
+    readSentInvoices(database, { from: d.cohortFrom, to: d.yesterday }),
     readOpenInvoices(database),
     readDrafts(database),
-    readDues(database, { today, to: windowEnd, now }),
-    readPrepaySales(database, { from: day(-91), to: yesterday }),
+    readDues(database, { today: d.today, to: d.windowEnd, now }),
+    readPrepaySales(database, { from: engine.addDays(d.today, -91), to: d.yesterday }),
     // 10 days either side so a transfer or card payment pair at the window's edge still matches.
-    readBankLines(database, { labels: [...poolAccounts, ...feedCards], from: engine.addDays(trailingFrom, -10), to: engine.addDays(trailingTo, 10) }),
-    readCardsOffFeed(database, { feedLabels: feedCards, since: day(-120) }),
-    readPayroll(database, { from: day(-35), to: windowEnd }),
-    readTaxRows(database, { from: today, to: windowEnd }),
+    readBankLines(database, { labels: [...pool.poolAccounts, ...pool.feedCards], from: engine.addDays(d.trailingFrom, -10), to: engine.addDays(d.trailingTo, 10) }),
+    readCardsOffFeed(database, { feedLabels: pool.feedCards, since: engine.addDays(d.today, -120) }),
+    readPayroll(database, { from: engine.addDays(d.today, -35), to: d.windowEnd }),
+    readTaxRows(database, { from: d.today, to: d.windowEnd }),
   ]);
-
-  // Visits: the completed ones are the collection cohort; the open ones in the window are booked work.
-  const completed = [];
-  const booked = [];
-  let payerBilled = { count: 0 };
-  let trailingVisits = 0;
-  let trailingWorkUsd = 0;
-  for (const v of visits) {
-    const value = visitValue(v);
-    if (v.status === 'completed') {
-      const doneDay = v.completed_day || v.scheduled_day;
-      if (doneDay < cohortFrom || doneDay > yesterday) continue;
-      if (doneDay >= trailingFrom && doneDay <= trailingTo) {
-        trailingVisits += 1;
-        trailingWorkUsd += value;
-      }
-      if (value > 0) completed.push({ id: v.id, day: doneDay, value });
-    } else if (v.scheduled_day >= today && v.scheduled_day <= windowEnd) {
-      if (v.payer_billed) payerBilled = { count: payerBilled.count + 1 };
-      // A visit already invoiced brings its cash once, as its open invoice (or a draft, listed apart),
-      // but it is still booked work when the expected line compares work to last year's pace.
-      booked.push({ day: v.scheduled_day, value: v.has_invoice ? 0 : value, work: value });
-    }
-  }
-  if (payerBilled.count) missing.push({ kind: 'payer_billed_visits', count: payerBilled.count });
-
-  const pays = await readVisitPayments(database, completed.map((v) => v.id));
-  const paidBy = new Map();
-  for (const p of pays) {
-    const list = paidBy.get(p.visit_id) || [];
-    list.push(p);
-    paidBy.set(p.visit_id, list);
-  }
-  let unbilled = { count: 0, usd: 0 };
+  const visits = splitVisits(visitRows, d);
+  const pays = await readVisitPayments(database, visits.cohort.map((v) => v.id));
+  const { visitCohort, unbilled } = cohortFrom(visits.cohort, pays, d.today);
   const gap = engine.dayDiff;
-  const visitCohort = completed.map((v) => {
-    const linked = paidBy.get(v.id) || [];
-    if (!linked.length && gap(v.day, today) <= 90) unbilled = { count: unbilled.count + 1, usd: unbilled.usd + v.value };
-    return {
-      value: v.value,
-      ageDays: gap(v.day, today),
-      paid: linked.filter((p) => p.paid_day && usd(p.paid_amount) > 0).map((p) => ({ lagDays: Math.max(0, gap(v.day, p.paid_day)), amount: usd(p.paid_amount) })),
-    };
-  });
-  if (unbilled.count) missing.push({ kind: 'completed_visits_not_billed', count: unbilled.count, usd: Math.round(unbilled.usd * 100) / 100 });
-
-  const invoiceCohort = sent.map((i) => ({
-    // what the customer had to pay when it went out (the canonical amount due, before any payment)
-    value: invoiceAmountDue({ total: i.total, credit_applied: i.credit_applied }),
-    ageDays: gap(i.sent_day, today),
-    paid: i.paid_day && usd(i.paid_amount) > 0 ? [{ lagDays: Math.max(0, gap(i.sent_day, i.paid_day)), amount: usd(i.paid_amount) }] : [],
-  }));
-  const openInvoices = open.map((i) => ({ amountUsd: invoiceAmountDue(i), ageDays: Math.max(0, gap(i.sent_day, today)), processing: i.status === 'processing' }));
-  if (Number(drafts.n) > 0) missing.push({ kind: 'draft_invoices', count: Number(drafts.n), usd: usd(drafts.total) });
-
-  const taxOut = [];
-  let taxNoAmount = 0;
-  for (const t of taxRows) {
-    if (t.amount_due === null || t.amount_due === undefined) { taxNoAmount += 1; continue; }
-    taxOut.push({ dueDay: t.due_day, amountUsd: Math.max(0, usd(t.amount_due) - usd(t.amount_paid)) });
-  }
-  if (taxNoAmount) missing.push({ kind: 'tax_rows_without_amount', count: taxNoAmount });
-  for (const c of offFeed) missing.push({ kind: 'card_not_in_feed', account: c.account_label, last_day: c.last_day, debits_30d_usd: usd(c.debits_30d) });
-
   return {
-    today,
-    opening: { bankUsd, cardOwedUsd, partial: !cash || (cash.unavailable || []).length > 0 || counted.length < accounts.length },
+    today: d.today,
+    opening: pool.opening,
     stripe: { availableUsd: stripeBalance.availableUsd, pendingUsd: stripeBalance.pendingUsd, payouts },
     visitCohort,
-    invoiceCohort,
-    booked,
-    openInvoices,
+    invoiceCohort: sent.map((i) => ({
+      // what the customer had to pay when it went out: the canonical amount due before any payment,
+      // since the curve measures the payments against it
+      value: invoiceAmountDue({ total: i.total, credit_applied: i.credit_applied, amount_paid: 0 }),
+      ageDays: gap(i.sent_day, d.today),
+      paid: (i.paid_day && usd(i.paid_amount) > 0) ? [{ lagDays: Math.max(0, gap(i.sent_day, i.paid_day)), amount: usd(i.paid_amount) }] : [],
+    })),
+    booked: visits.booked,
+    openInvoices: open.map((i) => ({ amountUsd: invoiceAmountDue(i), ageDays: Math.max(0, gap(i.sent_day, d.today)), processing: i.status === 'processing' })),
     dues,
-    trailing: { visits: trailingVisits, workValueUsd: trailingWorkUsd, prepaySalesUsd3m },
+    trailing: { visits: visits.trailingVisits, workValueUsd: visits.trailingWorkUsd, prepaySalesUsd3m },
     bankLines: bankLines.map((l) => ({ ...l, amount: usd(l.amount) })),
-    poolAccounts,
-    feedCards,
+    poolAccounts: pool.poolAccounts,
+    feedCards: pool.feedCards,
     payroll: [
-      ...payroll.filter((p) => p.pay_day >= today).map((p) => ({ payDay: p.pay_day, cashCostUsd: usd(p.net_cents) / 100 })),
-      ...projectPayroll(payroll, { today, to: windowEnd }),
+      ...payroll.filter((p) => p.pay_day >= d.today).map((p) => ({ payDay: p.pay_day, cashCostUsd: usd(p.net_cents) / 100 })),
+      ...projectPayroll(payroll, { today: d.today, to: d.windowEnd }),
     ],
-    taxRows: taxOut,
+    taxRows: taxRows.filter((t) => t.amount_due !== null && t.amount_due !== undefined)
+      .map((t) => ({ dueDay: t.due_day, amountUsd: Math.max(0, usd(t.amount_due) - usd(t.amount_paid)) })),
     items,
     settings,
-    missing,
+    missing: loaderFacts({ pool, visits, unbilled, drafts, taxRows, offFeed, stripeOk: stripeBalance.ok }),
   };
 }
 

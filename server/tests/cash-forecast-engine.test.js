@@ -92,10 +92,8 @@ describe('collection curve (per completed visit, censored by age)', () => {
   });
 
   test('spread lands each share two business days after the payment day', () => {
-    const into = new Map();
     const curve = new Array(92).fill(1);
-    spread(into, '2026-11-05', 100, curve, lander());
-    expect([...into]).toEqual([['2026-11-09', 100]]);
+    expect(spread('visits', '2026-11-05', 100, curve, lander())).toEqual([{ day: '2026-11-09', line: 'visits', amount: 100 }]);
   });
 });
 
