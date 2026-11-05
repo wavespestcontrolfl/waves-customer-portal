@@ -258,6 +258,12 @@ customer's message by this rule.
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
+   A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
+   `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
+   30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,
+   "Customers — Jane D.'s phone can't get texts" (`dedupeKey` `dead-number:<customerId>:<last10>`, open-only,
+   done-when `phone_replaced`). It closes at the customer's next delivered text when that text went to the dead
+   number and was sent after its last failure, or the number is no longer their phone or secondary phone.
    A standing backlog (overdue promises past five) is a count on its page, never a bell:
    its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
    Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
@@ -456,6 +462,21 @@ admin ("Cancelled by the owner.") under the same dedupe lock unless `sentToClaud
 Activity feed (`getActivity`, `fullAccess`, focus included) leave it out for any other login, and `PUT /:id/done` and
 `PUT /:id/reopen` answer such a login 404 `not_found`, as for an unknown row. The Mac's `markAdminDone` is not affected. The Mac launcher opens a
 Claude tab that scopes the idea and asks the owner.
+
+**Send a copy to Claude (step 3)** (owner 2026-11-03, decision 1 = A: "customer alerts = a COPY, read-only until approval";
+`GATE_ALERT_SEND_TO_CLAUDE_COPY`). "Send to Claude" refuses a bell row that is customer contact or whose words our own code did
+not write (`customer_contact`, `not_system_written`). For those rows only, the owner login gets **Send a copy to Claude
+(read-only)** (`sendCopyToClaude: true` on the bell row; `POST /api/admin/notifications/:id/send-copy-to-claude`,
+`server/services/admin-alert-copy-to-claude.js`). The tap writes ONE new row through `notifyAdmin` with title `Copy for Claude`
+and a fixed body, Activity-only, `ownerOnly: true`, `claudeQueue` `sent-to-claude`, dedupe key `claude-copy:<parent id>`, and a
+`sentToClaude` stamp: `kind` `guarded-copy`, `guarded: true`, `parentId`, `parentKind`, `parentCategory`, `records` (UUID-shaped
+ids) and the owner's optional note. No customer word is in the row; the locked Mac tab (launcher v2b, outside this repo)
+reads the parent alert itself, as data. The parent STAYS in the bell, because a reply may be owed. A step 1 row still uses step 1;
+an alert that step 1 can send gets no copy button. The 10-second Undo (`POST /:id/cancel-copy`, on the copy's id)
+closes the copy under the same dedupe lock unless a Mac tab started. The tab writes a plan that comes back as an owner-only
+bell (the bell list, `getAdminNotifications` with `fullAccess`, hides `ownerOnly` rows from every other login, and the alert
+button route refuses them). The owner acts with his own words: step 1 for a system alert, step 2 (Intelligence Bar) for the rest.
+Nothing here sends anything to a customer or makes a model call.
 
 ## 6. What is enforced today
 

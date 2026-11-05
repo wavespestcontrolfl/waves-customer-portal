@@ -45,6 +45,7 @@ import {
   etDateString,
   formatETDate,
   formatETDateOnly,
+  formatETDateTime,
 } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
@@ -1844,6 +1845,162 @@ function PayoutModal({
 // ═══════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ═══════════════════════════════════════════════════════════════
+// ── Cash today (owner only, GATE_CASH_FORECAST) ─────────────────────────
+// Reads the checking balances from the bank feed. Any failure (not the
+// owner, gate off, server or network error) renders nothing, so everyone
+// else sees the page exactly as before. The Stripe numbers come from the
+// page's own balance read (props), not a second Stripe call.
+const fmtAsOf = (iso) =>
+  iso
+    ? `as of ${formatETDateTime(iso, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })} ET`
+    : "as of the last bank update";
+const cashOf = (a) => (a.available != null ? a.available : a.current);
+const isUsdEntry = (e) => String(e.currency || "USD").toUpperCase() === "USD";
+const cashMuted = { color: "#71717A", fontSize: 14, marginTop: 4 };
+const cashRow = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "baseline",
+  gap: 12,
+  padding: "6px 0",
+};
+
+// The Stripe part comes from the page's own balance read; if that failed the
+// total says so instead of passing off a partial number as the whole.
+function cashTodayFigures(data, balance, balanceError) {
+  const stripeOk = !!balance && !balanceError;
+  const stripePart = stripeOk
+    ? (balance.total_available || 0) + (balance.total_pending || 0)
+    : 0;
+  const transitFailed = !!data.in_transit?.error;
+  const transitTotal = transitFailed ? 0 : data.in_transit?.total || 0;
+  let totalLabel = "Total";
+  if (!stripeOk) totalLabel = "Total without Stripe";
+  else if (transitFailed) totalLabel = "Total without payouts on the way";
+  return {
+    stripeOk,
+    stripePart,
+    transitFailed,
+    transitTotal,
+    total: data.totals.bank_usd + stripePart + transitTotal,
+    totalLabel,
+  };
+}
+
+function cashUnavailableText(u) {
+  const who = u.institution_name || "A bank";
+  if (u.reason === "login_required") return `${who} needs a new sign-in: Tax page → Live bank feeds`;
+  if (u.reason === "needs_confirmation") {
+    return `${who} reported a new or changed account: confirm it on Tax page → Live bank feeds`;
+  }
+  if (u.reason === "not_shared") {
+    return `${who} no longer shares ${u.mask ? `••${u.mask}` : "an account"}: Tax page → Live bank feeds → Add accounts (not counted)`;
+  }
+  return `${who} balance is unavailable right now`;
+}
+
+function CashTodayCard({ balance, balanceError, refreshKey }) {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch("/admin/banking/cash-today")
+      .then((d) => {
+        if (!cancelled) setData(d);
+      })
+      .catch(() => {
+        if (!cancelled) setData(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // refreshKey changes after a payout, so the new payout joins "on the way"
+    // when the Stripe balance it left is read again.
+  }, [refreshKey]);
+  if (!data || !data.totals) return null;
+
+  const { stripeOk, stripePart, transitFailed, transitTotal, total, totalLabel } =
+    cashTodayFigures(data, balance, balanceError);
+  const nextArrival = transitFailed ? null : data.in_transit?.payouts?.[0]?.arrival_day;
+  const money = (e, value) =>
+    isUsdEntry(e) ? fmtM(value) : `${fmtM(value)} ${e.currency}`;
+
+  return (
+    <Card style={{ padding: "16px 20px", marginBottom: 16 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: "#09090B", marginBottom: 6 }}>
+        Cash today
+      </div>
+      {data.accounts.map((a) => (
+        <div key={`${a.account_label}-${a.mask}`} style={cashRow}>
+          <div>
+            <div style={{ color: "#09090B" }}>
+              {a.name || a.account_label}
+              {a.mask ? ` ••${a.mask}` : ""}
+            </div>
+            <div style={{ ...cashMuted, marginTop: 0 }}>{fmtAsOf(a.balance_as_of)}</div>
+          </div>
+          <div className="u-nums" style={{ color: "#09090B" }}>
+            {cashOf(a) == null ? "—" : money(a, cashOf(a))}
+          </div>
+        </div>
+      ))}
+      {stripeOk && (
+        <div style={cashRow}>
+          <div style={{ color: "#09090B" }}>Stripe: available and pending</div>
+          <div className="u-nums" style={{ color: "#09090B" }}>
+            {fmtM(stripePart)}
+          </div>
+        </div>
+      )}
+      <div style={cashRow}>
+        <div>
+          <div style={{ color: "#09090B" }}>Stripe payouts on the way</div>
+          {nextArrival && (
+            <div style={{ ...cashMuted, marginTop: 0 }}>
+              next arrives {fmtDay(nextArrival)}
+            </div>
+          )}
+        </div>
+        <div className="u-nums" style={{ color: "#09090B" }}>
+          {transitFailed ? "—" : fmtM(transitTotal)}
+        </div>
+      </div>
+      <div
+        style={{
+          ...cashRow,
+          borderTop: "1px solid #E4E4E7",
+          marginTop: 6,
+          paddingTop: 10,
+        }}
+      >
+        <div style={{ color: "#09090B", fontWeight: 500 }}>{totalLabel}</div>
+        <div className="u-nums" style={{ color: "#09090B", fontWeight: 500 }}>
+          {fmtM(total)}
+        </div>
+      </div>
+      {transitFailed && (
+        <div style={cashMuted}>Stripe payouts on the way are unavailable right now.</div>
+      )}
+      {data.cards.map((c) => (
+        <div key={`${c.account_label}-${c.mask}`} style={cashMuted}>
+          {c.current == null
+            ? `Owed on card ••${c.mask}: balance unavailable (not counted)`
+            : `Owed on card ••${c.mask}: ${money(c, c.current)} (not counted)`}
+        </div>
+      ))}
+      {data.unavailable.map((u, i) => (
+        <div key={`${u.institution_name}-${i}`} style={cashMuted}>
+          {cashUnavailableText(u)}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
 export default function BankingPage() {
   const [tab, setTab] = useState("payouts");
   const isMobile = useIsMobile(640);
@@ -1897,10 +2054,12 @@ export default function BankingPage() {
   const pending = balance?.total_pending ?? 0;
   const instantAvailable = balance?.total_instant_available ?? null;
   const instantPayoutAvailable = instantAvailable > 0;
+  const [cashRefresh, setCashRefresh] = useState(0);
   const handlePayoutSuccess = () => {
     setPayoutModalMethod(null);
     loadBalance();
     loadStats();
+    setCashRefresh((n) => n + 1);
   };
   return (
     <UiSurface
@@ -2043,6 +2202,7 @@ export default function BankingPage() {
           </Button>{" "}
         </div>{" "}
       </div>
+      <CashTodayCard balance={balance} balanceError={balanceError} refreshKey={cashRefresh} />
       {/* Secondary metrics */}
       <div
         style={{

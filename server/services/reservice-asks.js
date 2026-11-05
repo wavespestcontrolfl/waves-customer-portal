@@ -352,7 +352,12 @@ function dedupeItems(items, bookingId) {
   });
 }
 
-async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date() } = {}) {
+// `skipCalls` (the technician's route, owner ruling D1 A 2026-11-04: no call words on a technician screen): the
+// list is built exactly as the completion freeze builds it (calls read, same dedupe and cap), and only then are the
+// call-sourced items (a call's quotes, and booking words that came from a call) taken out of what is returned. So
+// every item id a technician sees exists in the completion gather, and its answer is never dropped as unknown.
+// Left off, the result is unchanged.
+async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date(), skipCalls = false } = {}) {
   const visit = await readVisit(knex, scheduledServiceId);
   if (!visit) return { ok: false, reason: 'not_found' };
   if (!isReserviceVisit(visit)) return { ok: false, reason: 'not_reservice' };
@@ -381,11 +386,12 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
   const severalProperties = customerId ? await accountMayHaveSeveralPremises(knex, customerId) : false;
   const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean)
     .map((item) => (severalProperties && item.id !== bookingId ? { ...item, accountWide: true } : item));
+  const kept = limitItems(dedupeItems(items, bookingId), bookingId);
   return {
     ok: true,
     lane,
     window: { from: window.from.toISOString(), to: to.toISOString() },
-    items: limitItems(dedupeItems(items, bookingId), bookingId),
+    items: skipCalls ? kept.filter((item) => item.source !== 'call') : kept,
   };
 }
 

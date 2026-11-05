@@ -30,11 +30,12 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // owner sends all customer comms. The ONLY staff-wide read is the single-
 // draft lookup the tech-visible Communications surface uses (GET /:id);
 // list/enumeration reads are owner-only like the Agent Ops page they back.
-const SINGLE_DRAFT_GET_RE = /^\/[A-Za-z0-9_-]+$/;
+// The id must be a UUID, in any letter case: Express matches routes without
+// regard to case, so a name test let "/Stats" reach GET /stats (technician
+// visibility audit H8, 2026-11-04). Named GET siblings of /:id stay owner-only.
+const SINGLE_DRAFT_GET_RE = /^\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 router.use((req, res, next) => (
-  req.method === 'GET'
-    && SINGLE_DRAFT_GET_RE.test(req.path)
-    && req.path !== '/stats' // named GET siblings of /:id stay owner-only
+  req.method === 'GET' && SINGLE_DRAFT_GET_RE.test(req.path)
     ? next()
     : requireAdmin(req, res, next)
 ));
@@ -1144,7 +1145,8 @@ router.get('/:id', async (req, res, next) => {
     // Technician scope (codex #5568 r3 P1): the draft carries the customer's
     // name, phone and both message bodies, so a technician reads only drafts
     // for customers on their own route; a customerless draft is office work.
-    if (req.techRole !== 'admin') {
+    const isTechnician = req.techRole !== 'admin';
+    if (isTechnician) {
       if (!d.customer_id) return res.status(403).json({ error: 'Admin access required' });
       const { technicianServicesCustomer } = require('../services/technician-visit-scope');
       if (!(await technicianServicesCustomer(req, d.customer_id))) return res.status(404).json({ error: 'Draft not found' });
@@ -1164,14 +1166,17 @@ router.get('/:id', async (req, res, next) => {
       resolvedFromNumber: singleFrom,
       resolvedFromLabel: singleFrom ? (TWILIO_NUMBERS.findByNumber(singleFrom)?.label || null) : null,
       tier: d.waveguard_tier,
-      stage: d.pipeline_stage,
+      // Pipeline stage and the CRM context summary (dues, overdue amount,
+      // cancel-save and complaint flags) are office facts; Customer 360 keeps
+      // them from a technician too (technician visibility audit A11).
+      stage: isTechnician ? undefined : d.pipeline_stage,
       inboundMessage: d.inbound_message,
       draftResponse: d.draft_response,
       revisedResponse: d.revised_response,
       finalResponse: d.final_response,
       intent: d.intent,
       intentConfidence: d.intent_confidence,
-      contextSummary: d.context_summary,
+      contextSummary: isTechnician ? undefined : d.context_summary,
       flags,
       campaignType: d.campaign_type || null,
       purpose: d.purpose || null,

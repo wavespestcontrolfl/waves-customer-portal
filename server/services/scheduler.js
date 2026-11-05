@@ -2010,6 +2010,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — Lead contact sync (owner 2026-11-04, "WHY ARENT THESE
+  // UPDATED ... FOR ALL COMUNNICATION LINES"). Moves a 'new' lead to
+  // 'contacted' once a person reached it after its first contact: a delivered
+  // staff text, a connected call, a staff email or a visit booked for its
+  // customer. Lead status and history only; sends nothing. Gate
+  // GATE_LEAD_STATUS_FOLLOWS_CONTACT (off / shadow / true) is read at call
+  // time and checked before the lock, so an off gate leaves no job_health row;
+  // kill = unset. runExclusive: an overlapping tick must not judge a stale read.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    if (require('../config/feature-gates').leadStatusFollowsContactMode() === 'off') return;
+    try {
+      await runExclusive('lead-contact-sync', () =>
+        require('./lead-contact-sync').runLeadContactSync());
+    } catch (err) {
+      logger.error(`Lead contact sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
   // Scans top-spend products for a cheaper competitor per-unit price and stages a
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
@@ -4130,6 +4150,21 @@ function initScheduledJobs() {
       await runExclusive('call-fix-proposals', () => proposeCallFixes());
     } catch (err) {
       logger.error(`Call fix proposals failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:55AM ET — Correction-loop fix proposals for email labels
+  // (owner 2026-11-04, email learning loop), same rules as calls. No model
+  // call. Gate read inside the job (GATE_EMAIL_RECLASSIFY_PICK).
+  // =========================================================================
+  cron.schedule('55 4 * * 0', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeEmailFixes } = require('./email/email-reclassify-incident');
+      await runExclusive('email-fix-proposals', () => proposeEmailFixes());
+    } catch (err) {
+      logger.error(`Email fix proposals failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -9367,6 +9402,25 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[moving-pause] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Apply on accept (owner 2026-11-04 option A): a move whose
+  // new-home estimate the customer accepted is applied through Apply move's
+  // own preview and confirm, with no office click; a refusal rings the office
+  // once. Gate read per tick (GATE_MOVING_AUTO_APPLY), so a flip needs no restart.
+  // =========================================================================
+  // Off the quarter hours the other 15-minute jobs share.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').movingAutoApplyLive()) return;
+    try {
+      await runExclusive('moving-auto-apply', async () => {
+        const result = await require('./customer-moves').autoApplyAcceptedMoves();
+        if (result.applied || result.office || result.failed) logger.info(`[moving-auto-apply] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-auto-apply] run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

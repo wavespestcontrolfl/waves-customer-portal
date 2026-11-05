@@ -9,6 +9,7 @@ const NotificationService = require('./notification-service');
 const { computeDashboardAlerts, toNotifications } = require('./dashboard-alerts');
 const { COUNT_ESCALATION_COOLDOWN_MS } = require('./dashboard-alerts-cron');
 const { isBellPolicyEnabled } = require('./notification-bell-policy');
+const { isFullAccessEmail } = require('./intelligence-bar/ib-access');
 
 // Window before a per-admin dismissal expires and the alert can re-show
 // in the bell. 24h matches the "I see it, snooze for the day" intuition;
@@ -174,11 +175,25 @@ function isLiveDuplicate(persisted, liveKeys) {
 // holding one (codex #3541 round 11 — twenty concurrent staff polls
 // could otherwise hold twenty transactions all waiting for compute
 // connections).
+// Is this admin the owner login (its technicians-row email on the ib-access full-access list)? An owner-only row counts for
+// the owner alone. A missing id, a missing row or a failed read is not the owner.
+async function ownerLogin(adminUserId, trx = null) {
+  if (!adminUserId) return false;
+  try {
+    const row = await (trx || db)('technicians').where({ id: adminUserId }).first('email');
+    return isFullAccessEmail(row?.email);
+  } catch (err) {
+    logger.warn(`[admin-unread] owner check failed: ${err.message}`);
+    return false;
+  }
+}
+
 async function computeUnreadCount({ adminUserId, role } = {}, trx = null, precomputedAlerts = null) {
   const liveCtx = isBellPolicyEnabled() || role !== 'admin'
     ? { live: [], liveKeys: new Set() }
     : await liveAlertNotifications(adminUserId, trx, precomputedAlerts);
-  let persistedCount = await NotificationService.getAdminUnreadCount({ role, technicianId: adminUserId }, trx);
+  const fullAccess = role === 'admin' && await ownerLogin(adminUserId, trx);
+  let persistedCount = await NotificationService.getAdminUnreadCount({ role, technicianId: adminUserId, fullAccess }, trx);
   if (liveCtx.liveKeys.size > 0) {
     try {
       const unreadDashboardAlerts = await (trx || db)('notifications')
@@ -333,4 +348,4 @@ async function getUnreadCountForAdmin({ adminUserId, role } = {}, opts = {}) {
   }), opts);
 }
 
-module.exports = { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin };
+module.exports = { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin, _private: { ownerLogin, computeUnreadCount } };

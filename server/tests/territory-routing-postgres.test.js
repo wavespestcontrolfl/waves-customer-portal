@@ -27,22 +27,32 @@ const LAWN = { serviceType: 'Lawn Fertilization', date: DAY };
 
 describeDb('territory routing (Postgres)', () => {
   const techId = randomUUID();
+  const coverId = randomUUID(); // the line's cover technician (the owner's role)
+  let priorCard = [];
   const prior = { map: process.env.GATE_SERVICE_LINE_MAP, territory: process.env.GATE_TERRITORY_ROUTING };
   let priorOwner = null;
 
+  const synthetic = (id, label) => ({
+    id, name: `${label} ${id.slice(0, 8)}`, email: `${id}@example.invalid`,
+    password_hash: 'synthetic-not-a-login-hash', role: 'technician', active: true,
+    employment_status: 'active', field_dispatchable: true,
+  });
+
   beforeAll(async () => {
-    await db('technicians').insert({
-      id: techId, name: `Territory ${techId.slice(0, 8)}`, email: `${techId}@example.invalid`,
-      password_hash: 'synthetic-not-a-login-hash', role: 'technician', active: true,
-      employment_status: 'active', field_dispatchable: true,
-    });
+    await db('technicians').insert([synthetic(techId, 'Territory'), synthetic(coverId, 'Cover')]);
+    // A territory needs a cover on the card: the general pest line names one. A database that holds a card gets it back.
+    priorCard = await db('service_line_techs').select('*');
+    await db('service_line_techs').del();
+    await db('service_line_techs').insert({ service_category: 'general', home_technician_id: coverId, gap_technician_id: null });
     priorOwner = (await db('territory_zips').where({ zip: ZIP }).first('technician_id')).technician_id;
     await db('territory_zips').where({ zip: ZIP }).update({ technician_id: techId });
   });
 
   afterAll(async () => {
     await db('territory_zips').where({ zip: ZIP }).update({ technician_id: priorOwner });
-    await db('technicians').where({ id: techId }).del();
+    await db('service_line_techs').del();
+    if (priorCard.length) await db('service_line_techs').insert(priorCard);
+    await db('technicians').whereIn('id', [techId, coverId]).del();
     for (const [key, value] of [['GATE_SERVICE_LINE_MAP', prior.map], ['GATE_TERRITORY_ROUTING', prior.territory]]) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
@@ -64,7 +74,22 @@ describeDb('territory routing (Postgres)', () => {
   test('offers rank the territory technician first and drop a technician with no part in the line', async () => {
     const ranking = await lineTech.lineOfferRanking(db, { lines: ['general'], place: { zip: ZIP } });
     expect(ranking.rankOf(techId)).toBe(0);
+    expect(ranking.rankOf(coverId)).toBe(1);
     expect(ranking.rankOf(randomUUID())).toBeNull();
+  });
+
+  test('a territory line with no cover on the card adds no rule: the map decides, every technician\'s slots stay', async () => {
+    await db('service_line_techs').del();
+    try {
+      await expect(lineTech.pickLineTechnician(db, { ...PEST, zip: ZIP })).resolves.toMatchObject({ mapped: false, technicianId: null, reason: 'no_map' });
+      await expect(lineTech.lineOfferRanking(db, { lines: ['general'], place: { zip: ZIP } })).resolves.toBeNull();
+      // A card naming only the territory technician has no cover either: the card entry is unchanged.
+      await db('service_line_techs').insert({ service_category: 'general', home_technician_id: techId, gap_technician_id: null });
+      await expect(lineTech.pickLineTechnician(db, { ...PEST, zip: ZIP })).resolves.toMatchObject({ technicianId: techId, reason: 'home' });
+    } finally {
+      await db('service_line_techs').del();
+      await db('service_line_techs').insert({ service_category: 'general', home_technician_id: coverId, gap_technician_id: null });
+    }
   });
 
   test('the shadow resolver records the territory pick', async () => {

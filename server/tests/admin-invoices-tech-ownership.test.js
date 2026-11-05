@@ -16,23 +16,31 @@
  * customer gets 404 with no billing detail; a technician who DOES service
  * that customer (the tap-to-pay case) still gets 200 with the full payload,
  * so the legitimate checkout flow keeps working; admin is unscoped.
+ *
+ * Narrowed 2026-11-04 (technician visibility audit A10): an invoice bound to
+ * a visit is readable only through one of the technician's own current
+ * visits, and an invoice with no visit only when it is an annual prepay
+ * term's invoice for a customer the technician serves (the prepay switch
+ * re-read). The customer's other invoices answer 404.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
-// Chainable knex-ish stub: every builder resolves to [] / undefined.
-function mockMakeBuilder() {
-  const b = {};
+// Chainable knex-ish stub: every builder resolves to [] and first() to the
+// row a test put in mockRows for that table (undefined by default).
+const mockRows = {};
+function mockMakeBuilder(table) {
+  const b = { table };
   const chain = () => b;
   ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'orderBy',
     'limit', 'select', 'leftJoin', 'join', 'andWhere', 'orWhere', 'groupBy', 'forUpdate']
     .forEach((m) => { b[m] = jest.fn(chain); });
-  b.first = jest.fn(() => Promise.resolve(undefined));
+  b.first = jest.fn(() => Promise.resolve(mockRows[b.table]));
   b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
   b.catch = (fn) => Promise.resolve([]).catch(fn);
   return b;
 }
 jest.mock('../models/db', () => {
-  const fn = jest.fn(() => mockMakeBuilder());
+  const fn = jest.fn((table) => mockMakeBuilder(table));
   fn.raw = jest.fn((s) => s);
   fn.transaction = jest.fn(async (cb) => cb(fn));
   return fn;
@@ -70,11 +78,12 @@ jest.mock('../services/invoice', () => ({
 
 const express = require('express');
 const InvoiceService = require('../services/invoice');
-const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+const { technicianServicesCustomer, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const router = require('../routes/admin-invoices');
 
 const FOREIGN_INVOICE = {
-  id: 'inv-foreign-1',
+  id: '0f5a2c1e-1111-4a6b-9c3d-000000000001',
+  scheduled_service_id: '0f5a2c1e-2222-4a6b-9c3d-000000000002',
   customer_id: 'cust-foreign-1',
   invoice_number: 'WPC-2026-9999',
   token: 'tok-secret-foreign',
@@ -108,7 +117,10 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
     jest.clearAllMocks();
     InvoiceService.getById.mockResolvedValue({ ...FOREIGN_INVOICE });
     technicianServicesCustomer.mockResolvedValue(false);
+    for (const key of Object.keys(mockRows)) delete mockRows[key];
   });
+  // The technician holds the invoice's visit (technicianCurrentVisitFilter finds it).
+  const holdsVisit = () => { mockRows.scheduled_services = { id: FOREIGN_INVOICE.scheduled_service_id }; };
 
   test('sanity: named sibling GET /stats is still admin-only for a technician (403)', async () => {
     await withServer(async (baseUrl) => {
@@ -132,7 +144,7 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
   });
 
   test('a servicing technician never receives the frozen property addresses of a multi-property invoice (money fields kept)', async () => {
-    technicianServicesCustomer.mockResolvedValue(true);
+    holdsVisit();
     const palm = { address_line1: '1842 Palm Harbor Dr', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
     const bay = { address_line1: '410 Bayshore Rd', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' };
     InvoiceService.getById.mockResolvedValue({
@@ -153,8 +165,8 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
     });
   });
 
-  test('technician who DOES service the invoice\'s customer (own tap-to-pay checkout) still gets 200 with the full payload', async () => {
-    technicianServicesCustomer.mockResolvedValue(true);
+  test('technician who holds the invoice\'s visit (own tap-to-pay checkout) still gets 200 with the full payload', async () => {
+    holdsVisit();
     await withServer(async (baseUrl) => {
       const r = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
       const body = await r.json();
@@ -162,7 +174,46 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
       expect(body.customer.card_on_file).toEqual({ brand: 'visa', last_four: '4242' });
       expect(body.total).toBe(201.29);
       expect(body.token).toBe('tok-secret-foreign');
-      expect(technicianServicesCustomer).toHaveBeenCalledWith(expect.anything(), FOREIGN_INVOICE.customer_id);
+      expect(technicianCurrentVisitFilter).toHaveBeenCalledWith(expect.objectContaining({ techRole: 'technician' }), expect.objectContaining({ table: 'scheduled_services' }));
     });
   });
+
+  test('another invoice of a customer the technician serves, bound to a visit it does not hold, answers 404 (A10)', async () => {
+    technicianServicesCustomer.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
+      const body = await r.json().catch(() => ({}));
+      expect(r.status).toBe(404);
+      expect(body.total).toBeUndefined();
+    });
+  });
+
+  test('an invoice with no visit: readable only as an annual prepay term\'s invoice for a served customer (prepay switch re-read)', async () => {
+    InvoiceService.getById.mockResolvedValue({ ...FOREIGN_INVOICE, scheduled_service_id: null });
+    technicianServicesCustomer.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      const plain = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
+      expect(plain.status).toBe(404);
+
+      mockRows.annual_prepay_terms = { id: 'apt-1' };
+      const prepay = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
+      expect(prepay.status).toBe(200);
+      expect(technicianServicesCustomer).toHaveBeenCalledWith(expect.anything(), FOREIGN_INVOICE.customer_id);
+
+      technicianServicesCustomer.mockResolvedValue(false);
+      const notServed = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
+      expect(notServed.status).toBe(404);
+    });
+  });
+
+  test.each(['Stats', 'STATS', 'sTaTs', 'Customers', 'Payment-Notices'])(
+    'a named sibling in another letter case (/%s) stays admin-only for a technician (403, H8)',
+    async (name) => {
+      await withServer(async (baseUrl) => {
+        const r = await fetch(`${baseUrl}/api/admin/invoices/${name}`);
+        expect(r.status).toBe(403);
+        expect(InvoiceService.getById).not.toHaveBeenCalled();
+      });
+    },
+  );
 });

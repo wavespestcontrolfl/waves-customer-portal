@@ -35,7 +35,7 @@ const { auditAppointmentContract } = require('./prompts/appointment-confirmed-ru
 
 const auditPromptWith = (contract) => `You are auditing one phone-call analysis for Waves Pest Control (pest control + lawn care, SW Florida; "Agent" = staff, "Caller" = the external customer/contact). Judge ONLY from the transcript. Return ONLY JSON:
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
-Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.
+Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; is_lead uses production's meaning: true only for a NEW prospect, a caller who is not yet a Waves customer and asks about service, prices or a booking (a prospect calling back about an earlier quote still counts). A current Waves customer is never a new lead, even when asking about another or additional service, a quote, a new pest or a visit. A CALLER ON FILE line, when present, says what the caller's number matched before the call; rely on it unless the transcript shows the caller is a different person asking about their own property. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.
 appointment_agreed is production's appointment_confirmed field: answer it exactly as these production extraction rules decide it (the preferred_date_time and confirmed_start_at details do not apply to you):
 ${contract}`;
 // AUDIT_PROMPT grades an answer the V2 extractor wrote (its four V2-only confirmation rules
@@ -86,12 +86,29 @@ function compactDirection(direction) {
 // audit's own findings or counters; it only tallies into `tally`
 // ({ asked, recorded, failed } counts calls, not rows; `tally.clef` holds the
 // second leg's own counts and exists only while that gate is on).
-// What the auditor is shown for one call: the direction instruction and the
-// first 5,000 characters of the transcript. One builder, so the audit and
-// any later second reading render exactly the same text.
+// What the call processor knew about the caller before extraction
+// (ai_extraction.known_caller, written by knownCallerAuditStamp), so is_lead is
+// judged from the same caller facts as production (owner ruling 2026-11-04,
+// D1 A: a lead is a new prospect). No line for a row without the stamp, or
+// when the lookup failed: the transcript alone decides then, as before.
+const CALLER_ON_FILE_LINES = Object.freeze({
+  current_customer: 'CALLER ON FILE: before the call, this number matched a CURRENT Waves customer.',
+  other_account: 'CALLER ON FILE: before the call, this number matched a Waves account that is not a current customer (a prospect, or a closed or former account).',
+  not_on_file: 'CALLER ON FILE: before the call, this number matched no Waves account.',
+});
+function callerOnFileBlock(call) {
+  const parsed = safeParse(call && call.ai_extraction);
+  const stamp = parsed && typeof parsed === 'object' ? parsed.known_caller : undefined;
+  return typeof stamp === 'string' && Object.hasOwn(CALLER_ON_FILE_LINES, stamp) ? `${CALLER_ON_FILE_LINES[stamp]}\n` : '';
+}
+
+// What the auditor is shown for one call: the direction instruction, the
+// caller-on-file line and the first 5,000 characters of the transcript. One
+// builder, so the audit and any later second reading render exactly the
+// same text.
 const AUDIT_TRANSCRIPT_CHARS = 5000;
 function auditUserContent(call) {
-  return `${callDirectionBlock(call.direction)}\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
+  return `${callDirectionBlock(call.direction)}${callerOnFileBlock(call)}\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
 }
 
 // Identity of the COMPLETE input one audit ran on (system prompt + rendered
@@ -630,4 +647,4 @@ async function runSelfAudit(depsIn = {}) {
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails, AUDIT_PROMPT, AUDIT_PROMPT_V1, auditPromptFor, baselineFromV2, AUDIT_TRANSCRIPT_CHARS, auditUserContent, auditInputHash, productionAnswers };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails, AUDIT_PROMPT, AUDIT_PROMPT_V1, auditPromptFor, baselineFromV2, AUDIT_TRANSCRIPT_CHARS, auditUserContent, callerOnFileBlock, auditInputHash, productionAnswers };

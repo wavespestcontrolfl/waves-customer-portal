@@ -7,9 +7,10 @@ jest.mock('../models/db', () => jest.fn());
 
 const defaultDb = require('../models/db');
 const {
-  serviceLineFor, resolveLineTechnician, recordLinePickShadow, lineOfferRanking, pickLineTechnician, lineMapLive, liveServiceLine,
+  serviceLineFor, resolveLineTechnician, recordLinePickShadow, lineOfferRanking, pickLineTechnician, lineMapLive, liveServiceLine, _internals,
 } = require('../services/scheduling/line-technician');
 const pickTechnician = require('../services/scheduling/pick-technician');
+const territoryService = require('../services/territory');
 
 const OWNER = { id: 'tech-owner', name: 'Owner Tech', employment_status: 'active', field_dispatchable: true, work_days: null };
 const HIRE = { id: 'tech-hire', name: 'New Hire', employment_status: 'active', field_dispatchable: true, work_days: [1, 2, 3, 4] };
@@ -24,6 +25,7 @@ function fakeDb(state = {}) {
     technicians: state.techs || [OWNER, HIRE],
     technician_capabilities: state.caps || [],
     technician_absences: state.absences || [],
+    territory_zips: state.zips || [],
     scheduled_services: state.visits || [{ id: 'visit-1' }],
   };
   const inserts = [];
@@ -482,6 +484,86 @@ describe('recordLinePickShadow', () => {
     expect(db.inserts[0].row).toMatchObject({
       service_type: 'Lawn Fertilization', service_line: 'lawn', window_start: '13:00',
       actual_technician_id: OWNER.id, would_technician_id: OWNER.id, would_reason: 'home',
+    });
+  });
+});
+
+describe('a territory needs a cover (owner 2026-10-30; GATE_TERRITORY_ROUTING over the live map)', () => {
+  // The hire owns ZIP 34293; the owner is the cover when a card row names him.
+  const ZIPS = [{ zip: '34293', area: 'venice', technician_id: HIRE.id }];
+  const place = { zip: '34293' };
+  const cardRow = (line, home, gap) => ({ service_category: line, home_technician_id: home, gap_technician_id: gap });
+  beforeEach(() => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    process.env.GATE_TERRITORY_ROUTING = 'true';
+  });
+  afterEach(() => { delete process.env.GATE_TERRITORY_ROUTING; });
+
+  test('coverTechnicianId: the card technician who is not the territory technician (home first, else gap)', () => {
+    const { coverTechnicianId } = territoryService;
+    expect(coverTechnicianId({ homeId: OWNER.id, gapId: HIRE.id }, HIRE.id)).toBe(OWNER.id);
+    expect(coverTechnicianId({ homeId: HIRE.id, gapId: OWNER.id }, HIRE.id)).toBe(OWNER.id);
+    expect(coverTechnicianId({ homeId: HIRE.id, gapId: null }, HIRE.id)).toBeNull();
+    expect(coverTechnicianId({ homeId: HIRE.id, gapId: HIRE.id }, HIRE.id)).toBeNull();
+    expect(coverTechnicianId(null, HIRE.id)).toBeNull();
+    expect(coverTechnicianId({ homeId: OWNER.id, gapId: null }, null)).toBeNull();
+  });
+
+  test('withTerritory: no card row or a card naming only the territory technician -> the entry unchanged; a cover -> home T, gap cover', () => {
+    const { withTerritory } = _internals;
+    expect(withTerritory(null, 'general', HIRE.id)).toBeNull();
+    const onlyHire = { homeId: HIRE.id, gapId: null };
+    expect(withTerritory(onlyHire, 'termite', HIRE.id)).toBe(onlyHire);
+    expect(withTerritory({ homeId: OWNER.id, gapId: null }, 'general', HIRE.id)).toEqual({ homeId: HIRE.id, gapId: OWNER.id });
+  });
+
+  test('lineOfferRanking: an empty card and a territory technician is no rule (every technician\'s slots stay offered)', async () => {
+    expect(await lineOfferRanking(fakeDb({ lines: [], zips: ZIPS }), { lines: ['general'], place })).toBeNull();
+  });
+
+  test('lineOfferRanking: a cover on the card keeps the territory technician first and the cover second', async () => {
+    const ranking = await lineOfferRanking(fakeDb({ lines: [cardRow('general', OWNER.id, null)], zips: ZIPS }), { lines: ['general'], place });
+    expect(ranking.rankOf(HIRE.id)).toBe(0);
+    expect(ranking.rankOf(OWNER.id)).toBe(1);
+    expect(ranking.rankOf('tech-third')).toBeNull();
+  });
+
+  test('pickLineTechnician: the territory technician\'s day off goes to the cover, with no cover nothing is mapped', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    const ask = (db, date) => pickLineTechnician(db, { serviceType: 'General Pest Control', date, zip: '34293' });
+    const covered = fakeDb({ lines: [cardRow('general', OWNER.id, null)], zips: ZIPS });
+    expect(await ask(covered, MONDAY)).toEqual({ mapped: true, line: 'general', technicianId: HIRE.id, reason: 'home' });
+    expect(await ask(covered, FRIDAY)).toEqual({ mapped: true, line: 'general', technicianId: OWNER.id, reason: 'gap_off_day' });
+    expect(await ask(fakeDb({ lines: [], zips: ZIPS }), FRIDAY)).toMatchObject({ mapped: false, technicianId: null, reason: 'no_map' });
+  });
+
+  describe('lacksCoverLines (the write guards)', () => {
+    const ALL = ['general', 'mosquito', 'rodent', 'termite'];
+    const ownerOn = (...lines) => lines.map((line) => cardRow(line, OWNER.id, null));
+    const lacks = (state, rows) => territoryService.lacksCoverLines(fakeDb(state), HIRE.id, rows);
+
+    test('an empty card, or a card naming only the territory technician: every line lacks a cover', async () => {
+      expect(await lacks({ lines: [] })).toEqual(ALL);
+      expect(await lacks({ lines: ALL.map((line) => cardRow(line, HIRE.id, null)) })).toEqual(ALL);
+    });
+
+    test('the owner named on every territory line (home or gap) covers; lawn does not count', async () => {
+      expect(await lacks({ lines: [...ownerOn('general', 'mosquito'), cardRow('rodent', HIRE.id, OWNER.id), cardRow('termite', OWNER.id, HIRE.id)] })).toEqual([]);
+      expect(await lacks({ lines: [...ownerOn('general', 'mosquito', 'rodent'), cardRow('lawn', OWNER.id, null)] })).toEqual(['termite']);
+    });
+
+    test('rows passed in are the card as it will be saved, not the stored one', async () => {
+      expect(await lacks({ lines: ownerOn(...ALL) }, ALL.map((line) => cardRow(line, HIRE.id, null)))).toEqual(ALL);
+      expect(await lacks({ lines: [] }, ownerOn(...ALL))).toEqual([]);
+    });
+
+    test('a cover who is not assignable, or switched Off for the line, does not count', async () => {
+      expect(await lacks({ lines: ownerOn(...ALL), techs: [{ ...OWNER, employment_status: 'inactive' }, HIRE] })).toEqual(ALL);
+      expect(await lacks({ lines: ownerOn(...ALL), techs: [{ ...OWNER, field_dispatchable: false }, HIRE] })).toEqual(ALL);
+      const off = [{ technician_id: OWNER.id, service_category: 'termite', capability_level: 'qualified', active: false }];
+      expect(await lacks({ lines: ownerOn(...ALL), caps: off })).toEqual(['termite']);
+      const review = [{ technician_id: OWNER.id, service_category: 'termite', capability_level: 'review_required', active: true }];
+      expect(await lacks({ lines: ownerOn(...ALL), caps: review })).toEqual([]);
     });
   });
 });
