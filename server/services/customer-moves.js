@@ -489,6 +489,12 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = 
     // Moving PR 2b: the pause already stopped the old-house visits after the
     // old move-out date. A new date leaves those visits to the office to
     // check, and the job never ends this move on the old date's deadline.
+    // The app-made new-home estimate (GATE_MOVING_AUTO_ESTIMATE) tries the
+    // address on file once: an attempt for another address, finished or still
+    // running, is cleared, so the new address gets its own. A running attempt
+    // then finds its claim gone and ends without marking the move.
+    const autoEstimateReset = !!(locked.auto_estimate_state || locked.auto_estimate_at)
+      && (addressLine(parseJson(locked.normalized_address)) || '') !== (addressLine(address.normalized) || '');
     const oldMoveOut = dateOnlyString(locked.move_out_date) || null;
     const pauseNote = locked.pause_state === 'paused' && oldMoveOut !== moveOut
       ? `The customer changed the move-out date to ${prettyDate(moveOut) || 'not known yet'} after the pause stopped the old-house visits after ${prettyDate(oldMoveOut)}. Check those visits against the new date.`
@@ -512,6 +518,7 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = 
       submitted_at: now,
       updated_at: now,
       ...(pauseNote ? { pause_state: 'office', pause_note: pauseNote.slice(0, 300) } : {}),
+      ...(autoEstimateReset ? { auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null } : {}),
     }).returning('*');
     await trx('activity_log').insert({
       customer_id: locked.customer_id,
@@ -2357,5 +2364,5 @@ module.exports = {
   autoApplyAcceptedMoves,
   runMovePauseJob,
   PAUSE_DAYS,
-  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse, pauseLane },
+  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse, pauseLane, addressLine },
 };
