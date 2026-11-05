@@ -71,8 +71,9 @@ const isUnderway = (visit) => ACTIVE_STATUSES.includes(visit.status) || ACTIVE_T
 
 /**
  * Technicians (non-admin, active) whose visit today with this customer is en
- * route, on site, or their next open stop. Returns [{ id, name }], one per
- * technician.
+ * route, on site, or their next open stop. Returns [{ id, name, visitId }], one
+ * per technician; visitId is the visit that qualified (the card's Reply texts
+ * through it).
  */
 async function visitTechniciansFor(customerId, { conn = db, today = etDateString() } = {}) {
   const visits = await liveStops(conn('scheduled_services'), conn)
@@ -92,8 +93,8 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
   const out = [];
   for (const tech of techs) {
     const own = visits.filter((v) => String(v.technician_id) === String(tech.id));
-    let relay = own.some(isUnderway);
-    if (!relay) {
+    let visitId = own.find(isUnderway)?.id || null;
+    if (!visitId) {
       const next = await liveStops(conn('scheduled_services'), conn)
         .where({ technician_id: tech.id, scheduled_date: today })
         .whereNotIn('status', ACTIVE_STATUSES)
@@ -108,9 +109,9 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
           .where((q) => q.whereIn('sib.status', ACTIVE_STATUSES).orWhereIn('sib.track_state', ACTIVE_TRACK_STATES)))
         .orderByRaw(DAY_PLAN_ORDER)
         .first('id');
-      relay = !!next && own.some((v) => String(v.id) === String(next.id));
+      if (next && own.some((v) => String(v.id) === String(next.id))) visitId = next.id;
     }
-    if (relay) out.push(tech);
+    if (visitId) out.push({ ...tech, visitId });
   }
   return out;
 }
@@ -133,7 +134,7 @@ async function customerForPhone(conn, phone) {
     .whereNull('deleted_at')
     .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
     .limit(2)
-    .select('id', 'first_name', 'last_name');
+    .select('id', 'first_name', 'last_name', 'phone');
   return rows.length === 1 ? rows[0] : null;
 }
 
@@ -142,7 +143,10 @@ async function relayCustomerTextToVisitTech({ from, body, mediaCount = 0, conn =
   if (!customer?.id) return 0;
   const techs = await visitTechniciansFor(customer.id, { conn });
   if (!techs.length) return 0;
-  const { TEXT_CARD_TYPE } = require('./tech-line');
+  const { TEXT_CARD_TYPE, phoneOnFileTexted } = require('./tech-line');
+  // A Reply texts the phone on file (tech-line.js replyVisitFor), so a text
+  // from a service-contact or second phone gets no Reply.
+  const repliesToSender = phoneOnFileTexted(customer, from);
   const senderName = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'Your customer';
   const text = String(body || '').trim();
   const mediaText = mediaCount > 0 ? `${mediaCount} photo${mediaCount === 1 ? '' : 's'}` : '';
@@ -161,6 +165,7 @@ async function relayCustomerTextToVisitTech({ from, body, mediaCount = 0, conn =
           customer_name: senderName,
           body: text.slice(0, CARD_BODY_CHARS),
           media_count: mediaCount,
+          reply_visit_id: repliesToSender ? tech.visitId : null,
         }),
       });
     } catch (err) {
