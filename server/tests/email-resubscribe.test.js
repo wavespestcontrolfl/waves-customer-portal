@@ -280,21 +280,27 @@ describe('clearSendgridBeforeRelease', () => {
   });
 });
 
-describe('requestResubscribeEmail: the send claim is durable', () => {
+describe('requestResubscribeEmail: the send claim is durable, the handoff re-checks hard blocks', () => {
   const { requestResubscribeEmail } = require('../services/email-resubscribe');
   const { sendResubscribeConfirmation } = require('../services/email-resubscribe-confirm');
+  const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 
-  // Records ordering: the claim insert, the transaction end, the send, the settle update.
+  // Records ordering across the two transactions. `state.hardBlock` = a do_not_email row exists
+  // (the test flips it at the moment it wants the block to "appear").
   function claimDbh() {
     const events = [];
     const writes = [];
-    const table = (name) => {
+    const state = { hardBlock: false, claimed: false };
+    const makeTable = (name) => {
       const b = new Proxy({}, {
         get: (_t, method) => {
           if (method === 'then') return (resolve) => Promise.resolve(name === 'email_suppressions' ? [{ id: 'sup-1' }] : []).then(resolve);
           return (...args) => {
-            if (method === 'first') return Promise.resolve(undefined);
-            if (method === 'insert') { events.push('claim-insert'); writes.push({ insert: args[0] }); return { returning: async () => [{ id: 'req-1' }] }; }
+            if (method === 'first') {
+              if (name === 'email_suppressions') return Promise.resolve(state.hardBlock ? { id: 'block-1' } : undefined);
+              return Promise.resolve(state.claimed ? { id: 'req-1', sent_at: NOW, used_at: null } : undefined);
+            }
+            if (method === 'insert') { events.push('claim-insert'); state.claimed = true; writes.push({ insert: args[0] }); return { returning: async () => [{ id: 'req-1' }] }; }
             if (method === 'update') { events.push('settle'); writes.push({ update: args[0] }); return Promise.resolve(1); }
             return b;
           };
@@ -302,31 +308,62 @@ describe('requestResubscribeEmail: the send claim is durable', () => {
       });
       return b;
     };
-    const dbh = jest.fn((name) => table(name));
+    const dbh = jest.fn((name) => makeTable(name));
     dbh.raw = (sql) => ({ sql });
+    let n = 0;
     dbh.transaction = async (fn) => {
-      const trx = jest.fn((name) => table(name));
+      n += 1;
+      const label = `tx${n}`;
+      const trx = jest.fn((name) => makeTable(name));
       trx.raw = dbh.raw;
+      trx.label = label;
+      events.push(`${label}-start`);
       const out = await fn(trx);
-      events.push('tx-end');
+      events.push(`${label}-end`);
       return out;
     };
-    return { dbh, events, writes };
+    return { dbh, events, writes, state };
   }
   const NOW = new Date('2026-11-04T15:00:00.000Z');
   const ask = (dbh) => requestResubscribeEmail({ customerId: 'c-1', email: 'Pat@Example.com', firstName: 'Pat' }, { dbh, now: NOW });
 
-  beforeEach(() => { sendResubscribeConfirmation.mockReset(); });
+  beforeEach(() => { sendResubscribeConfirmation.mockReset(); lockCustomerEmail.mockClear(); logger.warn.mockClear(); });
 
-  test('the claim (sent_at = now, send_claimed) is inserted and the transaction ends BEFORE the send starts', async () => {
+  test('tx1 inserts the claim (sent_at = now, send_claimed) and COMMITS before tx2 locks the address and sends; the sender gets tx2 and a boundary check', async () => {
     const { dbh, events, writes } = claimDbh();
-    sendResubscribeConfirmation.mockImplementation(async () => { events.push('send'); return {}; });
+    lockCustomerEmail.mockImplementation(async (trx) => { events.push(`lock-${trx.label}`); });
+    sendResubscribeConfirmation.mockImplementation(async (args) => { events.push('send'); expect(args.database.label).toBe('tx2'); expect(typeof args.providerBoundaryCheck).toBe('function'); return {}; });
     const out = await ask(dbh);
-    expect(events).toEqual(['claim-insert', 'tx-end', 'send', 'settle']);
+    expect(events).toEqual(['tx1-start', 'lock-tx1', 'claim-insert', 'tx1-end', 'tx2-start', 'lock-tx2', 'send', 'settle', 'tx2-end']);
     expect(writes[0].insert).toMatchObject({ email: 'pat@example.com', sent_at: NOW, outcome: JSON.stringify({ send_claimed: true }) });
     expect(writes[1].update).toMatchObject({ outcome: JSON.stringify({ sent: true }) });
     expect(out).toEqual({ state: 'sent', maskedEmail: 'p***@example.com', sentAt: NOW.toISOString() });
-    expect(sendResubscribeConfirmation.mock.calls[0][0].database).toBeUndefined();
+    lockCustomerEmail.mockImplementation(() => Promise.resolve());
+  });
+
+  test('a do_not_email that appears after the claim commits but before the send: no send, claim undone, not_paused', async () => {
+    const { dbh, writes, state } = claimDbh();
+    // The block lands between tx1 and tx2: the first lock call of tx2 is when it becomes visible.
+    let locks = 0;
+    lockCustomerEmail.mockImplementation(async () => { locks += 1; if (locks === 2) state.hardBlock = true; });
+    expect(await ask(dbh)).toEqual({ state: 'not_paused' });
+    expect(sendResubscribeConfirmation).not.toHaveBeenCalled();
+    expect(writes[1].update).toMatchObject({ sent_at: null, outcome: JSON.stringify({ send_refused: 'hard_block' }) });
+    lockCustomerEmail.mockImplementation(() => Promise.resolve());
+  });
+
+  test('a hard block that appears inside providerBoundaryCheck refuses the send (tagged providerBoundaryBlocked): claim undone, not_paused', async () => {
+    const { dbh, writes, state } = claimDbh();
+    sendResubscribeConfirmation.mockImplementation(async ({ providerBoundaryCheck }) => {
+      expect(await providerBoundaryCheck()).toEqual({ ok: true });
+      state.hardBlock = true; // lands right before the fetch
+      await providerBoundaryCheck();
+      throw new Error('fetch must not be reached');
+    });
+    expect(await ask(dbh)).toEqual({ state: 'not_paused' });
+    expect(writes[1].update).toMatchObject({ sent_at: null, outcome: JSON.stringify({ send_refused: 'hard_block' }) });
+    // The refusal is a definite no-send, not a logged send failure.
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('outcome uncertain');
   });
 
   test('HTTP 4xx rejection: sent_at is cleared and the word recorded; the answer is failed', async () => {

@@ -52,7 +52,8 @@ function buildConfirmationEmail({ token, firstName = '' }) {
 }
 
 // Throws on a send failure (the caller records the error code and answers `failed`).
-async function sendResubscribeConfirmation({ to, token, firstName, database }) {
+// `providerBoundaryCheck` runs inside sendOne right before the request (it throws to refuse).
+async function sendResubscribeConfirmation({ to, token, firstName, database, providerBoundaryCheck }) {
   const { subject, html, text } = buildConfirmationEmail({ token, firstName });
   return sendgrid.sendOne({
     to,
@@ -66,6 +67,7 @@ async function sendResubscribeConfirmation({ to, token, firstName, database }) {
     suppressErrorLog: true,
     timeoutMs: SEND_TIMEOUT_MS,
     database,
+    ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
   });
 }
 

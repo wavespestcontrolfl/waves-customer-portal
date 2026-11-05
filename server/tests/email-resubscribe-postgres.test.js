@@ -266,17 +266,24 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
       });
     });
 
-    test('the claim is committed before the send starts, and neither a transaction nor the address lock is held during it; two racing taps send once', async () => {
+    const cleanup = async (email) => {
+      await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]).del();
+      await db('email_suppressions').whereRaw('lower(email) = ?', [email]).del();
+    };
+
+    test('the claim is committed before the send starts; the send runs in its own transaction holding the address lock; two racing taps send once', async () => {
       const email = `${uniq()}@example.com`;
       try {
         await sup(db, { email });
         const seen = [];
-        sender.sendResubscribeConfirmation.mockImplementation(async () => {
-          // From ANOTHER connection: the claim row is already readable, and the address lock is free.
+        sender.sendResubscribeConfirmation.mockImplementation(async (args) => {
+          // From ANOTHER connection: the claim row is already committed and readable, and the
+          // address lock is held by the send's transaction (a suppression writer would wait).
           const [row] = await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]);
           const lockFree = await db.transaction(async (other) => (
-            (await other.raw("SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS ok", [`customer-email:${email}`])).rows[0].ok));
-          seen.push({ sentAt: !!row?.sent_at, outcome: row?.outcome, lockFree });
+            (await other.raw('SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS ok', [`customer-email:${email}`])).rows[0].ok));
+          seen.push({ sentAt: !!row?.sent_at, outcome: row?.outcome, lockFree, hasBoundaryCheck: typeof args.providerBoundaryCheck === 'function' });
+          await args.providerBoundaryCheck();
           await new Promise((resolve) => { setTimeout(resolve, 100); });
           return { messageId: 'm1' };
         });
@@ -285,15 +292,51 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
           service.requestResubscribeEmail({ customerId: null, email, firstName: 'Pat' }, { dbh: db }),
         ]);
         expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(1);
-        expect(seen).toEqual([{ sentAt: true, outcome: { send_claimed: true }, lockFree: true }]);
+        expect(seen).toEqual([{ sentAt: true, outcome: { send_claimed: true }, lockFree: false, hasBoundaryCheck: true }]);
         expect([one.state, two.state]).toEqual(['sent', 'sent']);
         const rows = await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]);
         expect(rows).toHaveLength(1);
         expect(rows[0].outcome).toEqual({ sent: true });
-      } finally {
-        await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]).del();
-        await db('email_suppressions').whereRaw('lower(email) = ?', [email]).del();
-      }
+      } finally { await cleanup(email); }
+    });
+
+    // Lands a do_not_email (a staff suppression) at a chosen moment, from another connection.
+    const staffBlock = (email) => sup(db, { email, suppression_type: 'do_not_email', source: 'admin_manual', metadata: JSON.stringify({ created_by: 'tech-1' }) });
+
+    test('a do_not_email added after the claim commits but before the send: no send, claim undone, not_paused', async () => {
+      const email = `${uniq()}@example.com`;
+      try {
+        await sup(db, { email });
+        let commits = 0;
+        const dbh = Object.assign((table) => db(table), {
+          raw: db.raw.bind(db),
+          transaction: async (fn) => { const out = await db.transaction(fn); commits += 1; if (commits === 1) await staffBlock(email); return out; },
+        });
+        expect(await service.requestResubscribeEmail({ customerId: null, email }, { dbh })).toEqual({ state: 'not_paused' });
+        expect(sender.sendResubscribeConfirmation).not.toHaveBeenCalled();
+        const [row] = await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]);
+        expect(row.sent_at).toBeNull();
+        expect(row.outcome).toEqual({ send_refused: 'hard_block' });
+      } finally { await cleanup(email); }
+    });
+
+    test('a do_not_email that lands inside providerBoundaryCheck, right before the fetch, refuses the send: no fetch, claim undone, not_paused', async () => {
+      const email = `${uniq()}@example.com`;
+      const fetchSpy = jest.fn();
+      try {
+        await sup(db, { email });
+        sender.sendResubscribeConfirmation.mockImplementation(async ({ providerBoundaryCheck }) => {
+          await providerBoundaryCheck(); // clean
+          await staffBlock(email); // staff block commits on another connection
+          await providerBoundaryCheck(); // must throw before the request
+          fetchSpy();
+        });
+        expect(await service.requestResubscribeEmail({ customerId: null, email }, { dbh: db })).toEqual({ state: 'not_paused' });
+        expect(fetchSpy).not.toHaveBeenCalled();
+        const [row] = await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]);
+        expect(row.sent_at).toBeNull();
+        expect(row.outcome).toEqual({ send_refused: 'hard_block' });
+      } finally { await cleanup(email); }
     });
 
     test('a definite rejection on committed rows clears sent_at so the next tap can send', async () => {
@@ -304,10 +347,7 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
         expect(await service.requestResubscribeEmail({ customerId: null, email }, { dbh: db })).toEqual({ state: 'failed' });
         expect(await service.requestResubscribeEmail({ customerId: null, email }, { dbh: db })).toMatchObject({ state: 'sent' });
         expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(2);
-      } finally {
-        await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]).del();
-        await db('email_suppressions').whereRaw('lower(email) = ?', [email]).del();
-      }
+      } finally { await cleanup(email); }
     });
 
     test('resubscribeStatus: paused, then sent', async () => {

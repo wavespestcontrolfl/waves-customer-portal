@@ -73,6 +73,19 @@ describe('resubscribe confirmation email', () => {
     await expect(sendResubscribeConfirmation({ to: 'pat@example.com', token: TOKEN, firstName: 'Pat' })).rejects.toMatchObject({ status: 400 });
   });
 
+  test('a providerBoundaryCheck that refuses stops the send before any request', async () => {
+    const { sendResubscribeConfirmation } = require('../services/email-resubscribe-confirm');
+    const refusal = Object.assign(new Error('blocked'), { providerBoundaryBlocked: true });
+    await expect(sendResubscribeConfirmation({
+      to: 'pat@example.com', token: TOKEN, firstName: 'Pat', providerBoundaryCheck: async () => { throw refusal; },
+    })).rejects.toBe(refusal);
+    expect(global.fetch).not.toHaveBeenCalled();
+    const ok = jest.fn(async () => ({ ok: true }));
+    await sendResubscribeConfirmation({ to: 'pat@example.com', token: TOKEN, firstName: 'Pat', providerBoundaryCheck: ok });
+    expect(ok).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('an ordinary sendOne does not carry the bypass setting', async () => {
     const sendgrid = require('../services/sendgrid-mail');
     await sendgrid.sendOne({ to: 'pat@example.com', fromEmail: 'contact@example.test', subject: 'Hi', text: 'Hi', suppressErrorLog: true });

@@ -167,21 +167,39 @@ function sendDefinitelyFailed(err) {
   return require('./sendgrid-mail').isDefiniteRejection(err);
 }
 
+// A local hard block (bounce / spam complaint / do-not-email) is NOT enforced by SendGrid and
+// sendOne does not read local suppressions, so the handoff re-checks it (same recipe as
+// billing-channel-email-authority.js: a refusal tagged providerBoundaryBlocked).
+function hardBlockRefusal() {
+  const refusal = new Error('address has a hard block');
+  refusal.code = 'hard_block';
+  refusal.providerBoundaryBlocked = true;
+  return refusal;
+}
+
 // POST /api/notifications/email-resubscribe, after the route checked the gate and the session.
 // Transaction 1, under the per-address lock: nothing releasable or a hard block = send nothing; an
 // email sent in the last 24 h = send nothing, answer 'sent' while its link still works, else
-// 'wait'; else insert the request WITH sent_at = now (the durable send claim) and COMMIT. The lock
-// and the transaction end before any network call, so two taps cannot both send (the second sees
-// the committed claim) and a slow SendGrid holds nothing. Then send:
+// 'wait'; else insert the request WITH sent_at = now (the durable send claim) and COMMIT, before
+// any network call. Transaction 2 does the send: it takes the address lock again (the key every
+// suppression writer takes), re-checks that the claim still stands and that no hard block has
+// appeared since tx1 (a staff do_not_email added between the two would otherwise still be mailed),
+// and calls the sender inside it with a providerBoundaryCheck that re-checks the hard blocks on
+// that same transaction right before the fetch. The lock is held through the HTTP call, which is
+// bounded to ~10 s. Outcomes:
+//   - a hard block appeared (either check): nothing is sent, the claim is undone (sent_at null,
+//     outcome { send_refused }), and the answer is 'not_paused';
 //   - accepted: leave the claim as is;
-//   - a definite rejection: undo the claim (sent_at null, outcome { send_failed }) and answer
-//     'failed', so a retry can send;
+//   - a definite rejection: undo the claim (sent_at null, outcome { send_failed }), 'failed', so a
+//     retry can send;
 //   - anything uncertain (timeout, reset, 5xx, no status): the email may have been delivered, so
 //     the claim stays (the 24 h cap holds and the link works), outcome { send_uncertain }, and the
 //     answer is 'sent'.
 // Returns { state: 'not_paused' | 'sent' | 'wait' | 'failed', maskedEmail?, sentAt?, nextAt? }.
-// Lock order is address key first, then a NEW request row (nobody else can hold that row), so
-// it never inverts completeResubscribe's request row -> address key order.
+// Lock order: tx1 takes the address key then inserts a NEW request row; tx2 (a separate
+// transaction, after tx1 committed) takes only the address key and then updates that already
+// committed row. Neither takes a request row lock before the address key, so neither inverts
+// completeResubscribe's request row -> address key order.
 async function requestResubscribeEmail({ customerId, email, firstName = '' }, { dbh = db, now = new Date() } = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized) return { state: 'not_paused' };
@@ -206,11 +224,30 @@ async function requestResubscribeEmail({ customerId, email, firstName = '' }, { 
     return { requestId: request.id, maskedEmail };
   });
   if (claim.answer) return claim.answer;
+  return dbh.transaction((trx) => sendClaimedConfirmation(trx, { claim, normalized, token, firstName, now }));
+}
 
-  const settle = (patch) => dbh('email_resubscribe_requests').where({ id: claim.requestId }).update({ ...patch, updated_at: new Date() });
+// Transaction 2 of requestResubscribeEmail.
+async function sendClaimedConfirmation(trx, { claim, normalized, token, firstName, now }) {
+  await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalized);
+  const settle = (patch) => trx('email_resubscribe_requests').where({ id: claim.requestId }).update({ ...patch, updated_at: new Date() });
+  const refuse = async () => {
+    await settle({ sent_at: null, outcome: JSON.stringify({ send_refused: 'hard_block' }) });
+    return { state: 'not_paused' };
+  };
+  const stillClaimed = await trx('email_resubscribe_requests').where({ id: claim.requestId }).first();
+  if (!stillClaimed || !stillClaimed.sent_at || stillClaimed.used_at) return { state: 'not_paused' };
+  if (await hasHardBlock(normalized, { dbh: trx })) return refuse();
   try {
-    await require('./email-resubscribe-confirm').sendResubscribeConfirmation({ to: normalized, token, firstName });
+    await require('./email-resubscribe-confirm').sendResubscribeConfirmation({
+      to: normalized, token, firstName, database: trx,
+      providerBoundaryCheck: async () => {
+        if (await hasHardBlock(normalized, { dbh: trx })) throw hardBlockRefusal();
+        return { ok: true };
+      },
+    });
   } catch (err) {
+    if (err?.providerBoundaryBlocked) return refuse();
     const code = Number.isFinite(Number(err?.status)) ? `http_${Number(err.status)}` : errorWord(err);
     if (sendDefinitelyFailed(err)) {
       logger.warn(`[email-resubscribe] confirmation email rejected (${code})`);
