@@ -166,6 +166,17 @@ describe('PortalMessages read marker', () => {
     }
   });
 
+  it('reports a read that finishes after the customer left Messages', async () => {
+    let finish;
+    api.markPortalMessagesRead.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const onUnread = vi.fn();
+    const { unmount } = render(<PortalMessages onUnread={onUnread} />);
+    await waitFor(() => expect(api.markPortalMessagesRead).toHaveBeenCalledWith('m2'));
+    unmount();
+    await act(async () => { finish({ unread: 0 }); });
+    expect(onUnread).toHaveBeenCalledWith(0);
+  });
+
   it('waits while the page is hidden and marks when it comes back', async () => {
     setVisibility('hidden');
     render(<PortalMessages />);
@@ -324,6 +335,17 @@ describe('usePortalMessagesGate', () => {
     // The first probe answers late with the count from before the read.
     await act(async () => { answer({ count: 3 }); });
     expect(result.current.unread).toBe(0);
+  });
+
+  it('drops a read result from an earlier session', async () => {
+    api.getPortalMessagesUnread.mockResolvedValue({ count: 2 });
+    const { result, rerender } = renderHook(({ key }) => usePortalMessagesGate(true, key), { initialProps: { key: 'a' } });
+    const earlier = result.current.setUnread;
+    rerender({ key: 'b' });
+    act(() => { result.current.probe('dashboard'); });
+    await waitFor(() => expect(result.current.unread).toBe(2));
+    act(() => { earlier(0); });
+    expect(result.current.unread).toBe(2);
   });
 
   it('does not put a count back while the customer is on the Messages tab', async () => {

@@ -163,7 +163,9 @@ function useMarkRead(messages, ready, onUnread) {
       .then((res) => {
         marked = true;
         markedRef.current = want;
-        if (liveRef.current && Number.isFinite(res?.unread)) onUnreadRef.current?.(res.unread);
+        // Reported even when the page closed meanwhile: the badges live in the page shell, which drops a
+        // result from another session.
+        if (Number.isFinite(res?.unread)) onUnreadRef.current?.(res.unread);
       })
       .catch(() => {})
       .finally(() => {
@@ -229,6 +231,8 @@ export function usePortalMessagesGate(ask, sessionKey) {
   // Bumped by every probe and by every read the page reports: a probe answer
   // keeps its count only when nothing newer came after it asked.
   const seqRef = useRef(0);
+  const sessionRef = useRef(sessionKey);
+  sessionRef.current = sessionKey;
 
   const probe = useCallback((tab) => {
     if (tab !== undefined) tabRef.current = tab;
@@ -257,10 +261,12 @@ export function usePortalMessagesGate(ask, sessionKey) {
     return () => { genRef.current += 1; clearInterval(timer); };
   }, [ask, sessionKey, probe]);
 
+  // Bound to its session: a read result that lands after a session change is dropped.
   const setUnread = useCallback((n) => {
+    if (sessionKey !== sessionRef.current) return;
     seqRef.current += 1;
     setGate((prev) => ({ ...prev, unread: n }));
-  }, []);
+  }, [sessionKey]);
   return { enabled: gate.status === 'on', off: gate.status === 'off', unread: gate.unread, setUnread, probe };
 }
 
