@@ -140,8 +140,12 @@ describe('the scope the read and the write share', () => {
   });
 
   test('the money categories are bound from the one exported list', () => {
-    expect(fallOff.KEEP_UNTIL_SETTLED_CATEGORIES).toEqual(['billing', 'payment']);
-    expect(compiled().bindings).toContainEqual(['billing', 'payment']);
+    // Owner ruling 2026-11-05 "A": money alerts stay until settled. billing and payment are the money owed
+    // (payment_failed and bill_payment_error both write 'payment'); dispute, refund, payout and payroll are
+    // money at risk; tax is money owed; llm_cost is spend.
+    const kept = ['billing', 'payment', 'dispute', 'refund', 'tax', 'payout', 'payroll', 'llm_cost'];
+    expect(fallOff.KEEP_UNTIL_SETTLED_CATEGORIES).toEqual(kept);
+    expect(compiled().bindings).toContainEqual(kept);
   });
 
   test('a row stays open only when its FIRST registry match is periodic: the SQL is built from the ordered registry', () => {

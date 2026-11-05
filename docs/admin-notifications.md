@@ -326,8 +326,11 @@ customer's message by this rule.
    `GATE_ALERT_QUIET_FALL_OFF`, `server/services/admin-alert-quiet-fall-off.js`, every 10 minutes): an open bell row
    with no new activity for 72 hours is marked done (`done_by` `quiet-72h`, resolution "No new activity for 3 days"),
    never deleted. Last activity is the latest of `created_at`, `metadata.rungAt`, `observedAt`, `lastFailureAt` and
-   `quietHoldFrom`; a quiet refresh is not news. These stay: `billing` and `payment` alerts (`KEEP_UNTIL_SETTLED_CATEGORIES`
-   in the module, one line to change), Activity-only rows, Claude-queue rows, and the rows of an emitter that raises
+   `quietHoldFrom`; a quiet refresh is not news. These stay (owner ruling 2026-11-05, "A": money alerts stay until settled): the
+   `billing`, `payment`, `dispute`, `refund`, `tax`, `payout`, `payroll` and `llm_cost` categories
+   (`KEEP_UNTIL_SETTLED_CATEGORIES` in the module, one line each; `payment_failed` and `bill_payment_error` both write
+   `payment`). A person marks them done; a dispute alert stays until then, which covers "until the dispute closes".
+   Also kept: Activity-only rows, Claude-queue rows, and the rows of an emitter that raises
    a fresh row by itself while its condition holds (the `periodic` entries of `RERING` in the retention module).
    Recently done offers Reopen for a `quiet-72h` row; the Reopen stamps `metadata.quietHoldFrom`, so the row gets 72
    more hours. A new emission with changed content rings a fallen-off alert back, as after a person's Done, and a

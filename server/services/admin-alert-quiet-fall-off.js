@@ -15,8 +15,8 @@
  *     observedAt (an ops-crons digest repeat), lastFailureAt (the model-failure bell), and quietHoldFrom
  *     (a Reopen, below). A QUIET refresh stamps nothing, so it is not news and does not keep a row. A stamp that
  *     does not look like a timestamp, or lies more than a day ahead, is ignored.
- *   - KEEP_UNTIL_SETTLED_CATEGORIES stay: money alerts wait for the money to settle (owner is deciding this;
- *     emptying the list is the only change needed).
+ *   - KEEP_UNTIL_SETTLED_CATEGORIES stay: money alerts wait for the money to settle (owner ruling 2026-11-05, "A");
+ *     a person marks them done.
  *   - Claude's queue is never touched (metadata.claudeQueue / sentToClaude): a Mac launcher opens a terminal
  *     tab per row and that tab closes it. The bell filter already excludes those rows; this guards it twice.
  *   - A row an emitter re-raises by itself while its condition holds is left open: a dedupeOpenOnly emitter whose
@@ -64,8 +64,19 @@ const LOCK_TIMEOUT_MS = 2000;
 const STATEMENT_TIMEOUT_MS = 20000;
 const FUTURE_SLACK_MS = 24 * HOUR_MS;
 const RESOLUTION = 'No new activity for 3 days';
-// Money alerts stay until the money settles. One line to change.
-const KEEP_UNTIL_SETTLED_CATEGORIES = ['billing', 'payment'];
+// Money alerts stay until a person marks them done (owner ruling 2026-11-05, "A": money alerts stay until
+// settled). Nothing here closes them on a settlement event: a dispute alert stays until a person marks it done, which
+// covers "until the dispute closes". One entry per line, so a category leaves the list with a one-line change.
+const KEEP_UNTIL_SETTLED_CATEGORIES = [
+  'billing', // money owed: invoice and billing alerts
+  'payment', // money owed: failed payments (payment_failed) and bill payment errors (bill_payment_error)
+  'dispute', // money at risk: a chargeback with an evidence deadline that Stripe's handler states in the alert
+  'refund', // money at risk: refunds on combined charges that need a manual reconcile (stripe-webhook.js)
+  'tax', // money owed: tax deadlines and filings
+  'payout', // money at risk: a Stripe payout that failed or was held
+  'payroll', // money at risk: a failed Mercury paycheck (payroll-mercury-alerts.js)
+  'llm_cost', // spend: an AI spend spike must reach the owner
+];
 const TIMESTAMP_RE = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$';
 
 const notificationPrivate = () => require('./notification-service')._private;

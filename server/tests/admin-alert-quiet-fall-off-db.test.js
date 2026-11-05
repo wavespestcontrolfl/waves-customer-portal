@@ -108,6 +108,16 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     for (const r of [activity, queued, sentOnly]) expect((await get(r.id)).done_at).toBeNull();
   });
 
+  test('every money category stays open after 4 quiet days while a system row closes in the same pass', async () => {
+    const kept = {};
+    for (const category of fallOff.KEEP_UNTIL_SETTLED_CATEGORIES) kept[category] = await bell({ category });
+    const system = await bell({ category: 'system' });
+    expect(Object.keys(kept)).toEqual(['billing', 'payment', 'dispute', 'refund', 'tax', 'payout', 'payroll', 'llm_cost']);
+    expect((await run('true')).closed).toBe(1);
+    for (const [category, row] of Object.entries(kept)) expect([category, (await get(row.id)).done_at]).toEqual([category, null]);
+    expect((await get(system.id)).done_by).toBe('quiet-72h');
+  });
+
   test('billing and payment alerts stay until settled; another category falls', async () => {
     const billing = await bell({ category: 'billing' });
     const payment = await bell({ category: 'payment' });
