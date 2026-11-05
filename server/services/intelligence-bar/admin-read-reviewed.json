@@ -1096,7 +1096,7 @@
     },
     {
       "endpoint": "/admin/invoices",
-      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly. Re-reviewed 2026-10-29 (#6976 Undo): the response adds undoPaymentEnabled, one boolean read from GATE_UNDO_MANUAL_PAYMENT (undoManualPaymentLive); no new table, row field or write, and the keep list leaves it out. Re-reviewed 2026-10-29 (partial payments): the handler also sends the partialPaymentsEnabled flag; rows now carry amount_paid (money received on a still-open invoice), kept beside credit_applied; signals and unresolved unchanged. Re-reviewed 2026-10-30 (billing audit finding 7): the list date filter and ordering read an undated invoice on the Eastern day it was created ((created_at AT TIME ZONE 'America/New_York')::date instead of created_at::date); same rows and columns, no new table, field or write; signals and unresolved unchanged. Re-reviewed 2026-10-31 (after-visit prepay not overdue): status=overdue also leaves out the annual prepays whose charge waits for the first visit (invoices.id NOT IN AWAITING_FIRST_VISIT_INVOICE_IDS_SQL from paf-prepay-release.js: a read of annual_prepay_terms and each term's estimate_data prepayAutoChargeJob); a filter only, same rows and columns, no new field or write; signals and unresolved unchanged.",
+      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly. Re-reviewed 2026-10-29 (#6976 Undo): the response adds undoPaymentEnabled, one boolean read from GATE_UNDO_MANUAL_PAYMENT (undoManualPaymentLive); no new table, row field or write, and the keep list leaves it out. Re-reviewed 2026-10-29 (partial payments): the handler also sends the partialPaymentsEnabled flag; rows now carry amount_paid (money received on a still-open invoice), kept beside credit_applied; signals and unresolved unchanged. Re-reviewed 2026-10-30 (billing audit finding 7): the list date filter and ordering read an undated invoice on the Eastern day it was created ((created_at AT TIME ZONE 'America/New_York')::date instead of created_at::date); same rows and columns, no new table, field or write; signals and unresolved unchanged. Re-reviewed 2026-10-31 (after-visit prepay not overdue): status=overdue also leaves out the annual prepays whose charge waits for the first visit (invoices.id NOT IN AWAITING_FIRST_VISIT_INVOICE_IDS_SQL from paf-prepay-release.js: a read of annual_prepay_terms and each term's estimate_data prepayAutoChargeJob); a filter only, same rows and columns, no new field or write; signals and unresolved unchanged. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller.",
       "scope": "customer",
       "scopeParam": "customer_id",
       "query": [
@@ -1198,11 +1198,11 @@
         "services/invoice.js#database.transaction",
         "services/invoice.js#read"
       ],
-      "hash": "6c40d705d84f27cfa1c0f3f04cecda41"
+      "hash": "29649eb1f1dc8d3744c27c0abc889192"
     },
     {
       "endpoint": "/admin/invoices/:id",
-      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read 2026-10-24 (PR #6656, multi-property invoices): the handler now drops property_id and property_address from line_items for a TECHNICIAN request (isTechnicianRequest; the bar runs as admin, so its read is unchanged), and line items may carry property_id / property_address, which this row's keep list does not include. Re-read 2026-10-29 (PR #7008, lawn rounds prepay): loadInvoiceAnnualPrepay now resolves a lawn_rounds_9 term's round anchor for the coverage visit dates (roundAnchorForDisplay -> annual-prepay-renewals coverageRowsForTerm and seriesRoundAnchorForTerm, inside the same read-only optionalRead savepoint): SELECTs on scheduled_services and annual_prepay_terms only, no writes, no outside calls; other cadences make no extra read. The response keys and the keep list are unchanged; only coverageVisits dates differ for a rounds term. Re-read 2026-10-31 (lawn neighborhood days, PR 5a): for a rounds term that covers no series yet, roundAnchorOptionsForDisplay also calls annual-prepay-renewals areaRoundAnchorOptionsForTerm -> lawn-area-days newSeriesAreaAnchor, which reads the system_settings key lawn_round_area_days and the customers zip and city (explicit columns) in the same read-only savepoint; no write, outside call or new response key, and the signals are unchanged; the one new callee is named in unresolved. Re-read 2026-10-31 (offset rule, no floor): the area options return only the anchor and the date walk is the plain lawnRoundDateFrom; same reads, no write, outside call or response key.",
+      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read 2026-10-24 (PR #6656, multi-property invoices): the handler now drops property_id and property_address from line_items for a TECHNICIAN request (isTechnicianRequest; the bar runs as admin, so its read is unchanged), and line items may carry property_id / property_address, which this row's keep list does not include. Re-read 2026-10-29 (PR #7008, lawn rounds prepay): loadInvoiceAnnualPrepay now resolves a lawn_rounds_9 term's round anchor for the coverage visit dates (roundAnchorForDisplay -> annual-prepay-renewals coverageRowsForTerm and seriesRoundAnchorForTerm, inside the same read-only optionalRead savepoint): SELECTs on scheduled_services and annual_prepay_terms only, no writes, no outside calls; other cadences make no extra read. The response keys and the keep list are unchanged; only coverageVisits dates differ for a rounds term. Re-read 2026-10-31 (lawn neighborhood days, PR 5a): for a rounds term that covers no series yet, roundAnchorOptionsForDisplay also calls annual-prepay-renewals areaRoundAnchorOptionsForTerm -> lawn-area-days newSeriesAreaAnchor, which reads the system_settings key lawn_round_area_days and the customers zip and city (explicit columns) in the same read-only savepoint; no write, outside call or new response key, and the signals are unchanged; the one new callee is named in unresolved. Re-read 2026-10-31 (offset rule, no floor): the area options return only the anchor and the date walk is the plain lawnRoundDateFrom; same reads, no write, outside call or response key. Re-read 2026-11-04 (technician visibility H8/A10/D4): the router's staff exemption is UUID-only; a technician read now goes through technicianMayReadInvoice (its own current visit, or an annual prepay term's invoice for a customer it serves) and carries tech_card_on_file; an admin read, the bar's, is unchanged.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1324,11 +1324,11 @@
         "services/invoice.js#read",
         "services/recurring-appointment-seeder.js#isMistingSystemIdentity (depth limit)"
       ],
-      "hash": "de89b337af7a9cc1c86243c1f69c5618"
+      "hash": "1bbc36025308dec6f80e71aa7632f7cb"
     },
     {
       "endpoint": "/admin/invoices/:id/attachments",
-      "reviewed": "Handler + InvoiceAttachments.list (invoice-attachments.js): selects id, invoice_id, file_name, mime_type, file_size_bytes, created_at only (no s3_key, no URL); read end to end.",
+      "reviewed": "Handler + InvoiceAttachments.list (invoice-attachments.js): selects id, invoice_id, file_name, mime_type, file_size_bytes, created_at only (no s3_key, no URL); read end to end. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1336,11 +1336,11 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "4c6e79f68963d1085eddaa277e2e426f"
+      "hash": "0e123259a98a3e3857e194d5b817b31d"
     },
     {
       "endpoint": "/admin/invoices/:id/credit-context",
-      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged.",
+      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1348,11 +1348,11 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "966040c64648289015b4000eb9634955"
+      "hash": "1c612ac3b36040973f689636c11d148e"
     },
     {
       "endpoint": "/admin/invoices/:id/receipt-address",
-      "reviewed": "Handler + getInvoiceDisplayedAddress / loadDisplayedInvoiceAddress / invoiceCustomerAddress / invoiceAddressSnapshot (invoice-address.js): invoices and customers address selects, in-memory merge; read end to end.",
+      "reviewed": "Handler + getInvoiceDisplayedAddress / loadDisplayedInvoiceAddress / invoiceCustomerAddress / invoiceAddressSnapshot (invoice-address.js): invoices and customers address selects, in-memory merge; read end to end. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1360,11 +1360,11 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "b955aa2c143982fe7c885b4892c4c375"
+      "hash": "01135a2cad3242d8738601da3d9ad1bb"
     },
     {
       "endpoint": "/admin/invoices/:id/recipients",
-      "reviewed": "Handler + getInvoiceDeliveryRecipients: invoice id, number, customer name, primary contact, sms and email recipients, billing preference or the payer AP contact. Explicit columns; PayerService.attachToInvoice only fills the in-memory invoice. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler + getInvoiceDeliveryRecipients: invoice id, number, customer name, primary contact, sms and email recipients, billing preference or the payer AP contact. Explicit columns; PayerService.attachToInvoice only fills the in-memory invoice. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1396,22 +1396,22 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "6d9b5ed99fa06324a63634d35992ca8d"
+      "hash": "1d972901402900dd928944d36d7f2161"
     },
     {
       "endpoint": "/admin/invoices/customers/search",
-      "reviewed": "Handler: customers select with an explicit column list (id, names, phone, email, tier, address) and limit 10; read end to end.",
+      "reviewed": "Handler: customers select with an explicit column list (id, names, phone, email, tier, address) and limit 10; read end to end. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller.",
       "scope": "broad",
       "query": [
         "q"
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "0ee6b168e0e09738a781a1f9481012f5"
+      "hash": "d837e0218afb7a82716b848776c669f6"
     },
     {
       "endpoint": "/admin/invoices/service-records/:customerId",
-      "reviewed": "Handler: service_records joined to technicians, explicit columns, limit 20; read end to end.",
+      "reviewed": "Handler: service_records joined to technicians, explicit columns, limit 20; read end to end. Re-read 2026-11-04 (technician visibility H8): only the router's staff exemption changed (a UUID-only single-invoice GET and the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route still requires the admin role and its handler is unchanged.",
       "scope": "customer",
       "scopeParam": "customerId",
       "params": {
@@ -1419,11 +1419,11 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "518f53c56a96ccfc9c395c8278a755dc"
+      "hash": "74dbc3a293eaebf58b96cecd8343e606"
     },
     {
       "endpoint": "/admin/invoices/stats",
-      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): total_outstanding also subtracts amount_paid; still aggregates only, no row data. Re-reviewed 2026-10-31 (after-visit prepay not overdue): the overdue count leaves out the annual prepays whose charge waits for the first visit (the list's overdue subquery, a read of annual_prepay_terms and estimates); the table check is annualPrepayInvoiceTableExists, whose optionalInvoiceRead is the write:transaction signal (a nested transaction around a schema read, as on /admin/invoices); still aggregates only, no row data.",
+      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): total_outstanding also subtracts amount_paid; still aggregates only, no row data. Re-reviewed 2026-10-31 (after-visit prepay not overdue): the overdue count leaves out the annual prepays whose charge waits for the first visit (the list's overdue subquery, a read of annual_prepay_terms and estimates); the table check is annualPrepayInvoiceTableExists, whose optionalInvoiceRead is the write:transaction signal (a nested transaction around a schema read, as on /admin/invoices); still aggregates only, no row data. Re-read 2026-11-04 (technician visibility H8): only the router's staff exemption changed (UUID-only single-invoice GET, so /Stats in any letter case is admin only; card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); the handler is unchanged and still admin only.",
       "scope": "broad",
       "acceptSignals": [
         "write:transaction"
@@ -1435,7 +1435,7 @@
         "services/invoice.js#database.transaction",
         "services/invoice.js#read"
       ],
-      "hash": "3d561cd4c99776b5a8f0cf7727010fde"
+      "hash": "4bc971f0ec1d2dc6b707529f12ac7f18"
     },
     {
       "endpoint": "/admin/job-forms/templates/by-service/:serviceType",
