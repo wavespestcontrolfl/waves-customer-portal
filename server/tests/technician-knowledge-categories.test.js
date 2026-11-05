@@ -117,6 +117,20 @@ describe('WikiQA for a technician', () => {
     expect(result.articlesUsed).toEqual(['kb/chemicals/product-sample-herbicide.md']);
   });
 
+  test('the routing index the model reads carries no price in a title or summary', async () => {
+    const saved = { title: ROWS[0].title, summary: ROWS[0].summary };
+    Object.assign(ROWS[0], { title: 'Sample Herbicide ($139.50)', summary: 'Pre-emergent, $4.20 per gal' });
+    try {
+      routeTo(['kb/chemicals/product-sample-herbicide.md']);
+      await WikiQA.query('what herbicide', TECH_CONTEXT);
+      const routingPrompt = `${dispatchWithFallback.mock.calls[0][1].text || ''}`;
+      expect(routingPrompt).toContain('kb/chemicals/product-sample-herbicide.md');
+      expect(routingPrompt).not.toMatch(/\$|139\.50|4\.20/);
+    } finally {
+      Object.assign(ROWS[0], saved);
+    }
+  });
+
   test('an admin question reads every category and keeps the article as stored', async () => {
     routeTo(['kb/chemicals/product-sample-herbicide.md']);
     await WikiQA.query('what herbicide', { source: 'tech_field' });

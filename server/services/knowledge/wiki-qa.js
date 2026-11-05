@@ -142,7 +142,9 @@ class WikiQA {
       return { answer, articlesUsed: [] };
     }
 
-    const liveIndex = indexRows
+    // The routing model reads titles and summaries too: a technician's index
+    // goes through the same projection as the articles.
+    const liveIndex = (technicianOnly ? technicianKnowledgeRows(indexRows) : indexRows)
       .map(r => `${r.path} [${r.category}]: ${r.title} — ${r.summary || ''}`)
       .join('\n');
 
