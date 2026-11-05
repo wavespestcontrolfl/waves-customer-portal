@@ -7174,6 +7174,18 @@ move-pause job (not a route) closes a paused move with still no address 60
 days after its move-out date (`closed_reason` `pause_expired`); from then on
 its token is the generic 404, like any closed move. Gate off: the plain
 no-address sentence, and no move closes this way.
+Old-house stop (owner 2026-11-04, "YES app cancel those old-house visits"):
+while `GATE_MOVING_STOP_AT_MOVE_OUT` is also on (strict `'true'`, read per
+request, needs `GATE_MOVING_PAUSE`), a submit with a checked address on file
+and a move-out date reads the same lane. A customer billed per visit in the
+service area (or with an address we could not confirm) reads "Your plan at
+the new home starts when you approve it. We cancel the visits booked at your
+old home after <move-out date>." in place of "Nothing changes until you
+approve it."; the could-not-confirm sentence still follows. Everyone else, an
+out-of-area address, and a submit with no move-out date read the sentences
+from before. The move job (not a route) never closes such a move: its link
+keeps opening until the move is applied or closed some other way. Gate off:
+the receipt is unchanged.
 New-home estimates on the estimate routes (moving PR B1, owner 2026-11-02):
 `/estimate/:token` and its data, accept and decline routes,
 `/api/public/estimates/:token/find-slots`, `/available-slots`, `/reserve`,

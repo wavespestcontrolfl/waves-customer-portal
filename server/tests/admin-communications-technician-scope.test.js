@@ -189,6 +189,10 @@ describe('routes', () => {
 
 describe('AI draft reads own-customer texts only (B13)', () => {
   const PHONE = '9415550100';
+  // GET /unread-count above swaps in a rows-returning scope query, and a
+  // mock implementation outlives its describe: reset it to the module mock's
+  // marker so this block does not depend on test order.
+  beforeEach(() => { scope.technicianCustomerIdsSubquery.mockImplementation(() => 'SCOPED_CUSTOMER_IDS'); });
   function draftTables(sharing, spy) {
     db.mockImplementation((table) => {
       const q = chain(null);

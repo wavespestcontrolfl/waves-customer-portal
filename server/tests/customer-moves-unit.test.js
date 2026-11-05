@@ -159,9 +159,30 @@ describe('the receipt sentences', () => {
     expect(Moves.receiptFor(view({ moveOutDate: '2026-11-20' }), 'auto')[0]).not.toMatch(/pause/);
   });
 
+  // The old-house stop (GATE_MOVING_STOP_AT_MOVE_OUT, owner 2026-11-04): with an address on file the
+  // 'auto' lane says the old-home visits after move-out are cancelled, because they stop whether or not
+  // the customer approves the new price. 'office' and no lane keep the plain promise.
+  test('an address on file: the stop lane names the cancelled old-home visits, and needs a move-out date', () => {
+    const moving = view({ moveOutDate: '2026-11-20' });
+    const stop = 'Thanks, Chris. We have your move. We will price your new home and send it to you to review. Your plan at the new home starts when you approve it. We cancel the visits booked at your old home after Nov 20, 2026.';
+    const plain = 'Thanks, Chris. We have your move. We will price your new home and send it to you to review. Nothing changes until you approve it.';
+    expect(Moves.receiptFor(moving, 'auto')).toEqual([stop]);
+    expect(Moves.receiptFor(moving, 'office')).toEqual([plain]);
+    expect(Moves.receiptFor(moving, null)).toEqual([plain]);
+    expect(Moves.receiptFor({ ...moving, moveOutDate: null }, 'auto')).toEqual([plain]);
+    expect(Moves.receiptFor({ ...moving, verdict: 'unverified' }, 'auto')).toEqual([
+      stop, 'We could not confirm that address, so we will check it with you.',
+    ]);
+    // Out of area keeps its own sentence: it already says the plan ends on the move-out date.
+    expect(Moves.receiptFor({ ...moving, verdict: 'out_of_area' }, 'auto')).toEqual([
+      'Thanks, Chris. We do not serve that address yet. We will contact you about your last visit and ending your plan on your move-out date.',
+    ]);
+  });
+
   test('no receipt sentence carries a dollar sign', () => {
     for (const v of [view(), view({ verdict: 'out_of_area' }), view({ addressOnFile: false }), view({ verdict: 'unverified' })]) {
       expect(Moves.receiptFor(v).join(' ')).not.toMatch(/\$/);
+      expect(Moves.receiptFor({ ...v, moveOutDate: '2026-11-20' }, 'auto').join(' ')).not.toMatch(/\$/);
     }
   });
 });
