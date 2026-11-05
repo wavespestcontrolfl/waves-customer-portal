@@ -90,6 +90,9 @@ describe('notification trigger push tags', () => {
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 1, areas: [{ area: 'Billing', count: 1 }] }).title).toBe('1 item waits for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 2, areas: [{ area: 'Billing', count: 2 }] }).title).toBe('2 items wait for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 3, areas: [] }).body).toBeNull();
+    // Owner 2026-11-04 "fix count": read items still open show as "N open in all" after the unread areas.
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 39, total: 334, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2 \u00b7 334 open in all');
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 12, total: 12, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2');
     expect(TRIGGER_REGISTRY.waiting_summary).toMatchObject({ label: 'Morning summary: items waiting for you', category: 'alert', priority: 'normal', group: 'Alerts' });
     expect(TRIGGER_REGISTRY.waiting_summary.techVisible).toBeUndefined();
   });
