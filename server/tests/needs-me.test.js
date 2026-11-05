@@ -330,17 +330,18 @@ describe('GET /api/admin/needs-me', () => {
   const handler = router.stack.find((layer) => layer.route?.path === '/' && layer.route.methods.get).route.stack[0].handle;
   const call = async (query, techRole = 'admin') => {
     const res = { set: jest.fn(), status: jest.fn(() => res), json: jest.fn() };
-    await handler({ query, techRole }, res, (err) => { throw err; });
+    await handler({ query, techRole, technicianId: 'tech-7' }, res, (err) => { throw err; });
     return res;
   };
 
-  test('returns the reader\'s object, filtered by the query and scoped to the caller\'s role', async () => {
+  test('returns the reader\'s object, filtered by the query and scoped to the caller\'s role and technician', async () => {
     mockRows = [row({ id: 'fix', category: 'ops_digest', metadata: { kind: 'FIX', audience: 'engineering' } }), row()];
     const res = await call({ who: 'claude', area: 'System', limit: '5' }, 'technician');
     const body = res.json.mock.calls[0][0];
     expect(body.items.map((i) => i.id)).toEqual(['fix']);
     expect(body).toEqual(expect.objectContaining({ generatedAt: expect.any(String), total: 1, warnings: [] }));
-    expect(NotificationService.scopeAdminFeedToRole.mock.calls.map((c) => c[1])).toEqual(['technician']);
+    // The bell's technician privacy rule (GATE_TECH_LOGIN_PRIVACY) needs the caller's technician id.
+    expect(NotificationService.scopeAdminFeedToRole.mock.calls.map((c) => c.slice(1))).toEqual([['technician', 'tech-7']]);
   });
 
   test('a malformed after cursor is a 400', async () => {

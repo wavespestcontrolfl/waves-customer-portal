@@ -127,6 +127,13 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       ].sort());
     });
 
+    test('gate on: a caller that names no technician still never gets the follow-up list (key-only scope otherwise)', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      const seen = await titles({ role: 'technician' });
+      expect(seen).not.toContain('missed-list');
+      expect(seen).toEqual(expect.arrayContaining(['sms-other', 'promise-other']));
+    });
+
     test('gate on: an admin sees every row', async () => {
       process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
       expect((await titles({ role: 'admin', technicianId: ids.admin })).length).toBe(Object.keys(rows).length);

@@ -69,16 +69,19 @@ function scopeAdminFeedToRole(query, role, technicianId = null) {
   );
   // GATE_TECH_LOGIN_PRIVACY: a technician login also sees a customer's row only
   // for a customer on its own route (the Communications routes' rule). A row
-  // with no customer stays visible, as today, but a row listing several
+  // with no customer stays visible, as today. A row listing several
   // customers' promises (the follow-up pager's list, owner 2026-11-04) is
-  // hidden: the technician's own promises are on its Promises tab. Callers
-  // that pass no technicianId keep the key-only scope.
-  if (role === 'technician' && technicianId && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+  // hidden from every technician, whether or not the caller names one: the
+  // technician's own promises are on its Promises tab. Callers that pass no
+  // technicianId keep the key-only scope otherwise.
+  if (role === 'technician' && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+    const listless = scoped.whereRaw(`NOT ${NOTIFICATION_CUSTOMER_LIST_SQL}`);
+    if (!technicianId) return listless;
     const { technicianCustomerIdsSubquery } = require('./technician-visit-scope');
     const ownCustomers = technicianCustomerIdsSubquery({ techRole: 'technician', technicianId }, db)
       .clearSelect().select(db.raw('scheduled_services.customer_id::text'));
-    return scoped.where(function customerlessOrOwn() {
-      this.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL AND NOT ${NOTIFICATION_CUSTOMER_LIST_SQL}`)
+    return listless.where(function customerlessOrOwn() {
+      this.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL`)
         .orWhereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
     });
   }
