@@ -123,6 +123,12 @@ function asmBlockFor(groupId) {
   return { group_id: Number(groupId) };
 }
 
+// Only the resubscribe confirmation passes bypassUnsubscribeManagement (see sendOne). Anyone
+// else gets undefined, which JSON.stringify leaves out of the payload.
+function bypassMailSettings(bypass) {
+  return bypass ? { bypass_unsubscribe_management: { enable: true } } : undefined;
+}
+
 // An optional list field (cc, attachments): the list when it has entries, else
 // undefined, so JSON.stringify leaves the key out of the payload.
 function nonEmptyList(list) {
@@ -257,6 +263,11 @@ async function sendOne({
   to, cc, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
   customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy,
   database, providerBoundaryCheck = async () => ({ ok: true }),
+  // Asks SendGrid to skip its GLOBAL unsubscribe list for this one request (it never bypasses
+  // bounces or spam reports). ONLY the "Turn Waves emails back on?" confirmation uses it
+  // (services/email-resubscribe-confirm.js): the address is unsubscribed by definition, and
+  // without this SendGrid drops the one email that lets the customer undo it. Default off.
+  bypassUnsubscribeManagement,
   // Per-request bound override for callers that hold a connection/lock across
   // the call and must not wait out the 120 s default (e.g. the newsletter
   // confirmation). Default unchanged for every other caller.
@@ -294,6 +305,7 @@ async function sendOne({
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
     attachments: nonEmptyList(attachments),
+    mail_settings: bypassMailSettings(bypassUnsubscribeManagement),
     // Standard sends keep the existing provider tracking behavior. Security
     // emails opt out so one-time credentials never enter click/open metadata.
     tracking_settings: {

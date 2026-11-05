@@ -101,6 +101,7 @@ const staticGets = (user) => ({
   [`/api/admin/customers/${CUSTOMER_ID}/comms`]: { messages: [], calls: [], emails: [] },
   [`/api/admin/customers/${CUSTOMER_ID}/credits`]: { credits: [], balance: 0 },
   [`/api/admin/customers/${CUSTOMER_ID}/properties`]: { properties: [] },
+  [`/api/admin/customers/${CUSTOMER_ID}/multi-home-family`]: { familyId: null, members: [] },
   [`/api/admin/customers/${CUSTOMER_ID}/autopay-state`]: { autopay: false, cards: [] },
   [`/api/admin/customers/${CUSTOMER_ID}/invoices`]: { invoices: [] },
   [`/api/admin/customers/${CUSTOMER_ID}/estimates`]: { estimates: [] },
