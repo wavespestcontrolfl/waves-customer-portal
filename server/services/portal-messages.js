@@ -30,9 +30,9 @@ const ENDPOINT = 'portal';
 const BODY_MAX = 2000;
 const PAGE_SIZE = 50;
 const PREVIEW_MAX = 140;
-// A first attempt still sending its notice is never raced: a retry or the sweep resumes a pending notice only
-// after this long. The sweep looks back one day.
-const PENDING_GRACE_MS = 2 * 60 * 1000;
+// One attempt at a time runs an answer's notice (claimNotice). A claim older than this belongs to a process
+// that stopped, so a retry or the sweep may take it over. The sweep looks back one day.
+const CLAIM_STALE_MS = 2 * 60 * 1000;
 const SWEEP_MIN_AGE_MS = 5 * 60 * 1000;
 const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SWEEP_LIMIT = 50;
@@ -169,13 +169,34 @@ async function closeItemBells(kind, id, actor) {
   }
 }
 
-// The one notice for a saved answer: the customer's in-app bell plus a push to the Waves app (app devices
-// only: a browser subscription is not the app); an email with the whole answer when no app device took the
-// push. The outcome replaces the answer's pending marker. Never throws. Safe to run again for the same answer:
-// the bell dedupes on its key, an accepted push is not sent twice (push-notifications.js claims by bell), and
-// the email carries its own idempotency key.
-async function noticeCustomer(customerId, message) {
-  const notice = { bell: false, pushAccepted: 0, email: 'not_needed' };
+// The answer's notice as stored, without the claim's working fields.
+async function storedNotice(messageId) {
+  const row = await db('messages').where({ id: messageId }).first('metadata');
+  const notice = metaOf(row).notice || null;
+  return notice?.pending ? { pending: true } : notice;
+}
+
+function recordNotice(messageId, notice) {
+  return db('messages').where({ id: messageId })
+    .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', ?::jsonb)", [JSON.stringify(notice)]), updated_at: new Date() });
+}
+
+// Claims the answer's notice for this attempt: true only for the one attempt whose UPDATE stamped claimedAt.
+// No claim yet, or a stale one (CLAIM_STALE_MS), can be taken; a fresh claim means another attempt is on it.
+async function claimNotice(messageId, now = new Date()) {
+  const stale = new Date(now.getTime() - CLAIM_STALE_MS).toISOString();
+  const rows = await db('messages').where({ id: messageId })
+    .whereRaw("coalesce((metadata->'notice'->>'claimedAt')::timestamptz, '-infinity'::timestamptz) < ?::timestamptz", [stale])
+    .update({
+      metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', jsonb_build_object('pending', true, 'claimedAt', ?::text))", [now.toISOString()]),
+      updated_at: now,
+    })
+    .returning('id');
+  return rows.length > 0;
+}
+
+// The in-app bell plus a push to the Waves app. A push another attempt is still sending is not a miss.
+async function bellAndPush(customerId, message) {
   try {
     const bell = await require('./notification-service').notifyCustomer(customerId, 'service', NOTICE_TITLE, preview(message.body), {
       link: MESSAGES_LINK,
@@ -184,35 +205,45 @@ async function noticeCustomer(customerId, message) {
       pushOptions: { nativeOnly: true },
       metadata: { portalMessageId: message.id },
     });
-    notice.bell = Boolean(bell?.id) && !bell.suppressed;
-    notice.pushAccepted = Number(bell?.push?.accepted || 0);
+    return { bell: Boolean(bell?.id) && !bell.suppressed, pushAccepted: Number(bell?.push?.accepted || 0), inFlight: bell?.push?.reason === 'push_in_flight' };
   } catch (err) {
     logger.warn(`[portal-messages] bell or push failed for message ${message.id}: ${err.message}`);
+    return { bell: false, pushAccepted: 0, inFlight: false };
   }
-  if (notice.pushAccepted === 0) {
-    try {
-      const result = await require('./account-membership-email').sendPortalReply({ customerId, messageId: message.id, body: message.body });
-      notice.email = result?.ok ? 'sent' : (result?.reason || 'not_sent');
-    } catch (err) {
-      notice.email = 'failed';
-      logger.warn(`[portal-messages] reply email failed for message ${message.id}: ${err.message}`);
-    }
-  }
-  try {
-    await db('messages').where({ id: message.id })
-      .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ notice })]), updated_at: new Date() });
-  } catch (err) {
-    logger.warn(`[portal-messages] could not record the notice for message ${message.id}: ${err.message}`);
-  }
-  return notice;
 }
 
-// Whether a retried send should finish the answer's notice: one still pending past the grace time (the
-// process stopped between the commit and the send), or one that reached nobody (no app push, no email).
-function resumeDue(notice, createdAt, now = Date.now()) {
-  if (!notice || notice.pending) return now - new Date(createdAt).getTime() >= PENDING_GRACE_MS;
-  return !(Number(notice.pushAccepted) > 0 || notice.email === 'sent');
+async function replyEmail(customerId, message) {
+  try {
+    const result = await require('./account-membership-email').sendPortalReply({ customerId, messageId: message.id, body: message.body });
+    return result?.ok ? 'sent' : (result?.reason || 'not_sent');
+  } catch (err) {
+    logger.warn(`[portal-messages] reply email failed for message ${message.id}: ${err.message}`);
+    return 'failed';
+  }
 }
+
+// The one notice for a saved answer, run by one attempt at a time: the customer's in-app bell plus a push to
+// the Waves app (app devices only: a browser subscription is not the app); an email with the whole answer
+// when no app device took the push. The outcome replaces the answer's pending marker; a push still in flight
+// leaves it pending for a later attempt instead of adding an email. Never throws. Safe to run again: the bell
+// dedupes on its key, an accepted push is claimed by its bell (push-notifications.js), and the email carries
+// its own idempotency key.
+async function noticeCustomer(customerId, message) {
+  try {
+    if (!(await claimNotice(message.id))) return await storedNotice(message.id);
+    const { inFlight, ...sent } = await bellAndPush(customerId, message);
+    if (inFlight) return { pending: true };
+    const notice = { ...sent, email: sent.pushAccepted > 0 ? 'not_needed' : await replyEmail(customerId, message) };
+    await recordNotice(message.id, notice);
+    return notice;
+  } catch (err) {
+    logger.warn(`[portal-messages] notice failed for message ${message.id}: ${err.message}`);
+    return { pending: true };
+  }
+}
+
+// A notice that reached the customer: an app push or the email went out.
+const noticeReached = (notice) => Boolean(notice) && !notice.pending && (Number(notice.pushAccepted) > 0 || notice.email === 'sent');
 
 // Every 10 minutes (scheduler.js): finish the notices a stopped process left pending, for answers 5 minutes to
 // one day old. It only completes a send a staff member pressed. Gate off: nothing. Returns how many it ran.
@@ -264,10 +295,11 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
   });
   if (saved.replay) {
     const { notice } = metaOf(saved.message);
+    // A retried click finishes a notice that never reached the customer (claimNotice keeps it to one attempt).
     return {
       message: staffView(saved.message),
       closed: false,
-      notice: resumeDue(notice, saved.message.created_at) ? await noticeCustomer(saved.customerId, saved.message) : (notice || null),
+      notice: noticeReached(notice) ? notice : await noticeCustomer(saved.customerId, saved.message),
       replay: true,
     };
   }
@@ -338,5 +370,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, itemCustomerWith, resumeDue },
+  __private: { preview, noticeCustomer, closeItemWith, itemCustomerWith, claimNotice },
 };
