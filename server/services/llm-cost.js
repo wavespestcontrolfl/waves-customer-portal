@@ -100,6 +100,26 @@ const samePrice = (a, b) => sameRates(a, b)
   && (a.tiers || []).length === (b.tiers || []).length
   && (a.tiers || []).every((t, i) => t.minPromptTokens === b.tiers[i].minPromptTokens && sameRates(t, b.tiers[i]));
 
+// A call served at fast speed is ledgered as "<model>-fast"
+// (llm-dispatch-metrics anthropicServedModel). Anthropic's fast mode list rate
+// is a multiple of the model's standard rate; only a model on this exact map
+// is priced. Any other "-fast" key is unpriced (fail closed), never billed at
+// the standard rate.
+const FAST_SUFFIX = '-fast';
+const FAST_MODE_MULTIPLIER = Object.freeze({ 'claude-opus-5-5': 2, 'claude-opus-5': 2 });
+
+const scaleRates = (r, m) => Object.fromEntries(RATE_KEYS.map((k) => [k, r[k] == null ? r[k] : r[k] * m]));
+
+function fastPriceFor(prices, baseKey) {
+  const multiplier = FAST_MODE_MULTIPLIER[baseKey];
+  const base = multiplier ? priceFor(prices, baseKey) : null;
+  if (!base) return null;
+  return {
+    ...scaleRates(base, multiplier),
+    tiers: (base.tiers || []).map((t) => ({ minPromptTokens: t.minPromptTokens, ...scaleRates(t, multiplier) })),
+  };
+}
+
 /**
  * The price for a ledger model, or null (unpriced). Its own key first. A
  * dated model the feed does not list takes its undated alias's price only
@@ -112,6 +132,7 @@ function priceFor(prices, model) {
   const key = normalizeModelId(model);
   if (!key) return null;
   if (prices.has(key)) return prices.get(key);
+  if (key.endsWith(FAST_SUFFIX)) return fastPriceFor(prices, key.slice(0, -FAST_SUFFIX.length));
   const alias = aliasKeyOf(key);
   if (alias === key || !prices.has(alias)) return null;
   const aliasPrice = prices.get(alias);

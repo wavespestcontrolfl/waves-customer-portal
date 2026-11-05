@@ -299,6 +299,20 @@ function anthropicCacheWrites(usage) {
   return Object.values(perTtl).reduce((sum, v) => sum + (Number(v) || 0), 0);
 }
 
+// The model a ledger row names. A call Anthropic served at fast speed
+// (usage.speed === 'fast', Opus fast mode) is filed as "<model>-fast" so the
+// cost report prices it at the fast rate (llm-cost priceFor); standard or
+// absent speed leaves the model unchanged. The suffix is '-fast', not ':fast':
+// llm-cost normalizeModelId drops everything after a colon.
+function anthropicServedModel(message) {
+  const model = message?.model;
+  return model && message?.usage?.speed === 'fast' ? `${model}-fast` : model;
+}
+
+function servedModelOf(provider, value) {
+  return provider === 'anthropic' ? anthropicServedModel(value) : (value?.model || value?.modelVersion);
+}
+
 function extractUsage(provider, data) {
   const out = { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null };
   try {
@@ -480,7 +494,7 @@ function recordStreamedMessage({ provider, requestedModel, message, latencyMs = 
     void recordCall({
       provider,
       requestedModel,
-      servedModel: message?.model,
+      servedModel: servedModelOf(provider, message),
       ok: !code,
       errorCode: code,
       usage,
@@ -567,7 +581,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   const callId = recordCall({
     provider,
     requestedModel,
-    servedModel: value?.model || value?.modelVersion,
+    servedModel: servedModelOf(provider, value),
     ok: !errorCode,
     errorCode,
     usage: extractUsage(provider, value),
@@ -1185,6 +1199,7 @@ module.exports = {
   ledgerCallRejected,
   recordSessionUsage,
   extractUsage,
+  anthropicServedModel,
   runLlmDispatchDigest,
   alertRecorderUnreachable,
   detectExceptions,
