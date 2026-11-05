@@ -5,6 +5,7 @@
 
 const mockDevices = [];
 const mockProofRows = [];
+let mockPrefs;
 const mockSendToCustomer = jest.fn();
 const mockCustomerStatus = jest.fn();
 const mockNotifyCustomer = jest.fn(async () => ({ id: 'bell-1' }));
@@ -38,6 +39,7 @@ function plainQuery(first) {
 function tableFor(table) {
   if (table === 'push_subscriptions') return subscriptionQuery();
   if (table === 'customers') return plainQuery({ id: 'c-1', phone: '+19415550123', account_id: null });
+  if (table === 'notification_prefs') return plainQuery(mockPrefs);
   return plainQuery(undefined);
 }
 
@@ -92,6 +94,7 @@ beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   ENV_KEYS.forEach((k) => delete process.env[k]);
   mockDevices.length = 0;
+  mockPrefs = undefined;
   mockProofRows.length = 0;
   mockSendToCustomer.mockReset();
   mockSendToCustomer.mockResolvedValue({ sent: 1 });
@@ -263,5 +266,39 @@ describe('no bearer link reaches a device that may be stale (Codex security #758
     mockDevices.push(device({ updated_at: hoursAgo(1) }));
     await send({ messageType: 'tech_en_route', body: 'Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t' });
     expect(mockSendToCustomer.mock.calls[0][1].body).toBe('Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t');
+  });
+});
+
+describe('only the customer switches back to text (explicit-choice markers)', () => {
+  beforeEach(() => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    mockDevices.push(device());
+  });
+
+  it('an explicit Text choice keeps the text: no push, no app notice', async () => {
+    mockPrefs = { service_reminder_24h_channel: 'sms', service_reminder_24h_channel_explicit: true };
+    expect(await send()).toMatchObject({ delivered: false, reason: 'preference_changed' });
+    expect(mockSendToCustomer).not.toHaveBeenCalled();
+  });
+
+  it('the seeded default Text goes to the app', async () => {
+    mockPrefs = { service_reminder_24h_channel: 'sms', service_reminder_24h_channel_explicit: false };
+    expect((await send()).delivered).toBe(true);
+    expect(mockSendToCustomer).toHaveBeenCalledTimes(1);
+  });
+
+  it('the 72 hour reminder uses its own marker', async () => {
+    mockPrefs = { service_reminder_72h_channel: 'sms', service_reminder_72h_channel_explicit: true };
+    expect(await send({ messageType: 'reminder_72h' })).toMatchObject({ delivered: false, reason: 'preference_changed' });
+    mockPrefs = { service_reminder_72h_channel: 'sms', service_reminder_72h_channel_explicit: false };
+    expect((await send({ messageType: 'reminder_72h' })).delivered).toBe(true);
+  });
+
+  it('gate off: the marker changes nothing', async () => {
+    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
+    mockDevices.length = 0;
+    mockDevices.push(device({ updated_at: hoursAgo(2) }));
+    mockPrefs = { service_reminder_24h_channel: 'sms', service_reminder_24h_channel_explicit: true };
+    expect((await send()).delivered).toBe(true);
   });
 });

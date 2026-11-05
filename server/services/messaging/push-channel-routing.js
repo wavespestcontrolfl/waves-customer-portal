@@ -44,7 +44,7 @@
  * OWNER RULING 2026-11-04 (GATE_APP_FIRST_ANY_DEVICE, default OFF; Twilio
  * raises US-to-Verizon text prices on 2027-01-01): "if anyone has the app,
  * we would want to prefer to send notifications in the app, rather than
- * text". With that gate on, the matrix above changes in two ways and
+ * text". With that gate on, the matrix above changes in three ways and
  * nothing else:
  *   a. APP_FIRST_ANY_DEVICE_POLICY (below) moves appointment_reminder,
  *      reminder_72h, tech_arrived, lawn_watering_instruction and the
@@ -61,6 +61,10 @@
  *      heartbeat floor are dropped for these sends (a device the app
  *      released, or a provider-rejected token, is already inactive). The
  *      fallback is unchanged: when no device accepts the push, the text goes.
+ *   c. Only the customer switches back to text: a stored 'sms' vetoes the app
+ *      notice when the customer saved it (the *_channel_explicit marker the
+ *      notifications route stamps); the seeded default 'sms' does not. Email
+ *      and Both veto as before.
  * Gate off = the matrix and the 72 hour rule above, byte for byte. A
  * customer's explicit App choice keeps its own path (explicitPushOnly) and
  * is not touched by this gate.
@@ -353,6 +357,35 @@ const PRIMARY_SCOPED_COLUMNS = new Set([
   'service_reminder_72h_channel',
 ]);
 
+// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04: "only the customer can change
+// back to text, if they prefer"): the seeded 'sms' default is not a choice, so
+// a stored 'sms' vetoes the app only when its explicit-choice marker is true.
+// The notifications route stamps the marker on a customer's write of the
+// channel. Channels without a marker here keep the rules above.
+const EXPLICIT_TEXT_MARKER = {
+  service_reminder_24h_channel: 'service_reminder_24h_channel_explicit',
+  service_reminder_72h_channel: 'service_reminder_72h_channel_explicit',
+  en_route_channel: 'en_route_channel_explicit',
+  tech_arrived_channel: 'tech_arrived_channel_explicit',
+  service_complete_channel: 'service_complete_channel_explicit',
+  payment_receipt_channel: 'payment_receipt_channel_explicit',
+};
+
+// The marker column to read with the channel, only while the gate is on.
+function textMarkerColumns(col) {
+  const marker = EXPLICIT_TEXT_MARKER[col];
+  return marker && appFirstAnyDeviceLive() ? [marker] : [];
+}
+
+// A new explicit Text choice vetoes companion push, as does (gate on) the
+// customer's own Text on a routed notice channel; null retains legacy behavior.
+function explicitTextChosen(col, prefs) {
+  if (String(prefs?.[col] || '').toLowerCase() !== 'sms') return false;
+  if (col === 'payment_issue_channel') return true;
+  const [marker] = textMarkerColumns(col);
+  return Boolean(marker) && prefs[marker] === true;
+}
+
 function normalizeDigits(phone) {
   return String(phone || '').replace(/\D+/g, '').slice(-10);
 }
@@ -403,11 +436,11 @@ async function readChannelPreference(customerId, messageType, knex = db, custome
     : customerId;
   const columns = col === 'payment_issue_channel' ? [col, 'billing_channel'] : [col];
   if (category) columns.push(`${category === 'payment_receipt' ? 'payment_receipt' : category}_channels`);
+  if (pushEligibility) columns.push(...textMarkerColumns(col));
   const prefs = await knex('notification_prefs').where({ customer_id: ownerId }).first(...columns);
   const explicit = explicitBillingChannels(prefs, category);
   if (explicit !== null) return explicit.includes('push') ? 'push' : (pushEligibility ? null : 'email');
-  // A new explicit Text choice vetoes companion push; null retains legacy behavior.
-  if (pushEligibility && col === 'payment_issue_channel' && prefs?.[col] === 'sms') return null;
+  if (pushEligibility && explicitTextChosen(col, prefs)) return null;
   // Preserve legacy Email/Both vetoes for companion push until explicitly edited.
   return String(prefs?.[col] || (col === 'payment_issue_channel' && prefs?.billing_channel) || 'sms').toLowerCase();
 }
