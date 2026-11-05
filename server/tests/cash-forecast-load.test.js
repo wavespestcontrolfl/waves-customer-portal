@@ -98,7 +98,9 @@ describe('loadForecastInput', () => {
     for (const c of database.calls) expect(c.sql).not.toMatch(/current_date|now\(\)/i);
     // open invoices include 'overdue'; a pay run's net goes out on the pay date and the 941 return is never a payment
     expect(database.calls.find((c) => /i\.credit_applied, i\.amount_paid/.test(c.sql)).bindings).toEqual([['sent', 'viewed', 'overdue', 'processing']]);
-    expect(database.calls.find((c) => /FROM payroll_checks pc/.test(c.sql)).sql).toMatch(/pc\.net_cents/);
+    const pay = database.calls.find((c) => /FROM payroll_checks pc/.test(c.sql));
+    expect(pay.sql).toMatch(/pc\.net_cents/);
+    expect(pay.bindings).toEqual(['2026-10-01', '2027-01-31']); // 35 days back, for the weekly projection
     expect(database.calls.find((c) => /FROM tax_filing_calendar/.test(c.sql)).sql).toMatch(/filing_type <> 'payroll_941'/);
   });
 
@@ -151,7 +153,11 @@ describe('loadForecastInput', () => {
         [/i\.credit_applied, i\.status/, [{ sent_day: '2026-10-20', total: 100, credit_applied: 20, status: 'paid', paid_day: '2026-10-25', paid_amount: 80 }]],
         [/i\.status = 'draft'/, [{ n: 2, total: 300 }]],
         [/FROM tax_filing_calendar/, [{ due_day: '2026-11-20', amount_due: null }, { due_day: '2026-12-15', amount_due: 500, amount_paid: 100 }]],
-        [/FROM payroll_checks pc/, [{ pay_day: '2026-11-13', cost_cents: 81234 }]],
+        // t1 has a check in the window; t2 was last paid Oct 30 (inside the 35-day look-back)
+        [/FROM payroll_checks pc/, [
+          { technician_id: 't2', pay_day: '2026-10-30', net_cents: 60000, full_cents: 90000 },
+          { technician_id: 't1', pay_day: '2026-11-13', net_cents: 81234, full_cents: 100000 },
+        ]],
         [/WITH last AS/, [{ account_label: 'old-card', last_day: '2026-10-27', debits_30d: 900 }]],
       ],
     });
@@ -169,7 +175,13 @@ describe('loadForecastInput', () => {
     expect(input.openInvoices).toEqual([{ amountUsd: 40, ageDays: 10, processing: false }, { amountUsd: 25, ageDays: 0, processing: true }]);
     expect(input.invoiceCohort).toEqual([{ value: 80, ageDays: 16, paid: [{ lagDays: 5, amount: 80 }] }]);
     expect(input.taxRows).toEqual([{ dueDay: '2026-12-15', amountUsd: 400 }]);
-    expect(input.payroll).toEqual([{ payDay: '2026-11-13', cashCostUsd: 812.34 }]);
+    // the check in the window pays its net; each employee then repeats weekly at full cost (last 4 checks)
+    expect(input.payroll[0]).toEqual({ payDay: '2026-11-13', cashCostUsd: 812.34 });
+    const projected = input.payroll.slice(1);
+    expect(projected.filter((p) => p.cashCostUsd === 900).map((p) => p.payDay).slice(0, 2)).toEqual(['2026-11-06', '2026-11-13']);
+    expect(projected.filter((p) => p.cashCostUsd === 900)).toHaveLength(13); // Nov 6 .. Jan 29
+    expect(projected.filter((p) => p.cashCostUsd === 1000).map((p) => p.payDay)[0]).toBe('2026-11-20');
+    expect(projected.filter((p) => p.cashCostUsd === 1000)).toHaveLength(11); // Nov 20 .. Jan 29
     expect(input.missing).toEqual(expect.arrayContaining([
       { kind: 'payer_billed_visits', count: 1 },
       { kind: 'completed_visits_not_billed', count: 1, usd: 50 },

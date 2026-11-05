@@ -169,15 +169,42 @@ async function readCardsOffFeed(database, { feedLabels, since }) {
     GROUP BY 1, 2 ORDER BY 1`, [since, feedLabels]).then((r) => r.rows);
 }
 
-// A finalized check pays its net (and the employer's HSA money) on the pay date; the withheld and employer
-// taxes and the savings leave later, on the payroll tax rows' due dates (readTaxRows).
+// Finalized checks from 35 days back to the window's end. A check in the window pays its net (and the
+// employer's HSA money) on the pay date; the withheld and employer taxes and the savings leave later, on
+// the payroll tax rows' due dates (readTaxRows). Each employee paid in those 35 days is also projected
+// weekly after their last check (projectPayroll), at full cost: no deposit rows exist for those yet.
 async function readPayroll(database, { from, to }) {
   return database.raw(`
-    SELECT ${DAY('pc.pay_date')} AS pay_day,
-      (COALESCE(pc.net_cents, 0) + COALESCE(pc.hsa_employer_cents, 0)) AS cost_cents
+    SELECT pc.technician_id, ${DAY('pc.pay_date')} AS pay_day,
+      (COALESCE(pc.net_cents, 0) + COALESCE(pc.hsa_employer_cents, 0)) AS net_cents,
+      (pc.gross_cents + COALESCE(pc.employer_social_security_cents, 0) + COALESCE(pc.employer_medicare_cents, 0)
+        + COALESCE(pc.futa_cents, 0) + COALESCE(pc.fl_reemployment_cents, 0) + COALESCE(pc.simple_employer_cents, 0)
+        + COALESCE(pc.hsa_employer_cents, 0)) AS full_cents
     FROM payroll_checks pc JOIN payroll_runs pr ON pr.id = pc.run_id
     WHERE pc.pay_date BETWEEN ?::date AND ?::date AND pr.status = 'finalized' AND pr.voided_at IS NULL
-      AND COALESCE(pc.status, '') <> 'void'`, [from, to]).then((r) => r.rows);
+      AND COALESCE(pc.status, '') <> 'void'
+    ORDER BY pc.pay_date`, [from, to]).then((r) => r.rows);
+}
+
+// Weekly pay after each employee's last finalized check, at the average full cost of their last 4 checks.
+function projectPayroll(rows, { today, to }) {
+  const byEmployee = new Map();
+  for (const r of rows) {
+    const key = r.technician_id || 'unknown';
+    const list = byEmployee.get(key) || [];
+    list.push(r);
+    byEmployee.set(key, list);
+  }
+  const out = [];
+  for (const list of byEmployee.values()) {
+    const last = list[list.length - 1];
+    const recent = list.slice(-4);
+    const avgUsd = recent.reduce((s, r) => s + usd(r.full_cents), 0) / recent.length / 100;
+    for (let d = engine.addDays(last.pay_day, 7); d <= to; d = engine.addDays(d, 7)) {
+      if (d >= today) out.push({ payDay: d, cashCostUsd: Math.round(avgUsd * 100) / 100 });
+    }
+  }
+  return out;
 }
 
 // Tax payments due in the window, payroll deposits included (payroll-tax-calendar.js: the monthly 941
@@ -268,7 +295,7 @@ async function loadForecastInput({
     // 10 days either side so a transfer or card payment pair at the window's edge still matches.
     readBankLines(database, { labels: [...poolAccounts, ...feedCards], from: engine.addDays(trailingFrom, -10), to: engine.addDays(trailingTo, 10) }),
     readCardsOffFeed(database, { feedLabels: feedCards, since: day(-120) }),
-    readPayroll(database, { from: today, to: windowEnd }),
+    readPayroll(database, { from: day(-35), to: windowEnd }),
     readTaxRows(database, { from: today, to: windowEnd }),
   ]);
 
@@ -348,7 +375,10 @@ async function loadForecastInput({
     bankLines: bankLines.map((l) => ({ ...l, amount: usd(l.amount) })),
     poolAccounts,
     feedCards,
-    payroll: payroll.map((p) => ({ payDay: p.pay_day, cashCostUsd: usd(p.cost_cents) / 100 })),
+    payroll: [
+      ...payroll.filter((p) => p.pay_day >= today).map((p) => ({ payDay: p.pay_day, cashCostUsd: usd(p.net_cents) / 100 })),
+      ...projectPayroll(payroll, { today, to: windowEnd }),
+    ],
     taxRows: taxOut,
     items,
     settings,
@@ -356,4 +386,4 @@ async function loadForecastInput({
   };
 }
 
-module.exports = { loadForecastInput, _private: { visitValue, effectivePriceSql } };
+module.exports = { loadForecastInput, _private: { visitValue, effectivePriceSql, projectPayroll } };

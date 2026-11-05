@@ -227,6 +227,12 @@ describe('computeForecast', () => {
     expect(r.missing).toContainEqual({ kind: 'invoices_late_beyond', count: 1, usd: 70 });
   });
 
+  test('an open invoice unpaid when today began can still be paid today', () => {
+    const r = computeForecast(base({ invoiceCohort: cohort({ n: 20, lag: 5 }), openInvoices: [{ amountUsd: 90, ageDays: 5 }] }));
+    // lag 5 is today: paid Thu Nov 5, in the bank Mon Nov 9
+    expect(r.weeks[1].money_in.invoices).toBe(90);
+  });
+
   test('dues count from tomorrow, not today', () => {
     const r = computeForecast(base({ dues: [{ day: TODAY, amountUsd: 80 }, { day: '2026-12-01', amountUsd: 80 }] }));
     const total = r.weeks.reduce((s, w) => s + w.money_in.dues, 0);

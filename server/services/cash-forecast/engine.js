@@ -300,10 +300,10 @@ function computeForecast(input) {
       continue;
     }
     const s = Math.max(0, Math.round(inv.ageDays || 0));
-    const remaining = s <= MAX_LAG_DAYS ? 1 - invoiceCurve.curve[s] : 0;
+    // Unpaid when today began (age s): it can still be paid today (lag s) or later.
+    const remaining = s <= MAX_LAG_DAYS ? 1 - (s > 0 ? invoiceCurve.curve[s - 1] : 0) : 0;
     if (s > MAX_LAG_DAYS || remaining <= 0.001) { lateBeyond = { count: lateBeyond.count + 1, usd: lateBeyond.usd + amount }; continue; }
-    // From the day it was sent: lag s is today, so the first share it can still collect is tomorrow's.
-    spread(inBooked.invoices, addDays(today, -s), amount, invoiceCurve.curve, land, { fromLag: s + 1, norm: remaining });
+    spread(inBooked.invoices, addDays(today, -s), amount, invoiceCurve.curve, land, { fromLag: s, norm: remaining });
   }
   if (lateBeyond.count) missing.push({ kind: 'invoices_late_beyond', count: lateBeyond.count, usd: round2(lateBeyond.usd) });
 
@@ -366,7 +366,8 @@ function computeForecast(input) {
     const days = occurrences(item, today, windowEnd);
     if (item.kind === 'hire') {
       // A check is never matched to the planned hire (it may be another employee's): the item runs to
-      // its last date. When pay runs exist from its dates on, the owner is asked to end it.
+      // its last date. Once pay runs exist from its dates on, they project that pay themselves, so the
+      // owner is asked to end the item.
       for (const h of hireCosts(item, days)) addTo(out.hire, h.day, h.usd);
       if (firstCheckDay && days.some((d) => d >= firstCheckDay)) missing.push({ kind: 'hire_overlaps_pay_runs', label: item.label, first_pay_day: firstCheckDay });
     } else {
