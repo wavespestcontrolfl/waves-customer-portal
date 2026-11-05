@@ -100,6 +100,36 @@ describe('PortalMessages thread', () => {
     expect(api.getPortalMessages).toHaveBeenLastCalledWith(page[0].createdAt);
   });
 
+  it('a message sent here does not hide a gap: a refresh that skips messages still turns on Show earlier', async () => {
+    api.sendPortalMessage.mockResolvedValue({ message: { id: 's1', from: 'you', body: 'Any update?', createdAt: '2026-11-04T12:00:00.000Z' } });
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    fireEvent.change(composer(), { target: { value: 'Any update?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByText('Any update?');
+    // The next page holds the sent message but not what came between the first load and it.
+    const page = [
+      { id: 's1', from: 'you', body: 'Any update?', createdAt: '2026-11-04T12:00:00.000Z' },
+      ...Array.from({ length: 49 }, (_, i) => ({ id: `p${i}`, from: 'waves', body: `Reply ${i}`, createdAt: new Date(Date.UTC(2026, 10, 4, 13, i)).toISOString() })),
+    ];
+    api.getPortalMessages.mockResolvedValueOnce({ messages: page, hasMore: true, unread: 49 });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(await screen.findByText('Reply 48')).toBeInTheDocument();
+    expect(screen.queryByText('Do you spray the pool cage?')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Show earlier messages' })).toBeInTheDocument();
+  });
+
+  it('a refresh that reaches back to the thread joins it', async () => {
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    const newer = { id: 'm3', from: 'waves', body: 'Friday works.', createdAt: '2026-11-04T12:00:00.000Z' };
+    api.getPortalMessages.mockResolvedValueOnce({ messages: [thread[1], newer], hasMore: true, unread: 1 });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(await screen.findByText('Friday works.')).toBeInTheDocument();
+    expect(screen.getByText('Do you spray the pool cage?')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Show earlier messages' })).toBeNull();
+  });
+
   it('an empty thread that gets more than one page while hidden keeps the rest reachable', async () => {
     api.getPortalMessages.mockResolvedValueOnce({ messages: [], hasMore: false, unread: 0 });
     render(<PortalMessages />);

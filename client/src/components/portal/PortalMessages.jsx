@@ -78,6 +78,15 @@ function useThread() {
   const [earlierError, setEarlierError] = useState(false);
   const messagesRef = useRef([]);
   messagesRef.current = messages;
+  // The newest time any server page held (a message added on this screen does not count): a refresh page
+  // joins the thread only when it reaches back to it.
+  const fetchedNewestRef = useRef(null);
+  const noteFetched = (list) => {
+    for (const m of list) {
+      const t = Date.parse(m.createdAt);
+      if (Number.isFinite(t) && (fetchedNewestRef.current == null || t > fetchedNewestRef.current)) fetchedNewestRef.current = t;
+    }
+  };
   const live = useRef(true);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
 
@@ -86,7 +95,9 @@ function useThread() {
     api.getPortalMessages()
       .then((d) => {
         if (!live.current) return;
-        setMessages(Array.isArray(d?.messages) ? d.messages : []);
+        const list = Array.isArray(d?.messages) ? d.messages : [];
+        noteFetched(list);
+        setMessages(list);
         setHasMore(d?.hasMore === true);
         setStatus('ready');
       })
@@ -112,17 +123,20 @@ function useThread() {
   const add = useCallback((message) => setMessages((prev) => mergeMessages(prev, [message])), []);
 
   // A new answer from the office shows up without a reload. A failed refresh
-  // is silent: the thread on screen is still right. When more came than one
-  // page holds (the page was hidden, or refreshes failed), the newest page
-  // replaces the thread and "Show earlier messages" reaches the rest, so no gap
-  // is left that no button can fill.
+  // is silent: the thread on screen is still right. A page that does not reach
+  // back to the newest message an earlier page held (more came than one page
+  // holds: the page was hidden, or refreshes failed) replaces the thread, and
+  // "Show earlier messages" reaches the rest, so no gap is left that no button
+  // can fill.
   const refresh = useCallback(() => {
     if (!isVisible() || status !== 'ready') return;
     api.getPortalMessages()
       .then((d) => {
         if (!live.current || !Array.isArray(d?.messages)) return;
-        const held = new Set(messagesRef.current.map((m) => m.id));
-        if (d.hasMore === true && !d.messages.some((m) => held.has(m.id))) {
+        const oldest = Date.parse(d.messages[0]?.createdAt);
+        const reaches = d.hasMore !== true || (fetchedNewestRef.current != null && Number.isFinite(oldest) && oldest <= fetchedNewestRef.current);
+        noteFetched(d.messages);
+        if (!reaches) {
           setMessages(d.messages);
           setHasMore(true);
           return;
