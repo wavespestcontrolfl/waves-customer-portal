@@ -242,6 +242,23 @@ describe('reschedule proposal review', () => {
     expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
   });
 
+  // Owner 2026-11-04 (D1 A): a technician's preview comes back with no transcript quote; it still binds and applies.
+  it('accepts a technician preview with no quote and applies it', async () => {
+    const { quote: _quote, ...redacted } = PREVIEW;
+    adminFetch.mockImplementation(async (url) => (url.endsWith('/preview') ? redacted : url.endsWith('/apply') ? { ok: true } : FEED));
+    render(<RescheduleProposalCards ui={ui} />);
+    await screen.findByLabelText('Appointment discussed for Synthetic Caller');
+    selectSecond();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+    const apply = await screen.findByRole('button', { name: 'Apply change' });
+    expect(apply).toBeEnabled();
+    expect(screen.queryByText(/The preview was incomplete/)).not.toBeInTheDocument();
+    fireEvent.click(apply);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(expect.stringMatching(/\/apply$/), expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ visit_id: SECOND.id, preview_hash: PREVIEW.preview_hash }),
+    })));
+  });
+
   it('accepts a bound preview whose eligible appointment has no current window', async () => {
     const noWindow = { ...PREVIEW, selected: { ...SECOND, property: null, current_window: null }, from: null };
     adminFetch.mockImplementation(async (url) => url.endsWith('/preview') ? noWindow : FEED);
