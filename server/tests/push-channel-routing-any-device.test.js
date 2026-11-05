@@ -162,6 +162,8 @@ describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device stat
     expect((await send()).delivered).toBe(true);
     expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
     expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBe(true);
+    // Only routing asks for `reachable`; the customer-facing status routes keep their shape.
+    expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
   });
 
   it('gate on: app notifications switched off for the account still means text', async () => {
@@ -180,6 +182,7 @@ describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device stat
   it('gate off: a stale device is not enough', async () => {
     mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(mockCustomerStatus.mock.calls[0][2]).toBeUndefined();
   });
 });
 

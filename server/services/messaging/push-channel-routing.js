@@ -286,7 +286,7 @@ const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 // any active device on a configured provider, however long ago it checked in.
 async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } = {}) {
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId);
+    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true } : undefined);
     return status.enabled && (anyDevice ? status.reachable === true : status.fresh);
   }
   const query = knex('push_subscriptions')
