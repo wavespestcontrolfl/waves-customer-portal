@@ -1077,7 +1077,8 @@ async function getStub(checkId, conn = db) {
       medicareCents: Number(ytd.medicare),
       additionalMedicareCents: Number(ytd.additional_medicare),
       netCents: Number(ytd.net),
-      ...(c.simpleDeferralCents === undefined ? {} : { simpleIraCents: Number(ytd.simple_ira) }),
+      // Also on a later check with no savings, once the year holds some: the year's column still adds up.
+      ...(Number(ytd.simple_ira) > 0 || c.simpleDeferralCents !== undefined ? { simpleIraCents: Number(ytd.simple_ira) } : {}),
     },
   };
 }

@@ -280,6 +280,21 @@ postgres('payroll SIMPLE IRA elections and pay runs', () => {
       expect((await payrollSimple.simpleYtdBefore(trx, [id], '2026-10-02', W2)).get(id)).toEqual({ deferral: 0, compensation: 0 });
     });
 
+    it('a later check with no savings still shows the year-to-date savings, and no this-pay line', async () => {
+      const id = await technician({ name: 'Sample Alpha' });
+      await election(id, { deferral_cents: 5000, effective_on: '2026-01-02' });
+      await election(id, { participant: false, effective_on: '2026-10-05', created_at: new Date(Date.now() + 60000) });
+      await approvedWeek(id, W1);
+      await approvedWeek(id, W2);
+      await approvedWeek(id, '2026-09-28');
+      await draftAndFinalize(W1);
+      await draftAndFinalize(W2);
+      const ended = await draftAndFinalize('2026-09-28');
+      const stub = (await api('GET', `/checks/${ended.checks[0].id}/stub`)).body.stub;
+      expect(stub).not.toHaveProperty('preTaxDeductions');
+      expect(stub.ytd.simpleIraCents).toBe(10000);
+    });
+
     it('a check with no election has no SIMPLE line on its stub and no CSV column', async () => {
       const id = await technician({ name: 'Sample Alpha' });
       await approvedWeek(id, W1);
