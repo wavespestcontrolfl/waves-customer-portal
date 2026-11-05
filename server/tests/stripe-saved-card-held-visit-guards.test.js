@@ -6,7 +6,7 @@
 describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards', () => {
   beforeEach(() => { jest.resetModules(); });
 
-  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {} }) {
+  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {}, consents = [] }) {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       subtotal: '200.00', total: '200.00', discount_amount: '0.00',
@@ -35,6 +35,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'service_records') return record;
         if (table === 'annual_prepay_terms') return { status: 'payment_pending', prepay_invoice_id: 'inv-1' };
         if (table === 'customer_contracts') return contract;
+        if (table === 'payment_method_consents') return consents[0] || null;
         // Only the applied-prepayment marker lookup (it binds 'scheduled_service_prepaid') sees the marker.
         if (table === 'payments') return markerLookup ? appliedMarker : null;
         return null;
@@ -54,7 +55,11 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
-      chain.select = jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      chain.select = jest.fn(async () => {
+        if (table === 'payment_method_consents') return consents;
+        const row = await chain.first();
+        return row ? [row] : [];
+      });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -243,6 +248,23 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       });
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireBookedVisitLinesOnly: true }))
         .rejects.not.toMatchObject({ code: 'TECH_CHARGE_EXTRAS' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    test.each([
+      ['a card-hold consent only', [{ consent_text_version: 'v12_2026-10-01', source: 'estimate_card_hold' }]],
+      ['no consent row', []],
+    ])('requireGeneralChargeConsent: %s refuses before Stripe', async (_label, consents) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, consents });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireGeneralChargeConsent: true }))
+        .rejects.toMatchObject({ code: 'CARD_CONSENT_REQUIRED' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test('requireGeneralChargeConsent: a visit-and-invoice consent proceeds to Stripe', async () => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, consents: [{ consent_text_version: 'v12_2026-10-01', source: 'pay_page' }] });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireGeneralChargeConsent: true }))
+        .rejects.not.toMatchObject({ code: 'CARD_CONSENT_REQUIRED' });
       expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
     });
 

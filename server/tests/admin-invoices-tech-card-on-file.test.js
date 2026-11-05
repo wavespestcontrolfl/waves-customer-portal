@@ -16,6 +16,8 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockRows = {};
+// Lists a builder resolves to when awaited (first() reads mockRows instead).
+const mockLists = {};
 const mockAuth = { techRole: 'technician', technicianId: 'tech-1' };
 
 function mockMakeBuilder(table) {
@@ -25,7 +27,7 @@ function mockMakeBuilder(table) {
     'limit', 'select', 'leftJoin', 'join', 'andWhere', 'orWhere', 'groupBy', 'forUpdate', 'count']
     .forEach((m) => { b[m] = jest.fn(chain); });
   b.first = jest.fn(() => Promise.resolve(mockRows[table]));
-  b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+  b.then = (resolve, reject) => Promise.resolve(mockLists[table] || []).then(resolve, reject);
   b.catch = (fn) => Promise.resolve([]).catch(fn);
   return b;
 }
@@ -100,7 +102,10 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
     for (const key of Object.keys(mockRows)) delete mockRows[key];
     mockRows.invoices = invoiceRow();
     mockRows.scheduled_services = visitRow();
-    mockRows.payment_methods = { method_type: 'card' };
+    mockRows.payment_methods = { method_type: 'card', stripe_payment_method_id: 'pm_stripe_1' };
+    for (const key of Object.keys(mockLists)) delete mockLists[key];
+    // The card's recorded consent authorizes charges for visits and invoices (v8+, not a card hold).
+    mockLists.payment_method_consents = [{ consent_text_version: 'v12_2026-10-01', source: 'pay_page' }];
     Object.assign(mockAuth, { techRole: 'technician', technicianId: 'tech-1' });
     process.env.GATE_TECH_CARD_ON_FILE = 'true';
   });
@@ -134,8 +139,27 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       requireInvoiceScheduledServiceBinding: true,
       requireTechnicianCardOnFileFor: { techRole: 'technician', technicianId: 'tech-1' },
       requireCardMethod: true,
+      requireGeneralChargeConsent: true,
       requireBookedVisitLinesOnly: true,
     });
+  });
+
+  // Codex security P2 (#7587 r2): a card saved only for an estimate's card hold (or with only an old,
+  // non-authorizing consent) is not a card the technician may charge for today's invoice.
+  test.each([
+    ['saved only for an estimate card hold', [{ consent_text_version: 'v12_2026-10-01', source: 'estimate_card_hold' }]],
+    ['with only a pre-v8 consent', [{ consent_text_version: 'v7_2026-06-01', source: 'pay_page' }]],
+    ['with no consent row', []],
+  ])('gate on, a card %s: both routes answer 400 before Stripe', async (_label, consents) => {
+    mockLists.payment_method_consents = consents;
+    await withServer(async (baseUrl) => {
+      const quote = await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-1' });
+      expect(quote.status).toBe(400);
+      await expect(quote.json()).resolves.toEqual({ error: 'This card was not saved for visit charges. Take the payment by Tap to Pay or manual card.' });
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 102.9 })).status).toBe(400);
+    });
+    expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   // Codex security P2 (#7587): a line added at checkout (free description and price) is not part of

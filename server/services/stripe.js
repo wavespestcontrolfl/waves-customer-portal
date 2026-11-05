@@ -2203,7 +2203,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, requireTechnicianCardOnFileFor = null, requireCardMethod = false, requireBookedVisitLinesOnly = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, requireTechnicianCardOnFileFor = null, requireCardMethod = false, requireBookedVisitLinesOnly = false, requireGeneralChargeConsent = false } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2256,6 +2256,12 @@ const StripeService = {
     // a saved card only, never a saved bank account under any of its aliases.
     if (requireCardMethod && String(card.method_type || '').toLowerCase() !== 'card') {
       throw Object.assign(new Error('This charge takes a saved card, not a bank account.'), { code: 'CARD_METHOD_REQUIRED' });
+    }
+    // Opt-in (a technician's card on file): the card's recorded consent must authorize charges for
+    // visits and invoices; a card saved only for one estimate's card hold does not (hasEnrollmentScopedConsent).
+    if (requireGeneralChargeConsent
+      && !(await require('./payment-method-consents').hasEnrollmentScopedConsent(invoice.customer_id, card.stripe_payment_method_id))) {
+      throw Object.assign(new Error('This card was not saved for visit charges. Take the payment another way.'), { code: 'CARD_CONSENT_REQUIRED' });
     }
 
     const stripeCustomerId = await this.ensureStripeCustomer(invoice.customer_id);

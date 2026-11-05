@@ -2084,14 +2084,22 @@ async function technicianCardOnFileInvoice(req) {
 }
 
 // Card only at the visit: a technician's quote or charge takes one of the
-// invoice customer's saved CARDS, never a saved bank account. The charge
-// checks it again where it loads the method (requireCardMethod).
-async function technicianSavedMethodIsCard(invoice, paymentMethodId) {
+// invoice customer's saved CARDS, never a saved bank account, and only a card
+// whose recorded consent authorizes charges for visits and invoices (never a
+// card saved only for one estimate's card hold, whose consent covers that
+// hold alone; Codex security #7587). The charge checks both again where it
+// loads the method (requireCardMethod, requireGeneralChargeConsent).
+// Returns null when the card may be used, else the refusal text.
+async function technicianSavedCardRefusal(invoice, paymentMethodId) {
   const method = await db('payment_methods').where({ id: paymentMethodId, customer_id: invoice.customer_id })
-    .first('method_type');
-  return String(method?.method_type || '').toLowerCase() === 'card';
+    .first('method_type', 'stripe_payment_method_id');
+  if (String(method?.method_type || '').toLowerCase() !== 'card') return TECH_CARD_ONLY_ERROR;
+  const { hasEnrollmentScopedConsent } = require('../services/payment-method-consents');
+  if (!(await hasEnrollmentScopedConsent(invoice.customer_id, method.stripe_payment_method_id))) return TECH_CARD_CONSENT_ERROR;
+  return null;
 }
 const TECH_CARD_ONLY_ERROR = 'Card on file at the visit takes a saved card, not a bank account.';
+const TECH_CARD_CONSENT_ERROR = 'This card was not saved for visit charges. Take the payment by Tap to Pay or manual card.';
 
 router.post('/:id/charge-card-quote', async (req, res) => {
   try {
@@ -2099,9 +2107,8 @@ router.post('/:id/charge-card-quote', async (req, res) => {
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
     const techQuote = await technicianCardOnFileInvoice(req);
     if (!techQuote.ok) return res.status(404).json({ error: 'Invoice not found' });
-    if (techQuote.invoice && !(await technicianSavedMethodIsCard(techQuote.invoice, paymentMethodId))) {
-      return res.status(400).json({ error: TECH_CARD_ONLY_ERROR });
-    }
+    const quoteRefusal = techQuote.invoice ? await technicianSavedCardRefusal(techQuote.invoice, paymentMethodId) : null;
+    if (quoteRefusal) return res.status(400).json({ error: quoteRefusal });
     const StripeService = require('../services/stripe');
     const quote = await StripeService.quoteInvoiceSavedCardCharge(req.params.id, paymentMethodId);
     return res.json({ quote });
@@ -2125,9 +2132,8 @@ router.post('/:id/charge-card', async (req, res, next) => {
     if (techCharge.invoice && (expectedTotal == null || expectedTotal === '')) {
       return res.status(400).json({ error: 'expectedTotal required' });
     }
-    if (techCharge.invoice && !(await technicianSavedMethodIsCard(techCharge.invoice, paymentMethodId))) {
-      return res.status(400).json({ error: TECH_CARD_ONLY_ERROR });
-    }
+    const chargeRefusal = techCharge.invoice ? await technicianSavedCardRefusal(techCharge.invoice, paymentMethodId) : null;
+    if (chargeRefusal) return res.status(400).json({ error: chargeRefusal });
 
     // Account credit is auto-applied INSIDE chargeInvoiceWithSavedCard — after it
     // validates the saved card + triages a stale PI, all in the same locked
@@ -2150,6 +2156,7 @@ router.post('/:id/charge-card', async (req, res, next) => {
           requireInvoiceScheduledServiceBinding: true,
           requireTechnicianCardOnFileFor: { techRole: req.techRole, technicianId: req.technicianId },
           requireCardMethod: true,
+          requireGeneralChargeConsent: true,
           requireBookedVisitLinesOnly: true,
         }
         // An admin ordered this charge explicitly: exempt from the default
