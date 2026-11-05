@@ -25404,17 +25404,27 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
 // { httpStatus, httpBody } for a refusal. `expected` (bar only) pins the figures
 // the operator approved; `switchLane: true` opens the switch lane for a caller
 // with its own gate.
+const cents = (v) => Math.round((Number(v) || 0) * 100);
+// One superseded invoice as the card showed it: id, total and every line amount
+// (the waived setup fee is read off those lines), so an edit to the invoice it
+// voids is drift even when the year's price does not move.
+function prepaySwitchSupersedeKey(inv) {
+  const lines = (inv.lines || []).map((li) => `${String(li.description || '')}=${cents(li.amount)}`).sort();
+  return `${inv.id}:${cents(inv.total)}:${lines.join('|')}`;
+}
+function supersedeKeysMatch(supersedes, expected) {
+  const keys = (supersedes || []).map(prepaySwitchSupersedeKey).sort();
+  return JSON.stringify(keys) === JSON.stringify([...(expected.supersedeKeys || [])].sort());
+}
 function prepaySwitchMatchesExpected(live, expected) {
-  const c = (v) => Math.round((Number(v) || 0) * 100);
   const m = live.mintPayload || {};
-  const supersedeIds = (live.supersedes || []).map((inv) => String(inv.id)).sort();
-  return c(m.amount) === c(expected.amount)
-    && c(m.setupFeeAmount) === c(expected.setupFeeAmount)
+  return cents(m.amount) === cents(expected.amount)
+    && cents(m.setupFeeAmount) === cents(expected.setupFeeAmount)
     && Number(m.visitCount) === Number(expected.visitCount)
     && String(m.coverageCadence || '') === String(expected.coverageCadence || '')
     && String(m.serviceType || '') === String(expected.serviceType || '')
     && String(m.termStart || '') === String(expected.termStart || '')
-    && JSON.stringify(supersedeIds) === JSON.stringify([...(expected.supersedeIds || [])].map(String).sort());
+    && supersedeKeysMatch(live.supersedes, expected);
 }
 
 async function runPrepaySwitch({
@@ -25599,6 +25609,14 @@ async function runPrepaySwitch({
       if (!resolved.ok) {
         const err = new Error(`This visit ${resolved.blockReason}`);
         err.switchConflict = true;
+        throw err;
+      }
+      // The card's figures again, now that every series invoice is locked: the
+      // invoices about to be voided must be the ones (and amounts) it showed.
+      if (expected && !supersedeKeysMatch(resolved.supersedes, expected)) {
+        const err = new Error('The invoice this switch voids changed after the card was shown — nothing was switched');
+        err.switchConflict = true;
+        err.switchDrift = true;
         throw err;
       }
       for (const inv of resolved.supersedes) {
@@ -30006,6 +30024,7 @@ module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // (intelligence-bar/prepay-switch-tools.js), same avoid-a-route-load-cycle reason as above.
 module.exports.computeAnnualPrepayPreview = computeAnnualPrepayPreview;
 module.exports.runPrepaySwitch = runPrepaySwitch;
+module.exports.prepaySwitchSupersedeKey = prepaySwitchSupersedeKey;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
 module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;

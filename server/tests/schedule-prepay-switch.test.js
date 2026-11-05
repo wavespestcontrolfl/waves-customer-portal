@@ -837,7 +837,7 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
       coverageCadence: preview.mintPayload.coverageCadence,
       serviceType: preview.mintPayload.serviceType,
       termStart: preview.mintPayload.termStart,
-      supersedeIds: preview.supersedes.map((inv) => inv.id),
+      supersedeKeys: preview.supersedes.map((inv) => router.prepaySwitchSupersedeKey(inv)),
     };
   }
 
@@ -866,8 +866,22 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
   test('runPrepaySwitch refuses as drift when the invoice it would void is not the one the card named', async () => {
     const preview = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, { switchLane: true });
     stubTables();
-    const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected: { ...expectedFrom(preview), supersedeIds: [] } });
+    const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected: { ...expectedFrom(preview), supersedeKeys: [] } });
     expect(out).toMatchObject({ httpStatus: 409, drift: true });
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('runPrepaySwitch refuses as drift when the invoice it voids was edited after the card (same id, new amounts)', async () => {
+    const preview = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, { switchLane: true });
+    const expected = expectedFrom(preview);
+    // The card approved the accept invoice as it was; the switch now reads a changed setup-fee line.
+    stubTables({ invoices: [{ ...ACCEPT_INVOICE, total: '237.00', line_items: [
+      { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 109, amount: 109 },
+      { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
+    ] }] });
+    const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected });
+    expect(out).toMatchObject({ httpStatus: 409, drift: true });
+    expect(stubTables.casCalls.length).toBe(0);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 });

@@ -43,7 +43,7 @@ The first call returns a PREVIEW and writes nothing: the customer, the visit, th
 Effects: the series' unsent per-application invoice (setup fee and first application from the estimate) is voided, and its setup fee is waived; an UNPAID annual prepay invoice is created. Nothing is sent to the customer (no text, email or call) and no card is charged: collect the invoice afterwards (charge their card or record the payment on the invoice). Until it is paid the customer is not yet on annual prepay. Voiding the prepay invoice from Invoices puts the per-application invoice back.
 Refused with the reason when the switch does not apply: no per-visit price, a one-time or unsupported cadence, add-ons or boosters, a visit already closed out, a sent or paid per-application invoice, more than one live invoice, a deposit or account credit on it, a third-party payer, an existing annual prepay term, a renewal amount already given to the customer. Admin only.
 Takes appointment_id: the customer's live visit in the series (find it with get_schedule_view or the customer's detail first).
-Use for: "switch Ibrahim Hanna to annual prepay", "move this customer from per application to annual prepay", "he wants to prepay the year", "set up annual prepay for the visit I'm at".`,
+Use for: "switch Pat Sample to annual prepay", "move this customer from per application to annual prepay", "he wants to prepay the year", "set up annual prepay for the visit I'm at".`,
     input_schema: {
       type: 'object',
       properties: {
@@ -90,7 +90,7 @@ function versionOf({ visit, customer, mint, supersedes }) {
     cadence: mint.coverageCadence || null,
     service: mint.serviceType || null,
     term_start: mint.termStart || null,
-    supersedes: supersedes.map((inv) => `${inv.id}:${cents(inv.total)}`).sort(),
+    supersedes: supersedes.map((inv) => schedule().prepaySwitchSupersedeKey(inv)).sort(),
   };
 }
 
@@ -151,7 +151,7 @@ async function buildPlan(input) {
       coverageCadence: mint.coverageCadence,
       serviceType: mint.serviceType,
       termStart: mint.termStart,
-      supersedeIds: supersedes.map((inv) => String(inv.id)),
+      supersedeKeys: supersedes.map((inv) => schedule().prepaySwitchSupersedeKey(inv)),
     },
     note: 'PREVIEW ONLY — nothing was changed. Confirm makes exactly this switch; if anything changed it refuses.',
   };

@@ -7,7 +7,11 @@
  * in-transaction `expected` check). Synthetic names only.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../routes/admin-schedule', () => ({ computeAnnualPrepayPreview: jest.fn(), runPrepaySwitch: jest.fn() }));
+jest.mock('../routes/admin-schedule', () => ({
+  computeAnnualPrepayPreview: jest.fn(),
+  runPrepaySwitch: jest.fn(),
+  prepaySwitchSupersedeKey: (inv) => `${inv.id}:${inv.total}`,
+}));
 
 const VISIT = '00000000-0000-4000-8000-0000000000d1';
 const CUST = '00000000-0000-4000-8000-0000000000c1';
@@ -99,13 +103,22 @@ test('confirm runs the switch once with the figures the card showed', async () =
   expect(Schedule.runPrepaySwitch).toHaveBeenCalledTimes(1);
   expect(Schedule.runPrepaySwitch.mock.calls[0][0]).toMatchObject({
     visitId: VISIT, switchLane: true, acknowledgeNoticedAmount: false,
-    expected: { amount: 512, setupFeeAmount: 0, visitCount: 4, coverageCadence: 'quarterly', serviceType: 'Quarterly Pest Control', termStart: '2099-02-03', supersedeIds: ['inv-1'] },
+    expected: { amount: 512, setupFeeAmount: 0, visitCount: 4, coverageCadence: 'quarterly', serviceType: 'Quarterly Pest Control', termStart: '2099-02-03', supersedeKeys: ['inv-1:227'] },
   });
 });
 
 test('a price that moved after the card refuses as preview_changed and runs nothing', async () => {
   const p = await preview();
   Schedule.computeAnnualPrepayPreview.mockResolvedValue({ ...PREVIEW, mintPayload: { ...PREVIEW.mintPayload, amount: 540 } });
+  const out = await executePrepaySwitchTool('switch_visit_to_annual_prepay',
+    { appointment_id: VISIT, confirmed: true, _verified_prepay_switch_version: p._version }, ADMIN);
+  expect(out).toMatchObject({ code: 'preview_changed', preview_changed: true });
+  expect(Schedule.runPrepaySwitch).not.toHaveBeenCalled();
+});
+
+test('an edit to the invoice it voids (same id, new amount) refuses as preview_changed', async () => {
+  const p = await preview();
+  Schedule.computeAnnualPrepayPreview.mockResolvedValue({ ...PREVIEW, supersedes: [{ ...PREVIEW.supersedes[0], total: 237 }] });
   const out = await executePrepaySwitchTool('switch_visit_to_annual_prepay',
     { appointment_id: VISIT, confirmed: true, _verified_prepay_switch_version: p._version }, ADMIN);
   expect(out).toMatchObject({ code: 'preview_changed', preview_changed: true });
