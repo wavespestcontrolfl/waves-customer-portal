@@ -78,7 +78,7 @@ const ALLOWLIST = [
   },
   {
     file: 'services/dead-number-alert.js',
-    snippet: "return db('sms_log')",
+    snippet: "return conn('sms_log')",
     reason: 'settledTextsTo: reads texts the provider settled as failed, undelivered or delivered (statuses a send reservation never has) plus the callback\'s own sid, to count failures in a row; it presents rows to nobody and reads only created_at, status and twilio_sid.',
   },
   {

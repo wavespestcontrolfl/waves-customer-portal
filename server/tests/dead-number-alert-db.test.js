@@ -93,6 +93,29 @@ maybeDescribe('dead number alert (live Postgres)', () => {
     expect(await rows()).toHaveLength(0);
   });
 
+  test('the failure path reads the history inside the customer lock, so a delivery that lands meanwhile counts', async () => {
+    await text('undelivered', 30);
+    const second = await text('undelivered', 10);
+    const later = await text('sent', 5); // sent after the failures; its delivered update lands while the failure waits
+    let locked;
+    let release;
+    const isLocked = new Promise((r) => { locked = r; });
+    const held = new Promise((r) => { release = r; });
+    const holder = db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`dead-number:${customerId}`]);
+      locked();
+      await held;
+    });
+    await isLocked;
+    const pending = fail(second);
+    await new Promise((r) => { setTimeout(r, 300); });
+    await db('sms_log').where({ twilio_sid: later }).update({ status: 'delivered' });
+    release();
+    await holder;
+    expect(await pending).toBeNull();
+    expect(await rows()).toHaveLength(0);
+  });
+
   test('a late delivered callback for an older text leaves the row; a text sent after the failures closes it', async () => {
     await text('undelivered', 30);
     const older = await text('sent', 25); // its delivered callback arrives late
