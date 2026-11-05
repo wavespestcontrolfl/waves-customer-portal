@@ -151,7 +151,8 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     const [[, title, why, opts]] = officeItems();
     expect(title).toBe("Customers — price Pat Sample's new home by hand");
     expect(why).toBe('The app did not make their new-home estimate; the item says why.');
-    expect(opts).toMatchObject({ bell: true, dedupeKey: `moving_auto_estimate_office:${s.move.id}` });
+    // One item per attempt: the key names the move and the attempt's claim time.
+    expect(opts).toMatchObject({ bell: true, dedupeKey: expect.stringMatching(new RegExp(`^moving_auto_estimate_office:${s.move.id}:\\d+$`)) });
     const price = Number(/The new visit price \(\$(\d+\.\d\d)\) is more than 25% above the current one \(\$1\.00\)/.exec(opts.detail)[1]);
     expect(price).toBeGreaterThan(0);
     expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_state: 'office', estimate_id: null });
@@ -258,6 +259,32 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
       notes: `Customer moved out; plan stopped after the move-out date (moving flow, move pause ${s.move.id})`,
     });
     expect(await Auto._private.freeChecks(s.move)).toEqual({ code: 'not_pest_only' });
+  });
+
+  test('an estimate for a replaced address no longer counts; a live one the office made ends the attempts', async () => {
+    const s = await seed({ customer: { contact_role: 'tenant' } });
+    const stale = crypto.randomUUID();
+    await trx('estimates').insert({
+      id: stale, customer_id: customerId, customer_name: 'Pat Sample', status: 'sent', address: '12 Other Road, Venice, FL 34285',
+      estimate_data: JSON.stringify({ inputs: { svcPest: true }, move: { moveId: s.move.id, estimateId: stale, address: '12 Other Road, Venice, FL 34285' } }),
+    });
+    await trx('customer_moves').where({ id: s.move.id }).update({ estimate_id: stale });
+    // The replaced address's estimate does not stop the attempt (here the tenant check ends it).
+    expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ office: 1 });
+    expect((await moveRow(s.move.id)).auto_estimate_note).toContain('tenant account');
+
+    // A live estimate for this address, made by the office: no attempt, no item, no lookup.
+    jest.clearAllMocks();
+    const live = crypto.randomUUID();
+    await trx('estimates').insert({
+      id: live, customer_id: customerId, customer_name: 'Pat Sample', status: 'draft', address: NEW_ADDRESS,
+      estimate_data: JSON.stringify({ inputs: { svcPest: true }, move: { moveId: s.move.id, estimateId: live, address: NEW_ADDRESS } }),
+    });
+    await trx('customer_moves').where({ id: s.move.id }).update({ estimate_id: live, auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null });
+    expect(await Auto.runMoveAutoEstimateJob()).toEqual({ drafted: 0, office: 0, skipped: 1, failed: 0 });
+    expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_state: 'office', auto_estimate_note: 'The office made the estimate.', auto_estimate_at: null });
+    expect(officeItems()).toHaveLength(0);
+    expect(Lookup.performPropertyLookup).not.toHaveBeenCalled();
   });
 
   test('a new address after a finished attempt clears it, so the new address gets its own; the same address does not', async () => {

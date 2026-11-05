@@ -159,7 +159,8 @@ async function leaveToOffice(move, code, { now, note: given = null }) {
       detail: `${note} Make the estimate with Estimate for new home on the Moving card.`,
       icon: '🚚',
       bell: true,
-      dedupeKey: `moving_auto_estimate_office:${move.id}`,
+      // One item per attempt (a new address gets a new attempt): the claim time names it.
+      dedupeKey: `moving_auto_estimate_office:${move.id}:${new Date(move.auto_estimate_at || now).getTime()}`,
       metadata: { customerId: move.customer_id, moveId: move.id, kind: 'moving_auto_estimate_office', reason: code },
     });
     if (!notif || notif.suppressed) throw new Error('moving auto-estimate office item did not persist');
@@ -168,12 +169,21 @@ async function leaveToOffice(move, code, { now, note: given = null }) {
 }
 
 // Claims a move for its one automatic attempt, under its row lock, only while
-// it is still a candidate.
+// it is still a candidate and has no live new-home estimate (an estimate for
+// an address the customer since replaced no longer counts). A move whose live
+// estimate the office made is marked so the scan skips it from then on.
 async function claimMove(moveId, now) {
+  const Moves = require('./customer-moves');
   return db.transaction(async (trx) => {
     const locked = await trx('customer_moves').where({ id: moveId }).forUpdate().first();
     if (!locked || locked.status !== 'submitted' || locked.address_verdict !== 'in_area' || !locked.normalized_address
-      || locked.estimate_id || locked.auto_estimate_at || locked.auto_estimate_state) return null;
+      || locked.auto_estimate_at || locked.auto_estimate_state) return null;
+    const action = await Moves.newHomeAction(locked, trx);
+    if (action && action.action === 'open') {
+      await trx('customer_moves').where({ id: moveId })
+        .update({ auto_estimate_state: 'office', auto_estimate_note: 'The office made the estimate.', updated_at: now });
+      return null;
+    }
     const [claimed] = await trx('customer_moves').where({ id: moveId })
       .update({ auto_estimate_at: now, updated_at: now }).returning('*');
     return claimed;
@@ -372,10 +382,11 @@ async function runMoveAutoEstimateJob({ now = new Date() } = {}) {
       logger.error(`[moving-auto-estimate] stale hand-off failed for move ${move.id} (${errCode(err)})`);
     }
   }
+  // A move with an estimate id is a candidate too: claimMove skips a live
+  // estimate, and one for a replaced address no longer counts.
   const candidates = await db('customer_moves')
     .where({ status: 'submitted', address_verdict: 'in_area' })
     .whereNotNull('normalized_address')
-    .whereNull('estimate_id')
     .whereNull('auto_estimate_at')
     .whereNull('auto_estimate_state')
     .orderBy('submitted_at', 'asc').limit(CANDIDATE_LIMIT).pluck('id');
