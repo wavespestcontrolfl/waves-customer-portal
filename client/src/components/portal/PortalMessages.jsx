@@ -127,14 +127,16 @@ function useThread() {
 
   const add = useCallback((message) => setMessages((prev) => mergeMessages(prev, [message])), []);
 
-  // A new answer from the office shows up without a reload. A failed refresh
-  // is silent: the thread on screen is still right. A page that does not reach
-  // back to the newest message an earlier page held (more came than one page
-  // holds: the page was hidden, or refreshes failed) replaces the thread, and
-  // "Show earlier messages" reaches the rest, so no gap is left that no button
-  // can fill.
+  // A new answer from the office shows up without a reload. One refresh at a
+  // time, so answers never cross. A failed refresh is silent: the thread on
+  // screen is still right. A page that does not reach back to the newest message
+  // an earlier page held (more came than one page holds: the page was hidden, or
+  // refreshes failed) replaces the thread, and "Show earlier messages" reaches
+  // the rest, so no gap is left that no button can fill.
+  const refreshingRef = useRef(false);
   const refresh = useCallback(() => {
-    if (!isVisible() || status !== 'ready') return;
+    if (!isVisible() || status !== 'ready' || refreshingRef.current) return;
+    refreshingRef.current = true;
     api.getPortalMessages()
       .then((d) => {
         if (!live.current || !Array.isArray(d?.messages)) return;
@@ -143,13 +145,16 @@ function useThread() {
         noteFetched(d.messages);
         if (!reaches) {
           windowRef.current += 1;
-          setMessages(d.messages);
+          // A message sent here after the page was read is newer than all of it: it stays.
+          const pageNewest = Date.parse(d.messages[d.messages.length - 1]?.createdAt);
+          setMessages((prev) => mergeMessages(d.messages, prev.filter((m) => Date.parse(m.createdAt) > pageNewest)));
           setHasMore(true);
           return;
         }
         setMessages((prev) => mergeMessages(prev, d.messages));
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { refreshingRef.current = false; });
   }, [status]);
   useEffect(() => {
     const timer = setInterval(refresh, REFRESH_MS);

@@ -136,6 +136,19 @@ describe('PortalMessages thread', () => {
     expect(screen.getByRole('button', { name: 'Show earlier messages' })).toBeInTheDocument();
   });
 
+  it('runs one refresh at a time: a second one does not start while the first is out', async () => {
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    let answer;
+    api.getPortalMessages.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(api.getPortalMessages).toHaveBeenCalledTimes(2); // the first load and one refresh
+    await act(async () => { answer({ messages: thread, hasMore: false, unread: 0 }); });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    await waitFor(() => expect(api.getPortalMessages).toHaveBeenCalledTimes(3));
+  });
+
   it('a refresh that reaches back to the thread joins it', async () => {
     render(<PortalMessages />);
     await screen.findByText('Do you spray the pool cage?');
