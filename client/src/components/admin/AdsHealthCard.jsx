@@ -6,7 +6,9 @@ import { formatETDateTime } from "../../lib/timezone";
 // campaign serves (and why not), ad disapprovals, conversion uploads with
 // Google's own upload check, and a 30-day "who changed what" timeline. The
 // server route ships behind GATE_ADS_HEALTH_CARD; while it is off
-// GET /admin/ads/health answers 404 and this card renders nothing.
+// GET /admin/ads/health answers 404 and this card renders nothing. It also
+// renders nothing until the server answers, so a switched-off card never
+// flashes onto the dashboard.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const TIMELINE_PREVIEW = 10;
@@ -180,8 +182,8 @@ function Uploads({ uploads, check }) {
       {check?.error && <Muted className="[margin-top:8px]">{check.error}</Muted>}
       {actions.length > 0 && (
         <ul className="list-none [margin:8px_0_0] [padding:0]">
-          {actions.map((a) => (
-            <ActionLine key={a.name} action={a} />
+          {actions.map((a, i) => (
+            <ActionLine key={`${a.name}-${i}`} action={a} />
           ))}
         </ul>
       )}
@@ -291,12 +293,11 @@ export default function AdsHealthCard() {
     };
   }, []);
 
-  if (state === "off") return null;
+  if (state === "off" || state === "loading") return null;
   return (
     <Card className="[padding:16px_20px] [margin-bottom:24px]" data-qa="ads-health-card">
       <h2 className="text-18 font-medium text-zinc-900 [margin:0]">Ad health</h2>
       <Muted className="[margin-bottom:8px]">Live from Google Ads. Changes from the last 30 days.</Muted>
-      {state === "loading" && <Muted>Loading ad health...</Muted>}
       {state === "error" && <Muted>Ad health could not load: {message}</Muted>}
       {state === "ready" && <CardBody data={data} />}
     </Card>

@@ -31,10 +31,8 @@ function change(i) {
 function payload(overrides = {}) {
   return {
     generatedAt: '2026-11-05T05:40:00.000Z',
-    windowDays: 30,
     google: {
       configured: true,
-      accountTimeZone: 'America/New_York',
       serving: {
         campaigns: [
           { id: '1', name: 'Test Search Campaign', status: 'PAUSED', primaryStatus: 'PAUSED', reasons: ['CAMPAIGN_PAUSED'], dailyBudget: 5 },
@@ -78,8 +76,9 @@ describe('AdsHealthCard', () => {
   it('renders nothing while the gate is off (404)', async () => {
     reply({ error: 'ads_health_off' }, 404);
     const { container } = render(<AdsHealthCard />);
+    expect(container).toBeEmptyDOMElement();
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryByText('Loading ad health...')).not.toBeInTheDocument());
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(container).toBeEmptyDOMElement();
   });
 
