@@ -180,7 +180,9 @@ function mergeCandidates({ bouncedEmail, decoderCandidates = [], nameCandidates 
 
 // requireRecording=false / requireSettled=true: the other-spelling resend (email-bounce-recovery.js) reads only the
 // stored extraction, so it needs no audio, and it wants only a call whose extraction carries email_spelling_settled.
-async function findSourceCall({ bouncedEmail, customerId = null, requireRecording = true, requireSettled = false }) {
+// onlyCustomerId: that resend also needs a positive recipient link, so it keeps ONLY calls on that customer
+// (customerId alone just ranks).
+async function findSourceCall({ bouncedEmail, customerId = null, requireRecording = true, requireSettled = false, onlyCustomerId = null }) {
   const bounced = String(bouncedEmail || '').trim().toLowerCase();
   // The extraction must actually CONTAIN the bounced address (text-level —
   // no ::jsonb casts on legacy rows). A bare customer fallback would pick the
@@ -192,6 +194,7 @@ async function findSourceCall({ bouncedEmail, customerId = null, requireRecordin
     .modify((qb) => {
       if (requireRecording) qb.whereNotNull('recording_url');
       if (requireSettled) qb.whereRaw('COALESCE(ai_extraction, \'\') LIKE ?', ['%"email_spelling_settled"%']);
+      if (onlyCustomerId) qb.where('customer_id', onlyCustomerId);
     })
     .whereRaw(`created_at >= now() - interval '${SOURCE_CALL_LOOKBACK_DAYS} days'`)
     .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) ~ ?', [emailBoundaryRegex(bounced)])

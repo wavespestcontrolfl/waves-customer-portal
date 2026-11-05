@@ -1409,7 +1409,7 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     db.mockImplementation(mockDb);
     const res = await recovery.attemptRecovery(bounced(), { event: 'bounce', type: 'bounce' });
     expect(res).toEqual({ resent: true, corrected: 'jondoh@example.com', rule: 'call_other_spelling' });
-    expect(reverify.findSourceCall).toHaveBeenCalledWith(expect.objectContaining({ bouncedEmail: 'jondoe@example.com', customerId: 'c1', requireRecording: false, requireSettled: true }));
+    expect(reverify.findSourceCall).toHaveBeenCalledWith(expect.objectContaining({ bouncedEmail: 'jondoe@example.com', customerId: 'c1', onlyCustomerId: 'c1', requireRecording: false, requireSettled: true }));
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: 'jondoh@example.com' }));
     expect(mockDb._calls.find((c) => c.op === 'insert' && c.table === 'email_messages').data)
@@ -1512,6 +1512,25 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     expect(await recovery.attemptRecovery(bounced({ id: 'o2' }), { event: 'bounce', type: 'bounce' })).toEqual({ skipped: 'no_candidate' });
     reverify.findSourceCall.mockResolvedValueOnce(callRow(settled(), { customer_id: 'c-other' }));
     expect(await recovery.attemptRecovery(bounced({ id: 'o3' }), { event: 'bounce', type: 'bounce' })).toEqual({ skipped: 'no_candidate' });
+    // A call with no customer link is not proof it is this recipient's call.
+    reverify.findSourceCall.mockResolvedValueOnce(callRow(settled(), { customer_id: null }));
+    expect(await recovery.attemptRecovery(bounced({ id: 'o4' }), { event: 'bounce', type: 'bounce' })).toEqual({ skipped: 'no_candidate' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('positive recipient identity: a prospect, or a record other than the message\'s own recipient, gets no lookup and no resend', async () => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    db.mockImplementation(newDb());
+    // A lead/prospect message: the customer was found only by the address, which two contacts can share.
+    expect(await recovery.attemptRecovery(bounced({ id: 'p1', recipient_type: 'lead', recipient_id: 'l1' }), { event: 'bounce', type: 'bounce' }))
+      .toEqual({ skipped: 'no_candidate' });
+    // No recorded recipient at all.
+    expect(await recovery.attemptRecovery(bounced({ id: 'p2', recipient_id: null }), { event: 'bounce', type: 'bounce' }))
+      .toEqual({ skipped: 'no_candidate' });
+    // The message names c2, but the recovery resolves the record it would update to c1.
+    expect(await recovery.attemptRecovery(bounced({ id: 'p3', recipient_id: 'c2' }), { event: 'bounce', type: 'bounce' }))
+      .toEqual({ skipped: 'no_candidate' });
+    expect(reverify.findSourceCall).not.toHaveBeenCalled();
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 

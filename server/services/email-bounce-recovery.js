@@ -822,17 +822,24 @@ function settledOtherSpelling(extraction, bouncedEmail) {
  * GATE_CALL_BOUNCE_OTHER_SPELLING: when the domain corrector has nothing, the call that supplied the bounced
  * address may name the other spelling its two extraction passes disagreed on until the spelled letters settled it.
  * That address is a candidate like any domain correction: the caller decides ownership, suppression and
- * on-file checks, the resend and the commit-on-delivery. Scoped to the bounced message's customer when known.
- * Never twice: an address this one already bounced to as a recovery is not tried again. Fails closed (any
- * lookup error -> no candidate, today's behavior).
+ * on-file checks, the resend and the commit-on-delivery. Positive recipient identity only (pre-push audit P0):
+ * the bounced message must name its own customer recipient, the recovery must be updating that same record, and
+ * the source call must belong to it. A prospect, a customer found only by address, or a call with no or another
+ * customer link keeps the manual read-back path (two contacts can share a mistyped address). Never twice: an
+ * address this one already bounced to as a recovery is not tried again. Fails closed (any lookup error -> no
+ * candidate, today's behavior).
  */
-async function otherSpellingCandidate(bouncedEmail, customerId) {
+async function otherSpellingCandidate(bouncedMessage, bouncedEmail, match) {
   try {
     if (!callBounceOtherSpellingLive()) return null;
+    const recipientId = String(bouncedMessage?.recipient_type || '').toLowerCase() === 'customer'
+      ? bouncedMessage.recipient_id : null;
+    if (!recipientId || !match?.customerId || String(match.customerId) !== String(recipientId)) return null;
     const { findSourceCall } = require('./email-bounce-reverify');
-    const call = await findSourceCall({ bouncedEmail, customerId: customerId || null, requireRecording: false, requireSettled: true });
-    if (!call) return null;
-    if (customerId && call.customer_id && String(call.customer_id) !== String(customerId)) return null;
+    const call = await findSourceCall({
+      bouncedEmail, customerId: recipientId, onlyCustomerId: recipientId, requireRecording: false, requireSettled: true,
+    });
+    if (!call || String(call.customer_id || '') !== String(recipientId)) return null;
     const other = settledOtherSpelling(call.ai_extraction, bouncedEmail);
     if (!other) return null;
     const alreadyBounced = await db('email_bounce_recoveries')
@@ -855,7 +862,7 @@ async function otherSpellingCandidate(bouncedEmail, customerId) {
  */
 async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resumed = false } = {}) {
   const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
-  const candidate = correctEmailDomain(bouncedEmail) || await otherSpellingCandidate(bouncedEmail, match?.customerId);
+  const candidate = correctEmailDomain(bouncedEmail) || await otherSpellingCandidate(bouncedMessage, bouncedEmail, match);
   const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
   const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
   // For no-customer (prospect) recoveries, scope the on-file gate to the actual

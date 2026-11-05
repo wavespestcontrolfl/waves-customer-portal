@@ -405,7 +405,7 @@ describe('findSourceCall options (other-spelling resend reads the extraction onl
   function chainFor(rows) {
     const calls = [];
     const chain = {};
-    for (const m of ['whereNotNull', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'limit']) {
+    for (const m of ['where', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'limit']) {
       chain[m] = jest.fn((...a) => { calls.push([m, ...a]); return chain; });
     }
     chain.modify = jest.fn((fn) => { fn(chain); return chain; });
@@ -427,11 +427,17 @@ describe('findSourceCall options (other-spelling resend reads the extraction onl
     expect(row).toEqual({ id: 'call1' });
     expect(calls.some((c) => c[0] === 'whereNotNull' && c[1] === 'recording_url')).toBe(true);
     expect(calls.some((c) => c[0] === 'whereRaw' && JSON.stringify(c).includes('email_spelling_settled'))).toBe(false);
+    expect(calls.some((c) => c[0] === 'where')).toBe(false); // customerId only ranks
   });
 
   test('requireRecording=false, requireSettled=true: no recording filter, only calls with a settled spelling', async () => {
     const { calls } = await run({ requireRecording: false, requireSettled: true });
     expect(calls.some((c) => c[0] === 'whereNotNull')).toBe(false);
     expect(calls.some((c) => c[0] === 'whereRaw' && (c[2] || []).includes('%"email_spelling_settled"%'))).toBe(true);
+  });
+
+  test('onlyCustomerId keeps ONLY that customer\'s calls (the other-spelling resend needs a positive link)', async () => {
+    const { calls } = await run({ requireRecording: false, requireSettled: true, onlyCustomerId: 'c1' });
+    expect(calls).toContainEqual(['where', 'customer_id', 'c1']);
   });
 });
