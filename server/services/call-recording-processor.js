@@ -10951,7 +10951,7 @@ function buildOutOfAreaHoldAlert({ call, extracted, addressValidation }) {
   const { fitAction, tidyName, redactedWords, whyWithQuote } = require('./admin-alert-names');
   const who = tidyName(extracted?.first_name) || 'the caller';
   const city = tidyName(addressValidation?.normalized?.city || extracted?.city);
-  const county = tidyName(addressValidation?.county);
+  const county = tidyName(addressValidation?.county).replace(/\s+County$/i, '');
   const place = [city, county ? `${county} County` : ''].filter(Boolean).join(', ') || 'an unknown place';
   const asked = redactedWords(extracted?.matched_service || extracted?.requested_service || '').replace(/_/g, ' ');
   const why = asked
@@ -10979,7 +10979,7 @@ function buildOutOfAreaHoldAlert({ call, extracted, addressValidation }) {
   };
 }
 
-// Commitments, then the label, then the alert. Each step is isolated: a failure is logged
+// Commitments, then the label (only under GATE_CALL_DISPOSITION_V1's switch), then the alert. Each step is isolated: a failure is logged
 // by code and never fails the call, which is already finalized. Sends nothing to the caller.
 async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracted, v2Result, procGeneration, addressValidation }) {
   try {
@@ -10999,7 +10999,9 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
       extracted, v2Extraction: v2Result?.status === 'valid' ? v2Result.extraction : null, wavesPromiseRecorded,
     });
     // Only a call with no label yet (a person's tag or a later pass wins), and only this generation.
-    await writeCallDisposition({ callId: call.id, priorDisposition: null, priorGeneration: procGeneration, disposition, reason, callSid });
+    if (isEnabled('callDispositionV1')) {
+      await writeCallDisposition({ callId: call.id, priorDisposition: null, priorGeneration: procGeneration, disposition, reason, callSid });
+    }
     if (isHotOrWarm(extracted)) {
       const alert = buildOutOfAreaHoldAlert({ call, extracted, addressValidation });
       await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);

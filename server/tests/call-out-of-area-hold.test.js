@@ -64,7 +64,7 @@ function primeDb({ wavesPromise = false, disposition = 1 } = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  isEnabled.mockImplementation((k) => k === 'callCommitments');
+  isEnabled.mockImplementation((k) => k === 'callCommitments' || k === 'callDispositionV1');
   primeDb();
 });
 
@@ -119,6 +119,12 @@ describe('buildOutOfAreaHoldAlert', () => {
     expect(alert.opts.detail).toContain('outside the service area');
     expect(alert.opts.dedupeOpenOnly).toBeUndefined();
   });
+  test('a county that already ends in County is named once', () => {
+    const alert = buildOutOfAreaHoldAlert({ call: CALL, extracted: args().extracted, addressValidation: { ...AV, county: 'Manatee County', normalized: { city: 'Bradenton' } } });
+    expect(composeAdminAlert(alert.spec).why).toContain('Bradenton, Manatee County;');
+    expect(composeAdminAlert(alert.spec).why).not.toMatch(/County County/);
+    expect(alert.opts.detail).toContain('(Bradenton, Manatee County)');
+  });
   test('an unnamed caller with no ask or place still composes', () => {
     const alert = buildOutOfAreaHoldAlert({ call: CALL, extracted: { lead_quality: 'warm' }, addressValidation: null });
     expect(composeAdminAlert(alert.spec).headline).toBe("Leads — check the caller's out-of-area hold");
@@ -157,6 +163,14 @@ describe('keepOutOfAreaHoldRecords', () => {
     await keepOutOfAreaHoldRecords(args());
     expect(new Set(tables)).toEqual(new Set(['call_log', 'call_commitments']));
     expect(writes.every((w) => w.table === 'call_log' && Object.keys(w.u).sort().join() === 'disposition,updated_at')).toBe(true);
+  });
+
+  test('disposition switch off: no label written, commitments and the alert still happen', async () => {
+    isEnabled.mockImplementation((k) => k === 'callCommitments');
+    await keepOutOfAreaHoldRecords(args());
+    expect(writes).toEqual([]);
+    expect(recordCallCommitments).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
   test('a failure in a step never throws out of the hold', async () => {
