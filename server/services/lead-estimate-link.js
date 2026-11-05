@@ -343,10 +343,16 @@ async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system
 // staff booked/completed the in-person assessment discussed with them. Keep
 // this list positive: a voicemail, missed/failed call, transcription alone,
 // or generic enrichment must never move a lead out of the unanswered queue.
+// staff_text / staff_email / visit_booked come from the lead contact sync
+// (lead-contact-sync.js): a text or email a person sent, or a live visit a
+// person booked for the lead's own customer. Never an automated message.
 const CONTACT_EVIDENCE_TYPES = new Set([
   'live_conversation',
   'assessment_booked',
   'assessment_completed',
+  'staff_text',
+  'staff_email',
+  'visit_booked',
 ]);
 
 function isContactEvidenceType(value) {

@@ -2010,6 +2010,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — Lead contact sync (owner 2026-11-04, "WHY ARENT THESE
+  // UPDATED ... FOR ALL COMUNNICATION LINES"). Moves a 'new' lead to
+  // 'contacted' once a person reached it after its first contact: a delivered
+  // staff text, a connected call, a staff email or a visit booked for its
+  // customer. Lead status and history only; sends nothing. Gate
+  // GATE_LEAD_STATUS_FOLLOWS_CONTACT (off / shadow / true) is read at call
+  // time and checked before the lock, so an off gate leaves no job_health row;
+  // kill = unset. runExclusive: an overlapping tick must not judge a stale read.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    if (require('../config/feature-gates').leadStatusFollowsContactMode() === 'off') return;
+    try {
+      await runExclusive('lead-contact-sync', () =>
+        require('./lead-contact-sync').runLeadContactSync());
+    } catch (err) {
+      logger.error(`Lead contact sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
   // Scans top-spend products for a cheaper competitor per-unit price and stages a
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
