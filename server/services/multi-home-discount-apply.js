@@ -627,11 +627,23 @@ async function verifyTemplateForAlready(trx, schedule, { target, preset, upcomin
 
 // ── is this still a target? (checked under the family-changes lock) ─────
 
-async function sameProfileOtherHome(trx, { source, target }) {
-  if (!target.propertyId) return false;
-  const home = await trx('customer_properties').where({ id: target.propertyId, customer_id: target.customerId, active: true }).first('id');
+// The source's house now: the accepted estimate's own property (fixed once accepted), else the agreed house of its plan
+// series, read in this transaction.
+async function sourceHouseNow(trx, source, estimate) {
+  if (estimate && estimate.property_id) return estimate.property_id;
+  const firstRoot = source.roots ? [...source.roots][0] : null;
+  return firstRoot ? seriesAgreedPropertyId(firstRoot, source.customerId, trx) : null;
+}
+
+// Another active property of the same profile than the source's. Both houses are read now, never the values target
+// selection saw: a series moved to the source's own house (or to no agreed house) is not another home.
+async function sameProfileOtherHome(trx, { source, target, estimate }) {
+  const house = await seriesAgreedPropertyId(target.rootId, target.customerId, trx);
+  if (!house) return false;
+  const home = await trx('customer_properties').where({ id: house, customer_id: target.customerId, active: true }).first('id');
   if (!home) return false;
-  return !!source.propertyId && String(source.propertyId) !== String(target.propertyId);
+  const sourceHouse = await sourceHouseNow(trx, source, estimate);
+  return !!sourceHouse && String(sourceHouse) !== String(house);
 }
 
 async function sameLiveFamily(trx, { source, target }) {
@@ -644,13 +656,13 @@ async function sameLiveFamily(trx, { source, target }) {
 // waits for it): the source estimate is still accepted, both profiles are live, and either the target is another active
 // property of the same profile, or both profiles are in the SAME family that still has 2 or more live members.
 async function relationshipHolds(trx, { source, target }) {
-  const estimate = await trx('estimates').where({ id: source.estimateId, status: 'accepted' }).first('id');
+  const estimate = await trx('estimates').where({ id: source.estimateId, status: 'accepted' }).first('id', 'property_id');
   if (!estimate) return false;
   const people = await trx('customers').whereIn('id', [source.customerId, target.customerId]).select('id', 'active', 'deleted_at');
   const live = new Set(people.filter((c) => c.active === true && !c.deleted_at).map((c) => String(c.id)));
   if (!live.has(String(source.customerId)) || !live.has(String(target.customerId))) return false;
   return String(source.customerId) === String(target.customerId)
-    ? sameProfileOtherHome(trx, { source, target })
+    ? sameProfileOtherHome(trx, { source, target, estimate })
     : sameLiveFamily(trx, { source, target });
 }
 
@@ -694,6 +706,9 @@ async function applyInTransaction(trx, ctx) {
 
   const expectedIds = new Set(upcoming.map((v) => String(v.id)));
   const locked = await lockSeriesTargets(trx, schedule, { ledgerId: ledger.id, rootId: target.rootId, today, fields, expectedIds });
+  // Again under the visit-row locks, before any price is written: nothing target selection read is trusted (the
+  // source, the family, both houses). Nothing has been written yet, so a series that stopped being a target drops.
+  if (!(await relationshipHolds(trx, { source, target }))) return dropTarget(trx, { source, target });
   const addonRows = await trx('scheduled_service_addons').whereIn('scheduled_service_id', [...expectedIds, target.rootId]).select('scheduled_service_id');
   const liveTermIds = await loadLiveTermIds(trx, locked, today);
   const refusal = flatRefusal(locked, { addonCounts: countAddons(addonRows), liveTermIds, currentCents });

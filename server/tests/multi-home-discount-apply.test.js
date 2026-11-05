@@ -323,15 +323,26 @@ describe('the relationship is read again under the family lock', () => {
     expect(await relationshipHolds(fakeTrx({ ...base, multi_home_family_members: rows('f', 'f') }), { source: src, target })).toBe(false);
   });
 
-  test('the same profile: the target must be an active property that differs from the source\'s', async () => {
-    const target = { customerId: 'son', rootId: 'r1', propertyId: 'home-2' };
-    const base = { estimates: [{ id: 'est-1' }], customers: live('son') };
+  test('the same profile: the target must be an active property that differs from the source\'s, both read now', async () => {
+    // The selection-time propertyId is NOT trusted: the series' agreed house is read in the transaction.
+    const target = { customerId: 'son', rootId: 'r1', propertyId: 'stale-value' };
+    const base = { estimates: [{ id: 'est-1', property_id: 'home-s' }], customers: live('son') };
+    const houses = (map) => mockAgreed.mockImplementation(async (rootId) => (rootId in map ? map[rootId] : null));
+    houses({ r1: 'home-2' });
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(true);
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [] }), { source: src, target })).toBe(false);
-    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-s' }] }), { source: src, target: { ...target, propertyId: 'home-s' } })).toBe(false);
-    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target: { ...target, propertyId: null } })).toBe(false);
-    // Source property unknown: a same-profile series can never be shown to be another home.
-    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: { ...src, propertyId: null }, target })).toBe(false);
+    // The series moved to the source's own house after selection.
+    houses({ r1: 'home-s' });
+    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-s' }] }), { source: src, target })).toBe(false);
+    // The series names no agreed house any more.
+    houses({});
+    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(false);
+    // Source house unknown (no estimate property, no plan series): never shown to be another home.
+    houses({ r1: 'home-2' });
+    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [{ id: 'est-1', property_id: null }], customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(false);
+    // Source house from its plan series when the estimate names none.
+    houses({ r1: 'home-2', r0: 'home-s' });
+    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [{ id: 'est-1', property_id: null }], customer_properties: [{ id: 'home-2' }] }), { source: { ...src, roots: new Set(['r0']) }, target })).toBe(true);
   });
 
   test('a series that is no longer a target counts as dropped: no hold, no bell, no price', async () => {
