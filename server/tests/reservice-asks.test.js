@@ -391,19 +391,41 @@ describe('calls', () => {
     expect(callWheres.some(([, args]) => args[0].direction === 'inbound')).toBe(true);
   });
 
-  test('skipCalls (a technician caller): no call is read, texts and emails stay, call-sourced booking words go', async () => {
+  test('skipCalls (a technician caller): call items are taken out, texts and emails stay, nothing from a call is shown', async () => {
     const opts = {
       visit: baseVisit({ customer_request: 'Ants are back in the kitchen.', customer_request_source: 'call' }),
       calls: [v2Call('c1', 'There are ants all over the kitchen counter')],
       sms: [sms('s1', 'The roaches are in the garage too')],
     };
-    const knex = fakeKnex(opts);
-    const { items } = await gatherReserviceAsks('visit-1', { knex, now: NOW, skipCalls: true });
+    const { items } = await gatherReserviceAsks('visit-1', { knex: fakeKnex(opts), now: NOW, skipCalls: true });
     expect(items.map((item) => item.source)).toEqual(['text']);
-    expect(knex.seen).not.toContain('call_log');
+    expect(JSON.stringify(items)).not.toContain('kitchen');
     // Without the option (the office and the completion freeze) the same visit still carries both call items.
     const all = await gather(opts);
     expect(all.items.map((item) => item.source).sort()).toEqual(['call', 'call', 'text']);
+  });
+
+  test('skipCalls: a text that repeats call-sourced booking words never reaches the sheet, and every shown id is in the completion gather, so each answer survives the freeze', async () => {
+    const { buildReserviceAsksFreeze } = require('../services/reservice-answers');
+    const opts = {
+      visit: baseVisit({ customer_request: 'Ants are back in the kitchen.', customer_request_source: 'call' }),
+      // Repeats the call-sourced booking words, so the completion gather folds it into the booking item.
+      sms: [sms('s-repeat', 'Ants are back in the kitchen.'), sms('s-new', 'The roaches are in the garage too')],
+      calls: [v2Call('c1', 'There are ants all over the kitchen counter')],
+    };
+    const shown = (await gatherReserviceAsks('visit-1', { knex: fakeKnex(opts), now: NOW, skipCalls: true })).items;
+    const completion = await gatherReserviceAsks('visit-1', { knex: fakeKnex(opts), now: NOW });
+    const completionIds = new Set(completion.items.map((item) => item.id));
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.every((item) => completionIds.has(item.id))).toBe(true);
+    expect(shown.map((item) => item.id)).not.toContain('text:s-repeat');
+    const answers = shown.map((item, index) => (index === 0
+      ? { itemId: item.id, answer: 'not_today', reason: 'No product on the truck' }
+      : { itemId: item.id, answer: 'not_today', reason: 'Next visit' }));
+    const { freeze, dropped } = buildReserviceAsksFreeze({ gathered: completion, answers, gatheredAt: NOW });
+    expect(dropped).toBe(0);
+    expect(Object.keys(freeze.answers).sort()).toEqual(shown.map((item) => item.id).sort());
+    expect(Object.keys(freeze.officeNotes).sort()).toEqual(shown.map((item) => item.id).sort());
   });
 
   test('callDay uses the Eastern calendar day', () => {

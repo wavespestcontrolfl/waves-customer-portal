@@ -4708,13 +4708,22 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
 // Refused like router.param('serviceId'): 404 for a missing visit, 403
 // service_not_assigned for one that is not the caller's. Window-only occupancy
 // (no ids) stays. Admin callers and the gate off: unchanged.
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 async function foreignSlotCheckRefusal(req) {
   if (!isTechnicianRequest(req) || require('../config/feature-gates').techLoginPrivacyLive?.() !== true) return null;
-  const { isUuid } = require('../services/reservice-office-request');
   const targets = Array.isArray(req.body?.targets) ? req.body.targets : [];
+  // Every id present anywhere in the body must be a canonical hyphenated UUID. checkSlots validates with Joi.guid(),
+  // which also takes braced and unhyphenated forms (and Postgres reads them), so an id in another form must never
+  // slip past the ownership check below: it is refused, not skipped.
+  const carriers = [req.body, ...targets];
+  const badId = carriers.some((c) => ['serviceId', 'technicianId'].some((key) => (
+    c != null && typeof c === 'object' && c[key] != null && !(typeof c[key] === 'string' && CANONICAL_UUID_RE.test(c[key]))
+  )));
+  if (badId) return { status: 400, body: { error: 'serviceId and technicianId must be plain UUIDs' } };
   const notOwn = { status: 403, body: { error: 'Not assigned to this service', code: 'service_not_assigned' } };
-  if (targets.some((t) => t?.technicianId != null && String(t.technicianId) !== String(req.technicianId))) return notOwn;
-  const ids = [...new Set(targets.map((t) => t?.serviceId).filter((id) => typeof id === 'string' && isUuid(id)))];
+  if (carriers.some((c) => c?.technicianId != null && String(c.technicianId) !== String(req.technicianId))) return notOwn;
+  const ids = [...new Set(carriers.map((c) => c?.serviceId).filter((id) => typeof id === 'string'))];
   if (!ids.length) return null;
   const rows = await db('scheduled_services')
     .whereIn('id', ids)

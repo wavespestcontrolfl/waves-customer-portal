@@ -138,6 +138,49 @@ describe('POST /slot-check', () => {
     expect(RainOut.checkSlots).not.toHaveBeenCalled();
   });
 
+  const OTHER_ID = FOREIGN_VISIT;
+  const formsOf = (id) => [`{${id}}`, id.replace(/-/g, ''), id.toUpperCase(), `{${id.replace(/-/g, '')}}`.toUpperCase()];
+
+  test.each(formsOf(OTHER_ID))('gate on: another visit\'s id as %s, with no technicianId, is refused for a technician and never probed', async (form) => {
+    process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+    mockDbCurrent = dbWithVisits();
+    const res = await invoke('post', '/slot-check', { actor: TECH, body: { targets: [{ ...SLOT_TARGET, serviceId: form }] } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toEqual({ error: 'serviceId and technicianId must be plain UUIDs' });
+    expect(RainOut.checkSlots).not.toHaveBeenCalled();
+  });
+
+  test.each(formsOf(TECH.technicianId))('gate on: a technicianId as %s is refused, not skipped', async (form) => {
+    process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+    const res = await invoke('post', '/slot-check', { actor: TECH, body: { targets: [{ ...SLOT_TARGET, technicianId: form }] } });
+    expect(res.statusCode).toBe(400);
+    expect(RainOut.checkSlots).not.toHaveBeenCalled();
+  });
+
+  test('gate on: one odd id in a later target refuses the whole batch, and a non-string id is refused', async () => {
+    process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+    mockDbCurrent = dbWithVisits();
+    const batch = { targets: [{ ...SLOT_TARGET, serviceId: OWN_VISIT }, { ...SLOT_TARGET, serviceId: `{${OTHER_ID}}` }] };
+    expect((await invoke('post', '/slot-check', { actor: TECH, body: batch })).statusCode).toBe(400);
+    expect((await invoke('post', '/slot-check', { actor: TECH, body: { targets: [{ ...SLOT_TARGET, serviceId: 12 }] } })).statusCode).toBe(400);
+    expect(RainOut.checkSlots).not.toHaveBeenCalled();
+  });
+
+  test('gate on: an admin may still pass the odd forms (the admin path is unchanged)', async () => {
+    process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+    for (const form of formsOf(OTHER_ID)) {
+      const res = await invoke('post', '/slot-check', { actor: ADMIN, body: { targets: [{ ...SLOT_TARGET, serviceId: form }] } });
+      expect(res.statusCode).toBe(200);
+    }
+    expect(RainOut.checkSlots).toHaveBeenCalledTimes(4);
+  });
+
+  test('gate off: a technician passing the odd forms is probed as today', async () => {
+    delete process.env.GATE_TECH_LOGIN_PRIVACY;
+    const res = await invoke('post', '/slot-check', { actor: TECH, body: { targets: [{ ...SLOT_TARGET, serviceId: `{${OTHER_ID}}` }] } });
+    expect(res.statusCode).toBe(200);
+  });
+
   test('gate on: a visit that does not exist is the router\'s 404', async () => {
     process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
     mockDbCurrent = dbWithVisits();

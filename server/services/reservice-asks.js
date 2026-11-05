@@ -353,8 +353,10 @@ function dedupeItems(items, bookingId) {
 }
 
 // `skipCalls` (the technician's route, owner ruling D1 A 2026-11-04: no call words on a technician screen): the
-// call channel is not read and booking words that came from a call are dropped. Texts and emails stay. Left off,
-// the result is unchanged (the completion freeze reads it that way).
+// list is built exactly as the completion freeze builds it (calls read, same dedupe and cap), and only then are the
+// call-sourced items (a call's quotes, and booking words that came from a call) taken out of what is returned. So
+// every item id a technician sees exists in the completion gather, and its answer is never dropped as unknown.
+// Left off, the result is unchanged.
 async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date(), skipCalls = false } = {}) {
   const visit = await readVisit(knex, scheduledServiceId);
   if (!visit) return { ok: false, reason: 'not_found' };
@@ -366,8 +368,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
   const anchor = Number.isNaN(bookedAt.getTime()) ? to : bookedAt;
   const window = { from: new Date(anchor.getTime() - ASKS_LOOKBACK_DAYS * DAY_MS), to };
 
-  const allBooking = bookingWords(visit, lane);
-  const booking = skipCalls && allBooking?.source === 'call' ? null : allBooking;
+  const booking = bookingWords(visit, lane);
   const bookingId = `booking:${visit.id}`;
   const bookingItem = booking ? buildItem({ id: bookingId, at: anchor, ...booking }) : null;
   // A text that repeats the booking words (before or after the scrub) is the
@@ -377,7 +378,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
   const customerId = visit.customer_id;
   const channels = customerId ? await Promise.all([
     safeChannel('sms', () => readTexts(knex, customerId, window, bookingKeys)),
-    ...(skipCalls ? [] : [safeChannel('call', () => readCalls(knex, customerId, window))]),
+    safeChannel('call', () => readCalls(knex, customerId, window)),
     safeChannel('email', () => readEmails(knex, customerId, window)),
   ]) : [];
 
@@ -385,11 +386,12 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
   const severalProperties = customerId ? await accountMayHaveSeveralPremises(knex, customerId) : false;
   const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean)
     .map((item) => (severalProperties && item.id !== bookingId ? { ...item, accountWide: true } : item));
+  const kept = limitItems(dedupeItems(items, bookingId), bookingId);
   return {
     ok: true,
     lane,
     window: { from: window.from.toISOString(), to: to.toISOString() },
-    items: limitItems(dedupeItems(items, bookingId), bookingId),
+    items: skipCalls ? kept.filter((item) => item.source !== 'call') : kept,
   };
 }
 
