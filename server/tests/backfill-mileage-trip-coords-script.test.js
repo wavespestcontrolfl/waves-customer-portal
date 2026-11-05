@@ -9,8 +9,8 @@ const T0 = Date.parse('2026-10-08T14:00:00Z');
 const sample = (min, lat, lng) => ({ timestamp: new Date(T0 + min * 60000).toISOString(), gps: { lat, lon: lng } });
 const fixture = () => makeFakeDb({
   mileage: [
-    { id: 1, vehicle_id: 'imei-1', bouncie_trip_id: 't1', source: 'bouncie', trip_date: '2026-10-08', start_lat: null, start_lng: null, end_lat: null, end_lng: null },
-    { id: 2, vehicle_id: 'imei-1', bouncie_trip_id: 'lost', source: 'bouncie', trip_date: '2026-10-08', start_lat: null, start_lng: null, end_lat: null, end_lng: null },
+    { id: '00000000-0000-4000-8000-000000000001', vehicle_id: 'imei-1', bouncie_trip_id: 't1', source: 'bouncie', trip_date: '2026-10-08', start_lat: null, start_lng: null, end_lat: null, end_lng: null },
+    { id: '00000000-0000-4000-8000-000000000002', vehicle_id: 'imei-1', bouncie_trip_id: 'lost', source: 'bouncie', trip_date: '2026-10-08', start_lat: null, start_lng: null, end_lat: null, end_lng: null },
   ],
   log: [{
     id: 1, vehicle_imei: 'imei-1', event_type: 'trip-data', received_at: new Date(T0 + 60000),

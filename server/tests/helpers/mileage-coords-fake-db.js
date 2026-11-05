@@ -2,7 +2,7 @@
 
 // A tiny in-memory knex stand-in for the two tables the mileage coordinate fill touches (mileage_log and
 // bouncie_webhook_log). Supports only the query shapes that code uses: where (object, column/value, operator,
-// callback), orWhere, whereNull, whereNotNull, orWhereNull, orderBy, limit, select, first and update.
+// callback), orWhere, whereIn, whereNull, whereNotNull, orWhereNull, orderBy, limit, select, first and update.
 const norm = (value) => (value instanceof Date ? value.getTime() : value);
 
 function compare(left, op, right) {
@@ -38,6 +38,7 @@ function makeBuilder(rows, joinWith = 'and') {
       }
       return builder;
     },
+    whereIn(col, values) { add('and', (row) => values.includes(row[col])); return builder; },
     whereNull(col) { add('and', (row) => row[col] == null); return builder; },
     orWhereNull(col) { add('or', (row) => row[col] == null); return builder; },
     whereNotNull(col) { add('and', (row) => row[col] != null); return builder; },

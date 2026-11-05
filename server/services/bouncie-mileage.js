@@ -12,7 +12,6 @@ const logger = require('./logger');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { firstPresent, num } = require('./bouncie-payload');
 const { truckViewsPerVehicleLive } = require('../config/feature-gates');
-const { fillTripCoordinatesForTrip } = require('./mileage-trip-coords');
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -456,10 +455,6 @@ async function processTripWebhook(event) {
       ? 'business'
       : (jobMatch ? 'unclassified (job-match suggested — awaits review)' : 'unclassified');
     logger.info(`[bouncie-mileage] Processed trip ${tripId}: ${distanceMiles}mi, ${logState}`);
-
-    // Bouncie's trip events carry no location: copy the first and last trip-data point of this transaction into the
-    // NULL coordinate pairs only (GATE_MILEAGE_TRIP_COORDS; off = no-op). Best effort: it never throws into the webhook path.
-    await fillTripCoordinatesForTrip(db, tripId);
 
     // Update daily summary
     if (assignedVehicle) {
