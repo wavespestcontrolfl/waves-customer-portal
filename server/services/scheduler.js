@@ -5277,6 +5277,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN, 8AM-8PM — Caller callback late bell (GATE_CALLER_CALLBACK_BELL;
+  // returns before any read when off). Owner 2026-11-04 (option A): a new-lead
+  // caller who said they would call us back gets ONE Leads bell when that
+  // callback is late: at the time they named, else 2 business hours after the
+  // call. Each run closes the bells whose caller called or texted, whom a
+  // person reached, who got a visit, or whose lead closed. Admin notifications
+  // only: nothing goes to the caller.
+  // =========================================================================
+  cron.schedule('0 5-59/15 8-20 * * *', async () => {
+    if (!require('../config/feature-gates').callerCallbackBellLive()) return;
+    try {
+      await runExclusive('caller-callback-bell', async () => {
+        const result = await require('./caller-callback-bell').runCallerCallbackBell();
+        logger.info(`Caller callback bell: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Caller callback bell failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // MONDAYS 9:20AM — Monday review bell (GATE_MONDAY_REVIEW_BELL; returns before
   // any read when off). Owner 2026-11-02 ("build all", B2): one needs-you bell a
   // week for the work that sits: needs-you alerts unread 14+ days, overdue
