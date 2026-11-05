@@ -31,19 +31,29 @@ function parseExtracted(email) {
 
 /**
  * The AI's verdict on this email right now: { label, confidence }, or
- * { label: null } when no AI label is stored (never classified, or the sync's
- * known-vendor stamp 'vendor', which is not in the classifier's list). After
- * an earlier staff pick the stored label is the staff's, so the AI's own
- * verdict is read from the ai_label the pick kept in extracted_data.
+ * { label: null } when no AI label is stored: never classified, the sync's
+ * known-vendor stamp 'vendor' (not in the classifier's list), or the sync's
+ * block-list stamp. After an earlier staff pick the stored label is the
+ * staff's, so the AI's own verdict is read from the ai_label the pick kept in
+ * extracted_data.
  */
 function aiVerdictOf(email) {
   const extracted = parseExtracted(email);
-  const staffOnRow = extracted.staff_label === true;
-  const label = staffOnRow ? extracted.ai_label : email.classification;
-  const confidence = staffOnRow ? extracted.ai_confidence : email.classification_confidence;
+  const confidenceOf = (v) => (v !== null && v !== undefined && Number.isFinite(Number(v)) ? Number(v) : null);
+  if (extracted.staff_label === true) {
+    return { label: EMAIL_CATEGORIES.includes(extracted.ai_label) ? extracted.ai_label : null, confidence: confidenceOf(extracted.ai_confidence) };
+  }
+  // The block-list stamp (email-sync.js, auto_action 'blocked_sender_trashed')
+  // writes 'spam' with no model call and no confidence: it is not an AI
+  // verdict (Codex #7623 r1). Only the classifier writes
+  // classification_confidence, so a blocked email the AI later re-read
+  // (Reclassify) still counts.
+  if (email.auto_action === 'blocked_sender_trashed' && confidenceOf(email.classification_confidence) === null) {
+    return { label: null, confidence: null };
+  }
   return {
-    label: EMAIL_CATEGORIES.includes(label) ? label : null,
-    confidence: Number.isFinite(Number(confidence)) && confidence !== null ? Number(confidence) : null,
+    label: EMAIL_CATEGORIES.includes(email.classification) ? email.classification : null,
+    confidence: confidenceOf(email.classification_confidence),
   };
 }
 

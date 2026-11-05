@@ -111,6 +111,25 @@ describe('gate off', () => {
 describe('gate on', () => {
   beforeEach(() => { process.env.GATE_EMAIL_RECLASSIFY_PICK = 'true'; });
 
+  it('a block-list spam stamp is not an AI verdict: the pick sets the label and stores no incident (Codex #7623 r1)', async () => {
+    mockState.emails = [{ ...quarantinedSpam(), classification_confidence: null, extracted_data: null, auto_action: 'blocked_sender_trashed', quarantined_at: null }];
+    const res = await post({ classification: 'customer_request' });
+    expect(res.status).toBe(200);
+    expect(emailUpdate()[0]).toMatchObject({ classification: 'customer_request', classification_confidence: 1 });
+    expect(JSON.parse(emailUpdate()[0].extracted_data)).toMatchObject({ staff_label: true, ai_label: null, ai_confidence: null });
+    expect(mockState.inserts.filter((i) => i.table === 'ai_incidents')).toEqual([]);
+  });
+
+  it('a blocked email the AI later re-read still counts as an AI verdict', async () => {
+    mockState.emails = [{ ...quarantinedSpam(), auto_action: 'blocked_sender_trashed', classification_confidence: 0.88, quarantined_at: null }];
+    const res = await post({ classification: 'customer_request' });
+    expect(res.status).toBe(200);
+    const rows = mockState.inserts.filter((i) => i.table === 'ai_incidents');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].row).toMatchObject({ failure_mode: 'spam_should_be_customer_request' });
+    expect(JSON.parse(rows[0].row.adjudication)).toMatchObject({ ai_label: 'spam', ai_confidence: 0.88 });
+  });
+
   it('offers the classifier label list', async () => {
     expect(await get('/reclassify-options')).toEqual({ status: 200, body: { enabled: true, categories: EMAIL_CATEGORIES } });
   });
