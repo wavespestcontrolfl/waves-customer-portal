@@ -1451,6 +1451,21 @@ describe('an open card read against its visit as it is now (owner 2026-11-04)', 
     expect(liveCard(row, live(), null, 'Thu Nov 5, 8–9 AM')).toBe(row);
   });
 
+  test('a moved-off card follows the visit: a new holder, or back on this route with no card of its own', () => {
+    const offCard = cardRow('visit_unassigned', { when: 'Thu Nov 5, 8–9 AM', headline: 'Moved off your route', now_with: 'Pat', actor: 'by Virginia' });
+    expect(liveCard(offCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample' }), null))
+      .toMatchObject({ type: 'visit_unassigned', payload: { now_with: 'Lee', actor: 'by Virginia' } });
+    expect(liveCard(offCard, live(), { initiated_by: 'admin', created_at: '2026-11-03T21:50:00Z' }))
+      .toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route', when: 'Thu Nov 5, 8–9 AM', actor: 'by the office', changed_again: true, now_with: null } });
+  });
+
+  test('a cancelled card keeps its own line while cancelled, and says so when the visit is back', () => {
+    const gone = cardRow('visit_cancelled', { when: 'Thu Nov 5, 8–9 AM', headline: 'Visit cancelled', actor: 'by the customer online' });
+    expect(liveCard(gone, live({ status: 'cancelled', cancelled_at: '2026-11-03T15:00:00Z' }), null))
+      .toMatchObject({ type: 'visit_cancelled', payload: { actor: 'by the customer online', changed_at: null } });
+    expect(liveCard(gone, live(), null)).toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route' } });
+  });
+
   test('a customer-pick hand-off keeps its "picks a day" text', () => {
     const row = cardRow('visit_rescheduled', { when: 'the customer picks a day by Wed 8 PM' });
     expect(liveCard(row, live({ window_start: null, window_end: null, customer_pick_by: new Date('2026-11-05T01:00:00Z') }), null)).toBe(row);

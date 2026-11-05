@@ -1172,11 +1172,11 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
 // plan moves (rescheduleSeries) and the day re-plan. Old cards then showed
 // old times (5 of 9 on the owner's Today page). Both feeds now:
 //   - hide a card when a newer open card for the same visit exists, when the
-//     visit's day is before today, or (new-visit and moved cards) when the
-//     tech already arrived at the visit or it ended;
+//     visit's day is before today, or when the visit is on the tech's route
+//     and the tech already arrived at it or it ended;
 //   - re-read the rest from the visit row: its day and time now, who moved it
-//     last (reschedule_log), a visit that left this tech or was cancelled,
-//     and how a new visit came in.
+//     last (reschedule_log), a visit that left this tech, came back or was
+//     cancelled, and how a new visit came in.
 // Nothing is written; Got it / Clear all stay the only things that dismiss.
 // ---------------------------------------------------------------------------
 const VISIT_CARD_TYPES = Object.freeze(Object.values(TYPE_BY_KIND));
@@ -1202,9 +1202,10 @@ const CARD_VISIT_KEY_SQL = (alias) => `COALESCE(${alias}.payload->>'visit_id', $
 
 // SQL that is true for a visit card whose visit no longer leaves it anything
 // to say, for a query over tech_notifications under `alias`: the visit's day
-// has passed, or (new-visit and moved cards) the tech already arrived or the
-// visit ended. `today` is the ET date the read is judged against. Other card
-// types never match it.
+// has passed, or the visit is on this tech's route and the tech already
+// arrived or it ended (a visit on another route keeps its moved-off card).
+// `today` is the ET date the read is judged against. Other card types never
+// match it.
 function staleVisitCardSql(alias, today) {
   const holderDone = DONE_FOR_HOLDER.map((status) => `'${status}'`).join(', ');
   const visitId = cardVisitIdSql(alias);
@@ -1214,8 +1215,8 @@ function staleVisitCardSql(alias, today) {
       // A customer-pick hand-off keeps a placeholder day until the customer
       // picks, so its day never counts as passed.
       + ` (hv.scheduled_date < ?::date AND NOT (hv.customer_pick_by IS NOT NULL AND hv.window_start IS NULL))`
-      + ` OR (${alias}.type IN ('visit_assigned', 'visit_rescheduled') AND hv.technician_id = ${alias}.technician_id`
-      + ` AND (hv.arrived_at IS NOT NULL OR hv.status IN (${holderDone})))))`
+      // The visit is (back) on this tech's route and the tech reached it.
+      + ` OR (hv.technician_id = ${alias}.technician_id AND (hv.arrived_at IS NOT NULL OR hv.status IN (${holderDone})))))`
       // No visit row left to read: the card's own day decides.
       + ` OR (${alias}.payload->>'date' < ? AND NOT EXISTS (SELECT 1 FROM scheduled_services gone WHERE gone.id = ${visitId}))`
       + '))',
@@ -1301,55 +1302,94 @@ function firstName(name) {
   return name ? String(name).trim().split(/\s+/)[0] || null : null;
 }
 
-// One card against its visit row as it is now. `mover` is the newest
-// reschedule_log move of the visit; `soonWhen` is the today/tomorrow slot an
-// older open card of the same visit named (rankedVisitCards). Pure: returns
-// a new row, never the input.
-function liveCard(row, live, mover, soonWhen = null) {
+// The newest move of the visit logged after the card, as the card names it
+// (who, and when), or nothing.
+function moveSince(row, mover) {
+  if (!mover || !row.created_at || new Date(mover.created_at) <= new Date(row.created_at)) return { actor: null, changedAt: null };
+  return { actor: moverText(mover.initiated_by), changedAt: new Date(mover.created_at).toISOString() };
+}
+
+// The visit sits on another route now (or on none): "Moved off your route",
+// naming who holds it now and whether it ended. A card that already said so
+// keeps its own "Reassigned by …" unless a later move names someone else.
+function movedOffCard(row, live, view) {
   const payload = row.payload || {};
-  if (!live || !['visit_assigned', 'visit_rescheduled'].includes(row.type)) return row;
+  const status = String(live.status);
+  return {
+    ...row,
+    type: 'visit_unassigned',
+    payload: {
+      ...payload, headline: 'Moved off your route', when: view.when, date: view.date,
+      actor: view.actor || (row.type === 'visit_unassigned' ? payload.actor : null), changed_at: view.changedAt,
+      now_with: live.technician_id ? firstName(live.holder_name) : null,
+      ended: TERMINAL_VISIT_STATUSES.has(status) ? (ENDED_LABELS[status] || status.replace(/_/g, ' ')) : null,
+    },
+  };
+}
+
+// The visit was cancelled on the tech's own route. A card that already said
+// so keeps its own "Cancelled by …".
+function cancelledCard(row, live, view) {
+  const payload = row.payload || {};
+  const own = row.type === 'visit_cancelled';
+  return {
+    ...row,
+    type: 'visit_cancelled',
+    payload: {
+      ...payload, headline: 'Visit cancelled', when: view.when, date: view.date, actor: own ? payload.actor : null,
+      changed_at: own || !live.cancelled_at ? null : new Date(live.cancelled_at).toISOString(),
+    },
+  };
+}
+
+// A visit this card said had left the route (moved off, or cancelled) is on
+// it again, with no card of its own.
+function backOnRouteCard(row, view) {
+  return {
+    ...row,
+    type: 'visit_assigned',
+    payload: {
+      ...(row.payload || {}), headline: 'Back on your route', when: view.when, date: view.date,
+      actor: view.actor, changed_at: view.changedAt, changed_again: true, now_with: null, ended: null,
+    },
+  };
+}
+
+// A new-visit or moved card whose visit is still open on the tech's route.
+// `soonWhen` is the today/tomorrow slot an older open card of the same visit
+// named (rankedVisitCards).
+function onRouteCard(row, live, view, soonWhen) {
+  const payload = row.payload || {};
   // An older card put the visit on (or took it off) today or tomorrow: that
   // slot is the "Was" the tech needs, not this card's own.
   const olderSoon = soonWhen && soonWhen !== payload.when && soonWhen !== payload.previous_when ? soonWhen : null;
-  const movedSince = mover && row.created_at && new Date(mover.created_at) > new Date(row.created_at) ? mover : null;
-  const changedAt = movedSince ? new Date(movedSince.created_at).toISOString() : null;
-  const actor = movedSince ? moverText(movedSince.initiated_by) : null;
-  const when = visitWhen(live);
-  const date = dateOnly(live.scheduled_date);
-  const holder = live.technician_id ? String(live.technician_id) : null;
-  if (holder !== String(row.technician_id)) {
-    const status = String(live.status);
-    return {
-      ...row,
-      type: 'visit_unassigned',
-      payload: {
-        ...payload, headline: 'Moved off your route', when, date, actor, changed_at: changedAt,
-        now_with: holder ? firstName(live.holder_name) : null,
-        ended: TERMINAL_VISIT_STATUSES.has(status) ? (ENDED_LABELS[status] || status.replace(/_/g, ' ')) : null,
-      },
-    };
-  }
-  if (String(live.status) === 'cancelled') {
-    return {
-      ...row,
-      type: 'visit_cancelled',
-      payload: { ...payload, headline: 'Visit cancelled', when, date, actor: null, changed_at: live.cancelled_at ? new Date(live.cancelled_at).toISOString() : null },
-    };
-  }
-  if (when !== payload.when) {
+  if (view.when !== payload.when) {
     // "Was" is what the cards last told the tech; "Now" is the visit today.
     return {
       ...row,
       type: 'visit_rescheduled',
       payload: {
         ...payload, previous_when: olderSoon || payload.when || null, previous_date: olderSoon ? null : (payload.date || null),
-        when, date, actor, changed_at: changedAt, changed_again: true,
+        when: view.when, date: view.date, actor: view.actor, changed_at: view.changedAt, changed_again: true,
       },
     };
   }
   if (olderSoon) return { ...row, type: 'visit_rescheduled', payload: { ...payload, previous_when: olderSoon, previous_date: null } };
   const line = bookedLine(row, live);
   return line ? { ...row, payload: { ...payload, actor_line: line } } : row;
+}
+
+// One card against its visit row as it is now: where the visit sits (this
+// tech's route, another route, cancelled) decides the card. `mover` is the
+// newest reschedule_log move of the visit. Pure: returns a new row, never
+// the input.
+function liveCard(row, live, mover, soonWhen = null) {
+  if (!live || !VISIT_CARD_TYPES.includes(row.type)) return row;
+  const view = { when: visitWhen(live), date: dateOnly(live.scheduled_date), ...moveSince(row, mover) };
+  if (String(live.technician_id || '') !== String(row.technician_id)) return movedOffCard(row, live, view);
+  if (String(live.status) === 'cancelled') return cancelledCard(row, live, view);
+  if (row.type === 'visit_unassigned' || row.type === 'visit_cancelled') return backOnRouteCard(row, view);
+  return onRouteCard(row, live, view, soonWhen);
 }
 
 /**

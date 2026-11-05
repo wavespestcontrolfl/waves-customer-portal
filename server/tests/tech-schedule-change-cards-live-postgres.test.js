@@ -92,6 +92,7 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
   }
 
   const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+  const firstNameOf = (tech) => String(tech.name).split(' ')[0];
 
   beforeAll(async () => {
     db = require('../models/db');
@@ -204,6 +205,26 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
     expect(result).toEqual({ success: true, dismissed: 0 });
     const stillOpen = await db('tech_notifications').where({ technician_id: tech.id }).whereNull('dismissed_at').pluck('id');
     expect(stillOpen.sort()).toEqual([offToday, later].sort());
+  });
+
+  test('a moved-off card follows its visit: back on this route with no card of its own, or with a new holder', async () => {
+    const tech = await makeTech('Fixture Tech');
+    const first = await makeTech('Firstholder Hire');
+    const second = await makeTech('Secondholder Hire');
+    const { formatWhen } = require('../services/tech-visit-notifications');
+    const back = await makeVisit(tech, 'Cameback', tomorrow, '11:00', '12:00');
+    await card(tech, back, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '11:00', '12:00'), headline: 'Moved off your route', now_with: 'Firstholder', actor: 'by the office', customer_name: 'Cameback' }, daysAgo(2));
+    const away = await makeVisit(second, 'Stillaway', tomorrow, '12:00', '13:00');
+    await card(tech, away, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '12:00', '13:00'), headline: 'Moved off your route', now_with: firstNameOf(first), actor: 'by the office', customer_name: 'Stillaway' }, daysAgo(2));
+    // Back on this route and already reached: nothing left to say.
+    const reached = await makeVisit(tech, 'Reachedback', today, '09:00', '10:00', { status: 'on_site', arrived_at: new Date() });
+    await card(tech, reached, 'visit_unassigned', { date: today, when: formatWhen(today, '09:00', '10:00'), headline: 'Moved off your route', now_with: 'Firstholder', actor: 'by the office', customer_name: 'Reachedback' }, daysAgo(2));
+
+    const body = await call('/schedule-changes', 'get', { technicianId: tech.id });
+    const byName = new Map(body.changes.map((c) => [c.payload.customer_name, c]));
+    expect([...byName.keys()].sort()).toEqual(['Cameback', 'Stillaway']);
+    expect(byName.get('Cameback')).toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route', now_with: null } });
+    expect(byName.get('Stillaway')).toMatchObject({ type: 'visit_unassigned', payload: { now_with: 'Secondholder' } });
   });
 
   test('Got it clears the visit\'s older open cards too, so none takes its place', async () => {
