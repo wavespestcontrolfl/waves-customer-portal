@@ -508,8 +508,9 @@ export default function TechHomePage({ section = 'today' }) {
 
   // Office and customer moves send no socket event, so re-read the route
   // every minute while the page is visible, and on resume. Starts after the
-  // first load so it can never replace that read.
-  const backgroundRouteRead = useCallback(() => fetchSchedule({ background: true }), [fetchSchedule]);
+  // first load so it can never replace that read, and skips while a Refresh
+  // or status tap is still reading: a newer read would discard its answer.
+  const backgroundRouteRead = useCallback(() => (refreshing ? undefined : fetchSchedule({ background: true })), [fetchSchedule, refreshing]);
   useVisiblePageRefresh(backgroundRouteRead, { intervalMs: ROUTE_REFRESH_INTERVAL_MS, enabled: !loading });
 
   // Recap clips kept on this device past the draft retention window are
