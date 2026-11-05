@@ -195,6 +195,8 @@ describe('payment events', () => {
 });
 
 describe('loadForecastInput', () => {
+  beforeEach(() => monthlyDuesCollected.mockReset().mockResolvedValue(false));
+
   test('binds ET days from the app clock, never the UTC date', async () => {
     const database = fakeDb();
     const input = await loadForecastInput({ database, now: NOW, readCashBalances: cashOk, readStripeBalance: async () => ({}) });
@@ -340,16 +342,22 @@ describe('loadForecastInput', () => {
 
   test('dues: the verdict is judged as of each billing day, so a change on a later date counts from that date', async () => {
     const { monthlyDuesVerdict, autopayGuard } = require('../services/monthly-dues-eligibility');
-    // m1's card expires before January's run; m2's Auto Pay pause ends after December's run
+    // m1's card expires before January's run; m2's Auto Pay pause ends after December's run; m3 already paid
+    // December's dues early (a retry), so the run skips that month
     monthlyDuesVerdict.mockImplementation(async (db, id, { now }) => ({ eligible: !(id === 'm1' && now.toISOString() >= '2027-01') }));
     autopayGuard.mockImplementation((c, when) => (c.id === 'm2' && when.toISOString() < '2026-12-20' ? { event: 'skipped_autopay_paused' } : null));
+    monthlyDuesCollected.mockImplementation(async (db, id, when) => id === 'm3' && when.toISOString().startsWith('2026-12'));
     try {
       const database = fakeDb({ tables: { customers: [
         { id: 'm1', billing_mode: 'monthly_membership', monthly_rate: 80, billing_day: 1 },
         { id: 'm2', billing_mode: 'monthly_membership', monthly_rate: 60, billing_day: 15 },
+        { id: 'm3', billing_mode: 'monthly_membership', monthly_rate: 40, billing_day: 10 },
       ] } });
       const input = await loadForecastInput({ database, now: NOW, readCashBalances: cashOk, readStripeBalance: async () => ({}) });
-      expect(input.dues).toEqual([{ day: '2026-12-01', amountUsd: 80 }, { day: '2027-01-15', amountUsd: 60 }]);
+      expect(input.dues).toEqual([
+        { day: '2026-12-01', amountUsd: 80 }, { day: '2027-01-15', amountUsd: 60 },
+        { day: '2026-11-10', amountUsd: 40 }, { day: '2027-01-10', amountUsd: 40 },
+      ]);
       // each run is judged on its own morning, Eastern time
       expect(monthlyDuesVerdict.mock.calls.map((c) => [c[1], c[2].now.toISOString()])).toEqual(expect.arrayContaining([
         ['m1', '2026-12-01T12:00:00.000Z'], ['m1', '2027-01-01T12:00:00.000Z'], ['m2', '2027-01-15T12:00:00.000Z'],
@@ -357,6 +365,7 @@ describe('loadForecastInput', () => {
     } finally {
       monthlyDuesVerdict.mockImplementation(async () => ({ eligible: true }));
       autopayGuard.mockImplementation(() => null);
+      monthlyDuesCollected.mockReset().mockResolvedValue(false);
     }
   });
 });

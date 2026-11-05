@@ -98,16 +98,15 @@ async function annualVerdicts(database, rows) {
   return verdicts;
 }
 
-// Has the member's month of dues been paid for, leaving out the visit's own invoice? (billing-lane
-// monthlyDuesCollected, completion's own check.) A failed read counts the month as paid, so the forecast
-// never counts money it cannot place.
-async function duesPaid(database, row) {
+// Is a member's month of dues already paid for: a payment for the month, or a live dues invoice a visit's
+// completion minted? (billing-lane monthlyDuesCollected: completion's own check, and the dues run's
+// already-charged check.) `day` is any day of the month. A failed read counts the month as paid, so the
+// forecast never counts money it cannot place.
+async function duesMonthPaid(database, customerId, day, opts = {}) {
   try {
-    return await monthlyDuesCollected(database, row.customer_id, new Date(`${row.scheduled_day}T12:00:00Z`), {
-      excludeScheduledServiceId: row.id,
-    });
+    return await monthlyDuesCollected(database, customerId, new Date(`${day}T12:00:00Z`), opts);
   } catch (err) {
-    logger.warn(`[cash-forecast] dues read failed for visit ${row.id}: ${err.message}`);
+    logger.warn(`[cash-forecast] dues read failed for customer ${customerId}: ${err.message}`);
     return true;
   }
 }
@@ -126,7 +125,9 @@ async function valueVisits(database, rows) {
     const billed = predictedCash(row, { annualCoverage });
     const duesDecide = billed > 0 && predictedCash(row, { annualCoverage, duesCollected: true }) !== billed;
     const month = `${row.customer_id}|${row.scheduled_day.slice(0, 7)}`;
-    const paid = duesDecide && (billedMonths.has(month) || await duesPaid(database, row));
+    // leaving out the visit's own invoice
+    const paid = duesDecide && (billedMonths.has(month)
+      || await duesMonthPaid(database, row.customer_id, row.scheduled_day, { excludeScheduledServiceId: row.id }));
     if (duesDecide && !paid) billedMonths.add(month);
     values.set(String(row.id), paid ? 0 : billed);
   }
@@ -259,14 +260,15 @@ function duesBillingDays(customer, { today, to }) {
 
 // The 8 AM dues run's own cohort and verdict (monthly-dues-eligibility.js), judged as of each billing
 // day (a pause that ends, a card that expires, a prepay year that starts or ends), so the forecast counts
-// the dues that run would charge on that day. The cheap guard first; the full verdict only for the rest.
+// the dues that run would charge on that day. Like the run, a month already paid for is skipped. The
+// cheap guard first; the reads only for the rest.
 async function readDues(database, { today, to }) {
   const rows = await applyDuesCohort(database('customers')).select(DUES_COHORT_COLUMNS);
   const out = [];
   for (const c of rows.filter((r) => !laneGuard(r))) {
     for (const due of duesBillingDays(c, { today, to })) {
       const runDay = new Date(`${due}T12:00:00Z`); // the run's morning, Eastern time
-      if (autopayGuard(c, runDay)) continue;
+      if (autopayGuard(c, runDay) || await duesMonthPaid(database, c.id, due)) continue;
       const verdict = await monthlyDuesVerdict(database, c.id, { now: runDay });
       if (verdict.eligible) out.push({ day: due, amountUsd: usd(c.monthly_rate) });
     }
