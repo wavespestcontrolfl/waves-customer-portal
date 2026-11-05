@@ -257,6 +257,8 @@ maybeDescribe('portal messages (live Postgres)', () => {
     await age(3, 10);
     expect(await PortalMessages.resumePendingNotices()).toBeGreaterThanOrEqual(1);
     expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(2);
+    // After the move to the email, a later try finishes the email and pushes nothing.
+    expect(PushService.sendToCustomer).toHaveBeenCalledTimes(1);
     expect((await db('messages').where({ id: first.message.id }).first('metadata')).metadata.notice).toMatchObject({ bell: true, pushAccepted: 0, email: 'sent', pending: false });
     // Delivered: a retried click returns it and sends nothing.
     expect((await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor })).notice)
@@ -302,6 +304,54 @@ maybeDescribe('portal messages (live Postgres)', () => {
     await PortalMessages.resumePendingNotices();
     expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
   });
+  test('a try that stopped after the email went out: the next try finishes the email and never pushes', async () => {
+    const pat = await customer();
+    const { escalationId } = await chat(pat.id, { alert: false });
+    // The app push fails for now; the email goes; the process stops before it saves the outcome.
+    let atSend = null;
+    AccountMembershipEmail.sendPortalReply.mockImplementationOnce(async ({ messageId }) => {
+      atSend = (await db('messages').where({ id: messageId }).first('metadata')).metadata.notice;
+      return { ok: true, messageId: 'email-1' };
+    });
+    const answer = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We will call today.', actor });
+    // The move to the email was saved before the email went.
+    expect(atSend).toMatchObject({ email: 'sending', pending: true, pushAccepted: 0, attempts: 1 });
+    await db('messages').where({ id: answer.message.id }).update({
+      metadata: db.raw("jsonb_set(metadata, '{notice}', ?::jsonb || jsonb_build_object('claimedAt', (now() - interval '3 minutes')::text))", [JSON.stringify(atSend)]),
+      created_at: db.raw("now() - interval '10 minutes'"),
+    });
+    // The push provider is back. The sweep's try sends no push: it finishes the email (its own key dedupes it).
+    mockPushResult.sent = 1;
+    jest.clearAllMocks();
+    expect(await PortalMessages.resumePendingNotices()).toBeGreaterThanOrEqual(1);
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledWith(expect.objectContaining({ messageId: answer.message.id }));
+    expect((await db('messages').where({ id: answer.message.id }).first('metadata')).metadata.notice)
+      .toMatchObject({ bell: true, pushAccepted: 0, email: 'sent', pending: false, attempts: 2 });
+  });
+
+  test('an answer waits for a chat turn that holds the session, instead of deadlocking with it', async () => {
+    const pat = await customer();
+    const { escalationId, sessionId } = await chat(pat.id, { alert: false });
+    // A customer turn adding to the hand-off (assistant.js upsertOpenItem): session row first, then the hand-off row.
+    const turn = await db.transaction();
+    let answer;
+    try {
+      await turn('agent_sessions').where({ id: sessionId }).forUpdate().first('id');
+      answer = PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We can come Friday.', actor });
+      const waiting = async () => (await db.raw("select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'")).rows[0].n;
+      for (let i = 0; i < 100 && (await waiting()) < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+      await turn('ai_escalations').where({ id: escalationId }).update({ customer_message: `${RUN} and Friday works` });
+      await turn.commit();
+    } catch (err) {
+      await turn.rollback().catch(() => {});
+      throw err;
+    }
+    await expect(answer).resolves.toMatchObject({ closed: true });
+    expect(await db('ai_escalations').where({ id: escalationId }).first('status', 'customer_message'))
+      .toEqual({ status: 'resolved', customer_message: `${RUN} and Friday works` });
+  });
+
   test('gate off: every entry point refuses and nothing is written', async () => {
     const pat = await customer();
     const { escalationId } = await chat(pat.id, { alert: false });

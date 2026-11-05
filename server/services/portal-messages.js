@@ -135,6 +135,10 @@ async function itemCustomerWith(trx, kind, id) {
 async function closeItemWith(trx, kind, id, customerId) {
   const now = new Date();
   if (kind === 'chat') {
+    // The chat writer (assistant.js upsertOpenItem) locks the session row before the hand-off row. Same order
+    // here, so a customer adding to the hand-off while staff answers waits instead of deadlocking.
+    const open = await trx('ai_escalations').where({ id, customer_id: customerId }).first('conversation_id');
+    if (open?.conversation_id) await trx('agent_sessions').where({ id: open.conversation_id }).forUpdate().first('id');
     const [esc] = await trx('ai_escalations').where({ id, customer_id: customerId }).whereIn('status', OPEN_CHAT_STATUSES)
       .update({ status: 'resolved', resolution_notes: ANSWERED_NOTE, updated_at: now }).returning(['id', 'conversation_id']);
     if (esc?.conversation_id) {
@@ -207,7 +211,7 @@ function claimable(query, now) {
 // click, the sweep): only a notice still pending, under NOTICE_ATTEMPTS tries, and not held by a fresh claim
 // (CLAIM_STALE_MS: an older claim's process stopped, or a passing failure waits for its next try) can be taken.
 // A final notice (reached, a skip, or out of tries) is never claimed again. The claim counts the try.
-// Returns { at, attempts }.
+// Returns { at, attempts, emailStarted }: emailStarted when an earlier try already moved on to the email.
 async function claimNotice(messageId, now = new Date()) {
   const [row] = await claimable(db('messages as m').where('m.id', messageId), now)
     .update({
@@ -216,15 +220,19 @@ async function claimNotice(messageId, now = new Date()) {
       updated_at: now,
     })
     .returning('metadata');
-  return row ? { at: now.toISOString(), attempts: Number(metaOf(row).notice?.attempts) || 1 } : null;
+  if (!row) return null;
+  const { attempts, email } = metaOf(row).notice || {};
+  return { at: now.toISOString(), attempts: Number(attempts) || 1, emailStarted: email !== undefined };
 }
 
-// The in-app bell plus a push to the Waves app. A push another attempt is still sending is not a miss.
-async function bellAndPush(customerId, message) {
+// The in-app bell plus, unless push is false, a push to the Waves app. A push another attempt is still sending
+// is not a miss.
+async function bellAndPush(customerId, message, { push = true } = {}) {
   try {
     const bell = await require('./notification-service').notifyCustomer(customerId, 'service', NOTICE_TITLE, preview(message.body), {
       link: MESSAGES_LINK,
       dedupeKey: `portal-reply:${message.id}`,
+      push,
       awaitPush: true,
       pushOptions: { nativeOnly: true },
       metadata: { portalMessageId: message.id },
@@ -253,8 +261,10 @@ async function replyEmail(customerId, message) {
 
 // The one notice for a saved answer, one try at a time (claimNotice): the customer's in-app bell plus a push
 // to the Waves app (app devices only: a browser subscription is not the app); an email with the whole answer
-// when no app device took the push. The try's outcome is final when the customer was reached or can't be (an
-// email skip or block), or when it was the last try; a passing failure (no bell, or an email worth another try)
+// when no app device took the push. The move to the email is saved before the email goes, and a later try
+// never pushes after it (it makes sure of the bell and finishes the email): a try that stopped after the email
+// went out cannot add a push. The try's outcome is final when the customer was reached or can't be (an email
+// skip or block), or when it was the last try; a passing failure (no bell, or an email worth another try)
 // stays pending for a retried click or the sweep. A push another try is still sending leaves this try's claim
 // in place (it counted) and adds no email. The stored notice keeps its try count. Never throws. Safe to run
 // again: the bell dedupes on its key, an accepted push is claimed by its bell (push-notifications.js), and the
@@ -263,14 +273,20 @@ async function noticeCustomer(customerId, message) {
   try {
     const claim = await claimNotice(message.id);
     if (!claim) return await storedNotice(message.id);
-    const { inFlight, ...sent } = await bellAndPush(customerId, message);
+    const { inFlight, ...sent } = await bellAndPush(customerId, message, { push: !claim.emailStarted });
     if (inFlight) {
       // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
       // notice ends here, since whatever that push does is the outcome.
       if (claim.attempts >= NOTICE_ATTEMPTS) await recordNotice(message.id, { ...sent, email: 'not_needed', pending: false, claimedAt: claim.at, attempts: claim.attempts });
       return { pending: claim.attempts < NOTICE_ATTEMPTS };
     }
-    const mail = sent.pushAccepted > 0 ? { email: 'not_needed', retry: false } : await replyEmail(customerId, message);
+    let mail = { email: 'not_needed', retry: false };
+    if (!(sent.pushAccepted > 0)) {
+      // Saved before the send, while this try still holds the claim (a try that was taken over sends nothing).
+      const held = await recordNotice(message.id, { ...sent, email: 'sending', pending: true, claimedAt: claim.at, attempts: claim.attempts });
+      if (!held) return await storedNotice(message.id);
+      mail = await replyEmail(customerId, message);
+    }
     const outcome = { ...sent, email: mail.email };
     const pending = !noticeReached(outcome) && (mail.retry || !outcome.bell) && claim.attempts < NOTICE_ATTEMPTS;
     const notice = { ...outcome, pending, claimedAt: claim.at, attempts: claim.attempts };
