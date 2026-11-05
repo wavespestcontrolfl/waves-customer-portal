@@ -44,7 +44,7 @@ const args = (over = {}) => ({
 
 let tables;
 let writes;
-function primeDb({ wavesPromise = false, disposition = 1 } = {}) {
+function primeDb({ wavesPromise = false, disposition = 1, updateFails = false } = {}) {
   tables = [];
   writes = [];
   db.mockImplementation((table) => {
@@ -56,7 +56,7 @@ function primeDb({ wavesPromise = false, disposition = 1 } = {}) {
       first: jest.fn(async () => (table === 'call_commitments'
         ? (wavesPromise ? { id: 'cc1' } : undefined)
         : { transcript_structured: null, processing_status: 'processed' })),
-      update: jest.fn(async (u) => { writes.push({ table, u, where: b.where.mock.calls.map((c) => c[0]) }); return disposition; }),
+      update: jest.fn(async (u) => { if (updateFails) throw new Error('db down'); writes.push({ table, u, where: b.where.mock.calls.map((c) => c[0]) }); return disposition; }),
     };
     return b;
   });
@@ -134,7 +134,7 @@ describe('buildOutOfAreaHoldAlert', () => {
 describe('keepOutOfAreaHoldRecords', () => {
   test('hot lead: commitments recorded, callback_task_created written (null-only, this generation), one alert', async () => {
     await keepOutOfAreaHoldRecords(args());
-    expect(recordCallCommitments).toHaveBeenCalledWith(expect.objectContaining({ procGeneration: 4, transcript: expect.any(String) }));
+    expect(recordCallCommitments).toHaveBeenCalledWith(expect.objectContaining({ procGeneration: 4, transcript: expect.any(String), automationHold: true }));
     const dispo = writes.find((w) => w.u.disposition);
     expect(dispo.u).toMatchObject({ disposition: 'callback_task_created' });
     expect(dispo.where).toEqual(expect.arrayContaining([{ id: 'call-1' }, { disposition: null }, { processing_generation: 4 }]));
@@ -170,6 +170,18 @@ describe('keepOutOfAreaHoldRecords', () => {
     await keepOutOfAreaHoldRecords(args());
     expect(writes).toEqual([]);
     expect(recordCallCommitments).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('each record step stands alone: a failed label write or commitments pass still raises the alert', async () => {
+    primeDb({ updateFails: true });
+    await expect(keepOutOfAreaHoldRecords(args())).resolves.toBeUndefined();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    raiseAdminAlert.mockClear();
+    primeDb();
+    recordCallCommitments.mockRejectedValueOnce(new Error('boom'));
+    await keepOutOfAreaHoldRecords(args());
+    expect(writes.some((w) => w.u.disposition)).toBe(true);
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 

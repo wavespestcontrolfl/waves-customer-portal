@@ -10589,7 +10589,7 @@ function isTechFollowUpCall(call) {
 // Seeds from the V2 extraction plus one bounded model pass; a human-touched
 // row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never blocks
 // the call.
-async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration, historicalReplay = false }) {
+async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration, historicalReplay = false, automationHold = false }) {
   if (!transcription || extracted?.is_spam || !isEnabled('callCommitments')) return;
   try {
     const commitmentsStartedAt = Date.now();
@@ -10602,6 +10602,7 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
         v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
         procGeneration,
         historicalReplay,
+        automationHold,
         // GATE_CALL_APPLICANT_HANDLING: office promises on an applicant / vendor call are not customer promises
         // when the call asks no service of its own; a mixed-purpose call keeps its real service promises.
         thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)
@@ -10979,11 +10980,15 @@ function buildOutOfAreaHoldAlert({ call, extracted, addressValidation }) {
   };
 }
 
-// Commitments, then the label (only under GATE_CALL_DISPOSITION_V1's switch), then the alert. Each step is isolated: a failure is logged
+// Commitments, then the label (only under the callDispositionV1 switch), then the alert. Each step has its own try: a failure is logged
 // by code and never fails the call, which is already finalized. Sends nothing to the caller.
 async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracted, v2Result, procGeneration, addressValidation }) {
+  const failed = (step, err) => logger.warn(`[call-proc] out-of-area hold ${step} failed for ${maskSid(callSid)}: ${err?.code || err?.name || 'error'}`);
+  // automationHold: a link promise is stored office-only, so no live worker texts the caller.
   try {
-    await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
+    await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration, automationHold: true });
+  } catch (err) { failed('commitments', err); }
+  try {
     let wavesPromiseRecorded = false;
     try {
       const { staleAiRowSql } = require('./call-commitments');
@@ -10992,9 +10997,7 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
         .whereIn('kind', ['callback', 'send_estimate'])
         .whereRaw(`NOT ${staleAiRowSql('call_commitments')}`)
         .first('id'));
-    } catch (lookupErr) {
-      logger.warn(`[call-proc] out-of-area promise lookup failed for ${maskSid(callSid)}: ${lookupErr.code || lookupErr.name || 'error'}`);
-    }
+    } catch (lookupErr) { failed('promise lookup', lookupErr); }
     const { disposition, reason } = outOfAreaHoldDisposition({
       extracted, v2Extraction: v2Result?.status === 'valid' ? v2Result.extraction : null, wavesPromiseRecorded,
     });
@@ -11002,13 +11005,13 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
     if (isEnabled('callDispositionV1')) {
       await writeCallDisposition({ callId: call.id, priorDisposition: null, priorGeneration: procGeneration, disposition, reason, callSid });
     }
+  } catch (err) { failed('disposition', err); }
+  try {
     if (isHotOrWarm(extracted)) {
       const alert = buildOutOfAreaHoldAlert({ call, extracted, addressValidation });
       await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
     }
-  } catch (err) {
-    logger.warn(`[call-proc] out-of-area hold records failed for ${maskSid(callSid)}: ${err.code || err.name || 'error'}`);
-  }
+  } catch (err) { failed('alert', err); }
 }
 
 const CallRecordingProcessor = {
