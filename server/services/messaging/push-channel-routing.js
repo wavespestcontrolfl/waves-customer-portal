@@ -450,7 +450,7 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, appointmentId = null, invoiceId = null } = {}) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
   const { title, link, category } = await resolvePushDestination(pushPresentation(messageType), messageType, { customerId, appointmentId, invoiceId });
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
@@ -458,12 +458,23 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     body,
     url: link,
     category,
-    tag: `push-routed:${messageType}`,
+    tag: pushTag(messageType, { appointmentId, invoiceId, eventKey }),
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
   }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}) });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
+}
+
+// The push's collapse tag (APNs apns-collapse-id, hashed when long; the Android
+// notification tag): a resend of the same notice replaces its own banner. With
+// GATE_APP_FIRST_ANY_DEVICE on, the tag also names the visit (else the invoice,
+// else the notice event), so two visits' reminders never replace each other on
+// the phone: each push skips its own text, and a replaced banner would leave the
+// customer with only the last one. Gate off: the type-wide tag, as before.
+function pushTag(messageType, { appointmentId = null, invoiceId = null, eventKey = null } = {}) {
+  const scope = appFirstAnyDeviceLive() ? (appointmentId || invoiceId || eventKey) : null;
+  return scope ? `push-routed:${messageType}:${scope}` : `push-routed:${messageType}`;
 }
 
 // GATE_APP_FIRST_ANY_DEVICE applies to routed push_first sends only; a customer's
@@ -715,6 +726,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         ...fanOutReach(anyDevice),
         appointmentId,
         invoiceId,
+        eventKey: notificationEventKey,
       });
     if (!delivered) {
       // These App notices have durable replay owners. Other App-first
@@ -919,5 +931,5 @@ module.exports = {
   APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { pushTag, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };

@@ -202,3 +202,28 @@ describe('a push-routed reminder leaves the proof the reminder sweep reads', () 
     });
   });
 });
+
+describe('collapse tag: two visits never replace each other on the phone (Codex #7581 r1)', () => {
+  const { pushTag } = PushRouting._test;
+
+  it('gate off: the type-wide tag, as before', () => {
+    expect(pushTag('appointment_reminder', { appointmentId: 'visit-1', eventKey: 'k' })).toBe('push-routed:appointment_reminder');
+  });
+
+  it('gate on: names the visit, else the invoice, else the notice event, else the type alone', () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    expect(pushTag('appointment_reminder', { appointmentId: 'visit-1', invoiceId: 'inv-1', eventKey: 'k' })).toBe('push-routed:appointment_reminder:visit-1');
+    expect(pushTag('receipt', { invoiceId: 'inv-1', eventKey: 'k' })).toBe('push-routed:receipt:inv-1');
+    expect(pushTag('tech_arrived', { eventKey: 'arrived:visit-2' })).toBe('push-routed:tech_arrived:arrived:visit-2');
+    expect(pushTag('tech_arrived', {})).toBe('push-routed:tech_arrived');
+  });
+
+  it('gate on: reminders for two visits reach the device with different tags', async () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    mockDevices.push(device());
+    await send({ appointmentId: 'visit-1', notificationEventKey: 'reminder_24h:visit-1' });
+    await send({ appointmentId: 'visit-2', notificationEventKey: 'reminder_24h:visit-2' });
+    const tags = mockSendToCustomer.mock.calls.map((call) => call[1].tag);
+    expect(tags).toEqual(['push-routed:appointment_reminder:visit-1', 'push-routed:appointment_reminder:visit-2']);
+  });
+});
