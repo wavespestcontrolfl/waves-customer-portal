@@ -361,6 +361,28 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect(await get(texted.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
       expect(await get(called.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by a call' });
       for (const open of [unanswered, earlier]) expect((await get(open.id)).done_at).toBeNull();
+
+      // The sender's next text rewrites the closed row (the emitter's own refresh, sms-reply-alert-delivery.js
+      // ringTrackingLineTextBell): it rings again, unread and open, and the sweep judges it from that text.
+      const NotificationService = require('../services/notification-service');
+      const textedMeta = (await get(texted.id)).metadata;
+      const nextSid = sid('SMT');
+      await insert('sms_log', { direction: 'inbound', from_phone: '+15555557301', to_phone: BIZ, customer_id: null, message_body: 'Also the garage?',
+        message_type: 'domain_lead', status: 'received', twilio_sid: nextSid, created_at: mins(t0, 60) });
+      const refreshed = await NotificationService.notifyAdmin('new_lead', '2 texts from wavespestcontrol.com', '“Also the garage?” — unknown sender ***7301', {
+        link: `/admin/communications?message=${nextSid}`,
+        metadata: { triggerKey: 'new_lead', payload: { twilioSid: nextSid, textCount: 1 } },
+        dedupeKey: textedMeta.dedupeKey, refreshOnDedupe: true, bumpOnRefresh: true,
+      });
+      expect(refreshed.id).toBe(texted.id);
+      const rung = await get(texted.id);
+      expect([rung.read_at, rung.done_at, rung.done_by, rung.resolution]).toEqual([null, null, null, null]);
+      expect(rung.metadata.retired).toBeUndefined();
+      await sweep();
+      expect((await get(texted.id)).done_at).toBeNull();
+      await staffText(null, '+15555557301', mins(t0, 70));
+      await sweep();
+      expect(await get(texted.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
     });
 
     test('a new text after a close rings the sender\'s thread bell again', async () => {
