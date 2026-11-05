@@ -25,6 +25,10 @@
  * pauses every plan at the house left for the visits after move-out, and closes the
  * move when no address comes in within 60 days (see the Move pause section).
  *
+ * Apply on accept (GATE_MOVING_AUTO_APPLY, owner 2026-11-04 option A): once
+ * the customer accepts the new-home estimate, a job applies the move through
+ * Apply move's own preview and confirm, with no office click.
+ *
  * The old-house stop (GATE_MOVING_STOP_AT_MOVE_OUT, owner 2026-11-04) runs the
  * same pause step for a customer who gave the new address but whose move is not
  * applied by the move-out day: the plans at the house left stop after the
@@ -55,7 +59,7 @@ const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-e
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validateAddress, STATUSES } = require('./address-validation');
 const { moveVerdictLabel } = require('./move-address-verdict');
-const { movingEstimateLive, movingApplyLive, movingPauseLive, movingStopAtMoveOutLive } = require('../config/feature-gates');
+const { movingEstimateLive, movingApplyLive, movingAutoApplyLive, movingPauseLive, movingStopAtMoveOutLive } = require('../config/feature-gates');
 
 const TOKEN_RE = /^[a-f0-9]{48}$/;
 const DAILY_CHECK_CAP = 10;
@@ -1609,15 +1613,18 @@ async function applyMove(customerId, moveId, opts = {}) {
     }
 
     const summary = [
+      opts.auto ? 'Applied by the app after the customer accepted the new-home estimate.' : '',
       `New home is primary: ${propertyLine(plan.to)}.`,
       `Old-house plans stopped after ${prettyDate(plan.moveOut)}: ${plan.stops.length} (${progress.visitsCancelled} visits cancelled, no customer text, no fee).`,
       progress.stationTask ? 'Termite station pickup task opened.' : '',
     ].join(' ').trim();
     await step('close', () => closeAppliedMove(plan, { actorId, summary, now: opts.now || new Date() }));
     await require('./portal-inbox')
-      .resolveRequestQuietly(plan.move.service_request_id, customerId, 'Move applied from the Moving card.', { notAfter: new Date(), now: new Date() })
+      .resolveRequestQuietly(plan.move.service_request_id, customerId,
+        opts.auto ? 'Move applied by the app after the customer accepted the new-home estimate.' : 'Move applied from the Moving card.',
+        { notAfter: new Date(), now: new Date() })
       .catch((err) => logger.warn(`[customer-moves] office item close failed for move ${moveId} (${errCode(err)})`));
-    logger.info(`[customer-moves] applied move ${moveId} for customer ${customerId} by ${actorId || 'unknown'}`);
+    logger.info(`[customer-moves] applied move ${moveId} for customer ${customerId} by ${opts.auto ? 'the app (accepted estimate)' : (actorId || 'unknown')}`);
     return { applied: true, ...progress, oneOffs: plan.oneOffs, pastOpen: plan.pastOpen, summary };
   } finally {
     await release();
@@ -1641,6 +1648,111 @@ async function applyAction(move, conn = db) {
     logger.warn(`[customer-moves] apply action read failed for move ${move.id} (${errCode(err)})`);
     return null;
   }
+}
+
+// ── Apply on accept (GATE_MOVING_AUTO_APPLY) ───────────────────────────────
+//
+// Owner 2026-11-04 (option A of the hands-off moves page: "App applies the
+// move, with the same preview checks as the office button"): once the
+// customer accepts the new-home estimate, the app applies the move itself. A
+// job every 15 minutes reads Apply move's own preview for each submitted move
+// whose estimate is accepted, and confirms it on that preview's version, as
+// an office click would. A refusal the office must handle rings one office
+// item per move and refusal, and the Moving card keeps its Apply button. A
+// run that stops partway resumes on the next run, like a second confirm.
+
+// Refusals that mean "not yet" or "try again": no office item, the next run
+// reads the preview again. A visit under way finishes on its own.
+const AUTO_APPLY_WAIT = new Set(['gate_off', 'not_found', 'already_applied', 'not_submitted', 'no_estimate',
+  'estimate_not_accepted', 'apply_in_progress', 'apply_lock_unavailable', 'apply_changed', 'visit_underway',
+  // A step's own "changed since the preview" (the primary change, a plan's series).
+  'preview_changed', 'series_changed']);
+// Saved by the accept itself: right after it, a missing new home or new plan
+// is a write still landing, not a refusal yet.
+const AUTO_APPLY_SETTLING = new Set(['no_new_property', 'no_new_plan']);
+const AUTO_APPLY_SETTLE_MS = 60 * 60 * 1000;
+
+// Submitted moves whose new-home estimate the customer accepted.
+function acceptedEstimateMoves() {
+  return db('customer_moves')
+    .where({ status: 'submitted' })
+    .whereNotNull('estimate_id')
+    .whereExists(function acceptedEstimate() {
+      this.select(db.raw('1')).from('estimates as e')
+        .whereRaw('e.id = customer_moves.estimate_id')
+        .where('e.status', 'accepted')
+        .whereNull('e.archived_at');
+    });
+}
+
+// One ringing office item per move and refusal code (the key dedupes for
+// good): a refusal that persists rings once, a new one rings again.
+async function raiseAutoApplyAlert(move, err) {
+  const customer = await db('customers').where({ id: move.customer_id }).first('first_name', 'last_name');
+  const name = [customer && customer.first_name, customer && customer.last_name].filter(Boolean).join(' ').trim() || 'a customer';
+  const notif = await raiseAdminAlert('service', {
+    area: 'Customers',
+    action: cutAtWord(`apply ${name}'s move by hand`, MAX_HEADLINE_CHARS - 'Customers — '.length),
+    why: cutAtWord('They accepted the new-home estimate, but the app could not apply the move; the item says why.', MAX_WHY_CHARS),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
+    subject: { type: 'customer', id: move.customer_id },
+    doneWhen: 'move_handled',
+    who: 'person',
+  }, {
+    detail: `${err.message} Then press Apply move on the Moving card.`,
+    icon: '🚚',
+    bell: true,
+    dedupeKey: `moving_auto_apply_${err.code}:${move.id}`,
+    metadata: { customerId: move.customer_id, moveId: move.id, kind: 'moving_auto_apply', code: err.code },
+  });
+  if (!notif || notif.suppressed) logger.warn(`[customer-moves] auto-apply office item did not persist for move ${move.id}; the next run tries again`);
+}
+
+// When the move's estimate was accepted, or null.
+async function acceptedAt(move) {
+  const row = await db('estimates').where({ id: move.estimate_id }).first('accepted_at');
+  return row && row.accepted_at ? new Date(row.accepted_at) : null;
+}
+
+/**
+ * Apply one move whose new-home estimate is accepted: Apply move's preview,
+ * then its confirm on that preview's version. Returns 'applied', 'waiting'
+ * (not ready, busy or changed: the next run reads it again) or 'office'.
+ */
+async function autoApplyMove(moveId, { now }) {
+  const move = await db('customer_moves').where({ id: moveId }).first('id', 'customer_id', 'status', 'estimate_id');
+  if (!move || move.status !== 'submitted' || !move.estimate_id) return 'waiting';
+  try {
+    const { version } = await applyMovePreview(move.customer_id, move.id);
+    const result = await applyMove(move.customer_id, move.id, { version, actorId: null, now, auto: true });
+    return result && result.applied ? 'applied' : 'waiting';
+  } catch (err) {
+    if (!(err instanceof MoveError)) throw err;
+    if (AUTO_APPLY_WAIT.has(err.code)) return 'waiting';
+    if (AUTO_APPLY_SETTLING.has(err.code)) {
+      const accepted = await acceptedAt(move);
+      if (!accepted || now.getTime() - accepted.getTime() < AUTO_APPLY_SETTLE_MS) return 'waiting';
+    }
+    await raiseAutoApplyAlert(move, err);
+    return 'office';
+  }
+}
+
+/** The apply-on-accept job (scheduler, every 15 minutes). Off with GATE_MOVING_AUTO_APPLY. */
+async function autoApplyAcceptedMoves({ now = new Date() } = {}) {
+  if (!movingAutoApplyLive()) return { skipped: true };
+  const out = { applied: 0, waiting: 0, office: 0, failed: 0 };
+  await forEachMove(acceptedEstimateMoves(), async (id) => {
+    try {
+      const outcome = await autoApplyMove(id, { now });
+      if (outcome in out) out[outcome] += 1;
+    } catch (err) {
+      out.failed += 1;
+      logger.error(`[customer-moves] auto-apply failed for move ${id} (${errCode(err)}); the next run tries again`);
+    }
+  });
+  return out;
 }
 
 // ── Move pause (moving PR 2b, GATE_MOVING_PAUSE) ────────────────────────────
@@ -2212,6 +2324,7 @@ module.exports = {
   applyAction,
   applyMovePreview,
   applyMove,
+  autoApplyAcceptedMoves,
   runMovePauseJob,
   PAUSE_DAYS,
   _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse, pauseLane },

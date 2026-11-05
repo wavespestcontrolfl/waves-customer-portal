@@ -9336,6 +9336,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Apply on accept (owner 2026-11-04 option A): a move whose
+  // new-home estimate the customer accepted is applied through Apply move's
+  // own preview and confirm, with no office click; a refusal rings the office
+  // once. Gate read per tick (GATE_MOVING_AUTO_APPLY), so a flip needs no restart.
+  // =========================================================================
+  // Off the quarter hours the other 15-minute jobs share.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').movingAutoApplyLive()) return;
+    try {
+      await runExclusive('moving-auto-apply', async () => {
+        const result = await require('./customer-moves').autoApplyAcceptedMoves();
+        if (result.applied || result.office || result.failed) logger.info(`[moving-auto-apply] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-auto-apply] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 11AM — Owner heads-up for an imminent visit with a balance 30+ days
   // overdue. The customer-facing reminders (pre-visit tiers, account late
   // check) are retired: the 10:05 pre-visit balance reminder and the invoice
