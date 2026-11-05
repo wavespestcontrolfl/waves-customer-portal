@@ -3238,6 +3238,42 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
 }
 
 /**
+ * Spelled letters settle a V1/V2 email disagreement (owner 2026-11-04, "A",
+ * GATE_CALL_SPELLED_EMAIL_SETTLES). The hold above exists because neither
+ * extractor's guess is trusted over the other. The transcript dictation
+ * decoder is a third reading of the letters the caller spelled: when it heard
+ * exactly ONE spelling, its own adopt (past its ownership gate) already put
+ * that spelling on extracted.email at FULL confidence, and the spelling is
+ * exactly one of the two pass values, the caller's letters decide which pass
+ * was right. Any doubt keeps the hold: no or several decoder spellings, a
+ * spelling below full confidence (the decoder adopts from 0.75, and on a
+ * 2026-09-28 card its 0.90 top spelling lost to the other pass), an arbiter
+ * verdict short of a decisive adopt, a spelling that matches neither pass, or
+ * a value that is not email-shaped. The caller still runs the do-not-email
+ * check on both spellings before it skips the hold.
+ *
+ * Pure. Returns { email, otherSpelling } (both lowercased) or null.
+ */
+function spelledLettersSettleEmailDisagreement(extracted, dictationEmailPayload) {
+  const passes = Array.isArray(extracted?.email_candidates)
+    ? extracted.email_candidates.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+  if (passes.length !== 2 || passes[0] === passes[1]) return null;
+  const p = dictationEmailPayload;
+  if (!p || p.email_disagreement) return null;
+  const heard = Array.isArray(p.email_candidates) ? p.email_candidates : [];
+  if (heard.length !== 1 || !(Number(heard[0]?.confidence) >= 1)) return null;
+  const verdict = p.arbiter?.verdict;
+  if (verdict && verdict !== 'adopt') return null;
+  const spelled = String(heard[0]?.value || '').trim().toLowerCase();
+  if (!BASIC_EMAIL_SHAPE.test(spelled)) return null;
+  if (String(extracted.email || '').trim().toLowerCase() !== spelled) return null;
+  const at = passes.indexOf(spelled);
+  if (at === -1) return null;
+  return { email: spelled, otherSpelling: passes[1 - at] };
+}
+
+/**
  * Merge needs_confirmation reasons across calls on the same lead. Reasons are
  * read-back reminders that persist until the office confirms them — a later
  * call that never restates the address/email must not erase the earlier call's
@@ -3612,6 +3648,7 @@ module.exports = {
   CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
+  spelledLettersSettleEmailDisagreement,
   mergeNeedsConfirmation,
   detectRentalSignal,
   streetCompareKey,

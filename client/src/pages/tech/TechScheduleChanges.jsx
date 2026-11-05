@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
+import { addETDays, etDateString, formatETDate, formatETTime } from '../../lib/timezone';
 
 // Schedule changes on the Today page (owner ruling 2026-10-03). A change that
 // touches today or tomorrow keeps its own card; every other one folds into a
@@ -27,9 +28,36 @@ async function api(path, options = {}) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-function shortDay(iso) {
+function shortDay(iso, withYear = false) {
   if (!iso) return null;
-  return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(withYear ? { year: 'numeric' } : {}), timeZone: 'UTC' });
+}
+
+// When a change happened, in ET: "today 3:30 PM", "Oct 30", "Oct 30, 2025".
+function changedOn(iso) {
+  const at = iso ? new Date(iso) : null;
+  if (!at || Number.isNaN(at.getTime())) return null;
+  const day = etDateString(at);
+  const today = etDateString();
+  if (day === today) return `today ${formatETTime(at)}`;
+  return formatETDate(at, { month: 'short', day: 'numeric', ...(day.slice(0, 4) === today.slice(0, 4) ? {} : { year: 'numeric' }) });
+}
+
+// Who made the change and when. The server reads each card against its
+// visit as it is now (routes/tech-notifications.js): `actor_line` names how
+// a new visit came in, and a visit that changed after its card was written
+// says so with the last mover ("Changed again by the customer · today
+// 2:49 PM").
+function actorLine(change) {
+  const p = change.payload || {};
+  let who = null;
+  if (p.actor_line) who = p.actor_line;
+  else if (p.changed_again) who = ['Changed again', p.actor].filter(Boolean).join(' ');
+  else if (p.actor) who = `${VERB[change.type]} ${p.actor}`;
+  else if (p.changed_at) who = VERB[change.type];
+  if (!who) return null;
+  const on = changedOn(p.changed_again || p.changed_at ? p.changed_at : change.created_at);
+  return on ? `${who} · ${on}` : who;
 }
 
 // EARLIER / LATER / SAME DAY for a move both of whose days are known.
@@ -56,19 +84,29 @@ function swapPartners(changes) {
   return partners;
 }
 
+// Where a visit that left this route is now. A card the server could not
+// name a holder on says only that the visit is on another route.
+function nowLine(p) {
+  if (p.ended) return `Now ${p.ended}`;
+  if (p.now_with) return `Now with ${p.now_with}`;
+  return p.now_elsewhere ? 'Now on another route' : 'Now unassigned';
+}
+
 function detailLines(change) {
   const p = change.payload || {};
   const lines = [];
   if (change.type === 'visit_rescheduled') {
     if (p.service_type) lines.push({ text: p.service_type });
+    // Where: two customers can share a last name on one street.
+    if (p.address) lines.push({ text: p.address });
     if (p.previous_when) lines.push({ text: `Was ${p.previous_when}`, struck: true });
     if (p.when) lines.push({ text: `Now ${p.when}` });
   } else {
     lines.push({ text: [p.service_type, p.when].filter(Boolean).join(' · ') });
     if (change.type === 'visit_assigned' && p.address) lines.push({ text: p.address });
-    if (change.type === 'visit_unassigned') lines.push({ text: p.ended ? `Now ${p.ended}` : (p.now_with ? `Now with ${p.now_with}` : 'Now unassigned') });
+    if (change.type === 'visit_unassigned') lines.push({ text: nowLine(p) });
   }
-  if (p.actor) lines.push({ text: `${VERB[change.type]} ${p.actor}` });
+  lines.push({ text: actorLine(change) });
   return lines.filter((line) => line.text);
 }
 
@@ -121,6 +159,11 @@ function summaryOf(changes, total = changes.length) {
   const title = allAuto ? `Auto-dispatch moved ${plural(visits, 'visit')}` : plural(n, 'schedule change');
   const services = new Set(changes.map((c) => c.payload?.service_type).filter(Boolean));
   const days = changes.map((c) => c.payload?.date).filter(Boolean).sort();
+  // A range that leaves this year names its years: "Oct 5, 2026 – Oct 15, 2027", never "Oct 5 – Oct 15".
+  const thisYear = etDateString().slice(0, 4);
+  const withYear = days.some((day) => day.slice(0, 4) !== thisYear);
+  const twoWeeksOut = etDateString(addETDays(new Date(), 14));
+  const near = days.filter((day) => day <= twoWeeksOut).length;
   const counts = { EARLIER: 0, LATER: 0 };
   for (const c of changes) { const d = direction(c); if (d in counts) counts[d] += 1; }
   const parts = [];
@@ -128,7 +171,8 @@ function summaryOf(changes, total = changes.length) {
   // is all on hand; a capped sample says so instead (Codex #5786 P2).
   if (complete) {
     if (n > 1 && services.size === 1) parts.push(`All ${[...services][0]}`);
-    if (days.length) parts.push(days[0] === days[days.length - 1] ? shortDay(days[0]) : `${shortDay(days[0])} – ${shortDay(days[days.length - 1])}`);
+    if (near > 0 && near < days.length) parts.push(`${near} in the next 2 weeks`);
+    if (days.length) parts.push(days[0] === days[days.length - 1] ? shortDay(days[0], withYear) : `${shortDay(days[0], withYear)} – ${shortDay(days[days.length - 1], withYear)}`);
     const moved = [counts.EARLIER && `${counts.EARLIER} earlier`, counts.LATER && `${counts.LATER} later`].filter(Boolean).join(', ');
     if (moved) parts.push(moved);
   } else if (changes.length) {
@@ -173,7 +217,7 @@ function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatc
                   ? <>
                     <div className="tf-change-when"><span className="tf-struck">{p.previous_when}</span><span aria-hidden="true"> → </span><strong>{p.when}</strong></div>
                     <div className="tf-muted">{[p.service_type, partners.has(c.id) && `Swapped with ${partners.get(c.id)}`].filter(Boolean).join(' · ')}</div>
-                    {p.actor && <div className="tf-muted">{`${VERB[c.type]} ${p.actor}`}</div>}
+                    {actorLine(c) && <div className="tf-muted">{actorLine(c)}</div>}
                   </>
                   : <>
                     {/* Same details the card itself shows: where a new visit is, who holds a removed one, who acted. */}
@@ -261,8 +305,10 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
     setBusy(true);
     setError(null);
     try {
-      // The server clears every folded change up to the read on screen.
-      await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ as_of: feed.asOf }) });
+      // The server clears every folded change up to the read on screen, and
+      // never a card this screen shows on its own (a move since may have
+      // taken its visit off today and tomorrow).
+      await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ as_of: feed.asOf, keep_ids: soon.map((c) => c.id) }) });
       latest.current += 1;
       setChanges((prev) => prev.filter((c) => c.soon));
       setFeed((prev) => ({ ...prev, laterTotal: 0 }));

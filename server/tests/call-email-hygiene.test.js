@@ -31,7 +31,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
-const { deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold } = require('../services/call-triage-flags');
+const { deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement } = require('../services/call-triage-flags');
 const { alertBouncedContactAddress } = require('../services/email-bounce-recovery');
 
 describe('deriveCallReviewBridge — email', () => {
@@ -189,6 +189,66 @@ describe('applyEmailDisagreementHold', () => {
     const { dictationEmailPayload } = applyEmailDisagreementHold(extracted, priorPayload);
     expect(dictationEmailPayload.email_as_heard).toBe('decoder-heard@example.com');
     expect(dictationEmailPayload.confirmation_question).toBe('Already asking something?');
+  });
+});
+
+// GATE_CALL_SPELLED_EMAIL_SETTLES (owner 2026-11-04, "A"): the letters the
+// caller spelled settle a V1/V2 disagreement only when the decoder heard ONE
+// spelling at full confidence, adopted it, and it is exactly one pass value.
+describe('spelledLettersSettleEmailDisagreement', () => {
+  const passes = ['jondoe@gmail.com', 'jondoh@gmail.com']; // V1 wrote the spoken name, V2 the letters
+  const heard = (value, confidence = 1, extra = {}) => ({ email_candidates: [{ value, confidence }], ...extra });
+  const adopted = (email) => ({ email, email_candidates: passes.slice() });
+
+  test('settles on the pass the spelled letters match, and names the other spelling', () => {
+    expect(spelledLettersSettleEmailDisagreement(adopted('jondoh@gmail.com'), heard('jondoh@gmail.com')))
+      .toEqual({ email: 'jondoh@gmail.com', otherSpelling: 'jondoe@gmail.com' });
+    // Either leg can be the right one.
+    expect(spelledLettersSettleEmailDisagreement(adopted('jondoe@gmail.com'), heard('jondoe@gmail.com')))
+      .toEqual({ email: 'jondoe@gmail.com', otherSpelling: 'jondoh@gmail.com' });
+  });
+
+  test('a Gmail dot-only pair settles on the spelled form; case does not matter', () => {
+    const extracted = { email: 'JonDoh@Gmail.com', email_candidates: ['JonDoh@gmail.com', 'jon.doh@gmail.com'] };
+    expect(spelledLettersSettleEmailDisagreement(extracted, heard('JonDoh@Gmail.com')))
+      .toEqual({ email: 'jondoh@gmail.com', otherSpelling: 'jon.doh@gmail.com' });
+  });
+
+  test('a decisive arbiter adopt still settles', () => {
+    expect(spelledLettersSettleEmailDisagreement(adopted('jondoh@gmail.com'), heard('jondoh@gmail.com', 1, { arbiter: { verdict: 'adopt' } })))
+      .toEqual({ email: 'jondoh@gmail.com', otherSpelling: 'jondoe@gmail.com' });
+  });
+
+  test('any doubt keeps the 2026-09-25 hold', () => {
+    const settle = (extracted, payload) => spelledLettersSettleEmailDisagreement(extracted, payload);
+    // No decoder evidence, or no spelling heard.
+    expect(settle(adopted('jondoh@gmail.com'), null)).toBeNull();
+    expect(settle(adopted('jondoh@gmail.com'), { email_candidates: [] })).toBeNull();
+    // Two spellings heard (the 2026-09-25 incident had three).
+    expect(settle(adopted('jondoh@gmail.com'), {
+      email_candidates: [{ value: 'jondoh@gmail.com', confidence: 1 }, { value: 'jondoe@gmail.com', confidence: 0.4 }],
+    })).toBeNull();
+    // Below full confidence: the decoder adopts from 0.75, and a 0.90 top spelling has lost to the other pass.
+    expect(settle(adopted('jondoh@gmail.com'), heard('jondoh@gmail.com', 0.99))).toBeNull();
+    expect(settle(adopted('jondoh@gmail.com'), heard('jondoh@gmail.com', 0.9))).toBeNull();
+    expect(settle(adopted('jondoh@gmail.com'), { email_candidates: [{ value: 'jondoh@gmail.com' }] })).toBeNull();
+    // An arbiter short of a decisive adopt.
+    for (const verdict of ['adopt_with_confirmation', 'review', 'reject']) {
+      expect(settle(adopted('jondoh@gmail.com'), heard('jondoh@gmail.com', 1, { arbiter: { verdict } }))).toBeNull();
+    }
+    // The decoder did not adopt (its ownership gate declined): nothing on extracted.email.
+    expect(settle(adopted(null), heard('jondoh@gmail.com'))).toBeNull();
+    // extracted.email is not the spelling heard.
+    expect(settle(adopted('jondoe@gmail.com'), heard('jondoh@gmail.com'))).toBeNull();
+    // The spelling matches neither pass.
+    expect(settle({ email: 'jdoh@gmail.com', email_candidates: passes.slice() }, heard('jdoh@gmail.com'))).toBeNull();
+    // Not email-shaped.
+    expect(settle({ email: 'jondoh@gmail', email_candidates: ['jondoh@gmail', 'jondoe@gmail.com'] }, heard('jondoh@gmail'))).toBeNull();
+    // The payload already carries a disagreement.
+    expect(settle(adopted('jondoh@gmail.com'), heard('jondoh@gmail.com', 1, { email_disagreement: { v1: 'a', v2: 'b' } }))).toBeNull();
+    // Not a two-pass disagreement.
+    expect(settle({ email: 'jondoh@gmail.com', email_candidates: ['jondoh@gmail.com'] }, heard('jondoh@gmail.com'))).toBeNull();
+    expect(settle({ email: 'jondoh@gmail.com', email_candidates: ['JonDoh@gmail.com', 'jondoh@gmail.com'] }, heard('jondoh@gmail.com'))).toBeNull();
   });
 });
 

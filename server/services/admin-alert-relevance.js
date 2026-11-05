@@ -1233,7 +1233,7 @@ const CLASSES = [
     match: (meta) => meta.doneWhen === 'text_note_checked', contactOnly: true, contact: 'customer', contactRule: textNoteSettled,
   },
   // Leads bells that promise `doneWhen: 'lead_contacted'` and name a lead (lead-call-text-followup,
-  // lead-call-reply-ring, sms-lead-extraction, lead-unverified-hold; the lead id is in metadata.leadId
+  // lead-call-reply-ring, sms-lead-extraction, lead-unverified-hold, caller-callback-bell; the lead id is in metadata.leadId
   // and the link's ?lead=). The repeat-form alert (same doneWhen) is the lead_repeat_form class above,
   // matched first. A bid-invite Leads bell (doneWhen bid_decided) never matches. The whole class runs
   // under GATE_LEAD_CONTACTED_CLOSE (`gate`), whatever GATE_ALERT_CONTACT_CLOSE says.

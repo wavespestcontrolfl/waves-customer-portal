@@ -15,6 +15,12 @@ jest.mock('../routes/admin-sms-templates', () => ({
 jest.mock('../services/estimate-card-holds', () => ({
   cardHoldReminderLine: jest.fn(async () => ''),
 }));
+// The reschedule text's closing line reads scheduled_services for its link;
+// mocked so the reschedule tests' per-table read queues stay as written.
+jest.mock('../services/reschedule-link', () => ({
+  ...jest.requireActual('../services/reschedule-link'),
+  rescheduledTextLine: jest.fn(async () => 'Need a different time? Reply here.'),
+}));
 
 const db = require('../models/db');
 const { cardHoldReminderLine } = require('../services/estimate-card-holds');
