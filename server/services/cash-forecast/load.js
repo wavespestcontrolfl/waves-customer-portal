@@ -141,7 +141,11 @@ async function readVisits(database, { from, to, now }) {
       ss.prepaid_amount, ss.prepaid_method, ss.estimated_price, ss.primary_line_price, ss.service_type,
       COALESCE(ss.is_recurring, false) AS is_recurring,
       ${autopay.sql} AS autopay_active,
-      (COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END) IS NOT NULL) AS payer_billed,
+      -- billed to a payer only through an active one (payer.js resolveForInvoice: the visit's payer, else the
+      -- customer's unless the visit is pinned to self-pay; a missing or inactive payer is self-pay)
+      EXISTS (SELECT 1 FROM payers p
+        WHERE p.id = COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END)
+          AND p.active IS DISTINCT FROM false) AS payer_billed,
       (COALESCE(ss.is_callback, false) OR EXISTS (
         SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND COALESCE(sr.is_callback, false))) AS is_callback,
       -- its own live invoice, or a combined first-application invoice that covers it (the stamp
@@ -311,6 +315,21 @@ async function readPayroll(database, { from, to }) {
     ORDER BY pc.pay_date`, [from, to]).then((r) => r.rows);
 }
 
+// Paychecks past their pay date that are still owed: the portal's payment record says the money never went
+// out (payroll_payments has a row, none of them sent or paid by paper check: waiting on approval, unknown,
+// failed, rejected, cancelled or returned), and no bank line is matched to the check. A check with no
+// payment record was paid outside the portal, so it is not read here. They count today.
+async function readOverduePaychecks(database, { today }) {
+  return database.raw(`
+    SELECT ${DAY('pc.pay_date')} AS pay_day, (COALESCE(pc.net_cents, 0) + COALESCE(pc.hsa_employer_cents, 0)) AS net_cents
+    FROM payroll_checks pc JOIN payroll_runs pr ON pr.id = pc.run_id
+    WHERE pc.pay_date < ?::date AND pr.status = 'finalized' AND pr.voided_at IS NULL
+      AND COALESCE(pc.status, '') <> 'void'
+      AND EXISTS (SELECT 1 FROM payroll_payments pp WHERE pp.check_id = pc.id)
+      AND NOT EXISTS (SELECT 1 FROM payroll_payments pp WHERE pp.check_id = pc.id AND pp.state IN ('sent', 'paper'))
+      AND NOT EXISTS (SELECT 1 FROM bank_transactions bt WHERE bt.matched_payroll_check_id = pc.id)`, [today]).then((r) => r.rows);
+}
+
 // Weekly pay after each employee's last finalized check, at the average full cost of their last 4 checks.
 function projectPayroll(rows, { today, to }) {
   const byEmployee = new Map();
@@ -335,11 +354,14 @@ function projectPayroll(rows, { today, to }) {
 // Tax payments due in the window, payroll deposits included (payroll-tax-calendar.js: the monthly 941
 // deposit, SIMPLE savings, the quarterly RT-6, the employer 2%). The quarterly Form 941 is a return that
 // the monthly deposits already paid, so it is left out.
-async function readTaxRows(database, { from, to }) {
+// Unpaid ones already past due stay owed, as the tax page keeps them (admin-tax.js), so the read reaches
+// back 400 days and the caller counts them today.
+const OVERDUE_TAX_LOOKBACK_DAYS = 400;
+async function readTaxRows(database, { today, to }) {
   return database.raw(`
     SELECT ${DAY('due_date')} AS due_day, filing_type, amount_due, amount_paid FROM tax_filing_calendar
     WHERE due_date BETWEEN ?::date AND ?::date AND COALESCE(status, '') NOT IN ('paid', 'filed')
-      AND filing_type <> 'payroll_941'`, [from, to]).then((r) => r.rows);
+      AND filing_type <> 'payroll_941'`, [engine.addDays(today, -OVERDUE_TAX_LOOKBACK_DAYS), to]).then((r) => r.rows);
 }
 
 async function readCash(readCashBalances) {
@@ -475,7 +497,7 @@ async function loadForecastInput({
     inputs.listItems(database),
   ]);
   const pool = poolFrom(cash);
-  const [visitRows, sent, open, drafts, dues, prepaySalesUsd3m, bankLines, offFeed, payroll, taxRows] = await Promise.all([
+  const [visitRows, sent, open, drafts, dues, prepaySalesUsd3m, bankLines, offFeed, payroll, overduePay, taxRows] = await Promise.all([
     readVisits(database, { from: d.cohortFrom, to: d.windowEnd, now }),
     readSentInvoices(database, { from: d.cohortFrom, to: d.yesterday }),
     readOpenInvoices(database),
@@ -486,8 +508,8 @@ async function loadForecastInput({
     readBankLines(database, { labels: [...pool.poolAccounts, ...pool.feedCards], from: engine.addDays(d.trailingFrom, -10), to: engine.addDays(d.trailingTo, 10) }),
     readCardsOffFeed(database, { feedLabels: pool.feedCards, since: engine.addDays(d.today, -120) }),
     readPayroll(database, { from: engine.addDays(d.today, -35), to: d.windowEnd }),
-    // unpaid rows already past due stay owed (the tax page keeps them): they count today
-    readTaxRows(database, { from: engine.addDays(d.today, -400), to: d.windowEnd }),
+    readOverduePaychecks(database, { today: d.today }),
+    readTaxRows(database, { today: d.today, to: d.windowEnd }),
   ]);
   const visits = splitVisits(visitRows, d, await valueVisits(database, visitRows));
   const visitInvoices = await readVisitInvoices(database, visits.cohort.map((v) => v.id));
@@ -514,6 +536,7 @@ async function loadForecastInput({
     poolAccounts: pool.poolAccounts,
     feedCards: pool.feedCards,
     payroll: [
+      ...overduePay.map((p) => ({ payDay: d.today, cashCostUsd: usd(p.net_cents) / 100 })),
       ...payroll.filter((p) => p.pay_day >= d.today).map((p) => ({ payDay: p.pay_day, cashCostUsd: usd(p.net_cents) / 100 })),
       ...projectPayroll(payroll, { today: d.today, to: d.windowEnd }),
     ],

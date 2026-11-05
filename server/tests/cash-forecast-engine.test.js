@@ -211,12 +211,15 @@ describe('computeForecast', () => {
     expect(r.weeks[1].end_booked).toBe(1100);
   });
 
-  test('Stripe available +1 business day, pending +2, payouts on their day; a past payout day has landed', () => {
+  test('Stripe available +1 business day, pending +2, payouts on their day; one still on the way past its day is listed, not counted', () => {
     const r = computeForecast(base({ stripe: { availableUsd: 10, pendingUsd: 20, payouts: [
       { amountUsd: 30, arrivalDay: '2026-11-05' }, { amountUsd: 40, arrivalDay: '2026-11-04' }, { amountUsd: 50, arrivalDay: '2026-11-10' },
+      { amountUsd: 5, arrivalDay: '2026-11-02' },
     ] } }));
     expect(r.weeks[0].money_in.stripe).toBe(40); // available Fri + payout today
     expect(r.weeks[1].money_in.stripe).toBe(70); // pending Mon + payout Tue
+    // it may already be in the bank balance, so it is never counted twice
+    expect(r.missing).toContainEqual({ kind: 'payouts_overdue', count: 2, usd: 45, first_day: '2026-11-02' });
   });
 
   test('open invoices: the share still collectable at their age; a 92+ day invoice is listed apart', () => {

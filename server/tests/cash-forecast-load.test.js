@@ -210,7 +210,17 @@ describe('loadForecastInput', () => {
     const pay = database.calls.find((c) => /FROM payroll_checks pc/.test(c.sql));
     expect(pay.sql).toMatch(/pc\.net_cents/);
     expect(pay.bindings).toEqual(['2026-10-01', '2027-01-31']); // 35 days back, for the weekly projection
-    expect(database.calls.find((c) => /FROM tax_filing_calendar/.test(c.sql)).sql).toMatch(/filing_type <> 'payroll_941'/);
+    // a check past its pay date is still owed only on the portal's own record: a payment row, none sent or
+    // paid by paper, and no bank line matched
+    const owed = database.calls.find((c) => /FROM payroll_checks pc[\s\S]*payroll_payments/.test(c.sql));
+    expect(owed.bindings).toEqual(['2026-11-05']);
+    expect(owed.sql).toMatch(/EXISTS \(SELECT 1 FROM payroll_payments pp WHERE pp\.check_id = pc\.id\)/);
+    expect(owed.sql).toMatch(/NOT EXISTS \(SELECT 1 FROM payroll_payments pp WHERE pp\.check_id = pc\.id AND pp\.state IN \('sent', 'paper'\)\)/);
+    const tax = database.calls.find((c) => /FROM tax_filing_calendar/.test(c.sql));
+    expect(tax.sql).toMatch(/filing_type <> 'payroll_941'/);
+    expect(tax.bindings).toEqual(['2025-10-01', '2027-01-31']); // unpaid rows 400 days back stay owed
+    // a payer bills the visit only while it is active (payer.js resolveForInvoice); else it is self-pay
+    expect(visits.sql).toMatch(/FROM payers p\s+WHERE p\.id = COALESCE\(ss\.payer_id, CASE WHEN COALESCE\(ss\.self_pay_override, false\) THEN NULL ELSE c\.payer_id END\)\s+AND p\.active IS DISTINCT FROM false/);
   });
 
   test('opening pool: available else current, USD only; card owed; partial when an account is left out', async () => {
@@ -272,6 +282,8 @@ describe('loadForecastInput', () => {
           { due_day: '2026-12-15', amount_due: 500, amount_paid: 100 },
           { due_day: '2026-10-20', amount_due: 250, amount_paid: 0 }, // overdue and unpaid: still owed, counted today
         ]],
+        // an Oct 23 check whose bank transfer failed is still owed: it counts today
+        [/FROM payroll_checks pc[\s\S]*payroll_payments/, [{ pay_day: '2026-10-23', net_cents: 45000 }]],
         // t1 has a check in the window; t2 was last paid Oct 30 (inside the 35-day look-back)
         [/FROM payroll_checks pc/, [
           { technician_id: 't2', pay_day: '2026-10-30', net_cents: 60000, full_cents: 90000 },
@@ -297,8 +309,9 @@ describe('loadForecastInput', () => {
     expect(input.invoiceCohort).toEqual([{ value: 80, ageDays: 16, paid: [{ lagDays: 1, amount: 30 }, { lagDays: 5, amount: 50 }] }]);
     expect(input.taxRows).toEqual([{ dueDay: '2026-12-15', amountUsd: 400 }, { dueDay: '2026-11-05', amountUsd: 250 }]);
     // the check in the window pays its net; each employee then repeats weekly at full cost (last 4 checks)
-    expect(input.payroll[0]).toEqual({ payDay: '2026-11-13', cashCostUsd: 812.34 });
-    const projected = input.payroll.slice(1);
+    expect(input.payroll[0]).toEqual({ payDay: '2026-11-05', cashCostUsd: 450 });
+    expect(input.payroll[1]).toEqual({ payDay: '2026-11-13', cashCostUsd: 812.34 });
+    const projected = input.payroll.slice(2);
     expect(projected.filter((p) => p.cashCostUsd === 900).map((p) => p.payDay).slice(0, 2)).toEqual(['2026-11-06', '2026-11-13']);
     expect(projected.filter((p) => p.cashCostUsd === 900)).toHaveLength(13); // Nov 6 .. Jan 29
     expect(projected.filter((p) => p.cashCostUsd === 1000).map((p) => p.payDay)[0]).toBe('2026-11-20');

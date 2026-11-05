@@ -453,9 +453,13 @@ function weekRows(c, flows, start) {
   });
 }
 
-// What the forecast cannot see, from the run itself (the loader adds its own facts first).
-function runFacts(c) {
+// What the forecast cannot see, from the run itself (the loader adds its own facts first). A Stripe payout
+// past its arrival day that Stripe still shows on the way is listed, not counted: it may already be in the
+// bank balance, and counting it again would count it twice.
+function runFacts(c, i) {
+  const late = i.stripe.payouts.filter((p) => p.arrivalDay < c.today);
   const facts = [
+    { when: late.length > 0, fact: { kind: 'payouts_overdue', count: late.length, usd: round2(sum(late, (p) => p.amountUsd)), first_day: late.map((p) => p.arrivalDay).sort()[0] } },
     { when: c.lateBeyond.length > 0, fact: { kind: 'invoices_late_beyond', count: c.lateBeyond.length, usd: round2(sum(c.lateBeyond, (x) => x)) } },
     { when: !c.season.ratioFor, fact: { kind: 'last_year_months', months: c.season.missingMonths } },
     { when: !c.payoffs.length && c.weekly.card_payments_off_feed > 0, fact: { kind: 'card_payoff_plan', weekly_usd: round2(c.weekly.card_payments_off_feed) } },
@@ -494,7 +498,7 @@ function computeForecast(input) {
       products_fuel_per_visit_usd: round2(c.perVisit),
       baseline_weekly_work_usd: round2((i.trailing.workValueUsd / c.trailingDays.length) * 7),
     },
-    missing: [...c.missing, ...runFacts(c)],
+    missing: [...c.missing, ...runFacts(c, i)],
   };
 }
 
