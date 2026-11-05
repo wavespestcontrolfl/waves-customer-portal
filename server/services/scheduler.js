@@ -1245,6 +1245,19 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN — portal answers whose customer notice never finished (GATE_PORTAL_MESSAGES, read in the
+  // sweep): an answer a staff member sent is saved with its notice pending; a process that stopped before the
+  // push or email leaves it pending, and this finishes it (5 minutes to 1 day old). Exclusive; gate off = nothing.
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('portal-reply-notices', async () => {
+        await require('./portal-messages').resumePendingNotices();
+      });
+    } catch (err) {
+      logger.error(`[portal-messages] pending notice sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — retry committed route-quality refreshes, including dates
   // outside the nightly optimizer's six-day band. The durable row claim
   // fences overlapping ticks/deploys; no second cron lease is needed.
