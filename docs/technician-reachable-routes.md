@@ -413,6 +413,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/email/oauth/callback` | admin-email |
 | GET | `/api/admin/email/oauth/start` | admin-email |
 | GET | `/api/admin/email/oauth/status` | admin-email |
+| GET | `/api/admin/email/reclassify-options` | admin-email |
 | POST | `/api/admin/email/schedule` | admin-email |
 | POST | `/api/admin/email/schedule/reconcile` | admin-email |
 | GET | `/api/admin/email/scheduled` | admin-email |
