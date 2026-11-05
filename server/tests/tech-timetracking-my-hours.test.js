@@ -22,6 +22,7 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 
+const db = require('../models/db');
 const router = require('../routes/tech-timetracking');
 const { etWeekStart } = require('../utils/datetime-et');
 
@@ -54,8 +55,16 @@ const WEEK_ROW = {
   total_revenue: '999.00', avg_rpmh: '77.00', utilization_pct: '62.50', status: 'pending', tech_signed_at: null,
 };
 
+// The week's uncapped day-total read: db('time_entries')...select(). It returns the
+// rows the detail reader returns, unless a test gives it more.
+let dayRowsOverride = null;
 beforeEach(() => {
   jest.clearAllMocks();
+  dayRowsOverride = null;
+  const chain = {};
+  for (const method of ['where', 'whereRaw']) chain[method] = jest.fn(() => chain);
+  chain.select = jest.fn(async () => dayRowsOverride || (await mockGetEntries()).entries);
+  db.mockReturnValue(chain);
   mockGetEntries.mockResolvedValue({ entries: [ENTRY_ROW], total: 1 });
   mockGetDailySummaries.mockResolvedValue([DAY_ROW]);
   mockGetWeeklySummaries.mockResolvedValue([WEEK_ROW]);
@@ -138,6 +147,22 @@ describe('GET /my-hours, a day the office has not approved', () => {
     expect(body.totals).toMatchObject({ shiftMinutes: 480, jobCount: 2 });
     // The stored weekly row disagrees with the days, so no stale regular/overtime is shown.
     expect(body.week).toBeNull();
+  });
+
+  test('day totals come from every entry of the week, not from the capped detail list', async () => {
+    // 700 entries match; the detail reader serves 5 pages of 100, newest first, all on Saturday.
+    const SAT = { ...ENTRY_ROW, id: 'sat', clock_in: '2026-11-07T14:00:00Z', clock_out: '2026-11-07T15:00:00Z' };
+    mockGetEntries.mockResolvedValue({ entries: Array.from({ length: 100 }, (_, i) => ({ ...SAT, id: `sat-${i}` })), total: 700 });
+    // The uncapped read also holds Monday's shift and job, which the cap never reached.
+    dayRowsOverride = [SAT, SHIFT, ENTRY_ROW, JOB_AFTER_NO_LUNCH];
+    mockGetDailySummaries.mockResolvedValue([{ ...DAY_ROW, status: 'pending', total_shift_minutes: '480.00', job_count: 2 }]);
+    const res = responseDouble();
+    await handler('/my-hours')({ technicianId: 'tech-1', techRole: 'technician', query: { weekStart: '2026-11-02' } }, res, jest.fn());
+    const body = res.json.mock.calls[0][0];
+    expect(body.entriesTruncated).toBe(true);
+    expect(body.entries).toHaveLength(500);
+    const monday = body.days.find((day) => day.date === '2026-11-02');
+    expect(monday).toMatchObject({ shiftMinutes: 480, jobMinutes: 150, jobCount: 2 });
   });
 
   test('an approved day keeps its stored numbers', async () => {

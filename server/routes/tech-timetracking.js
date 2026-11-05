@@ -282,9 +282,10 @@ function myHoursWeek(row) {
 // refresh it. So every unapproved day is read from its current entries; the
 // stored row keeps only the unpaid meal and the status. An approved day keeps
 // its stored numbers, and a day with entries but no row still shows. Read-only.
-function reconcileMyHoursDays(dailies, liveEntries) {
+// dayRows is every non-voided entry of the week, not the capped detail list.
+function reconcileMyHoursDays(dailies, dayRows) {
   const byDate = new Map();
-  for (const row of liveEntries) {
+  for (const row of dayRows) {
     const date = staffWorkDate(row.clock_in);
     if (!byDate.has(date)) byDate.set(date, []);
     byDate.get(date).push(row);
@@ -329,13 +330,21 @@ router.get('/my-hours', async (req, res, next) => {
       total = result.total || 0;
       if (entryRows.length >= total || !(result.entries || []).length) break;
     }
-    const [dailies, weeklies] = await Promise.all([
+    const [dailies, weeklies, dayRows] = await Promise.all([
       timeTracking.getDailySummaries({ technicianId, startDate: monday, endDate: sunday }),
       timeTracking.getWeeklySummaries({ technicianId, startDate: monday, endDate: monday }),
+      // Every entry of the week, only the columns the day totals need: the totals
+      // never come from the capped detail list above.
+      db('time_entries')
+        .where({ technician_id: technicianId })
+        .where('status', '!=', 'voided')
+        .whereRaw(`${STAFF_WORK_DATE_SQL} >= ?::date`, [monday])
+        .whereRaw(`${STAFF_WORK_DATE_SQL} <= ?::date`, [sunday])
+        .select('entry_type', 'status', 'clock_in', 'clock_out', 'duration_minutes'),
     ]);
 
     const liveEntries = entryRows.filter((row) => row.status !== 'voided');
-    const days = reconcileMyHoursDays(dailies, liveEntries);
+    const days = reconcileMyHoursDays(dailies, dayRows);
     days.sort((a, b) => (a.date < b.date ? -1 : 1));
     const totals = days.reduce((sum, day) => ({
       shiftMinutes: sum.shiftMinutes + day.shiftMinutes,
