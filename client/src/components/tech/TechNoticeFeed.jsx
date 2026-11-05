@@ -174,17 +174,19 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       // A photo card's date is re-read from the live visit on every poll
       // (visit-prep-tech-alert.js refreshPhotoCardDates), so a card already
       // on screen takes the new payload when the visit moves (Codex #5303 r6).
-      const photoPayloads = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type)).map((n) => [n.id, n.payload]));
+      // A schedule-change card is re-read the same way, and can change kind
+      // too (a moved visit, one now on another route, a cancellation:
+      // tech-visit-notifications.js refreshVisitCards).
+      const refreshedCards = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type) || VISIT_TYPES.has(n.type)).map((n) => [n.id, n]));
       setActive((prev) => {
         const gone = prev.filter((n) => !listed.has(n.id));
         gone.forEach((n) => { seenIds.current.delete(n.id); seenAt.current.delete(n.id); });
         let refreshed = false;
         const kept = prev.filter((n) => !gone.includes(n)).map((n) => {
-          if (!photoPayloads.has(n.id)) return n;
-          const payload = photoPayloads.get(n.id);
-          if (JSON.stringify(payload) === JSON.stringify(n.payload)) return n;
+          const latest = refreshedCards.get(n.id);
+          if (!latest || (latest.type === n.type && JSON.stringify(latest.payload) === JSON.stringify(n.payload))) return n;
           refreshed = true;
-          return { ...n, payload };
+          return { ...n, type: latest.type, payload: latest.payload };
         });
         if (gone.length === 0 && fresh.length === 0 && !refreshed) return prev;
         return [...kept, ...fresh];
@@ -502,6 +504,14 @@ function StormCard({ n, onReview, onDismiss }) {
   );
 }
 
+// Where a visit that left this route is now (a card the server could not
+// name a holder on says only that the visit is on another route).
+function visitNowLine(p) {
+  if (p.ended) return `Now ${p.ended}`;
+  if (p.now_with) return `Now with ${p.now_with}`;
+  return p.now_elsewhere ? 'Now on another route' : 'Now unassigned';
+}
+
 // A schedule change on the tech's own route (tech-visit-notifications.js).
 // Headline + who + the details the server composed; "Got it" dismisses.
 function VisitCard({ n, onDismiss }) {
@@ -509,17 +519,22 @@ function VisitCard({ n, onDismiss }) {
   const lines = [];
   if (n.type === 'visit_rescheduled') {
     if (p.service_type) lines.push(p.service_type);
+    if (p.address) lines.push(p.address);
     if (p.previous_when) lines.push({ text: `Was ${p.previous_when}`, struck: true });
     if (p.when) lines.push(`Now ${p.when}`);
   } else {
     lines.push([p.service_type, p.when].filter(Boolean).join(' · '));
     if (n.type === 'visit_assigned' && p.address) lines.push(p.address);
     // `ended`: the visit finished (cancelled / completed …) before this card landed — name that, not a holder.
-    if (n.type === 'visit_unassigned') lines.push(p.ended ? `Now ${p.ended}` : (p.now_with ? `Now with ${p.now_with}` : 'Now unassigned'));
+    if (n.type === 'visit_unassigned') lines.push(visitNowLine(p));
   }
-  if (p.actor) {
+  // The server reads the card against its visit as it is now
+  // (tech-visit-notifications.js refreshVisitCards): how a new visit came in,
+  // or the last mover of a visit that changed after the card was written.
+  if (p.actor_line) lines.push(p.actor_line);
+  else if (p.actor) {
     const verb = { visit_assigned: 'Assigned', visit_unassigned: 'Reassigned', visit_rescheduled: 'Moved', visit_cancelled: 'Cancelled' }[n.type];
-    lines.push(`${verb} ${p.actor}`);
+    lines.push(`${p.changed_again ? 'Changed again' : verb} ${p.actor}`);
   }
   return (
     <div style={cardStyle(VISIT_ACCENT[n.type] || COLORS.ink)} data-testid="visit-notice">
