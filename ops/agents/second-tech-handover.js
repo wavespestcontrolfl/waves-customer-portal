@@ -5,6 +5,8 @@
 // new technician (second-tech plan, build 6; owner 2026-10-25: "move every pest,
 // rodent and mosquito series to the new tech the weekend before the first solo
 // week ... skip lawn, the termite-bait customers and any old grouped visits").
+// Owner 2026-10-30 (corrected the same day): "termite and WDO follow the territory",
+// so a --zips (territory) run also moves termite and WDO series; see --lines.
 //
 // WITHOUT `--execute` THIS SCRIPT ONLY PLANS. This file has no write path: every
 // query here is a SELECT inside a read-only transaction on a read-only session. The
@@ -15,7 +17,7 @@
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/second-tech-handover.js \
 //     --from <technician uuid> [--to <technician uuid>] [--start YYYY-MM-DD] \
-//     [--lines general,rodent,mosquito] [--zips 34293,34285] [--list] [--json]
+//     [--lines general,rodent,mosquito[,termite]] [--zips 34293,34285] [--list] [--json]
 //   node ops/agents/second-tech-handover.js --list-techs     # id, role, work days only
 //   ... --to <hire> --start <day> --lines <...> --execute --plan <PLAN ID from the dry run>
 //   ... --rollback <file the execute wrote> [--out-dir <dir>]
@@ -26,7 +28,18 @@
 //   --start  first solo day (default: next Monday, Eastern time). Visits dated
 //            before it are never touched.
 //   --lines  subset of general,rodent,mosquito (default all three). Lawn / tree &
-//            shrub and termite / WDO are never movable here.
+//            shrub are never movable here. `termite` (termite and WDO series: the
+//            catalog category first, then the name, serviceLineFor) is movable ONLY in a
+//            --zips run, where the default is general,rodent,mosquito,termite
+//            (services/territory.js TERRITORY_LINES). Naming termite without --zips is
+//            refused; a run without --zips is exactly what it was. Termite BAIT customers
+//            stay with the owner in every run (the owner has not ruled whether bait follows
+//            the territory; the dry run prints their count). One-time visits (a WDO
+//            inspection booked once) are not series and stay as booked: new bookings
+//            already route by territory.
+//            Capability: when --to's technician_capabilities row for a line that has a
+//            series to move reads Off (technician-capabilities stateOf), the run is refused
+//            (TARGET_CAPABILITY_OFF) before any write, for every line alike.
 //   --zips   territories by ZIP (owner 2026-10-30, build 6): only series whose service ZIP
 //            (the parent row's service_address_zip, else the customer's zip) is listed move,
 //            and --execute also makes --to the territory technician of every listed ZIP
@@ -121,8 +134,11 @@ const { overlayRecurringTemplateOverrides } = require(path.join(root, 'services'
 const { isEnabled } = require(path.join(root, 'config', 'feature-gates'));
 const { whereVisitRowLive } = require(path.join(root, 'services', 'customer-lifecycle-guard'));
 const { normalizeZip } = require(path.join(root, 'services', 'territory'));
+const { stateOf } = require(path.join(root, 'services', 'technician-capabilities'));
 
 const MOVABLE_LINES = ['general', 'rodent', 'mosquito'];
+// A --zips run also moves termite / WDO series (owner 2026-10-30); the same four lines as services/territory.js TERRITORY_LINES.
+const TERRITORY_MOVABLE_LINES = [...MOVABLE_LINES, 'termite'];
 const OPEN_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 const STOPPED_TRACK_STATES = ['en_route', 'on_property', 'complete', 'cancelled'];
 const ASSUMED_WORK_DAYS = [1, 2, 3, 4];
@@ -139,6 +155,15 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** A refusal the planner raises for a flag combination or target it cannot plan; the writer turns it into a Refusal. */
+class PlanError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'PlanError';
+    this.code = code;
+  }
+}
+
 const dayOf = (value) => (value == null ? null : String(value).slice(0, 10));
 // Owner 2026-10-28, question 1 = C (header, OFF DAY): a target-day-off visit within 13 weeks of --start keeps its customer
 // with --from, whole.
@@ -151,12 +176,15 @@ function defaultStart(now = new Date()) {
   return etDateString(addETDays(parseETDateTime(`${etWeekStart(now)}T12:00:00`), 7));
 }
 
-const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito] [--list] [--json]\n'
-  + '       node ops/agents/second-tech-handover.js --from <uuid> --to <uuid> [--start ...] [--lines ...] --execute --plan <PLAN ID> [--out-dir <dir>]\n'
+const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito[,termite: with --zips only]] [--zips 34293,34285] [--list] [--json]\n'
+  + '       node ops/agents/second-tech-handover.js --from <uuid> --to <uuid> [--start ...] [--lines ...] [--zips ...] --execute --plan <PLAN ID> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --rollback <rollback file> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --list-techs';
 const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json', '--execute': 'execute' };
 const PLAN_ID = /^[0-9a-f]{64}$/;
+// termite / WDO are movable only by territory (owner 2026-10-30): no --zips, no termite.
+const LINES_NEED_ZIPS = '--lines termite needs --zips: termite and WDO series move only in a territory run';
+const linesNeedZips = (lines, zips) => !zips && Array.isArray(lines) && lines.includes('termite');
 const technicianFlag = (name) => (v) => (UUID.test(v)
   ? { [name]: v.toLowerCase() }
   : `--${name} needs a technician uuid, got ${JSON.stringify(v)}`);
@@ -167,8 +195,8 @@ const VALUE_FLAGS = {
   '--start': (v) => (validCalendarDate(v) ? { start: v } : `--start needs a real YYYY-MM-DD calendar date, got ${JSON.stringify(v)}`),
   '--lines': (v) => {
     const lines = [...new Set(v.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean))];
-    const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
-    return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn and termite are never handed over), got ${JSON.stringify(v)}`;
+    const ok = lines.length && lines.every((l) => TERRITORY_MOVABLE_LINES.includes(l));
+    return ok ? { lines, linesGiven: true } : `--lines takes ${TERRITORY_MOVABLE_LINES.join(', ')} only (lawn is never handed over; termite needs --zips), got ${JSON.stringify(v)}`;
   },
   '--zips': (v) => {
     const zips = [...new Set(v.split(',').map((x) => x.trim()).filter(Boolean))].sort();
@@ -184,6 +212,7 @@ const ARG_RULES = [
   [(a) => a.rollback && (a.execute || a.plan), '--rollback stands alone: do not combine it with --execute or --plan'],
   [(a) => !a.listTechs && !a.rollback && !a.from, '--from <technician uuid> is required (use --list-techs to see ids)'],
   [(a) => a.from && a.to && a.from === a.to, '--from and --to are the same technician'],
+  [(a) => linesNeedZips(a.lines, a.zips), LINES_NEED_ZIPS],
   [(a) => a.execute && !a.to, '--execute needs --to <the hire\'s technician uuid>'],
   [(a) => a.execute && !a.plan, '--execute needs --plan <PLAN ID>: run the dry run first and pass the id it printed'],
   [(a) => a.plan && !a.execute, '--plan only goes with --execute'],
@@ -191,7 +220,7 @@ const ARG_RULES = [
 
 function parseArgs(argv) {
   const args = {
-    from: null, to: null, start: null, lines: [...MOVABLE_LINES], zips: null, list: false, listTechs: false, json: false,
+    from: null, to: null, start: null, lines: [...MOVABLE_LINES], linesGiven: false, zips: null, list: false, listTechs: false, json: false,
     execute: false, plan: null, rollback: null, outDir: null,
   };
   const fail = (msg) => { console.error(msg); process.exit(2); };
@@ -209,6 +238,8 @@ function parseArgs(argv) {
     if (typeof out === 'string') fail(out);
     Object.assign(args, out);
   }
+  // A territory run also hands over termite and WDO unless --lines narrows it.
+  if (args.zips && !args.linesGiven) args.lines = [...TERRITORY_MOVABLE_LINES];
   const broken = ARG_RULES.find(([bad]) => bad(args));
   if (broken) fail(broken[1]);
   return args;
@@ -327,6 +358,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     off_day_policy: 'weekend_customer_stays_whole',
     off_day_customer_until: etDateString(addETDays(parseETDateTime(`${start}T12:00:00`), OFF_DAY_CUSTOMER_DAYS)),
     series: { active: active.length, on_from: 0, in_lines: 0, retemplate: 0, with_visits_to_move: 0 },
+    retemplate_by_line: {},
     would_change: { series: 0, visits: 0, by_line: {}, by_weekday: {} },
     stays_off_day: { visits: 0, by_weekday: {} },
     skipped: {},
@@ -394,6 +426,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
   for (const { p, candidates, outcomes } of inScope) {
     if (weekendCustomers.has(p.customer_id)) { seriesSkip('off_day_customer', p, candidates); continue; }
     plan.series.retemplate += 1;
+    bump(plan.retemplate_by_line, p.line);
     plan.ids.retemplate.push(p.id);
 
     let moved = 0;
@@ -519,7 +552,27 @@ async function loadZipScope(db, zips, parents) {
   return territory;
 }
 
+/**
+ * The lines among `lines` that `toId` is set Off for (technician_capabilities, the editor's Off state: a hard
+ * drop in auto-dispatch). One rule for every line; a line with no row reads 'unset' and is allowed.
+ */
+async function offCapabilityLines(db, toId, lines) {
+  if (!toId || !lines.length) return [];
+  const rows = await db('technician_capabilities').where({ technician_id: toId }).whereIn('service_category', lines)
+    .select('service_category', 'capability_level', 'active');
+  return rows.filter((r) => stateOf(r) === 'off').map((r) => r.service_category).sort();
+}
+
+/** Refuse when the hire is set to Off for a line that has a series to move (a line with nothing to move does not count). */
+async function assertTargetTakesLines(db, toId, plan) {
+  const off = await offCapabilityLines(db, toId, Object.keys(plan.retemplate_by_line));
+  if (off.length) {
+    throw new PlanError('TARGET_CAPABILITY_OFF', `--to is set to Off for ${off.join(', ')} (Team tab, capabilities): turn it on, or leave the line out with --lines. Nothing was changed.`);
+  }
+}
+
 async function planHandover(db, { from, to = null, start, today = etDateString(), lines = MOVABLE_LINES, zips }) {
+  if (linesNeedZips(lines, zips)) throw new PlanError('LINES_NEED_ZIPS', LINES_NEED_ZIPS);
   const fromRow = await loadTechnician(db, from);
   if (!fromRow) throw new Error('--from: no technician row with that id');
   let toRow = null;
@@ -553,6 +606,8 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
     from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits,
     liveSeriesIds, baitAddonSeriesIds, zips, territory,
   });
+  // A line the hire is Off for cannot be handed to the hire.
+  await assertTargetTakesLines(db, to, plan);
   // The overlay follows GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, as in the app.
   plan.template_overrides = isEnabled('editApptPriceServiceScope') ? 'applied' : 'not_applied_gate_off';
   return plan;
@@ -598,6 +653,8 @@ function printPlan(plan, { list }) {
   const weekend = plan.skipped.off_day_customer;
   out.push(`Weekend customers kept whole with the owner until ${plan.off_day_customer_until} (question 1 = C): `
     + `${weekend ? `${weekend.customers} customers, ${weekend.series} series, ${weekend.visits} visits` : 'none'}`);
+  const bait = plan.skipped.termite_bait_customer;
+  out.push(`Termite bait customers kept with the owner in every run (owner has not ruled on bait): ${bait ? `${bait.customers} customers, ${bait.series} series, ${bait.visits} visits` : 'none'}`);
   out.push(`Later visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
   out.push(`  by weekday: ${weekdayLine(plan.stays_off_day.by_weekday)}`);
   out.push('  (a second handover run moves these customers and their dates; it is not built here.)');
@@ -738,7 +795,7 @@ async function main() {
 }
 
 module.exports = {
-  MOVABLE_LINES, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
+  MOVABLE_LINES, TERRITORY_MOVABLE_LINES, PlanError, offCapabilityLines, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
   parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
   buildPlan, planIdOf, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
 };

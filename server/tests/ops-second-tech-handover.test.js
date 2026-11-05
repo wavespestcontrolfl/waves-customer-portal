@@ -9,6 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const script = path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover.js');
 const {
   buildPlan, parseArgs, defaultStart, isOpenVisit, isGroupedVisit, seriesTechnicianId, isBaitSeries, isTermiteBaitAddon,
+  printPlan, planHandover, PlanError, offCapabilityLines, MOVABLE_LINES, TERRITORY_MOVABLE_LINES,
 } = require(script);
 
 const OWNER = '00000000-0000-4000-8000-000000000001';
@@ -599,5 +600,109 @@ describe('second-tech-handover planner — --zips (territory handover)', () => {
     expect(withZips).not.toBe(planIdOf(args));
     expect(planIdOf({ ...args, zips: ['34293'], territory: [{ zip: '34293', technician_id: OTHER }] })).not.toBe(withZips);
     expect(planIdOf({ ...args, zips: ['34285'], territory: [{ zip: '34285', technician_id: null }] })).not.toBe(withZips);
+  });
+});
+
+// Owner 2026-10-30 (corrected the same day): "termite and WDO follow the territory". A --zips run also hands over termite
+// and WDO series; a run without --zips is what it was. Termite BAIT customers stay with the owner in every run.
+describe('second-tech-handover — termite / WDO by territory', () => {
+  const territory = [{ zip: '34293', area: 'venice', technician_id: null }];
+  const south = (o = {}) => parent({ zip: '34293', ...o });
+  const termitePlan = (parents, visits, o = {}) => plan(parents, visits, { zips: ['34293'], territory, lines: TERRITORY_MOVABLE_LINES, ...o });
+
+  test('the territory lines are the four lines services/territory.js names; lawn is in neither list', () => {
+    const { TERRITORY_LINES } = require('../services/territory');
+    expect(new Set(TERRITORY_MOVABLE_LINES)).toEqual(new Set(TERRITORY_LINES));
+    expect(TERRITORY_MOVABLE_LINES).toEqual([...MOVABLE_LINES, 'termite']);
+    expect(MOVABLE_LINES).not.toContain('termite');
+    expect(TERRITORY_MOVABLE_LINES).not.toContain('lawn');
+  });
+
+  test('a termite series moves in a --zips run: its template and its Mon-Thu visits', () => {
+    const termite = south({ line: 'termite', service_type: 'Termite Spot Treatment Service' });
+    const wdo = south({ line: 'termite', service_type: 'WDO Inspection' });
+    const p = termitePlan([termite, wdo], [visit(termite, TUE), visit(wdo, WED)]);
+    expect(p.series.retemplate).toBe(2);
+    expect(p.would_change.by_line).toEqual({ termite: { series: 2, visits: 2 } });
+    expect(p.retemplate_by_line).toEqual({ termite: 2 });
+    expect(p.skipped.other_line).toBeUndefined();
+  });
+
+  test('without termite in the lines (a run without --zips) the same series stays as other_line', () => {
+    const termite = parent({ line: 'termite', service_type: 'Termite Spot Treatment Service' });
+    const p = plan([termite], [visit(termite, TUE)]);
+    expect(p.series.retemplate).toBe(0);
+    expect(p.skipped.other_line).toEqual({ series: 1, visits: 1 });
+  });
+
+  test('a termite series outside the listed ZIPs stays (the south goes to the hire, the north stays)', () => {
+    const north = parent({ zip: '34219', line: 'termite' });
+    const p = termitePlan([north], [visit(north, TUE)]);
+    expect(p.skipped.outside_zips).toMatchObject({ series: 1, visits: 1 });
+    expect(p.series.retemplate).toBe(0);
+  });
+
+  test('termite bait customers still stay whole in a territory run, and the dry run prints their count', () => {
+    const bait = south({ customer_id: 'C-bait2', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', service_type: 'Quarterly Termite Active Bait Station Service' });
+    const baitPest = south({ customer_id: 'C-bait2' });
+    const plain = south({ line: 'termite', service_type: 'Termite Spot Treatment Service' });
+    const p = termitePlan([bait, baitPest, plain], [bait, baitPest, plain].map((s) => visit(s, MON)));
+    expect(p.skipped.termite_bait_customer).toEqual({ series: 2, visits: 2, customers: 1 });
+    expect(p.ids.series).toEqual([plain.id]);
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    printPlan({ ...p, planId: 'x' }, { list: false });
+    const text = log.mock.calls.map((c) => c[0]).join('\n');
+    log.mockRestore();
+    expect(text).toMatch(/Termite bait customers kept with the owner in every run \(owner has not ruled on bait\): 1 customers, 2 series, 2 visits/);
+  });
+
+  test('lawn never moves, even in a territory run', () => {
+    const lawn = south({ line: 'lawn', service_type: 'Lawn Care Program' });
+    const p = termitePlan([lawn], [visit(lawn, MON)]);
+    expect(p.skipped.other_line).toEqual({ series: 1, visits: 1 });
+    expect(p.series.retemplate).toBe(0);
+  });
+
+  test('parseArgs: --zips alone defaults to the four lines; --lines narrows it; termite without --zips exits 2', () => {
+    expect(parseArgs(['--from', OWNER]).lines).toEqual(MOVABLE_LINES);
+    expect(parseArgs(['--from', OWNER, '--zips', '34293']).lines).toEqual(['general', 'rodent', 'mosquito', 'termite']);
+    expect(parseArgs(['--from', OWNER, '--zips', '34293', '--lines', 'general']).lines).toEqual(['general']);
+    expect(parseArgs(['--from', OWNER, '--zips', '34293', '--lines', 'termite']).lines).toEqual(['termite']);
+    const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => parseArgs(['--from', OWNER, '--lines', 'termite'])).toThrow('exit 2');
+    expect(err.mock.calls.map((c) => c[0]).join(' ')).toMatch(/termite needs --zips/);
+    expect(() => parseArgs(['--from', OWNER, '--lines', 'general,termite'])).toThrow('exit 2');
+    expect(() => parseArgs(['--from', OWNER, '--lines', 'lawn'])).toThrow('exit 2');
+    exit.mockRestore(); err.mockRestore();
+  });
+
+  test('planHandover refuses termite without --zips before it reads anything', async () => {
+    await expect(planHandover(null, { from: OWNER, start: START, today: TODAY, lines: ['termite'] })).rejects.toMatchObject({ code: 'LINES_NEED_ZIPS' });
+    await expect(planHandover(null, { from: OWNER, start: START, today: TODAY, lines: ['termite'] })).rejects.toBeInstanceOf(PlanError);
+  });
+
+  test('a WDO inspection reads termite: by name, and by the catalog categories wdo and termite', async () => {
+    const { serviceLineFor } = require('../services/scheduling/line-technician');
+    for (const name of ['WDO Inspection', 'WDO / Wood Destroying Organism Inspection', 'Wood-Destroying Organism Inspection', 'Termite Spot Treatment']) {
+      expect(await serviceLineFor(null, { serviceType: name })).toEqual({ line: 'termite', lineFrom: 'name' });
+    }
+    // The catalog row wins over a name that would read general.
+    const catalog = (category) => () => ({ where: () => ({ first: async () => ({ category }) }) });
+    for (const category of ['wdo', 'termite']) {
+      expect(await serviceLineFor(catalog(category), { serviceId: 'svc-1', serviceType: 'Home Inspection' })).toEqual({ line: 'termite', lineFrom: 'catalog' });
+    }
+  });
+
+  test('offCapabilityLines: only an Off row (active false) counts; unset, qualified and review_required are allowed', async () => {
+    const rows = [
+      { service_category: 'termite', capability_level: 'review_required', active: false },
+      { service_category: 'general', capability_level: 'qualified', active: true },
+      { service_category: 'rodent', capability_level: 'review_required', active: true },
+    ];
+    const db = () => ({ where: () => ({ whereIn: () => ({ select: async () => rows }) }) });
+    expect(await offCapabilityLines(db, HIRE, ['general', 'rodent', 'mosquito', 'termite'])).toEqual(['termite']);
+    expect(await offCapabilityLines(db, null, ['termite'])).toEqual([]);
+    expect(await offCapabilityLines(db, HIRE, [])).toEqual([]);
   });
 });
