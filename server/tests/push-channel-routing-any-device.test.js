@@ -102,16 +102,17 @@ afterEach(() => {
   ENV_KEYS.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
 });
 
+const daysBefore = (d) => (Date.now() - new Date(d).getTime()) / 86400000;
 const device = (extra = {}) => ({ id: 'd-1', customer_id: 'c-1', active: true, contact_phone_key: null, updated_at: hoursAgo(240), ...extra });
 
 describe('reachability without a recent check-in (legacy device query)', () => {
-  it('gate on: a device last seen 10 days ago takes the push, no text, and the heartbeat floor is dropped', async () => {
+  it('gate on: a device last seen 10 days ago takes the push, no text; the floor is the 30-day sign-in life, not 72 h', async () => {
     process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
     mockDevices.push(device());
     const result = await send();
     expect(result.delivered).toBe(true);
     expect(mockSendToCustomer).toHaveBeenCalledTimes(1);
-    expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
+    expect(daysBefore(mockSendToCustomer.mock.calls[0][2].minUpdatedAt)).toBeCloseTo(30, 1);
     expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBe(true);
   });
 
@@ -160,10 +161,11 @@ describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device stat
     process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
     mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
     expect((await send()).delivered).toBe(true);
-    expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
+    expect(daysBefore(mockSendToCustomer.mock.calls[0][2].minUpdatedAt)).toBeCloseTo(30, 1);
     expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBe(true);
     // Only routing asks for `reachable`; the customer-facing status routes keep their shape.
-    expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
+    expect(mockCustomerStatus.mock.calls[0][2]).toMatchObject({ withReachable: true });
+    expect(daysBefore(mockCustomerStatus.mock.calls[0][2].reachableSince)).toBeCloseTo(30, 1);
   });
 
   it('gate on: app notifications switched off for the account still means text', async () => {
@@ -263,5 +265,18 @@ describe('no bearer link reaches a device that may be stale (Codex security #758
     mockDevices.push(device({ updated_at: hoursAgo(1) }));
     await send({ messageType: 'tech_en_route', body: 'Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t' });
     expect(mockSendToCustomer.mock.calls[0][1].body).toBe('Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t');
+  });
+});
+
+describe('any-device reachability keeps the sign-in life as its bound (Codex security #7581 r2)', () => {
+  it('gate on: a device last seen 40 days ago no longer counts, so the text goes', async () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
+    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(mockSendToCustomer).not.toHaveBeenCalled();
+  });
+
+  it('the bound reads the refresh-token life (30d in prod) and falls back to 30 days', () => {
+    expect(PushRouting._test.sessionLifeMs()).toBe(30 * 24 * 3600 * 1000);
   });
 });
