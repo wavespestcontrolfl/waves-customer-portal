@@ -62,18 +62,20 @@ function scopeAdminFeedToRole(query, role, technicianId = null) {
     `COALESCE(metadata->>'triggerKey', '') IN (${keys.map(() => '?').join(', ')})`,
     keys,
   );
-  // GATE_TECH_LOGIN_PRIVACY: a technician login also sees a customer's row only
-  // for a customer on its own route (the Communications routes' rule). A row
-  // with no customer stays visible, as today. Callers that pass no technicianId
-  // keep the key-only scope.
-  if (role === 'technician' && technicianId && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+  // GATE_TECH_LOGIN_PRIVACY: a technician login sees an alert only for a
+  // customer on its own route (owner 2026-10-25, the Communications routes'
+  // rule). An alert with no customer is the office's (owner 2026-11-04): an
+  // unknown caller's voicemail, a phone failure to a number no one customer
+  // owns, the one-hour pager's list and the overdue watchdog's summary. That
+  // holds whether or not the caller names a technician; a caller that passes
+  // no technicianId keeps the key-only scope for customer rows.
+  if (role === 'technician' && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+    const customerRows = scoped.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NOT NULL`);
+    if (!technicianId) return customerRows;
     const { technicianCustomerIdsSubquery } = require('./technician-visit-scope');
     const ownCustomers = technicianCustomerIdsSubquery({ techRole: 'technician', technicianId }, db)
       .clearSelect().select(db.raw('scheduled_services.customer_id::text'));
-    return scoped.where(function customerlessOrOwn() {
-      this.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL`)
-        .orWhereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
-    });
+    return customerRows.whereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
   }
   return scoped;
 }
