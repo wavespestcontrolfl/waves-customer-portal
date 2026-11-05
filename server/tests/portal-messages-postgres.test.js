@@ -1,9 +1,10 @@
 /**
  * Portal messages against live Postgres (GATE_PORTAL_MESSAGES): the office answers a portal item inside the
- * portal. Pins: one thread per customer (channel 'portal'), an answer closes the item it answers (chat
- * resolved, request resolved quietly) and its bells, the one customer notice (bell + push, else the reply
- * email), a retried send is one answer, unread / mark read, and that a customer only ever reads their own
- * thread. Every row is synthetic and tagged with this run's id; cleanup removes only those rows. It refuses
+ * portal and the customer writes back. Pins: one thread per customer (channel 'portal'), an answer closes
+ * the item it answers (chat resolved, request resolved quietly, a portal message answered) and its bells,
+ * the one customer notice (bell + push, else the reply email), a retried send is one answer, a customer
+ * message rings one bell per thread and is a Portal-tab item until answered or handled, unread / mark read,
+ * and that a customer only ever reads their own thread. Every row is synthetic and tagged with this run's id; cleanup removes only those rows. It refuses
  * any database but a private QA one or CI's.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'portal-messages-postgres-only';
@@ -23,6 +24,10 @@ jest.mock('../services/push-notifications', () => ({
   sendToCustomer: jest.fn(async () => mockPushResult),
   resolveNotificationPropertyId: jest.fn(async () => null),
 }));
+jest.mock('../services/portal-ask-push', () => ({
+  pushPortalAsk: jest.fn(async () => ({ sent: true })),
+  shortName: (first, last) => [first, last ? `${last[0]}.` : ''].filter(Boolean).join(' '),
+}));
 
 afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 
@@ -33,6 +38,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
   let PortalMessages;
   let AccountMembershipEmail;
   let PushService;
+  let portalAskPush;
 
   const phone = () => `+1941555${String(Math.floor(Math.random() * 9000) + 1000)}`;
   const actor = { technicianId: null, role: 'admin' };
@@ -80,13 +86,14 @@ maybeDescribe('portal messages (live Postgres)', () => {
     PortalMessages = require('../services/portal-messages');
     AccountMembershipEmail = require('../services/account-membership-email');
     PushService = require('../services/push-notifications');
+    portalAskPush = require('../services/portal-ask-push');
   }, 60000);
 
   afterAll(async () => {
     delete process.env.GATE_PORTAL_MESSAGES;
     if (!db) return;
     const threads = await db('conversations').whereIn('customer_id', ids.customers).where({ channel: 'portal' }).pluck('id');
-    await db('notifications').whereRaw('title like ? or recipient_id = any(?)', [`%${RUN}%`, ids.customers]).del();
+    await db('notifications').whereRaw("title like ? or metadata->>'portalConversationId' = any(?) or recipient_id = any(?)", [`%${RUN}%`, threads, ids.customers]).del();
     await db('conversations').whereIn('id', threads).del();
     await db('service_requests').whereIn('id', ids.requests).del();
     await db('agent_sessions').whereIn('id', ids.sessions).del();
@@ -175,6 +182,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
     const { escalationId } = await chat(pat.id, { alert: false });
     process.env.GATE_PORTAL_MESSAGES = 'false';
     await expect(PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'x', actor })).rejects.toMatchObject({ status: 404, code: 'disabled' });
+    await expect(PortalMessages.customerPost({ customer: pat, body: 'x' })).rejects.toMatchObject({ status: 404 });
     await expect(PortalMessages.customerThread(pat.id)).rejects.toMatchObject({ status: 404 });
     await expect(PortalMessages.customerUnread(pat.id)).rejects.toMatchObject({ status: 404 });
     await expect(PortalMessages.markRead(pat.id, randomUUID())).rejects.toMatchObject({ status: 404 });
@@ -201,6 +209,91 @@ maybeDescribe('portal messages (live Postgres)', () => {
     expect(await PortalMessages.markRead(pat.id, a1.message.id)).toEqual({ unread: 0 });
     expect(await PortalMessages.customerUnread(pat.id)).toBe(0);
   });
+  test('a customer message rings one bell per thread: a second message rewrites it, a new one comes after Done', async () => {
+    const pat = await customer();
+    const first = await PortalMessages.customerPost({ customer: pat, body: 'Is the lawn treatment safe for my dog?' });
+    expect(first).toMatchObject({ from: 'you', body: 'Is the lawn treatment safe for my dog?' });
+    const [row] = await thread(pat.id);
+    let bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].title).toBe(`Comms — Answer Pat Synthetic${RUN}'s portal message`);
+    expect(bells[0].metadata).toMatchObject({ customerId: pat.id, portalMessageId: first.id, dedupeKey: `portal-message:${row.id}` });
+    expect(portalAskPush.pushPortalAsk).toHaveBeenCalledTimes(1);
+    expect(bells[0].body).toBe('They wrote in the portal: “Is the lawn treatment safe for my dog?”');
+
+    const second = await PortalMessages.customerPost({ customer: pat, body: 'Also, can you come Friday? I work Thursday.' });
+    bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].metadata.portalMessageId).toBe(second.id);
+    // Two sentences cannot stand in a bell's why: the plain line instead, the whole message in the full text.
+    expect(bells[0].body).toBe('They wrote in the portal and are waiting for an answer');
+    expect(bells[0].detail).toBe('Also, can you come Friday? I work Thursday.');
+    expect(portalAskPush.pushPortalAsk).toHaveBeenCalledTimes(2);
+
+    await db('notifications').whereIn('id', bells.map((b) => b.id)).update({ done_at: new Date() });
+    await PortalMessages.customerPost({ customer: pat, body: 'Hello again' });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+    expect((await thread(pat.id))[0].message_count).toBe(3);
+  });
+
+  test('the Portal tab lists an unanswered portal message; an answer, Mark handled or Close all older closes it', async () => {
+    process.env.GATE_PORTAL_INBOX = 'true';
+    const portalInbox = require('../services/portal-inbox');
+    const pat = await customer();
+    await PortalMessages.customerPost({ customer: pat, body: 'First question' });
+    await PortalMessages.customerPost({ customer: pat, body: 'Second line' });
+    const [row] = await thread(pat.id);
+    const mineOf = (items) => items.filter((i) => i.kind === 'message' && i.id === row.id);
+
+    let listed = mineOf((await portalInbox.list()).items);
+    expect(listed).toEqual([expect.objectContaining({ kind: 'message', customer: expect.objectContaining({ id: pat.id, firstName: 'Pat' }), customerMessage: 'First question\nSecond line', lastAnswer: '' })]);
+
+    // An answer closes it; a new customer message opens it again with only the new words and the answer.
+    await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Answer one.', actor });
+    expect(mineOf((await portalInbox.list()).items)).toEqual([]);
+    await PortalMessages.customerPost({ customer: pat, body: 'Thanks, one more thing' });
+    listed = mineOf((await portalInbox.list()).items);
+    expect(listed[0]).toMatchObject({ customerMessage: 'Thanks, one more thing', lastAnswer: 'Answer one.' });
+
+    // Mark handled stamps it once and closes its bell; a second Mark handled finds nothing open.
+    expect(await portalInbox.markMessageHandled(row.id, { technicianId: null, role: 'admin' })).toEqual({ handled: true });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    expect(await portalInbox.markMessageHandled(row.id, { technicianId: null, role: 'admin' })).toEqual({ handled: false });
+    expect(mineOf((await portalInbox.list()).items)).toEqual([]);
+
+    // Close all older: a thread whose open message is 20 days old is stamped handled; nothing is sent.
+    await PortalMessages.customerPost({ customer: pat, body: 'Old ask' });
+    // Backdate the whole thread as if it were never handled (the handledAt stamp above is from now).
+    await db('conversations').where({ id: row.id }).update({
+      last_inbound_at: db.raw("now() - interval '20 days'"), last_message_at: db.raw("now() - interval '20 days'"), metadata: db.raw("metadata - 'handledAt'"),
+    });
+    expect(mineOf((await portalInbox.list()).olderItems)).toHaveLength(1);
+    const closed = await portalInbox.closeOlder(new Date(Date.now() - 16 * 24 * 3600 * 1000), { technicianId: null, role: 'admin' });
+    expect(closed.messages).toBeGreaterThanOrEqual(1);
+    expect(mineOf((await portalInbox.list()).olderItems)).toEqual([]);
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
+
+    // Gate off: no message items at all.
+    await PortalMessages.customerPost({ customer: pat, body: 'Newest' });
+    process.env.GATE_PORTAL_MESSAGES = 'false';
+    expect(mineOf((await portalInbox.list()).items)).toEqual([]);
+    delete process.env.GATE_PORTAL_INBOX;
+  });
+
+  test('an answer to a portal message closes its bell, and the customer sees both sides in order', async () => {
+    const pat = await customer();
+    const asked = await PortalMessages.customerPost({ customer: pat, body: 'When is my next visit?' });
+    const [row] = await thread(pat.id);
+    const answer = await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Thursday morning.', actor });
+    expect(answer.closed).toBe(true);
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    const view = await PortalMessages.customerThread(pat.id);
+    expect(view.messages.map((m) => [m.id, m.from])).toEqual([[asked.id, 'you'], [answer.message.id, 'waves']]);
+    expect(view.unread).toBe(1);
+    // A thread id from another customer is not an item this one can be answered on.
+    await expect(PortalMessages.staffReply({ kind: 'message', id: randomUUID(), body: 'x', actor })).rejects.toMatchObject({ status: 404 });
+  });
+
   test('a customer reads and marks only their own thread', async () => {
     const pat = await customer('Pat');
     const sam = await customer('Sam');

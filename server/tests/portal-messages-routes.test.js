@@ -10,12 +10,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockService = {
   customerThread: jest.fn(),
   customerUnread: jest.fn(),
+  customerPost: jest.fn(),
   markRead: jest.fn(),
 };
 jest.mock('../services/portal-messages', () => ({
   ...jest.requireActual('../services/portal-messages'),
   customerThread: (...a) => mockService.customerThread(...a),
   customerUnread: (...a) => mockService.customerUnread(...a),
+  customerPost: (...a) => mockService.customerPost(...a),
   markRead: (...a) => mockService.markRead(...a),
 }));
 const CUSTOMER = { id: '11111111-1111-4111-8111-111111111111', first_name: 'Pat', last_name: 'Synthetic' };
@@ -57,7 +59,7 @@ describe('customer portal messages routes', () => {
     await withServer(async (base) => {
       expect((await fetch(base)).status).toBe(401);
       process.env.GATE_PORTAL_MESSAGES = 'false';
-      for (const [path, method] of [['', 'GET'], ['/unread-count', 'GET'], ['/read', 'POST']]) {
+      for (const [path, method] of [['', 'GET'], ['/unread-count', 'GET'], ['', 'POST'], ['/read', 'POST']]) {
         const res = await fetch(`${base}${path}`, { method, headers: signedIn, ...(method === 'POST' ? { body: '{}' } : {}) });
         expect(res.status).toBe(404);
         expect(await res.json()).toEqual({ enabled: false });
@@ -69,6 +71,7 @@ describe('customer portal messages routes', () => {
   test('every route uses the signed-in row, whatever customer id the request carries', async () => {
     mockService.customerThread.mockResolvedValue({ messages: [], hasMore: false, unread: 0 });
     mockService.customerUnread.mockResolvedValue(2);
+    mockService.customerPost.mockResolvedValue({ id: MSG, from: 'you', body: 'Hi', createdAt: '2026-11-04T20:00:00.000Z' });
     mockService.markRead.mockResolvedValue({ unread: 0 });
     await withServer(async (base) => {
       expect(await (await fetch(`${base}?customerId=${OTHER}`, { headers: signedIn })).json()).toEqual({ messages: [], hasMore: false, unread: 0 });
@@ -76,21 +79,40 @@ describe('customer portal messages routes', () => {
       const foreign = await fetch(`${base}/read`, { method: 'POST', headers: signedIn, body: JSON.stringify({ throughId: MSG, customerId: OTHER }) });
       expect(foreign.status).toBe(400); // unknown fields are refused, not ignored
       expect(await (await fetch(`${base}/read`, { method: 'POST', headers: signedIn, body: JSON.stringify({ throughId: MSG }) })).json()).toEqual({ unread: 0 });
+      const posted = await fetch(base, { method: 'POST', headers: signedIn, body: JSON.stringify({ body: 'Hi', customerId: OTHER }) });
+      expect(posted.status).toBe(400);
+      const ok = await fetch(base, { method: 'POST', headers: signedIn, body: JSON.stringify({ body: 'Hi', requestId: MSG }) });
+      expect(ok.status).toBe(201);
+      expect(await ok.json()).toEqual({ message: { id: MSG, from: 'you', body: 'Hi', createdAt: '2026-11-04T20:00:00.000Z' } });
     });
+    expect(mockService.customerPost).toHaveBeenCalledTimes(1);
+    expect(mockService.customerPost).toHaveBeenCalledWith({ customer: CUSTOMER, body: 'Hi', clientRequestId: MSG });
     expect(mockService.customerThread).toHaveBeenCalledWith(CUSTOMER.id, { before: null });
     expect(mockService.customerUnread).toHaveBeenCalledWith(CUSTOMER.id);
     expect(mockService.markRead).toHaveBeenCalledTimes(1);
     expect(mockService.markRead).toHaveBeenCalledWith(CUSTOMER.id, MSG);
   });
 
-  test('input checks: a bad page time or a bad read id is a 400', async () => {
+  test('input checks: a bad page time, a missing body, a bad retry id or a bad read id is a 400', async () => {
     await withServer(async (base) => {
       expect((await fetch(`${base}?before=yesterday`, { headers: signedIn })).status).toBe(400);
+      expect((await fetch(base, { method: 'POST', headers: signedIn, body: '{}' })).status).toBe(400);
+      expect((await fetch(base, { method: 'POST', headers: signedIn, body: JSON.stringify({ body: 'Hi', requestId: 'x' }) })).status).toBe(400);
       expect((await fetch(`${base}/read`, { method: 'POST', headers: signedIn, body: JSON.stringify({ throughId: 'x' }) })).status).toBe(400);
       expect((await fetch(`${base}/read`, { method: 'POST', headers: signedIn, body: '{}' })).status).toBe(400);
     });
     expect(mockService.customerThread).not.toHaveBeenCalled();
+    expect(mockService.customerPost).not.toHaveBeenCalled();
     expect(mockService.markRead).not.toHaveBeenCalled();
+  });
+
+  test('a write the service refuses keeps its status and words', async () => {
+    mockService.customerPost.mockRejectedValueOnce(new PortalMessageError('empty', 400, 'Write a message first.'));
+    await withServer(async (base) => {
+      const res = await fetch(base, { method: 'POST', headers: signedIn, body: JSON.stringify({ body: '  ' }) });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Write a message first.', code: 'empty' });
+    });
   });
 
   test('a page time is passed on as ISO; a service refusal keeps its status and words', async () => {

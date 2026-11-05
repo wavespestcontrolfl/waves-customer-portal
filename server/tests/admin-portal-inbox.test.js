@@ -12,12 +12,14 @@ const mockService = {
   summary: jest.fn(),
   list: jest.fn(),
   closeOlder: jest.fn(),
+  markMessageHandled: jest.fn(),
 };
 jest.mock('../services/portal-inbox', () => ({
   ...jest.requireActual('../services/portal-inbox'),
   summary: (...a) => mockService.summary(...a),
   list: (...a) => mockService.list(...a),
   closeOlder: (...a) => mockService.closeOlder(...a),
+  markMessageHandled: (...a) => mockService.markMessageHandled(...a),
 }));
 const mockStaffReply = jest.fn();
 jest.mock('../services/portal-messages', () => ({
@@ -149,7 +151,7 @@ describe('admin portal inbox routes', () => {
       process.env.GATE_PORTAL_INBOX = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'true';
       await withServer(async (base) => {
-        for (const body of [{ kind: 'booking', id: ITEM, body: 'Hi' }, { kind: 'message', id: ITEM, body: 'Hi' }, { kind: 'chat', id: 'nope', body: 'Hi' }, { kind: 'chat', id: ITEM }, { kind: 'chat', id: ITEM, body: 'Hi', requestId: 'x' }]) {
+        for (const body of [{ kind: 'booking', id: ITEM, body: 'Hi' }, { kind: 'chat', id: 'nope', body: 'Hi' }, { kind: 'chat', id: ITEM }, { kind: 'chat', id: ITEM, body: 'Hi', requestId: 'x' }]) {
           expect((await post(base, 'admin', body)).status).toBe(400);
         }
       });
@@ -173,6 +175,34 @@ describe('admin portal inbox routes', () => {
       expect(mockStaffReply.mock.calls[0][0]).toEqual({
         kind: 'request', id: ITEM, body: 'We can come Monday.', clientRequestId: REQ, actor: { technicianId: 'admin-1', role: 'admin' },
       });
+    });
+  });
+
+  describe('POST /messages/:id/handled', () => {
+    const THREAD = '66666666-6666-4666-8666-666666666666';
+    const post = (base, who, id) => fetch(`${base}/messages/${id}/handled`, { method: 'POST', headers: auth(who), body: '{}' });
+
+    test('404 while GATE_PORTAL_MESSAGES is off, 403 for a technician, 400 for a bad id', async () => {
+      process.env.GATE_PORTAL_INBOX = 'true';
+      await withServer(async (base) => {
+        expect((await post(base, 'admin', THREAD)).status).toBe(404);
+        process.env.GATE_PORTAL_MESSAGES = 'true';
+        expect((await post(base, 'tech', THREAD)).status).toBe(403);
+        expect((await post(base, 'admin', 'not-a-uuid')).status).toBe(400);
+      });
+      expect(mockService.markMessageHandled).not.toHaveBeenCalled();
+    });
+
+    test('passes the thread and the actor and answers whether it closed it', async () => {
+      process.env.GATE_PORTAL_INBOX = 'true';
+      process.env.GATE_PORTAL_MESSAGES = 'true';
+      mockService.markMessageHandled.mockResolvedValueOnce({ handled: false });
+      await withServer(async (base) => {
+        const res = await post(base, 'admin', THREAD);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ handled: false });
+      });
+      expect(mockService.markMessageHandled).toHaveBeenCalledWith(THREAD, { technicianId: 'admin-1', role: 'admin' });
     });
   });
 });

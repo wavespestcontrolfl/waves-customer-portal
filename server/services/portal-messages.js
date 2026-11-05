@@ -2,18 +2,25 @@
  * Portal messages (GATE_PORTAL_MESSAGES, owner 2026-11-04, "lets build it out" after "do we now have the
  * ability to answer clients in the portal?").
  *
- * The office answers a customer's portal ask inside the portal. One thread per customer row lives in the
- * unified comms tables (services/conversations.js): a `conversations` row with channel 'portal' and
- * our_endpoint_id 'portal' (not null, so the partial unique index conversations_customer_dedup keeps one per
- * customer), and its `messages` rows: the office's answers (outbound, author_type 'admin').
+ * The office answers a customer's portal ask inside the portal, and the customer can write back there.
+ * One thread per customer row lives in the unified comms tables (services/conversations.js): a
+ * `conversations` row with channel 'portal' and our_endpoint_id 'portal' (not null, so the partial unique
+ * index conversations_customer_dedup keeps one per customer), and its `messages` rows: the office's answers
+ * (outbound, author_type 'admin') and the customer's own words (inbound, author_type 'customer').
  *
- * - staffReply answers one open Portal-tab item (a chat hand-off or a customer service request). The customer
- *   is read from the item, never from the caller. One transaction saves the answer and closes the item it
- *   answers: a chat hand-off is resolved, a service request is resolved quietly (no "request updated"
- *   email). After the commit the item's open admin bells close, and the customer gets ONE notice: the in-app
- *   bell plus a push to the Waves app, or an email with the whole answer when no app device took the push.
+ * - staffReply answers one open Portal-tab item (a chat hand-off, a customer service request, or the
+ *   customer's own portal message). The customer is read from the item, never from the caller. One
+ *   transaction saves the answer and closes the item it answers: a chat hand-off is resolved, a service
+ *   request is resolved quietly (no "request updated" email), and a portal message is answered by the new
+ *   row itself. After the commit the item's open admin bells close, and the customer gets ONE notice: the
+ *   in-app bell plus a push to the Waves app, or an email with the whole answer when no app device took the
+ *   push.
+ * - customerPost saves a customer's own message, then raises one admin bell per thread (a later message
+ *   rewrites it and rings it again) and the admin phone page (GATE_PORTAL_ASK_PUSH).
  * - The customer reads the thread in the portal; their unread count is the office's answers newer than the
  *   thread's customerReadThrough stamp.
+ * - A thread is an open Portal-tab item while its newest message is the customer's and is newer than the
+ *   thread's handledAt stamp (portal-inbox.js openMessageScope; Mark handled).
  *
  * Nothing here messages a customer on its own: the one send is the notice for an answer a staff member
  * pressed Send on. Every entry point refuses while the gate is off, and an answer to an inactive customer
@@ -33,11 +40,11 @@ const PREVIEW_MAX = 140;
 const MESSAGES_LINK = '/?tab=messages';
 const NOTICE_TITLE = 'New message from Waves';
 const ANSWERED_NOTE = 'Answered in the portal';
-const ITEM_KINDS = ['chat', 'request'];
+const ITEM_KINDS = ['chat', 'request', 'message'];
 const OPEN_CHAT_STATUSES = ['pending', 'claimed'];
 const TERMINAL_REQUEST_STATUSES = ['resolved', 'closed', 'cancelled'];
 // The admin bell metadata key that names each item kind (portal-inbox.js closeAlerts).
-const ALERT_KEY = { chat: 'escalationId', request: 'requestId' };
+const ALERT_KEY = { chat: 'escalationId', request: 'requestId', message: 'portalConversationId' };
 
 class PortalMessageError extends Error {
   constructor(code, status, message = code) {
@@ -108,13 +115,18 @@ function staffView(row) {
   return { id: row.id, direction: row.direction, body: row.body || '', createdAt: row.created_at, adminUserId: row.admin_user_id || null };
 }
 
-// The customer row an open item belongs to, or a 404. A chat must be a portal chat hand-off, and a request
-// must be the customer's own (not staff-made).
+// The row each item kind names: a chat must be a portal chat hand-off, a request must be the customer's own
+// (not staff-made), and a message item is the portal thread itself.
+const ITEM_ROW = {
+  chat: (trx, id) => trx('ai_escalations as e').join('agent_sessions as s', 's.id', 'e.conversation_id')
+    .where('e.id', id).where('s.channel', 'portal_chat').first('e.customer_id'),
+  request: (trx, id) => trx('service_requests').where({ id }).whereRaw("coalesce(source, '') <> 'admin'").first('customer_id'),
+  message: (trx, id) => trx('conversations').where({ id, channel: CHANNEL, our_endpoint_id: ENDPOINT }).first('customer_id'),
+};
+
+// The customer row an open item belongs to, or a 404.
 async function itemCustomerWith(trx, kind, id) {
-  const row = kind === 'chat'
-    ? await trx('ai_escalations as e').join('agent_sessions as s', 's.id', 'e.conversation_id')
-      .where('e.id', id).where('s.channel', 'portal_chat').first('e.customer_id')
-    : await trx('service_requests').where({ id }).whereRaw("coalesce(source, '') <> 'admin'").first('customer_id');
+  const row = await ITEM_ROW[kind](trx, id);
   if (!row?.customer_id) throw new PortalMessageError('not_found', 404, 'This item is gone.');
   const customer = await trx('customers').where({ id: row.customer_id }).first('id', 'active', 'deleted_at');
   if (!customer || customer.deleted_at) throw new PortalMessageError('no_customer', 409, 'This customer record was removed.');
@@ -123,8 +135,10 @@ async function itemCustomerWith(trx, kind, id) {
   return customer.id;
 }
 
-// Closes the item the answer is for. Already closed is fine: the answer still stands.
+// Closes the item the answer is for. Already closed is fine: the answer still stands. A portal message is
+// answered by the new outbound row itself (openMessageScope), so there is nothing more to write.
 async function closeItemWith(trx, kind, id, customerId) {
+  if (kind === 'message') return true;
   const now = new Date();
   if (kind === 'chat') {
     const [esc] = await trx('ai_escalations').where({ id, customer_id: customerId }).whereIn('status', OPEN_CHAT_STATUSES)
@@ -151,6 +165,7 @@ async function closeItemWith(trx, kind, id, customerId) {
 async function closeItemBells(kind, id, actor) {
   try {
     const { closeAlerts } = require('./portal-inbox');
+    // A message item's id is its thread's id, which is what that thread's bells carry.
     return await closeAlerts(ALERT_KEY[kind], [id], {
       by: String(actor.technicianId || 'admin'),
       role: actor.role || 'admin',
@@ -199,7 +214,7 @@ async function noticeCustomer(customerId, message) {
 
 /**
  * The office answers an open Portal-tab item inside the portal.
- * @param {{ kind: 'chat'|'request', id: string, body: string, clientRequestId?: string,
+ * @param {{ kind: 'chat'|'request'|'message', id: string, body: string, clientRequestId?: string,
  *   actor: { technicianId: string|null, role: string } }} input
  * @returns {Promise<{ message: object, closed: boolean, notice: object|null, replay?: boolean }>}
  */
@@ -233,6 +248,78 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
   await closeItemBells(kind, id, actor);
   const notice = await noticeCustomer(saved.customerId, saved.message);
   return { message: staffView(saved.message), closed: saved.closed, notice };
+}
+
+// One admin bell per thread: a later message rewrites the standing bell and rings it again. Then the phone
+// page, only when the bell really rang. Never throws: the message is the record.
+async function ringOffice(customer, threadId, message) {
+  try {
+    const { raiseAdminAlert, breaksAlertRules } = require('./admin-alert-compose');
+    const { fitAction, redactedWords, whyWithQuote } = require('./admin-alert-names');
+    const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'A customer';
+    // The customer's words, redacted and cut like every bell body; a quote the headline rules refuse (a second
+    // sentence, a date) falls back to a plain why. The whole message is in the bell's full text either way.
+    const quoted = whyWithQuote({ lead: 'They wrote in the portal: ', quote: redactedWords(message.body) });
+    const result = await raiseAdminAlert('alert', {
+      area: 'Comms',
+      action: fitAction('Comms', name, [(who) => `Answer ${who}'s portal message`, (who) => `Answer ${who}`]),
+      why: breaksAlertRules(quoted) ? 'They wrote in the portal and are waiting for an answer' : quoted,
+      severity: 'needs-you',
+      link: '/admin/communications#tab=portal',
+      subject: { type: 'customer', id: String(customer.id) },
+      doneWhen: 'customer_answered',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `portal-message:${threadId}`,
+      dedupeOpenOnly: true,
+      refreshOnDedupe: true,
+      bumpOnRefresh: true,
+      detail: message.body,
+      metadata: { customerId: customer.id, portalConversationId: threadId, portalMessageId: message.id },
+    });
+    const rang = Boolean(result?.id) && !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false));
+    if (rang) {
+      const { pushPortalAsk, shortName } = require('./portal-ask-push');
+      void pushPortalAsk({
+        itemKey: `portal-message:${threadId}`,
+        title: 'Answer a portal message',
+        body: `${shortName(customer.first_name, customer.last_name)} wrote in the portal`,
+        link: '/admin/communications#tab=portal',
+        customerId: customer.id,
+      });
+    }
+  } catch (err) {
+    logger.error(`[portal-messages] bell failed for thread ${threadId}: ${err.message}`);
+  }
+}
+
+/**
+ * A signed-in customer writes in their portal thread.
+ * @param {{ customer: { id: string, first_name?: string, last_name?: string }, body: string, clientRequestId?: string }} input
+ */
+async function customerPost({ customer, body, clientRequestId = null }) {
+  requireLive();
+  const text = checkedBody(body);
+  const saved = await db.transaction(async (trx) => {
+    const thread = await threadWith(trx, customer.id);
+    const prior = await priorSend(trx, thread.id, clientRequestId);
+    if (prior) return { replay: true, message: prior };
+    const message = await Conversations.appendMessage({
+      conn: trx,
+      conversationId: thread.id,
+      channel: CHANNEL,
+      direction: 'inbound',
+      authorType: 'customer',
+      body: text,
+      deliveryStatus: 'received',
+      messageType: 'portal_message',
+      metadata: clientRequestId ? { clientRequestId } : {},
+    });
+    return { message, threadId: thread.id };
+  });
+  if (!saved.replay) await ringOffice(customer, saved.threadId, saved.message);
+  return customerView(saved.message);
 }
 
 async function unreadFor(thread) {
@@ -293,6 +380,7 @@ module.exports = {
   PortalMessageError,
   cleanBody,
   staffReply,
+  customerPost,
   customerThread,
   customerUnread,
   markRead,

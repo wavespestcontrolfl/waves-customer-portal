@@ -126,6 +126,8 @@ const RERING = [
     decision: 'expire: only a new Send to Mercury that Mercury refuses for the key raises it again' },
   { emitter: 'payroll-mercury-key', files: ['services/payroll-mercury-alerts.js'], prefixes: ['payroll-mercury-key'], kind: 'periodic',
     decision: 'expire, capped: while Mercury still refuses the key, the next status poll (every 15 minutes) raises one fresh row' },
+  { emitter: 'portal-message', files: ['services/portal-messages.js'], prefixes: ['portal-message:'], kind: 'event',
+    decision: 'expire: only a new message the customer writes in their portal thread raises it again (one open row per thread)' },
 ];
 
 const parseMeta = (metadata) => {
