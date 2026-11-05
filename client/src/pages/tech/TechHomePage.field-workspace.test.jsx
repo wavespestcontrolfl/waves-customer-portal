@@ -35,6 +35,8 @@ vi.mock('./VisitBriefPanel', () => ({ default: ({ stop, detail, onRetry, onPhoto
   <button onClick={() => onPhotos(stop.primary)}>Service photos</button>
   <button onClick={() => onBusyChange(true)}>Start contact action</button>
 </div> }));
+vi.mock('../admin/SchedulePage', () => ({ ProtocolPanel: ({ service, onClose }) => <div data-testid="job-card-panel" data-service-id={service.id}><button onClick={onClose}>Close job card</button></div> }));
+vi.mock('../../components/admin/PushSettingsV2', () => ({ default: () => <div>Push settings fixture</div> }));
 import TechHomePage from './TechHomePage';
 
 const row = (id, overrides = {}) => ({ id, technicianId: 'tech-fixture', customerName: `Fixture ${id}`, address: '100 Example Lane', serviceType: 'Lawn care', scheduledDate: '2099-01-01', status: 'confirmed', windowStart: '09:00:00', windowEnd: '10:00:00', ...overrides });
@@ -110,6 +112,33 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(await screen.findByText('Call about service access')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Done', exact: true })).toBeInTheDocument();
     expect(await screen.findByText('Route connection unavailable')).toBeInTheDocument();
+  });
+
+  it('opens the job card for the selected visit from the Today visit, and closes it', async () => {
+    mount('/admin/today?visit=row%3Atwo');
+    expect(await screen.findByText('Property brief for two')).toBeInTheDocument();
+    expect(screen.queryByTestId('job-card-panel')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Job card' }));
+    expect(await screen.findByTestId('job-card-panel')).toHaveAttribute('data-service-id', 'two');
+    fireEvent.click(screen.getByRole('button', { name: 'Close job card' }));
+    expect(screen.queryByTestId('job-card-panel')).not.toBeInTheDocument();
+  });
+
+  it('keeps the alert settings closed on More until opened, and opens them at the bell link (#notifications)', async () => {
+    mount('/admin/today/more');
+    fireEvent.click(await screen.findByRole('button', { name: 'Alert settings' }));
+    expect(await screen.findByText('Push settings fixture')).toBeInTheDocument();
+    cleanup();
+    mount('/admin/today/more');
+    expect(screen.queryByText('Push settings fixture')).not.toBeInTheDocument();
+    cleanup();
+    window.location.hash = '#notifications';
+    try {
+      mount('/admin/today/more');
+      expect(await screen.findByText('Push settings fixture')).toBeInTheDocument();
+    } finally {
+      window.location.hash = '';
+    }
   });
 
   it('opens a selected stop and sends arrival and photos to that service, even when it is not first', async () => {

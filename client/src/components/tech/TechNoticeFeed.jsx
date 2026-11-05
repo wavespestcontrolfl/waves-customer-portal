@@ -583,10 +583,14 @@ function PhotoCard({ n, onDismiss }) {
 
 // A text on the tech's own Twilio line (tech-line.js). The office sees the
 // same thread in /admin/communications; this card is the tech's copy, kept
-// until "Got it" like a visit card. Replying from the line is a later PR.
+// until "Got it" like a visit card. "Reply" opens that customer's thread in
+// Communications, where the composer sends from the technician's own line; the
+// route scopes the thread to customers on the technician's own route. A card
+// with no customer on it (an unknown sender) has no thread to open.
 function TextCard({ n, onDismiss }) {
   const p = n.payload || {};
   const media = Number(p.media_count || 0);
+  const replyTo = p.customer_id ? `/admin/communications?thread=${encodeURIComponent(p.customer_id)}` : null;
   return (
     <div style={cardStyle(COLORS.ink)} data-testid="tech-line-text">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
@@ -598,7 +602,10 @@ function TextCard({ n, onDismiss }) {
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {p.body || (media > 0 ? `${media} photo${media === 1 ? '' : 's'}` : '(empty message)')}
       </div>
-      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+      <div style={{ display: 'flex', gap: 8 }}>
+        {replyTo && <Link to={replyTo} style={{ ...btnSecondary, flex: 1, boxSizing: 'border-box', textAlign: 'center', textDecoration: 'none' }}>Reply</Link>}
+        <button onClick={onDismiss} style={{ ...btnSecondary, flex: 1 }}>Got it</button>
+      </div>
     </div>
   );
 }
