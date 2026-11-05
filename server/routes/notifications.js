@@ -687,7 +687,10 @@ router.post('/email-resubscribe', (req, res, next) => {
       customerId: req.customerId, email: holder.email, firstName: holder.firstName,
     }, { dbh: db }));
   } catch (err) {
-    return next(err);
+    // A database error carries the SQL with the address binding, and the shared error
+    // middleware logs message and stack: log the error word only and answer here.
+    logger.error(`[email-resubscribe] request failed (${require('../services/email-resubscribe').errorWord(err)})`);
+    return res.status(500).json({ state: 'failed' });
   }
 });
 

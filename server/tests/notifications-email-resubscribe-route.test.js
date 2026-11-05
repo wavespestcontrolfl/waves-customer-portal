@@ -21,6 +21,7 @@ jest.mock('../services/service-contact-events', () => ({ recordServiceContactCha
 jest.mock('../services/email-resubscribe', () => ({
   resubscribeStatus: jest.fn(),
   requestResubscribeEmail: jest.fn(),
+  errorWord: jest.requireActual('../services/email-resubscribe').errorWord,
 }));
 const mockSession = { current: null };
 jest.mock('../middleware/auth', () => ({
@@ -236,10 +237,17 @@ describe('POST /email-resubscribe', () => {
     expect(Resub.requestResubscribeEmail).toHaveBeenCalledTimes(6);
   });
 
-  test('gate on: a service error is a 500, not a send', async () => {
+  test('gate on: a thrown error with the address in its message answers 500 { state: failed }; only the error word is logged and nothing reaches the error middleware', async () => {
     gateOn();
-    Resub.requestResubscribeEmail.mockRejectedValue(new Error('db down'));
-    expect((await ask()).status).toBe(500);
+    const logger = require('../services/logger');
+    logger.error.mockClear();
+    Resub.requestResubscribeEmail.mockRejectedValue(Object.assign(
+      new Error('insert into "email_resubscribe_requests" ("email") values (\'pat@example.com\') - boom'), { code: '57014' }));
+    const res = await ask();
+    expect(res).toEqual({ status: 500, body: { state: 'failed' } });
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error.mock.calls[0][0]).toBe('[email-resubscribe] request failed (57014)');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('pat@example.com');
   });
 });
 

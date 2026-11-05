@@ -9,6 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../utils/email-equivalence', () => ({ suppressionCoversEmail: jest.fn(() => function covers() {}) }));
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerEmail: jest.fn(() => Promise.resolve()) }));
+jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfirmation: jest.fn() }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -276,5 +277,75 @@ describe('clearSendgridBeforeRelease', () => {
     const out = await clearSendgridBeforeRelease('pat@example.com');
     expect(global.fetch).not.toHaveBeenCalled();
     expect(out.clearedIds).toEqual([]);
+  });
+});
+
+describe('requestResubscribeEmail: the send claim is durable', () => {
+  const { requestResubscribeEmail } = require('../services/email-resubscribe');
+  const { sendResubscribeConfirmation } = require('../services/email-resubscribe-confirm');
+
+  // Records ordering: the claim insert, the transaction end, the send, the settle update.
+  function claimDbh() {
+    const events = [];
+    const writes = [];
+    const table = (name) => {
+      const b = new Proxy({}, {
+        get: (_t, method) => {
+          if (method === 'then') return (resolve) => Promise.resolve(name === 'email_suppressions' ? [{ id: 'sup-1' }] : []).then(resolve);
+          return (...args) => {
+            if (method === 'first') return Promise.resolve(undefined);
+            if (method === 'insert') { events.push('claim-insert'); writes.push({ insert: args[0] }); return { returning: async () => [{ id: 'req-1' }] }; }
+            if (method === 'update') { events.push('settle'); writes.push({ update: args[0] }); return Promise.resolve(1); }
+            return b;
+          };
+        },
+      });
+      return b;
+    };
+    const dbh = jest.fn((name) => table(name));
+    dbh.raw = (sql) => ({ sql });
+    dbh.transaction = async (fn) => {
+      const trx = jest.fn((name) => table(name));
+      trx.raw = dbh.raw;
+      const out = await fn(trx);
+      events.push('tx-end');
+      return out;
+    };
+    return { dbh, events, writes };
+  }
+  const NOW = new Date('2026-11-04T15:00:00.000Z');
+  const ask = (dbh) => requestResubscribeEmail({ customerId: 'c-1', email: 'Pat@Example.com', firstName: 'Pat' }, { dbh, now: NOW });
+
+  beforeEach(() => { sendResubscribeConfirmation.mockReset(); });
+
+  test('the claim (sent_at = now, send_claimed) is inserted and the transaction ends BEFORE the send starts', async () => {
+    const { dbh, events, writes } = claimDbh();
+    sendResubscribeConfirmation.mockImplementation(async () => { events.push('send'); return {}; });
+    const out = await ask(dbh);
+    expect(events).toEqual(['claim-insert', 'tx-end', 'send', 'settle']);
+    expect(writes[0].insert).toMatchObject({ email: 'pat@example.com', sent_at: NOW, outcome: JSON.stringify({ send_claimed: true }) });
+    expect(writes[1].update).toMatchObject({ outcome: JSON.stringify({ sent: true }) });
+    expect(out).toEqual({ state: 'sent', maskedEmail: 'p***@example.com', sentAt: NOW.toISOString() });
+    expect(sendResubscribeConfirmation.mock.calls[0][0].database).toBeUndefined();
+  });
+
+  test('HTTP 4xx rejection: sent_at is cleared and the word recorded; the answer is failed', async () => {
+    const { dbh, writes } = claimDbh();
+    sendResubscribeConfirmation.mockRejectedValue(Object.assign(new Error('SendGrid 400: pat@example.com'), { status: 400 }));
+    expect(await ask(dbh)).toEqual({ state: 'failed' });
+    expect(writes[1].update).toMatchObject({ sent_at: null, outcome: JSON.stringify({ send_failed: 'http_400' }) });
+    expect(JSON.stringify([logger.warn.mock.calls, writes[1]])).not.toContain('pat@example.com');
+  });
+
+  test.each([
+    ['a timeout', Object.assign(new Error('x'), { name: 'TimeoutError' })],
+    ['a 502', Object.assign(new Error('x'), { status: 502 })],
+    ['no status', new Error('socket hang up')],
+  ])('%s: the claim stays (no sent_at write) and the answer is sent', async (_name, error) => {
+    const { dbh, writes } = claimDbh();
+    sendResubscribeConfirmation.mockRejectedValue(error);
+    expect(await ask(dbh)).toMatchObject({ state: 'sent', sentAt: NOW.toISOString() });
+    expect(writes[1].update).not.toHaveProperty('sent_at');
+    expect(JSON.parse(writes[1].update.outcome)).toHaveProperty('send_uncertain');
   });
 });

@@ -216,18 +216,98 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
       });
     });
 
-    test('a send failure answers failed, keeps no sent_at, records only the error word, and a retry can send', async () => {
+    test('a definite rejection (HTTP 4xx) undoes the claim: failed, sent_at null, only the code recorded, and a retry sends', async () => {
       await inRolledBackTx(async (trx) => {
         const email = `${uniq()}@example.com`;
         await sup(trx, { email });
-        sender.sendResubscribeConfirmation.mockRejectedValueOnce(Object.assign(new Error(`SendGrid 500 for ${email}`), { code: 'ECONNRESET' }));
+        sender.sendResubscribeConfirmation.mockRejectedValueOnce(Object.assign(new Error(`SendGrid 400 for ${email}`), { status: 400 }));
         expect(await ask(trx, email)).toEqual({ state: 'failed' });
         const [row] = await requestsFor(trx, email);
         expect(row.sent_at).toBeNull();
-        expect(row.outcome).toEqual({ send_failed: 'ECONNRESET' });
+        expect(row.outcome).toEqual({ send_failed: 'http_400' });
         expect(JSON.stringify(row.outcome)).not.toContain(email);
         expect((await ask(trx, email)).state).toBe('sent');
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(2);
       });
+    });
+
+    test('a sender that never reached SendGrid (not configured) also undoes the claim', async () => {
+      await inRolledBackTx(async (trx) => {
+        const email = `${uniq()}@example.com`;
+        await sup(trx, { email });
+        sender.sendResubscribeConfirmation.mockRejectedValueOnce(Object.assign(new Error('SendGrid not configured'), { code: 'SENDGRID_NOT_CONFIGURED' }));
+        expect(await ask(trx, email)).toEqual({ state: 'failed' });
+        expect((await requestsFor(trx, email))[0].sent_at).toBeNull();
+      });
+    });
+
+    test.each([
+      ['a timeout', Object.assign(new Error('timed out'), { name: 'TimeoutError' }), 'timeout'],
+      ['a network reset', Object.assign(new TypeError('fetch failed'), { code: 'ECONNRESET' }), 'ECONNRESET'],
+      ['a 5xx', Object.assign(new Error('SendGrid 503'), { status: 503 }), 'http_503'],
+      ['an odd 4xx (408)', Object.assign(new Error('SendGrid 408'), { status: 408 }), 'http_408'],
+    ])('%s is uncertain: the claim stays (cap holds, the link works), the answer is sent, and no second email goes out', async (_name, error, word) => {
+      await inRolledBackTx(async (trx) => {
+        const email = `${uniq()}@example.com`;
+        await sup(trx, { email });
+        sender.sendResubscribeConfirmation.mockRejectedValueOnce(error);
+        const first = await ask(trx, email);
+        expect(first).toMatchObject({ state: 'sent', maskedEmail: `${email[0]}***@example.com`, sentAt: expect.any(String) });
+        const [row] = await requestsFor(trx, email);
+        expect(row.sent_at).toBeInstanceOf(Date);
+        expect(row.outcome).toEqual({ send_uncertain: word });
+        expect(JSON.stringify(row.outcome)).not.toContain(email);
+        // The delivered link is usable: the token the sender was given resolves to an open request.
+        const { token } = sender.sendResubscribeConfirmation.mock.calls[0][0];
+        expect((await service.findRequest(token, { dbh: trx })).status).toBe('open');
+        // Another tap does not send again.
+        expect(await ask(trx, email)).toMatchObject({ state: 'sent', sentAt: first.sentAt });
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    test('the claim is committed before the send starts, and neither a transaction nor the address lock is held during it; two racing taps send once', async () => {
+      const email = `${uniq()}@example.com`;
+      try {
+        await sup(db, { email });
+        const seen = [];
+        sender.sendResubscribeConfirmation.mockImplementation(async () => {
+          // From ANOTHER connection: the claim row is already readable, and the address lock is free.
+          const [row] = await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]);
+          const lockFree = await db.transaction(async (other) => (
+            (await other.raw("SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS ok", [`customer-email:${email}`])).rows[0].ok));
+          seen.push({ sentAt: !!row?.sent_at, outcome: row?.outcome, lockFree });
+          await new Promise((resolve) => { setTimeout(resolve, 100); });
+          return { messageId: 'm1' };
+        });
+        const [one, two] = await Promise.all([
+          service.requestResubscribeEmail({ customerId: null, email, firstName: 'Pat' }, { dbh: db }),
+          service.requestResubscribeEmail({ customerId: null, email, firstName: 'Pat' }, { dbh: db }),
+        ]);
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(1);
+        expect(seen).toEqual([{ sentAt: true, outcome: { send_claimed: true }, lockFree: true }]);
+        expect([one.state, two.state]).toEqual(['sent', 'sent']);
+        const rows = await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].outcome).toEqual({ sent: true });
+      } finally {
+        await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]).del();
+        await db('email_suppressions').whereRaw('lower(email) = ?', [email]).del();
+      }
+    });
+
+    test('a definite rejection on committed rows clears sent_at so the next tap can send', async () => {
+      const email = `${uniq()}@example.com`;
+      try {
+        await sup(db, { email });
+        sender.sendResubscribeConfirmation.mockRejectedValueOnce(Object.assign(new Error('bad'), { status: 422 }));
+        expect(await service.requestResubscribeEmail({ customerId: null, email }, { dbh: db })).toEqual({ state: 'failed' });
+        expect(await service.requestResubscribeEmail({ customerId: null, email }, { dbh: db })).toMatchObject({ state: 'sent' });
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(2);
+      } finally {
+        await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]).del();
+        await db('email_suppressions').whereRaw('lower(email) = ?', [email]).del();
+      }
     });
 
     test('resubscribeStatus: paused, then sent', async () => {

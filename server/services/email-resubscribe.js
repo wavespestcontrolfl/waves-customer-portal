@@ -159,46 +159,70 @@ async function resubscribeStatus(email, { dbh = db, now = new Date() } = {}) {
   }
 }
 
+// A send that never reached SendGrid (not configured, a guard refusal) or that SendGrid
+// conclusively rejected (sendgrid-mail isDefiniteRejection) was NOT delivered. Anything else
+// (timeout, network error, 5xx, an odd 4xx, no status) may have been accepted.
+function sendDefinitelyFailed(err) {
+  if (err?.code === 'SENDGRID_NOT_CONFIGURED' || err?.annualOfferWithheld || err?.annualOfferGuardFailed) return true;
+  return require('./sendgrid-mail').isDefiniteRejection(err);
+}
+
 // POST /api/notifications/email-resubscribe, after the route checked the gate and the session.
-// Under the per-address lock: nothing releasable or a hard block = send nothing; an email sent in
-// the last 24 h = send nothing, answer 'sent' while its link still works, else 'wait'; else create the request and send. The lock
-// stays held through the send (short timeout), so two taps cannot send twice.
+// Transaction 1, under the per-address lock: nothing releasable or a hard block = send nothing; an
+// email sent in the last 24 h = send nothing, answer 'sent' while its link still works, else
+// 'wait'; else insert the request WITH sent_at = now (the durable send claim) and COMMIT. The lock
+// and the transaction end before any network call, so two taps cannot both send (the second sees
+// the committed claim) and a slow SendGrid holds nothing. Then send:
+//   - accepted: leave the claim as is;
+//   - a definite rejection: undo the claim (sent_at null, outcome { send_failed }) and answer
+//     'failed', so a retry can send;
+//   - anything uncertain (timeout, reset, 5xx, no status): the email may have been delivered, so
+//     the claim stays (the 24 h cap holds and the link works), outcome { send_uncertain }, and the
+//     answer is 'sent'.
 // Returns { state: 'not_paused' | 'sent' | 'wait' | 'failed', maskedEmail?, sentAt?, nextAt? }.
 // Lock order is address key first, then a NEW request row (nobody else can hold that row), so
 // it never inverts completeResubscribe's request row -> address key order.
 async function requestResubscribeEmail({ customerId, email, firstName = '' }, { dbh = db, now = new Date() } = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized) return { state: 'not_paused' };
-  return dbh.transaction(async (trx) => {
+  const token = newToken();
+  const claim = await dbh.transaction(async (trx) => {
     await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalized);
     if (!(await releasableUnsubscribes(normalized, { dbh: trx })).length || await hasHardBlock(normalized, { dbh: trx })) {
-      return { state: 'not_paused' };
+      return { answer: { state: 'not_paused' } };
     }
     const maskedEmail = maskEmail(normalized);
     const recent = await recentSentRequest(normalized, { dbh: trx, now });
-    if (recent) return windowAnswer(recent, maskedEmail, now);
-
-    const token = newToken();
+    if (recent) return { answer: windowAnswer(recent, maskedEmail, now) };
     const [request] = await trx('email_resubscribe_requests').insert({
       email: normalized,
       customer_id: customerId || null,
       token_hash: hashToken(token),
       requested_at: now,
+      sent_at: now,
       expires_at: new Date(now.getTime() + REQUEST_TTL_MS),
+      outcome: JSON.stringify({ send_claimed: true }),
     }).returning(['id']);
-    try {
-      await require('./email-resubscribe-confirm').sendResubscribeConfirmation({ to: normalized, token, firstName, database: trx });
-    } catch (err) {
-      const code = errorWord(err);
-      logger.warn(`[email-resubscribe] confirmation email failed (${code})`);
-      await trx('email_resubscribe_requests').where({ id: request.id })
-        .update({ outcome: JSON.stringify({ send_failed: code }), updated_at: new Date() });
+    return { requestId: request.id, maskedEmail };
+  });
+  if (claim.answer) return claim.answer;
+
+  const settle = (patch) => dbh('email_resubscribe_requests').where({ id: claim.requestId }).update({ ...patch, updated_at: new Date() });
+  try {
+    await require('./email-resubscribe-confirm').sendResubscribeConfirmation({ to: normalized, token, firstName });
+  } catch (err) {
+    const code = Number.isFinite(Number(err?.status)) ? `http_${Number(err.status)}` : errorWord(err);
+    if (sendDefinitelyFailed(err)) {
+      logger.warn(`[email-resubscribe] confirmation email rejected (${code})`);
+      await settle({ sent_at: null, outcome: JSON.stringify({ send_failed: code }) });
       return { state: 'failed' };
     }
-    const sentAt = new Date();
-    await trx('email_resubscribe_requests').where({ id: request.id }).update({ sent_at: sentAt, updated_at: sentAt });
-    return { state: 'sent', maskedEmail, sentAt: sentAt.toISOString() };
-  });
+    logger.warn(`[email-resubscribe] confirmation email outcome uncertain (${code})`);
+    await settle({ outcome: JSON.stringify({ send_uncertain: code }) });
+    return { state: 'sent', maskedEmail: claim.maskedEmail, sentAt: now.toISOString() };
+  }
+  await settle({ outcome: JSON.stringify({ sent: true }) });
+  return { state: 'sent', maskedEmail: claim.maskedEmail, sentAt: now.toISOString() };
 }
 
 // Runs on the caller's transaction, after clearSendgridBeforeRelease. Takes the
