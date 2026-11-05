@@ -68,6 +68,7 @@ const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligi
 const { visitInsideMoveNoticeWindow, violatesSelfServeNotice, awaitingCustomerPick } = require('../services/scheduling/self-serve-notice');
 const moveLimits = require('../services/scheduling/customer-move-limits');
 const { roundsOneOffWindow, roundsRegularDate } = require('../services/lawn-rounds');
+const { isAssignable } = require('../services/technician-eligibility');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -491,6 +492,8 @@ function selectSvc(column, value, database = db) {
       's.status',
       's.source_action',
       's.customer_confirmed',
+      // The catalog row decides the visit's service line (offerTechnicianScope).
+      's.service_id',
       's.service_type',
       's.service_key_snapshot',
       's.estimated_duration_minutes',
@@ -763,6 +766,29 @@ function searchParseOpts(config, now = new Date()) {
   };
 }
 
+// Each visit stays with its own technician (owner 2026-10-25; the night run's
+// GATE_AUTO_DISPATCH_KEEP_TECH rule, the rain pass, the office and phone moves
+// and the Intelligence Bar all keep it). So a visit whose technician can still
+// take work (technician-eligibility isAssignable) is offered that technician's
+// times only, and the commit saves the technician of its own anti-forgery
+// rebuild (this same builder), so it keeps that one. A visit with no technician, or one whose
+// technician can no longer take work, gets /book's line and territory ranking
+// while GATE_SERVICE_LINE_MAP=live (serviceLines; a Waves Assessment has no
+// line; not live = no line read, as funnelServiceLines). With one assignable
+// technician the offers are the same as before.
+async function offerTechnicianScope(svc) {
+  if (svc.technician_id) {
+    const tech = await db('technicians').where({ id: svc.technician_id }).first('employment_status', 'field_dispatchable');
+    if (isAssignable(tech)) return { technicianId: svc.technician_id };
+  }
+  const { lineMapLive, liveServiceLine } = require('../services/scheduling/line-technician');
+  if (!lineMapLive()) return {};
+  const line = await liveServiceLine(db, {
+    serviceId: svc.service_id || null, serviceKey: svc.service_key_snapshot || null, serviceType: svc.service_type || null,
+  });
+  return line ? { serviceLines: [line] } : {};
+}
+
 async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay, offer = false }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey, bookInsertionOffersLive } = booking._internals;
@@ -835,6 +861,8 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     ...(timeOfDay ? { timeOfDay } : {}),
     // Up to 6 curated times while the customer picks (Quick Move customer pick).
     ...pickSlotCount(svc),
+    // The visit's own technician, else the line and territory ranking.
+    ...(await offerTechnicianScope(svc)),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
   // the commit path (SmartRebooker.reschedule / rescheduleSeries) refuses
