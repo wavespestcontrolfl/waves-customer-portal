@@ -841,7 +841,7 @@ async function otherSpellingCandidate(bouncedEmail, customerId) {
     if (alreadyBounced) return null;
     return { corrected: other, rule: OTHER_SPELLING_RULE, confidence: 'high', metadata: { source_call_id: call.id } };
   } catch (err) {
-    logger.warn(`[bounce-recovery] other-spelling lookup failed closed: ${err.message}`);
+    logger.warn(`[bounce-recovery] other-spelling lookup failed closed: ${err.code || err.name}`);
     return null;
   }
 }
@@ -1521,33 +1521,20 @@ const UNRECOVERABLE_REASONS = {
   no_candidate: 'no safe address correction was possible',
 };
 
-// The owner-facing reason for a skip. An other-spelling candidate is "the other spelling heard on the call", never
-// "the likely correction" (that wording means a domain typo fix).
-function unrecoverableReason(status, candidate) {
-  if (candidate?.rule === OTHER_SPELLING_RULE && candidate.corrected) {
-    if (status === 'corrected_owned_by_other') return `the other spelling heard on the call (${candidate.corrected}) already belongs to another customer`;
-    if (status === 'corrected_suppressed') return `the other spelling heard on the call (${candidate.corrected}) is on the suppression list`;
-  }
-  if (status === 'corrected_owned_by_other' && candidate?.corrected) {
-    return `the likely correction (${candidate.corrected}) already belongs to another customer`;
-  }
-  return UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate;
-}
-
 async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId, status, candidate = null }) {
   // Marketing bounces are noise here — the suppression ledger already handles them.
   const stream = String(bouncedMessage?.suppression_group_key_snapshot || '').toLowerCase();
   if (stream.startsWith('marketing_')) return;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return;
-  const reasonLabel = unrecoverableReason(status, candidate);
+  const reasonLabel = status === 'corrected_owned_by_other' && candidate?.corrected
+    ? `the likely correction (${candidate.corrected}) already belongs to another customer`
+    : (UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate);
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected
     && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed'].includes(status)
-    ? (candidate.rule === OTHER_SPELLING_RULE
-      ? ` Other spelling heard on the call: ${candidate.corrected}.`
-      : ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`)
+    ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
     : '';
   await adminAlertDeduped({
     dedupeKey: `bounce-recovery-unrecoverable:${email}`,
@@ -1619,9 +1606,7 @@ async function notifyRecoverySuccess({ recovery, bouncedEmail, correctedEmail, r
     windowHours: 24,
     category: 'system',
     title: 'Recovered a bounced email',
-    body: `${recovery.correction_rule === OTHER_SPELLING_RULE
-      ? `${bouncedEmail} bounced, so the same email was re-sent to the other spelling heard on the call, ${correctedEmail}, and the re-send delivered.`
-      : `Corrected ${bouncedEmail} → ${correctedEmail} (${recovery.correction_rule || 'domain fix'}) and the re-send delivered.`}${recordUpdated ? ` Updated ${field} on the customer record.` : ''}`,
+    body: `Corrected ${bouncedEmail} → ${correctedEmail} (${recovery.correction_rule || 'domain fix'}) and the re-send delivered.${recordUpdated ? ` Updated ${field} on the customer record.` : ''}`,
     link: recovery.customer_id ? `/admin/customers?customerId=${recovery.customer_id}` : '/admin/communications',
     metadata: { customer_id: recovery.customer_id || null, recovery_id: recovery.id, record_updated: recordUpdated },
   });

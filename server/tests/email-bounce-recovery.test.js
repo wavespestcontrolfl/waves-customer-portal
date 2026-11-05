@@ -1456,8 +1456,8 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(ledger(mockDb).pop().data).toMatchObject({ status: 'corrected_suppressed', corrected_email: 'jondoh@example.com', correction_rule: 'call_other_spelling' });
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
-    expect(body).toContain('the other spelling heard on the call (jondoh@example.com) is on the suppression list');
-    expect(body).not.toContain('likely correction');
+    // The skip alert keeps its existing wording (docs/admin-notifications.md: this PR changes no notification).
+    expect(body).toContain('the likely correction is on the suppression list');
     expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledWith({ bouncedEmail: 'jondoe@example.com', customerId: 'c1' });
   });
 
@@ -1468,7 +1468,7 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     const res = await recovery.attemptRecovery(bounced(), { event: 'bounce', type: 'bounce' });
     expect(res).toEqual({ skipped: 'corrected_owned_by_other' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('the other spelling heard on the call (jondoh@example.com) already belongs to another customer');
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('the likely correction (jondoh@example.com) already belongs to another customer');
     expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
   });
 
@@ -1540,7 +1540,7 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledWith(expect.objectContaining({ bouncedEmail: 'jondoh@example.com', sourceEmail: 'jondoe@example.com' }));
   });
 
-  test('the success bell says it was the other spelling, not a domain fix', async () => {
+  test('the success bell names both addresses and the rule (existing wording, unchanged)', async () => {
     const mockDb = orderedDb({ first: () => null });
     db.mockImplementation(mockDb);
     NotificationService.notifyAdmin.mockClear();
@@ -1550,8 +1550,7 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     db.transaction = jest.fn(async () => ({ fields: ['email'] }));
     await recovery.commitRecoveryOnDelivery({ id: 'msg1', recipient_email_snapshot: 'jondoh@example.com' });
     const call = NotificationService.notifyAdmin.mock.calls.find((c) => c[1] === 'Recovered a bounced email');
-    expect(call[2]).toContain('re-sent to the other spelling heard on the call, jondoh@example.com');
-    expect(call[2]).not.toContain('domain');
+    expect(call[2]).toContain('Corrected jondoe@example.com → jondoh@example.com (call_other_spelling) and the re-send delivered.');
     delete db.transaction;
   });
 });
