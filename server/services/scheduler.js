@@ -5386,6 +5386,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:37AM — Emailed invoices not linked to Spark (GATE_INVOICE_NOT_ON_SPARK;
+  // returns before any read when off). Owner 2026-11-05: one standing Tax bell
+  // lists, by vendor, the emailed vendor invoices dated 3 to 14 days ago whose
+  // paying bank or card line is on an account outside INVOICE_OK_ACCOUNT_LABELS,
+  // or was not found. Rings only when a vendor joins and closes itself when the
+  // list is empty. Reads expenses and bank lines; sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('37 7 * * *', async () => {
+    if (!require('../config/feature-gates').invoiceNotOnSparkLive()) return;
+    try {
+      await runExclusive('invoice-not-on-spark', async () => {
+        const result = await require('./invoice-not-on-spark').runInvoiceNotOnSpark();
+        logger.info(`Invoice not on Spark: ${result.count ?? 0} vendors listed (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Invoice not on Spark failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN (offset one minute) — Delayed gratitude replies
   // Independent of the scheduled-SMS sweep: queued operational sends never
   // wait behind courtesy replies, and a stalled scheduled-SMS recovery never
@@ -9332,7 +9352,9 @@ function initScheduledJobs() {
   // DAILY 10:20 AM — Move pause (moving PR 2b, owner Q4): the one reminder
   // text a week before move-out for a customer with no new address, then the
   // pause of the plans at the house left, then the close of a pause past 60
-  // days. Gate read per tick (GATE_MOVING_PAUSE), so a flip needs no restart.
+  // days. With GATE_MOVING_STOP_AT_MOVE_OUT the pause step also stops the
+  // old-house plans of a move with a new address not applied by move-out.
+  // Gates read per tick (GATE_MOVING_PAUSE), so a flip needs no restart.
   // =========================================================================
   cron.schedule('20 10 * * *', async () => {
     if (!require('../config/feature-gates').movingPauseLive()) return;

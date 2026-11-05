@@ -274,20 +274,24 @@ const w2ReadmeItems = (payRunWages) => [
 // routing number is ever read here.
 // timeOff (GATE_PAYROLL_TIME_OFF) adds 'Paid Time Off Hours' and 'Holiday Hours'
 // right after 'Overtime Hours', so the hours columns reconcile with gross.
+// A check with SIMPLE IRA savings (simple_deferral_cents, payroll-simple.js) adds a last column, only
+// when some check has them: the savings are in Gross Wages and come out of Net Pay, so Net Pay foots.
 function w2PayrollToCSV(checks, { timeOff = false } = {}) {
+  const withSimple = checks.some((k) => k.simple_deferral_cents != null);
   const headers = [
     'Employee', 'Week Start', 'Week End', 'Pay Date', 'Regular Hours', 'Overtime Hours',
     ...(timeOff ? ['Paid Time Off Hours', 'Holiday Hours'] : []),
     'Gross Wages', 'Federal Income Tax Withheld', 'Employee Social Security',
     'Employee Medicare (incl. Additional Medicare)', 'Employer Social Security', 'Employer Medicare',
     'FUTA', 'Florida Reemployment Tax', 'Net Pay',
+    ...(withSimple ? ['SIMPLE IRA Savings (not income tax wages)'] : []),
   ];
   const lines = [row(headers)];
   const dollars = (cents) => (cents / 100).toFixed(2);
   const hundredths = (minutes) => Math.round(((Number(minutes) || 0) / 60) * 100);
   const hours = (h) => (h / 100).toFixed(2);
   const c = (v) => Math.round(Number(v) || 0);
-  const tot = { reg: 0, ot: 0, pto: 0, hol: 0, gross: 0, fit: 0, ss: 0, med: 0, erSs: 0, erMed: 0, futa: 0, fl: 0, net: 0 };
+  const tot = { reg: 0, ot: 0, pto: 0, hol: 0, gross: 0, fit: 0, ss: 0, med: 0, erSs: 0, erMed: 0, futa: 0, fl: 0, net: 0, simple: 0 };
   for (const k of checks) {
     const reg = hundredths(k.regular_minutes);
     const ot = hundredths(k.overtime_minutes);
@@ -298,6 +302,7 @@ function w2PayrollToCSV(checks, { timeOff = false } = {}) {
     tot.gross += c(k.gross_cents); tot.fit += c(k.federal_income_tax_cents); tot.ss += c(k.social_security_cents);
     tot.med += med; tot.erSs += c(k.employer_social_security_cents); tot.erMed += c(k.employer_medicare_cents);
     tot.futa += c(k.futa_cents); tot.fl += c(k.fl_reemployment_cents); tot.net += c(k.net_cents);
+    tot.simple += c(k.simple_deferral_cents);
     lines.push(row([
       k.employee_name || '',
       k.week_start || '',
@@ -308,6 +313,7 @@ function w2PayrollToCSV(checks, { timeOff = false } = {}) {
       dollars(c(k.gross_cents)), dollars(c(k.federal_income_tax_cents)), dollars(c(k.social_security_cents)),
       dollars(med), dollars(c(k.employer_social_security_cents)), dollars(c(k.employer_medicare_cents)),
       dollars(c(k.futa_cents)), dollars(c(k.fl_reemployment_cents)), dollars(c(k.net_cents)),
+      ...(withSimple ? [dollars(c(k.simple_deferral_cents))] : []),
     ]));
   }
   lines.push(row([
@@ -315,6 +321,7 @@ function w2PayrollToCSV(checks, { timeOff = false } = {}) {
     ...(timeOff ? [hours(tot.pto), hours(tot.hol)] : []),
     dollars(tot.gross), dollars(tot.fit), dollars(tot.ss), dollars(tot.med), dollars(tot.erSs), dollars(tot.erMed),
     dollars(tot.futa), dollars(tot.fl), dollars(tot.net),
+    ...(withSimple ? [dollars(tot.simple)] : []),
   ]));
   return lines.join('\n');
 }

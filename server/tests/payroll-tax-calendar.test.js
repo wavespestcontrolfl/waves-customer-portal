@@ -103,6 +103,37 @@ describe('payrollObligations', () => {
     });
   });
 
+  test('SIMPLE IRA: a month with savings gets a Schwab row due 30 days after the month ends; the 2% is one row per year', () => {
+    const rows = payrollObligations({
+      checks: [
+        check('2027-01-15', { simple_deferral_cents: 5000, simple_employer_cents: 200 }),
+        check('2027-01-22', { simple_deferral_cents: 5000, simple_employer_cents: 200 }),
+        check('2027-02-05', { simple_deferral_cents: 0, simple_employer_cents: 200 }),
+        check('2027-03-05'),
+      ],
+      hires: [],
+      today: '2027-03-10',
+    });
+    const map = byKey(rows);
+    expect(map['payroll:simple_deposit:2027-01']).toMatchObject({
+      filing_type: 'payroll_simple_deposit', period_label: 'Jan 2027', due_date: '2027-03-02', amount_due: '100.00',
+    });
+    expect(map['payroll:simple_deposit:2027-01'].title).toBe('SIMPLE IRA savings to Schwab — Jan 2027');
+    // No savings in February (a participant who saved nothing) and none in March (no election): no row.
+    expect(map['payroll:simple_deposit:2027-02']).toBeUndefined();
+    expect(map['payroll:simple_deposit:2027-03']).toBeUndefined();
+    expect(map['payroll:simple_employer:2027']).toMatchObject({
+      filing_type: 'payroll_simple_employer', due_date: '2028-04-18', amount_due: '6.00', period_label: 'Tax Year 2027',
+    });
+    // The savings are not a payroll tax: the federal deposit amounts are what they were.
+    expect(map['payroll:941_deposit:2027-01'].amount_due).toBe('506.00');
+  });
+
+  test('no SIMPLE IRA figures on any check: no SIMPLE row, and the other rows are unchanged', () => {
+    const rows = payrollObligations({ checks: [check('2027-01-08'), check('2027-02-05')], hires: [], today: '2027-02-10' });
+    expect(rows.filter((r) => /simple/.test(r.source_key))).toEqual([]);
+  });
+
   test('941 and RT-6 per quarter, including quarters with no checks up to today', () => {
     const rows = payrollObligations({
       checks: [check('2027-01-08'), check('2027-01-22'), check('2027-02-05')],

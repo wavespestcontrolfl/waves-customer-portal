@@ -2,7 +2,9 @@
 // GATE_MOVING_PAUSE (owner Q4): the daily job's reminder text a week before move-out, the pause
 // of every plan at the house left on the move-out day for the visits after it (no customer text,
 // no fee), the office hand-offs and their items written with the move change, the move fence,
-// the end after 60 days, the receipt's pause lane, and Apply move after a pause. Sends, charges
+// the end after 60 days, the receipt's pause lane, and Apply move after a pause. With
+// GATE_MOVING_STOP_AT_MOVE_OUT (owner 2026-11-04) the same stop runs for a move with a new address
+// that is not applied by the move-out day, and the move stays open. Sends, charges
 // and texts nothing: the customer sender, the reminder sender and the admin bell writer are spies,
 // and the cancellation follow-through runs for real behind a call recorder. All names and
 // addresses are synthetic.
@@ -72,7 +74,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    for (const key of ['GATE_MOVING_FLOW', 'GATE_MOVING_PAUSE', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_APPLY', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
+    for (const key of ['GATE_MOVING_FLOW', 'GATE_MOVING_PAUSE', 'GATE_MOVING_STOP_AT_MOVE_OUT', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_APPLY', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
     // Three connections: the test's transaction, the job's move fence, and a rival fence holder.
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 3 } });
     Moves = require('../services/customer-moves');
@@ -134,6 +136,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     process.env.GATE_MOVING_FLOW = 'true';
     process.env.GATE_MOVING_PAUSE = 'true';
     process.env.GATE_CUSTOMER_PROPERTIES = 'true';
+    delete process.env.GATE_MOVING_STOP_AT_MOVE_OUT;
     delete process.env.GATE_MOVING_ESTIMATE;
     delete process.env.GATE_MOVING_APPLY;
     trx = await database.transaction();
@@ -152,6 +155,10 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
   const statusOf = async (id) => (await trx('scheduled_services').where({ id }).first('status')).status;
   const moveRow = (id) => trx('customer_moves').where({ id }).first();
   const alertCalls = (kind) => Notifications.notifyAdmin.mock.calls.filter(([, , , opts]) => opts?.metadata?.kind === `moving_pause_${kind}`);
+  // The visit note of every cancel the job makes, and the first (2b) note it still replays.
+  const pauseNote = (moveId) => `Customer moved out; plan stopped after the move-out date (moving flow, move pause ${moveId})`;
+  const firstPauseNote = (moveId) => `Customer moved out with no new address; plan paused after the move-out date (moving flow, move pause ${moveId})`;
+  const WITH_ADDRESS = { typed_address: NEW_ADDRESS, normalized_address: JSON.stringify(NEW_HOUSE), address_verdict: 'in_area' };
 
   test('after move-out, every plan at the house left pauses quietly and the move is held 60 days', async () => {
     const s = await seed();
@@ -168,7 +175,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     // The plan at their other property is untouched.
     expect(await trx('scheduled_services').where({ id: s.otherRoot }).first('status', 'recurring_ongoing')).toEqual({ status: 'pending', recurring_ongoing: true });
     const notes = await trx('job_status_history').whereIn('job_id', [s.pestAfter1, s.lawnAfter]).pluck('notes');
-    expect(notes).toEqual([expect.stringContaining(`move pause ${s.move.id}`), expect.stringContaining(`move pause ${s.move.id}`)]);
+    expect(notes).toEqual([pauseNote(s.move.id), pauseNote(s.move.id)]);
 
     // No customer text, no fee.
     expect(Sender.sendCustomerMessage).not.toHaveBeenCalled();
@@ -454,7 +461,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
 
   // A run that claimed the pause, cancelled the pest plan and stopped before that cancel's
   // follow-through (and before the lawn plan and the end state).
-  async function crashAfterPestCancel(s) {
+  async function crashAfterPestCancel(s, notes = pauseNote(s.move.id)) {
     await trx('customer_moves').where({ id: s.move.id }).update({
       paused_at: new Date(), pause_ends_on: etDateString(addETDays(new Date(`${MOVE_OUT}T12:00:00Z`), 60)),
     });
@@ -463,7 +470,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     FollowThrough.runVisitCancellationFollowThrough.mockImplementationOnce(async () => { throw Object.assign(new Error('process stopped'), { statusCode: 500 }); });
     await expect(actual.cancelSeriesRemainder({
       parentId: s.pestRoot, customerId, serviceType: 'Quarterly Pest Control Service', recurringPattern: 'quarterly', scope: 'following',
-      fromDate: day(0), notifyCustomer: false, notes: `Customer moved out with no new address; plan paused after the move-out date (moving flow, move pause ${s.move.id})`,
+      fromDate: day(0), notifyCustomer: false, notes,
       actorId: null, waiveFee: true, source: 'moving-pause', allowEmpty: true, linkedChildren: [],
     })).rejects.toThrow('process stopped');
     expect(await statusOf(s.pestAfter1)).toBe('cancelled');
@@ -472,10 +479,10 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     FollowThrough.runVisitCancellationFollowThrough.mockReset();
     FollowThrough.runVisitCancellationFollowThrough.mockImplementation((...args) => FT.runVisitCancellationFollowThrough(...args));
   }
-  async function expectPestReplayed(s) {
+  async function expectPestReplayed(s, reason = pauseNote(s.move.id)) {
     const replay = FollowThrough.runVisitCancellationFollowThrough.mock.calls.map(([args]) => args)
       .find((args) => args.targetIds.includes(s.pestAfter1));
-    expect(replay).toMatchObject({ waiveFee: true, source: 'moving-pause', linkedChildren: [] });
+    expect(replay).toMatchObject({ waiveFee: true, reason, source: 'moving-pause', linkedChildren: [] });
     expect([...replay.targetIds].sort()).toEqual([s.pestAfter1, s.pestAfter2].sort());
     expect(await trx('scheduled_services').whereIn('id', [s.pestAfter1, s.pestAfter2]).pluck('track_state')).toEqual(['cancelled', 'cancelled']);
   }
@@ -487,6 +494,15 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect((await Moves.submitMove(await moveRow(s.move.id), { moveOutDate: MOVE_OUT })).pauseLane).toBeNull();
     expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
     await expectPestReplayed(s);
+    expect(await statusOf(s.lawnAfter)).toBe('cancelled');
+    expect((await moveRow(s.move.id)).pause_state).toBe('paused');
+  });
+
+  test('a pause started on the first (2b) visit note still replays on it', async () => {
+    const s = await seed();
+    await crashAfterPestCancel(s, firstPauseNote(s.move.id));
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1 });
+    await expectPestReplayed(s, firstPauseNote(s.move.id));
     expect(await statusOf(s.lawnAfter)).toBe('cancelled');
     expect((await moveRow(s.move.id)).pause_state).toBe('paused');
   });
@@ -597,5 +613,135 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     expect(await moveRow(s.move.id)).toMatchObject({ status: 'closed', closed_reason: 'applied', to_property_id: newHouseId });
     // The open visit dated between move-out and today was never cancelled by either step.
     expect(await statusOf(s.pestPastOpen)).toBe('pending');
+  });
+
+  // ── The old-house stop (GATE_MOVING_STOP_AT_MOVE_OUT, owner 2026-11-04) ──
+
+  test('with the old-house stop on, a move with a new address stops every plan at the house left, quietly, and stays open', async () => {
+    const s = await seed({ move: WITH_ADDRESS });
+    // Off (the default), a move with an address is left alone; on, it still needs the move pause.
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 0 });
+    process.env.GATE_MOVING_STOP_AT_MOVE_OUT = 'true';
+    process.env.GATE_MOVING_PAUSE = 'false';
+    expect(await Moves.runMovePauseJob()).toEqual({ skipped: true });
+    expect(await statusOf(s.pestAfter1)).toBe('pending');
+    process.env.GATE_MOVING_PAUSE = 'true';
+
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1, office: 0, failed: 0, reminded: 0 });
+    // The same stop as the pause: visits from today on cancelled; the open visit dated before today,
+    // the one-time visit and the plan at the other property stay.
+    expect(await statusOf(s.pestAfter1)).toBe('cancelled');
+    expect(await statusOf(s.pestAfter2)).toBe('cancelled');
+    expect(await statusOf(s.lawnAfter)).toBe('cancelled');
+    expect(await statusOf(s.pestPastOpen)).toBe('pending');
+    expect(await statusOf(s.oneOff)).toBe('pending');
+    expect(await trx('scheduled_services').where({ id: s.otherRoot }).first('status', 'recurring_ongoing')).toEqual({ status: 'pending', recurring_ongoing: true });
+    const notes = await trx('job_status_history').whereIn('job_id', [s.pestAfter1, s.lawnAfter]).pluck('notes');
+    expect(notes).toEqual([pauseNote(s.move.id), pauseNote(s.move.id)]);
+    expect(Sender.sendCustomerMessage).not.toHaveBeenCalled();
+    for (const [, , options] of Reminders.handleSeriesCancellation.mock.calls) expect(options.sendNotification).toBe(false);
+    for (const [args] of FollowThrough.runVisitCancellationFollowThrough.mock.calls) {
+      expect(args).toMatchObject({ waiveFee: true, source: 'moving-pause', linkedChildren: [] });
+    }
+
+    // The move stays submitted for the new-home estimate and Apply move.
+    expect(await moveRow(s.move.id)).toMatchObject({ status: 'submitted', pause_state: 'paused', closed_reason: null });
+    const [log] = await trx('activity_log').where({ customer_id: customerId, action: 'moving_paused' }).pluck('description');
+    expect(log).toMatch(/^Customer moved out: plans at 1 Old Street.* stopped after .+ \(2 plans, 3 visits cancelled, no customer text, no fee\)\. The move stays open for the new-home estimate and Apply move\.$/);
+    const [[, title, why]] = alertCalls('left_booked');
+    expect(title).toBe("Customers — check Pat Sample's old-house visits");
+    expect(why).toBe('The plans stopped after the move-out, but 2 visits are still booked at the old house.');
+
+    // No reminder and no 60-day end for a move with an address: it never closes on its own.
+    await trx('customer_moves').where({ id: s.move.id }).update({ pause_ends_on: day(-1) });
+    jest.clearAllMocks();
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 0, ended: 0, reminded: 0 });
+    expect((await moveRow(s.move.id)).status).toBe('submitted');
+    expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the old-house stop never stops a plan the move\'s new-home estimate booked, and Apply move then finds nothing left to stop', async () => {
+    process.env.GATE_MOVING_STOP_AT_MOVE_OUT = 'true';
+    process.env.GATE_MOVING_ESTIMATE = 'true';
+    process.env.GATE_MOVING_APPLY = 'true';
+    const s = await seed({ move: WITH_ADDRESS });
+    const [{ id: newHouseId }] = await trx('customer_properties').insert({
+      customer_id: customerId, is_primary: false, active: true, occupancy_type: 'unknown',
+      address_line1: NEW_HOUSE.line1, city: NEW_HOUSE.city, state: NEW_HOUSE.state, zip: NEW_HOUSE.zip,
+    }).returning('id');
+    const estimateId = crypto.randomUUID();
+    await trx('estimates').insert({
+      id: estimateId, customer_id: customerId, customer_name: 'Pat Sample', status: 'accepted', address: NEW_ADDRESS, property_id: newHouseId,
+      accepted_at: new Date(),
+      estimate_data: JSON.stringify({ inputs: { svcPest: true, pestFreq: '4' }, move: { moveId: s.move.id, estimateId, address: NEW_ADDRESS, moveOutDate: MOVE_OUT } }),
+    });
+    await trx('customer_moves').where({ id: s.move.id }).update({ estimate_id: estimateId });
+    // The accepted estimate's plan at the new home, and a second series it booked whose visits carry
+    // no address (an unstamped visit reads as the primary property: the house left).
+    const newRoot = await insertVisit({
+      scheduled_date: day(20), is_recurring: true, recurring_pattern: 'quarterly', recurring_ongoing: true,
+      property_id: newHouseId, source_estimate_id: estimateId,
+      service_address_line1: NEW_HOUSE.line1, service_address_city: NEW_HOUSE.city, service_address_state: 'FL', service_address_zip: NEW_HOUSE.zip,
+    });
+    const unstampedRoot = await insertVisit({
+      service_type: 'Mosquito Control', scheduled_date: day(25), is_recurring: true, recurring_pattern: 'monthly', recurring_ongoing: true,
+      source_estimate_id: estimateId,
+    });
+
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 1, office: 0, failed: 0 });
+    expect(await statusOf(s.pestAfter1)).toBe('cancelled');
+    expect(await statusOf(s.lawnAfter)).toBe('cancelled');
+    for (const id of [newRoot, unstampedRoot]) {
+      expect(await trx('scheduled_services').where({ id }).first('status', 'recurring_ongoing')).toEqual({ status: 'pending', recurring_ongoing: true });
+    }
+
+    const preview = await Moves.applyMovePreview(customerId, s.move.id);
+    expect(preview.stops.every((stop) => stop.cancelCount === 0)).toBe(true);
+    const result = await Moves.applyMove(customerId, s.move.id, { version: preview.version, actorId: null });
+    expect(result).toMatchObject({ applied: true, primaryChanged: true, visitsCancelled: 0 });
+    expect(await moveRow(s.move.id)).toMatchObject({ status: 'closed', closed_reason: 'applied', to_property_id: newHouseId });
+    expect(await statusOf(newRoot)).toBe('pending');
+  });
+
+  test('with the old-house stop on, annual prepay and monthly members with a new address go to the office once, pointed to the steps', async () => {
+    process.env.GATE_MOVING_STOP_AT_MOVE_OUT = 'true';
+    const s = await seed({ move: WITH_ADDRESS, customer: { billing_mode: 'annual_prepay' } });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ paused: 0, office: 1 });
+    expect(await statusOf(s.pestAfter1)).toBe('pending');
+    const after = await moveRow(s.move.id);
+    expect(after).toMatchObject({ status: 'submitted', pause_state: 'office' });
+    expect(after.pause_note).toBe('They prepay for the year, so the app did not stop their old-house visits. Move them to the new home: follow the steps on the Moving card.');
+    const [[, title, why, opts]] = alertCalls('office');
+    expect(title).toBe("Customers — handle Pat Sample's old-house visits by hand");
+    expect(why).toMatch(/^Their move-out is .+ and the move is not applied yet; the app did not stop the old-house visits\.$/);
+    expect(opts).toMatchObject({ bell: true, dedupeKey: `moving_pause_office:${s.move.id}` });
+    expect(opts.detail).toBe(after.pause_note);
+    jest.clearAllMocks();
+    expect(await Moves.runMovePauseJob()).toMatchObject({ office: 0 });
+    expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
+
+    await trx('customer_moves').where({ id: s.move.id }).update({ pause_state: null, pause_note: null, paused_at: null });
+    await trx('customers').where({ id: customerId }).update({ billing_mode: null, waveguard_tier: 'Gold', monthly_rate: 89 });
+    expect(await Moves.runMovePauseJob()).toMatchObject({ office: 1 });
+    expect((await moveRow(s.move.id)).pause_note).toContain('monthly membership, so the app did not stop their old-house visits');
+    expect(await statusOf(s.pestAfter1)).toBe('pending');
+  });
+
+  test('the receipt lane for a move with a new address follows the old-house stop', async () => {
+    const s = await seed({ move: WITH_ADDRESS });
+    const lane = async () => Moves._private.pauseLane(await moveRow(s.move.id));
+    expect(await lane()).toBeNull();
+    process.env.GATE_MOVING_STOP_AT_MOVE_OUT = 'true';
+    expect(await lane()).toBe('auto');
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'annual_prepay' });
+    expect(await lane()).toBe('office');
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'one_time' });
+    expect(await lane()).toBeNull();
+    await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application' });
+    await trx('customer_moves').where({ id: s.move.id }).update({ move_out_date: null });
+    expect(await lane()).toBeNull();
+    await trx('customer_moves').where({ id: s.move.id }).update({ move_out_date: MOVE_OUT });
+    process.env.GATE_MOVING_PAUSE = 'false';
+    expect(await lane()).toBeNull();
   });
 });

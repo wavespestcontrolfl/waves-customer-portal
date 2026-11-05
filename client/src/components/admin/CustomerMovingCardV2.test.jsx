@@ -77,6 +77,20 @@ describe('movePauseText', () => {
     // A closed move has its own status line.
     expect(movePauseText({ status: 'closed', closed_reason: 'pause_expired', pause_state: 'paused' })).toBeNull();
   });
+
+  // GATE_MOVING_STOP_AT_MOVE_OUT: a move with a new address reads as the old-house stop, with no last day.
+  it('a move with a new address reads as the old-house stop', () => {
+    const withAddress = { ...submitted, normalized_address: { line1: '40 Sample Road', city: 'Venice', state: 'FL', zip: '34285' } };
+    expect(movePauseText(withAddress)).toBeNull();
+    expect(movePauseText({ ...withAddress, pause_state: 'paused', pause_ends_on: '2027-01-14' })).toBe('Old-house visits stopped after Nov 15');
+    // The server sends the address as stored (a JSON string) too.
+    expect(movePauseText({ ...withAddress, normalized_address: JSON.stringify(withAddress.normalized_address), pause_state: 'paused' }))
+      .toBe('Old-house visits stopped after Nov 15');
+    expect(movePauseText({ ...withAddress, pause_state: 'office', pause_note: 'They prepay for the year, so the app did not stop their old-house visits.' }))
+      .toBe('Old-house visits left to the office: They prepay for the year, so the app did not stop their old-house visits.');
+    expect(movePauseText({ ...withAddress, pause_state: 'office' })).toBe('Old-house visits left to the office: handle them by hand');
+    expect(movePauseText({ ...withAddress, paused_at: '2026-11-15T15:20:00Z' })).toBe('Old-house stop started Nov 15, not finished yet');
+  });
 });
 
 const PREVIEW = {

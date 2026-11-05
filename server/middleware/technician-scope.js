@@ -113,10 +113,11 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: ['PATCH', 'DELETE'], pattern: /^\/api\/visual-moments\/[^/]+$/ },
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/service\/records\/[^/]+\/validate-photo-chain$/ },
 
-  // Own timesheet and mileage.
+  // Own timesheet. The timesheet dispute and own mileage are not on the list
+  // (owner 2026-11-04, D5 A): the dispute router is admin-only and no
+  // technician screen offers it, and no technician mileage route exists.
   { bucket: 'own-time', methods: ANY, pattern: /^\/api\/tech\/timetracking(\/.*)?$/ },
   { bucket: 'own-time', methods: ANY, pattern: /^\/api\/admin\/timetracking(\/.*)?$/ },
-  { bucket: 'own-time', methods: ['POST'], pattern: /^\/api\/admin\/timesheets\/dispute$/ },
 
   // Texts with customers on their own visits: admin-communications scopes a
   // technician's inbox, sends, drafts and read-marks to customers on their
@@ -124,8 +125,11 @@ const TECHNICIAN_ALLOW_LIST = [
   // list closes the routes a technician has no business calling at all:
   // stats, the compliance export, outbound calls from the business line,
   // and link library configuration.
-  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|customer-link|agent-draft)$/ },
-  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|rewrite-sms|ai-draft|customer-link)$/ },
+  // The reschedule, re-service and customer link builders are not on the list
+  // (owner 2026-11-04): their routes are requireAdmin, so a technician login
+  // never reached them.
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|agent-draft)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|rewrite-sms|ai-draft)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   // Facebook Messenger threads (GATE_MESSENGER_INBOX, dark): the router scopes a
   // technician to threads linked to a customer on their own route, like the SMS inbox.

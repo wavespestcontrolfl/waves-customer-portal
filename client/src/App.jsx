@@ -493,7 +493,8 @@ function profileOnlyTarget({ propertyScopedDestination, sameProfile, primaryEntr
 // house a completion or receipt push names (uncapped codex r1v P1): a retired
 // house must not turn a report or an invoice into "Property unavailable" when
 // the tab itself opens. Home, Visits and My Property follow the selection.
-const CUSTOMER_WIDE_TABS = ['billing', 'refer', 'documents', 'plan', 'learn'];
+// Messages is one thread per profile (GATE_PORTAL_MESSAGES): a reply link needs only the profile.
+const CUSTOMER_WIDE_TABS = ['billing', 'refer', 'documents', 'plan', 'learn', 'messages'];
 
 // Where a notification deep link wants the portal to be, judged against the
 // session's current selection and property list. Pure: everything the route
