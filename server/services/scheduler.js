@@ -1054,6 +1054,20 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[multi-home-all-homes] tick failed: ${err.message}`);
     }
+    // Family PR 3: right after the discount job, the "Your Multi-Home Discount is on" email (services/
+    // multi-home-discount-email.js). Dark behind GATE_MULTI_HOME_DISCOUNT_EMAIL, read per tick BEFORE the cron lock;
+    // off = no query, no send. Its own lock so a slow email run never holds up the next discount tick's lock.
+    if (!(typeof gates.multiHomeDiscountEmailLive === 'function' && gates.multiHomeDiscountEmailLive())) return;
+    try {
+      await runExclusive('multi-home-discount-email', async () => {
+        const result = await require('./multi-home-discount-email').runMultiHomeDiscountEmail();
+        if (result.sent || result.failed || result.blocked) {
+          logger.info(`[multi-home-discount-email] tick: ${result.sent} sent, ${result.deduped} already sent, ${result.blocked} blocked, ${result.failed} failed`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[multi-home-discount-email] tick failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // HOURLY 8 AM-8 PM ET at :41 — the office check after a "report only, no
