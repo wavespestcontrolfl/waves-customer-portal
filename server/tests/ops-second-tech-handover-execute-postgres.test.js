@@ -25,7 +25,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
   const START = '2099-07-06'; // Monday
   const TODAY = '2099-06-30';
   const NOW = new Date('2099-07-01T16:00:00Z'); // a Wednesday noon, ET: outside every restart window
-  const created = { techs: [], customers: [], groups: [], plans: [] };
+  const created = { techs: [], customers: [], groups: [], plans: [], zips: [] };
   let priorGate;
 
   const tech = (id, extra = {}) => ({
@@ -142,6 +142,7 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
       await knex('scheduled_services').whereIn('customer_id', created.customers).del();
       await knex('customers').whereIn('id', created.customers).del();
     }
+    if (created.zips.length) await knex('territory_zips').whereIn('zip', created.zips).del();
     await knex('technicians').whereIn('id', created.techs).del();
     await knex.destroy();
   });
@@ -221,6 +222,70 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     // The same file a second time: refused, nothing written.
     await expect(exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW })).rejects.toMatchObject({ code: 'ALREADY_ROLLED_BACK' });
     expect(await knex('audit_log').where({ action: 'schedule.handover.rollback' }).whereRaw("metadata->>'plan_id' = ?", [result.planId])).toHaveLength(1);
+  });
+
+  // Owner 2026-10-30: termite and WDO follow the territory. A --zips run hands them over with the territory ZIP;
+  // the bait customer stays; --to set to Off for termite refuses before any write; termite needs --zips.
+  test('a territory run moves termite and WDO series with the ZIP, skips bait, refuses an Off line, and rolls back', async () => {
+    const ownerId = await makeTech();
+    const hireId = await makeTech({ work_days: [1, 2, 3, 4] });
+    // A territory run needs a cover on every territory line (#7606, NO_COVER_TECH): the owner is the gap technician.
+    const priorCard = await knex('service_line_techs').select('*');
+    await knex('service_line_techs').del();
+    await knex('service_line_techs').insert(['general', 'mosquito', 'rodent', 'termite']
+      .map((line) => ({ service_category: line, home_technician_id: hireId, gap_technician_id: ownerId })));
+    try {
+      await knex('territory_zips').insert({ zip: '99902', area: 'synthetic' });
+      created.zips.push('99902');
+      const on = (o) => ({ service_address_zip: '99902', ...o });
+      const wdo = await series(ownerId, await customer(), on({ service_type: 'WDO Inspection' }));
+      const wdoVisit = await child(ownerId, wdo, '2099-07-07', on({ service_type: wdo.service_type, route_order: 3 }));
+      const pest = await series(ownerId, await customer(), on());
+      const pestVisit = await child(ownerId, pest, '2099-07-08', on());
+      const baitCustomer = await customer();
+      const bait = await series(ownerId, baitCustomer, on({ service_type: 'Quarterly Termite Active Bait Station Service' }));
+      const baitVisit = await child(ownerId, bait, '2099-07-07', on({ service_type: bait.service_type }));
+      const lawn = await series(ownerId, await customer(), on({ service_type: 'Lawn Care Program' }));
+      const lawnVisit = await child(ownerId, lawn, '2099-07-07', on({ service_type: 'Lawn Care Program' }));
+      const base = { from: ownerId, to: hireId, start: START, today: TODAY, now: NOW, outDir, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) };
+      const zipArgs = { zips: ['99902'], lines: handover.TERRITORY_MOVABLE_LINES };
+      const plan = await handover.planHandover(knex, { from: ownerId, to: hireId, start: START, today: TODAY, ...zipArgs });
+      created.plans.push(plan.planId);
+      expect(new Set(plan.ids.visits)).toEqual(new Set([wdoVisit.id, pestVisit.id]));
+
+      // Termite without --zips is refused before any write.
+      await expect(exec.executeHandover(knex, { ...base, planId: plan.planId, lines: handover.TERRITORY_MOVABLE_LINES })).rejects.toMatchObject({ code: 'LINES_NEED_ZIPS' });
+      // --to Off for termite: refused with its own code, nothing written, no file.
+      await knex('technician_capabilities').insert({ technician_id: hireId, service_category: 'termite', capability_level: 'review_required', active: false });
+      const filesBefore = fs.readdirSync(outDir).length;
+      await expect(exec.executeHandover(knex, { ...base, planId: plan.planId, ...zipArgs })).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
+      expect((await get(wdoVisit.id)).technician_id).toBe(ownerId);
+      expect((await get(wdo.id)).recurring_technician_override).toBe(false);
+      expect((await knex('territory_zips').where({ zip: '99902' }).first()).technician_id).toBeNull();
+      expect(fs.readdirSync(outDir).length).toBe(filesBefore);
+      await knex('technician_capabilities').where({ technician_id: hireId }).del();
+
+      // The run: the executor's own default for --zips is the four lines.
+      const result = await exec.executeHandover(knex, { ...base, planId: plan.planId, zips: ['99902'] });
+      expect(result).toMatchObject({ series: 2, visits: 2, customers: 2, territory: 1, cardSent: true });
+      for (const s of [wdo, pest]) expect(await get(s.id)).toMatchObject({ recurring_technician_id: hireId, recurring_technician_override: true });
+      expect(await get(wdoVisit.id)).toMatchObject({ technician_id: hireId, route_order: null });
+      expect((await get(pestVisit.id)).technician_id).toBe(hireId);
+      for (const v of [baitVisit, lawnVisit]) expect((await get(v.id)).technician_id).toBe(ownerId);
+      for (const s of [bait, lawn]) expect(await get(s.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
+      expect((await knex('territory_zips').where({ zip: '99902' }).first()).technician_id).toBe(hireId);
+      const file = JSON.parse(fs.readFileSync(result.rollbackFile, 'utf8'));
+      expect(file.lines).toEqual(['general', 'rodent', 'mosquito', 'termite']);
+
+      const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn().mockResolvedValue({ status: 'refreshed' }) });
+      expect(undo).toMatchObject({ seriesRestored: 2, visitsRestored: 2, territoryRestored: 1 });
+      expect(await get(wdoVisit.id)).toMatchObject({ technician_id: ownerId, route_order: 3 });
+      expect(await get(wdo.id)).toMatchObject({ recurring_technician_id: null, recurring_technician_override: false });
+      expect((await knex('territory_zips').where({ zip: '99902' }).first()).technician_id).toBeNull();
+    } finally {
+      await knex('service_line_techs').del();
+      if (priorCard.length) await knex('service_line_techs').insert(priorCard);
+    }
   });
 
   test('a stale or wrong PLAN ID writes nothing and leaves no rollback file', async () => {

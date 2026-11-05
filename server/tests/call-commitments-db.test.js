@@ -1019,6 +1019,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       }));
       expect(r).toHaveProperty('snoozed_until');
       expect(r).toHaveProperty('due_at');
+      // The list's words: what was promised, and how.
+      expect(r).toHaveProperty('channel');
+      expect(r.description).toEqual(expect.any(String));
     }
   });
 
