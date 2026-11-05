@@ -3,17 +3,18 @@
  *
  * A customer's phone on file can be dead: every text to it fails with Twilio 30003 (unreachable handset)
  * or 30005 (unknown handset). Nothing used to tell staff. When a text to a customer's number fails with one
- * of those two codes and the customer has had 2 or more failed texts to the same number (last 10 digits)
- * in 180 days, ONE bell row says so by name: "Customers - <Name>'s phone can't get texts".
+ * of those two codes and it is the 2nd failed text in a row to that number (last 10 digits; no delivered text
+ * in between) in 180 days, ONE bell row says so by name: "Customers - <Name>'s phone can't get texts".
+ * Order is by when each text was sent, so a late callback for an older text never counts as news.
  *
  * - Called from the Twilio delivery callback (routes/twilio-webhook.js POST /status). Both entry points never
  *   throw: the callback and its other handlers must not feel a failure here. Logs carry codes only, never a
  *   name or a phone number.
  * - Dedupe: one OPEN row per customer + number (`dead-number:<customerId>:<last10>`, dedupeOpenOnly). A person's
  *   Done lets a later failed text raise a fresh row (RERING in admin-alert-retention.js, kind 'event').
- * - Close (done-when `phone_replaced`): the row closes when a later text to that number is delivered, or when the
- *   customer's phone and secondary phone no longer end in those 10 digits. Both are judged at the customer's next
- *   delivered text (closeDeadNumberAlerts), which is when a new number first gets used.
+ * - Close (done-when `phone_replaced`): the row closes when a text sent after the number's last failure is
+ *   delivered, or when the customer's phone and secondary phone no longer end in those 10 digits. Both are judged
+ *   at the customer's next delivered text (closeDeadNumberAlerts), which is when a new number first gets used.
  * - Sends nothing to anyone. Only the bell.
  */
 'use strict';
@@ -24,6 +25,8 @@ const { deadNumberAlertLive } = require('../config/feature-gates');
 
 const UNREACHABLE_CODES = new Set(['30003', '30005']);
 const FAILED_STATUSES = ['failed', 'undelivered'];
+// The statuses that settle a text: Twilio reported it failed, undelivered or delivered.
+const SETTLED_STATUSES = [...FAILED_STATUSES, 'delivered'];
 const WINDOW_DAYS = 180;
 const MIN_FAILURES = 2;
 const KEY_PREFIX = 'dead-number:';
@@ -65,7 +68,7 @@ function copyFor({ count, key, since, errorCode }) {
   const { shortDateET } = require('./admin-alert-names');
   const when = shortDateET(since);
   const { says, next } = CARRIER_SAYS[String(errorCode)] || CARRIER_SAYS[30005];
-  const why = `${count} texts to …${key.slice(-4)} failed${when ? ` since ${when}` : ''}: ${says}.`;
+  const why = `${count} texts in a row to …${key.slice(-4)} failed${when ? ` since ${when}` : ''}: ${says}.`;
   return { why, detail: `${why} ${next}` };
 }
 
@@ -75,16 +78,34 @@ async function outboundCustomerText(sid) {
   return row && row.customer_id && row.direction === 'outbound' ? row : null;
 }
 
-// This customer's failed or undelivered outbound texts to one number in the window, as created_at dates. The
-// status update at the top of the callback may have failed, so this callback's own row always counts.
-async function failedTextDates(customerId, key, sid) {
-  const rows = await db('sms_log')
+// This customer's settled outbound texts to one number in the window, plus this callback's own row, oldest
+// sent first.
+async function settledTextsTo(customerId, key, sid) {
+  return db('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     .where('created_at', '>=', new Date(Date.now() - WINDOW_DAYS * DAY_MS))
     .whereRaw("right(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
-    .where(function failedOrThis() { this.whereIn('status', FAILED_STATUSES).orWhere('twilio_sid', sid); })
-    .select('created_at');
-  return rows.map((r) => new Date(r.created_at));
+    .where(function settledOrThis() { this.whereIn('status', SETTLED_STATUSES).orWhere('twilio_sid', sid); })
+    .orderBy('created_at', 'asc')
+    .select('created_at', 'status', 'twilio_sid');
+}
+
+// The send dates of the failed texts after the last delivered one ("in a row"), oldest first. The callback's
+// own row counts as what the callback reports (`failedSid` / `deliveredSid`): the status update at the top of
+// the callback may not have landed.
+function failuresInARow(rows, { failedSid = null, deliveredSid = null } = {}) {
+  const stateOf = (r) => {
+    if (failedSid && r.twilio_sid === failedSid) return 'failed';
+    if (deliveredSid && r.twilio_sid === deliveredSid) return 'delivered';
+    return r.status;
+  };
+  let run = [];
+  for (const r of rows) {
+    const state = stateOf(r);
+    if (FAILED_STATUSES.includes(state)) run.push(new Date(r.created_at));
+    else if (state === 'delivered') run = [];
+  }
+  return run;
 }
 
 /**
@@ -106,10 +127,10 @@ async function handleDeadNumberFailure({ sid, status, errorCode, to } = {}) {
       .first('id', 'first_name', 'last_name', 'phone', 'secondary_phone', 'active', 'deleted_at');
     if (!customer || customer.active === false || customer.deleted_at || !holdsNumber(customer, key)) return null;
 
-    const failed = await failedTextDates(customer.id, key, sid);
+    const failed = failuresInARow(await settledTextsTo(customer.id, key, sid), { failedSid: sid });
     if (failed.length < MIN_FAILURES) return null;
 
-    const since = failed.reduce((a, b) => (b < a ? b : a));
+    const since = failed[0];
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const { why, detail } = copyFor({ count: failed.length, key, since, errorCode });
     return await raiseAdminAlert('customer', {
@@ -135,9 +156,10 @@ async function handleDeadNumberFailure({ sid, status, errorCode, to } = {}) {
 }
 
 /**
- * Called for a delivered callback. Closes this customer's open dead-number rows whose number just received a
- * text, or is no longer the customer's phone or secondary phone. Cheap when there is none: one indexed read
- * of the sms_log row, one read of the open dead-number keys.
+ * Called for a delivered callback. Closes this customer's open dead-number rows whose number now has no failure
+ * after its last delivered text (so a late callback for a text sent before the failures closes nothing), or is no
+ * longer the customer's phone or secondary phone. Cheap when there is none: one indexed read of the sms_log row,
+ * one read of the open dead-number keys.
  * @returns {Promise<number>} rows closed
  */
 async function closeDeadNumberAlerts({ sid, status } = {}) {
@@ -159,7 +181,10 @@ async function closeDeadNumberAlerts({ sid, status } = {}) {
     const customer = await db('customers').where({ id: row.customer_id }).first('phone', 'secondary_phone', 'active', 'deleted_at');
     const gone = !customer || customer.active === false || Boolean(customer.deleted_at);
     const numberOf = (k) => k.slice(k.lastIndexOf(':') + 1);
-    const delivered = keys.filter((k) => deliveredKey && numberOf(k) === deliveredKey);
+    const sameNumber = keys.filter((k) => deliveredKey && numberOf(k) === deliveredKey);
+    const working = sameNumber.length
+      && !failuresInARow(await settledTextsTo(row.customer_id, deliveredKey, sid), { deliveredSid: sid }).length;
+    const delivered = working ? sameNumber : [];
     const replaced = keys.filter((k) => !delivered.includes(k) && (gone || !holdsNumber(customer, numberOf(k))));
     const { closeAdminAlertKeys } = require('./admin-alert-episodes');
     const now = new Date();
@@ -184,5 +209,5 @@ const handleDeadNumberCallback = (callback = {}) => (String(callback.status) ===
 
 module.exports = {
   handleDeadNumberCallback, handleDeadNumberFailure, closeDeadNumberAlerts,
-  __private: { phoneKey, dedupeKeyFor, holdsNumber, shortName, actionFor, copyFor, KEY_PREFIX },
+  __private: { phoneKey, dedupeKeyFor, holdsNumber, shortName, actionFor, copyFor, failuresInARow, KEY_PREFIX },
 };

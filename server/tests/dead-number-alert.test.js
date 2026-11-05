@@ -80,7 +80,10 @@ async function status(body) {
   }
 }
 
-const failedAt = (...days) => days.map((d) => ({ created_at: new Date(`2026-${d}T15:00:00Z`) }));
+// Settled sms_log rows, oldest sent first (the order the real query returns).
+const sentAt = (d) => new Date(`2026-${d}T15:00:00Z`);
+const failedAt = (...days) => days.map((d, i) => ({ created_at: sentAt(d), status: 'undelivered', twilio_sid: `SM-old-${i}` }));
+const deliveredRow = (d, twilio_sid = 'SM-ok') => ({ created_at: sentAt(d), status: 'delivered', twilio_sid });
 const fail = (extra = {}) => status({ MessageSid: 'SM1', MessageStatus: 'undelivered', ErrorCode: '30005', To: '+19415550142', ...extra });
 
 beforeEach(() => {
@@ -120,7 +123,7 @@ describe('dead number alert: when it rings', () => {
     const [category, title, body, opts] = mockNotify.mock.calls[0];
     expect(category).toBe('customer');
     expect(title).toBe("Customers — Jane D.'s phone can't get texts");
-    expect(body).toBe('2 texts to …0142 failed since Jun 29: the carrier says the number does not exist.');
+    expect(body).toBe('2 texts in a row to …0142 failed since Jun 29: the carrier says the number does not exist.');
     expect(opts.detail).toBe(`${body} Get a new number from the customer.`);
     expect(opts.link).toBe('/admin/customers?customerId=cust-1');
     expect(opts.bell).toBe(true);
@@ -137,7 +140,7 @@ describe('dead number alert: when it rings', () => {
     await fail({ MessageSid: 'SM2' });
     expect(mockNotify).toHaveBeenCalledTimes(2);
     expect(mockNotify.mock.calls[1][3].dedupeKey).toBe(mockNotify.mock.calls[0][3].dedupeKey);
-    expect(mockNotify.mock.calls[1][2]).toMatch(/^3 texts to …0142/);
+    expect(mockNotify.mock.calls[1][2]).toMatch(/^3 texts in a row to …0142/);
     expect(mockRows.size).toBe(1);
   });
 
@@ -145,7 +148,7 @@ describe('dead number alert: when it rings', () => {
     mockState.failedRows = failedAt('06-29', '11-04');
     expect(await fail({ ErrorCode: '30003' })).toBe(200);
     const [, , body, opts] = mockNotify.mock.calls[0];
-    expect(body).toBe("2 texts to …0142 failed since Jun 29: the carrier can't reach the phone.");
+    expect(body).toBe("2 texts in a row to …0142 failed since Jun 29: the carrier can't reach the phone.");
     expect(opts.detail).toBe(`${body} Check the number with the customer.`);
   });
 
@@ -161,6 +164,25 @@ describe('dead number alert: when it rings', () => {
     // The 21610 branch has its own, unrelated failure bell; only this alert's key counts here.
     const ours = mockNotify.mock.calls.filter(([, , , opts]) => String(opts?.dedupeKey || '').startsWith('dead-number:'));
     expect(ours).toHaveLength(raises ? 1 : 0);
+  });
+
+  test('a delivered text between two failures means the number works: nothing is raised', async () => {
+    mockState.failedRows = [...failedAt('06-29'), deliveredRow('07-01'), { created_at: sentAt('11-04'), status: 'undelivered', twilio_sid: 'SM1' }];
+    expect(await fail()).toBe(200);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('a late failure callback for a text sent before a delivered one raises nothing', async () => {
+    // SM1 was sent Jul 15; its callback arrives after a text sent Aug 1 was delivered.
+    mockState.failedRows = [...failedAt('06-29'), { created_at: sentAt('07-15'), status: 'sent', twilio_sid: 'SM1' }, deliveredRow('08-01')];
+    expect(await fail()).toBe(200);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test("the callback's own text counts as failed even when the status update did not land", async () => {
+    mockState.failedRows = [...failedAt('06-29'), { created_at: sentAt('11-04'), status: 'sent', twilio_sid: 'SM1' }];
+    expect(await fail()).toBe(200);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 
   test('a delivered text never raises it', async () => {
@@ -235,12 +257,34 @@ describe('dead number alert: when it closes', () => {
   const delivered = (To = '+19415550142') => status({ MessageSid: 'SM9', MessageStatus: 'delivered', To });
   const KEY = 'dead-number:cust-1:9415550142';
 
-  test('a later text to the dead number that is delivered closes the row', async () => {
+  test('a text sent after the last failure that is delivered closes the row', async () => {
     mockState.openKeys = [KEY];
+    // SM9's own status update may not have landed yet: it still reads 'sent'.
+    mockState.failedRows = [...failedAt('06-29', '07-10'), { created_at: sentAt('11-05'), status: 'sent', twilio_sid: 'SM9' }];
     await delivered();
     expect(mockClose).toHaveBeenCalledTimes(1);
     expect(mockClose.mock.calls[0][1]).toEqual([KEY]);
     expect(mockClose.mock.calls[0][2]).toBe('text_delivered');
+  });
+
+  test('a late delivered callback for a text sent before the last failure leaves the row', async () => {
+    mockState.openKeys = [KEY];
+    mockState.failedRows = [
+      ...failedAt('06-29'), { created_at: sentAt('07-01'), status: 'sent', twilio_sid: 'SM9' }, ...failedAt('07-10', '11-04'),
+    ];
+    await delivered();
+    expect(mockClose).not.toHaveBeenCalled();
+  });
+
+  test('a late delivered callback still closes the row once the dead number is off the customer', async () => {
+    mockState.openKeys = [KEY];
+    mockState.customer.phone = '+19415550777';
+    mockState.failedRows = [
+      ...failedAt('06-29'), { created_at: sentAt('07-01'), status: 'sent', twilio_sid: 'SM9' }, ...failedAt('07-10', '11-04'),
+    ];
+    await delivered();
+    expect(mockClose).toHaveBeenCalledTimes(1);
+    expect(mockClose.mock.calls[0][2]).toBe('phone_replaced');
   });
 
   test('a delivered text to a new number closes the row once the dead number is off the customer', async () => {

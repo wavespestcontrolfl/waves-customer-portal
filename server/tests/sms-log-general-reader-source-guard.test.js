@@ -78,8 +78,8 @@ const ALLOWLIST = [
   },
   {
     file: 'services/dead-number-alert.js',
-    snippet: "const rows = await db('sms_log')",
-    reason: 'failedTextDates: counts texts the provider reported failed or undelivered (a status a send reservation never has) plus the callback\'s own sid; it presents rows to nobody and reads only created_at.',
+    snippet: "return db('sms_log')",
+    reason: 'settledTextsTo: reads texts the provider settled as failed, undelivered or delivered (statuses a send reservation never has) plus the callback\'s own sid, to count failures in a row; it presents rows to nobody and reads only created_at, status and twilio_sid.',
   },
   {
     file: 'services/one-text-per-day.js',
