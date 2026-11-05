@@ -298,10 +298,12 @@ describe('the relationship is read again under the family lock', () => {
   const fresh = () => ({ ok: true, sources: 1, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, dropped: 0, holds: [] });
   const dbhStub = () => { const d = jest.fn(); d.raw = jest.fn(async () => ({})); return d; };
   const live = (...ids) => ids.map((id) => ({ id, active: true, deleted_at: null }));
+  const MH_DATA = { summary: { manualDiscount: { presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40 } } };
+  const booked = { 'scheduled_services as s': [{ id: 'v1' }] };
 
   test('the source estimate must still be accepted, and both profiles live', async () => {
     const target = { customerId: 'parents', rootId: 'r1', propertyId: 'home-p' };
-    const base = { estimates: [{ id: 'est-1' }], customers: live('son', 'parents'), multi_home_family_members: [{ customer_id: 'son', family_id: 'f' }, { customer_id: 'parents', family_id: 'f' }] };
+    const base = { estimates: [{ id: 'est-1', estimate_data: MH_DATA }], ...booked, customers: live('son', 'parents'), multi_home_family_members: [{ customer_id: 'son', family_id: 'f' }, { customer_id: 'parents', family_id: 'f' }] };
     mockEligible.mockResolvedValue(true);
     expect(await relationshipHolds(fakeTrx(base), { source: src, target })).toBe(true);
     expect(await relationshipHolds(fakeTrx({ ...base, estimates: [] }), { source: src, target })).toBe(false);
@@ -310,9 +312,23 @@ describe('the relationship is read again under the family lock', () => {
     expect(await relationshipHolds(fakeTrx({ ...base, customers: [...live('son'), { id: 'parents', active: false, deleted_at: null }] }), { source: src, target })).toBe(false);
   });
 
+  test('the source itself is read again: it must still carry the Multi-Home Discount and have booked plan visits', async () => {
+    const target = { customerId: 'parents', rootId: 'r1', propertyId: null };
+    const base = {
+      estimates: [{ id: 'est-1', estimate_data: MH_DATA }], ...booked, customers: live('son', 'parents'),
+      multi_home_family_members: [{ customer_id: 'son', family_id: 'f' }, { customer_id: 'parents', family_id: 'f' }],
+    };
+    mockEligible.mockResolvedValue(true);
+    expect(await relationshipHolds(fakeTrx(base), { source: src, target })).toBe(true);
+    // A revise removed the discount after the scan.
+    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [{ id: 'est-1', estimate_data: {} }] }), { source: src, target })).toBe(false);
+    // The plan visits are gone (cancelled or rebooked under another estimate).
+    expect(await relationshipHolds(fakeTrx({ ...base, 'scheduled_services as s': [] }), { source: src, target })).toBe(false);
+  });
+
   test('another profile: both must be in the SAME family that still has 2 or more live members', async () => {
     const target = { customerId: 'parents', rootId: 'r1', propertyId: null };
-    const base = { estimates: [{ id: 'est-1' }], customers: live('son', 'parents') };
+    const base = { estimates: [{ id: 'est-1', estimate_data: MH_DATA }], ...booked, customers: live('son', 'parents') };
     mockEligible.mockResolvedValue(true);
     const rows = (a, b) => [{ customer_id: 'son', family_id: a }, { customer_id: 'parents', family_id: b }];
     expect(await relationshipHolds(fakeTrx({ ...base, multi_home_family_members: rows('f', 'f') }), { source: src, target })).toBe(true);
@@ -326,7 +342,7 @@ describe('the relationship is read again under the family lock', () => {
   test('the same profile: the target must be an active property that differs from the source\'s, both read now', async () => {
     // The selection-time propertyId is NOT trusted: the series' agreed house is read in the transaction.
     const target = { customerId: 'son', rootId: 'r1', propertyId: 'stale-value' };
-    const base = { estimates: [{ id: 'est-1', property_id: 'home-s' }], customers: live('son') };
+    const base = { estimates: [{ id: 'est-1', property_id: 'home-s', estimate_data: MH_DATA }], ...booked, customers: live('son') };
     const houses = (map) => mockAgreed.mockImplementation(async (rootId) => (rootId in map ? map[rootId] : null));
     houses({ r1: 'home-2' });
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(true);
@@ -339,10 +355,10 @@ describe('the relationship is read again under the family lock', () => {
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(false);
     // Source house unknown (no estimate property, no plan series): never shown to be another home.
     houses({ r1: 'home-2' });
-    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [{ id: 'est-1', property_id: null }], customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [{ id: 'est-1', property_id: null, estimate_data: MH_DATA }], customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(false);
     // Source house from its plan series when the estimate names none.
     houses({ r1: 'home-2', r0: 'home-s' });
-    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [{ id: 'est-1', property_id: null }], customer_properties: [{ id: 'home-2' }] }), { source: { ...src, roots: new Set(['r0']) }, target })).toBe(true);
+    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [{ id: 'est-1', property_id: null, estimate_data: MH_DATA }], customer_properties: [{ id: 'home-2' }] }), { source: { ...src, roots: new Set(['r0']) }, target })).toBe(true);
   });
 
   test('a series that is no longer a target counts as dropped: no hold, no bell, no price', async () => {

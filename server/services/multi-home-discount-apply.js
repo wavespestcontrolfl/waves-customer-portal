@@ -268,7 +268,7 @@ async function describeSource(dbh, estimate, presetId) {
   const roots = new Set(rows.map((r) => String(r.recurring_parent_id || r.id)));
   // The house the accept linked the estimate to, else the one the app agrees its first series is at.
   const propertyId = estimate.property_id || await seriesAgreedPropertyId([...roots][0], customer.id, dbh);
-  return { estimateId: estimate.id, customerId: customer.id, propertyId: propertyId || null, roots };
+  return { estimateId: estimate.id, customerId: customer.id, propertyId: propertyId || null, roots, presetId: presetId || null };
 }
 
 // Every active recurring series of these profiles with an upcoming (or parked) plan visit, one entry per series root.
@@ -652,12 +652,23 @@ async function sameLiveFamily(trx, { source, target }) {
   return familyMultiHomeEligible(trx, source.customerId);
 }
 
+// The source estimate still has booked plan visits (the same plan-row test describeSource uses).
+async function sourceStillBooked(trx, estimateId) {
+  const { PLAN_ROW_SQL } = PLAN_LINE_SQL;
+  const row = await trx('scheduled_services as s').where('s.source_estimate_id', estimateId).whereRaw(PLAN_ROW_SQL).first('s.id');
+  return !!row;
+}
+
 // The relationship that made this series a target, read again under the SHARED family-changes lock (a link or unlink
 // waits for it): the source estimate is still accepted, both profiles are live, and either the target is another active
 // property of the same profile, or both profiles are in the SAME family that still has 2 or more live members.
 async function relationshipHolds(trx, { source, target }) {
-  const estimate = await trx('estimates').where({ id: source.estimateId, status: 'accepted' }).first('id', 'property_id');
+  const estimate = await trx('estimates').where({ id: source.estimateId, status: 'accepted' }).first('id', 'property_id', 'estimate_data');
   if (!estimate) return false;
+  // The source itself, read again: it still carries the Multi-Home Discount's recurring slice and its plan is still
+  // booked. A revise or a cancel after the scan must not hand its targets a discount.
+  if (!multiHomeSourceDiscount(estimate.estimate_data, source.presetId || null)) return false;
+  if (!(await sourceStillBooked(trx, source.estimateId))) return false;
   const people = await trx('customers').whereIn('id', [source.customerId, target.customerId]).select('id', 'active', 'deleted_at');
   const live = new Set(people.filter((c) => c.active === true && !c.deleted_at).map((c) => String(c.id)));
   if (!live.has(String(source.customerId)) || !live.has(String(target.customerId))) return false;
