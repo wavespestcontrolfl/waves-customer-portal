@@ -3,10 +3,16 @@
  *
  * GET  /status                       { enabled }. Works while dark and reads nothing else.
  * GET  /technicians                  W-2 technicians (active or prospective) with pay
- *                                    rate, pay method and the W-4 in force today.
+ *                                    rate, pay method, the W-4 in force today and the SIMPLE IRA
+ *                                    election in force today (currentSimple, null if none).
  * GET  /technicians/:id/w4           that technician's W-4 history, newest first.
  * POST /technicians/:id/w4           enter an election typed from the signed paper W-4
  *                                    (201 with the new row). A correction is a new row.
+ * GET  /technicians/:id/simple-ira  that technician's SIMPLE IRA elections, newest first.
+ * POST /technicians/:id/simple-ira  enter an election typed from the signed SIMPLE IRA agreement
+ *                                    { participant, deferralPercent | deferralDollars, signedOn,
+ *                                    effectiveOn?, note? } (201 with the new row). A correction is a
+ *                                    new row. No gate of its own: no row, no change to any pay run.
  * PUT  /technicians/:id/pay-method   { payMethod: 'check' | 'bank_transfer', consentOn }
  *                                    bank_transfer needs the date the employee's written
  *                                    OK was received (Florida law).
@@ -92,6 +98,7 @@ const {
   payrollMercuryStatusLive, payrollMercuryPayLive,
 } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
+const payrollSimple = require('../services/payroll-simple');
 const payrollRuns = require('../services/payroll-runs');
 const payrollFormFigures = require('../services/payroll-form-figures');
 const payrollTimeOff = require('../services/payroll-time-off');
@@ -272,7 +279,7 @@ router.post('/checks/:id/paper', mercuryStatusOnly, async (req, res) => {
 
 router.get('/technicians', async (req, res) => {
   try {
-    res.json({ technicians: await payrollW4.listPayrollTechnicians() });
+    res.json({ technicians: await payrollSimple.withCurrentSimple(await payrollW4.listPayrollTechnicians()) });
   } catch (err) { fail(res, 'list technicians', err); }
 });
 
@@ -287,6 +294,19 @@ router.post('/technicians/:id/w4', async (req, res) => {
     const election = await payrollW4.recordW4(req.params.id, req.body, req.technicianId);
     res.status(201).json({ election });
   } catch (err) { fail(res, 'record W-4', err); }
+});
+
+router.get('/technicians/:id/simple-ira', async (req, res) => {
+  try {
+    res.json({ elections: await payrollSimple.listSimple(req.params.id) });
+  } catch (err) { fail(res, 'list SIMPLE IRA', err); }
+});
+
+router.post('/technicians/:id/simple-ira', async (req, res) => {
+  try {
+    const election = await payrollSimple.recordSimple(req.params.id, req.body, req.technicianId);
+    res.status(201).json({ election });
+  } catch (err) { fail(res, 'record SIMPLE IRA', err); }
 });
 
 router.put('/technicians/:id/pay-method', async (req, res) => {

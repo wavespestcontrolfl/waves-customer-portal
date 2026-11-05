@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GlassStickyBookBar } from './GlassEstimateExtras';
+import { GlassStickyBookBar, GlassTechChip } from './GlassEstimateExtras';
 
 afterEach(() => cleanup());
 
@@ -25,6 +25,26 @@ describe('GlassStickyBookBar', () => {
 
   it('renders nothing for unpriced selections (quote-required / ranged)', () => {
     const { container } = render(<GlassStickyBookBar show={false} slotMeta={null} onApprove={vi.fn()} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe('GlassTechChip', () => {
+  it('names the slot\'s own technician from the availability payload', () => {
+    const { container } = render(<GlassTechChip slotMeta={{ techFirstName: 'Sam', dow: 'Tue', time: '9 AM' }} />);
+    expect(screen.getByText('Your technician: Sam — Tue 9 AM')).toBeInTheDocument();
+    expect(container.querySelector('.gc-tc-avatar').textContent).toBe('S');
+  });
+
+  it('a slot with no technician attached names no one (no default name, no initial)', () => {
+    const { container } = render(<GlassTechChip slotMeta={{ techFirstName: null, dow: 'Tue', time: '9 AM' }} />);
+    expect(screen.getByText('Your technician — Tue 9 AM')).toBeInTheDocument();
+    expect(container.querySelector('.gc-tc-avatar')).toBeNull();
+    expect(container.textContent).not.toMatch(/Adam/);
+  });
+
+  it('renders nothing before a slot is picked', () => {
+    const { container } = render(<GlassTechChip slotMeta={null} />);
     expect(container).toBeEmptyDOMElement();
   });
 });
