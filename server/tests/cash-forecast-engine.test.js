@@ -219,14 +219,11 @@ describe('computeForecast', () => {
     expect(r.weeks[1].money_in.stripe).toBe(70); // pending Mon + payout Tue
   });
 
-  test('open invoices: the share still collectable at their age, a 92+ day invoice is listed, processing in 5 business days', () => {
+  test('open invoices: the share still collectable at their age; a 92+ day invoice is listed apart', () => {
     const invoiceCohort = [...cohort({ n: 10, lag: 5 }), ...cohort({ n: 10, lag: 20 })];
-    const r = computeForecast(base({ invoiceCohort, openInvoices: [
-      { amountUsd: 100, ageDays: 10 }, { amountUsd: 70, ageDays: 120 }, { amountUsd: 30, ageDays: 0, processing: true },
-    ] }));
+    const r = computeForecast(base({ invoiceCohort, openInvoices: [{ amountUsd: 100, ageDays: 10 }, { amountUsd: 70, ageDays: 120 }] }));
     // open at age 10: half the cohort is paid by 5; the rest pays at lag 20 -> 10 days from now (Sun Nov 15) + 2 bd = Tue Nov 17
     expect(r.weeks[2].money_in.invoices).toBe(100);
-    expect(r.weeks[1].money_in.invoices).toBe(30); // processing: Thu + 5 business days = Thu Nov 12
     expect(r.missing).toContainEqual({ kind: 'invoices_late_beyond', count: 1, usd: 70 });
   });
 

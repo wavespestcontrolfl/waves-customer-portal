@@ -10,6 +10,7 @@ jest.mock('../services/cash-forecast/inputs', () => ({
   getSettings: jest.fn(async () => ({ floor_cents: null, last_year_receipts: {}, updated_at: null })),
   listItems: jest.fn(async () => []),
 }));
+jest.mock('../services/open-balance', () => ({ applyOpenSelfPayPredicates: jest.fn((q) => q) }));
 jest.mock('../services/monthly-dues-eligibility', () => ({
   DUES_COHORT_COLUMNS: ['id', 'monthly_rate', 'billing_day', 'billing_mode'],
   applyDuesCohort: jest.fn((q) => q),
@@ -18,6 +19,7 @@ jest.mock('../services/monthly-dues-eligibility', () => ({
   monthlyDuesVerdict: jest.fn(async () => ({ eligible: true })),
 }));
 
+const { applyOpenSelfPayPredicates } = require('../services/open-balance');
 const { loadForecastInput, _private } = require('../services/cash-forecast/load');
 
 // 21:30 ET on Thursday Nov 5 is already Nov 6 in UTC: every bound day must still be Nov 5.
@@ -28,7 +30,7 @@ function fakeDb({ raw = [], tables = {} } = {}) {
   const database = (name) => {
     const rows = tables[name] || [];
     const q = {};
-    ['where', 'whereIn', 'whereNull', 'select', 'orderBy'].forEach((m) => { q[m] = () => q; });
+    ['where', 'whereIn', 'whereNull', 'whereRaw', 'select', 'orderBy'].forEach((m) => { q[m] = () => q; });
     q.then = (res, rej) => Promise.resolve(rows).then(res, rej);
     return q;
   };
@@ -43,8 +45,8 @@ function fakeDb({ raw = [], tables = {} } = {}) {
 
 const visit = (over) => ({
   id: 'v', status: 'pending', scheduled_day: '2026-11-10', completed_day: null, prepaid_amount: 0, annual_prepay_term_id: null,
-  effective_price: 100, payer_billed: false, is_callback: false, free_type: false, unpriced_consultation: false,
-  billing_mode: 'per_visit', waveguard_tier: null, monthly_rate: 0, ...over,
+  estimated_price: 100, primary_line_price: null, service_type: 'Quarterly Pest Control Service', payer_billed: false,
+  is_callback: false, free_type: false, billing_mode: 'per_visit', waveguard_tier: null, monthly_rate: 0, per_application_fee: null, ...over,
 });
 
 const cashOk = async () => ({
@@ -58,37 +60,58 @@ const cashOk = async () => ({
   unavailable: [],
 });
 
-describe('visit value (cash lanes, self-pay, less prepaid)', () => {
-  test('per-visit, per-application and one-time count; the dues lane, annual prepay, payer, callback and free types do not', () => {
-    const { visitValue } = _private;
+describe('visit value: what completion will invoice, less prepaid', () => {
+  const { visitValue } = _private;
+  const member = { billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 80, autopay_active: true, is_recurring: true };
+
+  test('cash lanes bill their price; payer-billed, callback, free types and annual prepay bill nothing here', () => {
     expect(visitValue(visit({}))).toBe(100);
-    expect(visitValue(visit({ billing_mode: 'per_application' }))).toBe(100);
     expect(visitValue(visit({ billing_mode: 'one_time', prepaid_amount: 30 }))).toBe(70);
-    // a member's recurring visit, dues on autopay: the dues pay for it
-    const member = { billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 50, autopay_active: true, is_recurring: true };
-    expect(visitValue(visit(member))).toBe(0);
-    expect(visitValue(visit({ ...member, billing_mode: null }))).toBe(0); // inferred member
-    // the dues run cannot collect without autopay, and a priced one-time visit is billed on its own
-    expect(visitValue(visit({ ...member, autopay_active: false }))).toBe(100);
-    expect(visitValue(visit({ ...member, is_recurring: false, estimated_price: 200, effective_price: 200 }))).toBe(200);
+    expect(visitValue(visit({ prepaid_amount: 150 }))).toBe(0);
+    expect(visitValue(visit({ estimated_price: null }))).toBe(0); // an unpriced per-visit visit bills nothing
     expect(visitValue(visit({ annual_prepay_term_id: 't1' }))).toBe(0);
     expect(visitValue(visit({ payer_billed: true }))).toBe(0);
     expect(visitValue(visit({ is_callback: true }))).toBe(0);
     expect(visitValue(visit({ free_type: true }))).toBe(0);
-    expect(visitValue(visit({ unpriced_consultation: true }))).toBe(0);
-    expect(visitValue(visit({ prepaid_amount: 150 }))).toBe(0);
   });
 
-  test('GATE_STAMPED_ZERO_FREE decides whether a stamped $0 falls to the per-application fee', () => {
+  test('per application: the fee when the row has no price; a stamped $0 follows GATE_STAMPED_ZERO_FREE', () => {
+    const perApp = { billing_mode: 'per_application', per_application_fee: 50 };
+    expect(visitValue(visit({ ...perApp, estimated_price: null }))).toBe(50);
     const saved = process.env.GATE_STAMPED_ZERO_FREE;
     try {
       process.env.GATE_STAMPED_ZERO_FREE = 'true';
-      expect(_private.effectivePriceSql()).not.toMatch(/NULLIF/);
+      expect(visitValue(visit({ ...perApp, estimated_price: 0 }))).toBe(0);
       process.env.GATE_STAMPED_ZERO_FREE = 'false';
-      expect(_private.effectivePriceSql()).toMatch(/NULLIF\(ss\.estimated_price, 0\)/);
+      expect(visitValue(visit({ ...perApp, estimated_price: 0 }))).toBe(50);
     } finally {
       if (saved === undefined) delete process.env.GATE_STAMPED_ZERO_FREE; else process.env.GATE_STAMPED_ZERO_FREE = saved;
     }
+  });
+
+  test('members: the dues cover a recurring visit on autopay; without autopay it bills the monthly rate; a priced one-time visit bills its price', () => {
+    expect(visitValue(visit({ ...member, estimated_price: null }))).toBe(0);
+    expect(visitValue(visit({ ...member, billing_mode: null, estimated_price: null }))).toBe(0); // inferred member
+    expect(visitValue(visit({ ...member, autopay_active: false, estimated_price: null }))).toBe(80);
+    expect(visitValue(visit({ ...member, is_recurring: false, estimated_price: 200 }))).toBe(200);
+  });
+});
+
+describe('shared definitions', () => {
+  test('open-balance exports the open-self-pay predicates the loader applies', () => {
+    expect(typeof jest.requireActual('../services/open-balance').applyOpenSelfPayPredicates).toBe('function');
+  });
+});
+
+describe('payment events', () => {
+  test('part payments on their own dates, the rest on the paid-in-full day; nothing twice', () => {
+    const parts = new Map([['i1', [{ paid_day: '2026-10-02', amount: 30 }]]]);
+    expect(_private.payEvents({ id: 'i1', paid_day: '2026-10-09', settled: 100 }, parts)).toEqual([
+      { day: '2026-10-02', amount: 30 }, { day: '2026-10-09', amount: 70 },
+    ]);
+    // still open: only the part payment counts
+    expect(_private.payEvents({ id: 'i1', paid_day: null, settled: 0 }, parts)).toEqual([{ day: '2026-10-02', amount: 30 }]);
+    expect(_private.payEvents({ id: 'i2', paid_day: '2026-10-09', settled: 100 }, parts)).toEqual([{ day: '2026-10-09', amount: 100 }]);
   });
 });
 
@@ -99,12 +122,12 @@ describe('loadForecastInput', () => {
     expect(input.today).toBe('2026-11-05');
     const visits = database.calls.find((c) => /FROM scheduled_services ss/.test(c.sql));
     expect(visits.bindings[0]).toBe('2026-11-05'); // the autopay check's ET day
-    expect(visits.bindings.slice(5, 7)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
+    expect(visits.bindings.slice(4, 6)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
     const bank = database.calls.find((c) => /FROM bank_transactions bt/.test(c.sql));
     expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f', 'card-g'], '2026-08-28', '2026-11-11']); // trailing Sep 7 - Nov 1 +- 10 days; USD only
     for (const c of database.calls) expect(c.sql).not.toMatch(/current_date|now\(\)/i);
-    // open invoices include 'overdue'; a pay run's net goes out on the pay date and the 941 return is never a payment
-    expect(database.calls.find((c) => /i\.credit_applied, i\.amount_paid/.test(c.sql)).bindings).toEqual([['sent', 'viewed', 'overdue', 'processing']]);
+    // open invoices are the shared open-self-pay set; a pay run's net goes out on the pay date and the 941 return is never a payment
+    expect(applyOpenSelfPayPredicates).toHaveBeenCalled();
     const pay = database.calls.find((c) => /FROM payroll_checks pc/.test(c.sql));
     expect(pay.sql).toMatch(/pc\.net_cents/);
     expect(pay.bindings).toEqual(['2026-10-01', '2027-01-31']); // 35 days back, for the weekly projection
@@ -143,25 +166,29 @@ describe('loadForecastInput', () => {
 
   test('visits: completed cash work is the cohort and the trailing baseline; open visits are booked; facts listed', async () => {
     const database = fakeDb({
+      tables: { invoices: [{ sent_day: '2026-10-26', status: 'sent', total: 60, credit_applied: 10, amount_paid: 10 }] },
       raw: [
         [/FROM scheduled_services ss/, [
           visit({ id: 'c1', status: 'completed', scheduled_day: '2026-10-20', completed_day: '2026-10-20' }),
-          visit({ id: 'c2', status: 'completed', scheduled_day: '2026-09-01', completed_day: '2026-09-01', effective_price: 50 }),
+          visit({ id: 'c2', status: 'completed', scheduled_day: '2026-09-01', completed_day: '2026-09-01', estimated_price: 50 }),
           // covered by a combined invoice on another visit: billed, so not listed (its cash sits on the anchor)
-          visit({ id: 'c4', status: 'completed', scheduled_day: '2026-10-22', completed_day: '2026-10-22', effective_price: 30, has_invoice: true }),
+          visit({ id: 'c4', status: 'completed', scheduled_day: '2026-10-22', completed_day: '2026-10-22', estimated_price: 30, has_invoice: true }),
           visit({ id: 'c3', status: 'completed', scheduled_day: '2026-10-21', completed_day: '2026-10-21', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 50, autopay_active: true, is_recurring: true }),
           visit({ id: 'b1', scheduled_day: '2026-11-05' }),
           visit({ id: 'b3', scheduled_day: '2026-11-06', has_invoice: true }),
           visit({ id: 'b2', scheduled_day: '2026-11-12', payer_billed: true }),
           visit({ id: 'old', scheduled_day: '2026-11-04' }),
         ]],
-        [/AS visit_id/, [{ visit_id: 'c1', paid_day: '2026-10-22', paid_amount: 100 }]],
-        // open: the canonical amount due (total - credit applied - amount paid)
-        [/i\.credit_applied, i\.amount_paid/, [{ sent_day: '2026-10-26', status: 'sent', total: 60, credit_applied: 10, amount_paid: 10 }, { sent_day: '2026-11-05', status: 'processing', total: 25 }]],
-        // sent: a credit is not new money, so the invoice's value is what was left to pay
-        [/i\.credit_applied, i\.status/, [{ sent_day: '2026-10-20', total: 100, credit_applied: 20, status: 'paid', paid_day: '2026-10-25', paid_amount: 80 }]],
+        [/AS visit_id/, [{ id: 'vi1', visit_id: 'c1', paid_day: '2026-10-22', settled: 100 }]],
+        // sent: a credit is not new money, so the invoice's value is what was left to pay; a part payment came first
+        [/i\.credit_applied, i\.status/, [{ id: 's1', sent_day: '2026-10-20', total: 100, credit_applied: 20, status: 'paid', paid_day: '2026-10-25', settled: 80 }]],
+        [/partial_payment/, [{ invoice_id: 's1', paid_day: '2026-10-21', amount: 30 }]],
         [/i\.status = 'draft'/, [{ n: 2, total: 300 }]],
-        [/FROM tax_filing_calendar/, [{ due_day: '2026-11-20', amount_due: null }, { due_day: '2026-12-15', amount_due: 500, amount_paid: 100 }]],
+        [/FROM tax_filing_calendar/, [
+          { due_day: '2026-11-20', amount_due: null },
+          { due_day: '2026-12-15', amount_due: 500, amount_paid: 100 },
+          { due_day: '2026-10-20', amount_due: 250, amount_paid: 0 }, // overdue and unpaid: still owed, counted today
+        ]],
         // t1 has a check in the window; t2 was last paid Oct 30 (inside the 35-day look-back)
         [/FROM payroll_checks pc/, [
           { technician_id: 't2', pay_day: '2026-10-30', net_cents: 60000, full_cents: 90000 },
@@ -182,9 +209,10 @@ describe('loadForecastInput', () => {
     expect(input.booked).toEqual([
       { day: '2026-11-05', value: 100, work: 100 }, { day: '2026-11-06', value: 0, work: 100 }, { day: '2026-11-12', value: 0, work: 0 },
     ]);
-    expect(input.openInvoices).toEqual([{ amountUsd: 40, ageDays: 10, processing: false }, { amountUsd: 25, ageDays: 0, processing: true }]);
-    expect(input.invoiceCohort).toEqual([{ value: 80, ageDays: 16, paid: [{ lagDays: 5, amount: 80 }] }]);
-    expect(input.taxRows).toEqual([{ dueDay: '2026-12-15', amountUsd: 400 }]);
+    // open: the canonical amount due (total - credit applied - amount paid)
+    expect(input.openInvoices).toEqual([{ amountUsd: 40, ageDays: 10 }]);
+    expect(input.invoiceCohort).toEqual([{ value: 80, ageDays: 16, paid: [{ lagDays: 1, amount: 30 }, { lagDays: 5, amount: 50 }] }]);
+    expect(input.taxRows).toEqual([{ dueDay: '2026-12-15', amountUsd: 400 }, { dueDay: '2026-11-05', amountUsd: 250 }]);
     // the check in the window pays its net; each employee then repeats weekly at full cost (last 4 checks)
     expect(input.payroll[0]).toEqual({ payDay: '2026-11-13', cashCostUsd: 812.34 });
     const projected = input.payroll.slice(1);

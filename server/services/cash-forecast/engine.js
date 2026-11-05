@@ -23,7 +23,6 @@ const { RATES } = require('../payroll-calc');
 const WEEKS = 13;
 const MAX_LAG_DAYS = 91;
 const SETTLE_BUSINESS_DAYS = 2; // page rule: card money reaches the bank ~2 business days after payment
-const ACH_IN_FLIGHT_BUSINESS_DAYS = 3; // a 'processing' bank payment settles, then pays out
 const TRAILING_WEEKS = 8;
 const MIN_COHORT = 20; // a lag with fewer watched samples keeps the last share instead of a noisy one
 
@@ -308,7 +307,6 @@ function bookedFlows(i, c) {
 // Open invoices: P(paid on day t | unpaid when today began, at age s). Past the curve -> listed apart.
 function invoiceFlows(i, c) {
   return i.openInvoices.flatMap((inv) => {
-    if (inv.processing) return [flow(addBusinessDays(c.today, ACH_IN_FLIGHT_BUSINESS_DAYS + SETTLE_BUSINESS_DAYS), 'invoices', inv.amountUsd)];
     const s = Math.max(0, Math.round(inv.ageDays));
     const remaining = s <= MAX_LAG_DAYS ? 1 - (c.invoiceCurve[s - 1] || 0) : 0;
     if (remaining > 0.001) return spread('invoices', addDays(c.today, -s), inv.amountUsd, c.invoiceCurve, c.land, { fromLag: s, norm: remaining });

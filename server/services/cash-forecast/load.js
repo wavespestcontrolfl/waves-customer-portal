@@ -9,9 +9,10 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const plaidSync = require('../plaid-sync');
 const StripeBanking = require('../stripe-banking');
-const { resolveBillingLane, stampedZeroFreeLive, membershipDuesCoverVisit } = require('../billing-lane');
+const { resolveBillingLane, membershipDuesCoverVisit, completionInvoiceAmount } = require('../billing-lane');
+const { applyOpenSelfPayPredicates } = require('../open-balance');
 const { autopayActivePredicate } = require('../autopay-eligibility');
-const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX } = require('../no-cost-visit-types');
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('../no-cost-visit-types');
 const { DUES_COHORT_COLUMNS, applyDuesCohort, autopayGuard, laneGuard, monthlyDuesVerdict } = require('../monthly-dues-eligibility');
 const InvoiceService = require('../invoice');
 const { invoiceAmountDue } = require('../invoice-helpers');
@@ -23,7 +24,6 @@ const COHORT_DAYS = 150;
 const CASH_LANES = new Set(['per_visit', 'per_application', 'one_time']);
 const CLOSED_VISIT_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
 const DEAD_INVOICE_STATUSES = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES;
-const OPEN_INVOICE_STATUSES = ['sent', 'viewed', 'overdue', 'processing'];
 const ET_DAY = (col) => `to_char((${col}) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')`;
 const DAY = (col) => `to_char(${col}, 'YYYY-MM-DD')`;
 const usd = (n) => Number(n) || 0;
@@ -31,15 +31,6 @@ const usd = (n) => Number(n) || 0;
 // invoice its total less the credit applied (a credit is not new money).
 const PAID_CASH_SQL = `CASE WHEN COALESCE(i.amount_paid, 0) > 0 THEN i.amount_paid
   WHEN i.status = 'paid' THEN GREATEST(0, COALESCE(i.total, 0) - COALESCE(i.credit_applied, 0)) ELSE 0 END`;
-
-// The billing pages' effective visit price (admin-billing-recovery.js): the row price, else the
-// customer's per-application fee for a per-application customer. With GATE_STAMPED_ZERO_FREE on, a
-// stamped $0 stays $0 (only a blank price falls to the fee).
-function effectivePriceSql() {
-  return stampedZeroFreeLive()
-    ? "COALESCE(ss.estimated_price, CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)"
-    : "COALESCE(NULLIF(ss.estimated_price, 0), CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)";
-}
 
 // Is this visit paid by the monthly dues? The completion path's own verdict (billing-lane
 // membershipDuesCoverVisit): a member's recurring or unpriced visit is; a priced one-time visit is billed.
@@ -57,14 +48,26 @@ function duesCover(row, lane) {
   });
 }
 
-// A visit's cash value: self-pay only (payer-billed is listed apart), no callbacks, no always-free types,
-// no unpriced consultations, nothing on an annual prepay term, nothing the dues pay for; less what was
-// prepaid. Cash lanes bill per visit; a member's visit the dues do not cover is billed too.
+// A visit's cash value: what completion will invoice for it (billing-lane completionInvoiceAmount: the
+// row price, else the per-application fee, else for the dues lane the monthly rate; a stamped $0, a
+// callback or an unpriced consultation bill nothing), less what was prepaid. Self-pay only (payer-billed
+// is listed apart); never a callback (a free re-treat, as on the billing recovery page, even when the row
+// carries a price), an always-free type, a visit on an annual prepay term, or one the dues cover.
 function visitValue(row) {
-  const excluded = row.payer_billed || row.is_callback || row.free_type || row.unpriced_consultation || row.annual_prepay_term_id;
   const lane = resolveBillingLane(row).mode;
   const billed = CASH_LANES.has(lane) || (lane === 'monthly_membership' && !duesCover(row, lane));
-  return !excluded && billed ? Math.max(0, usd(row.effective_price) - usd(row.prepaid_amount)) : 0;
+  if (!billed || row.payer_billed || row.is_callback || row.free_type || row.annual_prepay_term_id) return 0;
+  const amount = completionInvoiceAmount({
+    estimatedPrice: row.estimated_price,
+    isCallback: !!row.is_callback,
+    perApplicationBilling: row.billing_mode === 'per_application',
+    perApplicationFee: row.per_application_fee,
+    monthlyRate: row.monthly_rate,
+    billingMode: row.billing_mode,
+    primaryLinePrice: row.primary_line_price,
+    serviceType: row.service_type,
+  });
+  return Math.max(0, amount - usd(row.prepaid_amount));
 }
 
 async function readVisits(database, { from, to, now }) {
@@ -72,9 +75,9 @@ async function readVisits(database, { from, to, now }) {
   return database.raw(`
     SELECT ss.id, ss.status, ${DAY('ss.scheduled_date')} AS scheduled_day,
       CASE WHEN ss.completed_at IS NULL THEN NULL ELSE ${ET_DAY('ss.completed_at')} END AS completed_day,
-      ss.prepaid_amount, ss.annual_prepay_term_id, ss.estimated_price, COALESCE(ss.is_recurring, false) AS is_recurring,
+      ss.prepaid_amount, ss.annual_prepay_term_id, ss.estimated_price, ss.primary_line_price, ss.service_type,
+      COALESCE(ss.is_recurring, false) AS is_recurring,
       ${autopay.sql} AS autopay_active,
-      ${effectivePriceSql()} AS effective_price,
       (COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END) IS NOT NULL) AS payer_billed,
       (COALESCE(ss.is_callback, false) OR EXISTS (
         SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND COALESCE(sr.is_callback, false))) AS is_callback,
@@ -84,22 +87,22 @@ async function readVisits(database, { from, to, now }) {
       (EXISTS (SELECT 1 FROM invoices i LEFT JOIN service_records sr2 ON sr2.id = i.service_record_id
           WHERE COALESCE(i.scheduled_service_id, sr2.scheduled_service_id) = ss.id AND i.status <> ALL(?::text[]))
         OR EXISTS (SELECT 1 FROM invoices fi WHERE fi.id = ss.first_application_invoice_id AND fi.status <> ALL(?::text[]))) AS has_invoice,
-      (COALESCE(ss.service_type, '') ~* ? AND COALESCE(ss.estimated_price, 0) <= 0) AS unpriced_consultation,
-      c.billing_mode, c.waveguard_tier, c.monthly_rate
+      c.billing_mode, c.waveguard_tier, c.monthly_rate, c.per_application_fee
     FROM scheduled_services ss
     JOIN customers c ON c.id = ss.customer_id
     WHERE ss.scheduled_date BETWEEN ?::date AND ?::date
       AND (ss.status = 'completed' OR ss.status <> ALL(?::text[]))`,
-  [autopay.binding, ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, DEAD_INVOICE_STATUSES, DEAD_INVOICE_STATUSES, CONSULTATION_SERVICE_TYPE_SQL_REGEX, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
+  [autopay.binding, ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, DEAD_INVOICE_STATUSES, DEAD_INVOICE_STATUSES, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
 }
 
-// Invoices behind completed visits (linked by the visit or by its service record), live ones only.
-async function readVisitPayments(database, visitIds) {
+// Invoices behind completed visits (linked by the visit or by its service record), live ones only:
+// the amount settled and the day it was paid in full (part payments come from readPartPayments).
+async function readVisitInvoices(database, visitIds) {
   if (!visitIds.length) return [];
   return database.raw(`
-    SELECT COALESCE(i.scheduled_service_id, sr.scheduled_service_id) AS visit_id,
+    SELECT i.id, COALESCE(i.scheduled_service_id, sr.scheduled_service_id) AS visit_id,
       CASE WHEN i.paid_at IS NULL THEN NULL ELSE ${ET_DAY('i.paid_at')} END AS paid_day,
-      ${PAID_CASH_SQL} AS paid_amount
+      ${PAID_CASH_SQL} AS settled
     FROM invoices i
     LEFT JOIN service_records sr ON sr.id = i.service_record_id
     WHERE COALESCE(i.scheduled_service_id, sr.scheduled_service_id) = ANY(?::uuid[])
@@ -107,25 +110,59 @@ async function readVisitPayments(database, visitIds) {
   [visitIds, DEAD_INVOICE_STATUSES]).then((r) => r.rows);
 }
 
-// Sent self-pay invoices: the timing of money after an invoice goes out (open ones included, unpaid).
+// The homeowner's sent invoices: the timing of money after an invoice goes out (open ones included,
+// unpaid). Never one a payer or a payer statement owns, or one withdrawn when its Bill-To moved to a
+// payer (open-balance.js applyOpenSelfPayPredicates' ownership rules).
 async function readSentInvoices(database, { from, to }) {
   return database.raw(`
-    SELECT ${ET_DAY('i.sent_at')} AS sent_day, i.total, i.credit_applied, i.status,
+    SELECT i.id, ${ET_DAY('i.sent_at')} AS sent_day, i.total, i.credit_applied, i.status,
       CASE WHEN i.paid_at IS NULL THEN NULL ELSE ${ET_DAY('i.paid_at')} END AS paid_day,
-      ${PAID_CASH_SQL} AS paid_amount
+      ${PAID_CASH_SQL} AS settled
     FROM invoices i
-    WHERE i.sent_at IS NOT NULL AND i.payer_id IS NULL
+    WHERE i.sent_at IS NOT NULL AND i.payer_id IS NULL AND i.payer_statement_id IS NULL
+      AND COALESCE(i.scheduled_send_error, '') NOT LIKE 'payer_billed:%'
       AND (i.sent_at AT TIME ZONE 'America/New_York')::date BETWEEN ?::date AND ?::date
       AND i.status <> ALL(?::text[]) AND i.status <> 'prepaid'`,
   [from, to, DEAD_INVOICE_STATUSES]).then((r) => r.rows);
 }
 
-async function readOpenInvoices(database) {
+// Part payments recorded before an invoice is paid in full (invoice-manual-payment.js writes a dated
+// payments row and raises amount_paid, not paid_at): each counts on its own date.
+async function readPartPayments(database, invoiceIds) {
+  if (!invoiceIds.length) return [];
   return database.raw(`
-    SELECT ${ET_DAY('COALESCE(i.sent_at, i.created_at)')} AS sent_day, i.status, i.total, i.credit_applied, i.amount_paid
-    FROM invoices i
-    WHERE i.status = ANY(?::text[]) AND i.paid_at IS NULL AND i.archived_at IS NULL AND i.payer_id IS NULL`,
-  [OPEN_INVOICE_STATUSES]).then((r) => r.rows);
+    SELECT p.metadata->>'invoice_id' AS invoice_id, ${DAY('p.payment_date')} AS paid_day,
+      GREATEST(0, COALESCE(p.amount, 0) - COALESCE(p.refund_amount, 0)) AS amount
+    FROM payments p
+    WHERE p.status = 'paid' AND p.metadata->>'partial_payment' = 'true' AND p.metadata->>'invoice_id' = ANY(?::text[])`,
+  [invoiceIds.map(String)]).then((r) => r.rows);
+}
+
+// Cash events for one invoice: its part payments on their dates, and the rest on the day it was paid in
+// full. Nothing is counted twice: the final event is what the part payments did not already cover.
+function payEvents(inv, partsByInvoice) {
+  const parts = partsByInvoice.get(String(inv.id)) || [];
+  const partSum = parts.reduce((s, p) => s + usd(p.amount), 0);
+  const final = inv.paid_day ? [{ day: inv.paid_day, amount: Math.max(0, usd(inv.settled) - partSum) }] : [];
+  return [...parts.map((p) => ({ day: p.paid_day, amount: usd(p.amount) })), ...final].filter((e) => e.amount > 0);
+}
+
+function groupBy(rows, key) {
+  const out = new Map();
+  for (const r of rows) out.set(String(r[key]), [...(out.get(String(r[key])) || []), r]);
+  return out;
+}
+
+// Open self-pay invoices, by the shared definition (open-balance.js): presented, not payer-owned, not on
+// a statement, not withdrawn to a payer, something still owed; archived ones are left out.
+async function readOpenInvoices(database) {
+  return applyOpenSelfPayPredicates(database('invoices'))
+    .whereNull('invoices.paid_at')
+    .whereNull('invoices.archived_at')
+    .select(
+      database.raw(`${ET_DAY('COALESCE(invoices.sent_at, invoices.created_at)')} AS sent_day`),
+      'invoices.status', 'invoices.total', 'invoices.credit_applied', 'invoices.amount_paid',
+    );
 }
 
 async function readDrafts(database) {
@@ -324,18 +361,20 @@ function splitVisits(visits, d) {
   };
 }
 
-// The cohort with each visit's payments by days after the visit; visits with no invoice at all in the
-// last 90 days are listed as not billed. A combined invoice's cash sits on its anchor visit; the curve is
-// total cash over total value, so where that cash sits barely changes it, and a covered visit is billed.
-function cohortFrom(cohort, pays, today) {
+// The cohort with each visit's cash by days after the visit (its invoices' payment events); visits with
+// no invoice at all in the last 90 days are listed as not billed. A combined invoice's cash sits on its
+// anchor visit; the curve is total cash over total value, so where that cash sits barely changes it, and
+// a covered visit is billed.
+function cohortFrom(cohort, invoices, partsByInvoice, today) {
   const gap = engine.dayDiff;
-  const paidLines = (v) => pays
-    .filter((p) => p.visit_id === v.id && p.paid_day && usd(p.paid_amount) > 0)
-    .map((p) => ({ lagDays: Math.max(0, gap(v.day, p.paid_day)), amount: usd(p.paid_amount) }));
-  const unbilled = cohort.filter((v) => !v.invoiced && !pays.some((p) => p.visit_id === v.id) && gap(v.day, today) <= 90);
+  const byVisit = groupBy(invoices, 'visit_id');
+  const paidLines = (v) => (byVisit.get(String(v.id)) || [])
+    .flatMap((inv) => payEvents(inv, partsByInvoice))
+    .map((e) => ({ lagDays: Math.max(0, gap(v.day, e.day)), amount: e.amount }));
+  const unbilled = cohort.filter((v) => !v.invoiced && !byVisit.has(String(v.id)) && gap(v.day, today) <= 90);
   return {
     visitCohort: cohort.map((v) => ({ value: v.value, ageDays: gap(v.day, today), paid: paidLines(v) })),
-    unbilled: { count: unbilled.length, usd: Math.round(unbilled.reduce((s, v) => s + v.value, 0) * 100) / 100 },
+    unbilled: { count: unbilled.length, usd: Math.round(unbilled.reduce((s2, v) => s2 + v.value, 0) * 100) / 100 },
   };
 }
 
@@ -381,11 +420,13 @@ async function loadForecastInput({
     readBankLines(database, { labels: [...pool.poolAccounts, ...pool.feedCards], from: engine.addDays(d.trailingFrom, -10), to: engine.addDays(d.trailingTo, 10) }),
     readCardsOffFeed(database, { feedLabels: pool.feedCards, since: engine.addDays(d.today, -120) }),
     readPayroll(database, { from: engine.addDays(d.today, -35), to: d.windowEnd }),
-    readTaxRows(database, { from: d.today, to: d.windowEnd }),
+    // unpaid rows already past due stay owed (the tax page keeps them): they count today
+    readTaxRows(database, { from: engine.addDays(d.today, -400), to: d.windowEnd }),
   ]);
   const visits = splitVisits(visitRows, d);
-  const pays = await readVisitPayments(database, visits.cohort.map((v) => v.id));
-  const { visitCohort, unbilled } = cohortFrom(visits.cohort, pays, d.today);
+  const visitInvoices = await readVisitInvoices(database, visits.cohort.map((v) => v.id));
+  const parts = groupBy(await readPartPayments(database, [...visitInvoices, ...sent].map((i) => i.id)), 'invoice_id');
+  const { visitCohort, unbilled } = cohortFrom(visits.cohort, visitInvoices, parts, d.today);
   const gap = engine.dayDiff;
   return {
     today: d.today,
@@ -397,10 +438,10 @@ async function loadForecastInput({
       // since the curve measures the payments against it
       value: invoiceAmountDue({ total: i.total, credit_applied: i.credit_applied, amount_paid: 0 }),
       ageDays: gap(i.sent_day, d.today),
-      paid: (i.paid_day && usd(i.paid_amount) > 0) ? [{ lagDays: Math.max(0, gap(i.sent_day, i.paid_day)), amount: usd(i.paid_amount) }] : [],
+      paid: payEvents(i, parts).map((e) => ({ lagDays: Math.max(0, gap(i.sent_day, e.day)), amount: e.amount })),
     })),
     booked: visits.booked,
-    openInvoices: open.map((i) => ({ amountUsd: invoiceAmountDue(i), ageDays: Math.max(0, gap(i.sent_day, d.today)), processing: i.status === 'processing' })),
+    openInvoices: open.map((i) => ({ amountUsd: invoiceAmountDue(i), ageDays: Math.max(0, gap(i.sent_day, d.today)) })),
     dues,
     trailing: { visits: visits.trailingVisits, workValueUsd: visits.trailingWorkUsd, prepaySalesUsd3m },
     bankLines: bankLines.map((l) => ({ ...l, amount: usd(l.amount) })),
@@ -411,11 +452,11 @@ async function loadForecastInput({
       ...projectPayroll(payroll, { today: d.today, to: d.windowEnd }),
     ],
     taxRows: taxRows.filter((t) => t.amount_due !== null && t.amount_due !== undefined)
-      .map((t) => ({ dueDay: t.due_day, amountUsd: Math.max(0, usd(t.amount_due) - usd(t.amount_paid)) })),
+      .map((t) => ({ dueDay: t.due_day < d.today ? d.today : t.due_day, amountUsd: Math.max(0, usd(t.amount_due) - usd(t.amount_paid)) })),
     items,
     settings,
     missing: loaderFacts({ pool, visits, unbilled, drafts, taxRows, offFeed, stripeOk: stripeBalance.ok }),
   };
 }
 
-module.exports = { loadForecastInput, _private: { visitValue, effectivePriceSql, projectPayroll } };
+module.exports = { loadForecastInput, _private: { visitValue, projectPayroll, payEvents } };
