@@ -277,6 +277,92 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
     });
   });
 
+  describe('the cap is reserved before each call', () => {
+    const etDay = () => require('../utils/datetime-et').etDateString(new Date());
+    const reserved = () => evidence.noCustomerCallsToday(db, etDay());
+    const reserveRows = async (n, commitmentId) => {
+      await db('audit_log').insert(Array.from({ length: n }, () => ({ actor_type: 'system', action: evidence.MODEL_CALL_ACTION,
+        resource_type: 'call_commitment', resource_id: commitmentId, metadata: JSON.stringify({ etDay: etDay() }) })));
+    };
+
+    test('two overlapping reservers at 9 used: exactly one gets the call', async () => {
+      const w = await world();
+      await reserveRows(9, w.commitment.id);
+      const answers = await Promise.all([evidence.reserveNoCustomerCall(db, w.commitment.id, etDay()), evidence.reserveNoCustomerCall(db, w.commitment.id, etDay())]);
+      expect(answers.sort()).toEqual([false, true]);
+      expect(await reserved()).toBe(10);
+    });
+
+    test('the 11th call on a day is refused, and a refusal writes nothing', async () => {
+      const w = await world();
+      for (let i = 0; i < 10; i += 1) expect(await evidence.reserveNoCustomerCall(db, w.commitment.id, etDay())).toBe(true);
+      expect(await evidence.reserveNoCustomerCall(db, w.commitment.id, etDay())).toBe(false);
+      expect(await reserved()).toBe(10);
+    });
+
+    test('a reservation that throws means no model call and no close (fails closed)', async () => {
+      const w = await world();
+      const later = await addCall(w);
+      say(w, fulfilledBy(`call:${later}`, 'walkthrough at two PM tomorrow'));
+      // The same connection, except that a transaction cannot be had (a reservation is one).
+      const failing = Object.assign((...args) => db(...args), { raw: (...args) => db.raw(...args),
+        transaction: async () => { throw Object.assign(new Error('insert failed'), { code: 'XX000' }); } });
+      const result = await run(w, { conn: failing });
+      expect(modelCalls()).toBe(0);
+      expect(result.closed).toBe(0);
+      expect(await reserved()).toBe(0);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('two passes running at once never make more than the cap between them', async () => {
+      const worlds = [];
+      for (let i = 0; i < 12; i += 1) {
+        const w = await world({ callAgeDays: 2 + i / 100 });
+        await addCall(w);
+        worlds.push(w);
+      }
+      await Promise.all([run(worlds), run(worlds)]);
+      expect(modelCalls()).toBeLessThanOrEqual(10);
+      expect(await reserved()).toBeLessThanOrEqual(10);
+      // A call is made only for a reservation: every reservation row has its call, and the cap was reached.
+      expect(await reserved()).toBe(modelCalls());
+    });
+  });
+
+  describe('the walk pages past promises nothing has changed for', () => {
+    test('60 promises: the newest 50 have no witness, an older one has a qualifying call, and it is judged', async () => {
+      const worlds = [];
+      for (let i = 0; i < 60; i += 1) worlds.push(await world({ callAgeDays: 2 + i / 1000 })); // worlds[0] is the newest
+      const older = worlds[55];
+      const later = await addCall(older);
+      say(older, fulfilledBy(`call:${later}`, 'walkthrough at two PM tomorrow'));
+      const result = await run(worlds);
+      expect(result).toMatchObject({ no_customer_candidates: 60, closed: 1 });
+      expect(asked(older)).toHaveLength(1);
+      expect((await row(older.commitment.id)).status).toBe('fulfilled');
+    });
+
+    test('a run that stops early (the model budget) resumes after the last promise judged; a finished walk starts from the newest', async () => {
+      close.resetNoCustomerResume();
+      await db('call_commitments').whereIn('id', made.commitmentIds).update({ status: 'dismissed' });
+      const [a, b, c] = [await world({ callAgeDays: 0.9 }), await world({ callAgeDays: 0.91 }), await world({ callAgeDays: 0.92 })];
+      for (const w of [a, b, c]) await addCall(w, { created_at: after(w, 150) });
+      const open = (w) => asked(w).length;
+      // No callIds: the full walk. A budget of one model call judges the newest, then stops with its place kept.
+      await close.runCallPromiseAiClose({ conn: db, now: new Date(), maxModelCalls: 1 });
+      expect([open(a), open(b), open(c)]).toEqual([1, 0, 0]);
+      await close.runCallPromiseAiClose({ conn: db, now: new Date(), maxModelCalls: 1 });
+      expect([open(a), open(b), open(c)]).toEqual([1, 1, 0]);
+      await close.runCallPromiseAiClose({ conn: db, now: new Date() });
+      expect(open(c)).toBe(1);
+      // The walk reached the end: the next run starts from the newest again (cached verdicts cost no call).
+      dispatchWithFallback.mockClear();
+      await close.runCallPromiseAiClose({ conn: db, now: new Date() });
+      expect(modelCalls()).toBe(0);
+      close.resetNoCustomerResume();
+    });
+  });
+
   describe('a close is re-judged', () => {
     test('it stands while the call has no customer and the gate is on; it reopens when the call gains a customer, or the gate goes off', async () => {
       const w = await world();

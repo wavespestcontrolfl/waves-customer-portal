@@ -185,7 +185,7 @@ async function verifyThreadCompletion(conn, commitment, message, now = new Date(
   const { obligation, evidenceHash } = threadFingerprint(commitment, records);
   const previous = commitment.sms_context?.thread_check;
   if (previous?.evidence_hash === evidenceHash && (!previous.retry_after || new Date(previous.retry_after) > now)) return previous;
-  if (mayCall && !mayCall()) return null;
+  if (mayCall && !(await mayCall())) return null;
   const verdict = await checkThread(obligation, records);
   return { ...verdict, evidence_hash: evidenceHash,
     retry_after: ['provider_failed', 'invalid_model_output'].includes(verdict.reason)

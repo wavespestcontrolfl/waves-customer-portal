@@ -64,6 +64,42 @@ describe('no-customer candidates (call-promise-ai-close.js)', () => {
   });
 });
 
+describe('the daily model-call reservation (call-promise-phone-evidence.js)', () => {
+  const evidence = () => require('../services/call-promise-phone-evidence');
+  const logger = () => require('../services/logger');
+  // A connection whose transaction runs its callback on a fake: `used` rows already reserved today.
+  const fake = ({ used = 0, failInsert = false, failTransaction = false } = {}) => {
+    const inserted = [];
+    const order = [];
+    const trx = Object.assign((_table) => {
+      const q = { where: () => q, whereRaw: () => q, count: () => q, first: async () => { order.push('count'); return { n: used + inserted.length }; },
+        insert: async (row) => { order.push('insert'); if (failInsert) throw Object.assign(new Error('boom'), { code: 'XX000' }); inserted.push(row); } };
+      return q;
+    }, { raw: jest.fn(async () => { order.push('lock'); }) });
+    return { conn: { transaction: async (fn) => { if (failTransaction) throw new Error('no connection'); return fn(trx); } }, inserted, order, trx };
+  };
+
+  test('the lock comes first, then the count, then the insert; at 9 used one more is reserved', async () => {
+    const f = fake({ used: 9 });
+    expect(await evidence().reserveNoCustomerCall(f.conn, 'c1', '2026-11-05')).toBe(true);
+    expect(f.order).toEqual(['lock', 'count', 'insert']);
+    expect(f.trx.raw.mock.calls[0][0]).toContain('pg_advisory_xact_lock');
+    expect(f.inserted[0]).toMatchObject({ action: evidence().MODEL_CALL_ACTION, resource_id: 'c1', metadata: JSON.stringify({ etDay: '2026-11-05' }) });
+  });
+  test('the 11th call on a day is refused and writes nothing', async () => {
+    const f = fake({ used: 10 });
+    expect(await evidence().reserveNoCustomerCall(f.conn, 'c1', '2026-11-05')).toBe(false);
+    expect(f.inserted).toEqual([]);
+  });
+  test('an insert that throws, or a transaction that cannot start, reserves nothing: no call (fails closed), logged by code only', async () => {
+    const warn = jest.spyOn(logger(), 'warn').mockImplementation(() => {});
+    expect(await evidence().reserveNoCustomerCall(fake({ failInsert: true }).conn, 'c1', '2026-11-05')).toBe(false);
+    expect(await evidence().reserveNoCustomerCall(fake({ failTransaction: true }).conn, 'c1', '2026-11-05')).toBe(false);
+    expect(warn.mock.calls.map(([m]) => m).join(' ')).not.toContain('boom');
+    warn.mockRestore();
+  });
+});
+
 describe('phone identity and the witness (call-promise-phone-evidence.js)', () => {
   const evidence = () => require('../services/call-promise-phone-evidence');
   test('the caller\'s number is the inbound from_phone or the outbound to_phone; a carrier sentinel or blank is nobody', () => {

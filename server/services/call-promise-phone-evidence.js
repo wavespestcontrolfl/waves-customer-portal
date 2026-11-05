@@ -35,6 +35,8 @@ const { smsContactSelects, callContactSelects, operatorReply, personCallBack, sm
 // Owed-queue pass (owner 2026-11-05: about $0.05 a day expected; 10 calls caps the worst case near $0.33).
 const NO_CUSTOMER_DAILY_MODEL_CALLS = 10;
 const MODEL_CALL_ACTION = 'call_promise_ai_no_customer_model_call';
+// The advisory-lock key of the day's budget (hashed to the lock's integer in SQL).
+const BUDGET_LOCK = 'call-promise-ai-no-customer-model-budget';
 const LIMIT = 50;
 const TEXT_LIMIT = 16000;
 
@@ -118,26 +120,36 @@ function phoneWitness(record, commitment) {
 
 // ── The daily cap ───────────────────────────────────────────────────────────
 
-// Model calls already made today (Eastern day) for no-customer promises, across processes.
+// Model calls already reserved today (Eastern day) for no-customer promises, across processes.
 async function noCustomerCallsToday(conn, etDay) {
   const row = await conn('audit_log').where({ action: MODEL_CALL_ACTION }).whereRaw("metadata->>'etDay' = ?", [etDay]).count({ n: '*' }).first();
   return Number(row?.n) || 0;
 }
 
-// One audit row per model call made. Bookkeeping: a failed write is logged and never fails the pass.
-async function recordNoCustomerCalls(conn, commitmentId, count, etDay) {
-  if (!(count > 0)) return;
+// Reserve ONE model call for a no-customer promise BEFORE it is made (the owner's spend limit, so it holds exactly):
+// one short transaction takes a transaction-scoped advisory lock on this budget, counts today's reservation rows, and
+// inserts one more only while the count is under NO_CUSTOMER_DAILY_MODEL_CALLS. The caller calls the model only when
+// this resolves true, after the row is committed; a reservation stands even if the model call then fails. Two
+// overlapping runs (the watchdog and the Owed-queue read, in any process) queue on the lock, so together they can
+// never reserve more than the cap. Any error means no reservation, so no call (fails closed). No migration: the
+// reservation rows are audit_log rows.
+async function reserveNoCustomerCall(conn, commitmentId, etDay) {
   try {
-    await conn('audit_log').insert(Array.from({ length: count }, () => ({
-      actor_type: 'system', action: MODEL_CALL_ACTION, resource_type: 'call_commitment', resource_id: commitmentId,
-      metadata: JSON.stringify({ etDay }),
-    })));
+    return await conn.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [BUDGET_LOCK]);
+      if (await noCustomerCallsToday(trx, etDay) >= NO_CUSTOMER_DAILY_MODEL_CALLS) return false;
+      await trx('audit_log').insert({ actor_type: 'system', action: MODEL_CALL_ACTION, resource_type: 'call_commitment', resource_id: commitmentId,
+        metadata: JSON.stringify({ etDay }) });
+      return true;
+    });
   } catch (err) {
-    logger.warn(`[call-promise-phone-evidence] could not record ${count} model call(s): ${err.code || err.name}`);
+    // The code only: a query error's message can carry its bound values.
+    logger.warn(`[call-promise-phone-evidence] model-call reservation failed, no call made: ${err.code || err.name}`);
+    return false;
   }
 }
 
 module.exports = {
   NO_CUSTOMER_DAILY_MODEL_CALLS, MODEL_CALL_ACTION,
-  phoneIdentityOf, sharedPhoneReason, loadPhoneEvidence, phoneWitness, noCustomerCallsToday, recordNoCustomerCalls,
+  phoneIdentityOf, sharedPhoneReason, loadPhoneEvidence, phoneWitness, noCustomerCallsToday, reserveNoCustomerCall,
 };
