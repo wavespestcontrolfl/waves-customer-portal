@@ -108,4 +108,28 @@ async function recordStaffReclassify({ dbi, email, verdict, pick, staffUserId })
   }
 }
 
-module.exports = { AREA, SURFACE, EVIDENCE_TYPE, aiVerdictOf, staffClassification, recordStaffReclassify };
+const envNum = (name, def) => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v >= 0 ? v : def;
+};
+
+/**
+ * Sunday: fix proposals for email labels, the same rules as calls
+ * (proposeCallFixes). The email prompt is unversioned, so the count is the
+ * unversioned cohort, made fresh by the proposal watermark. No model call.
+ */
+async function proposeEmailFixes({ dbi = null, now = new Date() } = {}) {
+  const { emailReclassifyPickLive } = require('../../config/feature-gates');
+  if (!emailReclassifyPickLive()) return { skipped: 'gate_off' };
+  const { proposeFromIncidents } = require('../ai-incidents/fix-proposals');
+  return proposeFromIncidents({
+    dbi: dbi || require('../../models/db'),
+    area: AREA,
+    promptVersion: null,
+    minEvidence: envNum('EMAIL_FIX_PROPOSAL_MIN', 5),
+    maxCells: envNum('EMAIL_FIX_PROPOSAL_MAX_CELLS', 3),
+    now,
+  });
+}
+
+module.exports = { AREA, SURFACE, EVIDENCE_TYPE, aiVerdictOf, staffClassification, recordStaffReclassify, proposeEmailFixes };

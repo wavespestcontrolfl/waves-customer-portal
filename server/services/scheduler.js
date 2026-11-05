@@ -4134,6 +4134,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY SUN 4:55AM ET — Correction-loop fix proposals for email labels
+  // (owner 2026-11-04, email learning loop), same rules as calls. No model
+  // call. Gate read inside the job (GATE_EMAIL_RECLASSIFY_PICK).
+  // =========================================================================
+  cron.schedule('55 4 * * 0', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeEmailFixes } = require('./email/email-reclassify-incident');
+      await runExclusive('email-fix-proposals', () => proposeEmailFixes());
+    } catch (err) {
+      logger.error(`Email fix proposals failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
   // cell with enough DISTINCT confirmed ai_incidents on the live prompt
   // version gets one pending ai_fix_proposals row with its dev/holdout

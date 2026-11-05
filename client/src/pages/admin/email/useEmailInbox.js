@@ -341,7 +341,7 @@ export default function useEmailInbox(active, clearDraftResult) {
     try {
       const response = await adminFetch(
         `/api/admin/email/message/${emailId}/reclassify`,
-        label ? { method: "POST", body: JSON.stringify({ classification: label }) } : { method: "POST" },
+        { method: "POST", ...(label ? { body: JSON.stringify({ classification: label }) } : {}) },
       );
       const data = await response.json().catch(() => null);
       if (!response.ok) {
