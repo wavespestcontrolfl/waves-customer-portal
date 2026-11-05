@@ -112,11 +112,23 @@ function useThread() {
   const add = useCallback((message) => setMessages((prev) => mergeMessages(prev, [message])), []);
 
   // A new answer from the office shows up without a reload. A failed refresh
-  // is silent: the thread on screen is still right.
+  // is silent: the thread on screen is still right. When more came than one
+  // page holds (the page was hidden, or refreshes failed), the newest page
+  // replaces the thread and "Show earlier messages" reaches the rest, so no gap
+  // is left that no button can fill.
   const refresh = useCallback(() => {
     if (!isVisible() || status !== 'ready') return;
     api.getPortalMessages()
-      .then((d) => { if (live.current && Array.isArray(d?.messages)) setMessages((prev) => mergeMessages(prev, d.messages)); })
+      .then((d) => {
+        if (!live.current || !Array.isArray(d?.messages)) return;
+        const held = new Set(messagesRef.current.map((m) => m.id));
+        if (d.hasMore === true && held.size > 0 && !d.messages.some((m) => held.has(m.id))) {
+          setMessages(d.messages);
+          setHasMore(true);
+          return;
+        }
+        setMessages((prev) => mergeMessages(prev, d.messages));
+      })
       .catch(() => {});
   }, [status]);
   useEffect(() => {
@@ -214,16 +226,21 @@ export function usePortalMessagesGate(ask, sessionKey) {
   const statusRef = useRef('unknown');
   statusRef.current = gate.status;
   const genRef = useRef(0);
+  // Bumped by every probe and by every read the page reports: a probe answer
+  // keeps its count only when nothing newer came after it asked.
+  const seqRef = useRef(0);
 
   const probe = useCallback((tab) => {
     if (tab !== undefined) tabRef.current = tab;
     if (!ask || statusRef.current === 'off' || !isVisible()) return;
     const gen = genRef.current;
+    const seq = ++seqRef.current;
     Promise.resolve().then(() => api.getPortalMessagesUnread())
       .then((res) => {
         if (gen !== genRef.current) return;
+        const fresh = seq === seqRef.current && tabRef.current !== 'messages';
         const count = Number.isFinite(res?.count) ? res.count : 0;
-        setGate((prev) => ({ status: 'on', unread: tabRef.current === 'messages' ? prev.unread : count }));
+        setGate((prev) => ({ status: 'on', unread: fresh ? count : prev.unread }));
       })
       .catch((err) => {
         // A hiccup after Messages was on keeps it on; a first failure keeps it hidden.
@@ -240,7 +257,10 @@ export function usePortalMessagesGate(ask, sessionKey) {
     return () => { genRef.current += 1; clearInterval(timer); };
   }, [ask, sessionKey, probe]);
 
-  const setUnread = useCallback((n) => setGate((prev) => ({ ...prev, unread: n })), []);
+  const setUnread = useCallback((n) => {
+    seqRef.current += 1;
+    setGate((prev) => ({ ...prev, unread: n }));
+  }, []);
   return { enabled: gate.status === 'on', off: gate.status === 'off', unread: gate.unread, setUnread, probe };
 }
 

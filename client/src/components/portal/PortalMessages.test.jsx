@@ -83,6 +83,23 @@ describe('PortalMessages thread', () => {
     expect(screen.queryByRole('button', { name: 'Show earlier messages' })).toBeNull();
   });
 
+  it('a refresh with more than one page of new messages shows the newest page and keeps the rest reachable', async () => {
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    const page = Array.from({ length: 50 }, (_, i) => ({
+      id: `n${i}`, from: 'waves', body: `Note ${i}`, createdAt: new Date(Date.UTC(2026, 10, 4, 12, i)).toISOString(),
+    }));
+    api.getPortalMessages.mockResolvedValueOnce({ messages: page, hasMore: true, unread: 50 });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(await screen.findByText('Note 49')).toBeInTheDocument();
+    // No gap: the old messages left the window, and Show earlier loads from before the newest page.
+    expect(screen.queryByText('Do you spray the pool cage?')).toBeNull();
+    api.getPortalMessages.mockResolvedValueOnce({ messages: thread, hasMore: false, unread: 0 });
+    fireEvent.click(screen.getByRole('button', { name: 'Show earlier messages' }));
+    expect(await screen.findByText('Do you spray the pool cage?')).toBeInTheDocument();
+    expect(api.getPortalMessages).toHaveBeenLastCalledWith(page[0].createdAt);
+  });
+
   it('shows Try again when the thread cannot load, and loads it on retry', async () => {
     api.getPortalMessages.mockRejectedValueOnce(new Error('offline'));
     render(<PortalMessages />);
@@ -279,6 +296,21 @@ describe('usePortalMessagesGate', () => {
     const calls = api.getPortalMessagesUnread.mock.calls.length;
     act(() => { off.result.current.probe('plan'); });
     expect(api.getPortalMessagesUnread.mock.calls.length).toBe(calls);
+  });
+
+  it('a probe that asked before a read cannot put the count back once the customer leaves Messages', async () => {
+    let answer;
+    api.getPortalMessagesUnread.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const { result } = renderHook(() => usePortalMessagesGate(true, 'a'));
+    act(() => { result.current.probe('messages'); });
+    await waitFor(() => expect(api.getPortalMessagesUnread).toHaveBeenCalledTimes(1));
+    // The page reads the thread, then the customer goes Home; that probe answers 0.
+    api.getPortalMessagesUnread.mockResolvedValueOnce({ count: 0 });
+    act(() => { result.current.setUnread(0); result.current.probe('dashboard'); });
+    await waitFor(() => expect(result.current.enabled).toBe(true));
+    // The first probe answers late with the count from before the read.
+    await act(async () => { answer({ count: 3 }); });
+    expect(result.current.unread).toBe(0);
   });
 
   it('does not put a count back while the customer is on the Messages tab', async () => {
