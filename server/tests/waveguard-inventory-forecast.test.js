@@ -9,7 +9,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const db = require('../models/db');
 const { buildPlanForService, customerBillingModeColumnExists } = require('../services/waveguard-plan-engine');
-const { DEFAULT_FORECAST_DAYS, buildWaveGuardInventoryForecast, runWaveGuardInventoryForecastCheck } = require('../services/waveguard-inventory-forecast');
+const { DEFAULT_FORECAST_DAYS, buildWaveGuardInventoryForecast, forecastForTechnician, runWaveGuardInventoryForecastCheck } = require('../services/waveguard-inventory-forecast');
 const router = require('../routes/admin-inventory');
 
 // Read-only query double: unexpected tables/writes fail instead of touching a DB.
@@ -26,11 +26,11 @@ function item(id, amount, amountUnit, inventory) {
   return { product: { id, name: id, inventory }, mix: { amount, amountUnit } };
 }
 
-async function get(path, query = {}) {
+async function get(path, query = {}, req = {}) {
   const route = router.stack.find((layer) => layer.route?.path === path && layer.route.methods.get);
   const res = { json: jest.fn() };
   const next = jest.fn();
-  await route.route.stack[0].handle({ query }, res, next);
+  await route.route.stack[0].handle({ query, techRole: 'admin', ...req }, res, next);
   return { body: res.json.mock.calls[0]?.[0], next };
 }
 
@@ -320,4 +320,92 @@ test('cron check defaults to the one-week window', async () => {
   expect(alert.insert).toHaveBeenCalledWith(expect.objectContaining({
     description: expect.stringContaining('for 2030-01-09 through 2030-01-16.'),
   }));
+});
+
+describe('technician forecast (audit A2 / C1): product totals for all, names only on own visits', () => {
+  const people = {
+    'visit-1': { customer_id: 'cust-1', first_name: 'Pat', last_name: 'Example', city: 'Testville', waveguard_tier: 'Gold' },
+    'visit-2': { customer_id: 'cust-2', first_name: 'Sam', last_name: 'Sample', city: 'Exampleton', waveguard_tier: 'Silver' },
+    'visit-3': { customer_id: 'cust-3', first_name: 'Lee', last_name: 'Sample', city: 'Exampleton', waveguard_tier: 'Bronze' },
+  };
+  let ownQuery;
+  beforeEach(() => {
+    visits = readQuery([
+      { id: 'visit-1', scheduled_date: '2030-01-09', ...people['visit-1'] },
+      { id: 'visit-2', scheduled_date: '2030-01-10', ...people['visit-2'] },
+      { id: 'visit-3', scheduled_date: '2030-01-11', ...people['visit-3'] },
+    ]);
+    // The technician's own current visits among the ids the forecast used.
+    ownQuery = readQuery([]);
+    ownQuery.select = jest.fn(async () => [{ id: 'visit-1' }]);
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as ss') return visits;
+      if (table === 'scheduled_services') return ownQuery;
+      if (table === 'products_catalog') return products;
+      throw new Error(`Unexpected table: ${table}`);
+    });
+  });
+  const technician = { techRole: 'technician', technicianId: 'tech-1' };
+  const customerFields = ['customerName', 'customerId', 'city', 'waveguardTier'];
+
+  test('a technician keeps customer fields on the own visit only; every other visit loses them', async () => {
+    const { body, next } = await get('/waveguard-forecast', { days: '2', limit: '20' }, technician);
+    expect(next).not.toHaveBeenCalled();
+    const shortRow = body.forecast.products.find((row) => row.productId === 'short');
+    const own = shortRow.appointments.find((a) => a.serviceId === 'visit-1');
+    const other = shortRow.appointments.find((a) => a.serviceId === 'visit-2');
+    expect(own).toMatchObject({ customerName: 'Pat Example', customerId: 'cust-1', city: 'Testville', waveguardTier: 'Gold' });
+    for (const field of customerFields) expect(other).not.toHaveProperty(field);
+    // The visit itself still counts: date, amount and window stay.
+    expect(other).toMatchObject({ serviceId: 'visit-2', scheduledDate: '2030-01-10', inventoryAmount: 0.75 });
+    const mismatch = body.forecast.products.find((row) => row.productId === 'mismatch').mismatchAppointments[0];
+    expect(mismatch).toMatchObject({ serviceId: 'visit-1', customerName: 'Pat Example' });
+  });
+
+  test('a technician sees no other customer name anywhere in the response, plan errors included', async () => {
+    const { body } = await get('/waveguard-forecast', { days: '2', limit: '20' }, technician);
+    const text = JSON.stringify(body);
+    expect(text).not.toContain('Sam Sample');
+    expect(text).not.toContain('Lee Sample');
+    expect(text).not.toContain('Exampleton');
+    expect(text).not.toContain('cust-2');
+    expect(body.forecast.errors).toEqual([{ serviceId: 'visit-3', scheduledDate: '2030-01-11', message: 'Plan unavailable' }]);
+  });
+
+  test('product totals are the same for a technician and an admin', async () => {
+    const tech = (await get('/waveguard-forecast', { days: '2', limit: '20' }, technician)).body.forecast;
+    const admin = (await get('/waveguard-forecast', { days: '2', limit: '20' })).body.forecast;
+    const totals = (forecast) => forecast.products.map(({ productId, status, committedDemand, unconvertedDemand, projectedRemaining, shortfall, recommendedOrderQuantity, firstShortDate }) =>
+      ({ productId, status, committedDemand, unconvertedDemand, projectedRemaining, shortfall, recommendedOrderQuantity, firstShortDate }));
+    expect(totals(tech)).toEqual(totals(admin));
+    expect(tech.statusCounts).toEqual(admin.statusCounts);
+    expect(tech.serviceCount).toBe(admin.serviceCount);
+  });
+
+  test('the own-visit lookup is the technician assignment scope', async () => {
+    await get('/waveguard-forecast', { days: '2', limit: '20' }, technician);
+    expect(ownQuery.where).toHaveBeenCalledWith('scheduled_services.technician_id', 'tech-1');
+    expect(ownQuery.whereIn).toHaveBeenCalledWith('scheduled_services.id', expect.arrayContaining(['visit-1', 'visit-2', 'visit-3']));
+  });
+
+  test('an admin still gets every customer name and no scope lookup', async () => {
+    const { body } = await get('/waveguard-forecast', { days: '2', limit: '20' });
+    const shortRow = body.forecast.products.find((row) => row.productId === 'short');
+    expect(shortRow.appointments.map((a) => a.customerName)).toEqual(['Pat Example', 'Sam Sample']);
+    expect(body.forecast.errors[0]).toMatchObject({ customerName: 'Lee Sample' });
+    expect(ownQuery.where).not.toHaveBeenCalled();
+  });
+
+  test('skipped non-program visits drop out unless they are the own visit', async () => {
+    const forecast = {
+      products: [],
+      errors: [],
+      skippedNonProgram: [
+        { serviceId: 'visit-1', scheduledDate: '2030-01-09', customerName: 'Pat Example' },
+        { serviceId: 'visit-2', scheduledDate: '2030-01-10', customerName: 'Sam Sample' },
+      ],
+    };
+    const projected = await forecastForTechnician(forecast, { technicianId: 'tech-1' }, db);
+    expect(projected.skippedNonProgram).toEqual([{ serviceId: 'visit-1', scheduledDate: '2030-01-09', customerName: 'Pat Example' }]);
+  });
 });

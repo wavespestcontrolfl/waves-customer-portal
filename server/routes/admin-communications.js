@@ -513,7 +513,7 @@ async function sendSmsHandler(req, res, next) {
       body,
       customerId,
       messageType,
-      fromNumber,
+      fromNumber: requestedFromNumber,
       // The inbox row this text answers (Communications "Text back"): a
       // recruiting row keeps the reply on the recruiting rail even when the
       // shared phone is also a customer's (Codex r25 P1).
@@ -561,9 +561,12 @@ async function sendSmsHandler(req, res, next) {
         error: `Attachments total ${(totalMediaBytes / 1024 / 1024).toFixed(1)}MB, over Twilio's 5MB per-message limit`,
       });
     }
-    if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
+    if (requestedFromNumber && !TWILIO_NUMBERS.findByNumber(requestedFromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
+    // A technician texts from an office line or its own tech line only; any
+    // other line is ignored and the default office line is used.
+    const fromNumber = technicianAllowedFromNumber(req, requestedFromNumber);
     let trustedCustomerId;
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
@@ -1972,6 +1975,20 @@ router.get('/sender', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The lines a technician may text from: the main line, the office location
+// lines and its own tech line (technicians.twilio_number). Another
+// technician's line and the recruiting, tracking and chat lines are not
+// offered: the customer's reply would land on a line the sender does not own.
+function technicianAllowedFromNumber(req, fromNumber) {
+  if (!fromNumber || !isTechnicianRequest(req)) return fromNumber;
+  const allowed = [
+    TWILIO_NUMBERS.mainLine.number,
+    ...Object.values(TWILIO_NUMBERS.locations).map((l) => l.number),
+    req.technician?.twilio_number,
+  ].filter(Boolean).map((n) => normalizePhone(n));
+  return allowed.includes(normalizePhone(fromNumber)) ? fromNumber : undefined;
+}
+
 // POST /api/admin/communications/call — initiate an outbound call via Twilio.
 // Named so the bell's Call button runs this same handler (placeCallFromAlert below).
 async function callHandler(req, res, next) {
@@ -2575,18 +2592,34 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Shared inbox count; Customer 360 may scope it to the selected customer.
-router.get('/unread-count', requireAdmin, async (req, res, next) => {
+// A technician's Messages badge: the same needs-a-reply count, over texts from the customers on its own route
+// only. A text from a number that matches no customer is office work and never counts.
+async function technicianUnreadCount(req, customerId) {
+  const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
+  const owned = new Set((await technicianCustomerIdsSubquery(req, db)).map((row) => row.customer_id));
+  const rows = (await loadPendingSmsConversations({
+    excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE,
+  })).filter((row) => row.customer_id && owned.has(row.customer_id));
+  return { conversations: new Set(rows.map((row) => row.peer)).size, messages: rows.length };
+}
+
+// Shared inbox count; Customer 360 may scope it to the selected customer. A technician gets the count for its own
+// customers only (Messages badge).
+router.get('/unread-count', async (req, res, next) => {
   try {
     const { customerId } = req.query;
     if (customerId !== undefined && (typeof customerId !== 'string' || !UUID_RE.test(customerId))) {
       return res.status(400).json({ error: 'Invalid customer id' });
     }
+    if (isTechnicianRequest(req)) {
+      if (customerId && !(await technicianCustomerGuard(req, res, customerId))) return undefined;
+      return res.json(await technicianUnreadCount(req, customerId));
+    }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-    res.json(await countUnreadInboundSms({
+    return res.json(await countUnreadInboundSms({
       excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
     }));
-  } catch (err) { next(err); }
+  } catch (err) { return next(err); }
 });
 
 // POST /api/admin/communications/messages/:id/like — the office's like on a
@@ -2754,9 +2787,15 @@ router.post('/ai-draft', async (req, res, next) => {
       // route — otherwise another customer's texts would reach the prompt
       // (codex #5568 r9 P1). They can still type the reply themselves.
       // Stored phones carry punctuation: compare the last 10 digits, the
-      // file's own rule elsewhere (pre-push P1).
+      // file's own rule elsewhere (pre-push P1). Every known-caller slot
+      // counts (primary, service contacts, secondary): an off-route customer
+      // who holds the number in a secondary slot must block the draft too.
+      const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+      const slotMatch = KNOWN_CALLER_PHONE_COLS
+        .map((col) => `right(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`)
+        .join(' OR ');
       const sharing = await db('customers')
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [cleanPhone])
+        .whereRaw(`(${slotMatch})`, KNOWN_CALLER_PHONE_COLS.map(() => cleanPhone))
         .select('id');
       if (!sharing.length) return res.status(404).json({ error: 'Customer not found' });
       for (const row of sharing) {
@@ -2769,12 +2808,16 @@ router.post('/ai-draft', async (req, res, next) => {
     // prompt, and an applicant sharing the phone must never have interview
     // discussion or the bearer scheduling link fed into a service reply
     // (Codex #4623 r17). /log keeps showing them to admins.
-    const recentSms = await excludeUnresolvedSendReservations(
+    let historyQuery = excludeUnresolvedSendReservations(
       db('sms_log').where(function () {
         this.where('from_phone', 'like', `%${cleanPhone}`).orWhere('to_phone', 'like', `%${cleanPhone}`);
       }),
     )
-      .whereRaw("COALESCE(sms_log.message_type, '') NOT LIKE 'job\\_%'")
+      .whereRaw("COALESCE(sms_log.message_type, '') NOT LIKE 'job\\_%'");
+    // A technician's draft reads texts of its own customers only, even when the
+    // number is shared with another record.
+    if (isTechnicianRequest(req)) historyQuery = historyQuery.whereIn('sms_log.customer_id', technicianCustomerIdsSubquery(req, db));
+    const recentSms = await historyQuery
       .orderBy('created_at', 'desc')
       .limit(5);
 
@@ -4231,7 +4274,9 @@ router.get('/blocked-numbers', async (req, res, next) => {
       numbers: rows.map(r => ({
         number: r.number,
         blockType: r.block_type,
-        reason: r.reason,
+        // A technician learns that a number is blocked, not why: the reason an
+        // admin typed is office-only.
+        ...(req.techRole === 'admin' ? { reason: r.reason } : {}),
         autoBlocked: !!r.auto_blocked,
         blockedAt: r.blocked_at,
       })),
@@ -4813,5 +4858,6 @@ function sendOfficeLikeText(req, target) {
 }
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;
+router._technicianAllowedFromNumber = technicianAllowedFromNumber;
 // Test seam for the like's send verdict.
 router._officeLikeSendVerdict = officeLikeSendVerdict;

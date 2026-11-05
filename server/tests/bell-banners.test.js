@@ -68,11 +68,13 @@ describe('isNightQuiet', () => {
   });
 });
 
-test('the banner kinds: two reminders that keep the night quiet, and Facebook messages that do not', () => {
+test('the banner kinds: two reminders that keep the night quiet, and Facebook messages and new-lead emails that do not', () => {
   expect(BELL_BANNER_KINDS).toEqual({
     sms_operational_followup: { nightQuiet: true },
     call_commitment_overdue: { nightQuiet: true },
     messenger_reply: { nightQuiet: false },
+    // GATE_RING_NEW_CONTACTS, not GATE_BELL_BANNERS (owner 2026-11-04).
+    new_lead_email: { nightQuiet: false, gate: 'ringNewContactsLive' },
   });
   expect(Object.isFrozen(BELL_BANNER_KINDS)).toBe(true);
 });

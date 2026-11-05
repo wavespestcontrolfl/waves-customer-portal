@@ -70,3 +70,34 @@ test('GET /jobs?status=scheduled leaves out rescheduled placeholders and no-show
     expect(jobs.map((j) => j.id).sort()).toEqual(['svc-0', 'svc-1']);
   });
 });
+
+// Owner ruling D2 A (2026-11-04): the Scores data is owner-only. A technician's job list keeps the
+// visit facts and loses the revenue figure (it falls back to the customer's monthly rate) and the
+// revenue-ranked score fields. An admin's list is unchanged.
+describe('GET /jobs revenue and score fields', () => {
+  const OWNER_ONLY = ['estimated_revenue', 'job_score', 'score', 'score_breakdown', 'breakdown', 'priority', 'upsell_flags', 'protect_slot', 'is_high_value'];
+  const jobRow = () => ({ id: 'svc-1', status: 'confirmed', service_type: 'General Pest', scheduled_date: '2026-10-30', monthly_rate: 89, estimated_price: 120 });
+
+  test('a technician gets no revenue or score fields, and still gets the visit', async () => {
+    q = chain([jobRow()]);
+    db.mockImplementation(() => q);
+    await withServer(async (base) => {
+      const jobs = await (await fetch(`${base}/jobs?date=2026-10-30`)).json();
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].id).toBe('svc-1');
+      expect(jobs[0].service_type).toBe('general_pest');
+      for (const key of OWNER_ONLY) expect(jobs[0]).not.toHaveProperty(key);
+    });
+  });
+
+  test('an admin still gets the revenue and score fields', async () => {
+    mockRole = 'admin';
+    q = chain([jobRow()]);
+    db.mockImplementation(() => q);
+    await withServer(async (base) => {
+      const jobs = await (await fetch(`${base}/jobs?date=2026-10-30`)).json();
+      for (const key of OWNER_ONLY) expect(jobs[0]).toHaveProperty(key);
+      expect(jobs[0].estimated_revenue).toBe(120);
+    });
+  });
+});

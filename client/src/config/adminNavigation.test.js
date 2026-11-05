@@ -346,6 +346,9 @@ describe("role scoping (adminOnly)", () => {
   });
 
   it("flags owner-only deep links, including nested and non-nav paths", () => {
+    // The Add customer form's save route is requireAdmin: a technician typing the URL must not open it.
+    expect(isPathAdminOnly("/admin/customers/new")).toBe(true);
+    expect(isPathAdminOnly("/admin/customers/some-customer-id")).toBe(false);
     expect(isPathAdminOnly("/admin/banking")).toBe(true);
     expect(isPathAdminOnly("/admin/invoices/123")).toBe(true);
     expect(isPathAdminOnly("/admin/seo")).toBe(true);

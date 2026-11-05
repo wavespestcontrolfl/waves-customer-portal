@@ -687,3 +687,59 @@ describe('resolveContextWindow: re-service window (GATE_RESERVICE_ASKS)', () => 
     expect(Math.abs(win.floor.getTime() - (NOW - ONE_TIME_CAP_DAYS * DAY))).toBeLessThan(60 * 1000);
   });
 });
+
+// Owner ruling D1 A (2026-11-04), audit A14: a technician's report draft uses no call summaries or
+// transcripts. excludeCalls drops the call channel from both builders; texts and emails stay.
+describe('excludeCalls (a technician report draft)', () => {
+  const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
+  const tables = () => ({
+    scheduled_services: [
+      { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Service', created_at: mk(20) },
+    ],
+    service_completion_profiles: [],
+    call_log: [
+      { created_at: mk(1), direction: 'inbound', lead_synopsis: 'Caller reported roaches in the pantry', call_summary: 'Caller reported roaches in the pantry', transcription: 'full call words' },
+    ],
+    sms_log: [
+      { created_at: mk(2), direction: 'inbound', message_body: 'The ants are back by the sink' },
+    ],
+    emails: [
+      { received_at: mk(3), subject: 'Photos', snippet: 'Photos of the soffit gap attached', body_text: 'Photos of the soffit gap attached', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+    ],
+  });
+
+  test('the mixed log: no call line, the call table is never read, texts and emails stay', async () => {
+    const whereArgs = {};
+    const ctx = await buildCompletionCommsContext({
+      customerId: 'c1', scheduledServiceId: 'svc-1', knex: stubKnex(tables(), whereArgs), excludeCalls: true,
+    });
+    expect(whereArgs).not.toHaveProperty('call_log');
+    expect(ctx.text).not.toMatch(/^Call /m);
+    expect(ctx.text).not.toContain('roaches in the pantry');
+    expect(ctx.text).toContain('The ants are back by the sink');
+    expect(ctx.text).toContain('Photos of the soffit gap');
+  });
+
+  test('the mixed log: an admin (excludeCalls off) still gets the call line', async () => {
+    const ctx = await buildCompletionCommsContext({ customerId: 'c1', scheduledServiceId: 'svc-1', knex: stubKnex(tables()) });
+    expect(ctx.text).toMatch(/^Call /m);
+  });
+
+  test('the customer words: no call line, the call table is never read, the hint names no call', async () => {
+    const whereArgs = {};
+    const ctx = await buildCustomerWordsContext({
+      customerId: 'c1', scheduledServiceId: 'svc-1', knex: stubKnex(tables(), whereArgs), excludeCalls: true,
+    });
+    expect(whereArgs).not.toHaveProperty('call_log');
+    expect(ctx.text).not.toMatch(/^Call /m);
+    expect(ctx.text).not.toContain('roaches in the pantry');
+    expect(ctx.text).toContain('Customer text');
+    expect(ctx.text).toContain('Customer email');
+    expect(ctx.promptHint).not.toMatch(/call/i);
+  });
+
+  test('the customer words: an admin (excludeCalls off) still gets the call summary', async () => {
+    const ctx = await buildCustomerWordsContext({ customerId: 'c1', scheduledServiceId: 'svc-1', knex: stubKnex(tables()) });
+    expect(ctx.text).toContain('roaches in the pantry');
+  });
+});

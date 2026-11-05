@@ -159,6 +159,7 @@ it.each([
 });
 
 it('keeps a standalone row in the normal editor when the legacy gate marks every row enabled', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   vi.mocked(adminFetch).mockResolvedValue({ services: [enabledStandalone], technicians: [], products: [], types: [] });
   render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: 'Open standalone day' }));
@@ -249,12 +250,33 @@ vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div
 vi.mock('../../components/dispatch/RevenuePanelV2', () => ({ default: () => <div>Job Scores tools</div> }));
 
 it.each([['revenue', 'Job Scores tools']])('keeps board-only view switches out of mobile %s', async (tab, content) => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   vi.stubGlobal('innerWidth', 390);
   vi.mocked(adminFetch).mockResolvedValue({ services: [], technicians: [], products: [], types: [] });
   render(<MemoryRouter><DispatchPageV2 activeTab={tab} /></MemoryRouter>);
   expect(await screen.findByText(content)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Week', exact: true })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Day', exact: true })).not.toBeInTheDocument();
+});
+
+it('a technician gets no Scores panel and no revenue chip on the Schedule tab (owner D2 A, 2026-11-04)', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+  vi.mocked(adminFetch).mockResolvedValue({ services: [{ id: 's1', status: 'confirmed', estimatedPrice: 1234, customerName: 'Pat Example', windowStart: '09:00', windowEnd: '10:00', scheduledDate: '2026-09-12' }], technicians: [], products: [], types: [] });
+  const { container, rerender } = render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="revenue" /></MemoryRouter>);
+  await waitFor(() => expect(adminFetch).toHaveBeenCalled());
+  expect(screen.queryByText('Job Scores tools')).not.toBeInTheDocument();
+  rerender(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  await screen.findByText(/services/);
+  expect(container.textContent).not.toMatch(/\$1,234/);
+  expect(container.textContent).not.toMatch(/revenue/);
+});
+
+it('an admin still sees the revenue chip on the Schedule tab', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+  vi.mocked(adminFetch).mockResolvedValue({ services: [{ id: 's1', status: 'confirmed', estimatedPrice: 1234, customerName: 'Pat Example', windowStart: '09:00', windowEnd: '10:00', scheduledDate: '2026-09-12' }], technicians: [], products: [], types: [] });
+  const { container } = render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  await screen.findByText(/services/);
+  expect(container.textContent).toMatch(/\$1,234\s*revenue/);
 });
 
 it('keeps the mobile board Day and Week switches available', async () => {

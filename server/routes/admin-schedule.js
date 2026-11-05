@@ -526,6 +526,22 @@ function discountProvenanceProjection(req, s) {
   };
 }
 
+// Technician money strip (owner ruling D2 A 2026-11-04): the day and week
+// feeds keep the "balance due" facts on billingLane (openBalance,
+// openInvoiceCount, hasOverdue), the paid-this-month flag and the per-visit
+// prices checkout reads. The customer's monthly rate (row and billingLane)
+// and lead score are office-only, as Customer 360 already treats them. Rows
+// are shared by reference with techSummary / unassigned, so this mutates in
+// place and returns nothing. Admin rows are never touched.
+function stripTechOwnerOnlyMoney(req, rows) {
+  if (!isTechnicianRequest(req)) return;
+  for (const row of rows) {
+    delete row.monthlyRate;
+    delete row.leadScore;
+    if (row.billingLane) delete row.billingLane.monthlyRate;
+  }
+}
+
 // The visit's premise and contact fields, serialized ONE way for the day feed
 // and the week feed. The admin Dispatch Fast Complete rules
 // (client/src/lib/dispatchCompletionRouting.js) open a one-screen sheet only
@@ -1598,6 +1614,9 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .first('service_type')
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
+      // Built once for every recipient, after the move landed, so the link
+      // checks see the new slot.
+      const differentTimeLine = await require('../services/reschedule-link').rescheduledTextLine(serviceId, { customerId: customer.id });
       sent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
         const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
         return renderRequiredSmsTemplate('appointment_rescheduled', {
@@ -1608,6 +1627,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           time: timeText,
           // "between 9:00 AM and 11:00 AM" — the phrase every reminder uses.
           window: spokenArrivalWindow(start),
+          different_time_line: differentTimeLine,
         }, {
           workflow: 'schedule_update_reschedule',
           entity_type: 'scheduled_service',
@@ -7283,7 +7303,10 @@ router.get('/', async (req, res, next) => {
     // shows no open hours for them, since assertAssignableTechnician would
     // refuse the booking. An unreadable absence table hides nothing.
     const absent = await absentTechDays(db, { dateFrom: date, dateTo: date }).catch(() => new Set());
-    const technicians = roster.map((t) => ({ ...t, outToday: absent.has(`${t.id}:${date}`) }));
+    // A technician sees only itself: who else is out today is the office's view.
+    const technicians = roster
+      .filter((t) => !isTechnicianRequest(req) || t.id === req.technicianId)
+      .map((t) => ({ ...t, outToday: absent.has(`${t.id}:${date}`) }));
 
     // Requested-date rain chance (office point) + per-zone chances for the
     // zones actually on this day's board. Office and every zone resolve in
@@ -7320,6 +7343,8 @@ router.get('/', async (req, res, next) => {
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
       attachStopRain(enriched, date, hourlyByZone);
     } catch { /* rain outlook is optional */ }
+
+    stripTechOwnerOnlyMoney(req, enriched);
 
     res.json({
       date, services: enriched,
@@ -7875,6 +7900,12 @@ router.get('/week', async (req, res, next) => {
       }
     } catch (err) {
       logger.warn(`[admin-schedule] week gate waypoint lookup failed (${err.code || err.name || 'error'})`);
+    }
+
+    stripTechOwnerOnlyMoney(req, days.flatMap((day) => day.services));
+    if (isTechnicianRequest(req)) {
+      // Coworker absences are the office's view; the caller's own stays.
+      for (const day of days) if (day.outTechIds) day.outTechIds = day.outTechIds.filter((id) => id === req.technicianId);
     }
 
     res.json({ startDate, days, visitCloseout: visitCloseoutEnabled, bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay() });
@@ -27883,6 +27914,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         const comms = await (writerRulesOn ? buildCustomerWordsContext : buildCompletionCommsContext)({
           customerId: groundingCustomerId,
           scheduledServiceId,
+          // Owner 2026-11-04 (D1 A): a technician's draft uses no call
+          // summaries or transcripts; texts and emails stay.
+          excludeCalls: isTechnicianRequest(req),
         });
         if (comms.text) {
           commsBlock = writerRulesOn
@@ -29918,6 +29952,8 @@ module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;
+// Test surface for the technician money strip on the day and week feeds.
+module.exports.stripTechOwnerOnlyMoney = stripTechOwnerOnlyMoney;
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;

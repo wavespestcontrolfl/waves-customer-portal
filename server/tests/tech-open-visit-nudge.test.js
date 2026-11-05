@@ -7,15 +7,18 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(), isKnownOwnerPhone: jest.fn(() => false) }));
 jest.mock('../services/push-notifications', () => ({ sendToAdminUser: jest.fn() }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const PushService = require('../services/push-notifications');
 const logger = require('../services/logger');
+const { triggerNotification } = require('../services/notification-triggers');
 const { runTechOpenVisitNudge, _test } = require('../services/tech-open-visit-nudge');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
 const CARRY_GATE = 'GATE_RESERVICE_OPEN_CARRYOVER';
+const BANNER_GATE = 'GATE_OWNER_NUDGE_BANNER';
 
 function chain(overrides = {}) {
   const c = {
@@ -63,6 +66,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env[GATE];
   delete process.env[CARRY_GATE];
+  delete process.env[BANNER_GATE];
   db.raw = jest.fn((sql) => ({ raw: sql }));
   TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM123', deliveryOutcome: 'accepted' });
   // Fixture techs are the owner (texted) unless a test says otherwise.
@@ -925,5 +929,141 @@ describe('re-service carry-over (GATE_RESERVICE_OPEN_CARRYOVER)', () => {
       await runTechOpenVisitNudge({ now: EVE });
       expect(TwilioService.sendSMS.mock.calls[0][1].split('\n')[0]).toMatch(/^Waves: 1 re-service from earlier days is still open/);
     });
+  });
+});
+
+// Owner 2026-11-04 "banner": GATE_OWNER_NUDGE_BANNER sends the owner's nudge as a Waves Admin banner instead of the text.
+describe('owner banner (GATE_OWNER_NUDGE_BANNER)', () => {
+  const NOW = new Date('2026-09-28T23:00:00Z');
+  let notifChains;
+
+  function seed({ owner = true, extraRows = [] } = {}) {
+    TwilioService.isKnownOwnerPhone.mockReturnValue(owner);
+    notifChains = [];
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a' }), ...extraRows];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
+      return chain();
+    });
+  }
+  const released = () => notifChains.some((c) => c.del.mock.calls.length > 0);
+
+  beforeEach(() => {
+    process.env[GATE] = 'true';
+    triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
+  });
+
+  test('gate on, a phone takes it: the owner gets the banner and no text, and the slot stays claimed', async () => {
+    process.env[BANNER_GATE] = 'true';
+    seed();
+    const r = await runTechOpenVisitNudge({ now: NOW });
+    expect(r).toMatchObject({ sent: 1, skipped: 0 });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUser).not.toHaveBeenCalled();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const [key, payload, opts] = triggerNotification.mock.calls[0];
+    expect(key).toBe('open_visits_nudge');
+    // The words of the text, minus the link: a tap opens /tech.
+    expect(payload.headline).toBe('1 visit from today are still open');
+    expect(payload.lines).toEqual(['9:00 AM - Ana R. - Pest Control']);
+    expect(payload.day).toBe('2026-09-28');
+    // Push only, to the owner's own admin user alone.
+    expect(opts).toEqual({ pushOnly: true, adminOnly: true, onlyUserIds: ['tech-a'] });
+    expect(released()).toBe(false);
+  });
+
+  test('gate on, no device accepts it (sent 0): the same text goes out, once, and the slot stays claimed', async () => {
+    process.env[BANNER_GATE] = 'true';
+    triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 0 } });
+    seed();
+    const r = await runTechOpenVisitNudge({ now: NOW });
+    expect(r).toMatchObject({ sent: 1, skipped: 0 });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+19415550101',
+      expect.stringContaining('Waves: 1 visit from today are still open. Tap to close out:'),
+      expect.objectContaining({ messageType: 'internal_alert', allowOwnerSms: true }),
+    );
+    expect(released()).toBe(false);
+  });
+
+  test.each([
+    ['no push result (preferences off, nobody to send to)', { bellWritten: false, push: null }],
+    ['a policy silence', { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true }],
+    ['a dispatch error', { bellWritten: false, push: null, error: 'boom' }],
+    ['no result at all (unknown type)', undefined],
+  ])('gate on, %s: falls back to the text', async (_name, result) => {
+    process.env[BANNER_GATE] = 'true';
+    triggerNotification.mockResolvedValue(result);
+    seed();
+    await runTechOpenVisitNudge({ now: NOW });
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on, the banner throws: the text still goes out and the error text is never logged', async () => {
+    process.env[BANNER_GATE] = 'true';
+    triggerNotification.mockRejectedValue(Object.assign(new Error('Ana Ruiz 941-555-0101'), { code: 'EBANNER' }));
+    seed();
+    const r = await runTechOpenVisitNudge({ now: NOW });
+    expect(r).toMatchObject({ sent: 1, skipped: 0 });
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('Ana Ruiz');
+  });
+
+  test('gate on, no banner and the text is refused: the slot goes back (released only when nothing went out)', async () => {
+    process.env[BANNER_GATE] = 'true';
+    triggerNotification.mockResolvedValue({ push: { sent: 0 } });
+    TwilioService.sendSMS.mockResolvedValue({ success: false, error: 'blocked' });
+    seed();
+    const r = await runTechOpenVisitNudge({ now: NOW });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(released()).toBe(true);
+  });
+
+  test('gate on, a second run the same day (claim taken): no banner and no text', async () => {
+    process.env[BANNER_GATE] = 'true';
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+    TwilioService.isKnownOwnerPhone.mockReturnValue(true);
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') return chain({ returning: jest.fn().mockResolvedValue([]) });
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: NOW });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test.each([[undefined], ['1'], ['TRUE'], ['false']])('gate %p: the owner gets the text exactly as today, with no banner call', async (value) => {
+    if (value !== undefined) process.env[BANNER_GATE] = value;
+    seed();
+    const r = await runTechOpenVisitNudge({ now: NOW });
+    expect(r).toMatchObject({ sent: 1, skipped: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(TwilioService.sendSMS.mock.calls[0][1]).toBe(
+      _test.buildMessage([{ id: 'v1', ids: ['v1'], status: 'on_site', windowStart: '09:00:00', serviceTypes: ['Pest Control'], customerFirst: 'Ana', customerLast: 'Ruiz' }]),
+    );
+  });
+
+  test('gate on, another technician (not the owner): still a tech-home card + push, never the banner', async () => {
+    process.env[BANNER_GATE] = 'true';
+    PushService.sendToAdminUser.mockResolvedValue({ sent: 1 });
+    seed({ owner: false });
+    const r = await runTechOpenVisitNudge({ now: NOW });
+    expect(r).toMatchObject({ sent: 1, skipped: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUser).toHaveBeenCalledWith('tech-a', expect.objectContaining({ url: '/tech' }));
+  });
+
+  test('headlineText: the sentence the text and the banner share, for today and for carry-over only', () => {
+    const carry = [{ id: 'c1', ids: ['c1'], status: 'pending', day: '2026-09-26', serviceTypes: ['Lawn Re-service'], customerFirst: 'Bo', customerLast: 'Lee' }];
+    expect(_test.headlineText([], carry)).toBe('1 re-service from earlier days is still open');
+    expect(_test.headlineText([], [...carry, ...carry])).toBe('2 re-services from earlier days are still open');
+    expect(_test.headlineText([{ ids: ['v'] }, { ids: ['w'] }], carry)).toBe('2 visits from today are still open');
   });
 });

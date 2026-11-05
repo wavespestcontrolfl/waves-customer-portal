@@ -25,7 +25,7 @@ vi.mock('../../lib/adminFetch', () => ({
 
 import ScheduleCustomerSidebar from './ScheduleCustomerSidebar';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.removeItem('waves_admin_user'); });
 
 describe('ScheduleCustomerSidebar appointment history', () => {
   it('renders the newest 8 history rows without the helper being shadowed by the memo local', async () => {
@@ -192,5 +192,28 @@ describe('ScheduleCustomerSidebar Access block', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+// Audit C13: Book next, Edit and Take payment are office-only. /admin/invoices bounces a technician to Today.
+describe('ScheduleCustomerSidebar office-only actions by role', () => {
+  const service = { id: 'v0', customerId: 'c1', customerName: 'Test Customer', status: 'confirmed', estimatedPrice: 100 };
+
+  it('a technician sees no Book next, Edit or Take payment', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    render(<ScheduleCustomerSidebar service={service} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('Visit 0')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: 'Book next' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    expect(screen.queryByText('Take payment')).toBeNull();
+  });
+
+  it('an admin still sees Book next, Edit and Take payment', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    render(<ScheduleCustomerSidebar service={service} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('Visit 0')).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Book next' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeTruthy();
+    expect(screen.getByText('Take payment')).toBeTruthy();
   });
 });

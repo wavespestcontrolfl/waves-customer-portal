@@ -10,6 +10,7 @@ const response = (services = [row]) => ({ ok: true, json: async () => ({ service
 const failure = { ok: false, status: 503 };
 let load;
 beforeEach(() => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   load = vi.fn(async () => response());
   vi.stubGlobal('fetch', load);
 });

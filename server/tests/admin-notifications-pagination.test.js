@@ -61,6 +61,11 @@ const makeQuery = () => {
         rows = rows.filter(r => Date.parse(r.done_at) >= cutoff);
         return q;
       }
+      // The Recently done list leaves owner-only rows out unless the caller has full access.
+      if (/metadata->>'ownerOnly'/.test(sql)) {
+        rows = rows.filter(r => r.metadata?.ownerOnly !== true);
+        return q;
+      }
       if (!/metadata->>'feed'/.test(sql)) throw new Error(`unexpected whereRaw: ${sql}`);
       rows = rows.filter(r => r.metadata?.feed !== 'activity');
       return q;

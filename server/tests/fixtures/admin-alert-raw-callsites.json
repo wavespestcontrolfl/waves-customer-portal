@@ -17,6 +17,7 @@
   "routes/twilio-webhook.js": 2,
   "services/admin-alert-episodes.js": 1,
   "services/admin-cancellation.js": 2,
+  "services/admin-claude-ideas.js": 1,
   "services/agent-gap-reports.js": 1,
   "services/agent-watchdog-liveness.js": 1,
   "services/annual-prepay-addon-billing.js": 1,

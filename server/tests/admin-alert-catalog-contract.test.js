@@ -15,10 +15,11 @@ const REPO_ROOT = path.join(__dirname, '..', '..');
 const entries = Object.entries(TRIGGER_REGISTRY);
 
 // The 7 types that were `informational: true` before the rule existed (a fact, not work), plus waiting_summary
-// (GATE_MORNING_BANNER, owner 2026-11-03): the 8 AM count banner, push only, no bell row, so it is a note, not work.
+// (GATE_MORNING_BANNER, owner 2026-11-03): the 8 AM count banner, push only, no bell row, so it is a note, not work,
+// plus open_visits_nudge (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04): the owner's open-visit nudge banner, same reason.
 const FYI_KEYS = [
   'job_application_withdrawn', 'job_interview_booked', 'job_complete', 'newsletter_proof_approved',
-  'one_tap_purchase_completed', 'payment_refunded', 'payment_succeeded', 'waiting_summary',
+  'one_tap_purchase_completed', 'payment_refunded', 'payment_succeeded', 'waiting_summary', 'open_visits_nudge',
 ];
 
 describe('trigger registry catalog contract', () => {
@@ -63,7 +64,7 @@ describe('trigger registry catalog contract', () => {
     expect(declared('promise')).toEqual(['call_commitment_overdue', 'promise_chaser', 'sms_operational_followup']);
   });
 
-  test('the fyi set is the 7 former informational types and the morning count banner', () => {
+  test('the fyi set is the 7 former informational types and the two push-only banners', () => {
     const fyi = entries.filter(([, t]) => t.rule.severity === 'fyi').map(([key]) => key).sort();
     expect(fyi).toEqual([...FYI_KEYS].sort());
   });

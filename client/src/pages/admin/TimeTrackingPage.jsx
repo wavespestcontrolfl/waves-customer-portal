@@ -221,8 +221,10 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 );
 // Office-only leaves read routes a technician login cannot reach
 // (docs/technician-reachable-routes.md), so a technician never sees them: its
-// Staff page is Dashboard, its own pay stubs and the team roster.
-const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics"]);
+// Staff page is Dashboard, its own pay stubs and the team roster. Documents is
+// office-only too: its list and upload are admin routes (a technician reads its
+// own documents under Today -> More).
+const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents"]);
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
 // Gate-off or non-admin deep links to pay-growth fall back to the group's
@@ -610,7 +612,7 @@ export function DashboardTab({ showToast }) {
           display: "grid",
           gridTemplateColumns: isMobile
             ? "repeat(2, 1fr)"
-            : `repeat(${isRestrictedViewer ? 2 : 5}, 1fr)`,
+            : `repeat(${isRestrictedViewer ? 1 : 5}, 1fr)`,
           gap: 12,
           marginBottom: 24,
         }}
@@ -621,11 +623,14 @@ export function DashboardTab({ showToast }) {
           value={fmtHrs(todayPaidMin)}
           color={D.teal}
         />{" "}
-        <StatCard
-          label="Labor Cost"
-          value={fmt(todayLaborCost)}
-          color={D.amber}
-        />{" "}
+        {/* Labor cost implies a coworker wage: office-only. */}
+        {!isRestrictedViewer && (
+          <StatCard
+            label="Labor Cost"
+            value={fmt(todayLaborCost)}
+            color={D.amber}
+          />
+        )}{" "}
         {/* Revenue / Jobs Done / Utilization all derive from fields the
             server never sends a restricted (technician) viewer — hide
             rather than render the 0-default as a real metric. */}

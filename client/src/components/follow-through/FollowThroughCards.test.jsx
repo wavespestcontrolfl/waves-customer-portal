@@ -32,6 +32,22 @@ describe('callback cards', () => {
     expect(screen.queryByRole('button', { name: 'Call' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
   });
+  // Owner 2026-11-04 (D1 A): a technician's promise feed has no transcript quote and no phone.
+  it('shows the quote and phone when the feed has them, and reads cleanly when a technician feed has neither', async () => {
+    adminFetch.mockResolvedValue({ ...feed, commitments: [{ ...row, evidence: [{ quote: 'I will call you back tomorrow', speaker: 'agent' }] }] });
+    const first = render(<FollowThroughCards ui={ui} />);
+    await screen.findByText('“I will call you back tomorrow”');
+    expect(screen.getByText(/\+15555550176 · Call /)).toBeInTheDocument();
+    first.unmount();
+    const { from_phone: _from, ...technicianRow } = row;
+    adminFetch.mockResolvedValue({ ...feed, commitments: [technicianRow] });
+    render(<FollowThroughCards ui={ui} openCall={false} />);
+    await screen.findByText(row.description);
+    expect(screen.queryByText(/“/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\+1555/)).not.toBeInTheDocument();
+    expect(screen.getByText('Call Time needs review')).toBeInTheDocument();
+    expect(screen.queryByText(/undefined|null/)).not.toBeInTheDocument();
+  });
   it('reads open callback cards Waves owes from the commitments ledger', async () => {
     render(<FollowThroughCards ui={ui} />);
     await screen.findByText(row.description);
