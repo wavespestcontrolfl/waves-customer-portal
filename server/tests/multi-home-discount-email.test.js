@@ -44,7 +44,11 @@ const { openTargetReason, sourcePrices, targetPrices, idempotencyKeyFor, weekday
 const TODAY = '2026-11-06';
 const NOW = new Date('2026-11-06T15:00:00Z');
 const EST = 'est-1';
-const md = (extra = {}) => ({ presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40, ...extra });
+// The stored Multi-Home Discount of a $100/visit quarterly plan: 10% of the $400 discountable base, every line covered.
+const md = (extra = {}) => ({
+  presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40,
+  capped: false, excludedServices: [], eligibleServices: ['pest_control'], recurringDiscountableBase: 400, ...extra,
+});
 
 // A tiny knex stand-in: tables filtered by where/whereIn, raw() answers the visit query by series root.
 function fakeDb({ tables = {}, visits = {}, rawError = null }) {
@@ -802,6 +806,52 @@ describe('a series of the sale cancelled after it', () => {
     const send = sendOk();
     expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 1 });
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('a sale lists its series only when its discount covered every recurring line in full', () => {
+  const { saleDiscountCoversEveryLine } = email._private;
+
+  test('the coverage proof', () => {
+    expect(saleDiscountCoversEveryLine(md())).toBe(true);
+    expect(saleDiscountCoversEveryLine(md({ excludedServices: ['palm_injection'] }))).toBe(false);
+    expect(saleDiscountCoversEveryLine(md({ capped: true }))).toBe(false);
+    expect(saleDiscountCoversEveryLine(md({ capped: undefined }))).toBe(false);
+    expect(saleDiscountCoversEveryLine(md({ excludedServices: undefined }))).toBe(false);
+    expect(saleDiscountCoversEveryLine(md({ type: 'FIXED' }))).toBe(false);
+    expect(saleDiscountCoversEveryLine(md({ recurringAmount: 30 }))).toBe(false);
+    expect(saleDiscountCoversEveryLine(md({ recurringDiscountableBase: undefined }))).toBe(false);
+    expect(saleDiscountCoversEveryLine(md({ recurringAmount: 40.01 }))).toBe(true);
+    expect(saleDiscountCoversEveryLine(null)).toBe(false);
+  });
+
+  test.each([
+    ['a recurring line was excluded (palm injection)', { excludedServices: ['palm_injection'] }],
+    ['the slice was capped (lawn floor)', { capped: true, capReason: 'lawn_program_minimum' }],
+  ])('the new home\'s sale: %s -> the email waits', async (_label, extra) => {
+    const sc = scenario({
+      customers: [customer('son')],
+      estimateData: { summary: { manualDiscount: md(extra) } },
+      sourceExtra: { roots: new Set(['root-son', 'root-son-palm']) },
+      visits: { 'root-son-palm': [visit('2026-11-14', '60.00', { service_type: 'Palm Injection' })] },
+    });
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 1 });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  test('a sale of two series whose discount covered every line: both listed, at their current price only', async () => {
+    const sc = scenario({
+      customers: [customer('son')],
+      sourceExtra: { roots: new Set(['root-son', 'root-son-lawn']) },
+      visits: { 'root-son-lawn': [visit('2026-11-14', '45.00', { service_type: 'Lawn Care Service' })] },
+    });
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 1 });
+    const { payload } = send.mock.calls[0][0];
+    expect(payload.home_1_regular).toBe('');
+    expect(payload.home_2_regular).toBe('');
+    expect([payload.home_1_price, payload.home_2_price].sort()).toEqual(['$45.00', '$90.00']);
   });
 });
 

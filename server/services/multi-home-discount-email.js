@@ -51,6 +51,9 @@
  *                                      the stored manual discount's recurring slice per visit (recurringAmount over the
  *                                      cadence's visits a year), only for a single-series percent plan whose slice is
  *                                      the stored percent of that Regular. A gross price is never divided out of a net.
+ *     any home sold with the discount netted in (the new home, or another sold that way) is listed only when the sale's
+ *     stored discount took the full percent off every recurring line (percent, not capped, nothing excluded, slice =
+ *     percent of base); otherwise the email waits.
  *   How it is paid: the Bill-To payer -> "Invoice to you by email"; else Auto Pay on a saved card -> "Auto Pay card on
  *     file"; else a per-application customer -> "Invoice after each visit" (a bank Auto Pay or another billing basis
  *     leaves the cell out).
@@ -264,7 +267,8 @@ async function soldSeriesCount(dbh, estimateId) {
 // A home that counted because its plan was SOLD with the Multi-Home Discount netted in is proven now the way the new
 // home is: its own (single) accepted sold estimate's stored slice, exact to the cent, over the current flat price
 // (sourcePrices; `provable` false when that arithmetic does not apply), or null when no single sold estimate exists.
-async function soldTargetPrices(dbh, { rootId, presetId, facts }) {
+// The one accepted sale this series was booked from: its stored data and how many plan series it booked.
+async function soldTargetSale(dbh, rootId) {
   const links = await dbh('scheduled_services')
     .where(function inSeries() { this.where({ id: rootId }).orWhere({ recurring_parent_id: rootId }); })
     .whereNotNull('source_estimate_id')
@@ -273,8 +277,37 @@ async function soldTargetPrices(dbh, { rootId, presetId, facts }) {
   if (ids.length !== 1) return null;
   const estimate = await dbh('estimates').where({ id: ids[0], status: 'accepted' }).first('id', 'estimate_data');
   if (!estimate) return null;
-  const seriesCount = await soldSeriesCount(dbh, estimate.id);
-  return sourcePrices({ estimateData: estimate.estimate_data, presetId, facts, seriesCount });
+  return { estimateData: estimate.estimate_data, seriesCount: await soldSeriesCount(dbh, estimate.id) };
+}
+
+// The sale's stored Multi-Home Discount took the full percent off EVERY recurring line of the sale: a percent discount,
+// not capped (no lawn floor, no base cap), no recurring line excluded (palm injection, rodent bait, termite bait...), and
+// its recurring slice the stored percent of its stored discountable base (one cent of rounding). Only then does each
+// series of the sale carry it. Missing fields fail closed.
+function saleDiscountCoversEveryLine(md) {
+  if (!md || md.type !== 'PERCENT' || md.capped !== false) return false;
+  if (!Array.isArray(md.excludedServices) || md.excludedServices.length) return false;
+  const baseCents = cents(md.recurringDiscountableBase);
+  const sliceCents = cents(md.recurringAmount);
+  if (!(baseCents > 0) || !(sliceCents > 0)) return false;
+  return Math.abs(sliceCents - Math.round((baseCents * Number(md.value)) / 100)) <= 1;
+}
+
+// One series of a sale made with the Multi-Home Discount netted in (the new home's, or another home's sold that way).
+// Listed only when that discount covered every recurring line of the sale (pre-push audit P1: an excluded or capped
+// line must never sit under "10% off"); then proven by the arithmetic (one series, a known cadence: Regular and 10%
+// shown) or, where the arithmetic cannot apply, while unchanged since the sale (current price only).
+async function saleSeriesVerdict(dbh, { estimateData, presetId, facts, seriesCount, rootId, nextPrices }) {
+  const prices = { ...sourcePrices({ estimateData, presetId, facts, seriesCount }), startsDate: facts.startsDate };
+  if (!saleDiscountCoversEveryLine(apply.multiHomeSourceDiscount(estimateData, presetId))) {
+    return { prices: currentPriceOnly(prices), stale: true };
+  }
+  if (prices.provable) {
+    const proven = provenCells(prices) && await nextSpawnsAt(dbh, rootId, prices.priceCents, nextPrices);
+    return { prices, stale: !proven };
+  }
+  const unchanged = await unchangedSinceSale(dbh, { rootId, priceCents: prices.priceCents, nextPrices });
+  return { prices: currentPriceOnly(prices), stale: !unchanged };
 }
 
 const provenCells = (prices) => prices.priceCents != null && prices.regularCents != null && prices.discountCents != null;
@@ -296,16 +329,9 @@ const currentPriceOnly = (prices) => ({ ...prices, regularCents: null, discountC
 // The new home must prove its discount now (its current flat price plus the stored slice, exact to the cent) and every
 // next extension must price the same; the email never claims 10% off for a home it cannot show.
 async function sourceHomeVerdict(dbh, ctx, facts, rootId) {
-  const prices = {
-    ...sourcePrices({ estimateData: ctx.estimate.estimate_data, presetId: ctx.presetId, facts, seriesCount: ctx.source.roots.size }),
-    startsDate: facts.startsDate,
-  };
-  if (prices.provable) {
-    const proven = provenCells(prices) && await nextSpawnsAt(dbh, rootId, prices.priceCents, ctx.nextPrices);
-    return { prices, stale: !proven };
-  }
-  const unchanged = await unchangedSinceSale(dbh, { rootId, priceCents: prices.priceCents, nextPrices: ctx.nextPrices });
-  return { prices: currentPriceOnly(prices), stale: !unchanged };
+  return saleSeriesVerdict(dbh, {
+    estimateData: ctx.estimate.estimate_data, presetId: ctx.presetId, facts, seriesCount: ctx.source.roots.size, rootId, nextPrices: ctx.nextPrices,
+  });
 }
 
 // Another home, read now: sold with the discount -> proven from its own sold estimate; applied or carried -> the
@@ -313,15 +339,9 @@ async function sourceHomeVerdict(dbh, ctx, facts, rootId) {
 async function targetHomeVerdict(dbh, ctx, facts, rootId) {
   const row = ctx.ledger.get(String(rootId));
   if (row && row.status === STATUS_ALREADY && detailOf(row).reason === ALREADY_SOLD_REASON) {
-    const sold = facts.first && !facts.first.discount_id ? await soldTargetPrices(dbh, { rootId, presetId: ctx.presetId, facts }) : null;
-    if (!sold) return { prices: targetPrices({ row, facts, presetId: ctx.presetId }), stale: true };
-    const prices = { ...sold, startsDate: facts.startsDate };
-    if (sold.provable) {
-      const proven = provenCells(sold) && await nextSpawnsAt(dbh, rootId, sold.priceCents, ctx.nextPrices);
-      return { prices, stale: !proven };
-    }
-    const unchanged = await unchangedSinceSale(dbh, { rootId, priceCents: sold.priceCents, nextPrices: ctx.nextPrices });
-    return { prices: currentPriceOnly(prices), stale: !unchanged };
+    const sale = facts.first && !facts.first.discount_id ? await soldTargetSale(dbh, rootId) : null;
+    if (!sale) return { prices: targetPrices({ row, facts, presetId: ctx.presetId }), stale: true };
+    return saleSeriesVerdict(dbh, { ...sale, presetId: ctx.presetId, facts, rootId, nextPrices: ctx.nextPrices });
   }
   const prices = targetPrices({ row, facts, presetId: ctx.presetId });
   const current = await targetStillCurrent(dbh, { row, facts, presetId: ctx.presetId, rootId, nextPrices: ctx.nextPrices });
@@ -688,7 +708,7 @@ module.exports = {
   TEMPLATE_KEY,
   _private: {
     openTargetReason, sourcePrices, targetPrices, groupByPayingAddress, greetingFor, payloadFor, homeCells, idempotencyKeyFor,
-    weekdayDate, money, sortHomes, paymentCell, processSource, loadLedgerRows, sendGroups, failedRecently, earlierAttemptVerdict, targetStillCurrent, soldTargetPrices, sourceHomeVerdict, targetHomeVerdict, unchangedSinceSale, MAX_HOMES, HOME_FIELDS,
+    weekdayDate, money, sortHomes, paymentCell, processSource, loadLedgerRows, sendGroups, failedRecently, earlierAttemptVerdict, targetStillCurrent, soldTargetSale, saleDiscountCoversEveryLine, sourceHomeVerdict, targetHomeVerdict, unchangedSinceSale, MAX_HOMES, HOME_FIELDS,
     routeFor, sendsFor, composeSource, sendTimeHandoff,
     RETRY_BACKOFF_MS, CATEGORY,
   },

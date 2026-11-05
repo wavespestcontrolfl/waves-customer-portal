@@ -36,6 +36,13 @@ const NOW = new Date('2026-11-06T15:00:00Z');
 const ACCEPTED_AT = new Date('2026-11-05T15:00:00Z');
 const TEMPLATE_KEY = 'customer.multi_home_discount_on';
 
+// The stored Multi-Home Discount of a $100/visit quarterly plan, as the engine saves it: 10% of the $400 discountable
+// base, nothing excluded, not capped.
+const MULTI_HOME_SALE = {
+  presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40,
+  capped: false, excludedServices: [], eligibleServices: ['pest_control'], recurringDiscountableBase: 400,
+};
+
 class Rollback extends Error {}
 
 maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
@@ -102,7 +109,7 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     estimateIds.push(id);
     await trx('estimates').insert({
       id, customer_id: customerId, property_id: propertyId, status: 'accepted', accepted_at: ACCEPTED_AT, token: randomUUID().replace(/-/g, ''),
-      estimate_data: JSON.stringify({ summary: { manualDiscount: { presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40 } } }),
+      estimate_data: JSON.stringify({ summary: { manualDiscount: MULTI_HOME_SALE } }),
     });
     return id;
   }
@@ -336,6 +343,19 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     });
   });
 
+  test('a sale whose stored discount excluded a recurring line: no email claims the new home\'s 10%', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: JSON.stringify({ summary: { manualDiscount: { ...MULTI_HOME_SALE, excludedServices: ['palm_injection'] } } }),
+      });
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(await emailRun(trx)).toMatchObject({ sent: 0, waiting: 1, failed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(await messages(f.estimateId)).toHaveLength(0);
+    });
+  });
+
   test('a held target blocks the send; once it is no longer a target the email goes', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);
@@ -393,7 +413,7 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
       await trx('estimates').insert({
         id: sold, customer_id: f.parents, property_id: f.parentsHome, status: 'accepted', accepted_at: new Date(NOW.getTime() - 60 * 86400000),
         token: randomUUID().replace(/-/g, ''),
-        estimate_data: JSON.stringify({ summary: { manualDiscount: { presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40 } } }),
+        estimate_data: JSON.stringify({ summary: { manualDiscount: MULTI_HOME_SALE } }),
       });
       await trx('scheduled_services').whereIn('id', [f.parentSeries.rootId, ...f.parentSeries.ids]).update({ source_estimate_id: sold, estimated_price: 90 });
       expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ already: 1, applied: 0 });
