@@ -69,6 +69,17 @@ describe('GATE_ALERT_QUIET_FALL_OFF', () => {
     expect(calls.recorded).toEqual([]);
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shadow: scanned 3, would close 3'));
   });
+
+  test('shadow counts past the live cap, and says when the scan stopped before the end', async () => {
+    const pages = () => [[row('a'), row('b')], [row('c'), row('d')], [row('e')]];
+    const stopped = fakeIo({ pages: pages() });
+    const partial = await retention.runAdminAlertQuietPolicy({ now, mode: 'shadow', io: stopped.io, batchSize: 2, cap: 1, maxBatches: 2 });
+    expect(partial).toMatchObject({ written: 4, expire: { total: 4 }, complete: false });
+    expect(stopped.calls.limits).toEqual([2, 2]);
+    const whole = fakeIo({ pages: pages() });
+    const full = await retention.runAdminAlertQuietPolicy({ now, mode: 'shadow', io: whole.io, batchSize: 2, cap: 1 });
+    expect(full).toMatchObject({ written: 5, complete: true });
+  });
 });
 
 describe('a live pass', () => {

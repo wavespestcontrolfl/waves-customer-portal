@@ -15,6 +15,7 @@ async function main() {
   const io = { ...retention.defaultQuietIo(db), loadCursor: async () => null, saveCursor: async () => {}, record: async () => {} };
   const summary = await retention.runAdminAlertQuietPolicy({ mode: 'shadow', io, maxBatches: 1000 });
   console.log(`[quiet-fall-off] DRY-RUN: ${summary.expire.total} open bell alert(s) quiet for ${retention.QUIET_HOURS}+ hours would be marked done`);
+  if (!summary.complete) console.log(`[quiet-fall-off] PARTIAL: the scan stopped after ${summary.batches} page(s) (${summary.scanned} rows read); the real total is at least ${summary.expire.total}`);
   Object.entries(summary.expire.byCategory).sort((a, b) => b[1] - a[1]).forEach(([category, n]) => console.log(`  ${category}: ${n}`));
   console.log(`[quiet-fall-off] held (an emitter raises it again by itself): ${summary.held.periodic}`);
   console.log(`[quiet-fall-off] kept until settled: ${retention.KEEP_UNTIL_SETTLED_CATEGORIES.join(', ') || '(none)'}`);

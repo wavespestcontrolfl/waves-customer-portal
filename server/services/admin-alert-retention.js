@@ -615,10 +615,11 @@ const defaultQuietIo = (conn, scope = null) => ({
   record: (summary) => recordAudit('admin_alert_quiet_fall_off.close', summary),
 });
 
-// Per mode: what the pass does with the rows it judged due, and how many closes a tick may make.
+// Per mode: what the pass does with the rows it judged due, and its budget for them. The per-tick cap bounds real
+// closes only: a preview (shadow, the dry-run script) counts every due row it reads, up to maxBatches pages.
 const QUIET_MODES = {
-  shadow: { verb: 'would close', budget: Infinity, act: async (_io, due) => due.length },
-  true: { verb: 'closed', budget: QUIET_TICK_CAP, act: (io, due, ctx) => io.expire(due, ctx) },
+  shadow: { verb: 'would close', budget: () => Infinity, act: async (_io, due) => due.length },
+  true: { verb: 'closed', budget: (cap) => cap, act: (io, due, ctx) => io.expire(due, ctx) },
 };
 
 /**
@@ -632,7 +633,7 @@ async function runAdminAlertQuietPolicy({
   const handler = QUIET_MODES[mode];
   if (!handler) return { skipped: true, reason: 'gate_off' };
   const runId = now.toISOString();
-  const budget = Math.min(handler.budget, cap);
+  const budget = handler.budget(cap);
   const summary = {
     mode, runId, scanned: 0, written: 0, batches: 0,
     expire: { total: 0, byCategory: {} }, kept: { refreshed: 0 }, held: { periodic: 0 },
@@ -655,7 +656,9 @@ async function runAdminAlertQuietPolicy({
     if (reachedEnd) break;
   }
   await io.saveCursor(mode, reachedEnd ? null : cursor);
-  logger.info(`[alert-quiet-fall-off] ${mode}: scanned ${summary.scanned}, ${handler.verb} ${summary.written}, held ${summary.held.periodic}, kept ${summary.kept.refreshed}, by category ${JSON.stringify(summary.expire.byCategory)}`);
+  // false: the pass stopped on its cap or its page limit with rows left, so a preview's count is a floor.
+  summary.complete = reachedEnd;
+  logger.info(`[alert-quiet-fall-off] ${mode}: scanned ${summary.scanned}, ${handler.verb} ${summary.written}, held ${summary.held.periodic}, kept ${summary.kept.refreshed}, by category ${JSON.stringify(summary.expire.byCategory)}, complete ${summary.complete}`);
   if (mode === 'true' && summary.written > 0) await io.record(summary);
   return summary;
 }
