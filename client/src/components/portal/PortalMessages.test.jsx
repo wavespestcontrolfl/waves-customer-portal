@@ -119,6 +119,23 @@ describe('PortalMessages thread', () => {
     expect(screen.getByRole('button', { name: 'Show earlier messages' })).toBeInTheDocument();
   });
 
+  it('drops an earlier page that answers after a refresh replaced the thread', async () => {
+    api.getPortalMessages.mockResolvedValueOnce({ messages: thread, hasMore: true, unread: 0 });
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    let earlier;
+    api.getPortalMessages.mockImplementationOnce(() => new Promise((resolve) => { earlier = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show earlier messages' }));
+    const page = Array.from({ length: 50 }, (_, i) => ({ id: `r${i}`, from: 'waves', body: `Later ${i}`, createdAt: new Date(Date.UTC(2026, 10, 5, 12, i)).toISOString() }));
+    api.getPortalMessages.mockResolvedValueOnce({ messages: page, hasMore: true, unread: 50 });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(await screen.findByText('Later 49')).toBeInTheDocument();
+    // The old window's earlier page lands late: it neither joins the new window nor turns Show earlier off.
+    await act(async () => { earlier({ messages: [{ id: 'm0', from: 'waves', body: 'Welcome to Waves.', createdAt: '2026-11-01T14:00:00.000Z' }], hasMore: false }); });
+    expect(screen.queryByText('Welcome to Waves.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Show earlier messages' })).toBeInTheDocument();
+  });
+
   it('a refresh that reaches back to the thread joins it', async () => {
     render(<PortalMessages />);
     await screen.findByText('Do you spray the pool cage?');

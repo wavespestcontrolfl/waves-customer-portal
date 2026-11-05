@@ -89,6 +89,9 @@ function useThread() {
   };
   const live = useRef(true);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
+  // Bumped whenever the shown window is replaced (a load, or a refresh that does not reach back): an
+  // earlier-page answer for the old window is dropped.
+  const windowRef = useRef(0);
 
   const load = useCallback(() => {
     setStatus('loading');
@@ -97,6 +100,7 @@ function useThread() {
         if (!live.current) return;
         const list = Array.isArray(d?.messages) ? d.messages : [];
         noteFetched(list);
+        windowRef.current += 1;
         setMessages(list);
         setHasMore(d?.hasMore === true);
         setStatus('ready');
@@ -108,15 +112,16 @@ function useThread() {
   const loadEarlier = useCallback(() => {
     const oldest = messagesRef.current[0];
     if (!oldest) return;
+    const shown = windowRef.current;
     setLoadingEarlier(true);
     setEarlierError(false);
     api.getPortalMessages(oldest.createdAt)
       .then((d) => {
-        if (!live.current) return;
+        if (!live.current || shown !== windowRef.current) return;
         setMessages((prev) => mergeMessages(prev, Array.isArray(d?.messages) ? d.messages : []));
         setHasMore(d?.hasMore === true);
       })
-      .catch(() => { if (live.current) setEarlierError(true); })
+      .catch(() => { if (live.current && shown === windowRef.current) setEarlierError(true); })
       .finally(() => { if (live.current) setLoadingEarlier(false); });
   }, []);
 
@@ -137,6 +142,7 @@ function useThread() {
         const reaches = d.hasMore !== true || (fetchedNewestRef.current != null && Number.isFinite(oldest) && oldest <= fetchedNewestRef.current);
         noteFetched(d.messages);
         if (!reaches) {
+          windowRef.current += 1;
           setMessages(d.messages);
           setHasMore(true);
           return;
