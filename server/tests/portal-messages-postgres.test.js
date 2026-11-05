@@ -231,23 +231,59 @@ maybeDescribe('portal messages (live Postgres)', () => {
     expect((await db('messages').where({ id: row.id }).first('metadata')).metadata.notice).toMatchObject({ pending: true });
   });
 
-  test('a retry of an answer whose notice reached nobody tries the notice again; a delivered one is not sent twice', async () => {
+  test('a passing email failure stays pending and the sweep finishes it with no staff click; a skip is final; tries stop at 5', async () => {
     const pat = await customer();
     const { escalationId } = await chat(pat.id, { alert: false });
     const clientRequestId = randomUUID();
-    AccountMembershipEmail.sendPortalReply.mockResolvedValueOnce({ ok: false, reason: 'prefs_unavailable' });
+    AccountMembershipEmail.sendPortalReply.mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
     const first = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor });
-    expect(first.notice).toEqual({ bell: true, pushAccepted: 0, email: 'prefs_unavailable' });
-    const retried = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor });
-    expect(retried.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
+    expect(first.notice).toEqual({ bell: true, pushAccepted: 0, email: 'prefs_unavailable', pending: true });
+    // Its claim waits out the stale time; the answer is old enough for the sweep.
+    const age = (claimMinutesAgo, ageMinutes) => db('messages').where({ id: first.message.id }).update({
+      metadata: db.raw("jsonb_set(metadata, '{notice,claimedAt}', to_jsonb((now() - make_interval(mins => ?))::text))", [claimMinutesAgo]),
+      created_at: db.raw('now() - make_interval(mins => ?)', [ageMinutes]),
+    });
+    // A staff retry while the claim is fresh does nothing more.
+    expect((await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor })).notice)
+      .toEqual({ bell: true, pushAccepted: 0, email: 'prefs_unavailable', pending: true });
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
+    await age(3, 10);
+    expect(await PortalMessages.resumePendingNotices()).toBeGreaterThanOrEqual(1);
     expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(2);
-    const third = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor });
-    expect(third.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
+    expect((await db('messages').where({ id: first.message.id }).first('metadata')).metadata.notice).toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
+    // Delivered: a retried click returns it and sends nothing.
+    expect((await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answer.', clientRequestId, actor })).notice)
+      .toEqual({ bell: true, pushAccepted: 0, email: 'sent' });
     expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(2);
-    // One bell for the answer however often its notice ran.
+    // One in-app bell for the answer however often its notice ran.
     expect(await db('notifications').where({ recipient_type: 'customer', recipient_id: pat.id }).whereRaw("metadata->>'portalMessageId' = ?", [first.message.id])).toHaveLength(1);
-  });
 
+    // A skip (opted out of email) is final: not pending, never swept.
+    const second = await chat(pat.id, { alert: false });
+    AccountMembershipEmail.sendPortalReply.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'email_opted_out' });
+    const skipped = await PortalMessages.staffReply({ kind: 'chat', id: second.escalationId, body: 'Answer two.', actor });
+    expect(skipped.notice).toEqual({ bell: true, pushAccepted: 0, email: 'email_opted_out' });
+    await db('messages').where({ id: skipped.message.id }).update({ created_at: db.raw("now() - interval '10 minutes'") });
+    jest.clearAllMocks();
+    await PortalMessages.resumePendingNotices();
+    expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: skipped.message.id }));
+
+    // A failure that keeps passing is tried 5 times in all, then left as it is.
+    const third = await chat(pat.id, { alert: false });
+    AccountMembershipEmail.sendPortalReply.mockResolvedValue({ ok: false, reason: 'provider_down' });
+    const stuck = await PortalMessages.staffReply({ kind: 'chat', id: third.escalationId, body: 'Answer three.', actor });
+    const backdate = () => db('messages').where({ id: stuck.message.id }).update({
+      metadata: db.raw("jsonb_set(metadata, '{notice,claimedAt}', to_jsonb((now() - interval '3 minutes')::text))"),
+      created_at: db.raw("now() - interval '10 minutes'"),
+    });
+    // The send above was try 1; four sweeps make tries 2-5, and a sixth finds nothing pending.
+    for (let i = 0; i < 4; i += 1) { await backdate(); await PortalMessages.resumePendingNotices(); }
+    await PortalMessages.resumePendingNotices();
+    const finalNotice = (await db('messages').where({ id: stuck.message.id }).first('metadata')).metadata.notice;
+    expect(finalNotice).toEqual({ bell: true, pushAccepted: 0, email: 'provider_down' });
+    expect(AccountMembershipEmail.sendPortalReply.mock.calls.filter(([a]) => a.messageId === stuck.message.id)).toHaveLength(5);
+    AccountMembershipEmail.sendPortalReply.mockResolvedValue({ ok: true, messageId: 'email-1' });
+  });
   test('gate off: every entry point refuses and nothing is written', async () => {
     const pat = await customer();
     const { escalationId } = await chat(pat.id, { alert: false });
