@@ -8,21 +8,28 @@
  * due more than 24 hours ago all raise nothing; the gate off reads nothing. It reads every candidate promise in the
  * database, so it asserts on its own rows only. It refuses any database but a private QA one or CI's.
  */
-process.env.GATE_ADMIN_BELL_POLICY = 'true'; // read once, when feature-gates loads
-process.env.GATE_CALL_COMMITMENTS = 'true'; // read once, when feature-gates loads
+// Read once, when feature-gates loads; put back after the suite so a later suite in the same worker sees its own env.
+const ENV_BEFORE = { GATE_ADMIN_BELL_POLICY: process.env.GATE_ADMIN_BELL_POLICY, GATE_CALL_COMMITMENTS: process.env.GATE_CALL_COMMITMENTS };
+process.env.GATE_ADMIN_BELL_POLICY = 'true';
+process.env.GATE_CALL_COMMITMENTS = 'true';
 const { randomUUID } = require('crypto');
 
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
-afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
+afterAll(async () => {
+  for (const [key, value] of Object.entries(ENV_BEFORE)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  if (!SKIP) await require('../models/db').destroy();
+});
 
 maybeDescribe('caller callback late bell (live Postgres)', () => {
   let db;
   let Bell;
   const NOW = new Date('2026-11-04T18:00:00Z'); // 1:00 PM Eastern, Wednesday
   const CALL_AT = '2026-11-04T15:00:00Z'; // 10:00 AM Eastern; with 120 s of talk time it ends 10:02, due 12:02 PM
-  const ids = { customers: [], leads: [], calls: [], promises: [], visits: [], texts: [] };
+  const ids = { customers: [], leads: [], calls: [], promises: [], visits: [], texts: [], estimates: [] };
   let seq = 0;
 
   beforeAll(() => {
@@ -41,6 +48,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
   afterAll(async () => {
     if (!db) return;
     await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [bellKeys()]).del();
+    await db('estimates').whereIn('id', ids.estimates).del();
     await db('sms_log').whereIn('id', ids.texts).del();
     await db('scheduled_services').whereIn('id', ids.visits).del();
     await db('call_commitments').whereIn('id', ids.promises).del();
@@ -85,6 +93,17 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     const id = randomUUID();
     await db('call_log').insert({ id, direction: 'inbound', from_phone: from, to_phone: '+19415550000', status: 'no-answer', created_at: at, updated_at: at });
     ids.calls.push(id);
+  }
+
+  // A quote delivered at `at` (the shared hand-off witness reads deliveryState, never sent_at).
+  async function deliveredQuote({ customerId = null, leadId = null }, at) {
+    const id = randomUUID();
+    const deliveryState = { firstDeliveredAt: at, lastDeliveredAt: at, deliveredAt: [at] };
+    await db('estimates').insert({
+      id, customer_id: customerId, status: 'sent', customer_name: 'Pat Synthetic',
+      estimate_data: JSON.stringify({ ...(leadId ? { lead_id: leadId } : {}), deliveryState }), created_at: at,
+    });
+    ids.estimates.push(id);
   }
 
   async function inboundText(from, at) {
@@ -161,6 +180,16 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     await settle(c);
     await run();
     expect(await rowsFor(c.promiseId)).toHaveLength(0);
+  });
+
+  test('a quote sent after the call does not stop the bell: the caller may have promised to call back about it', async () => {
+    const owned = await caller({ withCustomer: true });
+    await deliveredQuote({ customerId: owned.customerId }, '2026-11-04T16:00:00Z');
+    const parked = await caller();
+    await deliveredQuote({ leadId: parked.leadId }, '2026-11-04T16:00:00Z');
+    await run();
+    expect(await rowsFor(owned.promiseId)).toHaveLength(1);
+    expect(await rowsFor(parked.promiseId)).toHaveLength(1);
   });
 
   test('evidence from before the call ended does not settle it', async () => {

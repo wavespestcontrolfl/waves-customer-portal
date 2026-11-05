@@ -5281,9 +5281,9 @@ function initScheduledJobs() {
   // returns before any read when off). Owner 2026-11-04 (option A): a new-lead
   // caller who said they would call us back gets ONE Leads bell when that
   // callback is late: at the time they named, else 2 business hours after the
-  // call. Each run closes the bells whose caller called or texted, got a visit
-  // or a quote, or whose lead closed. Admin notifications only: nothing goes to
-  // the caller.
+  // call. Each run closes the bells whose caller called or texted, whom a
+  // person reached, who got a visit, or whose lead closed. Admin notifications
+  // only: nothing goes to the caller.
   // =========================================================================
   cron.schedule('0 5-59/15 8-20 * * *', async () => {
     if (!require('../config/feature-gates').callerCallbackBellLive()) return;

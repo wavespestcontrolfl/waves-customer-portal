@@ -10,8 +10,8 @@
 //
 // Every 15 minutes in office hours this job:
 //   1. CLOSE: every open bell under `caller-callback-late:` is judged again from its promise, call and lead. A bell
-//      whose caller has since called or texted, whose lead got a visit or a quote, whose lead is closed, or whose
-//      promise was closed (or is gone) closes itself with a one-line resolution.
+//      whose caller has since called or texted, whom a person reached, whose lead got a visit, whose lead is
+//      closed, or whose promise was closed (or is gone) closes itself with a one-line resolution.
 //   2. RAISE: an open, untouched AI-heard customer call_back promise from an inbound new-lead call (last 30 days,
 //      a lead that is still open) whose due time fell in the last 24 hours and that nobody has settled gets ONE
 //      Leads bell, raised once ever (no dedupeOpenOnly: a closed bell does not ring again).
@@ -22,8 +22,10 @@
 //
 // Settled means one of these happened AFTER the call ended: the caller called us (even if we missed it: the missed
 // call and voicemail bells own that follow-up), the caller texted us, followedUpIds holds the promise (a staff call
-// that reached them, a person's delivered text, a booked visit), a quote was handed to them, the lead is no longer
-// open, or the promise is no longer open. A lookup that throws fails CLOSED for that row (no raise, no close) and
+// that reached them, a person's delivered text, a booked visit), the lead is no longer open, or the promise is no
+// longer open. A quote sent is NOT settled: a caller often promises to call back about the quote itself (a Nov 2
+// caller opened his quote 4 times and went quiet). Once the bell rang, the lead_contacted relevance class closes it
+// on a quote handed off after the bell, as for every lead_contacted bell. A lookup that throws fails CLOSED for that row (no raise, no close) and
 // the run throws at the end, after the other rows, so job_health shows it.
 //
 // Read-only except admin notifications. Sends nothing to a customer, calls no paid API.
@@ -51,7 +53,6 @@ const SETTLED = Object.freeze({
   called: { reason: 'caller_called', text: 'They called back' },
   texted: { reason: 'caller_texted', text: 'They texted us' },
   followedUp: { reason: 'followed_up', text: 'Someone followed up (a call, a text or a booking)' },
-  quote: { reason: 'quote_sent', text: 'A quote was sent' },
   leadClosed: { reason: 'lead_closed', text: 'The lead is closed' },
   promiseClosed: { reason: 'promise_closed', text: 'The promise was closed' },
   gone: { reason: 'promise_or_lead_gone', text: 'The promise or lead is gone' },
@@ -175,14 +176,7 @@ async function settledBy(database, { promise, call, lead, base }) {
     to_phone: call.to_phone, party: promise.party, kind: promise.kind, source: promise.source, human_state: promise.human_state,
     due_at: null, due_type: null, call_ended_at: base,
   };
-  if ((await followedUpIds(database, [asPromise])).has(promise.id)) return 'followedUp';
-  // A quote handed to the customer (the shared "reached the customer" witness, never estimates.sent_at), or one
-  // parked on this caller's lead.
-  const quote = await commitments.handedOffWithin(database('estimates'), base).where(function ownedByCaller() {
-    this.whereRaw("COALESCE(estimate_data ->> 'lead_id', '') = ?", [String(lead.id)]);
-    if (customerId) this.orWhere(function customerQuote() { commitments.whereEstimateCustomerOwnership(this, customerId); });
-  }).first('id');
-  return quote ? 'quote' : null;
+  return (await followedUpIds(database, [asPromise])).has(promise.id) ? 'followedUp' : null;
 }
 
 // ------------------------------------------------------------------ writes
@@ -276,5 +270,5 @@ async function runCallerCallbackBell({ now = new Date(), database = db, gateEnab
 module.exports = {
   runCallerCallbackBell,
   OWN_PREFIX,
-  _private: { dueOf, baseOf, specFor, detailFor, settledBy, SETTLED, BASIS_WORDS, LOOKBACK_MS },
+  _private: { dueOf, baseOf, specFor, detailFor, settledBy, loadPromises, loadCalls, loadLead, SETTLED, BASIS_WORDS, LOOKBACK_MS },
 };
