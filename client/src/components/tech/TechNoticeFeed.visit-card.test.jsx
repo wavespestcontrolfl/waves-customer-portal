@@ -3,7 +3,7 @@
 // tech-visit-notifications.js as one card shape, and never auto-dismisses
 // them: the card stays until the tech taps "Got it" (a dismiss, not a read).
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, waitFor, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechNoticeFeed from './TechNoticeFeed';
 
@@ -26,6 +26,10 @@ const OFF = notification('visit_unassigned', {
 const OFF_ENDED = notification('visit_unassigned', {
   headline: 'Moved off your route', customer_name: 'Ruiz', service_type: 'Pest Control',
   when: 'Thu Sep 10, 9–11 AM', now_with: null, ended: 'cancelled', actor: 'by Virginia',
+});
+const OFF_ELSEWHERE = notification('visit_unassigned', {
+  headline: 'Moved off your route', customer_name: 'Ruiz', service_type: 'Pest Control',
+  when: 'Thu Sep 10, 9–11 AM', now_with: null, ended: null, now_elsewhere: true, actor: null,
 });
 const GONE = notification('visit_cancelled', {
   headline: 'Visit cancelled', customer_name: 'Ruiz', service_type: 'Pest Control',
@@ -64,11 +68,26 @@ describe('TechNoticeFeed — visit cards', () => {
     vi.useRealTimers();
   });
 
+  it('a card already on screen takes the server\'s re-read: a new time, then a cancellation under the same id', async () => {
+    const movedAgain = { ...ASSIGNED, type: 'visit_rescheduled', payload: { ...ASSIGNED.payload, previous_when: 'Thu Sep 10, 9–11 AM', when: 'Mon Sep 14, 8–9 AM', actor: 'by the office', changed_again: true } };
+    const cancelled = { ...ASSIGNED, type: 'visit_cancelled', payload: { ...ASSIGNED.payload, headline: 'Visit cancelled', actor: null } };
+    stubFeed((poll) => (poll === 1 ? [ASSIGNED] : poll === 2 ? [movedAgain] : [cancelled]));
+    render(<TechNoticeFeed />);
+    await act(async () => { await Promise.resolve(); });
+    expect(await screen.findByTestId('visit-notice')).toHaveTextContent('Assigned by Virginia');
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await waitFor(() => expect(screen.getByTestId('visit-notice')).toHaveTextContent('Now Mon Sep 14, 8–9 AM'));
+    expect(screen.getByTestId('visit-notice')).toHaveTextContent('Changed again by the office');
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await waitFor(() => expect(screen.getByTestId('visit-notice')).toHaveTextContent('Visit cancelled'));
+  });
+
   it.each([
     ['assigned', ASSIGNED, ['New visit on your route', 'Ruiz', 'Pest Control · Thu Sep 10, 9–11 AM', '4312 Cortez Rd W, Bradenton', 'Assigned by Virginia']],
     ['rescheduled', MOVED, ['Visit moved', 'Was Thu Sep 10, 9–11 AM', 'Now Fri Sep 11, 1–3 PM', 'Moved by the customer online']],
     ['unassigned', OFF, ['Moved off your route', 'Now with Adam Benetti', 'Reassigned by Virginia']],
     ['unassigned (visit since ended)', OFF_ENDED, ['Moved off your route', 'Now cancelled', 'Reassigned by Virginia']],
+    ['unassigned (holder not named to a former holder)', OFF_ELSEWHERE, ['Moved off your route', 'Now on another route']],
     ['cancelled', GONE, ['Visit cancelled', 'Cancelled by the office']],
   ])('renders the %s card with its headline, customer, details, and who acted', async (_kind, fixture, expected) => {
     stubFeed([fixture]);
