@@ -962,15 +962,6 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
   if (!isEnabled('techArrivedSms')) return 'gate_off';
 
-  // The COMPLETE attempt fence: everything the claim above matched, plus this invocation's own claim
-  // stamp. A re-armed visit that arrived again (a new arrival time, a new claim) no longer matches.
-  const arrivalAttemptFence = function arrivalAttempt() {
-    this.where({ id: serviceId, track_state: 'on_property', scheduled_date: svc.scheduled_date ?? null, arrival_sms_sent_at: claimStamp });
-    if (expectTechnicianId) this.where('technician_id', expectTechnicianId);
-    if (claimArrivedAt == null) this.whereNull('arrived_at');
-    else this.whereRaw(`date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`, [new Date(claimArrivedAt)]);
-  };
-
   let outcome = 'retry';
   try {
     const techId = actingTechId || svc.technician_id;
