@@ -14,6 +14,7 @@ import { centsToDollars, dayLabel, defaultPayDate, lastFinishedWeekStart, weekLa
 import { addStaffCalendarDays } from '../../lib/staffTimeDate';
 import TimeOffPanel from './TimeOffPanel';
 import PayLinesPanel from './PayLinesPanel';
+import { SimpleStubRow } from './SimpleIra';
 import './pay-runs-print.css';
 
 // Staff page, Payroll tab, "Pay runs" (owner 2026-10-25, basic payroll layer
@@ -106,6 +107,7 @@ export function StubDialog({ call, check, onClose }) {
               <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
               <TR><TD>Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.medicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.medicareCents)}</TD></TR>
               {stub.taxes.additionalMedicareCents > 0 && <TR><TD>Additional Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.additionalMedicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.additionalMedicareCents)}</TD></TR>}
+              <SimpleStubRow stub={stub} />
               <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
             </TBody>
           </Table>

@@ -4,7 +4,10 @@
  * transaction and emits TWO Socket.io events *after* commit:
  *
  *   - customer:job_update    → customer:<customer_id> room (one customer)
- *   - dispatch:job_update    → dispatch:admins        room (all staff)
+ *   - dispatch:job_update    → dispatch:admins        room (office; all staff
+ *                              while GATE_TECH_LOGIN_PRIVACY is off), plus an
+ *                              ids-and-status ping to the visit's own
+ *                              technician room (tech:<id>) when it is on
  *
  * Both fire from the same trx commit. Either both fire (commit) or
  * neither fires (rollback) — see "Post-commit emit" below. They go
@@ -94,7 +97,7 @@
  * ADMIN PAYLOAD SCOPE — what dispatch:job_update can carry
  * ============================================================
  *   The `dispatch:job_update` payload is sent only to dispatch:admins
- *   (staff: admin + technician), so it MAY include data that the
+ *   (office; technicians too while GATE_TECH_LOGIN_PRIVACY is off), so it MAY include data that the
  *   customer payload above redacts:
  *
  *     - tech full name
@@ -126,6 +129,7 @@
  */
 const db = require('../models/db');
 const { getIo } = require('../sockets');
+const { pingTechnicianRooms } = require('../sockets/tech-rooms');
 const logger = require('./logger');
 const { autoResolveOverdueAlertsForJob } = require('./dispatch-alerts');
 
@@ -1159,6 +1163,12 @@ function emitToAdmins(payload) {
     return;
   }
   io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
+  // GATE_TECH_LOGIN_PRIVACY: the visit's own technician hears a refetch ping,
+  // ids and status only. The room above is office-only with the gate on.
+  pingTechnicianRooms(io, ADMIN_EVENT, {
+    payload: payload?.job_id ? { job_id: payload.job_id, status: payload.status, tech_id: payload.tech_id || null } : null,
+    techIds: [payload?.tech_id],
+  });
 }
 
 // Terminal visit statuses are one-way (#2717 server hardening). The status
@@ -1237,5 +1247,6 @@ module.exports = {
   customerRoom,
   _test: {
     buildCustomerEta,
+    emitToAdmins,
   },
 };

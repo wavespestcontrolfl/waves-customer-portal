@@ -665,17 +665,14 @@ async function runPacketCompletionCredits(packetId, database) {
   const backfill = (member) => notesOf(member).backfill === true;
   const internalOnly = (member) => notesOf(member).internalOnlyCompletion === true
     || (notesOf(member).internalOnlyCompletion === undefined && notesOf(member).typedReportDelivery === 'disabled');
-  // A REAL completion outranks a quiet backfill for the card email (Codex
-  // #4311 r47 P2): window/id ordering could make a backfill the first
-  // eligible member, and the helper deliberately leaves email_sent_at empty
-  // in suppressed mode — so the real completion sitting in the same packet
-  // was skipped and the card email waited for some future visit.
+  // A REAL completion outranks a quiet backfill as the card's anchor visit
+  // (Codex #4311 r47 P2): window/id ordering could make a backfill the first
+  // eligible member.
   const cardEligible = recorded.filter((member) => performed(member) && !internalOnly(member));
   const cardMember = cardEligible.find((member) => !backfill(member)) || cardEligible[0];
   if (cardMember) {
     await require('./customer-card').ensureCardForCompletion({
       customerId: cardMember.customer_id, serviceRecordId: cardMember.record_id, scheduledServiceId: cardMember.id,
-      suppressIssuedEmail: backfill(cardMember),
       firstVisitAt: backfill(cardMember) ? parseETDateTime(`${dateOnly(cardMember.service_date)}T12:00`) : null,
     });
   }
