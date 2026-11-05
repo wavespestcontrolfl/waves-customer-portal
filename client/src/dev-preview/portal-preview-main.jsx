@@ -37,6 +37,14 @@ const addDays = (n) => {
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const day = (n) => iso(addDays(n));
 
+// ── portal messages sample thread ──────────────────────────────────────────
+const hoursAgo = (n) => new Date(Date.now() - n * 3600 * 1000).toISOString();
+const PREVIEW_MESSAGES = [
+  { id: 'msg-demo-1', from: 'you', body: 'Do you spray around the pool cage too?', createdAt: hoursAgo(26) },
+  { id: 'msg-demo-2', from: 'waves', body: 'Yes. We treat the outside of the cage and the lanai edge on every visit.', createdAt: hoursAgo(25) },
+  { id: 'msg-demo-3', from: 'waves', body: 'Tell us if you see ants inside and we will add a quick look at the next stop.', createdAt: hoursAgo(25) },
+];
+
 // ── personas ───────────────────────────────────────────────────────────────
 // ?persona=cancelled renders the C4 read-only cancelled state (churned
 // account: cancelled banner, cancelled plan page + restart hand-off, no
@@ -481,6 +489,7 @@ Object.assign(api, {
     Object.assign(NOTIFICATION_PREFS, updates);
     return { success: true, preferences: { ...NOTIFICATION_PREFS } };
   },
+  requestEmailResubscribe: async () => ({ state: 'sent', maskedEmail: 'j***@example.com', sentAt: new Date().toISOString() }),
   getCustomerPushStatus: async () => ({ available: !!APP_NOTIFICATIONS, enabled: NOTIFICATION_PREFS.pushEnabled !== false,
     registered: APP_NOTIFICATIONS !== 'missing', fresh: APP_NOTIFICATIONS === 'ready' }),
   updateAccountCreditPreference: async (on) => { CUSTOMER.autoApplyAccountCredit = !!on; return { autoApplyAccountCredit: !!on }; },
@@ -541,6 +550,11 @@ Object.assign(api, {
   // satisfaction / requests / documents
   getGoogleReviewCard: async () => ({ card: null }),
   getRequests: async () => ({ requests: [], total: 0 }),
+  // Portal messages: one customer question and two Waves answers, no network.
+  getPortalMessages: async () => ({ messages: PREVIEW_MESSAGES, hasMore: false, unread: 0 }),
+  getPortalMessagesUnread: async () => ({ count: 0 }),
+  sendPortalMessage: async (body) => ({ message: { id: `msg-demo-${Date.now()}`, from: 'you', body, createdAt: new Date().toISOString() } }),
+  markPortalMessagesRead: async () => ({ unread: 0 }),
   createRequest: async (data) => (data?.category === 'cancellation'
     ? { success: true, cancellation: { processed: true, visitsPulled: 2, confirmation: 'sms', confirmationChannels: ['sms', 'email'], effectiveDate: day(0), scope: data.families || 'account' } }
     : { success: true }),
