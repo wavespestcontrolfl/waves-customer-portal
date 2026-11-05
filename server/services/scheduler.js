@@ -5294,15 +5294,19 @@ function initScheduledJobs() {
   // caller who said they would call us back gets ONE Leads bell when that
   // callback is late: at the time they named, else 2 business hours after the
   // call. Each run closes the bells whose caller called or texted, whom a
-  // person reached, who got a visit, or whose lead closed. Admin notifications
-  // only: nothing goes to the caller.
+  // person reached, who got a visit, or whose lead closed. With
+  // GATE_CALLER_CALLBACK_PROMISE_CLOSE on it also closes the caller's own
+  // promise when they called, texted or a person followed up. Nothing goes to
+  // the caller.
   // =========================================================================
   cron.schedule('0 5-59/15 8-20 * * *', async () => {
     if (!require('../config/feature-gates').callerCallbackBellLive()) return;
     try {
       await runExclusive('caller-callback-bell', async () => {
         const result = await require('./caller-callback-bell').runCallerCallbackBell();
-        logger.info(`Caller callback bell: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed (${result.outcome || result.skipped})`);
+        // The promises part prints only when a promise was closed (GATE_CALLER_CALLBACK_PROMISE_CLOSE), so a gate-off line is unchanged.
+        const promises = result.promisesClosed ? `, ${result.promisesClosed} promises closed` : '';
+        logger.info(`Caller callback bell: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed${promises} (${result.outcome || result.skipped})`);
       });
     } catch (err) {
       logger.error(`Caller callback bell failed: ${err.message}`);

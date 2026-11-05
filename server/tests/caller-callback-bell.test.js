@@ -11,7 +11,7 @@ const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { OPEN_CALENDAR } = require('../services/followup-sla-watcher');
 const { runCallerCallbackBell, _private } = require('../services/caller-callback-bell');
 
-const { dueOf, specFor, detailFor } = _private;
+const { dueOf, specFor, detailFor, keepPromise, KEPT_AS } = _private;
 
 // Eastern time is UTC-5 after the 2026-11-01 clock change, so 10:00 AM Eastern is 15:00Z.
 const WED_10AM = new Date('2026-11-04T15:00:00Z');
@@ -120,5 +120,23 @@ describe('guards that return before any read', () => {
       delete process.env.GATE_CALL_COMMITMENTS;
       delete process.env.ALERT_EPISODES;
     }
+  });
+});
+
+describe('promise close writes only for a call, a text or a follow-up, and only a customer call_back', () => {
+  const noDatabase = () => { throw new Error('the database must not be written'); };
+  const customerPromise = { id: randomUUID(), party: 'customer', kind: 'call_back', updated_at: new Date() };
+
+  test('the lead closed, the promise closed and a gone row never write the promise', async () => {
+    for (const key of ['leadClosed', 'promiseClosed', 'gone']) {
+      await expect(keepPromise(noDatabase, customerPromise, { key }, new Date())).resolves.toBe(0);
+    }
+    expect(Object.keys(KEPT_AS).sort()).toEqual(['called', 'followedUp', 'texted']);
+  });
+
+  test('a Waves promise, or a customer promise of another kind, is never written', async () => {
+    const verdict = { key: 'called', record: { type: 'call_log', id: randomUUID(), at: new Date() } };
+    await expect(keepPromise(noDatabase, { ...customerPromise, party: 'waves' }, verdict, new Date())).resolves.toBe(0);
+    await expect(keepPromise(noDatabase, { ...customerPromise, kind: 'other' }, verdict, new Date())).resolves.toBe(0);
   });
 });

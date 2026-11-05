@@ -68,6 +68,13 @@ test('gate on: the job runs once inside runExclusive and its outcome is logged',
   expect(logger.info).toHaveBeenCalledWith('Caller callback bell: 2 raised, 1 closed (changed)');
 });
 
+test('gate on: a run that closed promises says so in the log line', async () => {
+  callerCallbackBellLive.mockReturnValue(true);
+  runCallerCallbackBell.mockResolvedValueOnce({ raised: 0, closed: 1, promisesClosed: 3, candidates: 4, outcome: 'changed' });
+  await bellTick();
+  expect(logger.info).toHaveBeenCalledWith('Caller callback bell: 0 raised, 1 closed, 3 promises closed (changed)');
+});
+
 test('a failed run is logged, never thrown out of the tick', async () => {
   callerCallbackBellLive.mockReturnValue(true);
   runCallerCallbackBell.mockRejectedValueOnce(new Error('connection reset'));
