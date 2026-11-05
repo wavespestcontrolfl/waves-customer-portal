@@ -8,9 +8,15 @@ function RouteError({ error, busy, onRetry }) {
 
 // The visit job card (product checks, mix amounts, label limits, Order more)
 // opens from the Today visit (owner 2026-11-04); without a handler there is no button.
-function JobCardButton({ service, onJobCard }) {
+// The card is per scheduled service, so a grouped stop (pest and lawn at one home)
+// gets one button for each member, named by its service.
+function JobCardButtons({ services, onJobCard }) {
   if (!onJobCard) return null;
-  return <button type="button" className="tf-button" onClick={() => onJobCard(service)}>Job card</button>;
+  if (services.length <= 1) return <button type="button" className="tf-button" onClick={() => onJobCard(services[0])}>Job card</button>;
+  return services.map((row) => {
+    const name = row.serviceTypeDisplay || row.serviceType || row.service_type || 'Service';
+    return <button key={row.id} type="button" className="tf-button" onClick={() => onJobCard(row)}>Job card: {name}</button>;
+  });
 }
 
 export default function TechFieldVisit({ stop, loading, error, onBack, onRetry, busy, enRouteState, onSiteState, onEnRoute, onSite, onSync, onMove, onJobCard, children }) {
@@ -40,7 +46,7 @@ export default function TechFieldVisit({ stop, loading, error, onBack, onRetry, 
       {!outOfSync && status === 'en_route' && <button type="button" className="tf-button" disabled={pending} onClick={() => onSite(service.id)}><MapPin aria-hidden="true" />On site</button>}
       {outOfSync && <button type="button" className="tf-button" disabled={pending} onClick={() => onSync(stop)}>Sync stop</button>}
       {live.length > 0 && <button type="button" className="tf-button" disabled={pending} onClick={() => onMove(service)}>Quick Move</button>}
-      <JobCardButton service={service} onJobCard={onJobCard} />
+      <JobCardButtons services={stop.services} onJobCard={onJobCard} />
     </div>
     {pending && <p role="status">Updating visit…</p>}
     {feedback && <p role="status" className={`tf-alert ${feedback.isError ? 'tf-error' : ''}`}>{feedback.message}</p>}

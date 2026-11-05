@@ -29,4 +29,16 @@ describe('Job card action on the Today visit', () => {
     renderVisit();
     expect(screen.queryByRole('button', { name: 'Job card' })).not.toBeInTheDocument();
   });
+
+  it('gives a grouped stop one Job card button per service, each opening its own card', () => {
+    const lawn = { id: 'svc-2', status: 'confirmed', customerName: 'Pat Sample', address: SERVICE.address, serviceType: 'Lawn Care' };
+    const grouped = { ...stop, services: [SERVICE, lawn], primary: SERVICE, liveCount: 2 };
+    const onJobCard = vi.fn();
+    renderVisit({ stop: grouped, onJobCard });
+    expect(screen.queryByRole('button', { name: 'Job card' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Job card: Lawn Care' }));
+    expect(onJobCard).toHaveBeenCalledWith(lawn);
+    fireEvent.click(screen.getByRole('button', { name: 'Job card: Quarterly Pest Control' }));
+    expect(onJobCard).toHaveBeenLastCalledWith(SERVICE);
+  });
 });

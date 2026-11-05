@@ -57,4 +57,17 @@ describe('TechMyHoursCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'My hours' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Hours unavailable now');
   });
+
+  it('reads the shown week again each time it is opened, so a shift closed since the last look appears', async () => {
+    let shift = 480;
+    fetchMock.mockImplementation(async () => ({ ok: true, status: 200, json: async () => WEEK({ totals: { ...WEEK().totals, shiftMinutes: shift } }) }));
+    render(<TechMyHoursCard />);
+    fireEvent.click(screen.getByRole('button', { name: 'My hours' }));
+    expect(await screen.findByText(/Week total: 8h 00m on shift/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide my hours' }));
+    shift = 540;
+    fireEvent.click(screen.getByRole('button', { name: 'My hours' }));
+    expect(await screen.findByText(/Week total: 9h 00m on shift/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

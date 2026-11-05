@@ -90,7 +90,8 @@ export default function TechMyHoursCard() {
   const toggle = () => {
     const next = !open;
     setOpen(next);
-    if (next && !data) load();
+    // Every opening reads the shown week again: a shift closed on the time clock since the last look must appear.
+    if (next) load(data?.weekStart);
   };
 
   const entriesByDay = {};
