@@ -330,7 +330,7 @@ async function loadSeriesVisits(trx, rootId, today) {
     SELECT s.id, s.customer_id, s.scheduled_date, s.status, s.estimated_price, s.primary_line_price,
       s.discount_type, s.discount_amount, s.discount_dollars, s.discount_id, s.line_discount_id, s.line_discount_dollars,
       s.annual_prepay_term_id, s.prepaid_amount, s.is_callback, s.is_recurring, s.recurring_parent_id,
-      s.service_key_snapshot, s.service_category_snapshot
+      s.service_key_snapshot, s.service_category_snapshot, s.service_id, s.service_type
     FROM scheduled_services s
     WHERE (s.id = ? OR s.recurring_parent_id = ?)
       AND s.scheduled_date >= ?
@@ -406,25 +406,31 @@ async function priceWithDiscount(trx, schedule, row, fields) {
   return legacy.price;
 }
 
-// What the next auto-extended visit of the series costs, in cents, read from PRODUCTION: seriesNextOccurrencesPrice
+// What the next auto-extended visits of the series cost, read from PRODUCTION: seriesNextOccurrencePrices
 // (routes/admin-schedule.js) walks the same dates the top-up walks and prices each through the extension writers' own
 // chain: overlayRecurringTemplateOverrides, resolveSeriesExtensionPriceTemplate, the add-ons due on the date, then
 // storedOccurrenceFloorPrice (the stacking restack with GATE_DISCOUNT_STACKING on, calculateStoredVisitFinancials
 // off). It reads the STORED parent, so call it after the template is written. null = nothing will ever be extended
 // (no pattern), so there is no spawn to price; a walk that cannot finish is unproven and holds.
-async function nextSpawnCents(trx, schedule, rootId) {
-  const read = schedule.seriesNextOccurrencesPrice || require('../routes/admin-schedule').seriesNextOccurrencesPrice;
+// EVERY walked date's price, in cents (seriesNextOccurrencePrices: the same walk and verdicts as
+// seriesNextOccurrencesPrice, which returns only the highest). A recurring add-on due on some dates only, or a line
+// discount kept on the parent, makes the dates differ, so each one is proven, never just the maximum.
+async function nextSpawnPrices(trx, schedule, rootId) {
+  const read = schedule.seriesNextOccurrencePrices || require('../routes/admin-schedule').seriesNextOccurrencePrices;
   const next = await read(trx, rootId);
   if (next === null || next === undefined) return null;
   if (next.unverified) throw hold('series_template_complex', { unverified: true });
-  return cents(next.price);
+  return (next.prices || []).map((p) => cents(p));
 }
 
-// Refuse unless the next spawn prices at the discounted amount (a parent with a recurring add-on or its own line
-// discount would not).
+const everyDateAt = (prices, expectedCents) => prices.every((p) => p === expectedCents);
+
+// Refuse unless every walked date of the next spawns prices at the discounted amount.
 async function assertNextSpawn(trx, schedule, { rootId, expectedCents }) {
-  const spawn = await nextSpawnCents(trx, schedule, rootId);
-  if (spawn !== null && spawn !== expectedCents) throw hold('series_template_complex', { spawn: dollars(spawn), expected: dollars(expectedCents) });
+  const prices = await nextSpawnPrices(trx, schedule, rootId);
+  if (prices !== null && !everyDateAt(prices, expectedCents)) {
+    throw hold('series_template_complex', { spawn: prices.map(dollars), expected: dollars(expectedCents) });
+  }
 }
 
 // The sale's own estimates (any visit of the series points at one): the Multi-Home Discount netted into the price
@@ -616,14 +622,14 @@ async function verifyTemplateForAlready(trx, schedule, { target, preset, upcomin
     throw guardHold(err) || err;
   }
   try {
-    const current = await nextSpawnCents(trx, schedule, target.rootId);
-    if (current === null || current === netCents) return { templateStamped: false };
+    const current = await nextSpawnPrices(trx, schedule, target.rootId);
+    if (current === null || everyDateAt(current, netCents)) return { templateStamped: false };
     if (reason !== ALREADY_CARRIED) throw hold('template_not_discounted', { reason });
     const fields = { ...discountFields(preset, grossDollarsOf(upcoming[0])), estimated_price: dollars(netCents) };
     if (cents(await priceWithDiscount(trx, schedule, upcoming[0], fields)) !== netCents) throw hold('template_not_discounted', { reason: 'visit_price_differs_from_catalog' });
     await schedule.stampRecurringTemplateOverrides(trx, target.rootId, fields, await trx('scheduled_services').columnInfo());
-    const after = await nextSpawnCents(trx, schedule, target.rootId);
-    if (after !== null && after !== netCents) throw hold('template_not_discounted', { spawn: dollars(after), expected: dollars(netCents) });
+    const after = await nextSpawnPrices(trx, schedule, target.rootId);
+    if (after !== null && !everyDateAt(after, netCents)) throw hold('template_not_discounted', { spawn: after.map(dollars), expected: dollars(netCents) });
     return { templateStamped: true };
   } catch (err) {
     if (isHold(err) && err.holdCode === 'series_template_complex') throw hold('template_not_discounted', err.detail);

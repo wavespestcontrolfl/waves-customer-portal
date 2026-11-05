@@ -174,9 +174,17 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
       const f = await family(trx);
       const production = require('../routes/admin-schedule');
       expect((await production.seriesNextOccurrencesPrice(trx, f.parentSeries.rootId)).price).toBe(117);
+      const before = await production.seriesNextOccurrencePrices(trx, f.parentSeries.rootId);
+      expect(before.unverified).toBe(false);
+      expect(before.prices.length).toBeGreaterThan(0);
+      expect(before.prices.every((p) => Number(p) === 117)).toBe(true);
       await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
       const next = await production.seriesNextOccurrencesPrice(trx, f.parentSeries.rootId);
       expect(next).toMatchObject({ unverified: false, price: 105.3 });
+      // Every walked date, not only the highest, is at the discounted price.
+      const every = await production.seriesNextOccurrencePrices(trx, f.parentSeries.rootId);
+      expect(every.prices.length).toBe(before.prices.length);
+      expect(every.prices.every((p) => Number(p) === 105.3)).toBe(true);
     });
   });
 
@@ -295,6 +303,25 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
       expect((await visitRows(trx, otherHome.ids)).every((r) => Number(r.estimated_price) === 117 && r.discount_id === null)).toBe(true);
       // And the scan no longer treats it as a source at all.
       expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ sources: 0, applied: 0 });
+    });
+  });
+
+  test('a preset scoped to a service still applies to visits that store that service (service_id is loaded)', async () => {
+    await inRollback(async (trx) => {
+      const svc = await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id', 'service_key');
+      expect(svc).toBeTruthy();
+      await trx('discounts').where({ discount_key: 'multi_home' }).update({ service_key_filter: svc.service_key });
+      const son = await customer(trx);
+      const home1 = await property(trx, son);
+      const home2 = await property(trx, son, { is_primary: false });
+      await trx('customers').where({ id: son }).update({ has_multi_home: true });
+      const estimateId = await estimate(trx, son, home1);
+      const withService = { service_id: svc.id };
+      await series(trx, { customerId: son, propertyId: home1, price: 90, sourceEstimateId: estimateId, rootExtra: withService, childExtra: withService });
+      const otherHome = await series(trx, { customerId: son, propertyId: home2, price: 117, rootExtra: withService, childExtra: withService });
+      const out = await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(out).toMatchObject({ applied: 1, held: 0 });
+      expect((await visitRows(trx, otherHome.ids)).every((r) => Number(r.estimated_price) === 105.3)).toBe(true);
     });
   });
 

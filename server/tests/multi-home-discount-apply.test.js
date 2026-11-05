@@ -401,7 +401,7 @@ describe('already_discounted is only recorded when the next spawn is discounted 
 
   // The production price walk (seriesNextOccurrencesPrice) is faked from the stored parent: the next spawn prices the
   // parent overlaid with its stamped overrides, plus any recurring add-on. The real function runs in the Postgres suite.
-  function setup({ overrides = null, stampWorks = true, addons = [], walk = null } = {}) {
+  function setup({ overrides = null, stampWorks = true, addons = [], walk = null, datePrices = null } = {}) {
     const parent = { id: 'root', estimated_price: 117, recurring_template_overrides: overrides };
     const price = () => {
       const row = { ...parent, ...(parent.recurring_template_overrides || {}) };
@@ -417,7 +417,7 @@ describe('already_discounted is only recorded when the next spawn is discounted 
         const off = row.discount_type === 'percentage' ? Math.round(gross * Number(row.discount_amount)) / 100 : 0;
         return { price: Math.round((gross - off) * 100) / 100 };
       },
-      seriesNextOccurrencesPrice: jest.fn(async () => (walk !== null ? walk : { unverified: false, price: price() })),
+      seriesNextOccurrencePrices: jest.fn(async () => (walk !== null ? walk : { unverified: false, prices: datePrices || [price()] })),
       stampRecurringTemplateOverrides: jest.fn(async (_t, _id, fields) => { if (stampWorks) parent.recurring_template_overrides = { ...(parent.recurring_template_overrides || {}), ...fields }; }),
     };
     return { parent, schedule, trx: fakeTrx({ scheduled_services: [parent] }) };
@@ -453,13 +453,21 @@ describe('already_discounted is only recorded when the next spawn is discounted 
   });
 
   test('the price comes from production\'s own walk; a walk that cannot finish is unproven, and a series with no spawn needs no proof', async () => {
-    const env = setup({ walk: { unverified: true, price: 0 } });
+    const env = setup({ walk: { unverified: true, prices: [] } });
     await expect(run(env, 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
-    expect(env.schedule.seriesNextOccurrencesPrice).toHaveBeenCalledWith(env.trx, 'root');
+    expect(env.schedule.seriesNextOccurrencePrices).toHaveBeenCalledWith(env.trx, 'root');
     const none = setup({ walk: null });
-    none.schedule.seriesNextOccurrencesPrice = jest.fn(async () => null);
+    none.schedule.seriesNextOccurrencePrices = jest.fn(async () => null);
     expect(await run(none, 'all_upcoming_visits_carry_it')).toEqual({ templateStamped: false });
     expect(none.schedule.stampRecurringTemplateOverrides).not.toHaveBeenCalled();
+  });
+
+  test('every walked date must price at the discount, not only the highest (an add-on due on some dates only)', async () => {
+    // Production walks two dates: 105.30, and 96.30 where a kept line discount and an intermittent add-on meet.
+    const env = setup({ datePrices: [105.3, 96.3] });
+    await expect(run(env, 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
+    const ok = setup({ datePrices: [105.3, 105.3] });
+    expect(await run(ok, 'all_upcoming_visits_carry_it')).toEqual({ templateStamped: false });
   });
 
   test('visits at different prices hold', async () => {
