@@ -109,6 +109,33 @@ describe("useEmailInbox reclassify and attachment feedback", () => {
     expect(result.current.actionFeedback).toEqual({ error: true, message: "Could not reclassify the email. Try again." });
   });
 
+  it("offers no label list unless the server says the pick gate is on", async () => {
+    const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
+    await flush();
+    expect(result.current.reclassifyLabels).toEqual([]);
+    handlers["/api/admin/email/reclassify-options"] = () => Promise.reject(new Error("offline"));
+    const { result: unreadable } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
+    await flush();
+    expect(unreadable.current.reclassifyLabels).toEqual([]);
+  });
+
+  it("loads the label list when the gate is on and posts the picked label", async () => {
+    handlers["/api/admin/email/reclassify-options"] = () => json({ enabled: true, categories: ["lead_inquiry", "spam"] });
+    handlers["/api/admin/email/message/m1/reclassify"] = () => json({ classification: { category: "spam", confidence: 1 } });
+    const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
+    await flush();
+    expect(result.current.reclassifyLabels).toEqual(["lead_inquiry", "spam"]);
+    await act(async () => { await result.current.handleReclassify("m1", "spam"); });
+    const call = adminFetch.mock.calls.find(([path]) => path === "/api/admin/email/message/m1/reclassify");
+    expect(call[1]).toEqual({ method: "POST", body: JSON.stringify({ classification: "spam" }) });
+    expect(result.current.visibleEmails.find((email) => email.id === "m1").classification).toBe("spam");
+    expect(result.current.actionFeedback).toEqual({ message: "Email reclassified." });
+    // Run-the-AI-again sends no body, as before.
+    await act(async () => { await result.current.handleReclassify("m1"); });
+    const again = adminFetch.mock.calls.filter(([path]) => path === "/api/admin/email/message/m1/reclassify")[1];
+    expect(again[1]).toEqual({ method: "POST" });
+  });
+
   it("drops the error from a superseded attachment download", async () => {
     const createObjectURL = vi.fn(() => "blob:one");
     const revokeObjectURL = vi.fn();
