@@ -124,11 +124,28 @@ async function lineForTechnician(technicianId, { strict = false } = {}) {
   }
 }
 
+// GATE_TECH_LOGIN_PRIVACY: the card and the push name the matched customer only
+// when that customer is on the holder's own route (the same rule the
+// Communications routes use). Any other match shows the formatted number. The
+// text itself stays: the person texted this line. Gate off = today's behavior.
+// Fails closed: a failed lookup counts as "not on the route".
+async function customerForCard(tech, customer) {
+  if (!customer || !require('../config/feature-gates').techLoginPrivacyLive?.()) return customer;
+  try {
+    const { technicianServicesCustomer } = require('./technician-visit-scope');
+    return (await technicianServicesCustomer({ techRole: 'technician', technicianId: tech.id }, customer.id)) ? customer : null;
+  } catch (err) {
+    logger.warn(`[tech-line] route check failed for technician ${tech.id} (${errorTag(err)})`);
+    return null;
+  }
+}
+
 // One tech_notifications card (kept until the tech taps "Got it") + one
 // best-effort push. Returns true when the card was written.
-async function notifyTechLineText({ lineNumber, from, body, customer = null, mediaCount = 0 }) {
+async function notifyTechLineText({ lineNumber, from, body, customer: matchedCustomer = null, mediaCount = 0 }) {
   const tech = await technicianForLine(lineNumber);
   if (!tech) return false;
+  const customer = await customerForCard(tech, matchedCustomer);
   const senderName = customer
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || displayPhone(from)
     : displayPhone(from);

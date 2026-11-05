@@ -12,14 +12,14 @@
     },
     {
       "endpoint": "/admin/communications/blocked-numbers",
-      "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end.",
+      "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end. Re-read 2026-11-04 (technician visibility B15): a non-admin caller now gets the numbers without the reason an admin typed; an admin read, the bar's, is unchanged.",
       "scope": "broad",
       "freeText": {
         "reason": "note"
       },
       "signals": [],
       "unresolved": [],
-      "hash": "6bf3dfd7c9419b27a7b802fccd127503"
+      "hash": "60da5bab800ffc6a154f989a16b28beb"
     },
     {
       "endpoint": "/admin/csr/overview",

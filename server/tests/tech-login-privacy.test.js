@@ -290,6 +290,104 @@ describe('M5: the promise routes answer 404 for a customer outside the technicia
   });
 });
 
+describe('M5b: a technician reads a promise in plain words, with no call words', () => {
+  const ROW = {
+    id: '11111111-2222-4333-8444-000000000009',
+    description: 'Call Test Caller back about the quote',
+    kind: 'callback',
+    customer_first_name: 'Pat',
+    customer_last_name: 'Example',
+    evidence: [{ quote: 'I will call you tomorrow', speaker: 'agent' }],
+    subject: { service: 'Pest control', quote: 'that estimate thing', date_claims: [{ binding: 'requested', quote: 'tomorrow' }] },
+    fulfillment: { kind: 'person_contact', quote: 'Called her back at noon', matched_at: '2026-11-04T16:00:00Z' },
+    twilio_call_sid: 'CA0000000000000000000000000000beef',
+    from_phone: '+19415550123',
+    to_phone: '+19415550124',
+    call_started_at: '2026-11-03T15:00:00Z',
+    direction: 'inbound',
+    customer_id: 'customer-own',
+  };
+  const PROPOSAL = {
+    id: '11111111-2222-4333-8444-000000000010',
+    first_name: 'Pat',
+    last_name: 'Example',
+    phone: '+19415550123',
+    proposal: { proposed_start_at: '2026-11-10T14:00:00Z', quote: 'Could you come next Tuesday' },
+    candidates: [],
+  };
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+
+  const express = require('express');
+  const router = require('../routes/admin-call-recordings');
+  const commitments = require('../services/call-commitments');
+  const proposals = require('../services/call-reschedule-proposals');
+
+  function withServer(fn) {
+    const app = express();
+    app.use(express.json());
+    app.use('/calls', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    return fn(base).finally(() => new Promise((r) => server.close(r)));
+  }
+  const get = async (base, route) => (await fetch(`${base}/calls${route}`)).json();
+
+  beforeEach(() => {
+    global.__privacyRole = 'technician';
+    commitments.listOpenCommitments.mockImplementation(async () => [clone(ROW)]);
+    commitments.listAutoClosedCommitments.mockImplementation(async () => ({ commitments: [clone(ROW)], next: null }));
+    proposals.listProposals.mockImplementation(async () => [clone(PROPOSAL)]);
+    db.mockImplementation(() => ({
+      orderBy: jest.fn(async () => [{ id: 'b1', number: '+19415550188', block_type: 'spam', reason: 'Typed by an admin', blocked_at: 'x', auto_blocked: false }]),
+    }));
+  });
+  afterEach(() => { delete global.__privacyRole; });
+
+  test('a technician gets the promise text and customer name, with no quote, phone or call SID in any of the three feeds', async () => {
+    await withServer(async (base) => {
+      const open = (await get(base, '/commitments/open')).commitments[0];
+      const closed = (await get(base, '/commitments/auto-closed')).commitments[0];
+      const proposal = (await get(base, '/proposals')).proposals[0];
+      for (const row of [open, closed]) {
+        expect(row).toMatchObject({ description: 'Call Test Caller back about the quote', customer_first_name: 'Pat', call_started_at: '2026-11-03T15:00:00Z' });
+        expect(row.fulfillment).toMatchObject({ kind: 'person_contact', matched_at: '2026-11-04T16:00:00Z' });
+      }
+      expect(proposal).toMatchObject({ first_name: 'Pat', last_name: 'Example' });
+      expect(proposal.proposal.proposed_start_at).toBe('2026-11-10T14:00:00Z');
+      const text = JSON.stringify([open, closed, proposal]);
+      for (const word of ['I will call you tomorrow', 'that estimate thing', 'Called her back', 'next Tuesday', 'CA0000', '+1941555012']) {
+        expect(text).not.toContain(word);
+      }
+      expect(open).not.toHaveProperty('evidence');
+    });
+  });
+
+  test('an admin still gets the quotes, the phones and the call SID', async () => {
+    global.__privacyRole = 'admin';
+    await withServer(async (base) => {
+      const open = (await get(base, '/commitments/open')).commitments[0];
+      const proposal = (await get(base, '/proposals')).proposals[0];
+      expect(open.evidence[0].quote).toBe('I will call you tomorrow');
+      expect(open.fulfillment.quote).toBe('Called her back at noon');
+      expect(open.twilio_call_sid).toBe(ROW.twilio_call_sid);
+      expect(open.from_phone).toBe('+19415550123');
+      expect(proposal.proposal.quote).toBe('Could you come next Tuesday');
+      expect(proposal.phone).toBe('+19415550123');
+    });
+  });
+
+  test('the blocked-number list tells a technician the number is blocked, without the typed reason; an admin keeps the reason', async () => {
+    await withServer(async (base) => {
+      const tech = (await get(base, '/blocked')).numbers[0];
+      expect(tech).toMatchObject({ phone: '+19415550188', block_type: 'spam' });
+      expect(tech).not.toHaveProperty('reason');
+      global.__privacyRole = 'admin';
+      expect((await get(base, '/blocked')).numbers[0].reason).toBe('Typed by an admin');
+    });
+  });
+});
+
 describe('A10: the customer-deleted-account push goes to admin devices only', () => {
   test('sendToAdmins with adminOnly reads the admin role alone; without it, both staff roles as before', async () => {
     jest.resetModules();

@@ -114,6 +114,52 @@ describe('notifyTechLineText', () => {
     expect(JSON.parse(inserted[0].payload).customer_name).toBe('(941) 555-0199');
   });
 
+  describe('GATE_TECH_LOGIN_PRIVACY: a matched customer is named only when on the holder\'s route', () => {
+    const scope = require('../services/technician-visit-scope');
+    const OFF_ROUTE = { id: 'c-off', first_name: 'Test', last_name: 'Caller' };
+
+    beforeEach(() => { jest.spyOn(scope, 'technicianServicesCustomer'); });
+    afterEach(() => { jest.restoreAllMocks(); delete process.env.GATE_TECH_LOGIN_PRIVACY; });
+
+    test('gate on, customer off the route: the card and the push show the formatted number, not the name', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      scope.technicianServicesCustomer.mockResolvedValue(false);
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'Is anyone coming?', customer: OFF_ROUTE });
+      expect(scope.technicianServicesCustomer).toHaveBeenCalledWith({ techRole: 'technician', technicianId: 'tech-1' }, 'c-off');
+      expect(inserted[0].message).toBe('Text from (941) 555-0199: Is anyone coming?');
+      expect(JSON.parse(inserted[0].payload)).toMatchObject({ customer_id: null, customer_name: '(941) 555-0199' });
+      expect(PushService.sendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'Text from (941) 555-0199' }));
+    });
+
+    test('gate on, customer on the route: the name stays', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      scope.technicianServicesCustomer.mockResolvedValue(true);
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'On my way out', customer: OFF_ROUTE });
+      expect(inserted[0].message).toBe('Text from Test Caller: On my way out');
+    });
+
+    test('gate on, route check fails: counts as off the route (fail closed)', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      scope.technicianServicesCustomer.mockRejectedValue(new Error('db down'));
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'hello', customer: OFF_ROUTE });
+      expect(inserted[0].message).toBe('Text from (941) 555-0199: hello');
+    });
+
+    test('gate off: the name shows with no route lookup, as before', async () => {
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'hello', customer: OFF_ROUTE });
+      expect(inserted[0].message).toBe('Text from Test Caller: hello');
+      expect(scope.technicianServicesCustomer).not.toHaveBeenCalled();
+    });
+  });
+
   test('no assignable holder → nothing written, nothing pushed', async () => {
     db.mockImplementation(() => chain({ first: undefined }));
     await expect(techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'hi' })).resolves.toBe(false);
