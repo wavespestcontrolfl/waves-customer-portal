@@ -13,7 +13,7 @@
 const fs = require('fs');
 const { decideDisposition } = require('../services/call-disposition');
 const {
-  thirdPartyCustomerOnlyCards, THIRD_PARTY_CUSTOMER_ONLY_CARDS, dropUnneededCallCards,
+  thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk, THIRD_PARTY_CUSTOMER_ONLY_CARDS, dropUnneededCallCards,
 } = require('../services/call-triage-flags');
 const { recordCallCommitments, asThirdPartyPromise } = require('../services/call-commitments');
 const { createJobApplicationFromCall, OPEN_STATUSES } = require('../services/job-applications');
@@ -116,7 +116,7 @@ describe('2. customer-only cards', () => {
       { scheduling: { status: 'confirmed' } },
       { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', quote_requested: true } },
       { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', quote_promised: true } },
-      { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', price_discussed: true } },
+      { scheduling: { status: 'none' }, service_request: { service_intent: 'quote_only', price_discussed: true, primary_service_category: 'pest_general' } },
       { scheduling: { status: 'none' }, service_request: { service_intent: 'new_service' } },
       // Existing-service asks are service asks for a third party too (callback, complaint, cancellation).
       { scheduling: { status: 'none' }, service_request: { service_intent: 'follow_up_existing_service' } },
@@ -128,6 +128,79 @@ describe('2. customer-only cards', () => {
         expect(thirdPartyCustomerOnlyCards({ call_nature: nature, ...shape }, { gateOn: true })).toEqual([]);
       }
     }
+  });
+
+  // 2026-11-04 audit: six real vendor/applicant calls carried the model's default intent
+  // ('inspection_only' or 'quote_only') with no property-service evidence and still filed cards.
+  describe('no property-service evidence (synthetic shapes of the six audited calls)', () => {
+    const noEvidence = (nature, overrides = {}) => ({
+      call_nature: nature,
+      scheduling: { status: 'none' },
+      property: { service_address: { street_line_1: null, city: null, postal_code: null, raw_text: null } },
+      service_request: {
+        service_intent: 'inspection_only', primary_service_category: 'other', secondary_categories: [],
+        pests_observed: [], quote_requested: false, quote_promised: false, price_discussed: false,
+        ...overrides,
+      },
+    });
+    const withGate = (ext) => thirdPartyCustomerOnlyCards(ext, { gateOn: true });
+
+    test('inspection_only, quote_only and a null intent drop the customer cards, including caller_not_authorized', () => {
+      for (const nature of ['vendor_or_partner', 'job_applicant']) {
+        for (const intent of ['inspection_only', 'quote_only', null]) {
+          const out = withGate(noEvidence(nature, { service_intent: intent }));
+          expect(out).toEqual([...THIRD_PARTY_CUSTOMER_ONLY_CARDS]);
+          expect(out).toContain('missing_service_address');
+          expect(out).toContain('caller_not_authorized');
+        }
+      }
+    });
+
+    test('price discussed with no category, pest or address (a technician pay talk) still drops', () => {
+      expect(withGate(noEvidence('vendor_or_partner', { price_discussed: true }))).toContain('missing_service_address');
+    });
+
+    test('callback_number_needed and caller_phone_missing are never dropped', () => {
+      expect(THIRD_PARTY_CUSTOMER_ONLY_CARDS).not.toContain('callback_number_needed');
+      expect(THIRD_PARTY_CUSTOMER_ONLY_CARDS).not.toContain('caller_phone_missing');
+      expect(THIRD_PARTY_CUSTOMER_ONLY_CARDS).toContain('caller_not_authorized');
+    });
+
+    test('gate off: nothing is dropped, including caller_not_authorized', () => {
+      expect(thirdPartyCustomerOnlyCards(noEvidence('vendor_or_partner'))).toEqual([]);
+      expect(thirdPartyCustomerOnlyCards(noEvidence('vendor_or_partner'), { gateOn: false })).toEqual([]);
+    });
+
+    test('any property-service evidence keeps every card, caller_not_authorized included', () => {
+      const keeps = [
+        // a realtor partner asking for a WDO inspection
+        { service_intent: 'inspection_only', primary_service_category: 'wdo' },
+        { service_intent: 'inspection_only', primary_service_category: 'termite' },
+        // an applicant asking about his own home
+        { service_intent: 'quote_only', primary_service_category: 'pest_general' },
+        { service_intent: 'inspection_only', secondary_categories: ['lawn'] },
+        { service_intent: 'inspection_only', pests_observed: [{ pest_type: 'ants' }] },
+        { service_intent: 'inspection_only', quote_requested: true },
+        { service_intent: 'inspection_only', quote_promised: true },
+        { service_intent: 'inspection_only', price_discussed: true, primary_service_category: 'pest_general' },
+        { service_intent: 'new_service' },
+        { service_intent: 'complaint_or_callback' },
+      ];
+      for (const overrides of keeps) {
+        expect(withGate(noEvidence('vendor_or_partner', overrides))).toEqual([]);
+      }
+      for (const address of [{ street_line_1: '1 Test St' }, { city: 'Testville' }, { postal_code: '00000' }, { raw_text: 'one test street' }]) {
+        const ext = noEvidence('job_applicant');
+        ext.property.service_address = { ...ext.property.service_address, ...address };
+        expect(withGate(ext)).toEqual([]);
+        expect(thirdPartyCallMakesNoServiceAsk(ext)).toBe(false);
+      }
+      for (const status of ['requested', 'confirmed', 'offered']) {
+        const ext = noEvidence('vendor_or_partner');
+        ext.scheduling = { status };
+        expect(withGate(ext)).toEqual([]);
+      }
+    });
   });
 
   test('gate on: every other nature drops nothing', () => {
