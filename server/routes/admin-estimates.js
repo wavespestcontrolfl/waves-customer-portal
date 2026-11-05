@@ -897,7 +897,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // Independent of the bundle build below — it is content, not pricing.
   if (delivered) {
     Object.assign(sendSnapshot, scopeRevision(sendSnapshot, await deliveryScopeOf(estimate), deliveredAt || snapshotAt));
-    // The prices this delivery carried (each engine line's and the totals), beside its scope:
+    // The prices this delivery carried (the totals and a digest of every line's price), beside its scope:
     // GATE_ESTIMATE_UPDATED_WORDING's witness that a later send with other prices is a corrected quote. Stamped on
     // every delivery, gate on or off, so a quote delivered before the flip still counts; a suppressed attempt carries
     // the prior stamp forward like the scope.

@@ -1,14 +1,16 @@
 'use strict';
 
+const crypto = require('crypto');
+
 // Owner 2026-11-04 "updated" (GATE_ESTIMATE_UPDATED_WORDING, dark): a corrected estimate says so. Before, an
 // estimate the office edited and sent again went out word for word like the first send ("your Waves estimate is
 // ready"), so the customer could not tell the new quote from the old one.
 //
 // A send is an UPDATE when the customer already received this estimate (a delivery stamped sendSnapshot.scope) and
 // what this send delivers differs from that last delivery: its priced lines or address (the scope every delivery
-// stamps), or its prices (sendSnapshot.priced, stamped beside the scope since this change: every engine line's
-// customer-facing prices plus the totals, so two prices that move by offsetting amounts still count). A delivery
-// stamped before carries no prices, so only its scope can differ. A plain resend of the same quote keeps the normal
+// stamps), or its prices (sendSnapshot.priced, stamped beside the scope since this change: the totals and a digest of
+// the priced engine output, every line's price and the office's manual overrides included, so two prices that move by
+// offsetting amounts still count). A delivery stamped before carries no prices, so only its scope can differ. A plain resend of the same quote keeps the normal
 // wording. A commercial proposal keeps its own template.
 
 const UPDATED_SMS_TEMPLATE_KEY = 'estimate_updated';
@@ -42,24 +44,28 @@ function deliveredTotals(row = {}) {
   return { monthly: money(row.monthly_total), annual: money(row.annual_total), onetime: money(row.onetime_total) };
 }
 
-// The prices the customer sees on each engine line (engineResult.lineItems; the scope keeps names and cadence only).
-// Costs, margins, diagnostics and generatedAt stay out: a re-price that lands on the same prices is the same quote.
-const LINE_PRICE_FIELDS = ['annual', 'monthly', 'perApp', 'price', 'initialFee', 'finalAnnual', 'finalMonthly',
-  'annualAfterDiscount', 'monthlyAfterDiscount', 'priceAfterDiscount', 'visitsPerYear'];
+// The containers that carry an estimate's prices: the engine output (result, engineResult: every line, the office's
+// manual overrides such as manualFinalAnnual / manualFinalOneTime) and the manual and self-service quote lines. The
+// scope keeps line names and cadence only. The customer's own selections are not the office's quote and stay out.
+const PRICED_CONTAINERS = ['result', 'engineResult', 'manualQuoteLines', 'services', 'setupFeeQuote'];
+// Bookkeeping a re-price rewrites without changing what the customer is charged: a re-price that lands on the same
+// prices is the same quote.
+const NON_PRICE_KEYS = new Set(['generatedAt', 'productionDiagnostics', 'routingMetadata', 'pricingMetadata', 'costs',
+  'margin', 'finalMargin', 'manualFinalMargin', 'marginWarnings', 'warnings', 'featureWarnings', 'pestAgeAdjWarnings']);
+const isNonPriceKey = (key) => NON_PRICE_KEYS.has(key) || /^diagnostic/i.test(key);
 
-function linePrices(estimateData) {
-  const items = Array.isArray(estimateData?.engineResult?.lineItems) ? estimateData.engineResult.lineItems : [];
-  return items.filter((item) => item && typeof item === 'object').map((item) => ({
-    service: item.service ?? null,
-    frequency: item.selectedFrequency ?? item.frequency ?? null,
-    ...Object.fromEntries(LINE_PRICE_FIELDS.filter((key) => money(item[key]) !== null).map((key) => [key, money(item[key])])),
-  }));
+function pricedOnly(value) {
+  if (Array.isArray(value)) return value.map(pricedOnly);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().filter((key) => !isNonPriceKey(key)).map((key) => [key, pricedOnly(value[key])]));
 }
 
-// What a delivery charged, line by line and in total: stamped as sendSnapshot.priced by every delivery.
+// What a delivery charged: its totals and a digest of its priced content. Stamped as sendSnapshot.priced by every
+// delivery (a digest, so the stamp stays small beside the pricing bundle).
 function pricedContent(row = {}) {
   const data = parseEstimateData(row.estimate_data) || {};
-  return { totals: deliveredTotals(row), lines: linePrices(data), engineTotals: data.result?.totals ?? null };
+  const priced = Object.fromEntries(PRICED_CONTAINERS.map((key) => [key, pricedOnly(data[key] ?? null)]));
+  return { totals: deliveredTotals(row), digest: crypto.createHash('sha256').update(JSON.stringify(priced)).digest('hex') };
 }
 
 const validScope = (scope) => Boolean(scope && typeof scope === 'object' && Array.isArray(scope.lines));

@@ -22,7 +22,7 @@ describe('offerChangedSinceDelivery', () => {
   });
   test('the same scope and prices, in another key order (JSONB), is the same quote', () => {
     const reordered = { property: null, address: 'Synthetic street', lines: [{ cadence: 'quarterly', name: 'Synthetic pest service' }] };
-    const stampedPriced = JSON.parse(JSON.stringify({ engineTotals: PRICED.engineTotals, lines: PRICED.lines, totals: PRICED.totals }));
+    const stampedPriced = { digest: PRICED.digest, totals: { onetime: TOTALS.onetime, annual: TOTALS.annual, monthly: TOTALS.monthly } };
     expect(wording.offerChangedSinceDelivery({ scope: reordered, priced: stampedPriced }, SCOPE, wording.pricedContent(structuredClone(ROW)))).toBe(false);
   });
   test('a changed line, address or total is an update', () => {
@@ -36,10 +36,25 @@ describe('offerChangedSinceDelivery', () => {
     expect(offset.totals).toEqual(PRICED.totals);
     expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: PRICED }, SCOPE, offset)).toBe(true);
   });
+  test('offsetting manual price overrides (manualFinalAnnual / manualFinalOneTime) are an update', () => {
+    const [pest, lawn] = ROW.estimate_data.engineResult.lineItems;
+    const before = wording.pricedContent(withLines([{ ...pest, manualFinalAnnual: 450 }, { ...lawn, manualFinalOneTime: 120 }]));
+    const after = wording.pricedContent(withLines([{ ...pest, manualFinalAnnual: 480 }, { ...lawn, manualFinalOneTime: 90 }]));
+    expect(after.totals).toEqual(before.totals);
+    expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: before }, SCOPE, after)).toBe(true);
+  });
+  test('a manual override in another priced container (result.recurring) counts too', () => {
+    const recurring = (amount) => ({ ...ROW, estimate_data: { ...ROW.estimate_data, result: { ...ROW.estimate_data.result, recurring: { services: [{ name: 'pest', manualFinalAnnual: amount }] } } } });
+    expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: wording.pricedContent(recurring(450)) }, SCOPE, wording.pricedContent(recurring(480)))).toBe(true);
+  });
+  test('what the customer selected on the page is not the office quote', () => {
+    const selected = { ...ROW, estimate_data: { ...ROW.estimate_data, customerSelection: { frequencyKey: 'monthly' } } };
+    expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: PRICED }, SCOPE, wording.pricedContent(selected))).toBe(false);
+  });
   test('a re-price that lands on the same prices (new generatedAt, costs, margins) is the same quote', () => {
     const [pest, lawn] = ROW.estimate_data.engineResult.lineItems;
-    const repriced = withLines([{ ...pest, costs: { labor: 11 }, margin: 0.85 }, { ...lawn, diagnosticMargin: 0.7 }]);
-    repriced.estimate_data.engineResult.generatedAt = '2026-11-04T09:00:00.000Z';
+    const repriced = withLines([{ ...pest, costs: { labor: 11 }, margin: 0.85, warnings: ['synthetic'] }, { ...lawn, diagnosticMargin: 0.7 }]);
+    repriced.estimate_data.engineResult = { ...repriced.estimate_data.engineResult, generatedAt: '2026-11-04T09:00:00.000Z', productionDiagnostics: { ms: 12 }, pricingMetadata: { at: 'x' } };
     expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: PRICED }, SCOPE, wording.pricedContent(repriced))).toBe(false);
   });
   test('a stamp from before prices were stamped can only differ by scope', () => {
@@ -48,18 +63,12 @@ describe('offerChangedSinceDelivery', () => {
 });
 
 describe('pricedContent', () => {
-  test('keeps each line identity and its customer-facing prices as fixed cents, and the totals', () => {
-    expect(PRICED).toEqual({
-      totals: TOTALS,
-      lines: [
-        { service: 'pest', frequency: 'quarterly', annual: '487.00', perApp: '121.75' },
-        { service: 'lawn', frequency: 'monthly', annual: '650.60', monthly: '54.22' },
-      ],
-      engineTotals: { year1: 1137.6, year2: 1137.6, year2mo: 94.8 },
-    });
+  test('carries the totals as fixed cents and a digest of the priced content', () => {
+    expect(PRICED).toEqual({ totals: TOTALS, digest: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(wording.pricedContent(structuredClone(ROW))).toEqual(PRICED);
   });
-  test('an estimate without engine lines (or with unreadable data) still carries its totals', () => {
-    expect(wording.pricedContent({ monthly_total: '10', estimate_data: 'not json' })).toEqual({ totals: { monthly: '10.00', annual: null, onetime: null }, lines: [], engineTotals: null });
+  test('an estimate with no priced data (or unreadable data) still carries its totals', () => {
+    expect(wording.pricedContent({ monthly_total: '10', estimate_data: 'not json' }).totals).toEqual({ monthly: '10.00', annual: null, onetime: null });
   });
 });
 
