@@ -102,7 +102,7 @@ describe('technician tech-tool execution is scoped to the technician', () => {
       expect(mockExecuteTechTool).toHaveBeenCalledTimes(1);
       const [name, , techContext] = mockExecuteTechTool.mock.calls[0];
       expect(name).toBe('get_my_route');
-      expect(techContext).toEqual({ techId: 'tech-1', techName: 'Adam' });
+      expect(techContext).toEqual({ techId: 'tech-1', techName: 'Adam', techRole: 'technician' });
     });
   });
 
@@ -122,7 +122,7 @@ describe('technician tech-tool execution is scoped to the technician', () => {
       expect(res.status).toBe(200);
       const [name, , techContext] = mockExecuteTechTool.mock.calls[0];
       expect(name).toBe('get_my_route');
-      expect(techContext).toEqual({ techId: 'tech-1', techName: 'Adam' });
+      expect(techContext).toEqual({ techId: 'tech-1', techName: 'Adam', techRole: 'technician' });
     });
   });
 
