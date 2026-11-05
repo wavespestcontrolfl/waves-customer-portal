@@ -235,6 +235,24 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     expect(await get(s.kids[0].id)).toMatchObject({ technician_id: w.hireId });
   });
 
+  test('rollback keeps the new anchor when the series\' top-up has created a child since the run', async () => {
+    const w = await world();
+    const s = await weekendSeries(w.ownerId, await customer());
+    const result = await execute(w, await plan(w));
+    // The nightly top-up commits the next child on the new Thursday cadence.
+    const trx = await mockPg.transaction();
+    const cols = await trx('scheduled_services').columnInfo();
+    const parent = await trx('scheduled_services').where({ id: s.parent.id }).first();
+    const spawned = await Admin._test.extendSeriesOnceLocked(trx, parent, s.parent.id, cols, parent);
+    await trx.commit();
+    expect(dow(spawned.scheduledDate)).toBe(4);
+    const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn() });
+    expect(undo.visitsRestored).toBe(3);
+    expect(undo.skipped.anchors).toEqual([s.parent.id]);
+    expect(await get(s.parent.id)).toMatchObject({ recurring_nth: 2, recurring_weekday: 4 });
+    expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-11');
+  });
+
   test('rollback leaves a date move alone once the old day is inside the freeze margin', async () => {
     const w = await world();
     const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });

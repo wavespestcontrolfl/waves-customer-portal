@@ -510,12 +510,20 @@ function restorePatch(trx, v) {
   };
 }
 
+/** A child the series' top-up created after the run (it sits on the new weekday and still depends on the new anchor). */
+async function hasNewerChildren(trx, seriesId, record) {
+  const recorded = record.visits.map((v) => v.id);
+  const row = await trx('scheduled_services').where({ recurring_parent_id: seriesId }).whereNotIn('id', recorded)
+    .whereNotIn('status', ['cancelled', 'skipped', 'no_show']).where('created_at', '>', record.created_at).first('id');
+  return !!row;
+}
+
 /** Put the parents' nth / weekday back; returns the series ids whose anchor stayed. */
 async function restoreAnchors(trx, record, restoredIds) {
   const kept = [];
   for (const a of record.anchors || []) {
     const moved = record.visits.filter((v) => v.to_date && v.series_id === a.series_id);
-    if (!moved.every((v) => restoredIds.has(v.id))) { kept.push(a.series_id); continue; }
+    if (!moved.every((v) => restoredIds.has(v.id)) || await hasNewerChildren(trx, a.series_id, record)) { kept.push(a.series_id); continue; }
     const n = await trx('scheduled_services').where({ id: a.series_id })
       .whereRaw('recurring_nth IS NOT DISTINCT FROM ?', [a.nth]).whereRaw('recurring_weekday IS NOT DISTINCT FROM ?', [a.weekday])
       .update({ recurring_nth: a.old_nth, recurring_weekday: a.old_weekday, updated_at: trx.fn.now() });
@@ -593,7 +601,8 @@ async function rollbackHandover(db, opts) {
         seriesRestored += 1;
       }
       // --weekend-move: a parent's anchor goes back only while it still holds the run's stamp AND every date-moved visit
-      // of its series was restored (a visit left on its new day needs the new anchor to stay on cadence).
+      // of its series was restored (a visit left on its new day needs the new anchor to stay on cadence) AND the series' top-up has
+      // created no child since the run (it sits on the new weekday and needs the anchor too).
       const anchorsSkipped = await restoreAnchors(trx, record, restoredIds);
       skipped.anchors = anchorsSkipped;
       // --zips: a ZIP goes back to its earlier territory technician only while it still names --to.

@@ -56,7 +56,7 @@ const seeder = require(path.join(root, 'services', 'recurring-appointment-seeder
 const { clearOfBlackout, isBlackedOut } = require(path.join(root, 'services', 'scheduling', 'blackout-nudge'));
 
 const { nextRecurringDate, recurrenceOrdinalOptions } = seeder._internals;
-const { SEASONAL_FEB_OCT, shiftPastWeekend, clampDateToSeason, intervalDaysForPattern, schedulerPlacesPattern } = seeder;
+const { SEASONAL_FEB_OCT, shiftPastWeekend, clampDateToSeason, schedulerPlacesPattern } = seeder;
 
 // Days after today a new date must be (and --start must be): the 73 h reminder freeze, with margin.
 const MIN_DAYS_OUT = 4;
@@ -96,9 +96,22 @@ function candidateDates(current, workDays, today) {
 }
 
 /**
+ * How many cadence steps separate two surviving visits today: the smallest count (1..12) whose hop from the earlier one lands
+ * within the flex radius of the later one, so a cancelled or skipped middle occurrence (also in the seasonal Feb-Oct walk,
+ * which skips the winter) does not shift every later date. 1 when none does (the projection then fails the radius check).
+ */
+function hopsBetween(parent, earlier, later) {
+  const opts = { ...recurrenceOrdinalOptions(earlier, {}), intervalDays: parent.recurring_interval_days };
+  for (let hops = 1; hops <= 12; hops += 1) {
+    if (Math.abs(dayDiff(nextRecurringDate(earlier, parent.recurring_pattern, hops, opts), later)) <= FLEX_TIER_RADIUS_DAYS) return hops;
+  }
+  return 1;
+}
+
+/**
  * Project every chain member from first date `a0`: the dates the series' own top-up would have given them
  * had the series been anchored there. `chain` = members sorted by date; each hop is as many cadence steps
- * as separate the two visits today (at least one). Null when the pattern is not one the scheduler places.
+ * as separate the two visits today (hopsBetween). Null when the pattern is not one the scheduler places.
  */
 function projectChain(parent, chain, a0) {
   const pattern = parent.recurring_pattern;
@@ -107,12 +120,9 @@ function projectChain(parent, chain, a0) {
     ...(isMonthBased(pattern) ? recurrenceOrdinalOptions(a0, {}) : {}),
     intervalDays: parent.recurring_interval_days,
   };
-  const nominal = intervalDaysForPattern(pattern, parent.recurring_interval_days);
   const dates = [a0];
   for (let i = 1; i < chain.length; i += 1) {
-    const gap = dayDiff(chain[i - 1].scheduled_date, chain[i].scheduled_date);
-    const hops = nominal && pattern !== SEASONAL_FEB_OCT ? Math.max(1, Math.round(gap / nominal)) : 1;
-    dates.push(nextRecurringDate(dates[i - 1], pattern, hops, opts));
+    dates.push(nextRecurringDate(dates[i - 1], pattern, hopsBetween(parent, chain[i - 1].scheduled_date, chain[i].scheduled_date), opts));
   }
   return { dates, anchor: isMonthBased(pattern) ? { nth: opts.nth, weekday: opts.weekday } : null };
 }

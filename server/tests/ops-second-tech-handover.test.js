@@ -800,6 +800,23 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     }
   });
 
+  test('a cancelled or skipped middle occurrence does not shift the later dates (seasonal Feb-Oct and monthly walks count the real cadence steps)', async () => {
+    for (const [pattern, first, steps] of [['seasonal_feb_oct', '2099-07-11', 2], ['monthly', '2099-07-11', 2], ['quarterly', '2099-07-11', 2]]) {
+      const parentRow = { id: `P-gap-${pattern}`, customer_id: `C-gap-${pattern}`, service_type: 'Mosquito', recurring_pattern: pattern, recurring_nth: null, recurring_weekday: null, recurring_interval_days: null };
+      const opts = ord(first);
+      // The occurrence one step after `first` was cancelled: the survivors sit `steps` cadence steps apart.
+      const live = [first, hop(first, pattern, steps, opts)].map((d, i) => ({
+        id: `V-gap-${pattern}-${i}`, series_id: parentRow.id, recurring_parent_id: parentRow.id, is_recurring: true, scheduled_date: d, status: 'confirmed',
+        technician_id: OWNER, window_start: '09:00:00', window_end: '10:00:00',
+      }));
+      const c = { customer_id: parentRow.customer_id, series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
+      const out = await run([c]);
+      expect(out.kept.size).toBe(0);
+      expect(live.map((v) => dow(out.newDates.get(v.id)))).toEqual([4, 4]);
+      for (const v of live) expect(Math.abs(weekend.dayDiff(v.scheduled_date, out.newDates.get(v.id)))).toBeLessThanOrEqual(5);
+    }
+  });
+
   test('month boundary: a 1st Saturday moved two days earlier lands in the previous month, projects wrong, so the next day is tried', async () => {
     let first = null;
     for (let m = 1; m <= 12 && !first; m += 1) {
