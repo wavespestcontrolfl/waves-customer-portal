@@ -1347,6 +1347,18 @@ describe('bell banner triggers', () => {
     expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
   });
 
+  test('new_lead_email (GATE_RING_NEW_CONTACTS) builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+    const lead = TRIGGER_REGISTRY.new_lead_email;
+    expect(lead).toEqual(expect.objectContaining({ category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
+    expect(lead.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });
+    expect(lead.build(bannerPayload)).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(lead.build({}).link).toBe('/admin/email');
+    await triggerNotification('new_lead_email', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    const sent = PushService.sendToAdminUsers.mock.calls.at(-1)[1]('admin-1');
+    expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_email-n-42', sound: 'waves-lead.caf' });
+  });
+
   test('the banner is tagged by its row, so a refresh ring replaces it, and a second row never does', () => {
     expect(__private.pushTagFor('messenger_reply', { alertRowId: 'n-42' })).toBe('waves-messenger_reply-n-42');
     expect(__private.pushTagFor('call_commitment_overdue', { alertRowId: 'n-43' })).toBe('waves-call_commitment_overdue-n-43');
