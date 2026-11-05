@@ -808,6 +808,7 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
           { ...cashToday.accounts[0] },
           { ...cashToday.accounts[1], available: null, current: null },
         ],
+        cards: [{ ...cashToday.cards[0], current: null }],
         unavailable: [
           { institution_name: "Synthetic Bank", reason: "not_shared", mask: "4444", account_type: "bank" },
           { institution_name: "Other Bank", reason: "needs_confirmation" },
@@ -822,6 +823,8 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
     expect(
       screen.getByText("Other Bank reported a new or changed account: confirm it on Tax page → Live bank feeds"),
     ).toBeInTheDocument();
+    // an unknown card balance is no proof the card owes nothing
+    expect(screen.getByText("Owed on card ••3333: balance unavailable (not counted)")).toBeInTheDocument();
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 

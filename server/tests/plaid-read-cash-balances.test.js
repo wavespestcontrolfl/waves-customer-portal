@@ -78,15 +78,23 @@ describe('readCashBalances', () => {
   });
 
   test('a first connection still in setup with nothing enabled is not read and not reported', async () => {
-    mockState.items = [item({ status: 'setup' })];
+    mockState.items = [item({ status: 'setup', last_synced_at: '2026-11-01T12:00:00Z' })];
     mockState.accounts = [stored({ enabled: false })];
     const out = await plaidSync.readCashBalances();
     expect(plaid.getAccounts).not.toHaveBeenCalled();
     expect(out).toEqual({ accounts: [], cards: [], unavailable: [] });
   });
 
+  test('a fresh link in setup that never synced is not read, even with accounts enabled by default', async () => {
+    mockState.items = [item({ status: 'setup', last_synced_at: null })];
+    mockState.accounts = [stored()];
+    const out = await plaidSync.readCashBalances();
+    expect(plaid.getAccounts).not.toHaveBeenCalled();
+    expect(out).toEqual({ accounts: [], cards: [], unavailable: [] });
+  });
+
   test('an established connection back in setup (new account reported) still counts its balances and asks to confirm', async () => {
-    mockState.items = [item({ status: 'setup' })];
+    mockState.items = [item({ status: 'setup', last_synced_at: '2026-11-01T12:00:00Z' })];
     mockState.accounts = [stored()];
     plaid.getAccounts.mockResolvedValue({ accounts: [{ account_id: 'acc-1', type: 'depository', balances: { available: 75, current: 80 } }] });
     const out = await plaidSync.readCashBalances();

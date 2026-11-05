@@ -1030,8 +1030,11 @@ async function readItemCashBalances(item) {
   const unavailable = (reason) => ({ unavailable: { institution_name: item.institution_name || null, reason } });
   if (item.status === 'login_required') return unavailable('login_required');
   const stored = await db('plaid_accounts').where({ plaid_item_id: item.id, enabled: true });
-  // A first connection still in setup has nothing enabled yet: nothing to read or report.
-  if (item.status === 'setup' && !stored.length) return {};
+  // A connection in setup that has never synced is a fresh link the owner has not confirmed
+  // (connectItem enables accounts by default, so enabled rows are no proof): reading it could
+  // count a replacement connection's bank twice. Only an established feed (it synced before)
+  // that the sync put back in setup still counts.
+  if (item.status === 'setup' && (!item.last_synced_at || !stored.length)) return {};
   let accessToken = null;
   try {
     accessToken = await decryptToken(db, item.access_token_enc);

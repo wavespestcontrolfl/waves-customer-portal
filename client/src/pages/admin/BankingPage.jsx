@@ -1987,7 +1987,9 @@ function CashTodayCard({ balance, balanceError, refreshKey }) {
       )}
       {data.cards.map((c) => (
         <div key={`${c.account_label}-${c.mask}`} style={cashMuted}>
-          Owed on card ••{c.mask}: {money(c, c.current ?? 0)} (not counted)
+          {c.current == null
+            ? `Owed on card ••${c.mask}: balance unavailable (not counted)`
+            : `Owed on card ••${c.mask}: ${money(c, c.current)} (not counted)`}
         </div>
       ))}
       {data.unavailable.map((u, i) => (
