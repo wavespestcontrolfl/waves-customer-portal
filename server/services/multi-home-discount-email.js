@@ -1,0 +1,649 @@
+'use strict';
+
+/**
+ * "Your Multi-Home Discount is on" email (owner 2026-11-04, family build PR 3 of 3).
+ * Dark behind GATE_MULTI_HOME_DISCOUNT_EMAIL (multiHomeDiscountEmailLive(), read at call time: off = return before any
+ * query, nothing sent; kill = unset). The owner flips it only after approving the copy.
+ *
+ *   runMultiHomeDiscountEmail({ now })   right after PR 2's job in the same 15-minute scheduler tick, under runExclusive
+ *
+ * WHEN. For every source estimate PR 2 (services/multi-home-discount-apply.js) would work on (the same readers:
+ * eachSourceEstimate + describeSource, so the same 14-day window and the same source rules; a source past the window is
+ * never sent, and there is no catch-up for older multi-home customers), the email goes out only when EVERY current
+ * target series of that source (the same targetsForSource PR 2 applies to) has a multi_home_discount_applications row
+ * that is `applied` or `already_discounted` and NONE is `held`. The ledger is read AGAINST the current target set, never
+ * alone: a dropped target's held row is deleted by PR 2 and its applied/already rows stay as history, so rows for series
+ * that are no longer targets are ignored. A source with no target series at all still gets the email for its own home.
+ * Needs PR 2's gate on too (the job is only run after PR 2's job).
+ *
+ * ONCE. One email per (source estimate, paying address), ever. The email library's own idempotency does it: the
+ * idempotency key is customer.multi_home_discount_on:<estimate id>:<hash of the lower-cased address>, so a second run
+ * finds the stored email_messages row and sends nothing (a `blocked` suppression row dedupes too). A provider failure
+ * follows the transactional retry rail exactly as every other transactional send: a failed row with a retry scheduled
+ * or in flight holds the next attempt (EMAIL_PROVIDER_RETRY_HELD), an accepted send counts even when its bookkeeping
+ * failed. Nothing here re-sends on its own, so a failure can never double-send.
+ *
+ * WHO. Each home goes to its profile's active Bill-To payer's AP email (payers.ap_email, customers.payer_id) when it
+ * has one, else to the profile's own email. Homes are grouped by paying address (case-insensitive); each group is one
+ * email listing only the homes that address pays for. Greeting = the payer's display name (first word) when a home in the
+ * group bills to a payer with that AP email, else the first home's profile first name. No address -> no email for that
+ * group (logged). A profile whose portal-wide email switch (notification_prefs.email_enabled) is off, or whose switch
+ * cannot be read, is left out of the send; suppression and the transactional stream go through sendTemplate as usual.
+ * At the provider handoff (sendTemplate's withProviderHandoff) the profiles, email switches and payers are read again
+ * FOR SHARE, under each profile's customer-comms lock and then the address key, held through the request: a home whose
+ * address, payer or switch changed, or a changed greeting, refuses that email before the request (counted as waiting;
+ * a later run regroups from fresh rows).
+ *
+ * CELLS (per home; a cell that cannot be read from a stored record is left out, never guessed; the template drops the
+ * row):
+ *   address  the series' saved property (customer_properties), else the visit's stamped address, else the profile's
+ *   service  the series' visit service_type (the exact name on the schedule, e.g. "Quarterly Pest Control Service")
+ *   Regular / Per application / Starts
+ *     other homes, applied:            the PR 2 ledger (price_before, price_after, first_visit_date)
+ *     other homes, already_discounted: the series' next visits (price; Regular only when the visit carries the preset
+ *                                      with its stored primary_line_price)
+ *     the new (source) home:           Per application = the plan's stored flat visit price; Regular = that price plus
+ *                                      the stored manual discount's recurring slice per visit (recurringAmount over the
+ *                                      cadence's visits a year), only for a single-series percent plan whose slice is
+ *                                      the stored percent of that Regular. A gross price is never divided out of a net.
+ *   How it is paid: the Bill-To payer -> "Invoice to you by email"; else Auto Pay on a saved card -> "Auto Pay card on
+ *     file"; else a per-application customer -> "Invoice after each visit" (a bank Auto Pay or another billing basis
+ *     leaves the cell out).
+ */
+
+const crypto = require('node:crypto');
+const db = require('../models/db');
+const logger = require('./logger');
+const featureGates = require('../config/feature-gates');
+const { etDateString } = require('../utils/datetime-et');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { propertyStreetLine } = require('../utils/property-display');
+const { PLAN_LINE_SQL } = require('./rate-review');
+const { PRICE_SERVICE_PRICE_KEYS, parseTemplateOverrides } = require('./recurring-template-overrides');
+const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const apply = require('./multi-home-discount-apply');
+
+const TEMPLATE_KEY = 'customer.multi_home_discount_on';
+// Never re-sent from stored copy (constants/email-replay-exclusions.js): a failed send is retried by this job only,
+// after its fresh checks, at most once per RETRY_BACKOFF_MS.
+const { MULTI_HOME_DISCOUNT_CATEGORY: CATEGORY } = require('../constants/email-replay-exclusions');
+const RETRY_BACKOFF_MS = 24 * 60 * 60 * 1000;
+// PR 2's already_discounted reason when the series counted because its upcoming visits carried the preset.
+const ALREADY_CARRIED_REASON = 'all_upcoming_visits_carry_it';
+// ... and when its plan was sold with the preset netted into the price.
+const ALREADY_SOLD_REASON = 'sold_with_multi_home_discount';
+const MAX_HOMES = 8;
+const HOME_FIELDS = ['address', 'service', 'regular', 'discount', 'price', 'starts', 'payment'];
+const VISITS_PER_YEAR = Object.freeze({ monthly: 12, bimonthly: 6, quarterly: 4, semiannual: 2 });
+const STATUS_APPLIED = 'applied';
+const STATUS_ALREADY = 'already_discounted';
+const STATUS_HELD = 'held';
+const PAY_INVOICE_PAYER = 'Invoice to you by email';
+const PAY_AUTOPAY_CARD = 'Auto Pay card on file';
+const PAY_INVOICE_AFTER = 'Invoice after each visit';
+
+// ── small helpers ───────────────────────────────────────────────────────
+
+const clean = (v) => String(v == null ? '' : v).trim();
+const lower = (v) => clean(v).toLowerCase();
+const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean(v));
+
+function cents(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) : null;
+}
+
+function money(c) {
+  if (c == null) return '';
+  return `$${(c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function ymd(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+  }
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value).trim());
+  return m ? m[1] : null;
+}
+
+// "Sat, Nov 14" from a calendar date (no time zone shift: the date is formatted as UTC noon).
+function weekdayDate(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+  if (!m) return '';
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+const firstWord = (v) => clean(v).split(/\s+/)[0] || '';
+
+// ── readiness ───────────────────────────────────────────────────────────
+
+async function loadLedgerRows(dbh, estimateId) {
+  const rows = await dbh(apply.TABLE).where({ source_estimate_id: estimateId })
+    .select('series_root_id', 'status', 'price_before', 'price_after', 'first_visit_date', 'detail');
+  return new Map(rows.map((r) => [String(r.series_root_id), r]));
+}
+
+// null when every CURRENT target is applied or already_discounted; else the code of what is still open.
+function openTargetReason(targets, ledger) {
+  for (const t of targets) {
+    const row = ledger.get(String(t.rootId));
+    if (!row) return 'target_not_recorded';
+    if (row.status === STATUS_HELD) return 'target_held';
+    if (row.status !== STATUS_APPLIED && row.status !== STATUS_ALREADY) return 'target_unknown_status';
+  }
+  return null;
+}
+
+// ── per-home facts (stored records only) ────────────────────────────────
+
+// The series' upcoming plan visits (pending or confirmed, from today on), oldest first.
+async function loadSeriesFacts(dbh, { customerId, rootId }, today) {
+  const { PLAN_ROW_SQL, CADENCE_SQL } = PLAN_LINE_SQL;
+  const { rows } = await dbh.raw(
+    `SELECT s.id, s.scheduled_date, s.estimated_price, s.primary_line_price, s.discount_id, s.service_type, s.property_id,
+            s.service_address_line1, s.service_address_line2, ${CADENCE_SQL} AS cadence
+       FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
+      WHERE (s.id = ? OR s.recurring_parent_id = ?) AND s.customer_id = ? AND s.scheduled_date >= ?
+        AND s.status IN ('pending', 'confirmed') AND ${PLAN_ROW_SQL}
+      ORDER BY s.scheduled_date ASC, s.id ASC`,
+    [rootId, rootId, customerId, today],
+  );
+  const upcoming = rows.map((r) => ({ ...r, date: ymd(r.scheduled_date), priceCents: cents(r.estimated_price) }));
+  const first = upcoming[0] || null;
+  const flat = first && first.priceCents > 0 && upcoming.every((v) => v.priceCents === first.priceCents);
+  return {
+    first,
+    serviceName: clean(first?.service_type),
+    cadence: first?.cadence || null,
+    flatPriceCents: flat ? first.priceCents : null,
+    startsDate: first?.date || null,
+  };
+}
+
+async function homeAddress(dbh, { customerId, propertyId, visit, profile }) {
+  const lookup = async (id) => (id
+    ? dbh('customer_properties').where({ id, customer_id: customerId }).first('address_line1', 'address_line2')
+    : null);
+  const property = (await lookup(propertyId)) || (await lookup(visit?.property_id));
+  return propertyStreetLine(property || {})
+    || propertyStreetLine({ address_line1: visit?.service_address_line1, address_line2: visit?.service_address_line2 })
+    || propertyStreetLine(profile || {})
+    || '';
+}
+
+// The new (source) home's Regular and discount, from the stored manual discount and the stored visit price only.
+function sourcePrices({ estimateData, presetId, facts, seriesCount }) {
+  const out = { priceCents: facts.flatPriceCents, regularCents: null, discountCents: null, provable: false };
+  const md = apply.multiHomeSourceDiscount(estimateData, presetId);
+  const visits = VISITS_PER_YEAR[facts.cadence];
+  const slice = md ? Number(md.recurringAmount) : NaN;
+  // The arithmetic proof applies only to a single-series percent plan on a cadence with a known visit count.
+  if (!md || seriesCount !== 1 || !visits || md.type !== 'PERCENT' || !(slice > 0)) return out;
+  out.provable = true;
+  if (out.priceCents == null) return out;
+  const discountCents = Math.round((slice * 100) / visits);
+  const regularCents = out.priceCents + discountCents;
+  // The stored discount must be the stored percent of that Regular to the cent (one cent of rounding), or the figure is
+  // not trusted and left out. A plan repriced or stripped of its discount after the sale fails this, so the email for
+  // it waits (buildHome marks the new home unproven).
+  if (Math.abs(discountCents - Math.round((regularCents * Number(md.value)) / 100)) > 1) return out;
+  return { ...out, regularCents, discountCents };
+}
+
+function targetPrices({ row, facts, presetId }) {
+  if (row.status === STATUS_APPLIED) {
+    const before = cents(row.price_before);
+    const after = cents(row.price_after);
+    const ok = before != null && after != null && before > after;
+    return { priceCents: after, regularCents: ok ? before : null, discountCents: ok ? before - after : null, startsDate: ymd(row.first_visit_date) };
+  }
+  // already_discounted: the next visits' stored price; Regular only when the visit carries the Multi-Home preset.
+  const first = facts.first;
+  const gross = first ? cents(first.primary_line_price) : null;
+  const carries = !!(first && presetId && first.discount_id && String(first.discount_id) === String(presetId));
+  const ok = carries && gross != null && facts.flatPriceCents != null && gross > facts.flatPriceCents;
+  return {
+    priceCents: facts.flatPriceCents,
+    regularCents: ok ? gross : null,
+    discountCents: ok ? gross - facts.flatPriceCents : null,
+    startsDate: facts.startsDate,
+  };
+}
+
+// Every next visit the series' top-up would mint, priced by PRODUCTION (seriesNextOccurrencePrices: every walked date),
+// must be at the price the email states. null = nothing will be extended; a walk that cannot finish is unproven.
+async function nextSpawnsAt(dbh, rootId, expectedCents, nextPrices) {
+  const read = nextPrices || require('../routes/admin-schedule').seriesNextOccurrencePrices;
+  const next = await read(dbh, rootId);
+  if (next === null || next === undefined) return true;
+  if (next.unverified) return false;
+  return (next.prices || []).every((p) => cents(p) === expectedCents);
+}
+
+const detailOf = (row) => {
+  if (!row || !row.detail) return {};
+  if (typeof row.detail === 'object') return row.detail;
+  try { return JSON.parse(row.detail); } catch { return {}; }
+};
+
+// The ledger is history: staff can remove the discount or reprice a series before this email goes (a held home or a
+// failed send can delay it). Another home counts only while its upcoming visits are flat at the price the row
+// recorded (applied), still carry the preset when that is how it counted (already discounted, visits carried it),
+// carry no other appointment discount, and every next extension prices the same.
+async function targetStillCurrent(dbh, { row, facts, presetId, rootId, nextPrices }) {
+  if (!row || !facts.first || facts.flatPriceCents == null) return false;
+  const visitDiscount = facts.first.discount_id ? String(facts.first.discount_id) : null;
+  const carries = !!(presetId && visitDiscount === String(presetId));
+  if (visitDiscount && !carries) return false;
+  if (row.status === STATUS_APPLIED && facts.flatPriceCents !== cents(row.price_after)) return false;
+  if (row.status === STATUS_ALREADY && detailOf(row).reason === ALREADY_CARRIED_REASON && !carries) return false;
+  return nextSpawnsAt(dbh, rootId, facts.flatPriceCents, nextPrices);
+}
+
+// How many series the sold estimate booked (its plan rows), so a several-series sale is never proven per series.
+async function soldSeriesCount(dbh, estimateId) {
+  const { PLAN_ROW_SQL } = PLAN_LINE_SQL;
+  const { rows } = await dbh.raw(
+    `SELECT s.id, s.recurring_parent_id FROM scheduled_services s WHERE s.source_estimate_id = ? AND ${PLAN_ROW_SQL}`,
+    [estimateId],
+  );
+  return new Set((rows || []).map((r) => String(r.recurring_parent_id || r.id))).size;
+}
+
+// A home that counted because its plan was SOLD with the Multi-Home Discount netted in is proven now the way the new
+// home is: its own (single) accepted sold estimate's stored slice, exact to the cent, over the current flat price
+// (sourcePrices; `provable` false when that arithmetic does not apply), or null when no single sold estimate exists.
+async function soldTargetPrices(dbh, { rootId, presetId, facts }) {
+  const links = await dbh('scheduled_services')
+    .where(function inSeries() { this.where({ id: rootId }).orWhere({ recurring_parent_id: rootId }); })
+    .whereNotNull('source_estimate_id')
+    .distinct('source_estimate_id');
+  const ids = [...new Set((links || []).map((r) => String(r.source_estimate_id)))];
+  if (ids.length !== 1) return null;
+  const estimate = await dbh('estimates').where({ id: ids[0], status: 'accepted' }).first('id', 'estimate_data');
+  if (!estimate) return null;
+  const seriesCount = await soldSeriesCount(dbh, estimate.id);
+  return sourcePrices({ estimateData: estimate.estimate_data, presetId, facts, seriesCount });
+}
+
+const provenCells = (prices) => prices.priceCents != null && prices.regularCents != null && prices.discountCents != null;
+
+// A plan the arithmetic cannot prove (several series in one sale, or a cadence whose visit count the slice cannot be
+// read for, e.g. a lawn program) counts only while it is UNCHANGED since the sale: flat upcoming visits, no price key
+// stamped on its series template (every Edit-appointment "this and following" price change stamps one; a "this only"
+// change breaks flatness), and every next extension at that price. Shown with its current price only.
+async function unchangedSinceSale(dbh, { rootId, priceCents, nextPrices }) {
+  if (priceCents == null) return false;
+  const root = await dbh('scheduled_services').where({ id: rootId }).first('recurring_template_overrides');
+  const overrides = parseTemplateOverrides(root && root.recurring_template_overrides) || {};
+  if (PRICE_SERVICE_PRICE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(overrides, k))) return false;
+  return nextSpawnsAt(dbh, rootId, priceCents, nextPrices);
+}
+
+const currentPriceOnly = (prices) => ({ ...prices, regularCents: null, discountCents: null });
+
+// The new home must prove its discount now (its current flat price plus the stored slice, exact to the cent) and every
+// next extension must price the same; the email never claims 10% off for a home it cannot show.
+async function sourceHomeVerdict(dbh, ctx, facts, rootId) {
+  const prices = {
+    ...sourcePrices({ estimateData: ctx.estimate.estimate_data, presetId: ctx.presetId, facts, seriesCount: ctx.source.roots.size }),
+    startsDate: facts.startsDate,
+  };
+  if (prices.provable) {
+    const proven = provenCells(prices) && await nextSpawnsAt(dbh, rootId, prices.priceCents, ctx.nextPrices);
+    return { prices, stale: !proven };
+  }
+  const unchanged = await unchangedSinceSale(dbh, { rootId, priceCents: prices.priceCents, nextPrices: ctx.nextPrices });
+  return { prices: currentPriceOnly(prices), stale: !unchanged };
+}
+
+// Another home, read now: sold with the discount -> proven from its own sold estimate; applied or carried -> the
+// ledger row checked against the current visits (targetStillCurrent). Both also prove every next extension.
+async function targetHomeVerdict(dbh, ctx, facts, rootId) {
+  const row = ctx.ledger.get(String(rootId));
+  if (row && row.status === STATUS_ALREADY && detailOf(row).reason === ALREADY_SOLD_REASON) {
+    const sold = facts.first && !facts.first.discount_id ? await soldTargetPrices(dbh, { rootId, presetId: ctx.presetId, facts }) : null;
+    if (!sold) return { prices: targetPrices({ row, facts, presetId: ctx.presetId }), stale: true };
+    const prices = { ...sold, startsDate: facts.startsDate };
+    if (sold.provable) {
+      const proven = provenCells(sold) && await nextSpawnsAt(dbh, rootId, sold.priceCents, ctx.nextPrices);
+      return { prices, stale: !proven };
+    }
+    const unchanged = await unchangedSinceSale(dbh, { rootId, priceCents: sold.priceCents, nextPrices: ctx.nextPrices });
+    return { prices: currentPriceOnly(prices), stale: !unchanged };
+  }
+  const prices = targetPrices({ row, facts, presetId: ctx.presetId });
+  const current = await targetStillCurrent(dbh, { row, facts, presetId: ctx.presetId, rootId, nextPrices: ctx.nextPrices });
+  return { prices, stale: !current };
+}
+
+async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx) {
+  const facts = await loadSeriesFacts(dbh, { customerId, rootId }, ctx.today);
+  const profile = ctx.customers.get(String(customerId));
+  const { prices, stale } = isSource
+    ? await sourceHomeVerdict(dbh, ctx, facts, rootId)
+    : await targetHomeVerdict(dbh, ctx, facts, rootId);
+  return {
+    customerId: String(customerId),
+    rootId: String(rootId),
+    isSource,
+    stale,
+    address: await homeAddress(dbh, { customerId, propertyId, visit: facts.first, profile }),
+    service: facts.serviceName,
+    ...prices,
+  };
+}
+
+async function buildHomes(dbh, ctx) {
+  const homes = [];
+  for (const rootId of ctx.source.roots) {
+    homes.push(await buildHome(dbh, { customerId: ctx.source.customerId, rootId, propertyId: ctx.source.propertyId, isSource: true }, ctx));
+  }
+  for (const t of ctx.targets) {
+    homes.push(await buildHome(dbh, { customerId: t.customerId, rootId: t.rootId, propertyId: t.propertyId, isSource: false }, ctx));
+  }
+  return homes;
+}
+
+// ── who pays, who may be emailed ────────────────────────────────────────
+
+async function loadCustomers(dbh, ids) {
+  const rows = await dbh('customers').whereIn('id', ids).whereNull('deleted_at').select(
+    'id', 'first_name', 'last_name', 'email', 'payer_id', 'billing_mode', 'autopay_enabled', 'autopay_paused_until',
+    'autopay_payment_method_id', 'ach_status', 'address_line1', 'address_line2',
+  );
+  return new Map(rows.map((r) => [String(r.id), r]));
+}
+
+// The ACTIVE Bill-To payers of those profiles that have a usable AP email, by payer id. `lock` reads them FOR SHARE.
+async function loadPayers(dbh, customers, { lock = false } = {}) {
+  const payerIds = [...new Set([...customers.values()].map((c) => c.payer_id).filter((v) => v != null))];
+  if (!payerIds.length) return new Map();
+  const query = dbh('payers').whereIn('id', payerIds).select('id', 'display_name', 'company_name', 'ap_email', 'active');
+  const rows = lock ? await query.orderBy('id').forShare() : await query;
+  return new Map(rows.filter((p) => p.active !== false && isEmailLike(p.ap_email)).map((p) => [String(p.id), p]));
+}
+
+// Profiles whose portal-wide email switch is off. A read that fails throws: the source waits for the next tick.
+async function loadEmailOptOuts(dbh, ids) {
+  const rows = await dbh('notification_prefs').whereIn('customer_id', ids).where({ email_enabled: false }).select('customer_id');
+  return new Set(rows.map((r) => String(r.customer_id)));
+}
+
+async function paymentCell(dbh, customer, payer) {
+  if (payer) return PAY_INVOICE_PAYER;
+  if (customer.billing_mode !== 'per_application') return '';
+  try {
+    const autopay = require('./autopay-eligibility');
+    if (!(await autopay.customerOnAutopay(customer, { db: dbh, failClosed: true }))) return PAY_INVOICE_AFTER;
+    const method = await autopay.getChargeableAutopayMethod(customer, dbh);
+    return method && !autopay.isBankMethodType(method.method_type) ? PAY_AUTOPAY_CARD : '';
+  } catch (err) {
+    logger.warn(`[multi-home-discount-email] Auto Pay unreadable for a profile, payment cell left out: ${err.message}`);
+    return '';
+  }
+}
+
+// Where a profile's homes are emailed: its active Bill-To payer's AP email when it has one, else its own email.
+function routeFor(customer, payers) {
+  const payer = customer.payer_id != null ? payers.get(String(customer.payer_id)) || null : null;
+  const address = payer ? clean(payer.ap_email) : clean(customer.email);
+  return { payer, address, key: lower(address) };
+}
+
+// Groups the homes by paying address. A home with no usable address is returned in `noAddress`.
+async function groupByPayingAddress(dbh, homes, { customers, payers, optedOut }) {
+  const groups = new Map();
+  const noAddress = [];
+  for (const home of homes) {
+    if (optedOut.has(home.customerId)) continue;
+    const customer = customers.get(home.customerId);
+    if (!customer) continue;
+    const { payer, address, key } = routeFor(customer, payers);
+    if (!isEmailLike(address)) { noAddress.push(home); continue; }
+    if (!groups.has(key)) groups.set(key, { key, address, payer: null, homes: [] });
+    const group = groups.get(key);
+    if (payer && !group.payer) group.payer = payer;
+    group.homes.push({ ...home, payerId: payer ? String(payer.id) : null, payment: await paymentCell(dbh, customer, payer) });
+  }
+  return { groups: [...groups.values()], noAddress };
+}
+
+// The routing rows again, FOR SHARE inside the handoff transaction: an edit of a profile's email or Bill-To payer, its
+// email switch, or a payer's AP email either committed first (and is read here) or waits until the request is made.
+async function lockedRouting(trx, ids) {
+  const rows = await trx('customers').whereIn('id', ids).whereNull('deleted_at').orderBy('id').forShare()
+    .select('id', 'first_name', 'email', 'payer_id');
+  const customers = new Map(rows.map((r) => [String(r.id), r]));
+  const prefs = await trx('notification_prefs').whereIn('customer_id', ids).orderBy('customer_id').forShare()
+    .select('customer_id', 'email_enabled');
+  const optedOut = new Set(prefs.filter((p) => p.email_enabled === false).map((p) => String(p.customer_id)));
+  return { customers, optedOut, payers: await loadPayers(trx, customers, { lock: true }) };
+}
+
+// Every home of the group still pays to this address through the same payer (or none), no profile turned email off,
+// and the greeting is still the one rendered.
+function routingUnchanged(group, greeting, { customers, optedOut, payers }) {
+  const stillRouted = group.homes.every((home) => {
+    const customer = customers.get(home.customerId);
+    if (!customer || optedOut.has(home.customerId)) return false;
+    const route = routeFor(customer, payers);
+    return route.key === group.key && (route.payer ? String(route.payer.id) : null) === home.payerId;
+  });
+  if (!stillRouted) return false;
+  const payer = group.payer ? payers.get(String(group.payer.id)) || null : null;
+  return greetingFor({ ...group, payer }, customers) === greeting;
+}
+
+// The email library's provider-boundary hook. Under each profile's customer-comms lock (sorted ids, taken before any
+// row lock), the routing rows are read again; a change refuses before the request (nothing is sent, a later run
+// regroups from fresh rows). Otherwise the address key, which suppression writers share, is taken and every lock is
+// held through the provider request.
+function routingHandoff(dbh, group, greeting, state) {
+  return (dispatch) => dbh.transaction(async (trx) => {
+    const ids = [...new Set(group.homes.map((h) => h.customerId))].sort();
+    for (const id of ids) await lockCustomerComms(trx, id);
+    if (!routingUnchanged(group, greeting, await lockedRouting(trx, ids))) {
+      state.routingChanged = true;
+      return { ok: false, reason: 'recipient_changed' };
+    }
+    await lockCustomerEmail(trx, group.address);
+    await dispatch(trx);
+    return { ok: true };
+  });
+}
+
+function greetingFor(group, customers) {
+  if (group.payer) return firstWord(group.payer.display_name) || 'there';
+  const first = customers.get(group.homes[0].customerId);
+  return firstWord(first?.first_name) || 'there';
+}
+
+// ── the email ───────────────────────────────────────────────────────────
+
+function homeCells(home) {
+  return {
+    address: home.address,
+    service: home.service,
+    regular: money(home.regularCents),
+    discount: home.discountCents != null ? `-${money(home.discountCents)}` : '',
+    price: money(home.priceCents),
+    starts: weekdayDate(home.startsDate),
+    payment: home.payment,
+  };
+}
+
+function payloadFor(group, customers) {
+  const payload = { greeting_name: greetingFor(group, customers), company_phone: WAVES_SUPPORT_PHONE_DISPLAY };
+  group.homes.forEach((home, idx) => {
+    const cells = homeCells(home);
+    for (const field of HOME_FIELDS) payload[`home_${idx + 1}_${field}`] = cells[field];
+  });
+  return payload;
+}
+
+// New (source) homes first, then the others by address.
+function sortHomes(homes) {
+  return [...homes].sort((a, b) => (Number(b.isSource) - Number(a.isSource)) || a.address.localeCompare(b.address) || a.rootId.localeCompare(b.rootId));
+}
+
+function idempotencyKeyFor(estimateId, groupKey) {
+  return `${TEMPLATE_KEY}:${estimateId}:${crypto.createHash('sha256').update(groupKey).digest('hex').slice(0, 32)}`;
+}
+
+// Returns the send's result and whether the provider-boundary recheck refused it.
+async function sendGroup(send, { dbh, estimateId, group, customers }) {
+  const payer = !!group.payer;
+  const payload = payloadFor(group, customers);
+  const state = { routingChanged: false };
+  const result = await send({
+    templateKey: TEMPLATE_KEY,
+    to: group.address,
+    payload,
+    recipientType: payer ? 'payer' : 'customer',
+    recipientId: payer ? String(group.payer.id) : group.homes[0].customerId,
+    triggerEventId: `multi_home_discount_on:${estimateId}`,
+    idempotencyKey: idempotencyKeyFor(estimateId, group.key),
+    categories: [CATEGORY],
+    suppressProviderErrorLog: true,
+    withProviderHandoff: routingHandoff(dbh, group, payload.greeting_name, state),
+  });
+  return { result, routingChanged: state.routingChanged };
+}
+
+function tally(out, result) {
+  if (result?.sent && result.deduped) out.deduped += 1;
+  else if (result?.sent) out.sent += 1;
+  else if (result?.blocked) out.blocked += 1;
+  else out.failed += 1;
+}
+
+// Never logs the address: a provider error can echo it.
+function redact(err) {
+  return String(err?.code || err?.status || 'send_error');
+}
+
+// An earlier attempt to this address that FAILED (it is never re-sent from stored copy) is tried again only after
+// RETRY_BACKOFF_MS, so a send the provider keeps refusing is tried about once a day inside the 14-day window, each
+// time after this job's fresh checks.
+async function failedRecently(dbh, key) {
+  if (!dbh) return false;
+  // The database's own clock on both sides (the row's updated_at is written by it), never the job's `now`.
+  const row = await dbh('email_messages').where({ idempotency_key: key })
+    .whereRaw("lower(coalesce(status, '')) = 'failed'")
+    .whereRaw('updated_at > now() - make_interval(secs => ?)', [RETRY_BACKOFF_MS / 1000])
+    .first('id');
+  return !!row;
+}
+
+// What an earlier attempt to this address allows now. The email library re-sends a failed row only when it was
+// definitely never handed to the provider; a failure that may have been delivered (or that a provider retry owns) is
+// held there forever, so this job skips it quietly instead of trying it again every tick. A definitely-unsent failure
+// is tried again only after RETRY_BACKOFF_MS, each time after this job's fresh checks.
+async function earlierAttemptVerdict(dbh, key, holdsEarlier) {
+  if (!dbh) return 'send';
+  const row = await dbh('email_messages').where({ idempotency_key: key }).first();
+  if (!row || String(row.status || '').toLowerCase() !== 'failed') return 'send';
+  const holds = holdsEarlier || require('./email-template-library').providerRetryHoldErrorForExistingMessage;
+  if (holds(row)) return 'never';
+  return (await failedRecently(dbh, key)) ? 'wait' : 'send';
+}
+
+async function sendGroups(send, groups, ctx, out) {
+  for (const group of groups) {
+    group.homes = sortHomes(group.homes);
+    if (group.homes.length > MAX_HOMES) {
+      logger.error(`[multi-home-discount-email] estimate ${ctx.estimate.id}: ${group.homes.length} homes pay to one address, more than the ${MAX_HOMES} the email holds; not sent`);
+      out.skipped += 1;
+      continue;
+    }
+    if (group.homes.some((h) => !h.address)) {
+      logger.warn(`[multi-home-discount-email] estimate ${ctx.estimate.id}: a home has no street address on file; email to its paying address not sent`);
+      out.skipped += 1;
+      continue;
+    }
+    const earlier = await earlierAttemptVerdict(ctx.dbh, idempotencyKeyFor(ctx.estimate.id, group.key), ctx.holdsEarlier);
+    if (earlier === 'wait') { out.waiting += 1; continue; }
+    if (earlier === 'never') { out.skipped += 1; continue; }
+    try {
+      const { result, routingChanged } = await sendGroup(send, { dbh: ctx.dbh, estimateId: ctx.estimate.id, group, customers: ctx.customers });
+      if (routingChanged) {
+        logger.info(`[multi-home-discount-email] estimate ${ctx.estimate.id}: a payer, email address or email switch changed just before the send; nothing sent, the next run regroups`);
+        out.waiting += 1;
+        continue;
+      }
+      tally(out, result);
+    } catch (err) {
+      out.failed += 1;
+      logger.warn(`[multi-home-discount-email] estimate ${ctx.estimate.id}: send not completed (${redact(err)}); the next run retries through the email library`);
+    }
+  }
+}
+
+// ── the job ─────────────────────────────────────────────────────────────
+
+async function processSource(dbh, estimate, run, out) {
+  const source = await apply._private.describeSource(dbh, estimate, run.presetId);
+  if (!source) return;
+  out.sources += 1;
+  const targets = await apply._private.targetsForSource(dbh, source, run.today);
+  const ledger = await loadLedgerRows(dbh, estimate.id);
+  if (openTargetReason(targets, ledger)) { out.waiting += 1; return; }
+  const ids = [...new Set([source.customerId, ...targets.map((t) => t.customerId)].map(String))];
+  const customers = await loadCustomers(dbh, ids);
+  const ctx = { estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh, nextPrices: run.nextPrices };
+  const homes = await buildHomes(dbh, ctx);
+  if (homes.some((h) => h.stale)) {
+    logger.info(`[multi-home-discount-email] estimate ${estimate.id}: a home's discount or price is not proven now (changed, or not shown); the email waits`);
+    out.waiting += 1;
+    return;
+  }
+  const payers = await loadPayers(dbh, customers);
+  const optedOut = await loadEmailOptOuts(dbh, ids);
+  const { groups, noAddress } = await groupByPayingAddress(dbh, homes, { customers, payers, optedOut });
+  if (noAddress.length) {
+    logger.info(`[multi-home-discount-email] estimate ${estimate.id}: ${noAddress.length} home(s) have no email address to send to`);
+    out.noAddress += noAddress.length;
+  }
+  await sendGroups(run.send, groups, ctx, out);
+}
+
+/**
+ * Gate off -> returns before any query. Returns
+ * { ok, sources, waiting, sent, deduped, blocked, failed, skipped, noAddress }.
+ */
+async function runMultiHomeDiscountEmail({ now = new Date(), dbh = db, send = null, nextPrices = null } = {}) {
+  if (!featureGates.multiHomeDiscountEmailLive()) return { ok: false, reason: 'gate_off' };
+  if (!featureGates.multiHomeAllHomesLive()) return { ok: false, reason: 'discount_job_off' };
+  const sender = send || ((args) => require('./email-template-library').sendTemplate(args));
+  const out = { ok: true, sources: 0, waiting: 0, sent: 0, deduped: 0, blocked: 0, failed: 0, skipped: 0, noAddress: 0 };
+  const preset = await dbh('discounts').where({ discount_key: apply._private.PRESET_KEY }).first('id');
+  const run = { presetId: preset ? preset.id : null, today: etDateString(now), send: sender, nextPrices };
+  await apply._private.eachSourceEstimate(dbh, now, async (estimate) => {
+    try {
+      await processSource(dbh, estimate, run, out);
+    } catch (err) {
+      out.failed += 1;
+      logger.error(`[multi-home-discount-email] source estimate ${estimate.id} failed: ${err.message}`);
+    }
+  }, apply._private.MAX_SOURCES, run.presetId);
+  if (out.sent || out.failed || out.blocked) {
+    logger.info(`[multi-home-discount-email] ${out.sources} source(s): ${out.sent} sent, ${out.deduped} already sent, ${out.blocked} blocked, ${out.failed} failed, ${out.waiting} waiting on a home`);
+  }
+  return out;
+}
+
+module.exports = {
+  runMultiHomeDiscountEmail,
+  TEMPLATE_KEY,
+  _private: {
+    openTargetReason, sourcePrices, targetPrices, groupByPayingAddress, greetingFor, payloadFor, homeCells, idempotencyKeyFor,
+    weekdayDate, money, sortHomes, paymentCell, processSource, loadLedgerRows, sendGroups, failedRecently, earlierAttemptVerdict, targetStillCurrent, soldTargetPrices, sourceHomeVerdict, targetHomeVerdict, unchangedSinceSale, MAX_HOMES, HOME_FIELDS,
+    routeFor, routingUnchanged, routingHandoff,
+    RETRY_BACKOFF_MS, CATEGORY,
+  },
+};

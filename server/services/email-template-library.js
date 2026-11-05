@@ -2070,6 +2070,9 @@ function thrownSendDeliveryOutcome(err) {
 }
 
 module.exports = {
+  // Read by the Multi-Home Discount email job (multi-home-discount-email.js) so it skips an earlier attempt this
+  // library would hold (a provider retry owns it, or the handoff is ambiguous) instead of re-trying it every tick.
+  providerRetryHoldErrorForExistingMessage,
   thrownSendDeliveryOutcome,
   isSendRefusal,
   asArray,

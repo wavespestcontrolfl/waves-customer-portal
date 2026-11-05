@@ -1001,5 +1001,7 @@ module.exports = {
   _private: {
     guardHold, seriesShapeVerdict, flatRefusal, discountFields, describeSource, loadCandidateSeries, hold, HoldError,
     soldDiscountVerdict, relationshipHolds, verifyTemplateForAlready, pruneStaleHeld, recordHold, raiseHoldAlert, processSource, applyTargets, settleTarget, eachSourceEstimate, dropHeldForSource, pruneOutOfScopeHeld,
+    targetsForSource, // PR 3 (services/multi-home-discount-email.js) reads the same current target set the job applies to
+    PRESET_KEY, MAX_SOURCES,
   },
 };
