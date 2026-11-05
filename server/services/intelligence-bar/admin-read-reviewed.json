@@ -463,14 +463,14 @@
     },
     {
       "endpoint": "/admin/discounts",
-      "reviewed": "Handler + attachDiscountCatalogClassification (discount-catalog-classifier.js): discounts table select (includes promo_code values, the owner own marketing codes), in-memory classification; read end to end.",
+      "reviewed": "Handler + attachDiscountCatalogClassification (discount-catalog-classifier.js): discounts table select (includes promo_code values, the owner own marketing codes), in-memory classification; read end to end. Re-read 2026-11-04 (technician visibility A7): a non-admin caller now gets the rows without times_applied, total_discount_given and every promo_code field (stripDiscountOwnerFields, after classification); an admin read, which the bar makes, is unchanged.",
       "scope": "broad",
       "freeText": {
         "description": "content"
       },
       "signals": [],
       "unresolved": [],
-      "hash": "0475bbf9300cad99ce10d3d31666452a"
+      "hash": "f94d8cd481430c1af2d1bbdb5509ff2b"
     },
     {
       "endpoint": "/admin/discounts/stacking",
