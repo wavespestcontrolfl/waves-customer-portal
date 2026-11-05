@@ -30,6 +30,9 @@ const financialRoutes = [
   ['GET', '/equipment-maintenance/analytics/costs', 200],
   ['GET', '/equipment-maintenance/analytics/reliability', 200],
   ['GET', '/equipment-maintenance/mileage/summary', 200],
+  // A vehicle's mileage log has personal miles, fuel cost and the IRS
+  // deduction, for any truck (owner ruling D5 A, 2026-11-04).
+  ['GET', `/equipment-maintenance/${equipmentId}/mileage`, 200],
 ];
 const financialRow = {
   id: equipmentId, name: 'Synthetic vehicle', category: 'vehicle', status: 'active',
@@ -152,7 +155,6 @@ describe('operational equipment access', () => {
     '/equipment/tank-mixes',
     '/equipment-maintenance/analytics/overview',
     `/equipment-maintenance/${equipmentId}`,
-    `/equipment-maintenance/${equipmentId}/mileage`,
   ])('technicians still read %s', async route => {
     const response = await request('GET', route, 'technician');
     const body = await response.json();
