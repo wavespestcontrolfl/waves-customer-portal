@@ -76,17 +76,41 @@ function copyFor({ count, key, since, errorCode }) {
   return { why, detail: `${why} ${next}` };
 }
 
-// The outbound text behind a callback, or null: { customer_id, to_phone } for a text sent to a customer.
-async function outboundCustomerText(sid) {
+// A callback can beat the sender's own sms_log insert (services/twilio.js logs a text after messages.create
+// returns), so a sid with no row yet is tried again in this process after these delays, never dropped on the
+// first miss. A retry that finds the row writes the status the route's own update missed (it ran before the row
+// existed), so the text counts in later runs too.
+const RETRY_DELAYS_MS = [15 * 1000, 60 * 1000];
+const UNSETTLED_STATUSES = ['queued', 'sending', 'sent'];
+const NOT_LOGGED = Symbol('dead-number: sid not logged yet');
+
+// The outbound text behind a callback: { customer_id, to_phone } for a text sent to a customer, null for any
+// other text, or NOT_LOGGED while the sender has not logged the sid.
+async function outboundCustomerText(sid, { status, attempt = 0 } = {}) {
   const row = await db('sms_log').where({ twilio_sid: sid }).first('customer_id', 'direction', 'to_phone');
-  return row && row.customer_id && row.direction === 'outbound' ? row : null;
+  if (!row) return NOT_LOGGED;
+  if (attempt > 0) {
+    await db('sms_log').where({ twilio_sid: sid }).whereIn('status', UNSETTLED_STATUSES).update({ status: String(status) });
+  }
+  return row.customer_id && row.direction === 'outbound' ? row : null;
+}
+
+function retryLater(handler, callback) {
+  const attempt = Number(callback.attempt) || 0;
+  if (attempt >= RETRY_DELAYS_MS.length) return;
+  const timer = setTimeout(() => {
+    Promise.resolve().then(() => handler({ ...callback, attempt: attempt + 1 })).catch(() => {});
+  }, RETRY_DELAYS_MS[attempt]);
+  if (typeof timer.unref === 'function') timer.unref();
 }
 
 // This customer's settled outbound texts to one number in the window, plus this callback's own row, oldest
-// sent first.
+// sent first. Only texts Twilio took (a sid): a queued send that failed before reaching the provider is not a
+// carrier failure.
 async function settledTextsTo(conn, customerId, key, sid) {
   return conn('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
+    .whereNotNull('twilio_sid')
     .where('created_at', '>=', new Date(Date.now() - WINDOW_DAYS * DAY_MS))
     .whereRaw("right(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
     .where(function settledOrThis() { this.whereIn('status', SETTLED_STATUSES).orWhere('twilio_sid', sid); })
@@ -166,12 +190,16 @@ async function raiseForNumber(trx, { customerId, key, sid, errorCode }) {
  * number with error 30003 / 30005 and this is the 2nd or later failure in a row to that number in 180 days.
  * @returns {Promise<object|null>} the alert result, or null when nothing was raised
  */
-async function handleDeadNumberFailure({ sid, status, errorCode, to } = {}) {
+async function handleDeadNumberFailure({ sid, status, errorCode, to, attempt = 0 } = {}) {
   try {
     if (!deadNumberAlertLive()) return null;
     if (!sid || !FAILED_STATUSES.includes(String(status)) || !UNREACHABLE_CODES.has(String(errorCode))) return null;
 
-    const row = await outboundCustomerText(sid);
+    const row = await outboundCustomerText(sid, { status, attempt });
+    if (row === NOT_LOGGED) {
+      retryLater(handleDeadNumberFailure, { sid, status, errorCode, to, attempt });
+      return null;
+    }
     const key = row ? phoneKey(row.to_phone) || phoneKey(to) : '';
     if (!key) return null;
     return await withCustomerLock(row.customer_id, (trx) => raiseForNumber(trx, { customerId: row.customer_id, key, sid, errorCode }));
@@ -218,12 +246,16 @@ async function closeForDelivery(trx, { customerId, deliveredKey, sid }) {
  * then one short locked read of the open dead-number keys.
  * @returns {Promise<number>} rows closed
  */
-async function closeDeadNumberAlerts({ sid, status } = {}) {
+async function closeDeadNumberAlerts({ sid, status, attempt = 0 } = {}) {
   try {
     if (!deadNumberAlertLive()) return 0;
     if (!sid || String(status) !== 'delivered') return 0;
 
-    const row = await outboundCustomerText(sid);
+    const row = await outboundCustomerText(sid, { status, attempt });
+    if (row === NOT_LOGGED) {
+      retryLater(closeDeadNumberAlerts, { sid, status, attempt });
+      return 0;
+    }
     if (!row) return 0;
     return await withCustomerLock(row.customer_id, (trx) => closeForDelivery(trx, { customerId: row.customer_id, deliveredKey: phoneKey(row.to_phone), sid }));
   } catch (err) {
@@ -239,5 +271,5 @@ const handleDeadNumberCallback = (callback = {}) => (String(callback.status) ===
 
 module.exports = {
   handleDeadNumberCallback, handleDeadNumberFailure, closeDeadNumberAlerts,
-  __private: { phoneKey, dedupeKeyFor, holdsNumber, shortName, actionFor, copyFor, failuresInARow, KEY_PREFIX },
+  __private: { phoneKey, dedupeKeyFor, holdsNumber, shortName, actionFor, copyFor, failuresInARow, KEY_PREFIX, RETRY_DELAYS_MS },
 };

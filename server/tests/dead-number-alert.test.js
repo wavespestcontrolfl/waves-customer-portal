@@ -19,6 +19,7 @@ const mockResetState = () => {
 };
 mockResetState();
 const mockDbCalls = jest.fn();
+const mockUpdates = [];
 jest.mock('../models/db', () => {
   const resolveList = (table) => {
     if (table === 'sms_log') return mockState.failedRows;
@@ -36,6 +37,7 @@ jest.mock('../models/db', () => {
       if (prop === 'then') return (resolve, reject) => Promise.resolve(resolveList(table)).then(resolve, reject);
       if (prop === 'catch') return (reject) => Promise.resolve(resolveList(table)).catch(reject);
       if (prop === 'first') return () => Promise.resolve(resolveFirst(table));
+      if (prop === 'update') return (vals) => { mockUpdates.push({ table, vals }); return builder(table); };
       return () => builder(table);
     },
   });
@@ -95,6 +97,7 @@ const fail = (extra = {}) => status({ MessageSid: 'SM1', MessageStatus: 'undeliv
 beforeEach(() => {
   mockResetState();
   mockRows.clear();
+  mockUpdates.length = 0;
   jest.clearAllMocks();
   process.env.GATE_DEAD_NUMBER_ALERT = 'true';
 });
@@ -237,7 +240,6 @@ describe('dead number alert: when it rings', () => {
   test.each([
     ['no customer on the text', () => { mockState.logRow = { customer_id: null, direction: 'outbound', to_phone: '+19415550142' }; }],
     ['an inbound row', () => { mockState.logRow = { customer_id: 'cust-1', direction: 'inbound', to_phone: '+19415550142' }; }],
-    ['no row for the sid', () => { mockState.logRow = null; }],
     ['an inactive customer', () => { mockState.customer.active = false; }],
     ['a number the customer no longer has', () => { mockState.customer.phone = '+19415550999'; }],
   ])('nothing for %s', async (_label, arrange) => {
@@ -359,6 +361,48 @@ describe('dead number alert: when it closes', () => {
     await delivered();
     expect(mockClose).not.toHaveBeenCalled();
     expect(mockDbCalls).not.toHaveBeenCalledWith('notifications');
+  });
+});
+
+describe("dead number alert: a callback that beats the sender's own log", () => {
+  // services/twilio.js logs a text after messages.create returns, so Twilio's callback can arrive first.
+  const logged = () => { mockState.logRow = { customer_id: 'cust-1', direction: 'outbound', to_phone: '+19415550142' }; };
+  beforeEach(() => { jest.useFakeTimers(); mockState.logRow = null; });
+  afterEach(() => { jest.clearAllTimers(); jest.useRealTimers(); });
+
+  test('a failure is tried again after 15 s, raises once the text is logged, and writes the status it missed', async () => {
+    mockState.failedRows = failedAt('06-29', '11-04');
+    expect(await deadNumber.handleDeadNumberFailure({ sid: 'SM1', status: 'undelivered', errorCode: '30005', to: '+19415550142' })).toBeNull();
+    expect(mockNotify).not.toHaveBeenCalled();
+    logged();
+    await jest.advanceTimersByTimeAsync(15 * 1000);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toContainEqual({ table: 'sms_log', vals: { status: 'undelivered' } });
+  });
+
+  test('it tries twice more, then lets the sid go', async () => {
+    mockState.failedRows = failedAt('06-29', '11-04');
+    await deadNumber.handleDeadNumberFailure({ sid: 'SM1', status: 'undelivered', errorCode: '30005' });
+    await jest.advanceTimersByTimeAsync(15 * 1000 + 60 * 1000);
+    expect(jest.getTimerCount()).toBe(0);
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockDbCalls.mock.calls.filter(([table]) => table === 'sms_log')).toHaveLength(3);
+  });
+
+  test('a delivered callback is tried again too, and closes the row once the text is logged', async () => {
+    mockState.openKeys = ['dead-number:cust-1:9415550142'];
+    mockState.failedRows = [...failedAt('06-29', '07-10'), { created_at: sentAt('11-05'), status: 'sent', twilio_sid: 'SM9' }];
+    expect(await deadNumber.closeDeadNumberAlerts({ sid: 'SM9', status: 'delivered' })).toBe(0);
+    logged();
+    await jest.advanceTimersByTimeAsync(15 * 1000);
+    expect(mockClose).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toContainEqual({ table: 'sms_log', vals: { status: 'delivered' } });
+  });
+
+  test('gate off: a missing row schedules nothing', async () => {
+    delete process.env.GATE_DEAD_NUMBER_ALERT;
+    await deadNumber.handleDeadNumberFailure({ sid: 'SM1', status: 'undelivered', errorCode: '30005' });
+    expect(jest.getTimerCount()).toBe(0);
   });
 });
 

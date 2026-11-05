@@ -86,6 +86,24 @@ maybeDescribe('dead number alert (live Postgres)', () => {
     expect(all[1].body).toMatch(/^4 texts in a row/);
   });
 
+  test('a queued text that failed before reaching Twilio (no sid) does not count', async () => {
+    await db('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+19415550100', to_phone: PHONE,
+      message_body: 'Synthetic reminder.', message_type: 'reminder_72h', status: 'failed', twilio_sid: null, created_at: ago(20),
+    });
+    await fail(await text('undelivered', 2));
+    expect(await rows()).toHaveLength(0);
+  });
+
+  test("a retry for a callback that beat the sender's log writes the missed status and raises", async () => {
+    await text('undelivered', 30);
+    const early = await text('sent', 1); // logged after its undelivered callback had already come and gone
+    await deadNumber.handleDeadNumberFailure({ sid: early, status: 'undelivered', errorCode: '30005', to: PHONE, attempt: 1 });
+    expect((await db('sms_log').where({ twilio_sid: early }).first('status')).status).toBe('undelivered');
+    const [row] = await rows();
+    expect(row.body).toMatch(/^2 texts in a row/);
+  });
+
   test('a delivery between two failures raises nothing', async () => {
     await text('undelivered', 30);
     await text('delivered', 20);
