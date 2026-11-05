@@ -80,6 +80,8 @@
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_CALL_PROMISE_AI_CLOSE=true (owner 2026-10-24: an open Waves call promise closes on its own when the same AI check the text-follow-up lane uses finds, across every line (texts both ways, calls, emails, visits booked, moved or completed, estimates, payments), a later record that kept it, quoted exactly; a customer text confirming it was done also closes it. Read at call time via callPromiseAiCloseLive(), strict 'true', dark by default; off = exactly today's behavior. Needs GATE_CALL_COMMITMENTS and PROMISE_EVIDENCE_CLOSE. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
  *   GATE_CALL_PROMISE_LATER_TEXT_CHECK=true (owner 2026-10-25 "build it": a record proof the call-promise AI check accepted is no longer held for good by any later human text. The AI reads the texts that came after the proof and answers one question: does any of them say this promise was not kept, was undone, went wrong or is still needed? Only a clear no lets the proof close the promise; yes, unclear, a failed read, any later message with no words (a photo) or too long to read whole, more later texts than it reads, and card-number fragments it cannot attribute keep it held as before. Needs GATE_CALL_PROMISE_AI_CLOSE. Read at call time via callPromiseLaterTextCheckLive(), strict 'true', dark by default; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
+ *   GATE_CALL_PROMISE_AI_NO_CUSTOMER=true (owner 2026-11-05, "A, AI": the call-promise AI check also judges an open Waves promise on a call with NO customer record (a job candidate, a vendor, a prospect not yet on file), by the caller's phone identity: texts and calls both ways, same checker, same guards (admissible witness, evidence-hash cache, later-human-text hold, model budgets). A number that is one of ours, a carrier sentinel, or on more than one customer record is skipped. At most 10 model calls per Eastern day for these promises across the watchdog pass and the Owed-queue pass (about $0.05 a day expected), newest call first. Read at call time via callPromiseAiNoCustomerLive(), strict 'true', dark by default, honoured only while GATE_CALL_PROMISE_AI_CLOSE is live; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to anyone.)
+ *   GATE_PROMISE_PHONE_MATCH_CLOSE=shadow|true (owner 2026-11-04, "FOR ALL COMUNNICATION LINES": two free, fixed rules matched by phone, no model. A text bell from a number with no customer record closes once a person's delivered reply (or a call a person placed or answered and spoke on) reached that number after the sender's latest text; an automated reply never closes it. A Waves promise on a call dispositioned vendor_logged or spam_discarded, or whose caller is a job applicant, raises no promise-chaser, follow-up SLA or overdue alert; it stays on the Owed tab. Rides on GATE_ALERT_CONTACT_CLOSE for the text rule. Read at call time via promisePhoneMatchCloseMode(); shadow records or logs what would change and changes nothing; true acts; unset = off.)
  *   GATE_TECH_LOGIN_PRIVACY=true (owner 2026-10-25, second technician: a login with the technician role sees only its own customers' alerts and promises. Customer-text bells and pushes (sms_reply, reschedule intent, voicemail callback, service report and completion text failures, Twilio failures, job complete, follow-up bells) reach a technician only when the customer is on that technician's route (the same rule the Communications routes use); an alert with no customer keeps today's routing. The Promises tab feeds (proposals, open commitments, auto-closed) list only own-customer rows and closing, dismissing or reopening another customer's promise answers 404. The customer-deleted-account push goes to admin-role staff only. A technician socket joins a room of its own (tech:<id>) instead of the office-wide dispatch:admins room and hears only ids-and-status pings about its own visits; GET /dispatch/weather/tomorrow answers a technician 403; POST /dispatch/slot-check refuses a visit or technician that is not the caller's. Admin and office logins see everything as before. Read at call time via techLoginPrivacyLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer.)
  *   GATE_ESTIMATE_SLOT_ONE_PER_HOUR=true (owner 2026-10-25, second technician: the estimate time picker lists ONE opening for each date and start time, not one per technician. Of the openings sharing a start the picker keeps the one it sorts first (route-optimal, then the shortest detour to a nearby job, then the slot id); the kept opening is a complete reservable slot with its own technician and hold. The "Only N openings" count and every cut of the list follow the collapsed list, so a repeated time no longer pushes other times out. Same list the page, its search, the fresh recheck, one-tap purchase and the estimate-time text drafts read. Reserve and accept are unchanged. Read at call time via estimateSlotOnePerHourLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer by itself.)
  *   GATE_MOVING_FLOW=true (owner 2026-11-02, "a moving email where they can do it": the office can send a customer a moving link by email or text (Customer 360 Moving card, Communications composer). The link opens a plain page at /moving/<token> where the customer types a new address (checked once by Google Address Validation, capped at 10 checks per link per day, the last result reused for 24 hours), adds move-out and move-in dates, and sees a fixed receipt. A submit makes one office item (category moving) and one admin alert. It changes no visit, price, property or plan and sends no message by itself; every email and text starts with a staff click. Strict opt-in, read at call time via movingFlowLive(); off = the public page and its routes answer 404, the admin routes answer 404 (the list answers enabled:false) and the admin buttons are hidden. The owner flips it because it adds a customer page and email. Kill switch: unset.)
@@ -6136,6 +6138,26 @@ function callPromiseLaterTextCheckLive() {
   return callPromiseAiCloseLive() && process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK === 'true';
 }
 
+// GATE_CALL_PROMISE_AI_NO_CUSTOMER read at CALL time — strict `=== 'true'`; unset = off.
+// call-promise-ai-close.js: the AI check also judges an open Waves promise on a call with no customer
+// record, by the caller's phone identity (texts and calls both ways). Honoured only while the AI close
+// itself is live. Off = exactly today's behavior (such calls are never listed).
+function callPromiseAiNoCustomerLive() {
+  return callPromiseAiCloseLive() && process.env.GATE_CALL_PROMISE_AI_NO_CUSTOMER === 'true';
+}
+
+// GATE_PROMISE_PHONE_MATCH_CLOSE read at CALL time: 'shadow', 'true' or 'off'. Two free (no model)
+// phone-matched rules: (1) a text bell from a number with no customer record closes once a person's
+// delivered reply reached that number after the text (admin-alert-relevance.js, rides on
+// GATE_ALERT_CONTACT_CLOSE: the weaker of the two wins); (2) an open Waves promise on a call whose
+// disposition is vendor_logged or spam_discarded (or whose caller is a job applicant or vendor) raises no
+// promise-chaser, follow-up SLA or overdue alert. It stays on the Owed tab. 'shadow' records or logs what
+// would change and changes nothing; 'true' acts. Anything else, unset included, is off.
+function promisePhoneMatchCloseMode() {
+  const value = String(process.env.GATE_PROMISE_PHONE_MATCH_CLOSE || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_CALL_ADDRESS_FAMILY_CARD read at CALL time — strict `=== 'true'`; unset = kill.
 // call-family-name-link.js matchStatedAddressAccounts (the stated_address_on_account basis),
 // the processor's no-mint hold on a filed family card, and the card's two actions
@@ -10434,6 +10456,10 @@ module.exports.setupFeeSettledAnywhereLive = setupFeeSettledAnywhereLive;
 module.exports.callPromiseAiCloseLive = callPromiseAiCloseLive;
 // GATE_CALL_PROMISE_LATER_TEXT_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.callPromiseLaterTextCheckLive = callPromiseLaterTextCheckLive;
+// GATE_CALL_PROMISE_AI_NO_CUSTOMER reader, on its own line so gate PRs never conflict.
+module.exports.callPromiseAiNoCustomerLive = callPromiseAiNoCustomerLive;
+// GATE_PROMISE_PHONE_MATCH_CLOSE reader, on its own line so gate PRs never conflict.
+module.exports.promisePhoneMatchCloseMode = promisePhoneMatchCloseMode;
 // GATE_SATELLITE_PALM_COUNT_TYPED reader, on its own line so gate PRs never conflict.
 module.exports.satellitePalmCountTypedLive = satellitePalmCountTypedLive;
 // GATE_CALL_ADDRESS_FAMILY_CARD reader, on its own line so gate PRs never conflict.

@@ -537,7 +537,7 @@ async function listOpenWaves(now) {
   // bounded to promises that can fall due inside the window (activeSince).
   for (let page = 0; ; page += 1) {
     const rows = await commitments.listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, prepare: page === 0, now, activeSince });
-    all.push(...rows);
+    all.push(...commitments.pagerRows(rows));
     if (rows.length < SCAN_LIMIT) break;
   }
   return all;
