@@ -4734,9 +4734,14 @@ async function foreignSlotCheckRefusal(req) {
 
 router.post('/slot-check', async (req, res, next) => {
   try {
+    // checkSlots' own 25-target cap, applied before the ownership scan reads a
+    // single id: an oversized array never reaches a query (same 400 as before).
+    const RainOut = require('../services/rain-out');
+    if (Array.isArray(req.body?.targets) && req.body.targets.length > RainOut.SLOT_CHECK_TARGET_CAP) {
+      return res.status(400).json({ error: 'too_many_targets' });
+    }
     const refusal = await foreignSlotCheckRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.body);
-    const RainOut = require('../services/rain-out');
     const result = await RainOut.checkSlots({
       targets: req.body?.targets,
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },

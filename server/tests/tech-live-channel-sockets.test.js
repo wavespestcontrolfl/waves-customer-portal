@@ -62,6 +62,7 @@ function makeFakeIo() {
         },
         emit: jest.fn(),
         on: jest.fn(),
+        disconnect: jest.fn(),
       };
       all.add(socket);
       return socket;
@@ -71,7 +72,11 @@ function makeFakeIo() {
 }
 
 const savedGate = process.env.GATE_TECH_LOGIN_PRIVACY;
+// Every socket connect() made: its staff re-check interval is real, so it is
+// cleared after each test (a leaked interval fired inside a later suite).
+const connectedSockets = [];
 afterEach(() => {
+  for (const socket of connectedSockets.splice(0)) clearInterval(socket.staffRecheckTimer);
   mockIo = null;
   if (savedGate === undefined) delete process.env.GATE_TECH_LOGIN_PRIVACY; else process.env.GATE_TECH_LOGIN_PRIVACY = savedGate;
   jest.clearAllMocks();
@@ -85,6 +90,7 @@ function connect(userType, userId) {
   const server = Server.mock.results[Server.mock.results.length - 1].value;
   const socket = makeFakeIo().add(userType, userId);
   server.handlers.connection(socket);
+  connectedSockets.push(socket);
   return socket;
 }
 

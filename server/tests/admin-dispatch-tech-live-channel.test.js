@@ -29,7 +29,7 @@ jest.mock('../services/job-costing', () => ({
 }));
 jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async () => ({})) }));
 jest.mock('../services/forecast-analyzer', () => ({ analyzeTomorrow: jest.fn() }));
-jest.mock('../services/rain-out', () => ({ checkSlots: jest.fn() }));
+jest.mock('../services/rain-out', () => ({ checkSlots: jest.fn(), SLOT_CHECK_TARGET_CAP: 25 }));
 
 const router = require('../routes/admin-dispatch');
 const ForecastAnalyzer = require('../services/forecast-analyzer');
@@ -120,6 +120,24 @@ describe('POST /slot-check', () => {
   };
 
   beforeEach(() => RainOut.checkSlots.mockResolvedValue({ ok: true, results: [{ conflicts: [] }] }));
+
+  // Codex security P2 (#7585): the 25-target cap runs before the ownership scan, so an oversized body never
+  // reaches a query, for any caller.
+  test.each([['a technician, gate on', 'true'], ['an admin', 'true'], ['a technician, gate off', undefined]])(
+    '%s: more than 25 targets answers 400 before any read',
+    async (label, gate) => {
+      if (gate) process.env.GATE_TECH_LOGIN_PRIVACY = gate; else delete process.env.GATE_TECH_LOGIN_PRIVACY;
+      const reads = [];
+      mockDbCurrent = dbWithVisits(reads);
+      const targets = Array.from({ length: 26 }, () => ({ ...SLOT_TARGET, serviceId: OWN_VISIT }));
+      const actor = label.startsWith('an admin') ? ADMIN : TECH;
+      const res = await invoke('post', '/slot-check', { actor, body: { targets } });
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({ error: 'too_many_targets' });
+      expect(reads).toEqual([]);
+      expect(RainOut.checkSlots).not.toHaveBeenCalled();
+    },
+  );
 
   test('gate on: a technician naming another route\'s technician is refused and nothing is probed', async () => {
     process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
