@@ -40,11 +40,35 @@
  * informational types are push-first; anything unlisted is sms_only by
  * omission (fail-safe default). Changing a template's channel is a
  * one-line edit here.
+ *
+ * OWNER RULING 2026-11-04 (GATE_APP_FIRST_ANY_DEVICE, default OFF; Twilio
+ * raises US-to-Verizon text prices on 2027-01-01): "if anyone has the app,
+ * we would want to prefer to send notifications in the app, rather than
+ * text". With that gate on, the matrix above changes in two ways and
+ * nothing else:
+ *   a. APP_FIRST_ANY_DEVICE_POLICY (below) moves appointment_reminder,
+ *      reminder_72h, tech_arrived, lawn_watering_instruction and the
+ *      invoice-free service_complete* / service_report_v1 completion
+ *      notices to push_first, next to tech_en_route, receipt and
+ *      deposit_receipt. Billing, payment-failure, autopay and ACH types stay
+ *      push_and_sms; service_complete_with_invoice and
+ *      service_report_v1_with_invoice carry a bill to pay and stay SMS;
+ *      review_request, invoice, payment_link, manual, ai_assistant, the
+ *      staff-initiated appointment_confirmation / appointment_cancelled and
+ *      a completion text that bundles a review invite stay SMS too.
+ *   b. A customer is reachable once the account HOLDER has any active app
+ *      device. The "checked in within 72 hours" rule and the fan-out's
+ *      heartbeat floor are dropped for these sends (a device the app
+ *      released, or a provider-rejected token, is already inactive). The
+ *      fallback is unchanged: when no device accepts the push, the text goes.
+ * Gate off = the matrix and the 72 hour rule above, byte for byte. A
+ * customer's explicit App choice keeps its own path (explicitPushOnly) and
+ * is not touched by this gate.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, appFirstAnyDeviceLive } = require('../../config/feature-gates');
 const { BILLING_MESSAGE_CATEGORIES } = require('./billing-channel-routing');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 
@@ -89,6 +113,34 @@ const PUSH_ROUTING_POLICY = {
   bank_verification_incomplete: 'push_and_sms',
   bank_verification_failed: 'push_and_sms',
 };
+
+// OWNER RULING 2026-11-04 (GATE_APP_FIRST_ANY_DEVICE): these types go in the
+// app instead of a text for a customer with an active app device. Layered
+// over PUSH_ROUTING_POLICY at call time; gate off leaves it unused. Every key
+// needs a PREF_CHANNEL_COLUMN entry (test-enforced), so a saved Email / Both
+// choice still vetoes. Deliberately ABSENT: service_complete_with_invoice and
+// service_report_v1_with_invoice (they carry a bill to pay), every billing /
+// payment-failure / autopay / ACH type, review_request, invoice, payment_link,
+// manual, ai_assistant, appointment_confirmation and appointment_cancelled.
+const APP_FIRST_ANY_DEVICE_POLICY = {
+  appointment_reminder: 'push_first',
+  reminder_72h: 'push_first',
+  tech_arrived: 'push_first',
+  service_complete: 'push_first',
+  service_complete_paid_receipt: 'push_first',
+  service_complete_prepaid: 'push_first',
+  service_complete_annual_prepay: 'push_first',
+  service_complete_annual_prepay_after_first_visit: 'push_first',
+  service_report_v1: 'push_first',
+  lawn_watering_instruction: 'push_first',
+};
+
+function routingPolicyFor(messageType) {
+  if (appFirstAnyDeviceLive() && Object.prototype.hasOwnProperty.call(APP_FIRST_ANY_DEVICE_POLICY, messageType)) {
+    return APP_FIRST_ANY_DEVICE_POLICY[messageType];
+  }
+  return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
+}
 
 // Lock-screen presentation per message family. Titles are plain Waves
 // voice — no emoji. Links are portal routes the native handler opens on
@@ -202,7 +254,7 @@ async function resolvePushDestination(presentation, messageType, { customerId, a
  * Pure routing decision — unit-tested. Everything that must force SMS is
  * decided here; subscription presence and delivery proof are runtime.
  */
-function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated, adminAttributed }) {
+function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated, adminAttributed, bundledReview }) {
   if (!gateOn) return 'sms_only';
   if (!customerId) return 'sms_only';
   if (hasMedia) return 'sms_only'; // push carries no MMS media
@@ -212,7 +264,10 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
   // learned the operatorInitiated flag (IB send_sms, comms composer both
   // stamp adminUserId) — staff-triggered sends stay on the channel staff chose.
   if (adminAttributed) return 'sms_only';
-  return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
+  // A completion text that bundles the review invite keeps its tappable link:
+  // a push would count the review ask as delivered without a link to tap.
+  if (bundledReview) return 'sms_only';
+  return routingPolicyFor(messageType);
 }
 
 // push_first additionally requires a FRESH device heartbeat. Provider
@@ -227,18 +282,19 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
 // push_and_sms is exempt: its SMS goes regardless.
 const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 
-async function hasFreshPushDevice(customerId, knex = db) {
+// anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with
+// any active device on a configured provider, however long ago it checked in.
+async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } = {}) {
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
     const status = await require('../push-notifications').customerStatus(customerId);
-    return status.enabled && status.fresh;
+    return status.enabled && (anyDevice ? status.reachable === true : status.fresh);
   }
-  const row = await knex('push_subscriptions')
+  const query = knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
     // A contact's device (contact login) is never proof the HOLDER has the app.
-    .whereNull('contact_phone_key')
-    .where('updated_at', '>=', heartbeatCutoff())
-    .first('id')
-    .catch(() => null);
+    .whereNull('contact_phone_key');
+  if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
+  const row = await query.first('id').catch(() => null);
   return Boolean(row);
 }
 
@@ -551,7 +607,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
-    const fresh = await hasFreshPushDevice(customerId);
+    // GATE_APP_FIRST_ANY_DEVICE: a push_first send to the holder needs only an
+    // active device, not a recent check-in. A customer's explicit App choice
+    // keeps its own path and the 72 hour rule.
+    const anyDevice = !explicitPushOnly && appFirstAnyDeviceLive();
+    const fresh = await hasFreshPushDevice(customerId, db, { anyDevice });
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
     // (Codex #4816 r49).
@@ -638,7 +698,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
       : await sendPush(customerId, messageType, body, {
         shouldContinue: windowGuardFrom(preSendCheck),
-        minUpdatedAt: heartbeatCutoff(),
+        minUpdatedAt: anyDevice ? undefined : heartbeatCutoff(),
         appointmentId,
         invoiceId,
       });
@@ -842,6 +902,7 @@ module.exports = {
   bellPushAllowed,
   sendCompanionPush,
   PUSH_ROUTING_POLICY,
+  APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
   _test: { pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
