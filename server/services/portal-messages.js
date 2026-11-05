@@ -175,14 +175,15 @@ async function closeItemWith(trx, kind, id, customerId) {
 }
 
 // The item's open admin bells close once the answer is saved. Never throws: the answer is the record.
-async function closeItemBells(kind, id, actor) {
+async function closeItemBells(kind, id, actor, threadId) {
   try {
     const { closeAlerts, onLockedThread } = require('./portal-inbox');
     const by = { by: String(actor.technicianId || 'admin'), role: actor.role || 'admin', technicianId: actor.technicianId || null, resolution: ANSWERED_NOTE };
-    // A message item's id is its thread's id, which is what that thread's bells carry. They close on the locked
-    // thread row, and only when the answer left nothing open: a newer customer message keeps its bell.
-    if (kind === 'message') return await onLockedThread(id, (trx, open) => (open ? 0 : closeAlerts(ALERT_KEY.message, [id], by, trx)));
-    return await closeAlerts(ALERT_KEY[kind], [id], by);
+    // Any answer lands in the thread, so it covers the thread's open message too: the thread's bells close on its
+    // locked row, and only when the answer left nothing open (a newer customer message keeps its bell).
+    const threadBells = await onLockedThread(threadId, (trx, open) => (open ? 0 : closeAlerts(ALERT_KEY.message, [threadId], by, trx)));
+    // A message item's id is its thread's id; a chat or a request has bells of its own.
+    return kind === 'message' ? threadBells : threadBells + await closeAlerts(ALERT_KEY[kind], [id], by);
   } catch (err) {
     logger.warn(`[portal-messages] could not close the bells of ${kind} ${id}: ${err.message}`);
     return 0;
@@ -364,7 +365,7 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
       metadata: { portalItem: { kind, id }, notice: { pending: true }, ...(clientRequestId ? { clientRequestId } : {}) },
     });
     const closed = await closeItemWith(trx, kind, id, customerId);
-    return { message, closed, customerId };
+    return { message, closed, customerId, threadId: thread.id };
   });
   if (saved.replay) {
     const { notice } = metaOf(saved.message);
@@ -376,7 +377,7 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
       replay: true,
     };
   }
-  await closeItemBells(kind, id, actor);
+  await closeItemBells(kind, id, actor, saved.threadId);
   const notice = await noticeCustomer(saved.customerId, saved.message);
   return { message: staffView(saved.message), closed: saved.closed, notice };
 }

@@ -507,7 +507,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
     await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Tuesday at 9.', actor });
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
     await PortalMessages.customerPost({ customer: pat, body: 'Great, see you then.' });
-    expect(await closeItemBells('message', row.id, actor)).toBe(0);
+    expect(await closeItemBells('message', row.id, actor, row.id)).toBe(0);
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
 
     // A late ring for a message an answer already covered raises nothing.
@@ -517,6 +517,14 @@ maybeDescribe('portal messages (live Postgres)', () => {
     await ringOffice(pat, row.id, m2);
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
     expect(portalAskPush.pushPortalAsk).not.toHaveBeenCalled();
+
+    // Any answer lands in the thread and covers its open message: a reply to a chat hand-off closes that bell too.
+    await PortalMessages.customerPost({ customer: pat, body: 'One more question.' });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+    const { escalationId } = await chat(pat.id, { alert: false });
+    await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answered both.', actor });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    expect((await portalInbox.list()).items.filter((i) => i.kind === 'message' && i.id === row.id)).toEqual([]);
   });
 
   test('an answer to a portal message closes its bell, and the customer sees both sides in order', async () => {
