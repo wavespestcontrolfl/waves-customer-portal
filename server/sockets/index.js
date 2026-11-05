@@ -13,9 +13,18 @@
  * adapter before any room write.
  *
  * Current rooms (one per event channel):
- *   dispatch:admins      — staff (admin + technician). Receives
- *                          dispatch:tech_status broadcasts on every
- *                          tech_status row upsert. Customers do not join.
+ *   dispatch:admins      — staff. Receives dispatch:tech_status broadcasts
+ *                          on every tech_status row upsert, every visit
+ *                          update, alert and absence. Admin sockets always
+ *                          join. A technician socket joins only while
+ *                          GATE_TECH_LOGIN_PRIVACY is off (today's behavior).
+ *                          Customers do not join.
+ *   tech:<id>            — one room per technician socket while
+ *                          GATE_TECH_LOGIN_PRIVACY is on, keyed by the
+ *                          technician id socket auth verified. Receives
+ *                          dispatch:job_update pings for that technician's
+ *                          own visits only (ids and status, no customer
+ *                          data). See ./tech-rooms.js.
  *   customer:<id>        — exactly one room per customer. The customer
  *                          joins their own room only (matched against
  *                          socket.userId). Receives customer:job_update
@@ -50,6 +59,7 @@ const logger = require('../services/logger');
 const db = require('../models/db');
 const { staffTokenVersionMatches } = require('../middleware/admin-auth');
 const { sessionMfaBlock } = require('../services/staff-mfa');
+const { techRoom, technicianRoomsLive } = require('./tech-rooms');
 
 // Module-level singleton so service modules (server/services/*.js)
 // can call getIo().to(room).emit(...) without us threading the io
@@ -163,11 +173,19 @@ function attachSockets(httpServer) {
     // Room joins live here, not in the auth middleware. See header
     // comment for why.
     if (socket.userType === 'admin' || socket.userType === 'technician') {
-      socket.join('dispatch:admins');
+      // GATE_TECH_LOGIN_PRIVACY: the company-wide channel is office-only. A
+      // technician gets a room of its own (keyed by the id socket auth
+      // verified) and no alert-board replay. Gate off: today's join.
+      const ownRoomOnly = socket.userType === 'technician' && technicianRoomsLive();
+      if (ownRoomOnly) {
+        socket.join(techRoom(socket.userId));
+      } else {
+        socket.join('dispatch:admins');
+      }
       startStaffSocketRevalidation(socket);
       // A board open across a deploy that retired an alert type drops those
       // cards here (see services/retired-dispatch-alerts.js).
-      require('../services/retired-dispatch-alerts').emitRetiredAlertResolutions(socket);
+      if (!ownRoomOnly) require('../services/retired-dispatch-alerts').emitRetiredAlertResolutions(socket);
     } else if (socket.userType === 'customer' || socket.userType === 'customer-track') {
       // Customer joins exactly one room: their own. socket.userId
       // came from socket auth's verified DB lookup (or, for
