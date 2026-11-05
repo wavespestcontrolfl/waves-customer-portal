@@ -28,9 +28,11 @@ jest.mock('../services/address-validation', () => ({ ...jest.requireActual('../s
 jest.mock('../services/short-url', () => ({ ...jest.requireActual('../services/short-url'), shortenOrPassthrough: jest.fn(async (url) => url) }));
 
 const crypto = require('crypto');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const NEW_HOUSE = { line1: '40 Sample Road', line2: null, city: 'Venice', state: 'FL', zip: '34285' };
 const NEW_ADDRESS = '40 Sample Road, Venice, FL 34285';
+const day = (n) => etDateString(addETDays(new Date(), n));
 
 postgres('moving: the app-made new-home estimate (live Postgres)', () => {
   // The first save loads the estimate, pricing and lookup modules.
@@ -94,7 +96,7 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
       }),
     });
     const root = (await trx('scheduled_services').insert({
-      customer_id: customerId, status: 'completed', service_type: 'Monthly Pest Control Service', scheduled_date: '2026-10-01',
+      customer_id: customerId, status: 'completed', service_type: 'Monthly Pest Control Service', scheduled_date: day(-30),
       is_recurring: true, recurring_pattern: 'monthly', recurring_ongoing: true, property_id: oldHouseId, estimated_price: 50, ...plan,
     }).returning('id'))[0].id;
     const [{ id: requestId }] = await trx('service_requests').insert({
@@ -103,7 +105,7 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     const [row] = await trx('customer_moves').insert({
       customer_id: customerId, token: crypto.randomBytes(24).toString('hex'), status: 'submitted', from_property_id: oldHouseId,
       typed_address: NEW_ADDRESS, normalized_address: JSON.stringify(NEW_HOUSE), address_verdict: 'in_area',
-      move_out_date: '2026-11-20', move_in_date: '2026-11-25', service_request_id: requestId, submitted_at: new Date(), ...move,
+      move_out_date: day(16), move_in_date: day(21), service_request_id: requestId, submitted_at: new Date(), ...move,
     }).returning('*');
     return { move: row, root, sourceId };
   }
@@ -218,7 +220,7 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
   test('after the old-house stop ran, the plan it stopped still gives the schedule and the price', async () => {
     const s = await seed({ plan: { recurring_ongoing: false } });
     const child = (await trx('scheduled_services').insert({
-      customer_id: customerId, status: 'cancelled', service_type: 'Monthly Pest Control Service', scheduled_date: '2026-12-01',
+      customer_id: customerId, status: 'cancelled', service_type: 'Monthly Pest Control Service', scheduled_date: day(30),
       recurring_parent_id: s.root, recurring_pattern: 'monthly', property_id: oldHouseId,
     }).returning('id'))[0].id;
     await trx('job_status_history').insert({
@@ -242,13 +244,28 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
         normalized: { street_line_1: street, city: 'Venice', state: 'FL', postal_code: '34285' },
       });
       const check = await Moves.checkMoveAddress(await moveRow(s.move.id), `${street}, Venice FL`);
-      await Moves.submitMove(await moveRow(s.move.id), { checkId: check.checkId, moveOutDate: '2026-11-20' });
+      await Moves.submitMove(await moveRow(s.move.id), { checkId: check.checkId, moveOutDate: day(16) });
       return moveRow(s.move.id);
     };
     // The same house again: the finished attempt stands.
     expect(await resubmit('40 Sample Road')).toMatchObject({ auto_estimate_state: 'office' });
     // Another house: cleared, so the next run tries the new address.
     expect(await resubmit('12 Other Road')).toMatchObject({ auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null });
+  });
+
+  test('the plan reads as its current template: a scoped price or service edit wins over the historical root', async () => {
+    // The overlay's own gate is read once at load: the suite flips the live object, as its own suite does.
+    const FG = require('../config/feature-gates');
+    const saved = FG.gates.editApptPriceServiceScope;
+    FG.gates.editApptPriceServiceScope = true;
+    try {
+      const s = await seed({ plan: { estimated_price: 40, recurring_template_overrides: JSON.stringify({ estimated_price: 62.5 }) } });
+      expect(await Auto._private.freeChecks(s.move)).toMatchObject({ currentPrice: 62.5 });
+      await trx('scheduled_services').where({ id: s.root }).update({ recurring_template_overrides: JSON.stringify({ service_type: 'Lawn Care' }) });
+      expect(await Auto._private.freeChecks(s.move)).toEqual({ code: 'not_pest_only' });
+    } finally {
+      FG.gates.editApptPriceServiceScope = saved;
+    }
   });
 
   test('a unit address goes to the office before any lookup', async () => {

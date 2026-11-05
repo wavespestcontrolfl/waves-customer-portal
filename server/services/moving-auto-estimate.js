@@ -81,16 +81,22 @@ function hadDiscount(inputs) {
 
 // The pest plan the move takes along, with its root row: the live series, or,
 // once the old-house stop ran, the series it stopped for this move (found by
-// the stop's visit note). Null unless it is exactly one pest plan.
+// the stop's visit note). Each root reads as its current template (a scoped
+// service or price edit lives in recurring_template_overrides, the completed
+// root stays historical). Null unless it is exactly one pest plan.
 async function movingPestPlan(move) {
   const Moves = require('./customer-moves');
+  const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
+  const cols = await db('scheduled_services').columnInfo().catch(() => ({}));
+  const columns = ['id', 'service_type', 'recurring_pattern', 'estimated_price', 'is_callback',
+    ...(cols.recurring_template_overrides ? ['recurring_template_overrides'] : [])];
   const notCallback = function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); };
   let roots = await db('scheduled_services')
     .where({ customer_id: move.customer_id, recurring_ongoing: true })
     .whereNull('recurring_parent_id')
     .where(notCallback)
     .whereNotNull('service_type')
-    .select('id', 'service_type', 'recurring_pattern', 'estimated_price');
+    .select(columns);
   if (!roots.length) {
     const stopped = db('job_status_history')
       .where({ to_status: 'cancelled' })
@@ -100,12 +106,12 @@ async function movingPestPlan(move) {
       .select(db.raw('COALESCE(recurring_parent_id, id) AS root_id'));
     const rootIds = [...new Set(cancelled.map((r) => String(r.root_id)))];
     roots = rootIds.length
-      ? await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', rootIds).where(notCallback)
-        .select('id', 'service_type', 'recurring_pattern', 'estimated_price')
+      ? await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', rootIds).where(notCallback).select(columns)
       : [];
   }
-  if (roots.length !== 1) return null;
-  const [root] = roots;
+  const current = roots.map((root) => overlayRecurringTemplateOverrides(root, cols)).filter((root) => root.is_callback !== true);
+  if (current.length !== 1) return null;
+  const [root] = current;
   const name = String(root.service_type || '');
   return PEST_PLAN.test(name) && !NOT_PEST_PLAN.test(name) ? root : null;
 }
