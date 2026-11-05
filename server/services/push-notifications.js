@@ -207,8 +207,7 @@ class PushNotificationService {
   // devices count; a holder's status never counts a contact device.
   // opts.withReachable: routing only (GATE_APP_FIRST_ANY_DEVICE) also reads
   // `reachable`; the customer-facing status routes keep their exact shape.
-  // opts.reachableSince: the oldest check-in that still counts as reachable.
-  async customerStatus(customerId, database = db, { contactKey = null, withReachable = false, reachableSince = null } = {}) {
+  async customerStatus(customerId, database = db, { contactKey = null, withReachable = false } = {}) {
     const context = await customerPushContext(customerId, database);
     if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false } : {}) };
     const rows = (await database('push_subscriptions')
@@ -223,8 +222,7 @@ class PushNotificationService {
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
       // Any active holder device whose provider is configured, however long
       // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
-      ...(withReachable ? { reachable: rows.some((row) => providers[row.platform]
-        && (!reachableSince || new Date(row.updated_at).getTime() >= new Date(reachableSince).getTime())) } : {}),
+      ...(withReachable ? { reachable: rows.some((row) => providers[row.platform]) } : {}),
     };
   }
 

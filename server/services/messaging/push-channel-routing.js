@@ -56,11 +56,10 @@
  *      review_request, invoice, payment_link, manual, ai_assistant, the
  *      staff-initiated appointment_confirmation / appointment_cancelled and
  *      a completion text that bundles a review invite stay SMS too.
- *   b. A customer is reachable once the account HOLDER has an active app
- *      device that checked in within the app's sign-in life (the 30-day
- *      refresh-token life, sessionLifeMs), not only within 72 hours (a device
- *      the app released, or a provider-rejected token, is already inactive).
- *      Such a push carries no bearer link (linkFreeBody, signedInOnly). The
+ *   b. A customer is reachable once the account HOLDER has any active app
+ *      device. The "checked in within 72 hours" rule and the fan-out's
+ *      heartbeat floor are dropped for these sends (a device the app
+ *      released, or a provider-rejected token, is already inactive). The
  *      fallback is unchanged: when no device accepts the push, the text goes.
  * Gate off = the matrix and the 72 hour rule above, byte for byte. A
  * customer's explicit App choice keeps its own path (explicitPushOnly) and
@@ -283,19 +282,18 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
 // push_and_sms is exempt: its SMS goes regardless.
 const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 
-// anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with an
-// active device on a configured provider that checked in within the app's
-// sign-in life (sessionLifeCutoff, 30 days), not only within 72 hours.
+// anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with
+// any active device on a configured provider, however long ago it checked in.
 async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } = {}) {
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true, reachableSince: sessionLifeCutoff() } : undefined);
+    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true } : undefined);
     return status.enabled && (anyDevice ? status.reachable === true : status.fresh);
   }
   const query = knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
     // A contact's device (contact login) is never proof the HOLDER has the app.
     .whereNull('contact_phone_key');
-  query.where('updated_at', '>=', anyDevice ? sessionLifeCutoff() : heartbeatCutoff());
+  if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
   const row = await query.first('id').catch(() => null);
   return Boolean(row);
 }
@@ -515,25 +513,7 @@ function anyDeviceSend(explicitPushOnly) {
 // counts phone apps only): a stale browser subscription that accepts must never
 // stand in for delivery and skip the text. Otherwise: the 72 hour floor.
 function fanOutReach(anyDevice) {
-  return anyDevice ? { nativeOnly: true, minUpdatedAt: sessionLifeCutoff() } : { minUpdatedAt: heartbeatCutoff() };
-}
-
-// Any-device reachability still has a freshness bound (Codex security #7581 r2): a
-// device counts while its app sign-in can still be live, i.e. it checked in within
-// the refresh-token life (config.jwt.refreshExpiry, REFRESH_TOKEN_EXPIRY = 30d in
-// prod). The app re-registers on every launch, so a phone not opened for that long
-// is signed out; a former phone whose logout cleanup failed stops suppressing texts
-// once that much time passes, and the current phone gets the text again.
-const DEFAULT_SESSION_LIFE_MS = 30 * 24 * 3600 * 1000;
-function sessionLifeMs() {
-  const raw = String(require('../../config').jwt?.refreshExpiry || '').trim();
-  const m = /^(\d+)\s*([dh])$/i.exec(raw);
-  if (!m) return DEFAULT_SESSION_LIFE_MS;
-  const ms = Number(m[1]) * (m[2].toLowerCase() === 'd' ? 24 : 1) * 3600 * 1000;
-  return ms > 0 && ms <= DEFAULT_SESSION_LIFE_MS * 3 ? ms : DEFAULT_SESSION_LIFE_MS;
-}
-function sessionLifeCutoff() {
-  return new Date(Date.now() - sessionLifeMs());
+  return anyDevice ? { nativeOnly: true } : { minUpdatedAt: heartbeatCutoff() };
 }
 
 function heartbeatCutoff() {
@@ -978,5 +958,5 @@ module.exports = {
   APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushTag, linkFreeBody, sessionLifeMs, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };
