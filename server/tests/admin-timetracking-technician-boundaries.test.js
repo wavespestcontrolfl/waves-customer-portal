@@ -190,6 +190,26 @@ describe('admin timetracking technician data/auth boundaries', () => {
     }
   });
 
+  test('a technician sees active coworkers by name and photo only; an admin still sees every row', async () => {
+    const hire = { ...rawTechnician, id: 'tech-hire', name: 'Pat Hire', employment_status: 'prospective', active: false };
+    const gone = { ...rawTechnician, id: 'tech-gone', name: 'Sam Gone', employment_status: 'inactive', active: false };
+    const caller = { ...rawTechnician, id: 'tech-2', name: 'Own Tech', phone: '+19415550102', twilio_number: '+19415550133' };
+    const rows = [rawTechnician, hire, gone, caller];
+
+    db.mockReturnValueOnce(makeChain({ rows }));
+    db.mockReturnValueOnce(makeChain({ rows: [] }));
+    const tech = await invoke(listTechnicians, { technician: { id: 'tech-2', role: 'technician' }, technicianId: 'tech-2' });
+    expect(tech.body.technicians.map((t) => t.id)).toEqual(['tech-1', 'tech-2']);
+    const [coworker, own] = tech.body.technicians;
+    expect(Object.keys(coworker).sort()).toEqual(['active', 'avatar_url', 'capability_summary', 'employment_status', 'field_dispatchable', 'id', 'name', 'role']);
+    expect(own).toMatchObject({ phone: '+19415550102', twilio_number: '+19415550133' });
+
+    db.mockReturnValueOnce(makeChain({ rows }));
+    db.mockReturnValueOnce(makeChain({ rows: [] }));
+    const admin = await invoke(listTechnicians, { technician: { id: 'admin-1', role: 'admin' } });
+    expect(admin.body.technicians.map((t) => t.id)).toEqual(['tech-1', 'tech-hire', 'tech-gone', 'tech-2']);
+  });
+
   test('create trims/lowercases email and rejects a case-insensitive duplicate', async () => {
     const noConflict = makeChain({ first: undefined });
     const insert = makeChain({ returning: [{

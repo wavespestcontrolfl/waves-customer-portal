@@ -1048,7 +1048,9 @@ app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthen
       .applyAssignable(require('./models/db')('technicians'))
       .select('id', 'name', 'role', 'phone', 'active')
       .orderBy('name');
-    res.json({ technicians: techs });
+    // A technician gets its own phone and coworkers' names only (owner
+    // 2026-11-04, "Own number only"); an admin response is unchanged.
+    res.json({ technicians: require('./services/technician-picker-rows').technicianPickerRows(techs, req) });
   } catch (err) { next(err); }
 });
 app.use('/api/admin/data-hygiene', require('./routes/admin-data-hygiene'));
@@ -1115,6 +1117,7 @@ app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
+app.use('/api/admin/claude-ideas', require('./routes/admin-claude-ideas'));
 app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 // GATE_PORTAL_MESSAGES: the customer's Messages page (their portal thread with the office); 404 while dark.

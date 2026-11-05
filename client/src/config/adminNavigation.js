@@ -558,6 +558,8 @@ const TECH_ALLOWED_PATH_PREFIXES = [
 const OWNER_ONLY_NESTED_PATHS = [
   "/admin/customers/duplicates",
   "/admin/customers/gate-codes",
+  // The Add customer form: its save route is requireAdmin.
+  "/admin/customers/new",
   "/admin/settings/pest-pressure",
 ];
 

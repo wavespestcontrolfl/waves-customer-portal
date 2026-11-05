@@ -3,6 +3,7 @@ import { Badge, Button, cn } from '../ui';
 import { addETDays, etDateString } from '../../lib/timezone';
 import { useBulkSlotConflicts } from './useSlotConflicts';
 import { fetchSeriesMovePreview, isCollectivePreview } from './seriesMove';
+import { getAdminUser } from '../../lib/adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -37,6 +38,10 @@ const STATUS_LABELS = {
 };
 
 export default function ScheduleListView({ technicians = [], onEdit, onRefresh, refreshKey = 0, lastSave = null }) {
+  // The selection checkboxes and the bulk bar post /admin/schedule/bulk-action,
+  // which is office-only: a technician gets the plain list.
+  const canBulk = getAdminUser()?.role === 'admin';
+  const colCount = canBulk ? 9 : 8;
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -418,7 +423,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
       </div>
 
       {/* Bulk actions toolbar */}
-      {selected.size > 0 && (
+      {canBulk && selected.size > 0 && (
         <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 text-white rounded-sm text-12">
           <span className="u-nums font-medium">{selected.size} selected</span>
           <span className="text-zinc-500">·</span>
@@ -516,14 +521,16 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
         <table className="w-full border-collapse min-w-[700px]">
           <thead>
             <tr>
-              <th className={cn(thClass, 'w-8')}>
-                <input type="checkbox" checked={allVisibleSelected}
-                  aria-label="Select all visible appointments"
-                  ref={node => { if (node) node.indeterminate = someVisibleSelected && !allVisibleSelected; }}
-                  disabled={loading || loadError || sorted.length === 0}
-                  onChange={toggleAll}
-                  className="w-4 h-4" style={{ accentColor: '#18181B' }} />
-              </th>
+              {canBulk && (
+                <th className={cn(thClass, 'w-8')}>
+                  <input type="checkbox" checked={allVisibleSelected}
+                    aria-label="Select all visible appointments"
+                    ref={node => { if (node) node.indeterminate = someVisibleSelected && !allVisibleSelected; }}
+                    disabled={loading || loadError || sorted.length === 0}
+                    onChange={toggleAll}
+                    className="w-4 h-4" style={{ accentColor: '#18181B' }} />
+                </th>
+              )}
               {sortTh('customerName', 'Customer')}
               {sortTh('serviceType', 'Service')}
               {sortTh('scheduledDate', 'Date')}
@@ -536,16 +543,16 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={9} className="px-3 py-8 text-center text-zinc-400 text-13">Loading…</td></tr>
+              <tr><td colSpan={colCount} className="px-3 py-8 text-center text-zinc-400 text-13">Loading…</td></tr>
             )}
             {!loading && loadError && (
-              <tr><td colSpan={9} className="px-3 py-8 text-center text-14">
+              <tr><td colSpan={colCount} className="px-3 py-8 text-center text-14">
                 <div role="alert" className="text-alert-fg mb-3">Failed to load appointments</div>
                 <Button onClick={() => fetchList(pendingSaveRef.current)}>Retry</Button>
               </td></tr>
             )}
             {!loading && !loadError && sorted.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-8 text-center text-zinc-400 text-13">No appointments match your filters</td></tr>
+              <tr><td colSpan={colCount} className="px-3 py-8 text-center text-zinc-400 text-13">No appointments match your filters</td></tr>
             )}
             {!loading && sorted.map(s => {
               const isSelected = selected.has(s.id);
@@ -555,11 +562,13 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                   className={cn('hover:bg-zinc-50 cursor-pointer', isSelected && 'bg-zinc-50')}
                   onClick={() => onEdit?.(s)}
                 >
-                  <td className={tdClass} onClick={e => e.stopPropagation()}>
-                    <input type="checkbox" checked={isSelected}
-                      onChange={() => toggleSelect(s.id)}
-                      className="w-4 h-4" style={{ accentColor: '#18181B' }} />
-                  </td>
+                  {canBulk && (
+                    <td className={tdClass} onClick={e => e.stopPropagation()}>
+                      <input type="checkbox" checked={isSelected}
+                        onChange={() => toggleSelect(s.id)}
+                        className="w-4 h-4" style={{ accentColor: '#18181B' }} />
+                    </td>
+                  )}
                   <td className={cn(tdClass, 'font-medium text-zinc-900')}>
                     {/* The row click is mouse-only; this button opens the
                         appointment from the keyboard too. */}

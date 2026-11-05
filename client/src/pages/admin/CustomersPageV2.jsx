@@ -237,6 +237,12 @@ function formatCustomerAddress(address) {
   return "";
 }
 
+// A technician's SMS link names the customer: the server refuses a technician's text with no customer.
+// An admin's link is unchanged.
+function messagesHref(c, isAdmin) {
+  const base = `/admin/communications?phone=${encodeURIComponent(c.phone)}`;
+  return isAdmin ? base : `${base}&customerId=${encodeURIComponent(c.id)}&thread=${encodeURIComponent(c.id)}`;
+}
 function getAdminRole() {
   try {
     return (
@@ -960,9 +966,12 @@ const VIEWS = [
   { key: "intelligence", label: "Opportunities", Icon: Sparkles },
 ];
 
+const ADMIN_ONLY_VIEWS = new Set(["intelligence", "map"]);
+
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, isAdmin }) {
   const density = useUiDensity();
-  const views = VIEWS.filter((v) => isAdmin || v.key !== "intelligence");
+  // The Map plots stored coordinates, which the server withholds from a technician: its Map is always empty.
+  const views = VIEWS.filter((v) => isAdmin || !ADMIN_ONLY_VIEWS.has(v.key));
   const activeConfig = views.find((v) => v.key === view) || views[0];
 
   return (
@@ -1391,7 +1400,7 @@ function CustomerDirectoryView({
                         )}
                         {c.phone && (
                           <a
-                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                            href={messagesHref(c, isAdmin)}
                             onClick={(e) => e.stopPropagation()}
                             aria-label="SMS"
                             className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
@@ -1478,7 +1487,7 @@ function CustomerDirectoryView({
                       )}
                       {c.phone && (
                         <a
-                          href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                          href={messagesHref(c, isAdmin)}
                           onClick={(e) => e.stopPropagation()}
                           aria-label="SMS"
                           title={`SMS ${c.phone}`}
@@ -1770,6 +1779,9 @@ function CustomerFiltersDialog({
             ))}
           </div>{" "}
         </div>{" "}
+        {/* Cards on file, Status and Has Balance read fields the server withholds from a technician: they would count as active and change nothing. */}
+        {isAdmin && (
+          <>
         <div className="mb-4">
           {" "}
           <div className="text-14 font-medium text-ink-secondary mb-1.5">
@@ -1821,6 +1833,8 @@ function CustomerFiltersDialog({
             </FilterPill>{" "}
           </div>{" "}
         </div>{" "}
+          </>
+        )}
         <div>
           {" "}
           <div className="text-14 font-medium text-ink-secondary mb-1.5">
@@ -1967,6 +1981,7 @@ function customerRouteSignature(searchParams, isAdmin) {
   const view = new Map([
     ["health", "directory"],
     ["intelligence", isAdmin ? "intelligence" : "directory"],
+    ["map", isAdmin ? "map" : "directory"],
   ]).get(rawView) || rawView || "directory";
   return {
     view,
@@ -2646,12 +2661,11 @@ export default function CustomersPageV2() {
   }
 
   const activeFilterCount =
-    [filterTier, filterStage, filterLastVisited, filterCards].filter(
-      (value) => value !== "all",
-    ).length +
-    Number(filterHasBalance) +
+    [filterTier, filterLastVisited].filter((value) => value !== "all").length +
     (isAdmin
-      ? Object.values(healthFilters).filter((value) => value !== "").length
+      ? [filterStage, filterCards].filter((value) => value !== "all").length +
+        Number(filterHasBalance) +
+        Object.values(healthFilters).filter((value) => value !== "").length
       : 0);
 
   const resetTableFilters = () => {

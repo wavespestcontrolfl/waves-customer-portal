@@ -163,7 +163,7 @@ describe("AdminDispatchPage", () => {
     expect(screen.getByRole("button", { name: "Board" })).toHaveAttribute("aria-current", "page");
   });
 
-  it("gives a technician Schedule, Protocols and Scores only", async () => {
+  it("gives a technician Schedule and Protocols only (Scores ranks jobs by revenue: owner only)", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
     renderSchedule("/admin/dispatch?tab=csr");
 
@@ -171,12 +171,25 @@ describe("AdminDispatchPage", () => {
     for (const label of ["Board", "Matching", "Booking", "Insights"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
-    for (const label of ["Schedule", "Protocols", "Scores"]) {
+    for (const label of ["Schedule", "Protocols"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
+    expect(screen.queryByRole("button", { name: "Scores" })).not.toBeInTheDocument();
     // A deep link to a hidden tab falls back to Schedule for a technician.
     expect(await screen.findByText(/Dispatch workspace:/)).toBeInTheDocument();
     expect(screen.queryByText("Dispatch board workspace")).not.toBeInTheDocument();
+  });
+
+  it("an admin still gets the Scores tab", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    renderSchedule("/admin/dispatch?tab=board");
+    expect(screen.getByRole("button", { name: "Scores" })).toBeInTheDocument();
+  });
+
+  it("a technician's ?tab=revenue deep link falls back to Schedule", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
+    renderSchedule("/admin/dispatch?tab=revenue");
+    expect(await screen.findByText(/Dispatch workspace:/)).toBeInTheDocument();
   });
 
   it("keeps the Scorecard tab off the strip while GATE_ROUTE_SCORECARD is off", async () => {

@@ -116,22 +116,29 @@ function applyWikiTrustGate(queryBuilder, trustedOnly) {
 const KB_SEARCH_COLUMNS = ['id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id'];
 const WIKI_SEARCH_COLUMNS = ['id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status'];
 
-function kbFtsQuery(q, trustedOnly, limit) {
-  return applyKbTrustGate(
+// A caller that passes kbCategories (a technician: field categories only) sees
+// knowledge_base rows in those categories and no others. The trust gate filters
+// review state, never category.
+function applyKbCategoryGate(queryBuilder, kbCategories) {
+  return kbCategories ? queryBuilder.whereIn('category', kbCategories) : queryBuilder;
+}
+
+function kbFtsQuery(q, trustedOnly, limit, kbCategories) {
+  return applyKbCategoryGate(applyKbTrustGate(
     db('knowledge_base')
       .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q])
       .where({ status: 'active' })
       .whereRaw('active IS NOT FALSE'), // an admin's active=false hides the row (NULL counts as on)
     trustedOnly,
-  )
+  ), kbCategories)
     .select(...KB_SEARCH_COLUMNS, db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
     .orderBy('rank', 'desc')
     .orderBy('updated_at', 'desc')
     .limit(limit);
 }
 
-function kbIlikeQuery(term, trustedOnly, limit) {
-  return applyKbTrustGate(
+function kbIlikeQuery(term, trustedOnly, limit, kbCategories) {
+  return applyKbCategoryGate(applyKbTrustGate(
     db('knowledge_base')
       .where(function () {
         this.where('title', 'ilike', term)
@@ -140,7 +147,7 @@ function kbIlikeQuery(term, trustedOnly, limit) {
       .where({ status: 'active' })
       .whereRaw('active IS NOT FALSE'),
     trustedOnly,
-  )
+  ), kbCategories)
     .orderBy('updated_at', 'desc')
     .limit(limit)
     .select(...KB_SEARCH_COLUMNS);
@@ -808,13 +815,13 @@ const KnowledgeBridge = {
     let wikiMethod = 'fts';
 
     try {
-      claudeopedia = await kbFtsQuery(q, options.trustedOnly, limit);
+      claudeopedia = await kbFtsQuery(q, options.trustedOnly, limit, options.kbCategories);
     } catch (err) {
       logger.warn(`[knowledge-bridge] KB FTS search failed, falling back to ILIKE: ${err.message}`);
     }
     if (!claudeopedia.length) {
       kbMethod = 'ilike';
-      claudeopedia = await kbIlikeQuery(term, options.trustedOnly, limit);
+      claudeopedia = await kbIlikeQuery(term, options.trustedOnly, limit, options.kbCategories);
     }
 
     try {

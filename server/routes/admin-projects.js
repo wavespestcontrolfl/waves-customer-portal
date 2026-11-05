@@ -1438,6 +1438,11 @@ router.get('/types', async (_req, res) => {
 // ---------------------------------------------------------------------------
 // GET /api/admin/projects/service-search — tech-safe service title picker
 // ---------------------------------------------------------------------------
+const SERVICE_TITLE_FIELDS = ['id', 'service_key', 'name', 'category', 'billing_type', 'default_duration_minutes'];
+function pickServiceTitleFields(service) {
+  return Object.fromEntries(SERVICE_TITLE_FIELDS.filter((field) => service[field] !== undefined).map((field) => [field, service[field]]));
+}
+
 router.get('/service-search', async (req, res, next) => {
   try {
     const { search, limit = 10 } = req.query;
@@ -1446,6 +1451,13 @@ router.get('/service-search', async (req, res, next) => {
       isActive: 'true',
       limit: Math.min(Number(limit) || 10, 25),
     });
+    // The title picker reads a name and the line under it (category, billing
+    // type, duration). A technician gets only those: the full catalog row
+    // carries typical_materials_cost, internal_notes and prices, and material
+    // cost next to price shows the margin (technician visibility audit A9).
+    if (req.techRole !== 'admin') {
+      return res.json({ ...result, services: (result.services || []).map(pickServiceTitleFields) });
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

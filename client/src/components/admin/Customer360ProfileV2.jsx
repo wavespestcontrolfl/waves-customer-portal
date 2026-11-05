@@ -297,6 +297,12 @@ function defaultAnnualPrepayStart(activeTerm) {
   }
   return end && end >= today ? addDaysInput(end, 1) : today;
 }
+// A technician's Text link names the customer: the server refuses a technician's text with no customer.
+// An admin's link is unchanged.
+function customerTextHref(c, isAdmin) {
+  const base = `/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`;
+  return isAdmin ? base : `${base}&customerId=${encodeURIComponent(c.id)}&thread=${encodeURIComponent(c.id)}`;
+}
 function getAdminRole() {
   try {
     return (
@@ -5800,6 +5806,10 @@ function CustomerCallMessage({ message: m }) {
   );
 }
 
+// Overlay tabs whose every panel reads an office-only route (billing, auto-pay, contract documents): a technician's
+// copy would show blanks and 403s.
+const OFFICE_ONLY_OVERLAY_TABS = new Set(["billing", "contracts"]);
+
 // Names the overlay dialog. Only one customer overlay is open at a time.
 const CUSTOMER_OVERLAY_TITLE_ID = "customer-overlay-title";
 
@@ -5903,10 +5913,14 @@ function CustomerOverlayHeader({
             ))}
           <div className="flex gap-4 items-center flex-wrap text-ui-label text-ink-secondary mb-2.5">
             <CustomerAddressLink address={c.address} />
-            <span className="u-nums text-zinc-900">
-              {fmtCurrency(c.monthlyRate)}/mo
-            </span>{" "}
-            <span className="u-nums">{fmtCurrency(c.annualValue)}/yr</span>
+            {isAdmin && (
+              <>
+                <span className="u-nums text-zinc-900">
+                  {fmtCurrency(c.monthlyRate)}/mo
+                </span>{" "}
+                <span className="u-nums">{fmtCurrency(c.annualValue)}/yr</span>
+              </>
+            )}
             {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
           </div>{" "}
           <div className="flex gap-2 flex-wrap">
@@ -5917,7 +5931,7 @@ function CustomerOverlayHeader({
               <>
                 {" "}
                 <a
-                  href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
+                  href={customerTextHref(c, isAdmin)}
                   className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Text
@@ -5940,18 +5954,23 @@ function CustomerOverlayHeader({
                 )}{" "}
               </>
             )}
-            <a
-              href={`/admin/schedule?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-            >
-              Book Appt
-            </a>{" "}
-            <a
-              href={`/admin/invoices?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-            >
-              Invoice
-            </a>
+            {/* Booking and invoices are office pages: a technician would land on Today (or get a 403 on Save). */}
+            {isAdmin && (
+              <>
+                <a
+                  href={`/admin/schedule?customer=${customerId}`}
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                >
+                  Book Appt
+                </a>{" "}
+                <a
+                  href={`/admin/invoices?customer=${customerId}`}
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                >
+                  Invoice
+                </a>
+              </>
+            )}
             {isAdmin && (
               <button data-ui-text-action
                 type="button"
@@ -6009,6 +6028,8 @@ function CustomerOverlayHeader({
           </div>{" "}
           <div className="flex items-stretch gap-3 pt-3 border-t border-hairline border-zinc-200">
             {" "}
+            {isAdmin && (
+              <>
             <div className="flex-1">
               {" "}
               <div className="ui-label text-ink-tertiary">Monthly</div>{" "}
@@ -6023,7 +6044,9 @@ function CustomerOverlayHeader({
                 {fmtCurrency(c.annualValue)}
               </div>{" "}
             </div>{" "}
-            <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
+              </>
+            )}
+            <div className={cn("flex-1", isAdmin && "border-l border-hairline border-zinc-200 pl-3")}>
               {" "}
               <div className="ui-label text-ink-tertiary">Health</div>{" "}
               <div
@@ -6094,6 +6117,7 @@ function CustomerWorkspaceNavigation({
   );
 }
 function CustomerOverlayNavigation({
+  isAdmin,
   activeTab,
   setActiveTab,
   profileContentId,
@@ -6106,7 +6130,9 @@ function CustomerOverlayNavigation({
         onChange={setActiveTab}
         contentId={profileContentId}
         sections={CUSTOMER_360_SECTIONS.filter(
-          (section) => section.key !== "estimates",
+          (section) =>
+            section.key !== "estimates" &&
+            (isAdmin || !OFFICE_ONLY_OVERLAY_TABS.has(section.key)),
         )}
       />
     </>
@@ -6150,9 +6176,7 @@ function CustomerProfileOverview({
           services={services}
           comms={comms}
           commsLoading={commsLoading}
-          commsError={
-            isAdmin ? commsErr : "Message history requires admin access"
-          }
+          commsError={commsErr}
           balance={data.billingSummary}
           unread={unreadConversations}
           preferences={prefs}
@@ -6290,6 +6314,8 @@ function CustomerProfileOverview({
           </div>{" "}
         </div>
       )}
+      {/* The review flag is stripped from a technician's copy: the switch would read off for every customer. */}
+      {isAdmin && (
       <div className="flex items-center justify-between mb-4 pb-3 border-b border-hairline border-zinc-200">
         {" "}
         <div>
@@ -6352,7 +6378,8 @@ function CustomerProfileOverview({
             }
           }}
         />{" "}
-      </div>{" "}
+      </div>
+      )}{" "}
       {!embedded && (
         <>
           <div className="c360-overview-grid grid grid-cols-3 gap-5">
@@ -8632,7 +8659,7 @@ function CustomerProfileMobileActions({
           )}
           {c.phone && (
             <a
-              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
+              href={customerTextHref(c, isAdmin)}
               className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Text
@@ -9142,6 +9169,17 @@ function CustomerBillingSummary({
   data,
   invoices,
 }) {
+  // The server strips balance, cards, payments and prepay terms from a technician's copy; showing the empty
+  // arrays would state "No card on file" and "No transactions yet" as facts.
+  if (!isAdmin)
+    return (
+      <div className="c360-overview-billing">
+        <SectionTitle>Billing</SectionTitle>
+        <p className="text-ui-label text-ink-secondary mb-3">
+          Not shown to technicians. The visit card shows any balance due.
+        </p>
+      </div>
+    );
   return (
     <div className="c360-overview-billing">
       {" "}
@@ -9617,6 +9655,21 @@ function CustomerRecipientDetails({
   notificationPrefs,
   updateNotificationPrefs,
 }) {
+  // The payer, invoice email and notification choices are stripped from a technician's copy; the cards below
+  // would state "Customer pays (self)" and "No email" as facts.
+  if (!isAdmin)
+    return (
+      <div className="mt-4">
+        <SectionTitle>Contacts &amp; Recipients</SectionTitle>
+        <p className="text-14 text-ink-secondary">
+          Account contact: {[c.firstName, c.lastName].filter(Boolean).join(" ")}
+          {c.email ? ` · ${c.email}` : ""}
+        </p>
+        <p className="text-14 text-ink-secondary">
+          Bill-to payer, invoice email and notification choices are not shown to technicians.
+        </p>
+      </div>
+    );
   return (
     <div className="mt-4">
       {" "}
@@ -9895,11 +9948,14 @@ function CustomerConversation({
       )}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <SectionTitle>Thread ({comms.length} loaded)</SectionTitle>
-        <Select aria-label="Filter communication history" value={commsChannel} onChange={(event) => setCommsChannel(event.target.value)} className="!w-auto">
-          <option value="all">Texts & calls</option>
-          <option value="sms">Texts</option>
-          <option value="voice">Calls</option>
-        </Select>
+        {/* Calls are office only: a technician's thread is texts, so it gets no channel filter. */}
+        {isAdmin && (
+          <Select aria-label="Filter communication history" value={commsChannel} onChange={(event) => setCommsChannel(event.target.value)} className="!w-auto">
+            <option value="all">Texts & calls</option>
+            <option value="sms">Texts</option>
+            <option value="voice">Calls</option>
+          </Select>
+        )}
       </div>
       {commsHasMore && !commsErr && <Button variant="secondary" onClick={loadOlderComms} disabled={commsLoading} className="mb-3">Load older messages</Button>}
       <div className="flex flex-col gap-1.5 mb-3">
@@ -10183,7 +10239,7 @@ function CustomerWorkspacePresentation({
             <>
               {sections.property}
               {(hasLawnHistory || hasCompliance) && sections.compliance}
-              {sections.contracts}
+              {isAdmin && sections.contracts}
             </>
           )}
         </div>
@@ -10234,6 +10290,7 @@ function CustomerOverlayPresentation({
         <CustomerOverlayHeader {...headerProps} />
         <CustomerProfileAlerts alerts={alerts} />
         <CustomerOverlayNavigation
+          isAdmin={headerProps.isAdmin}
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           profileContentId={profileContentId}
@@ -10814,6 +10871,62 @@ function useCustomerProfileEditor({
   };
 }
 
+const TECHNICIAN_THREAD_PAGE = 50;
+
+// A text from the SMS log, shaped like a row of /customers/:id/comms (which is admin only), so the thread and the
+// composer read it the same way.
+function technicianThreadMessage(m) {
+  const inbound = m.direction === "inbound";
+  return {
+    ...m,
+    channel: "sms",
+    deliveryStatus: m.status,
+    contactPhone: inbound ? m.from : m.to,
+    ourEndpointId: inbound ? m.to : m.from,
+  };
+}
+
+// A technician's customer thread: GET /admin/communications/log?customerId= (texts only; the server scopes it to
+// the technician's own customers). Same result shape as useCustomerHistory.
+function useTechnicianCustomerThread({ customerId, enabled, revision }) {
+  const key = `${customerId}#${revision}`;
+  const sequence = useRef(0);
+  const [state, setState] = useState({ key, items: [], loaded: false, loading: false, error: "", nextPage: null, smsLike: false });
+  const load = useCallback(async (page = 1) => {
+    if (!enabled) return;
+    const current = ++sequence.current;
+    setState((previous) => ({ ...(page > 1 && previous.key === key ? previous : { items: [], loaded: false, nextPage: null, smsLike: false }), key, loading: true, error: "" }));
+    try {
+      const result = await adminFetch(`/admin/communications/log?customerId=${encodeURIComponent(customerId)}&limit=${TECHNICIAN_THREAD_PAGE}&page=${page}`);
+      if (current !== sequence.current) return;
+      const incoming = (Array.isArray(result?.messages) ? result.messages : []).map(technicianThreadMessage);
+      setState((previous) => {
+        const existing = page > 1 && previous.key === key ? previous.items : [];
+        const ids = new Set(existing.map((item) => item.id));
+        return { key, items: [...existing, ...incoming.filter((item) => !ids.has(item.id))], loaded: true, loading: false, error: "", nextPage: result?.hasMore ? result.nextPage : null, smsLike: result?.smsLike === true };
+      });
+    } catch (err) {
+      if (current === sequence.current) setState((previous) => ({ ...previous, loaded: true, loading: false, error: err.message || "Could not load the conversation." }));
+    }
+  }, [customerId, enabled, key]);
+  useEffect(() => {
+    void load(1);
+    return () => { sequence.current += 1; };
+  }, [load]);
+  const visible = state.key === key && enabled ? state : { items: [], loaded: false, loading: false, error: "", nextPage: null, smsLike: false };
+  return {
+    items: visible.items,
+    meta: { composerComms: visible.items, readScope: null, smsLike: visible.smsLike },
+    loaded: visible.loaded,
+    loading: visible.loading || (enabled && !visible.loaded),
+    error: visible.error,
+    hasMore: Boolean(visible.nextPage),
+    reload: () => load(1),
+    retry: () => load(1),
+    loadOlder: () => visible.nextPage && load(visible.nextPage),
+  };
+}
+
 function useCustomerMessages({
   profileReloadKey,
   loading,
@@ -10828,11 +10941,17 @@ function useCustomerMessages({
   const [commsChannel, setCommsChannel] = useState("all");
   const [commsRevision, setCommsRevision] = useState(0);
   const [composerContext, setComposerContext] = useState(null);
-  const history = useCustomerHistory({
-    customerId, kind: "comms", enabled: !loading && isAdmin && (embedded || activeTab === "comms"),
+  const threadWanted = !loading && (embedded || activeTab === "comms");
+  const adminHistory = useCustomerHistory({
+    customerId, kind: "comms", enabled: isAdmin && threadWanted,
     query: new URLSearchParams({ channel: commsChannel }).toString(),
     revision: `${profileReloadKey}:${commsRevision}`,
   });
+  // /customers/:id/comms is admin only: a technician reads the thread from the SMS log instead.
+  const technicianHistory = useTechnicianCustomerThread({
+    customerId, enabled: !isAdmin && threadWanted, revision: `${profileReloadKey}:${commsRevision}`,
+  });
+  const history = isAdmin ? adminHistory : technicianHistory;
   const comms = history.items;
   const commsLoaded = history.loaded && !history.loading && !history.error;
   const [commsComposerReady, setCommsComposerReady] = useState(false);
@@ -10973,7 +11092,7 @@ function useCustomerProfileNavigation({
   // still exists when the modal closes (the menu item unmounts on click).
   const menuButtonRef = useRef(null);
   const activeTab =
-    embedded && !isAdmin && requestedTab === "billing"
+    !isAdmin && OFFICE_ONLY_OVERLAY_TABS.has(requestedTab)
       ? "overview"
       : requestedTab;
   // Single "draft active" choke point for every control that can unmount
@@ -11260,6 +11379,7 @@ function customerServiceFacts({
 }
 
 function customerProfileAlerts({
+  isAdmin,
   cards,
   prefs,
   balanceOwed,
@@ -11272,6 +11392,11 @@ function customerProfileAlerts({
     return diff < 60 && diff > -30;
   });
 
+  // Gate codes show to a technician on the visit card only (owner 2026-10-05, 2026-11-04), never here.
+  const accessCodeAlert = (key, prefix) => ({
+    ...preferenceAlert(key, "GATE", prefix),
+    present: isAdmin && prefs[key],
+  });
   const preferenceAlert = (key, label, prefix = "") => ({
     present: prefs[key],
     alert: false,
@@ -11280,8 +11405,8 @@ function customerProfileAlerts({
   });
   return [
     preferenceAlert("pet_details", "PET", "Pet: "),
-    preferenceAlert("property_gate_code", "GATE", "Property gate: "),
-    preferenceAlert("neighborhood_gate_code", "GATE", "Neighborhood gate: "),
+    accessCodeAlert("property_gate_code", "Property gate: "),
+    accessCodeAlert("neighborhood_gate_code", "Neighborhood gate: "),
     {
       present: balanceOwed > 0,
       alert: true,
@@ -11570,10 +11695,7 @@ export default function Customer360ProfileV2({
     (section) => isAdmin || section.key !== "billing",
   );
 
-  const unreadConversations = useUnreadConversations(
-    embedded && isAdmin,
-    customerId,
-  );
+  const unreadConversations = useUnreadConversations(embedded, customerId);
 
   if (loading || !data?.customer)
     return (
@@ -11625,6 +11747,7 @@ export default function Customer360ProfileV2({
     upcomingScheduled,
   });
   const alerts = customerProfileAlerts({
+    isAdmin,
     cards,
     prefs,
     balanceOwed,
