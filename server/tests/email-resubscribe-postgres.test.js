@@ -339,6 +339,44 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
       } finally { await cleanup(email); }
     });
 
+    // Codex regression: the customer presses the emailed button while the send is still in flight.
+    // Every path takes the request row BEFORE the address key. With the old order (address key first
+    // in the send transaction) the send held the address key, the click held the request row, and
+    // the send's settle() update then waited on the click: a 40P01 deadlock.
+    test('a confirmation pressed while the send is still in flight waits on the request row, then releases: no deadlock', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      const realFetch = global.fetch;
+      const email = `${uniq()}@example.com`;
+      let click;
+      try {
+        const row = await sup(db, { email });
+        global.fetch = jest.fn(async () => ({ ok: true, status: 204 }));
+        sender.sendResubscribeConfirmation.mockImplementation(async (args) => {
+          // The committed claim makes the link open, read on another connection.
+          const found = await service.findRequest(args.token);
+          expect(found.status).toBe('open');
+          click = service.completeResubscribe(found.request);
+          click.catch(() => {}); // surfaced below; no unhandled rejection while the send is pending
+          await new Promise((resolve) => { setTimeout(resolve, 200); }); // the click is now blocked on the request row
+          return { messageId: 'm1' };
+        });
+        const answer = await service.requestResubscribeEmail({ customerId: null, email, firstName: 'Pat' }, { dbh: db });
+        expect(answer).toMatchObject({ state: 'sent' });
+        expect(await click).toBe('done');
+        const [request] = await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]);
+        expect(request.used_at).toBeInstanceOf(Date);
+        expect(request.outcome).toEqual({ released_ids: [row.id] });
+        expect(request.sent_at).toBeInstanceOf(Date);
+        expect((await db('email_suppressions').where({ id: row.id }).first())).toMatchObject({ status: 'released', consent_source: 'email_confirm_link' });
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+      } finally {
+        global.fetch = realFetch;
+        delete process.env.SENDGRID_API_KEY;
+        if (click) await click.catch(() => {});
+        await cleanup(email);
+      }
+    });
+
     test('a definite rejection on committed rows clears sent_at so the next tap can send', async () => {
       const email = `${uniq()}@example.com`;
       try {
