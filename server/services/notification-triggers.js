@@ -132,6 +132,12 @@ const callButtonAlert = (ids) => {
   const buttons = require('./alert-call-button').callButtons(ids);
   return buttons ? { alert: { buttons } } : {};
 };
+// A US number the way the office writes it, "(941) 544-1363" (owner 2026-10-21 for the promise chaser,
+// 2026-11-04 for a voicemail's callback number); anything else as it came. Still the whole real number.
+function shownPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : phone;
+}
 
 // bundle_quote_requested's `alert` (GATE_PORTAL_ITEM_CLOSE): the request row and its customer at the top of the
 // bell's metadata. Gate off, or a bell with no request row (a self-applied bundle): nothing, as before.
@@ -543,10 +549,12 @@ const TRIGGER_REGISTRY = {
     // Payload fields are built by call-recording-processor, not free text.
     allowContactDetails: true,
     build: (p) => {
-      const who = p.name || p.phone || 'Unknown caller';
+      // The callback number the way the office writes it (owner 2026-11-04), still the whole number.
+      const phone = shownPhone(p.phone);
+      const who = p.name || phone || 'Unknown caller';
       const bodyParts = [who];
       if (p.service) bodyParts.push(`Asked about ${p.service}`);
-      if (p.phone) bodyParts.push(`Callback: ${p.phone}`);
+      if (phone) bodyParts.push(`Callback: ${phone}`);
       return {
         // Banner-first: the WHO leads so a truncated phone banner still
         // identifies the caller (owner ruling 2026-07-30).
@@ -629,9 +637,7 @@ const TRIGGER_REGISTRY = {
       // else the number in its usual form, else a plain "A lead". The body
       // used to show the raw +1 number under a formatted headline (owner
       // screenshot 2026-11-04).
-      const digits = String(p.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
-      const shownPhone = digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : p.phone;
-      const who = p.name || shownPhone || 'A lead';
+      const who = p.name || shownPhone(p.phone) || 'A lead';
       // Dispatched only by the durable sweep now (no more live /voice call
       // site) — the call has always already ended by the time this fires,
       // so the copy always states when they called, never "is calling in
