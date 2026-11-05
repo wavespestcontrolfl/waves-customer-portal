@@ -263,11 +263,13 @@ async function negativeChanges(since) {
   }));
 }
 
-// The portal's own upload rows for the window: sent, waiting, and refused.
+// The portal's own upload rows for the window: sent, waiting, refused, and partial. A partial row was in a Google
+// batch that Google partly refused (data-manager.js 'partial_success'): Google gives only totals, so no one knows
+// which rows failed.
 async function uploadCounts(query, since) {
   const rows = await query.where('created_at', '>=', since).groupBy('status').select('status', db.raw('count(*)::int AS n'));
   const count = (status) => rows.find((row) => row.status === status)?.n || 0;
-  return { sent: count('sent'), pending: count('pending'), failed: count('failed') };
+  return { sent: count('sent'), pending: count('pending'), failed: count('failed'), partial: count('partial_success') };
 }
 
 async function buildAdsHealth(now = new Date()) {

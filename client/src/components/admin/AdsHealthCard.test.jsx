@@ -91,9 +91,18 @@ describe('AdsHealthCard', () => {
     expect(screen.getByText('$5.00/day')).toBeInTheDocument();
     expect(screen.getByText('No ads disapproved.')).toBeInTheDocument();
     expect(screen.getByText(/Google: 104 sent, 7 pending,/)).toBeInTheDocument();
+    expect(screen.queryByText(/partly refused/)).not.toBeInTheDocument();
     expect(screen.getByText(/Google accepted 25 in the last 7 upload days/)).toBeInTheDocument();
     expect(screen.getByText('Change number 1')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Show all/ })).not.toBeInTheDocument();
+  });
+
+  it('shows rows in a batch Google partly refused', async () => {
+    const body = payload();
+    body.uploads.google = { sent: 100, pending: 0, failed: 0, partial: 3 };
+    reply(body);
+    render(<AdsHealthCard />);
+    expect(await screen.findByText(', 3 in batches Google partly refused')).toBeInTheDocument();
   });
 
   it('shows a section error but still renders the other sections', async () => {

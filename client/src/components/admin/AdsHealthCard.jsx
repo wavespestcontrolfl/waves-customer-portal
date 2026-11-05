@@ -142,7 +142,11 @@ function PortalCount({ label, counts }) {
   return (
     <div className="text-ui-body text-zinc-900">
       {label}: {counts.sent} sent{pending},{" "}
-      <span className={failedClass}>{counts.failed} failed</span> (30 days).
+      <span className={failedClass}>{counts.failed} failed</span>
+      {counts.partial > 0 && (
+        <span className="text-alert-fg">, {counts.partial} in batches Google partly refused</span>
+      )}{" "}
+      (30 days).
     </div>
   );
 }

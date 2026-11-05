@@ -195,7 +195,9 @@ describe('buildAdsHealth', () => {
       total: 1,
       truncated: false,
     }));
-    mockTables.google_ads_conversion_uploads = [{ status: 'sent', n: 99 }, { status: 'pending', n: 7 }, { status: 'validated', n: 1 }];
+    mockTables.google_ads_conversion_uploads = [
+      { status: 'sent', n: 99 }, { status: 'pending', n: 7 }, { status: 'validated', n: 1 }, { status: 'partial_success', n: 3 },
+    ];
     mockTables.meta_conversion_uploads = [{ status: 'sent', n: 103 }, { status: 'failed', n: 2 }];
 
     const out = await buildAdsHealth(NOW);
@@ -217,7 +219,11 @@ describe('buildAdsHealth', () => {
         }],
       },
     });
-    expect(out.uploads).toEqual({ google: { sent: 99, pending: 7, failed: 0 }, meta: { sent: 103, pending: 0, failed: 2 } });
+    // A row in a batch Google partly refused is its own count, never hidden.
+    expect(out.uploads).toEqual({
+      google: { sent: 99, pending: 7, failed: 0, partial: 3 },
+      meta: { sent: 103, pending: 0, failed: 2, partial: 0 },
+    });
     // Meta test events are not real uploads.
     expect(callsFor('meta_conversion_uploads')[0]).toContainEqual(['where', 'test_mode', false]);
     expect(callsFor('google_ads_conversion_uploads')[0]).toContainEqual(['where', 'created_at', '>=', SINCE]);
@@ -240,7 +246,7 @@ describe('buildAdsHealth', () => {
     // With no live campaign list, a Google row names the campaign by its id.
     expect(out.timeline).toEqual([expect.objectContaining({ what: 'Status Enabled → Paused', campaign: 'Campaign 111' })]);
     expect(out.notes).toEqual(['The budget log could not be read: relation "ad_budget_log" does not exist']);
-    expect(out.uploads.google).toEqual({ sent: 4, pending: 0, failed: 0 });
+    expect(out.uploads.google).toEqual({ sent: 4, pending: 0, failed: 0, partial: 0 });
   });
 
   test('a failed change history is a note; the portal rows still show', async () => {
