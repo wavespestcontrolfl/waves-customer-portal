@@ -6,9 +6,10 @@
 //
 // A send is an UPDATE when the customer already received this estimate (a delivery stamped sendSnapshot.scope) and
 // what this send delivers differs from that last delivery: its priced lines or address (the scope every delivery
-// stamps), or its totals (stamped beside the scope since this change; a delivery stamped before carries no totals,
-// so only its scope can differ). A plain resend of the same quote keeps the normal wording. A commercial proposal
-// keeps its own template.
+// stamps), or its prices (sendSnapshot.priced, stamped beside the scope since this change: every engine line's
+// customer-facing prices plus the totals, so two prices that move by offsetting amounts still count). A delivery
+// stamped before carries no prices, so only its scope can differ. A plain resend of the same quote keeps the normal
+// wording. A commercial proposal keeps its own template.
 
 const UPDATED_SMS_TEMPLATE_KEY = 'estimate_updated';
 const UPDATED_EMAIL_TEMPLATE_KEY = 'estimate.updated_delivery';
@@ -26,22 +27,51 @@ function canonicalJson(value) {
     : v));
 }
 
+function parseEstimateData(estimateData) {
+  if (!estimateData) return null;
+  if (typeof estimateData === 'string') {
+    try { return JSON.parse(estimateData); } catch { return null; }
+  }
+  return typeof estimateData === 'object' ? estimateData : null;
+}
+
+const money = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v).toFixed(2));
+
 // The totals a delivery carries, as fixed cents: pg returns numeric columns as strings.
 function deliveredTotals(row = {}) {
-  const money = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v).toFixed(2));
   return { monthly: money(row.monthly_total), annual: money(row.annual_total), onetime: money(row.onetime_total) };
+}
+
+// The prices the customer sees on each engine line (engineResult.lineItems; the scope keeps names and cadence only).
+// Costs, margins, diagnostics and generatedAt stay out: a re-price that lands on the same prices is the same quote.
+const LINE_PRICE_FIELDS = ['annual', 'monthly', 'perApp', 'price', 'initialFee', 'finalAnnual', 'finalMonthly',
+  'annualAfterDiscount', 'monthlyAfterDiscount', 'priceAfterDiscount', 'visitsPerYear'];
+
+function linePrices(estimateData) {
+  const items = Array.isArray(estimateData?.engineResult?.lineItems) ? estimateData.engineResult.lineItems : [];
+  return items.filter((item) => item && typeof item === 'object').map((item) => ({
+    service: item.service ?? null,
+    frequency: item.selectedFrequency ?? item.frequency ?? null,
+    ...Object.fromEntries(LINE_PRICE_FIELDS.filter((key) => money(item[key]) !== null).map((key) => [key, money(item[key])])),
+  }));
+}
+
+// What a delivery charged, line by line and in total: stamped as sendSnapshot.priced by every delivery.
+function pricedContent(row = {}) {
+  const data = parseEstimateData(row.estimate_data) || {};
+  return { totals: deliveredTotals(row), lines: linePrices(data), engineTotals: data.result?.totals ?? null };
 }
 
 const validScope = (scope) => Boolean(scope && typeof scope === 'object' && Array.isArray(scope.lines));
 
 // sendSnapshot = the row's estimate_data.sendSnapshot, the LAST delivery's stamp. No valid stamp = never
 // delivered (or delivered before the stamp existed): not an update.
-function offerChangedSinceDelivery(sendSnapshot, currentScope, currentTotals) {
+function offerChangedSinceDelivery(sendSnapshot, currentScope, currentPriced) {
   if (!validScope(sendSnapshot?.scope) || !validScope(currentScope)) return false;
   if (canonicalJson(sendSnapshot.scope) !== canonicalJson(currentScope)) return true;
-  const stamped = sendSnapshot.totals;
+  const stamped = sendSnapshot.priced;
   if (!stamped || typeof stamped !== 'object') return false;
-  return canonicalJson(stamped) !== canonicalJson(currentTotals);
+  return canonicalJson(stamped) !== canonicalJson(currentPriced);
 }
 
 // The updated email template can send: present, enabled (sendTemplate refuses any other template status) and with
@@ -57,6 +87,7 @@ module.exports = {
   updatedWordingLive,
   canonicalJson,
   deliveredTotals,
+  pricedContent,
   offerChangedSinceDelivery,
   updatedEmailTemplateUsable,
 };

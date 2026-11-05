@@ -2810,7 +2810,8 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
   const baseSms = async (key, vars) => `Synthetic estimate: ${vars.estimate_url.replace(/^https:\/\//, '')}`;
   const DELIVERED_SCOPE = { lines: [{ name: 'Synthetic pest service', cadence: 'quarterly' }], address: 'Synthetic service property', property: null };
   const CORRECTED_SCOPE = { lines: [...DELIVERED_SCOPE.lines, { name: 'Synthetic lawn service', cadence: 'monthly' }], address: 'Synthetic service property', property: null };
-  const DELIVERED_TOTALS = { monthly: '100.00', annual: '1200.00', onetime: '0.00' };
+  const wording = require('../services/estimate-updated-wording');
+  const deliveredPriced = () => wording.pricedContent({ monthly_total: '100', annual_total: '1200', onetime_total: '0', estimate_data: {} });
   let liveScope;
 
   beforeEach(() => {
@@ -2822,7 +2823,7 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     Object.assign(row, {
       status: 'sent', sent_at: new Date('2026-01-01T12:00:00.000Z'),
       // JSONB returns the stamp's keys in its own order: the check must not read that as a change.
-      estimate_data: { sendSnapshot: { totals: DELIVERED_TOTALS, scope: { property: null, address: 'Synthetic service property', lines: DELIVERED_SCOPE.lines } } },
+      estimate_data: { sendSnapshot: { priced: deliveredPriced(), scope: { property: null, address: 'Synthetic service property', lines: DELIVERED_SCOPE.lines } } },
     });
   });
   afterEach(() => {
@@ -2835,7 +2836,7 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
   const loadedKeys = () => email.loadTemplateByKey.mock.calls.map(([key]) => key);
   const smsKeys = () => smsTemplates.getTemplate.mock.calls.map(([key]) => key);
 
-  test('the review shows the updated text and email, the reviewed send delivers them, and the send stamps its totals', async () => {
+  test('the review shows the updated text and email, the reviewed send delivers them, and the send stamps its prices', async () => {
     const preview = await invoke('/:id/send-preview', 'get');
     expect(preview.body.messages.sms).toMatch(/^Updated estimate: /);
     expect(preview.body.messages.email).toMatchObject({ provider: 'sendgrid', versionId: 'synthetic-email-version', updated: true });
@@ -2848,10 +2849,19 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     expect(email.sendTemplate).toHaveBeenCalledTimes(1);
     expect(email.sendTemplate.mock.calls[0][0]).toMatchObject({ templateKey: 'estimate.updated_delivery', versionId: 'synthetic-email-version' });
     expect(dataOf().sendSnapshot.scope).toEqual(CORRECTED_SCOPE);
-    expect(dataOf().sendSnapshot.totals).toEqual(DELIVERED_TOTALS);
+    expect(dataOf().sendSnapshot.priced).toEqual(deliveredPriced());
   });
 
-  test('a totals-only correction is an update too', async () => {
+  test('two line prices that move by offsetting amounts, same totals, are an update', async () => {
+    liveScope = DELIVERED_SCOPE;
+    const line = (service, annual) => ({ service, frequency: 'quarterly', annual });
+    const stampedRow = { ...row, estimate_data: { engineResult: { lineItems: [line('pest', 400), line('lawn', 800)] } } };
+    row.estimate_data = { engineResult: { lineItems: [line('pest', 500), line('lawn', 700)] }, sendSnapshot: { ...dataOf().sendSnapshot, priced: wording.pricedContent(stampedRow) } };
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.sms).toMatch(/^Updated estimate: /);
+  });
+
+  test('a total-only correction is an update too', async () => {
     liveScope = DELIVERED_SCOPE;
     row.annual_total = '1080';
     const preview = await invoke('/:id/send-preview', 'get');
@@ -2862,7 +2872,7 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
   test.each([
     ['the same quote sent again', (r) => { liveScope = DELIVERED_SCOPE; return r; }],
     ['a first send (no delivery stamp)', (r) => { r.estimate_data = {}; return r; }],
-    ['a delivery stamped before totals existed, same scope, new totals', (r) => {
+    ['a delivery stamped before prices existed, same scope, new totals', (r) => {
       liveScope = DELIVERED_SCOPE; r.annual_total = '999'; r.estimate_data = { sendSnapshot: { scope: DELIVERED_SCOPE } }; return r;
     }],
     ['the gate off', (r) => { gates.estimateUpdatedWordingLive.mockReturnValue(false); return r; }],

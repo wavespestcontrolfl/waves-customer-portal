@@ -897,10 +897,11 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // Independent of the bundle build below — it is content, not pricing.
   if (delivered) {
     Object.assign(sendSnapshot, scopeRevision(sendSnapshot, await deliveryScopeOf(estimate), deliveredAt || snapshotAt));
-    // The totals this delivery carried, beside its scope: GATE_ESTIMATE_UPDATED_WORDING's witness that a later send
-    // with other totals is a corrected quote. Stamped on every delivery, gate on or off, so a quote delivered before
-    // the flip still counts; a suppressed attempt carries the prior stamp forward like the scope.
-    sendSnapshot.totals = updatedWording.deliveredTotals(estimate);
+    // The prices this delivery carried (each engine line's and the totals), beside its scope:
+    // GATE_ESTIMATE_UPDATED_WORDING's witness that a later send with other prices is a corrected quote. Stamped on
+    // every delivery, gate on or off, so a quote delivered before the flip still counts; a suppressed attempt carries
+    // the prior stamp forward like the scope.
+    sendSnapshot.priced = updatedWording.pricedContent(estimate);
   }
 
   try {
@@ -1030,14 +1031,14 @@ function estimateSmsPhoneProblem(estimate) {
   return problem ? `${problem} Fix the phone on the contact or the estimate, then send again. Nothing was sent.` : null;
 }
 
-// GATE_ESTIMATE_UPDATED_WORDING: true when this send re-delivers an estimate whose priced lines, address or totals
+// GATE_ESTIMATE_UPDATED_WORDING: true when this send re-delivers an estimate whose priced lines, address or prices
 // changed since the customer last received it (services/estimate-updated-wording.js). A grouped send judges the row
 // it is called with (no live group sends since September). Any failure reads as the normal wording.
 async function updatedWordingFor(estimate, proposalMode) {
   if (proposalMode || !updatedWording.updatedWordingLive()) return false;
   try {
     const sendSnapshot = (parseEstimateData(estimate.estimate_data) || {}).sendSnapshot;
-    return updatedWording.offerChangedSinceDelivery(sendSnapshot, await deliveryScopeOf(estimate, { rethrow: true }), updatedWording.deliveredTotals(estimate));
+    return updatedWording.offerChangedSinceDelivery(sendSnapshot, await deliveryScopeOf(estimate, { rethrow: true }), updatedWording.pricedContent(estimate));
   } catch (err) {
     logger.warn(`[admin-estimates] updated-wording check failed for estimate ${estimate?.id}: ${err.message}`);
     return false;
