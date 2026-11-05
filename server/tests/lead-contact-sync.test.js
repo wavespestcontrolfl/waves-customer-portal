@@ -43,8 +43,9 @@ const lead = (fields = {}) => ({
   id: 'lead-1', customer_id: null, phone: '(941) 555-0100', email: null, first_contact_at: FIRST, response_time_minutes: null, ...fields,
 });
 const text = (fields = {}) => ({ id: 'sms-1', customer_id: null, at: T(7), peer: '9415550100', ...fields });
+// `at` is the call's START (callStartedAtSql), the time the sweep orders and judges by.
 const call = (fields = {}) => ({
-  id: 'call-1', customer_id: null, created_at: T(10), at: T(12), peer: '9415550100', origin_lead_id: null, relay_lead_id: null, ...fields,
+  id: 'call-1', customer_id: null, at: T(10), peer: '9415550100', origin_lead_id: null, relay_lead_id: null, twilio_call_sid: null, ...fields,
 });
 const sharing = (fields = {}) => ({ id: 'lead-2', customer_id: null, email: null, peer: '9415550100', ...fields });
 
@@ -143,9 +144,16 @@ describe('lead contact sync: what does not count', () => {
     expect(result.moved).toBe(0);
   });
 
-  test('a call that started before first contact does not count even if it ended after', async () => {
-    const result = await run({ leads: [[lead()], []], call_log: [call({ created_at: T(-2), at: T(3) })] });
+  test('a call that started before first contact does not count', async () => {
+    const result = await run({ leads: [[lead()], []], call_log: [call({ at: T(-2) })] });
     expect(result.moved).toBe(0);
+  });
+
+  test('the lead\'s own call sid marks its originating call; a null sid excludes nothing', async () => {
+    const own = await run({ leads: [[lead({ twilio_call_sid: 'CA-own' })], []], call_log: [call({ twilio_call_sid: 'CA-own' })] });
+    expect(own.moved).toBe(0);
+    const other = await run({ leads: [[lead({ twilio_call_sid: null })], []], call_log: [call({ twilio_call_sid: null })] });
+    expect(other.moved).toBe(1);
   });
 
   test('two open leads on one phone: skipped and counted, never marked', async () => {

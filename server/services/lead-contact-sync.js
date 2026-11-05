@@ -49,7 +49,7 @@ const { phoneIdentitySql } = require('./sms-response-policy');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { callEndedAtSql } = require('./sms-pending-conversations');
+const { callEndedAtSql, callStartedAtSql } = require('./sms-pending-conversations');
 const { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 
@@ -109,12 +109,14 @@ function candidateLeadsQuery(dbi, now, after = null) {
 // ---- Witness reads: one bulk query per kind for the whole batch ----------
 // Every loader returns WITNESSES in one shape, so the judging below is one loop
 // over a table of kinds with no per-kind branches:
-//   { type, id, at, startedAt, scope, value, key, customerId, originOf }
+//   { type, id, at, scope, value, key, customerId, originOf }
+// `at` is when the contact HAPPENED: a text's or email's own time, a call's start,
+// a visit's booking time. It must be after the lead's first contact.
 // `key` is `<scope>:<value>` (phone, email or customer), the identity the
 // contact names; `customerId` is the customer the contact row itself carries.
 const ms = (value) => asDate(value).getTime();
 const witness = (type, scope, value, row, extra = {}) => ({
-  type, id: String(row.id), at: ms(row.at), startedAt: ms(row.at), scope, value, key: `${scope}:${value}`,
+  type, id: String(row.id), at: ms(row.at), scope, value, key: `${scope}:${value}`,
   customerId: row.customer_id == null ? null : String(row.customer_id), originOf: [], ...extra,
 });
 
@@ -132,16 +134,21 @@ async function staffTexts(dbi, peers, since) {
 }
 
 // Completed calls on a lead phone that reached a person or the call agent.
-// Judged by when the call ENDED (callEndedAtSql, the Messages reader's
-// definition): a row with no trustworthy end counts for nothing. The call
-// that created a lead (metadata lead_id / relay_lead_id) is never its evidence.
+// A call's time is when it STARTED (callStartedAtSql, the Messages reader's
+// definition): created_at is the start only for a row inserted when the call
+// began, and a row a status callback or recording recovery inserted after
+// hangup is backed out by the call's length. A row with no trustworthy end
+// (callEndedAtSql) counts for nothing. The call that created a lead (its
+// metadata lead_id / relay_lead_id, or the lead's own twilio_call_sid) is
+// never its evidence.
 async function connectedCalls(dbi, peers, since) {
   const ended = callEndedAtSql('cl');
+  const started = callStartedAtSql('cl');
   const peerSql = `(CASE WHEN cl.direction = 'inbound' THEN ${phoneIdentitySql('cl.from_phone')} ELSE ${phoneIdentitySql('cl.to_phone')} END)`;
   const rows = await whereNotSandboxCall(dbi('call_log as cl'), 'cl.source')
     .where('cl.status', 'completed')
     .whereIn('cl.direction', ['inbound', 'outbound'])
-    .where('cl.created_at', '>', since)
+    .whereRaw(`${started} > ?`, [since])
     .whereRaw(`${peerSql} = ANY(?)`, [peers])
     .whereRaw(`${ended} IS NOT NULL`)
     .where((connected) => {
@@ -158,16 +165,16 @@ async function connectedCalls(dbi, peers, since) {
           .whereRaw("COALESCE(cl.call_outcome, '') <> 'voicemail'")
           .whereRaw("COALESCE(cl.answered_by, '') <> 'voicemail'"));
     })
-    .orderBy('cl.created_at', 'asc')
+    .orderByRaw(`${started} asc`)
     .limit(ROW_CAP)
     .select(
-      'cl.id', 'cl.customer_id', 'cl.created_at',
-      dbi.raw(`${ended} as at`), dbi.raw(`${peerSql} as peer`),
+      'cl.id', 'cl.customer_id', 'cl.twilio_call_sid',
+      dbi.raw(`${started} as at`), dbi.raw(`${peerSql} as peer`),
       dbi.raw("cl.metadata->>'lead_id' as origin_lead_id"),
       dbi.raw("cl.metadata->>'relay_lead_id' as relay_lead_id"),
     );
   return rows.map((row) => witness('live_conversation', 'phone', row.peer, row, {
-    startedAt: ms(row.created_at), originOf: [String(row.origin_lead_id), String(row.relay_lead_id)],
+    originOf: [row.origin_lead_id, row.relay_lead_id, row.twilio_call_sid].filter(Boolean).map(String),
   }));
 }
 
@@ -217,7 +224,7 @@ async function openLeadIdentities(dbi, { peers, emails, customerIds }) {
     .whereNull('deleted_at')
     .where((same) => same
       .orWhereRaw(`${peerSql} = ANY(?)`, [peers])
-      .orWhereRaw('LOWER(TRIM(leads.email)) = ANY(?)', [emails])
+      .orWhereRaw('EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(leads.email), a.addr) > 0)', [emails])
       .orWhereIn('leads.customer_id', customerIds))
     .select('id', 'customer_id', 'email', dbi.raw(`${peerSql} as peer`));
   const owners = new Map();
@@ -262,7 +269,8 @@ async function judgeLeads(dbi, leads) {
   const idents = leads.map((lead) => {
     const customerId = lead.customer_id ?? null;
     const keys = [`phone:${usablePhoneKey(lead.phone)}`, `email:${leadEmail(lead.email)}`, `customer:${customerId}`];
-    return { id: String(lead.id), firstAt: ms(lead.first_contact_at), customerId: customerId && String(customerId), keys };
+    const origins = [lead.id, lead.twilio_call_sid].filter(Boolean).map(String);
+    return { id: String(lead.id), firstAt: ms(lead.first_contact_at), customerId: customerId && String(customerId), keys, origins };
   });
   const peers = uniq(leads.map((l) => usablePhoneKey(l.phone)));
   const emails = uniq(leads.map((l) => leadEmail(l.email)));
@@ -279,9 +287,9 @@ async function judgeLeads(dbi, leads) {
   const byKey = new Map();
   for (const w of [...texts, ...calls, ...mails, ...visits]) byKey.set(w.key, [...(byKey.get(w.key) || []), w]);
 
-  for (const { id, firstAt, customerId, keys } of idents) {
+  for (const { id, firstAt, customerId, keys, origins } of idents) {
     const mine = keys.flatMap((key) => byKey.get(key) || [])
-      .filter((w) => w.at > firstAt && w.startedAt > firstAt && !w.originOf.includes(id))
+      .filter((w) => w.at > firstAt && !origins.some((origin) => w.originOf.includes(origin)))
       .sort((a, b) => a.at - b.at);
     const skips = [];
     const usable = [];
@@ -336,7 +344,7 @@ async function runLeadContactSync(options = {}) {
   for (let page = 0; page < maxPages; page += 1) {
     const leads = await candidateLeadsQuery(dbi, now, cursor)
       .orderBy('first_contact_at', 'desc').orderBy('id', 'desc').limit(pageSize)
-      .select('id', 'customer_id', 'phone', 'email', 'first_contact_at', dbi.raw('first_contact_at::text as cursor_at'));
+      .select('id', 'customer_id', 'phone', 'email', 'twilio_call_sid', 'first_contact_at', dbi.raw('first_contact_at::text as cursor_at'));
     if (!leads.length) break;
     cursor = { at: leads[leads.length - 1].cursor_at, id: leads[leads.length - 1].id };
     if (leads.length === pageSize && page === maxPages - 1) resumeAfter = cursor;

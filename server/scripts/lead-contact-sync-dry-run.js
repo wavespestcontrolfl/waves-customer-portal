@@ -15,7 +15,7 @@ const { candidateLeadsQuery, judgeLeads, LOOKBACK_DAYS } = require('../services/
 async function main() {
   const leads = await candidateLeadsQuery(db, new Date())
     .orderBy('first_contact_at', 'desc')
-    .select('id', 'customer_id', 'phone', 'email', 'first_contact_at');
+    .select('id', 'customer_id', 'phone', 'email', 'twilio_call_sid', 'first_contact_at');
   const verdicts = await judgeLeads(db, leads);
   const wouldMove = {};
   const stay = {};

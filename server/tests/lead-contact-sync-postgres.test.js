@@ -154,6 +154,54 @@ jest.setTimeout(30000);
     expect((await read(l.id)).status).toBe('contacted');
   });
 
+  // A row a status callback inserted after hangup: created_at is the insert time, the real start is
+  // created_at minus the call's length (callStartedAtSql).
+  // Twilio's own end stamp is what makes such a row count at all (callEndedAtSql); it ended when it was inserted.
+  const delayedRow = (fields) => callRow({
+    answered_by: 'ai_agent', processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: agentVerdict,
+    metadata: JSON.stringify({ source: 'status_callback', inserted_on_status: 'completed', ended_at: fields.created_at.toISOString() }),
+    duration_seconds: 600, ...fields,
+  });
+
+  test('a call inserted after hangup that really started before first contact moves nothing', async () => {
+    const l = await lead({ first_contact_at: AT(30), created_at: AT(30) });
+    // Inserted at minute 35, 10 minutes long: it started at minute 25, before the lead's first contact.
+    await delayedRow({ created_at: AT(35), updated_at: AT(35) });
+    expect((await sync()).moved).toBe(0);
+    expect((await read(l.id)).status).toBe('new');
+  });
+
+  test('a call inserted after hangup that really started after first contact moves the lead at its real start', async () => {
+    const l = await lead({ first_contact_at: AT(30), created_at: AT(30) });
+    // Inserted at minute 50, 10 minutes long: it started at minute 40.
+    await delayedRow({ created_at: AT(50), updated_at: AT(50) });
+    expect((await sync()).byEvidence).toEqual({ live_conversation: 1 });
+    const row = await read(l.id);
+    expect(row.status).toBe('contacted');
+    expect(row.response_time_minutes).toBe(10);
+  });
+
+  test('the lead\'s own originating call sid is never its evidence', async () => {
+    const l = await lead({ twilio_call_sid: 'CA-origin' });
+    await callRow({ twilio_call_sid: 'CA-origin', answered_by: 'ai_agent', processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: agentVerdict });
+    expect((await sync()).moved).toBe(0);
+    expect((await read(l.id)).status).toBe('new');
+  });
+
+  test('another lead whose email field holds the same address in a display-name form is a shared address', async () => {
+    const a = await lead({ phone: null, email: 'pat@example.invalid' });
+    const b = await lead({ phone: null, email: 'Pat Sample <PAT@example.invalid>', first_contact_at: AT(2) });
+    await database('emails').insert({
+      id: randomUUID(), gmail_id: 'g-3', gmail_thread_id: 'th-3', from_address: 'office@example.invalid',
+      to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', label_ids: JSON.stringify(['SENT']), received_at: AT(20),
+    });
+    const result = await sync();
+    expect(result.moved).toBe(0);
+    expect(result.skipped.shared_email).toBe(2);
+    expect((await read(a.id)).status).toBe('new');
+    expect((await read(b.id)).status).toBe('new');
+  });
+
   test('the call that created the lead is not its own evidence', async () => {
     const l = await lead();
     await callRow({ processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }), metadata: JSON.stringify({ lead_id: l.id }) });
