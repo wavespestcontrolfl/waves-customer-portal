@@ -340,8 +340,12 @@ function computeForecast(input) {
   const perVisit = trailing.visits > 0 ? spend.totals.products_fuel / trailing.visits : 0;
 
   const items = (input.items || []).filter((i) => i.active !== false);
-  // A payoff plan that has ended no longer stands in for the card payments.
+  // A payoff plan stands in for the off-feed card payments from its first date on (its own payments are
+  // planned items, none after it ends: the old cards are paid). Before that date the trailing line still
+  // applies, so a plan that starts later never hides the weeks before it. An ended plan stands in for none.
   const payoffItems = items.filter((i) => i.kind === 'card_payoff' && (!i.last_date || i.last_date >= today));
+  const payoffFrom = payoffItems.length ? payoffItems.map((i) => i.first_date).sort()[0] : null;
+  const offFeedDays = (w) => (payoffFrom ? daysOfWeek(w).filter((d) => d < payoffFrom).length : w.days);
   if (!payoffItems.length && weekly.card_payments_off_feed > 0) missing.push({ kind: 'card_payoff_plan', weekly_usd: round2(weekly.card_payments_off_feed) });
 
   // Card owed today: past charges not yet paid.
@@ -392,7 +396,7 @@ function computeForecast(input) {
     const moneyOut = {
       products_fuel: perVisit * bookedVisits[w.index],
       ai_software: weekly.ai_software * frac,
-      card_payments_off_feed: payoffItems.length ? 0 : weekly.card_payments_off_feed * frac,
+      card_payments_off_feed: weekly.card_payments_off_feed * (offFeedDays(w) / 7),
       other_spending: weekly.other_spending * frac,
       card_owed: sumWeek(out.card_owed, w),
       payroll: sumWeek(out.payroll, w),

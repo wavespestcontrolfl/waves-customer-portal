@@ -141,7 +141,10 @@ describe('loadForecastInput', () => {
           visit({ id: 'old', scheduled_day: '2026-11-04' }),
         ]],
         [/AS visit_id/, [{ visit_id: 'c1', paid_day: '2026-10-22', paid_amount: 100 }]],
-        [/AS open_amount/, [{ sent_day: '2026-10-26', status: 'sent', open_amount: 40 }, { sent_day: '2026-11-05', status: 'processing', open_amount: 25 }]],
+        // open: the canonical amount due (total - credit applied - amount paid)
+        [/i\.credit_applied, i\.amount_paid/, [{ sent_day: '2026-10-26', status: 'sent', total: 60, credit_applied: 10, amount_paid: 10 }, { sent_day: '2026-11-05', status: 'processing', total: 25 }]],
+        // sent: a credit is not new money, so the invoice's value is what was left to pay
+        [/i\.credit_applied, i\.status/, [{ sent_day: '2026-10-20', total: 100, credit_applied: 20, status: 'paid', paid_day: '2026-10-25', paid_amount: 80 }]],
         [/i\.status = 'draft'/, [{ n: 2, total: 300 }]],
         [/FROM tax_filing_calendar/, [{ due_day: '2026-11-20', amount_due: null }, { due_day: '2026-12-15', amount_due: 500, amount_paid: 100 }]],
         [/WITH last AS/, [{ account_label: 'old-card', last_day: '2026-10-27', debits_30d: 900 }]],
@@ -157,6 +160,7 @@ describe('loadForecastInput', () => {
     // b3 is already invoiced: it counts once, as its invoice
     expect(input.booked).toEqual([{ day: '2026-11-05', value: 100 }, { day: '2026-11-06', value: 0 }, { day: '2026-11-12', value: 0 }]);
     expect(input.openInvoices).toEqual([{ amountUsd: 40, ageDays: 10, processing: false }, { amountUsd: 25, ageDays: 0, processing: true }]);
+    expect(input.invoiceCohort).toEqual([{ value: 80, ageDays: 16, paid: [{ lagDays: 5, amount: 80 }] }]);
     expect(input.taxRows).toEqual([{ dueDay: '2026-12-15', amountUsd: 400 }]);
     expect(input.missing).toEqual(expect.arrayContaining([
       { kind: 'payer_billed_visits', count: 1 },

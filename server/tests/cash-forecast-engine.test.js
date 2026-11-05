@@ -281,7 +281,10 @@ describe('computeForecast', () => {
     const withPlan = computeForecast(base({ bankLines: lines, items: [
       { kind: 'card_payoff', label: 'Old card', amount_cents: 50000, cadence: 'monthly', first_date: '2026-11-20', active: true },
     ] }));
-    expect(withPlan.weeks[1].money_out.card_payments_off_feed).toBe(0);
+    // the plan starts Fri Nov 20: the trailing line still covers the days before it
+    expect(withPlan.weeks[1].money_out.card_payments_off_feed).toBe(200);
+    expect(withPlan.weeks[2].money_out.card_payments_off_feed).toBeCloseTo(200 * 4 / 7, 2); // Nov 16-19
+    expect(withPlan.weeks[3].money_out.card_payments_off_feed).toBe(0);
     expect(withPlan.weeks[2].money_out.planned).toBe(500);
     expect(withPlan.missing.find((m) => m.kind === 'card_payoff_plan')).toBeUndefined();
   });

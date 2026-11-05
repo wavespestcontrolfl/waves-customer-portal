@@ -13,6 +13,7 @@ const { resolveBillingLane, stampedZeroFreeLive } = require('../billing-lane');
 const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX } = require('../no-cost-visit-types');
 const { DUES_COHORT_COLUMNS, applyDuesCohort, autopayGuard, laneGuard, monthlyDuesVerdict } = require('../monthly-dues-eligibility');
 const InvoiceService = require('../invoice');
+const { invoiceAmountDue } = require('../invoice-helpers');
 const { etDateString } = require('../../utils/datetime-et');
 const inputs = require('./inputs');
 const { _private: engine } = require('./engine');
@@ -25,6 +26,10 @@ const OPEN_INVOICE_STATUSES = ['sent', 'viewed', 'processing'];
 const ET_DAY = (col) => `to_char((${col}) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')`;
 const DAY = (col) => `to_char(${col}, 'YYYY-MM-DD')`;
 const usd = (n) => Number(n) || 0;
+// Cash an invoice brought in: the amount paid when it is stored (partial payments), else for a paid
+// invoice its total less the credit applied (a credit is not new money).
+const PAID_CASH_SQL = `CASE WHEN COALESCE(i.amount_paid, 0) > 0 THEN i.amount_paid
+  WHEN i.status = 'paid' THEN GREATEST(0, COALESCE(i.total, 0) - COALESCE(i.credit_applied, 0)) ELSE 0 END`;
 
 // The billing pages' effective visit price (admin-billing-recovery.js): the row price, else the
 // customer's per-application fee for a per-application customer. With GATE_STAMPED_ZERO_FREE on, a
@@ -72,7 +77,7 @@ async function readVisitPayments(database, visitIds) {
   return database.raw(`
     SELECT COALESCE(i.scheduled_service_id, sr.scheduled_service_id) AS visit_id,
       CASE WHEN i.paid_at IS NULL THEN NULL ELSE ${ET_DAY('i.paid_at')} END AS paid_day,
-      COALESCE(NULLIF(i.amount_paid, 0), CASE WHEN i.status = 'paid' THEN i.total END, 0) AS paid_amount
+      ${PAID_CASH_SQL} AS paid_amount
     FROM invoices i
     LEFT JOIN service_records sr ON sr.id = i.service_record_id
     WHERE COALESCE(i.scheduled_service_id, sr.scheduled_service_id) = ANY(?::uuid[])
@@ -83,9 +88,9 @@ async function readVisitPayments(database, visitIds) {
 // Sent self-pay invoices: the timing of money after an invoice goes out (open ones included, unpaid).
 async function readSentInvoices(database, { from, to }) {
   return database.raw(`
-    SELECT ${ET_DAY('i.sent_at')} AS sent_day, i.total, i.status,
+    SELECT ${ET_DAY('i.sent_at')} AS sent_day, i.total, i.credit_applied, i.status,
       CASE WHEN i.paid_at IS NULL THEN NULL ELSE ${ET_DAY('i.paid_at')} END AS paid_day,
-      COALESCE(NULLIF(i.amount_paid, 0), CASE WHEN i.status = 'paid' THEN i.total END, 0) AS paid_amount
+      ${PAID_CASH_SQL} AS paid_amount
     FROM invoices i
     WHERE i.sent_at IS NOT NULL AND i.payer_id IS NULL
       AND (i.sent_at AT TIME ZONE 'America/New_York')::date BETWEEN ?::date AND ?::date
@@ -95,8 +100,7 @@ async function readSentInvoices(database, { from, to }) {
 
 async function readOpenInvoices(database) {
   return database.raw(`
-    SELECT ${ET_DAY('COALESCE(i.sent_at, i.created_at)')} AS sent_day, i.status,
-      GREATEST(0, COALESCE(i.total, 0) - COALESCE(i.amount_paid, 0)) AS open_amount
+    SELECT ${ET_DAY('COALESCE(i.sent_at, i.created_at)')} AS sent_day, i.status, i.total, i.credit_applied, i.amount_paid
     FROM invoices i
     WHERE i.status = ANY(?::text[]) AND i.paid_at IS NULL AND i.archived_at IS NULL AND i.payer_id IS NULL`,
   [OPEN_INVOICE_STATUSES]).then((r) => r.rows);
@@ -133,7 +137,7 @@ async function readDues(database, { today, to, now }) {
 
 async function readPrepaySales(database, { from, to }) {
   const r = await database.raw(`
-    SELECT COALESCE(sum(COALESCE(NULLIF(i.amount_paid, 0), i.total)), 0) AS usd FROM invoices i
+    SELECT COALESCE(sum(${PAID_CASH_SQL}), 0) AS usd FROM invoices i
     WHERE i.status = 'paid' AND EXISTS (SELECT 1 FROM annual_prepay_terms t WHERE t.prepay_invoice_id = i.id)
       AND (i.paid_at AT TIME ZONE 'America/New_York')::date BETWEEN ?::date AND ?::date`, [from, to]);
   return usd(r.rows[0]?.usd);
@@ -311,11 +315,12 @@ async function loadForecastInput({
   if (unbilled.count) missing.push({ kind: 'completed_visits_not_billed', count: unbilled.count, usd: Math.round(unbilled.usd * 100) / 100 });
 
   const invoiceCohort = sent.map((i) => ({
-    value: usd(i.total),
+    // what the customer had to pay when it went out (the canonical amount due, before any payment)
+    value: invoiceAmountDue({ total: i.total, credit_applied: i.credit_applied }),
     ageDays: gap(i.sent_day, today),
     paid: i.paid_day && usd(i.paid_amount) > 0 ? [{ lagDays: Math.max(0, gap(i.sent_day, i.paid_day)), amount: usd(i.paid_amount) }] : [],
   }));
-  const openInvoices = open.map((i) => ({ amountUsd: usd(i.open_amount), ageDays: Math.max(0, gap(i.sent_day, today)), processing: i.status === 'processing' }));
+  const openInvoices = open.map((i) => ({ amountUsd: invoiceAmountDue(i), ageDays: Math.max(0, gap(i.sent_day, today)), processing: i.status === 'processing' }));
   if (Number(drafts.n) > 0) missing.push({ kind: 'draft_invoices', count: Number(drafts.n), usd: usd(drafts.total) });
 
   const taxOut = [];
