@@ -1,4 +1,5 @@
 // Shared delivery lifecycle for inbound SMS alerts and durable recovery.
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -104,6 +105,37 @@ async function receivedAtMs(MessageSid) {
   } catch (e) {
     return Date.now();
   }
+}
+
+// One bell row per unknown sender on a website or van-wrap tracking line (owner screenshot 2026-11-04: two texts
+// from one number rang two "New text from wavespestcontrol.com" rows four minutes apart). It is the thread row a
+// known customer's texts get (threadRefresh above): a new text rewrites it with the latest text and a running count,
+// unread again and back on top, and still pushes. Keyed on a hash of the sender's number, so the row's metadata
+// never holds the number in the clear. Still the new_lead bell (admin role only), as before. The key must never merge
+// two senders: a sender with no digits keys on its raw value, and a text with no sender at all on itself.
+const trackingThreadBellKey = (From, MessageSid) => {
+  const raw = String(From || '').trim();
+  const sender = raw.replace(/\D/g, '') || raw || `message:${MessageSid}`;
+  return `sms-tracking-thread:${crypto.createHash('sha256').update(sender).digest('hex').slice(0, 32)}`;
+};
+
+async function ringTrackingLineTextBell({ From, MessageSid, source, message }) {
+  const { triggerNotification } = require('./notification-triggers');
+  const arrivedAtMs = await receivedAtMs(MessageSid);
+  // The sender's name when one is on file for the number (owner 2026-11-04, admin-alert-names.js
+  // nameOnFileForPhone); a failed lookup rings without it.
+  const name = await require('./admin-alert-names').nameOnFileForPhone(db, From).catch(() => null);
+  return triggerNotification('new_lead', {
+    name,
+    twilioSid: MessageSid,
+    phone: From,
+    message: message || '',
+    source,
+    textCount: 1,
+    receivedAtMs: arrivedAtMs,
+    // The unknown sender's thread, named by the message (no phone in a link).
+    link: `/admin/communications?message=${encodeURIComponent(MessageSid)}`,
+  }, { dedupeKey: trackingThreadBellKey(From, MessageSid), refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) });
 }
 
 async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead, leadPreference }) {
@@ -241,4 +273,4 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
   return delivered || suppressed || alreadyRead;
 }
 
-module.exports = { ringSmsReplyBell, dispatchUnknownSenderAlert, claimUnknownSenderAlertWindow, confirmUnknownSenderAlertWindow, releaseUnknownSenderAlertClaim };
+module.exports = { ringSmsReplyBell, ringTrackingLineTextBell, dispatchUnknownSenderAlert, claimUnknownSenderAlertWindow, confirmUnknownSenderAlertWindow, releaseUnknownSenderAlertClaim };

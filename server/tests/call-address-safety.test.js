@@ -52,6 +52,14 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(deps.autocomplete).not.toHaveBeenCalled();
     expect(canAutoRoute(v2({ property: { service_address: sa }, triage_flags: ['out_of_service_area'] }), { contactPhone: ANI, addressValidation: av }).allowed).toBe(false);
   });
+  test('a street named after a state keeps the Florida hint (call 68356d3d)', async () => {
+    const sa = { street_line_1: '1234 Oregon St', city: 'Bradenton', state: 'FL', raw_text: "It's 1234, and it's Oregon Street." };
+    const lines = buildAddressLines(sa);
+    expect(lines).toEqual(['1234 Oregon St', 'Bradenton FL']);
+    const av = await validateAddress({ addressLines: lines, administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('FL');
+    expect(av.status).not.toBe('out_of_service_area');
+  });
   test('a fragment with no contrary state keeps the Florida hint', async () => {
     const av = await validateAddress({ addressLines: buildAddressLines({ street_line_1: '100 Example Street', city: 'Parrish' }), administrativeArea: 'FL' });
     expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('FL');

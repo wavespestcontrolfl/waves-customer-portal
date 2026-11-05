@@ -213,13 +213,15 @@ describe('customer_voicemail_callback trigger registry entry', () => {
     expect(built.title).toBe('Voicemail — Sam Example');
     expect(built.body).toContain('Sam Example');
     expect(built.body).toContain('WDO Inspection');
-    expect(built.body).toContain(TEST_PHONE);
+    // The whole number, written the way the office writes it (owner 2026-11-04), never the raw +1 form.
+    expect(built.body).toContain('Callback: (500) 555-0006');
+    expect(built.body).not.toContain(TEST_PHONE);
     // Voicemails render under the Calls tab — ?thread= would open the SMS
     // view instead.
     expect(built.link).toBe('/admin/communications#tab=calls');
 
     const anon = entry.build({ phone: TEST_PHONE });
-    expect(anon.title).toBe(`Voicemail — ${TEST_PHONE}`);
+    expect(anon.title).toBe('Voicemail — (500) 555-0006');
     expect(anon.link).toBe('/admin/communications#tab=calls');
   });
 

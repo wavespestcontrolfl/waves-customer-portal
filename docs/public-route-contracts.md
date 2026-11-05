@@ -4035,8 +4035,9 @@ owner-approval reply draft, which replaces the legacy AI draft for that
 message — never a send, no response change;
 unknown domain/van-tracking SMS stays unlinked in the inbox and does not
 create customer/account rows or guess a customer name from message prose.
-Substantive messages ring a per-message `new_lead` bell/push linking to the
-inbox; reactions, empty messages and courtesy-only replies do not;
+Substantive messages ring the sender's one `new_lead` bell row (keyed on a
+hash of the number; each new text rewrites it, rings it again and pushes)
+linking to the inbox; reactions, empty messages and courtesy-only replies do not;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. STOP/HELP/START handling (opt-out
 suppression + the `<Message>` confirmation TwiML) applies only to a sender

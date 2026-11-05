@@ -11,6 +11,7 @@ import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { captureNativeBadgeUpdate } from '../native/nativeBadge';
 import { UNREAD_CHANGED_EVENT } from '../hooks/useUnreadConversations';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import AuthenticatedCallAudio from './admin/AuthenticatedCallAudio';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PUSH_RECEIVED_MESSAGE = 'waves:push-received';
@@ -150,6 +151,44 @@ function SourceText({ n, type, style }) {
 // persisted id and customer bells have no done state, so neither offers it.
 function canMarkDone(n, type) {
   return type === 'admin' && n?.id != null && !String(n.id).startsWith('live:');
+}
+
+// A voicemail bell's recording (owner 2026-11-04: "a button where we can click on the voicemail and listen to it
+// within the admin section"): the call the row names (call-recording-processor.js puts its call_log id in the
+// payload), played through the admin-only audio proxy that the Calls tab uses. Shown to the admin role by the local
+// role hint (the proxy enforces it). Not on the AI-call callback (reason sandy_provider_failure): that bell is
+// raised during the call, before there is a recording.
+const CALL_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function voicemailRecordingFor(n, type) {
+  if (!canMarkDone(n, type) || n.category !== 'voicemail_callback' || staffRoleFromToken() !== 'admin') return null;
+  const meta = parsedMetadata(n);
+  const payload = meta?.triggerKey === 'customer_voicemail_callback' ? meta.payload : null;
+  if (!payload || typeof payload !== 'object' || payload.reason === 'sandy_provider_failure') return null;
+  const id = String(payload.callLogId || '');
+  return CALL_LOG_ID_RE.test(id) ? id : null;
+}
+
+// Listen: the shared call-recording player, one tap to load and play (AuthenticatedCallAudio playOnLoad), styled
+// like a row's secondary button. Its own click and key handling, never the row's (the row would open its link and
+// mark itself read).
+function VoicemailListen({ recordingId, tall, marginTop }) {
+  return (
+    <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} style={{ marginTop }}>
+      <AuthenticatedCallAudio
+        recordingId={recordingId}
+        aria-label="Voicemail"
+        loadLabel="Listen"
+        playOnLoad
+        // The player sizes its audio at 100% of this box, so the box needs a height (the Calls tab's is 32px):
+        // with none the controls collapse to nothing. The button's own height, so neither state jumps.
+        style={{ width: '100%', height: tall ? 44 : 32 }}
+        buttonStyle={{
+          padding: tall ? '0 14px' : '6px 12px', minHeight: tall ? 44 : undefined, minWidth: tall ? 44 : undefined,
+          borderRadius: 6, fontSize: 14, fontWeight: 600, background: '#FFFFFF', color: '#18181B', border: '1px solid #D4D4D8',
+        }}
+      />
+    </div>
+  );
 }
 
 // "Done": its own click and key handling, never the row's (the row would
@@ -1351,6 +1390,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                 const chip = digestKindChip(n);
                 const report = reportLinkFor(n);
                 const actions = actionsFor(n, type);
+                const voicemail = voicemailRecordingFor(n, type);
                 return (
                 <div key={n.id}
                   role={href ? 'link' : undefined}
@@ -1420,6 +1460,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                         }}>Full report</button>
                     )}
                     <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} onSend={sendRowToClaude} />
+                    {voicemail && <VoicemailListen tall recordingId={voicemail} marginTop={8} />}
                     {actions.length > 0 && <RowActions tall marginTop={8} actions={actions} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onRun={(e, a) => runAction(e, n, a)} />}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                       <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted }}>
@@ -1528,6 +1569,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                     const report = reportLinkFor(n);
                     const title = displayTitle(n);
                     const actions = actionsFor(n, type);
+                    const voicemail = voicemailRecordingFor(n, type);
                     return (
                     <div key={n.id}
                       role={href ? 'link' : undefined}
@@ -1592,6 +1634,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                             }}>Full report</button>
                         )}
                         <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} onSend={sendRowToClaude} />
+                        {voicemail && <VoicemailListen recordingId={voicemail} marginTop={6} />}
                         {actions.length > 0 && <RowActions marginTop={6} actions={actions} color={colors.text} onRun={(e, a) => runAction(e, n, a)} />}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
                           <div style={{ fontSize: 11, color: colors.muted }}>
@@ -1670,4 +1713,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor, actionsFor, customerNameFor };
+export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor, actionsFor, customerNameFor, voicemailRecordingFor };

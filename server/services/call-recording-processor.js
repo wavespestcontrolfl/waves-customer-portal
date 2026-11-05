@@ -10589,7 +10589,7 @@ function isTechFollowUpCall(call) {
 // Seeds from the V2 extraction plus one bounded model pass; a human-touched
 // row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never blocks
 // the call.
-async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration, historicalReplay = false }) {
+async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration, historicalReplay = false, automationHold = false }) {
   if (!transcription || extracted?.is_spam || !isEnabled('callCommitments')) return;
   try {
     const commitmentsStartedAt = Date.now();
@@ -10602,6 +10602,7 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
         v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
         procGeneration,
         historicalReplay,
+        automationHold,
         // GATE_CALL_APPLICANT_HANDLING: office promises on an applicant / vendor call are not customer promises
         // when the call asks no service of its own; a mixed-purpose call keeps its real service promises.
         thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)
@@ -10917,6 +10918,100 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
   await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
   logger.info(`[call-proc] Completed tech follow-up processing for ${maskSid(callSid)}: customer=${call.customer_id || null}`);
   return { success: true, callSid, customerId: call.customer_id || null, extracted, techFollowUp: true };
+}
+
+// ── Out-of-area hold ──────────────────────────────────────────────────────
+// The V2 hard veto (v2CanonicalWriteBlocked) returns before the lead pipeline, so a
+// call held ONLY because the address check put it outside the service area got no
+// label, no recorded promise and no alert (2026-11-03: a hot lead's "we'll send over
+// a quote" was never listed by the follow-up pager). When out_of_service_area is the
+// veto's only canonical-write blocker, the hold keeps three records, and nothing else:
+// the call's commitments, a disposition, and one admin alert for a hot or warm caller.
+// No customer, lead, appointment, estimate, automation, text or email is written or
+// sent. Any other blocker (spam_or_wrong_number, do_not_contact_requested), alone or
+// beside out_of_service_area, keeps today's silent return.
+const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
+
+function isOutOfAreaOnlyHold(finalFlags) {
+  const blockers = [...new Set((finalFlags || []).filter((f) => hasCanonicalWriteBlock([f])))];
+  return blockers.length === 1 && blockers[0] === 'out_of_service_area';
+}
+
+const isHotOrWarm = (extracted) => extracted?.lead_quality === 'hot' || extracted?.lead_quality === 'warm';
+
+// A lead or a quote/callback ask gets callback_task_created, anything else no_action_needed.
+function outOfAreaHoldDisposition({ extracted, v2Extraction = null, wavesPromiseRecorded = false }) {
+  const { quoteRequested, quotePromised } = resolveCallQuoteSignals(extracted || {}, v2Extraction);
+  const callbackOwed = extracted?.is_lead === true || isHotOrWarm(extracted)
+    || quoteRequested || quotePromised || wavesPromiseRecorded === true;
+  return { disposition: callbackOwed ? 'callback_task_created' : 'no_action_needed', reason: OUT_OF_AREA_HOLD_REASON };
+}
+
+// The one Leads alert for a hot or warm caller held out of area: short why, full facts in detail.
+function buildOutOfAreaHoldAlert({ call, extracted, addressValidation }) {
+  const { fitAction, tidyName, redactedWords, whyWithQuote } = require('./admin-alert-names');
+  const who = tidyName(extracted?.first_name) || 'the caller';
+  const city = tidyName(addressValidation?.normalized?.city || extracted?.city);
+  const county = tidyName(addressValidation?.county).replace(/\s+County$/i, '');
+  const place = [city, county ? `${county} County` : ''].filter(Boolean).join(', ') || 'an unknown place';
+  const asked = redactedWords(extracted?.matched_service || extracted?.requested_service || '').replace(/_/g, ' ');
+  const why = asked
+    ? whyWithQuote({ lead: `Address check says ${place}; asked about `, quote: asked, tail: '.' })
+    : `Address check says ${place}, outside our area.`;
+  return {
+    category: 'lead',
+    spec: {
+      area: 'Leads',
+      action: fitAction('Leads', who, [(n) => `check ${n}'s out-of-area hold`, (n) => `check ${n}'s area`]),
+      why,
+      severity: 'needs-you',
+      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
+      subject: { type: 'call', id: String(call.id) },
+      doneWhen: 'area_confirmed',
+      who: 'person',
+      contact: true,
+    },
+    opts: {
+      bell: true,
+      dedupeKey: `call-out-of-area:${call.id}`,
+      detail: `The address check placed the address outside the service area (${place}). ${asked ? `The caller asked about ${asked}. ` : ''}Confirm the area and follow up. No customer, lead, appointment or message was created.`,
+      metadata: { callLogId: call.id, source: 'call_out_of_area_hold' },
+    },
+  };
+}
+
+// Commitments, then the label (only under the callDispositionV1 switch), then the alert. Each step has its own try: a failure is logged
+// by code and never fails the call, which is already finalized. Sends nothing to the caller.
+async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracted, v2Result, procGeneration, addressValidation }) {
+  const failed = (step, err) => logger.warn(`[call-proc] out-of-area hold ${step} failed for ${maskSid(callSid)}: ${err?.code || err?.name || 'error'}`);
+  // automationHold: a link promise is stored office-only, so no live worker texts the caller.
+  try {
+    await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration, automationHold: true });
+  } catch (err) { failed('commitments', err); }
+  try {
+    let wavesPromiseRecorded = false;
+    try {
+      const { staleAiRowSql } = require('./call-commitments');
+      wavesPromiseRecorded = !!(await db('call_commitments')
+        .where({ call_log_id: call.id, party: 'waves' })
+        .whereIn('kind', ['callback', 'send_estimate'])
+        .whereRaw(`NOT ${staleAiRowSql('call_commitments')}`)
+        .first('id'));
+    } catch (lookupErr) { failed('promise lookup', lookupErr); }
+    const { disposition, reason } = outOfAreaHoldDisposition({
+      extracted, v2Extraction: v2Result?.status === 'valid' ? v2Result.extraction : null, wavesPromiseRecorded,
+    });
+    // Only a call with no label yet (a person's tag or a later pass wins), and only this generation.
+    if (isEnabled('callDispositionV1')) {
+      await writeCallDisposition({ callId: call.id, priorDisposition: null, priorGeneration: procGeneration, disposition, reason, callSid });
+    }
+  } catch (err) { failed('disposition', err); }
+  try {
+    if (isHotOrWarm(extracted)) {
+      const alert = buildOutOfAreaHoldAlert({ call, extracted, addressValidation });
+      await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
+    }
+  } catch (err) { failed('alert', err); }
 }
 
 const CallRecordingProcessor = {
@@ -12848,7 +12943,10 @@ const CallRecordingProcessor = {
                 .filter(Boolean).join(' ') || null;
               await triggerNotification('customer_voicemail_callback', {
                 ...alertPlan,
-                name: alertPlan.name || vmCustomerName,
+                // Last, the name on file for the number (owner 2026-11-04: estimates and leads too); a failed
+                // lookup keeps the number.
+                name: alertPlan.name || vmCustomerName
+                  || await require('./admin-alert-names').nameOnFileForPhone(db, vmAlertPhone).catch(() => null),
                 customerId: vmAlertCustomer?.id || null,
                 callLogId: call.id,
               });
@@ -12999,6 +13097,9 @@ const CallRecordingProcessor = {
     // and force-reprocessing a previously booked call under one must not
     // delete its accumulated revenue (pre-push P0 r15).
     let v2VetoDefinitiveRejection = false;
+    // The hard veto's ONLY canonical-write blocker is out_of_service_area (no spam, no
+    // do-not-contact beside it): that hold keeps the call's promises, label and one alert.
+    let v2OutOfAreaOnlyHold = false;
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
     let v2StreetLevelHold = null;
@@ -13837,6 +13938,7 @@ const CallRecordingProcessor = {
             v2RoutingBlocked = true;
             v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
             v2VetoDefinitiveRejection = (finalFlags || []).includes('spam_or_wrong_number');
+            v2OutOfAreaOnlyHold = v2CanonicalWriteBlocked && isOutOfAreaOnlyHold(finalFlags);
             logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}${v2CanonicalWriteBlocked ? ' (canonical-write veto)' : ''}`);
           } else {
             // Approved — dispatch proceeds on the AV-normalized address
@@ -14478,6 +14580,11 @@ const CallRecordingProcessor = {
         }
       }
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
+      // An out-of-area-only hold still keeps the call's promises, label and one alert
+      // (no customer, lead, appointment or message). Non-blocking.
+      if (v2OutOfAreaOnlyHold && !extracted.is_spam) {
+        await keepOutOfAreaHoldRecords({ call, callSid, transcription, extracted, v2Result, procGeneration, addressValidation: effectiveAddressValidation });
+      }
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
     }
 
@@ -25860,6 +25967,10 @@ CallRecordingProcessor._test = {
   linkedCustomerAcceptsBackfill,
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
+  isOutOfAreaOnlyHold,
+  outOfAreaHoldDisposition,
+  buildOutOfAreaHoldAlert,
+  keepOutOfAreaHoldRecords,
   recordCommitmentsStep,
   fileApplicantCareersRowStep,
   applyCallRescheduleStep,

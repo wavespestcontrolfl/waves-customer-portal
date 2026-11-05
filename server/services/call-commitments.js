@@ -1153,6 +1153,11 @@ function parseSegments(transcriptStructured) {
   } catch { return null; }
 }
 
+// Kinds whose open Waves row a live worker acts on by messaging the caller. Today only
+// send_reschedule_link (reschedule-link-promises.js stages it into the outbox and texts the caller).
+// A call held from automation stores these through asThirdPartyPromise: kind 'other', no due_at.
+const AUTOMATION_HOLD_KINDS = Object.freeze(new Set(['send_reschedule_link']));
+
 /**
  * The processor's one entry point: derive seeds, run the model pass, anchor
  * evidence, upsert under the claim fence. Never throws — a failure here
@@ -1169,6 +1174,7 @@ async function recordCallCommitments({
   runModel = true,
   historicalReplay,
   thirdPartyCall = false,
+  automationHold = false,
 } = {}) {
   const summary = { seeds: 0, model: 0, written: 0, dropped: 0, ownershipLost: false, skipped: null };
   try {
@@ -1202,8 +1208,11 @@ async function recordCallCommitments({
     const replayOmits = (item) => historicalReplay && item.kind === 'send_reschedule_link';
     const omitted = [...seeds, ...modelItems].filter(replayOmits);
     summary.omittedLinkPromises = omitted.length;
+    // A call the pipeline holds from every automation (the out-of-area hold) stores the kinds a live
+    // worker would act on as office-only promises (AUTOMATION_HOLD_KINDS); every other kind is unchanged.
+    const holdsKind = (item) => automationHold === true && AUTOMATION_HOLD_KINDS.has(item.kind);
     const items = [...seeds, ...modelItems].filter((item) => !replayOmits(item))
-      .map((item) => (thirdPartyCall === true ? asThirdPartyPromise(item) : item)).map((item) => ({
+      .map((item) => (thirdPartyCall === true || holdsKind(item) ? asThirdPartyPromise(item) : item)).map((item) => ({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
@@ -4294,6 +4303,7 @@ async function buildCallOutcomes(conn, call) {
 
 module.exports = {
   asThirdPartyPromise,
+  AUTOMATION_HOLD_KINDS,
   COMMITMENT_KINDS,
   normalizeChannel,
   normalizeKind,

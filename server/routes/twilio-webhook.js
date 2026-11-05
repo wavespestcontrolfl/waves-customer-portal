@@ -1256,21 +1256,15 @@ router.post('/sms', async (req, res) => {
     // or create the record, like every other unknown-sender thread. The
     // admin bell still fires — it replaces the owner SMS forward for
     // tracking lines (isTrackingLeadInbound below) — and links to the inbox
-    // instead of a lead record.
+    // instead of a lead record. One row per sender, which each new text
+    // rewrites (sms-reply-alert-delivery.js ringTrackingLineTextBell).
     if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer && !staffSender && !smsReaction && !courtesyOnly && (Body || inboundMedia.length)) {
       try {
-        const { triggerNotification } = require('../services/notification-triggers');
-        const source = numberConfig.domain || 'van wrap';
-        await triggerNotification('new_lead', {
-          title: `New text from ${source}`,
-          name: 'Unknown sender',
-          twilioSid: MessageSid,
-          phone: From,
-          message: Body || 'Photo',
-          source,
-          area: numberConfig.area || 'Unknown',
-          // The unknown sender's thread, named by the message (no phone in a link).
-          link: `/admin/communications?message=${encodeURIComponent(MessageSid)}`,
+        await require('../services/sms-reply-alert-delivery').ringTrackingLineTextBell({
+          From,
+          MessageSid,
+          source: numberConfig.domain || 'van wrap',
+          message: Body,
         });
       } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
     }

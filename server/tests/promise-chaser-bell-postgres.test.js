@@ -17,7 +17,7 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const { triggerNotification } = require('../services/notification-triggers');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
-const { etDateString, formatETDate, formatETTime, etParts } = require('../utils/datetime-et');
+const { etDateString, formatETDayDate, formatETTime, etParts } = require('../utils/datetime-et');
 const {
   sweepPromiseChasers, ringForCall,
 } = require('../services/promise-chaser-bell');
@@ -550,7 +550,7 @@ const OUR_NUMBER = '+19415550100';
       // started earlier — call_started_at-only sorting would have picked
       // the human one instead.
       expect(payload.commitmentId).toBe(aiCommitment.id);
-      expect(payload.when).toBe(`${formatETDate(aiCall.created_at)} ${formatETTime(aiCall.created_at)}`);
+      expect(payload.when).toBe(`${formatETDayDate(aiCall.created_at)} at ${formatETTime(aiCall.created_at)}`);
     });
 
     test('a dark-period call (the gate was off at arrival, so /voice never stamped it) inside the window never rings after re-enable', async () => {
@@ -749,8 +749,8 @@ const OUR_NUMBER = '+19415550100';
 
     expect(await sweepPromiseChasers()).toBe(1);
     const [, payload] = triggerNotification.mock.calls[0];
-    expect(payload.when).toBe(`${formatETDate(loggedAt)} ${formatETTime(loggedAt)}`);
-    expect(payload.when).not.toBe(`${formatETDate(earlier.created_at)} ${formatETTime(earlier.created_at)}`);
+    expect(payload.when).toBe(`${formatETDayDate(loggedAt)} at ${formatETTime(loggedAt)}`);
+    expect(payload.when).not.toBe(`${formatETDayDate(earlier.created_at)} at ${formatETTime(earlier.created_at)}`);
   });
 
   test("an AI-extracted commitment's alert reports the ORIGINATING call's time, not its own (later) extraction insert time (Codex #5019 r8 P2)", async () => {
@@ -766,7 +766,7 @@ const OUR_NUMBER = '+19415550100';
 
     expect(await sweepPromiseChasers()).toBe(1);
     const [, payload] = triggerNotification.mock.calls[0];
-    expect(payload.when).toBe(`${formatETDate(earlier.created_at)} ${formatETTime(earlier.created_at)}`);
+    expect(payload.when).toBe(`${formatETDayDate(earlier.created_at)} at ${formatETTime(earlier.created_at)}`);
   });
 
   test("a promise on another customer's call on the same number is excluded; an unlinked one is kept", async () => {
@@ -1364,7 +1364,7 @@ const OUR_NUMBER = '+19415550100';
       expect(opts2.dedupeKey).not.toBe(opts1.dedupeKey);
       // The renewed obligation's alert says when it was RENEWED (codex r9 P2).
       const [, payload2] = triggerNotification.mock.calls[1];
-      expect(payload2.when).toBe(`${formatETDate(renewedAt)} ${formatETTime(renewedAt)}`);
+      expect(payload2.when).toBe(`${formatETDayDate(renewedAt)} at ${formatETTime(renewedAt)}`);
     });
 
     test('repeated calls for the SAME unrenewed obligation still collapse onto one dedupeKey', async () => {

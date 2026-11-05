@@ -143,3 +143,55 @@ describe("AuthenticatedCallAudio playback handle", () => {
     play.mockRestore();
   });
 });
+
+describe("AuthenticatedCallAudio one-tap listening (playOnLoad)", () => {
+  it("asks the same mounted element to play inside the tap, plays it once loaded, and takes the caller's label and style", async () => {
+    localStorage.setItem("waves_admin_token", "staff-jwt");
+    const blob = new Blob(["audio-bytes"], { type: "audio/mpeg" });
+    let resolveFetch;
+    fetch.mockImplementation(() => new Promise((resolve) => {
+      resolveFetch = () => resolve({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(blob) });
+    }));
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+
+    const { container } = render(
+      <AuthenticatedCallAudio recordingId="RE123" aria-label="Voicemail" loadLabel="Listen" playOnLoad buttonStyle={{ fontSize: 14 }} />,
+    );
+    // Mounted from the start, hidden and with no source: nothing is downloaded before the tap.
+    const audio = container.querySelector("audio");
+    expect(audio).not.toBeVisible();
+    expect(audio.getAttribute("src")).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+
+    const button = screen.getByRole("button", { name: "Listen" });
+    expect(button).toHaveStyle({ fontSize: "14px" });
+    fireEvent.click(button);
+    // Inside the tap, before the recording arrives, that element was asked to play (iOS WebKit's rule).
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(play.mock.instances[0]).toBe(audio);
+    expect(screen.getByRole("status")).toHaveTextContent("Loading recording");
+
+    resolveFetch();
+    await waitFor(() => expect(audio.getAttribute("src")).toBe("blob:call-recording"));
+    // The same element, never remounted, now shown and played.
+    expect(container.querySelector("audio")).toBe(audio);
+    expect(audio).toBeVisible();
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(2));
+    expect(play.mock.instances[1]).toBe(audio);
+    play.mockRestore();
+  });
+
+  it("without playOnLoad mounts no audio before the load and never plays on its own", async () => {
+    localStorage.setItem("waves_admin_token", "staff-jwt");
+    const blob = new Blob(["audio-bytes"], { type: "audio/mpeg" });
+    fetch.mockResolvedValue({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(blob) });
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+
+    const { container } = render(<AuthenticatedCallAudio recordingId="RE123" />);
+    expect(container.querySelector("audio")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Load call recording" }));
+    expect(await screen.findByLabelText("Call recording")).toBeVisible();
+    expect(play).not.toHaveBeenCalled();
+    play.mockRestore();
+  });
+});

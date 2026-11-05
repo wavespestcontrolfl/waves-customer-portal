@@ -57,7 +57,10 @@ note") never stores the text, because a text can hold a code or a word that open
 screen catches every form; the bell list reads it from the text itself while it serves the list
 (`withTextNoteSources` in `server/services/sms-operational-actions.js`, admin role only, masked
 the same way) and the bell shows it in quotes as `source_text`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
-long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
+long name inside the 60-character headline; `whyWithQuote` budgets the quote; `nameOnFileForPhone` names the
+person behind a number with no customer link: the customer records on it, then estimates, then leads, only when
+they agree on one person. The promise chaser, a text to a website line and a voicemail use it; owner 2026-10-21 and
+2026-11-04, "it should be the name of the person rather than just the number, if possible, if we have it on file"). Where an
 alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
 
 **The bell names the customer and says what to do** (owner 2026-11-02, `GATE_ALERT_EXPLAINER`, admin logins
@@ -207,6 +210,14 @@ Kinds today:
   The owner's own word list sends no bell. It sends nothing to a customer and moves no money; it changes where the ad
   can show, and **Undo** is on the Ads page.
 
+**Listen on a voicemail** (owner 2026-11-04: "for voicemails, can we have a button where we can click on the
+voicemail and listen to it within the admin section"). A voicemail row (`customer_voicemail_callback`; not the AI-call
+callback, `reason` `sandy_provider_failure`, raised before any recording exists) shows **Listen** above its buttons, for
+the admin role. One tap loads the recording of the call the row names (`payload.callLogId`) through the admin-only audio
+proxy the Calls tab uses (`GET /api/admin/call-recordings/audio/:id`) and plays it in the bell
+(`AuthenticatedCallAudio` with `playOnLoad`). It is not a button kind: it runs no server step, changes nothing on the
+row and never opens it; the row closes by its own done-when as before.
+
 ## 3. Never in a headline or a why
 
 Timestamps and ISO dates, UUIDs and hashes, table and column names, `GATE_*` and other
@@ -233,6 +244,14 @@ customer's message by this rule.
    text rewrites it (latest text as the body, "3 texts from Name" in the title, unread,
    moved to the top) and still pushes; the count restarts once the row was read or done.
    The link keeps its `?thread=<customerId>` prefix, which the thread-read matchers use.
+   A number with no customer record texting a website or van-wrap line is one subject too
+   (owner screenshot 2026-11-04: two texts from one number rang two rows): its texts share
+   one `new_lead` row (`dedupeKey` `sms-tracking-thread:<hash of the number>`, the same
+   refresh, `ringTrackingLineTextBell` in `server/services/sms-reply-alert-delivery.js`),
+   "2 texts from wavespestcontrol.com" in the title and the latest text quoted in the why,
+   masked like every bell body, then the masked number; with a name on file for the number
+   (`nameOnFileForPhone`), the name leads the title and the why ends "via <the line>".
+   Its link and Call follow the latest text.
    A standing backlog (overdue promises past five) is a count on its page, never a bell:
    its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
    Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
@@ -243,7 +262,8 @@ customer's message by this rule.
    for the customer-contact bells (owner 2026-10-24: "most of these should close
    automatically ... text sent, agent confirms resolved, appt booked, rescheduled").
    A customer's text, voicemail callback request, email or new lead closes once
-   a person answered it (a missed-call bell is closed by `server/services/missed-call-bell.js`,
+   a person answered it (a text to a website or van-wrap line from a number with no customer
+   record too, judged by that text's sender number: owner 2026-11-04, "D") (a missed-call bell is closed by `server/services/missed-call-bell.js`,
    its one owner, on the same facts: a person's text, a booked visit, a handed-off quote, beside
    its own called-back proof), judged only by what happened AFTER the text, call or email the bell
    is about, and only by the repo's shared witnesses: the Messages "needs a reply" reader
