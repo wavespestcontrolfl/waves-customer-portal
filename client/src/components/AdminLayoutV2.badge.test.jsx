@@ -3,15 +3,20 @@
 // the destination stays the inbox.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminLayoutV2 from "./AdminLayoutV2";
 import { adminFetch } from "../utils/admin-fetch";
 
-const unread = vi.hoisted(() => ({ value: 0 }));
+const unread = vi.hoisted(() => ({ value: 0, enabledArgs: [] }));
 const mobile = vi.hoisted(() => ({ value: false }));
-vi.mock("../hooks/useUnreadConversations", () => ({ default: () => unread.value }));
+vi.mock("../hooks/useUnreadConversations", () => ({
+  default: (enabled) => {
+    unread.enabledArgs.push(enabled);
+    return unread.value;
+  },
+}));
 vi.mock("../hooks/useIsMobile", () => ({ default: () => mobile.value }));
 vi.mock("../hooks/useFeatureFlag", () => ({
   refetchFlags: vi.fn(() => Promise.resolve()),
@@ -61,7 +66,14 @@ describe("AdminLayoutV2 Messages badge", () => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
     unread.value = 0;
+    unread.enabledArgs = [];
     mobile.value = false;
+  });
+
+  it("polls the unread count for a technician, whose count the server scopes to its own customers", async () => {
+    adminFetch.mockResolvedValue({ id: 2, name: "Tech", role: "technician" });
+    mount();
+    await waitFor(() => expect(unread.enabledArgs).toContain(true));
   });
 
   it("is hidden at zero", async () => {

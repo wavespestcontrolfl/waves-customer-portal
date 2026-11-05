@@ -44,6 +44,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/communications/send-prep` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
 | POST | `/api/admin/communications/sms` | admin-communications |
+| GET | `/api/admin/communications/unread-count` | admin-communications |
 | GET | `/api/admin/consultations/:scheduledServiceId/estimate` | admin-consultations |
 | GET | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
 | POST | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
@@ -157,6 +158,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/inventory/waveguard-forecast` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/waveguard-forecast/:productId/restock-request` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/:id` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/invoices/:id/charge-card` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/invoices/:id/charge-card-quote` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/stats` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/kb` | admin-kb |
@@ -355,6 +357,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/tech/timetracking/end-break` | tech-timetracking |
 | POST | `/api/tech/timetracking/end-job` | tech-timetracking |
 | GET | `/api/tech/timetracking/history` | tech-timetracking |
+| GET | `/api/tech/timetracking/my-hours` | tech-timetracking |
 | POST | `/api/tech/timetracking/no-lunch` | tech-timetracking |
 | GET | `/api/tech/timetracking/pending-signoff` | tech-timetracking |
 | POST | `/api/tech/timetracking/sign-week` | tech-timetracking |

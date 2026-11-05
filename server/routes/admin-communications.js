@@ -2592,18 +2592,34 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Shared inbox count; Customer 360 may scope it to the selected customer.
-router.get('/unread-count', requireAdmin, async (req, res, next) => {
+// A technician's Messages badge: the same needs-a-reply count, over texts from the customers on its own route
+// only. A text from a number that matches no customer is office work and never counts.
+async function technicianUnreadCount(req, customerId) {
+  const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
+  const owned = new Set((await technicianCustomerIdsSubquery(req, db)).map((row) => row.customer_id));
+  const rows = (await loadPendingSmsConversations({
+    excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE,
+  })).filter((row) => row.customer_id && owned.has(row.customer_id));
+  return { conversations: new Set(rows.map((row) => row.peer)).size, messages: rows.length };
+}
+
+// Shared inbox count; Customer 360 may scope it to the selected customer. A technician gets the count for its own
+// customers only (Messages badge).
+router.get('/unread-count', async (req, res, next) => {
   try {
     const { customerId } = req.query;
     if (customerId !== undefined && (typeof customerId !== 'string' || !UUID_RE.test(customerId))) {
       return res.status(400).json({ error: 'Invalid customer id' });
     }
+    if (isTechnicianRequest(req)) {
+      if (customerId && !(await technicianCustomerGuard(req, res, customerId))) return undefined;
+      return res.json(await technicianUnreadCount(req, customerId));
+    }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-    res.json(await countUnreadInboundSms({
+    return res.json(await countUnreadInboundSms({
       excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
     }));
-  } catch (err) { next(err); }
+  } catch (err) { return next(err); }
 });
 
 // POST /api/admin/communications/messages/:id/like — the office's like on a

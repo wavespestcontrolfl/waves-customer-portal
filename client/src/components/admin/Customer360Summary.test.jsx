@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
-// Latest communication card (tech portal gaps audit, fix 2): a non-admin never
-// loads message history, so the card says it is admin-only instead of the
-// retry hint, which cannot help.
+// Latest communication card: a technician's thread loads from the SMS log (its own customers only), so the card
+// shows the latest text like an admin's. Access notes: a technician is pointed to the visit card.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
@@ -35,11 +34,14 @@ function renderSummary(props) {
 }
 
 describe("Customer360Summary latest communication", () => {
-  it("tells a non-admin the history is admin-only, with no retry hint", () => {
-    renderSummary({ isAdmin: false, commsError: "Message history requires admin access" });
+  it("shows a non-admin the latest text, as the technician thread now loads", () => {
+    renderSummary({
+      isAdmin: false,
+      comms: [{ id: "m1", channel: "sms", direction: "inbound", body: "Gate is open", createdAt: "2026-11-03T15:00:00Z" }],
+    });
 
-    expect(screen.getByText("Message history requires admin access.")).toBeInTheDocument();
-    expect(screen.queryByText(/Communication history is unavailable/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Message history requires admin access.")).not.toBeInTheDocument();
+    expect(screen.getByText("Gate is open")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open conversation" })).toBeInTheDocument();
   });
 
@@ -49,6 +51,20 @@ describe("Customer360Summary latest communication", () => {
     expect(
       screen.getByText("Communication history is unavailable. Open the conversation to retry."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Message history requires admin access.")).not.toBeInTheDocument();
+  });
+});
+
+describe("Customer360Summary access notes", () => {
+  it("points a technician to the visit card instead of claiming no instructions exist", () => {
+    renderSummary({ isAdmin: false });
+
+    expect(screen.queryByText("No access instructions recorded.")).not.toBeInTheDocument();
+    expect(screen.getByText(/show on the visit card on the day of service/)).toBeInTheDocument();
+  });
+
+  it("keeps the empty-state line for an admin", () => {
+    renderSummary({ isAdmin: true });
+
+    expect(screen.getByText("No access instructions recorded.")).toBeInTheDocument();
   });
 });

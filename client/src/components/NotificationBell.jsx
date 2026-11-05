@@ -32,6 +32,16 @@ function staffRoleFromToken() {
   }
 }
 
+// Where the bell's "Notification settings" link goes, by staff role. The admin
+// role's per-event toggles live on Communications → Notifications, a tab hidden
+// from non-admins. A technician's own list (only the alert types it can
+// receive) is on Today → More (owner 2026-11-04). No link for a customer bell.
+function notificationSettingsHref(type) {
+  const role = type === 'admin' ? staffRoleFromToken() : null;
+  if (role === 'admin') return '/admin/communications#tab=notifications';
+  return role === 'technician' ? '/admin/today/more#notifications' : null;
+}
+
 // Mirror a server-confirmed unread count onto the home-screen app icon
 // (Badging API — iOS 16.4+ installed PWAs; no-op elsewhere). Only called
 // with counts the server returned or accepted a read-write for, so an
@@ -1217,13 +1227,15 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     </div>
   );
 
-  // Admin ROLE only (AdminLayoutV2 mounts this bell for technicians too, still
-  // as type 'admin'): the per-event bell/push toggles live on Settings →
+  // AdminLayoutV2 mounts this bell for technicians too, still as type 'admin'.
+  // The admin role's per-event bell/push toggles live on Settings →
   // Notifications, a tab CommunicationsPageV2 hides from non-admins, and it
-  // reads the hash as #tab=<name>.
-  const settingsLink = type === 'admin' && staffRoleFromToken() === 'admin' && (
+  // reads the hash as #tab=<name>. A technician's own list (only the alert
+  // types it can receive) is on Today → More (owner 2026-11-04).
+  const settingsHref = notificationSettingsHref(type);
+  const settingsLink = settingsHref && (
     <div style={{ padding: '12px 20px 16px', textAlign: 'center' }}>
-      <a href="/admin/communications#tab=notifications" style={{ color: colors.teal, fontSize: 14, fontWeight: 500, textDecoration: 'none' }}>
+      <a href={settingsHref} style={{ color: colors.teal, fontSize: 14, fontWeight: 500, textDecoration: 'none' }}>
         Notification settings →
       </a>
     </div>

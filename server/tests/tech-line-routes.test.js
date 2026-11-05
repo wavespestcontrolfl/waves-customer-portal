@@ -9,7 +9,7 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
-jest.mock('../services/tech-line', () => ({ techLineContext: jest.fn() }));
+jest.mock('../services/tech-line', () => ({ techLineContext: jest.fn(), TEXT_CARD_TYPE: 'tech_line_sms' }));
 jest.mock('../services/call-bridge', () => ({
   placeBridgeCall: jest.fn(async () => ({ callSid: 'CA-1', callLogId: 'log-1' })),
   activeBridgeCall: jest.fn(async () => null),
@@ -64,13 +64,17 @@ async function call(method, path, req) {
 }
 const chains = {};
 const CLAIM_SQL = /INSERT INTO sms_send_claims/;
-function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' } } = {}) {
+function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' }, notice = null } = {}) {
   for (const k of Object.keys(chains)) delete chains[k];
   db.mockImplementation((table) => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.whereNull = jest.fn(() => chain);
-    chain.first = jest.fn(async () => (table === 'scheduled_services' ? visit : customer));
+    chain.first = jest.fn(async () => {
+      if (table === 'scheduled_services') return visit;
+      if (table === 'tech_notifications') return notice;
+      return customer;
+    });
     chain.del = jest.fn(async () => 1);
     chain.catch = jest.fn(() => undefined);
     chains[table] = chain;
@@ -291,6 +295,42 @@ describe('POST /sms', () => {
     sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit down'), { providerOutcome: { sent: true, providerMessageId: 'gate-blocked' } }));
     await expect(call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } })).rejects.toMatchObject({ statusCode: 500 });
     expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: false }));
+  });
+
+  // Reply on a Today text card (TechNoticeFeed): the card stays until "Got it", so the send checks
+  // again that the phone on file is still the number that texted (pre-push audit P1).
+  describe('replyToNoticeId', () => {
+    const NOTICE = '33333333-3333-4333-8333-333333333333';
+    const card = (payload = {}) => ({ payload: JSON.stringify({ reply_visit_id: VISIT, from: '+19415550100', ...payload }) });
+    const reply = (replyToNoticeId) => call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way.', replyToNoticeId } });
+
+    test('the tech\'s own card for this visit, its sender still the phone on file: the text goes out', async () => {
+      primeVisit({ notice: card() });
+      const r = await reply(NOTICE);
+      expect(r.statusCode).toBe(200);
+      expect(chains.tech_notifications.where).toHaveBeenCalledWith({ id: NOTICE, technician_id: 'tech-1', type: 'tech_line_sms' });
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415550100' }));
+    });
+
+    test.each([
+      ['the phone on file changed since the text', card({ from: '+19415550199' })],
+      ['the card names another visit', card({ reply_visit_id: '44444444-4444-4444-8444-444444444444' })],
+      ['no such card of this technician', null],
+    ])('%s: 409 REPLY_SENDER_CHANGED before any claim, nothing sent', async (_label, notice) => {
+      primeVisit({ notice });
+      const r = await reply(NOTICE);
+      expect(r.statusCode).toBe(409);
+      expect(r.body).toMatchObject({ code: 'REPLY_SENDER_CHANGED' });
+      expect(db.raw).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a notice id that is not a UUID: 400, nothing sent', async () => {
+      primeVisit({ notice: card() });
+      const r = await reply('n-1');
+      expect(r.statusCode).toBe(400);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
   });
 
   test('a visit on another tech\'s route is refused; an admin may text any visit', async () => {

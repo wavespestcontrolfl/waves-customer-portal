@@ -5,7 +5,8 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled, accountSavedProperties } = require('../services/account-properties');
 const PropertyTexts = require('../services/property-notification-prefs');
-const { gateEnvValue } = require('../config/feature-gates');
+const rateLimit = require('express-rate-limit');
+const { gateEnvValue, appFirstAnyDeviceLive, portalEmailResubscribeLive } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -166,9 +167,17 @@ const CHANNEL_DB_COLUMNS = [
   // owner's explicit Text choice.
   'service_reminder_72h_channel_explicit',
   'service_reminder_24h_channel',
+  // Explicit-Text markers for the routed notices (GATE_APP_FIRST_ANY_DEVICE,
+  // owner 2026-11-04). Like the 72 hour stamp they travel WITH their channel to
+  // the primary-profile row, where the routing reads both. The receipt marker
+  // is per charged row, like payment_receipt_channel, so it is not listed.
+  'service_reminder_24h_channel_explicit',
   'en_route_channel',
+  'en_route_channel_explicit',
   'tech_arrived_channel',
+  'tech_arrived_channel_explicit',
   'service_complete_channel',
+  'service_complete_channel_explicit',
   'push_enabled',
 ];
 
@@ -197,6 +206,18 @@ const PREF_SELECT = [
   'billing_channel',
   'payment_receipt_channel',
 ];
+
+// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04): the routed notices go to a
+// customer's app unless the customer chose Text. A stored 'sms' is a choice only
+// when its marker is true; the seeded default is not. key -> [column, marker].
+const APP_FIRST_CHOICE_COLUMNS = {
+  serviceReminder72hChannel: ['service_reminder_72h_channel', 'service_reminder_72h_channel_explicit'],
+  serviceReminder24hChannel: ['service_reminder_24h_channel', 'service_reminder_24h_channel_explicit'],
+  enRouteChannel: ['en_route_channel', 'en_route_channel_explicit'],
+  techArrivedChannel: ['tech_arrived_channel', 'tech_arrived_channel_explicit'],
+  serviceCompleteChannel: ['service_complete_channel', 'service_complete_channel_explicit'],
+  paymentConfirmationChannel: ['payment_receipt_channel', 'payment_receipt_channel_explicit'],
+};
 
 function channelValue(value, appPreferences = false) {
   return value === 'push' && appPreferences ? 'push' : CHANNEL_VALUES.includes(value) ? value : 'sms';
@@ -263,7 +284,30 @@ function comparableEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-function notificationPrefsDbUpdates(updates = {}, existing = {}) {
+// What the settings page shows for a receipt channel: the stored value, or App
+// while the untouched Text default is displayed as App (appShown).
+function shownReceiptChannel(existing, appShown) {
+  const stored = channelValue(existing.payment_receipt_channel, true);
+  return appShown && stored === 'sms' && existing.payment_receipt_channel_explicit !== true ? 'push' : stored;
+}
+
+// Marks the routed notices a customer wrote as explicit choices, Text included
+// (GATE_APP_FIRST_ANY_DEVICE: only the customer switches back to text). The
+// receipt choice is per row and its legacy form is echoed by a full billing
+// save, so an echo of what the page showed is not a choice.
+function explicitChoiceStamps(updates, existing, opts) {
+  const stamps = {};
+  for (const key of ['serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel']) {
+    if (updates[key] !== undefined) stamps[APP_FIRST_CHOICE_COLUMNS[key][1]] = true;
+  }
+  if (updates.paymentConfirmationChannel !== undefined
+    && updates.paymentConfirmationChannel !== shownReceiptChannel(existing, opts?.appShown === true)) {
+    stamps.payment_receipt_channel_explicit = true;
+  }
+  return stamps;
+}
+
+function notificationPrefsDbUpdates(updates = {}, existing = {}, opts) {
   const dbUpdates = {};
   for (const [key, field] of Object.entries(DB_FIELD_BY_PREF)) {
     if (['seasonalTips', 'billingEmail', 'billingContactName'].includes(key) || updates[key] === undefined) continue;
@@ -312,6 +356,7 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
     // flips is exactly the opt-out this exists to honor.
     dbUpdates.service_reminder_72h_channel_explicit = true;
   }
+  Object.assign(dbUpdates, explicitChoiceStamps(updates, existing, opts));
   // A full preference round trip may echo the default Email value. Only a
   // changed request channel proves a choice; unrelated saves keep provenance.
   if (updates.requestChannel !== undefined && updates.requestChannel !== (existing.request_channel || 'email')) {
@@ -482,6 +527,71 @@ async function ensurePrefs(customerId) {
 }
 
 
+// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04): the settings page shows App for
+// a routed notice the customer never chose Text for, once the account holder
+// has the phone app, because that is where the notice goes. It shows only where
+// the page can render App (appPreferences), never to a contact session, and
+// fails closed: any doubt shows the stored value.
+async function appFirstDisplayActive(req) {
+  if (req.contactSession || !appFirstAnyDeviceLive() || !appPreferencesAvailable(req)
+    || !gateEnvValue('GATE_PUSH_CHANNEL_ROUTING')) return false;
+  try {
+    const status = await require('../services/push-notifications').customerStatus(req.customerId, db, { withReachable: true });
+    return status.enabled === true && status.reachable === true;
+  } catch {
+    return false;
+  }
+}
+
+function withAppFirstDisplay(payload, channelPrefs, prefs) {
+  const shown = { ...payload };
+  for (const [key, [column, marker]] of Object.entries(APP_FIRST_CHOICE_COLUMNS)) {
+    const owner = column === 'payment_receipt_channel' ? prefs : channelPrefs;
+    if (shown[key] === 'sms' && owner?.[marker] !== true) shown[key] = 'push';
+  }
+  return shown;
+}
+
+// Builds on appFirstDisplayActive: while the page shows App for an untouched
+// Text default, a save that echoes that App back is not a choice. Storing it
+// would also need a fresh device (409 for a phone last seen weeks ago) and would
+// pin the customer to App. The echoed key is dropped; the notice keeps routing
+// to the app by default. Returns whether the page was showing App for this save.
+async function settleShownAppChoices(req, updates, existing) {
+  const keys = Object.keys(APP_FIRST_CHOICE_COLUMNS).filter((key) => updates[key] !== undefined);
+  if (!keys.length || !(await appFirstDisplayActive(req))) return false;
+  const echoed = keys.filter((key) => updates[key] === 'push');
+  if (echoed.length) {
+    const primary = await resolvePrimaryProfileId(req);
+    const channelPrefs = String(primary) === String(req.customerId) ? existing : await ensurePrefs(primary);
+    for (const key of echoed) {
+      const [column, marker] = APP_FIRST_CHOICE_COLUMNS[key];
+      const owner = column === 'payment_receipt_channel' ? existing : channelPrefs;
+      if (channelValue(owner?.[column], true) === 'sms' && owner?.[marker] !== true) delete updates[key];
+    }
+  }
+  return true;
+}
+
+// GATE_PORTAL_EMAIL_RESUBSCRIBE: the holder's own address on file, for the "Turn emails
+// back on" flow. The app never releases an unsubscribe itself: it can only ask for one
+// confirmation email to this address (POST /email-resubscribe below). Contacts are out.
+async function holderEmailForResubscribe(customerId) {
+  const row = await db('customers').where({ id: customerId }).first('email', 'first_name');
+  return deliverableEmail(row?.email) ? { email: String(row.email).trim(), firstName: row.first_name || '' } : null;
+}
+
+// Gate off, a contact session, or no deliverable address: the field is absent.
+async function emailResubscribeField(req) {
+  if (!portalEmailResubscribeLive() || req.contactSession) return null;
+  try {
+    const holder = await holderEmailForResubscribe(req.customerId);
+    return holder ? await require('../services/email-resubscribe').resubscribeStatus(holder.email, { dbh: db }) : null;
+  } catch {
+    return null; // a read problem must not fail the whole preferences screen
+  }
+}
+
 // Build the account-level preferences payload: per-property toggles/contacts
 // come from the current customer; delivery channels come from the account's
 // primary profile.
@@ -491,7 +601,8 @@ async function loadPreferencePayload(req) {
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
   const accountHasEmail = await accountEmailAvailable(req.customerId, primaryId);
   const billingHasEmail = await customerEmailAvailable(req.customerId) || deliverableEmail(prefs.billing_email);
-  return {
+  const emailResubscribe = await emailResubscribeField(req);
+  const payload = {
     ...preferencePayload({
       ...prefs,
       appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
@@ -507,7 +618,10 @@ async function loadPreferencePayload(req) {
     // Email/Both offer keys on the ACCOUNT having an address — not on the
     // currently-selected property row alone.
     channelEmailAvailable: accountHasEmail,
+    // Never changes emailEnabled; absent unless the holder's address carries a customer unsubscribe.
+    ...(emailResubscribe ? { emailResubscribe } : {}),
   };
+  return await appFirstDisplayActive(req) ? withAppFirstDisplay(payload, channelPrefs, prefs) : payload;
 }
 
 function deliverableEmail(value) {
@@ -633,6 +747,41 @@ router.get('/preferences', async (req, res, next) => {
     res.json(await loadPreferencePayload(req));
   } catch (err) {
     next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/notifications/email-resubscribe — GATE_PORTAL_EMAIL_RESUBSCRIBE
+// The account holder asks for ONE "Turn Waves emails back on?" email to their own
+// address on file. Only a click on its button (public-email-resubscribe.js) undoes
+// the unsubscribe. Answers { state: 'not_paused' | 'sent' | 'failed' }; 'sent' carries
+// maskedEmail and sentAt. At most one email per address per 24 h.
+// =========================================================================
+const emailResubscribeLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many requests. Try again in a few minutes.' },
+});
+
+router.post('/email-resubscribe', (req, res, next) => {
+  if (!portalEmailResubscribeLive()) return res.status(404).json({ state: 'off' });
+  if (req.contactSession) return res.status(403).json({ error: 'Account holders only', code: 'HOLDER_SESSION_ONLY' });
+  return next();
+}, emailResubscribeLimiter, async (req, res, next) => {
+  try {
+    const holder = await holderEmailForResubscribe(req.customerId);
+    if (!holder) return res.json({ state: 'not_paused' });
+    return res.json(await require('../services/email-resubscribe').requestResubscribeEmail({
+      customerId: req.customerId, email: holder.email, firstName: holder.firstName,
+    }, { dbh: db }));
+  } catch (err) {
+    // A database error carries the SQL with the address binding, and the shared error
+    // middleware logs message and stack: log the error word only and answer here.
+    logger.error(`[email-resubscribe] request failed (${require('../services/email-resubscribe').errorWord(err)})`);
+    return res.status(500).json({ state: 'failed' });
   }
 });
 
@@ -1007,7 +1156,8 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     const existing = await ensurePrefs(req.customerId);
-    const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});
+    const appShown = await settleShownAppChoices(req, updates, existing);
+    const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {}, { appShown });
 
     // Delivery channels are account-level — persist them on the primary profile
     // so the choice is honored no matter which property the customer is viewing.
@@ -1472,6 +1622,7 @@ router._private = {
   serviceContactsRequireConsent,
   normalizeContactInput,
   loadPreferencePayload,
+  settleShownAppChoices,
   accountEmailAvailable,
   customerEmailAvailable,
   CHANNEL_DB_COLUMNS,
