@@ -391,6 +391,21 @@ describe('calls', () => {
     expect(callWheres.some(([, args]) => args[0].direction === 'inbound')).toBe(true);
   });
 
+  test('skipCalls (a technician caller): no call is read, texts and emails stay, call-sourced booking words go', async () => {
+    const opts = {
+      visit: baseVisit({ customer_request: 'Ants are back in the kitchen.', customer_request_source: 'call' }),
+      calls: [v2Call('c1', 'There are ants all over the kitchen counter')],
+      sms: [sms('s1', 'The roaches are in the garage too')],
+    };
+    const knex = fakeKnex(opts);
+    const { items } = await gatherReserviceAsks('visit-1', { knex, now: NOW, skipCalls: true });
+    expect(items.map((item) => item.source)).toEqual(['text']);
+    expect(knex.seen).not.toContain('call_log');
+    // Without the option (the office and the completion freeze) the same visit still carries both call items.
+    const all = await gather(opts);
+    expect(all.items.map((item) => item.source).sort()).toEqual(['call', 'call', 'text']);
+  });
+
   test('callDay uses the Eastern calendar day', () => {
     expect(_test.callDay('2026-10-26T01:30:00Z')).toBe('Oct 25');
     expect(_test.callDay('2026-10-26T12:00:00Z')).toBe('Oct 26');

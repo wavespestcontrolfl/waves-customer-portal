@@ -115,7 +115,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/dispatch/recap-preview` | admin-dispatch |
 | PUT | `/api/admin/dispatch/reorder/bulk` | admin-dispatch |
 | POST | `/api/admin/dispatch/slot-check` | admin-dispatch |
-| GET | `/api/admin/dispatch/weather/tomorrow` | admin-dispatch |
 | GET | `/api/admin/drafts/:id` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/drafts/stats` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/equipment-maintenance` | admin-equipment-maintenance |

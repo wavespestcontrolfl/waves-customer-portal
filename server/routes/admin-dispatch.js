@@ -4701,8 +4701,32 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
 // Warn-only + read-only: none of these surfaces disable saving on this
 // data. Always on — no gate. Validation (cap 25, YYYY-MM-DD dates, HH:MM
 // windows) lives in checkSlots; !ok maps to 400 here.
+//
+// GATE_TECH_LOGIN_PRIVACY on, technician caller: a target's serviceId must be
+// the caller's own visit and its technicianId the caller's own id (or absent),
+// else the arrival check would describe another route's stops (audit A12).
+// Refused like router.param('serviceId'): 404 for a missing visit, 403
+// service_not_assigned for one that is not the caller's. Window-only occupancy
+// (no ids) stays. Admin callers and the gate off: unchanged.
+async function foreignSlotCheckRefusal(req) {
+  if (!isTechnicianRequest(req) || require('../config/feature-gates').techLoginPrivacyLive?.() !== true) return null;
+  const { isUuid } = require('../services/reservice-office-request');
+  const targets = Array.isArray(req.body?.targets) ? req.body.targets : [];
+  const notOwn = { status: 403, body: { error: 'Not assigned to this service', code: 'service_not_assigned' } };
+  if (targets.some((t) => t?.technicianId != null && String(t.technicianId) !== String(req.technicianId))) return notOwn;
+  const ids = [...new Set(targets.map((t) => t?.serviceId).filter((id) => typeof id === 'string' && isUuid(id)))];
+  if (!ids.length) return null;
+  const rows = await db('scheduled_services')
+    .whereIn('id', ids)
+    .select('id', 'technician_id', 'status', 'scheduled_date');
+  if (rows.length < ids.length) return { status: 404, body: { error: 'Service not found' } };
+  return rows.every((row) => technicianVisitRowInScope(req, row)) ? null : notOwn;
+}
+
 router.post('/slot-check', async (req, res, next) => {
   try {
+    const refusal = await foreignSlotCheckRefusal(req);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
     const RainOut = require('../services/rain-out');
     const result = await RainOut.checkSlots({
       targets: req.body?.targets,
@@ -4778,7 +4802,12 @@ router.get('/:reserviceAsksServiceId/reservice-asks', async (req, res, next) => 
     }
     req.params.serviceId = id;
     if (!(await assertRecapOwnership(req, res))) return;
-    const asks = await require('../services/reservice-asks').gatherReserviceAsks(req.params.serviceId);
+    // Owner ruling D1 A (2026-11-04): no call words on a technician screen, so the
+    // call channel is left out for a technician caller. Texts and emails stay.
+    const asks = await require('../services/reservice-asks').gatherReserviceAsks(
+      req.params.serviceId,
+      ...(req.techRole === 'admin' ? [] : [{ skipCalls: true }])
+    );
     if (!asks.ok) {
       const status = asks.reason === 'not_reservice' ? 409 : recapStatusForReason(asks.reason);
       return res.status(status).json({ error: asks.reason, code: asks.reason });
@@ -6685,7 +6714,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/weather/tomorrow
-router.get('/weather/tomorrow', async (req, res, next) => {
+// GATE_TECH_LOGIN_PRIVACY on: office only. The analysis lists every visit booked
+// tomorrow with customer name, phone and tier, and no technician screen calls it
+// (audit A1). A technician gets requireAdmin's refusal; gate off: unchanged.
+router.get('/weather/tomorrow', (req, res, next) => {
+  if (req.techRole !== 'admin' && require('../config/feature-gates').techLoginPrivacyLive?.() === true) {
+    return requireAdmin(req, res, next);
+  }
+  return next();
+}, async (req, res, next) => {
   try {
     const analysis = await ForecastAnalyzer.analyzeTomorrow();
     res.json(analysis);

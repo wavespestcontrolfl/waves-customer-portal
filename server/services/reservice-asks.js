@@ -352,7 +352,10 @@ function dedupeItems(items, bookingId) {
   });
 }
 
-async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date() } = {}) {
+// `skipCalls` (the technician's route, owner ruling D1 A 2026-11-04: no call words on a technician screen): the
+// call channel is not read and booking words that came from a call are dropped. Texts and emails stay. Left off,
+// the result is unchanged (the completion freeze reads it that way).
+async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date(), skipCalls = false } = {}) {
   const visit = await readVisit(knex, scheduledServiceId);
   if (!visit) return { ok: false, reason: 'not_found' };
   if (!isReserviceVisit(visit)) return { ok: false, reason: 'not_reservice' };
@@ -363,7 +366,8 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
   const anchor = Number.isNaN(bookedAt.getTime()) ? to : bookedAt;
   const window = { from: new Date(anchor.getTime() - ASKS_LOOKBACK_DAYS * DAY_MS), to };
 
-  const booking = bookingWords(visit, lane);
+  const allBooking = bookingWords(visit, lane);
+  const booking = skipCalls && allBooking?.source === 'call' ? null : allBooking;
   const bookingId = `booking:${visit.id}`;
   const bookingItem = booking ? buildItem({ id: bookingId, at: anchor, ...booking }) : null;
   // A text that repeats the booking words (before or after the scrub) is the
@@ -373,7 +377,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
   const customerId = visit.customer_id;
   const channels = customerId ? await Promise.all([
     safeChannel('sms', () => readTexts(knex, customerId, window, bookingKeys)),
-    safeChannel('call', () => readCalls(knex, customerId, window)),
+    ...(skipCalls ? [] : [safeChannel('call', () => readCalls(knex, customerId, window))]),
     safeChannel('email', () => readEmails(knex, customerId, window)),
   ]) : [];
 
