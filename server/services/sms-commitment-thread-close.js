@@ -79,7 +79,10 @@ function humanTextQueries(conn, message, now) {
   const phoneOf = (column) => `RIGHT(regexp_replace(${column}, '[^0-9]', '', 'g'), 10) = ?`;
   const onPeer = (q, column) => (anyPhone ? q : q.whereRaw(phoneOf(column), [peer]));
   // Recruiting threads (applicant texts) are owner-only and never evidence.
-  const base = () => excludeRecruitingSmsLog(conn('sms_log').where({ customer_id: message.customer_id })
+  // A call promise with no customer record (message.phone_identity, call-promise-phone-evidence.js) is read by the
+  // phone alone: no customer id to scope by, and the peer number is required (anyPhone is never set for it).
+  const scope = (q) => (message.phone_identity ? q : q.where({ customer_id: message.customer_id }));
+  const base = () => excludeRecruitingSmsLog(scope(conn('sms_log'))
     .where('created_at', '>', after)
     .modify((q) => { if (now) q.where('created_at', '<=', now); })
     .whereNot('id', message.id));

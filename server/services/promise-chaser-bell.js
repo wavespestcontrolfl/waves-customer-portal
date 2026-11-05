@@ -193,7 +193,7 @@ async function findPromiseToRing(call, now) {
     // or long-lived number's unrelated commitments (customer-party rows,
     // other kinds) crowd the one relevant promise out of every tick's page
     // entirely — it was never wrong, just never reached.
-    party: 'waves', kinds: SLA_KINDS, phone: call.from_phone, limit: 200, includeHints: true, now,
+    party: 'waves', kinds: SLA_KINDS, phone: call.from_phone, limit: 200, includeHints: true, now, quietAlerts: true,
   })).filter((r) => String(r.call_log_id) !== String(call.id)
     // Strictly PRECEDES this callback — never the current call's own row
     // (excluded above), and never a call that arrived AFTER it either. A

@@ -208,6 +208,19 @@ async function sharedPhoneItems(conn, smsIdents, since) {
   return shared;
 }
 
+// The newest text each unknown sender (an sms item with no customer id) sent after its anchor, by phone: a bell for
+// an unknown sender is raised once per 4-hour window, so the text it names may not be the sender's latest, and a reply
+// that came before a later text does not answer it (admin-alert-relevance.js unknownTextAnswered).
+async function latestInboundTexts(conn, unknownIdents) {
+  const peers = unique(unknownIdents.flatMap((i) => [...i.peers]));
+  if (!peers.length) return [];
+  const peerSql = phoneIdentitySql('sl.from_phone');
+  const since = new Date(Math.min(...unknownIdents.map((i) => i.anchor.getTime())));
+  return excludeUnresolvedSendReservations(conn('sms_log as sl').where('sl.direction', 'inbound'), 'sl')
+    .whereRaw(`${peerSql} = ANY(?)`, [peers]).where('sl.created_at', '>', since)
+    .select(conn.raw(`${peerSql} as peer`)).max('sl.created_at as at').groupByRaw('1');
+}
+
 // A person's reply to a customer on a SHARED phone, by customer id: the replies the
 // Messages reader accepts as sent (sent or delivered), not only delivered ones, so
 // a reply still on its way answers the customer it went to. Newest per customer / phone.
@@ -469,6 +482,8 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
   const visits = await bookedVisits(customerIds);
   const ranVisits = visitRan ? await visitsThatRan(conn, idents.filter((i) => i.item.kind === 'voice')) : new Map();
   const staffActed = await staffActionsAfterTexts(conn, smsIdents, staffActions);
+  const unknownSenders = idents.filter((i) => i.item.kind === 'sms' && i.item.refs.unknownSender === true && !i.customerId);
+  const inboundRows = unknownSenders.length ? await latestInboundTexts(conn, unknownSenders) : [];
   for (const ident of idents) {
     const { item, customerId } = ident;
     // A shared phone: this customer's own evidence by customer id only (ownMatch).
@@ -485,6 +500,7 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
       replyAt: null,
       visitRanAt: ranVisits.get(String(item.id)) || null,
       ...staffActionFields(staffActed, item),
+      ...(unknownSenders.includes(ident) ? { unknownSender: true, lastInboundAt: inboundRows.filter((r) => ident.peers.has(r.peer)).reduce((best, r) => later(asDate(r.at), best), null) } : {}),
     };
     bundle.quote = await quoteHandedOff(conn, ident, bundle);
     bundles.set(String(item.id), bundle);

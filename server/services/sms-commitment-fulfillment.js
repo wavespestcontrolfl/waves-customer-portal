@@ -328,6 +328,8 @@ const invoiceRecords = (conn, customerId, after, now, scopedProperty) => Promise
   text: invoiceText({ ...row, line_items: lineItems, annual_prepay: annualPrepay }) })));
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
+  // A call promise with no customer record is judged by the caller's phone identity (call-promise-phone-evidence.js).
+  if (message.phone_identity) return require('./call-promise-phone-evidence').loadPhoneEvidence(conn, commitment, message, now);
   const after = new Date(message.created_at);
   const customerId = message.customer_id;
   const peer = message.direction === 'inbound' ? message.from_phone : message.to_phone;
@@ -866,6 +868,8 @@ function scopedToProperty(record, commitment) {
 }
 
 function admissibleWitness(record, commitment, records = []) {
+  // Judged by phone (sms_context.phone_keyed): only a person's delivered text or a live call counts.
+  if (commitment.sms_context?.phone_keyed) return require('./call-promise-phone-evidence').phoneWitness(record, commitment);
   // Deliverables and completed work need their actual records. A staff
   // text/call saying "sent" or "done" is only an association hint.
   const emails = requestedEmails(commitment);
@@ -957,6 +961,8 @@ const ORDERING_TIME = {
 // only these rows for money landing (Codex #4996 r4).
 const PAYMENT_WITNESS_KINDS = Object.freeze(['other']);
 function witnessTypes(commitment) {
+  // A promise judged by phone has no visits, estimates or payments to cite: texts and calls only.
+  if (commitment.sms_context?.phone_keyed) return ['sms', 'call'];
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
   // Owner ruling 2026-09-28 (reversing R3, 2026-09-24): a general `other` ask
   // is answered by any text a person from Waves sends after it (operatorReply

@@ -531,7 +531,7 @@ async function listOpenWaves(now) {
   // Every page, however many: the list is uncapped, and the read is already
   // bounded to promises that can fall due inside the window (activeSince).
   for (let page = 0; ; page += 1) {
-    const rows = await commitments.listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, prepare: page === 0, now, activeSince });
+    const rows = await commitments.listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, prepare: page === 0, now, activeSince, quietAlerts: true });
     all.push(...rows);
     if (rows.length < SCAN_LIMIT) break;
   }

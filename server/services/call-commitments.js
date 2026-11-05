@@ -3597,7 +3597,33 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // callback cards (deadline, default owner, audit row) as they read; every
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
-async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null, customerScope = null } = {}) {
+// A call that is not a customer or prospect: a vendor or partner (disposition vendor_logged, which a job applicant
+// shares when GATE_CALL_APPLICANT_HANDLING is on), a spam call (spam_discarded), or one whose valid extraction says the
+// caller is a job applicant. A promise made on it stays on the Owed tab, but the promise-chaser bell, the follow-up
+// SLA pager and the overdue watchdog do not page for it (GATE_PROMISE_PHONE_MATCH_CLOSE, owner 2026-11-04). Over a
+// call_log alias; no bare question mark (a knex raw would read it as a binding).
+const quietCallSql = (cl = 'cl') => `(COALESCE(${cl}.disposition, '') IN ('vendor_logged', 'spam_discarded')
+  OR (${cl}.v2_extraction_status = 'valid' AND ${cl}.ai_extraction_enriched->>'call_nature' = 'job_applicant'))`;
+
+// Shadow (GATE_PROMISE_PHONE_MATCH_CLOSE=shadow): the pagers still see these promises; one log line per Eastern day
+// says how many they would stop seeing. Reads only; a failed count is ignored.
+let quietShadowDay = null;
+async function noteQuietCallsShadow(conn) {
+  const day = etDateString(new Date());
+  if (quietShadowDay === day) return;
+  quietShadowDay = day;
+  try {
+    const row = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
+      .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereRaw(quietCallSql('cl')).count({ n: '*' }).first();
+    logger.info(`[call-commitments] shadow: ${Number(row?.n) || 0} open Waves promise(s) on vendor, spam or applicant calls would raise no pager alert`);
+  } catch { /* advisory */ }
+}
+
+async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null, customerScope = null, quietAlerts = false } = {}) {
+  // The pagers (promise chaser, follow-up SLA, overdue watchdog) ask for quietAlerts: under the gate, a promise on a
+  // vendor, spam or applicant call is left out of what they page for. Every other reader (the Owed tab) keeps it.
+  const quiet = quietAlerts ? require('../config/feature-gates').promisePhoneMatchCloseMode() : 'off';
+  if (quiet === 'shadow') await noteQuietCallsShadow(conn);
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -3630,6 +3656,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
       scopeCommitmentRows(b, { customerId, leadId, leadSid, phone });
       // customerScope: a subquery of customer ids (a technician login's own customers, GATE_TECH_LOGIN_PRIVACY).
       if (customerScope) b.whereIn('cl.customer_id', customerScope);
+      if (quiet === 'true') b.whereRaw(`NOT ${quietCallSql('cl')}`);
       if (!includeHints) b.whereNull('cc.fulfillment');
       // activeSince (the follow-up pager): only promises made, dated or
       // snoozed since then — a large historical backlog must not page
@@ -4401,6 +4428,7 @@ module.exports = {
   selectOverdue,
   scopeCommitmentRows,
   listOpenCommitments,
+  quietCallSql,
   listAutoClosedCommitments,
   deriveRelayCommitments,
   recordRelayCommitments,
