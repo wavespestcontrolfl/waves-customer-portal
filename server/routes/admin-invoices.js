@@ -2082,11 +2082,25 @@ async function technicianCardOnFileInvoice(req) {
   return { ok: !!invoice && techCardOnFileLive() && await technicianMayChargeCardOnFile(req, invoice), invoice };
 }
 
+// Card only at the visit: a technician's quote or charge takes one of the
+// invoice customer's saved CARDS, never a saved bank account. The charge
+// checks it again where it loads the method (requireCardMethod).
+async function technicianSavedMethodIsCard(invoice, paymentMethodId) {
+  const method = await db('payment_methods').where({ id: paymentMethodId, customer_id: invoice.customer_id })
+    .first('method_type');
+  return String(method?.method_type || '').toLowerCase() === 'card';
+}
+const TECH_CARD_ONLY_ERROR = 'Card on file at the visit takes a saved card, not a bank account.';
+
 router.post('/:id/charge-card-quote', async (req, res) => {
   try {
     const { paymentMethodId } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
-    if (!(await technicianCardOnFileInvoice(req)).ok) return res.status(404).json({ error: 'Invoice not found' });
+    const techQuote = await technicianCardOnFileInvoice(req);
+    if (!techQuote.ok) return res.status(404).json({ error: 'Invoice not found' });
+    if (techQuote.invoice && !(await technicianSavedMethodIsCard(techQuote.invoice, paymentMethodId))) {
+      return res.status(400).json({ error: TECH_CARD_ONLY_ERROR });
+    }
     const StripeService = require('../services/stripe');
     const quote = await StripeService.quoteInvoiceSavedCardCharge(req.params.id, paymentMethodId);
     return res.json({ quote });
@@ -2106,9 +2120,12 @@ router.post('/:id/charge-card', async (req, res, next) => {
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
     const techCharge = await technicianCardOnFileInvoice(req);
     if (!techCharge.ok) return res.status(404).json({ error: 'Invoice not found' });
-    // A technician charges only the total it was quoted.
+    // A technician charges only the total it was quoted, and only a card.
     if (techCharge.invoice && (expectedTotal == null || expectedTotal === '')) {
       return res.status(400).json({ error: 'expectedTotal required' });
+    }
+    if (techCharge.invoice && !(await technicianSavedMethodIsCard(techCharge.invoice, paymentMethodId))) {
+      return res.status(400).json({ error: TECH_CARD_ONLY_ERROR });
     }
 
     // Account credit is auto-applied INSIDE chargeInvoiceWithSavedCard — after it
@@ -2131,6 +2148,7 @@ router.post('/:id/charge-card', async (req, res, next) => {
           requireSelfPayScheduledServiceId: techCharge.invoice.scheduled_service_id,
           requireInvoiceScheduledServiceBinding: true,
           requireTechnicianCardOnFileFor: { techRole: req.techRole, technicianId: req.technicianId },
+          requireCardMethod: true,
         }
         // An admin ordered this charge explicitly: exempt from the default
         // collections dispute-hold guard (an operator may override a hold).

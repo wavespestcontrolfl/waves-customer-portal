@@ -6,14 +6,14 @@
 describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards', () => {
   beforeEach(() => { jest.resetModules(); });
 
-  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) } }) {
+  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card' }) {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       subtotal: '200.00', total: '200.00', discount_amount: '0.00',
       credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
     };
     const card = {
-      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      id: 'pm-1', customer_id: 'cust-1', method_type: methodType,
       stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
     };
     let chargeAttempt = null;
@@ -214,6 +214,13 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', guards))
         .rejects.not.toMatchObject({ code: 'TECH_VISIT_NOT_CHARGEABLE' });
       expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    test.each(['ach', 'us_bank_account', 'bank', 'bank_account'])('requireCardMethod: a saved %s method refuses before Stripe', async (methodType) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, methodType });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireCardMethod: true }))
+        .rejects.toMatchObject({ code: 'CARD_METHOD_REQUIRED' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     });
 
     test('the option without the visit lock is a caller error', async () => {

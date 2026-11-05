@@ -93,6 +93,7 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
     for (const key of Object.keys(mockRows)) delete mockRows[key];
     mockRows.invoices = invoiceRow();
     mockRows.scheduled_services = visitRow();
+    mockRows.payment_methods = { method_type: 'card' };
     Object.assign(mockAuth, { techRole: 'technician', technicianId: 'tech-1' });
     process.env.GATE_TECH_CARD_ON_FILE = 'true';
   });
@@ -125,7 +126,32 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       requireSelfPayScheduledServiceId: VISIT_ID,
       requireInvoiceScheduledServiceBinding: true,
       requireTechnicianCardOnFileFor: { techRole: 'technician', technicianId: 'tech-1' },
+      requireCardMethod: true,
     });
+  });
+
+  // Card only at the visit: a saved bank account, under any of its aliases, never reaches Stripe for a technician.
+  test.each(['ach', 'us_bank_account', 'bank', 'bank_account', null])(
+    'gate on, a saved method of type %s: both routes answer 400 before Stripe',
+    async (methodType) => {
+      mockRows.payment_methods = { method_type: methodType };
+      await withServer(async (baseUrl) => {
+        const quote = await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-bank' });
+        expect(quote.status).toBe(400);
+        await expect(quote.json()).resolves.toEqual({ error: 'Card on file at the visit takes a saved card, not a bank account.' });
+        expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-bank', expectedTotal: 102.9 })).status).toBe(400);
+      });
+      expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+      expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    },
+  );
+
+  test('gate on, a method of another customer is not a card the technician may use', async () => {
+    delete mockRows.payment_methods;
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-other', expectedTotal: 102.9 })).status).toBe(400);
+    });
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   test('gate on, a completed visit today still qualifies', async () => {
@@ -171,6 +197,7 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
     const opts = StripeService.chargeInvoiceWithSavedCard.mock.calls[0][2];
     expect(opts).toMatchObject({ expectedTotal: 102.9, operatorOverride: true });
     expect(opts).not.toHaveProperty('requireTechnicianCardOnFileFor');
+    expect(opts).not.toHaveProperty('requireCardMethod');
     expect(opts).not.toHaveProperty('refuseWhenDunningStopped');
   });
 
