@@ -619,9 +619,14 @@ async function dropSlotsTheUnitCannotTake(service, candidates, ctx, drops) {
   });
 }
 
+// TERRITORY COVER (dropCoverWhenOwnerHas) runs here, after the feasibility filters and before the cap: a
+// territory technician whose slots all fail the overlap or grouped-unit checks has no candidate, so the cover's stay.
 async function rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops) {
-  if (!autoDispatchSharedModelLive()) return legacyCap(service, await dropSlotsTheUnitCannotTake(service, candidates, ctx, drops), ctx);
-  const survivors = await filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops);
+  if (!autoDispatchSharedModelLive()) {
+    const feasible = await dropSlotsTheUnitCannotTake(service, candidates, ctx, drops);
+    return legacyCap(service, dropCoverWhenOwnerHas(feasible, { ...ctx, drops }), ctx);
+  }
+  const survivors = dropCoverWhenOwnerHas(await filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops), { ...ctx, drops });
   return survivors.slice().sort((a, b) => (a.detour_minutes || 0) - (b.detour_minutes || 0));
 }
 
@@ -1313,7 +1318,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   const hard = {
     service, prefs, ctx, category, siblingDates, drops, territoryTechId, territoryCoverId: ctx.territoryCoverId || null, mowing,
   };
-  const candidates = dropCoverWhenOwnerHas(admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean), hard);
+  const candidates = admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean);
 
   // Gate off: find-time's best-first order, top SCORE_CAP survivors (see
   // rankSurvivorsForSharedModel). Gate on: SLOT_TAKEN candidates dropped and
@@ -1352,7 +1357,7 @@ async function mowingShadowCandidates(admitted, run) {
   });
   const shadowCtx = { ...ctx, evalConflict };
   const asTrue = { ...hard, ctx: shadowCtx, drops: { ...hard.drops, mowing_day: 0 }, mowing: { ...mowing, mode: 'true' } };
-  const candidates = dropCoverWhenOwnerHas(admitted.map((slot) => candidateFromSlot(slot, asTrue)).filter(Boolean), asTrue);
+  const candidates = admitted.map((slot) => candidateFromSlot(slot, asTrue)).filter(Boolean);
   const ranked = await rankSurvivorsForSharedModel(service, geo, candidates, shadowCtx, asTrue.drops);
   return (await withDryWindowCandidates(ranked, { ...run, hard: asTrue })).candidates;
 }

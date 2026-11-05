@@ -15,6 +15,10 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
+jest.mock('../services/rebooker', () => ({
+  probeMoveConflicts: jest.fn().mockResolvedValue({ rows: [], snapshot: [] }),
+  occupancyProbeEnd: jest.requireActual('../services/rebooker').occupancyProbeEnd,
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/territory', () => ({
@@ -25,24 +29,27 @@ jest.mock('../services/territory', () => ({
 jest.mock('../services/scheduling/line-technician', () => ({ liveServiceLine: jest.fn() }));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { probeMoveConflicts } = require('../services/rebooker');
 const territory = require('../services/territory');
 const lineTech = require('../services/scheduling/line-technician');
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 
 const { findValidCandidateSlots, territoryCoverForVisit, _internals } = candidateSlots;
 const GATE = 'GATE_TERRITORY_NIGHT_RUN';
-const ENV = { gate: process.env[GATE], drive: process.env.GATE_DRIVE_TIME_CALIBRATION };
+const ENV = { gate: process.env[GATE], drive: process.env.GATE_DRIVE_TIME_CALIBRATION, shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
 
 beforeEach(() => {
   process.env[GATE] = 'true';
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   jest.clearAllMocks();
+  probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] });
   lineTech.liveServiceLine.mockReset().mockResolvedValue('general');
   territory.territoryTechnicianFor.mockReset().mockResolvedValue('t-south');
   territory.territoryCoverFor.mockReset().mockResolvedValue('t-owner');
 });
+afterEach(() => { delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; });
 afterAll(() => {
-  for (const [key, value] of [[GATE, ENV.gate], ['GATE_DRIVE_TIME_CALIBRATION', ENV.drive]]) {
+  for (const [key, value] of [[GATE, ENV.gate], ['GATE_DRIVE_TIME_CALIBRATION', ENV.drive], ['GATE_AUTO_DISPATCH_SHARED_MODEL', ENV.shared]]) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 });
@@ -94,6 +101,20 @@ describe('night run: territory technician first, cover second', () => {
     const out = await find([slot('t-third'), slot('t-third', '2026-08-06')]);
     expect(out.candidates).toEqual([]);
     expect(out.drops.other_territory).toBe(2);
+  });
+
+  test('the territory technician\'s slots all fail the feasibility checks (SLOT_TAKEN): the cover\'s feasible slots stay (cover is judged after the checks, before the cap)', async () => {
+    const slots = [slot('t-south', '2026-08-05'), slot('t-owner', '2026-08-06'), slot('t-third', '2026-08-07')];
+    const conflict = { id: 'occupied-1', window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 60 };
+    probeMoveConflicts.mockImplementation(async ({ target }) => (
+      target.date === '2026-08-05' ? { rows: [conflict], snapshot: [] } : { rows: [], snapshot: [] }
+    ));
+    for (const shared of ['true', undefined]) {
+      if (shared) process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = shared; else delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      const out = await find(slots);
+      // Shared model: the probe drops the territory technician's slot. Legacy model has no per-date probe, so his slot stays and the cover's go.
+      expect(techsOf(out)).toEqual(shared ? ['t-owner'] : ['t-south']);
+    }
   });
 
   test('the line has no cover: the territory technician alone, as before', async () => {
