@@ -1,7 +1,7 @@
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { CheckCircle2, DatabaseZap, Eye, EyeOff, Play, RefreshCw, RotateCcw, ShieldAlert, XCircle } from "lucide-react";
+import { CheckCircle2, DatabaseZap, Play, RefreshCw, RotateCcw, ShieldAlert, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   ActionFeedback,
@@ -68,8 +68,6 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState("");
-  const [revealingId, setRevealingId] = useState("");
-  const [revealed, setRevealed] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [notice, setNotice] = useState("");
   const [readError, setReadError] = useState("");
@@ -107,7 +105,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
     return () => { loadSeq.current += 1; };
   }, [load]);
   useVisiblePageRefresh(() => load({ background: true }), {
-    intervalMs: 60000, enabled: !loading && !busyId && !scanning && !revealingId && !revertTarget && !revealed,
+    intervalMs: 60000, enabled: !loading && !busyId && !scanning && !revertTarget,
   });
   useEffect(() => { if (busyId || scanning) loadSeq.current += 1; }, [busyId, scanning]);
 
@@ -115,16 +113,6 @@ export default function DataHygienePage({ embedded = false } = {}) {
     () => data.proposals?.find((p) => p.id === selectedId) || data.proposals?.[0] || null,
     [data.proposals, selectedId]
   );
-
-  useEffect(() => {
-    setRevealed(null);
-  }, [selectedId]);
-
-  useEffect(() => {
-    if (!revealed) return undefined;
-    const timer = setTimeout(() => setRevealed(null), 60000);
-    return () => clearTimeout(timer);
-  }, [revealed]);
 
   const runScan = useCallback(async (mode) => {
     setScanning(true);
@@ -196,28 +184,6 @@ export default function DataHygienePage({ embedded = false } = {}) {
       setBusyId("");
     }
   }, [load]);
-
-  const reveal = useCallback(async (proposal) => {
-    if (!proposal) return;
-    if (revealed?.proposalId === proposal.id) {
-      setRevealed(null);
-      return;
-    }
-    setRevealingId(proposal.id);
-    setActionError("");
-    try {
-      const result = await adminFetch(`/admin/data-hygiene/proposals/${proposal.id}/reveal`, {
-        method: "POST",
-        body: "{}",
-      });
-      setRevealed(result);
-      setNotice("Sensitive value revealed. This access was audited.");
-    } catch (err) {
-      setActionError(err.message);
-    } finally {
-      setRevealingId("");
-    }
-  }, [revealed]);
 
   const pendingCount = data.proposals?.filter((p) => p.status === "pending").length || 0;
 
@@ -318,35 +284,6 @@ export default function DataHygienePage({ embedded = false } = {}) {
                   <Info label="Source" value={selected.source} />
                   <Info label="Confidence" value={confidence(selected.confidence)} />
                 </div>
-
-                {selected.isSensitive && (
-                  <Card>
-                    <CardBody className="space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <div className="text-14 font-medium text-alert-fg">Sensitive value</div>
-                        <div className="text-ui-caption text-ink-secondary mt-1">
-                          Reveal decrypts the vault value and writes an audit event.
-                        </div>
-                      </div>
-                      <Button
-                        variant="secondary"
-                        onClick={() => reveal(selected)}
-                        loading={revealingId === selected.id}
-                      >
-                        {revealed?.proposalId === selected.id ? <EyeOff size={16} aria-hidden /> : <Eye size={16} aria-hidden />}
-                        {revealed?.proposalId === selected.id ? "Hide" : "Reveal"}
-                      </Button>
-                    </div>
-                    {revealed?.proposalId === selected.id && (
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <Info label="Raw Current" value={valueText(revealed.currentValue)} />
-                        <Info label="Raw Proposed" value={valueText(revealed.proposedValue)} />
-                      </div>
-                    )}
-                    </CardBody>
-                  </Card>
-                )}
 
                 <Card>
                   <CardBody>

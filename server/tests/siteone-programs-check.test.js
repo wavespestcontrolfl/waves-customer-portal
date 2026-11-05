@@ -12,11 +12,6 @@ const {
 const siteone = require('../services/procurement/adapters/siteone');
 const { loadProgramHistory, oldestKeptMonth, HISTORY_PREFIX } = mod;
 
-const GATE = 'GATE_SITEONE_PROGRAMS_CHECK';
-let savedGate;
-beforeEach(() => { savedGate = process.env[GATE]; delete process.env[GATE]; });
-afterEach(() => { if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate; });
-
 // ---- synthetic page text, shaped like the real pages -------------------------------
 
 const EOP_TEXT = [
@@ -343,29 +338,7 @@ describe('buildAlertText', () => {
 // ---- the run -------------------------------------------------------------------------
 
 describe('runSiteOneProgramsCheck', () => {
-  test('gate off (unset or not truthy): skipped before any DB read or browser launch', async () => {
-    const h = harness();
-    const throwingConn = new Proxy(() => { throw new Error('db touched'); }, { get() { throw new Error('db touched'); } });
-    await expect(runSiteOneProgramsCheck({ ...h.deps, conn: throwingConn })).resolves.toEqual({ skipped: 'gated' });
-    process.env[GATE] = 'false';
-    await expect(runSiteOneProgramsCheck({ ...h.deps, conn: throwingConn })).resolves.toEqual({ skipped: 'gated' });
-    expect(h.readSignedIn).not.toHaveBeenCalled();
-    expect(h.getCredentials).not.toHaveBeenCalled();
-    expect(h.raise).not.toHaveBeenCalled();
-  });
-
-  test('gate is read at call time', async () => {
-    const h = harness();
-    await expect(runSiteOneProgramsCheck(h.deps)).resolves.toEqual({ skipped: 'gated' });
-    process.env[GATE] = 'true';
-    const r = await runSiteOneProgramsCheck(h.deps);
-    expect(r.skipped).toBeUndefined();
-    expect(r.programs).toBeGreaterThan(0);
-  });
-
-  describe('gate on', () => {
-    beforeEach(() => { process.env[GATE] = 'true'; });
-
+  describe('the run', () => {
     test('first run: baseline alert with the whole list in the detail, and a snapshot is saved', async () => {
       const h = harness();
       const r = await runSiteOneProgramsCheck(h.deps);
@@ -569,7 +542,6 @@ describe('runSiteOneProgramsCheck', () => {
 // ---- month-by-month history ---------------------------------------------------------------
 
 describe('program history', () => {
-  beforeEach(() => { process.env[GATE] = 'true'; });
   const monthRow = (m, extra = {}) => JSON.stringify({ version: 1, takenAt: `${m}-01T13:00:00.000Z`, programs: [{ key: `k-${m}`, name: `P ${m}` }], points: null, ...extra });
 
   test('a successful run writes the latest row AND a row for this month, same JSON, in one transaction', async () => {

@@ -63,7 +63,6 @@ const ROUTES = [
   ['POST', '/scan'],
   ['POST', '/proposals/p1/approve'],
   ['POST', '/proposals/p1/reject'],
-  ['POST', '/proposals/p1/reveal'],
   ['POST', '/proposals/p1/revert'],
 ];
 

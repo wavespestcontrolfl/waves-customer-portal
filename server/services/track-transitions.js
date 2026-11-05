@@ -33,7 +33,6 @@ const {
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
-const { sendTrackTextOnce } = require('./one-text-per-day');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
@@ -500,9 +499,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         smsOutcome = 'lease_expired';
         throw Object.assign(new Error('lease expired before send'), { leaseExpired: true });
       }
-      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: sent once per customer, address, technician and day,
-      // decided under a lock from a recorded delivery (one-text-per-day.js). Gate off: just the send.
-      const result = await sendTrackTextOnce(svc, 'en_route', () => TwilioService.sendTechEnRoute(
+      const result = await TwilioService.sendTechEnRoute(
         svc.customer_id,
         techName,
         etaMinutes,
@@ -512,7 +509,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
           notificationEventKey: enRouteNotificationKey(svc, attemptAt),
           scheduledServiceId: svc.id,
         },
-      ), { fence: attemptFence, technicianId: svc.technician_id });
+      );
 
       // undefined = deterministic opt-out (tech_en_route off / SMS disabled,
       // twilio.js sendTechEnRoute) — handled, not a retry (codex r9).
@@ -981,9 +978,7 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
       ? await db('technicians').where({ id: techId }).first('name')
       : null;
     const techName = tech?.name || 'Your Waves technician';
-    // GATE_ONE_TEXT_PER_CUSTOMER_DAY: once per customer, address, technician and day, from a recorded
-    // delivery, not from the claim above (which is stamped before any send). Gate off: just the send.
-    const result = await sendTrackTextOnce(svc, 'arrived', (extra) => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null, ...extra }), { fence: arrivalAttemptFence, technicianId: techId });
+    const result = await TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null });
     outcome = classifyArrivalSend(result);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);

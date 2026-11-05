@@ -168,7 +168,6 @@
  *   GATE_IB_MODEL_FAILURE_NOTICE=true (when the Intelligence Bar's AI model call fails (a provider 4xx/5xx, a timeout, an overload such as the monthly spend limit), /query answers 200 with a plain reply (what failed, whether anything was changed, try again in a few minutes), records one 'ib-model' gap row, and rings one admin bell at most once an hour; never a customer message. Owner request 2026-10-20 after the 2026-10-19 limit outage. Read at call time via ibModelFailureNoticeLive(), strict 'true', dark by default; off = the error goes to the error handler, the task is marked outcome_unknown and nothing else is recorded, as before.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_SERIES_MOVE_SKIP_CLOSED_DAYS=true (a staff series move re-dates the later visits of the plan; a re-dated visit that lands on a closed day (owner blackout date, weekly day off, closed holiday) moves forward to the next open day, as the Edit appointment cadence rewrite already does; the date the staffer picked stays as picked; owner 2026-10-22 "fix series edit". Read at call time via seriesMoveSkipClosedDaysLive(), strict 'true', dark by default; off = every projected date is byte-identical to before; customer moves unchanged)
- *   GATE_ONE_TEXT_PER_CUSTOMER_DAY=true (owner 2026-10-12/13: one on-the-way text and one arrived text per customer, service address, technician and ET day, however many services or visits that day has; appointment reminders are NOT changed (the existing same-slot merge owns them); the rule never reads visit_id, service_visits or visit_effects; read at call time via oneTextPerCustomerDayLive(), dark by default; off = every tracker text is byte-identical to before)
  *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
  *   GATE_REPORT_ONLY_PAYMENT_ALERT=true (hourly 8 AM-8 PM ET, a bill still open the ET day after a "report only, no pay link" completion raises one needs-you Billing alert to record the payment, and the alert closes when the bill is paid, voided or no longer owed; read at call time via reportOnlyPaymentAlertLive(), dark by default; office-side only, sends nothing)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
@@ -393,7 +392,6 @@
  *   GATE_LAWN_SCORE_SCALE_V2=true (lawn score scale 2, owner 2026-10-24 lawn scoring review: the lawn visit assessment asks the model for the four scores the technician reviews as 0-100 ratings against written anchors (turf_density, weed_control, color_health, condition) under its own prompt versions (any lawn-visit-v1 variant plus -scale2), instead of scale 1's weed share of the lawn (stored as 100 minus it, so 95-99 on almost every lawn), color 1-10 x10 and a severity-word map for Condition; the severity words are still asked and stored; the server stores the ratings as read (weed_suppression = weed_control, color_health as read, stress_damage = condition, no season multiplier; fungus_control and thatch_level still come from the severity words; a Condition the AI cannot rate stays unknown until the technician enters it) and stamps lawn_assessments.score_scale = 2 on every scale-2 read, a failed one included; property history (lawn-assessment-history.js sameScoreScale) holds one score scale, the current visit's, else a scale the caller names, else the newest row's, so everything that compares visits (the report's since-last lines, prior-visit score line, before/after and trend chart, the paired recheck and treatment memory, baseline, property score, lawn health signal, portal lawn card and the technician's Last visit row, which follows the visit's own read) starts fresh at the first scale-2 visit, like a baseline reset, and so do the treatment-outcome deltas, the ROI improvement buckets, the neighbor benchmarks (one segment per scale) and the assistant's lawn health tool; the treatment guide's weed card reads a scale-2 row's rating, never a share of the lawn. Old rows are never rewritten. No customer message. Needs GATE_LAWN_VISIT_ASSESSMENT and GATE_LAWN_PROPERTY_HISTORY also on (the reader reports off without either). Migration: lawn_assessments.score_scale (nullable smallint; NULL = scale 1). Ships DARK, read at call time via lawnScoreScaleV2Live(); off = byte-identical prompt, schema, stored run and scores)
  *   GATE_LAWN_TECH_PARAGRAPH=true (lawn report "From your technician" paragraph, owner 2026-10-05; FIXED SENTENCES since 2026-10-06: every word comes from the owner-approved LAWN_SENTENCES in lawn-tech-paragraph.js ("Our technician saw {condition} in the {place}.", "There may be early signs of {label}; we will keep an eye on it.", "Today we applied {products}."); at most ONE model call per lawn visit extracts closed-list conditions and places with the technician's exact words and a seenToday judgment, and code keeps an item only when the quote is word for word in one note sentence naming the condition (the model judges, the code verifies, no word lists); the entry { text, slots, v: 2 } freezes first-writer-wins in structured_notes.lawnTechParagraph[assessmentId], is re-checked against its slots at read time and rides reportV2.lead.techParagraph on the web report and the PDF; lane lawn_tech_paragraph on TEXT_POLICIES.report; lawn only; read at call time via lawnTechParagraphLive(); off = no model call, byte-identical payload, PDF and PDF cache key)
  *   GATE_LAWN_COST_PLUS_LIST=true (residential recurring lawn care list price = annual cost / (1 - 0.45), never below the market table, at least $55 a visit, from the v13 program product cost plus 10 more labor minutes a visit; WaveGuard and manual discounts on the lawn line apply in full since owner 2026-11-02 (they stopped at a 35% margin before); owner 2026-10-09; strict opt-in via gateEnvValue, read at CALL time in priceLawnCare and generateEstimate; a saved estimate replays as it was priced (pricingMetadata.lawnCostPlusList); the one-time lawn anchor and commercial lawn stay on the market table; ships DARK, off = byte-identical prices)
- *   GATE_SITEONE_PROGRAMS_CHECK=true (owner 2026-10-26: on the 1st of each month at 9:00 AM ET the portal signs in to siteone.com with the order bot's stored login, reads SiteOne's Early Order Programs, promotions and Partners points, compares them with last month's list and posts one admin notification for new programs, programs ending within 30 days and points expiring within 60 days. Read-only on SiteOne: never adds to the cart, never changes the account, never orders. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/siteone-programs-check.js; dark by default; off = nothing runs. Sends nothing to a customer.)
  *   GATE_SITEONE_EMAIL_ORDER=true (owner 2026-10-26, "OK DO OPTION B": SiteOne's website blocks the order bot, so an owner can instead email ONE pickup order to SiteOne for an open restock request. The Restock tab shows "Email order to SiteOne" on an open request (admins only); it opens a preview with To, Subject, the body and the estimate before tax, and Send email goes out through SendGrid from contact@ to SITEONE_ORDER_EMAIL (cc SITEONE_ORDER_CC). Then the request is marked ordered, so Receive works as today. One email per request, ever. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/vendor-order-email.js via siteOneEmailOrderLive(); dark by default; off = the two routes answer 404 and the tab shows no button. Sends an email to SiteOne, a vendor, never to a customer; the order bot is untouched.)
  *   GATE_MOSQUITO_MISTING=true (automatic mosquito misting system pricer: install price by tier, nozzle and riser overage, a $59 monthly plan and per-fill refill rates; the estimate engine accepts services.mosquitoMisting, the legacy mapper emits the plan line and a one-time install item, and the public price ranges list two rows; the line is not a WaveGuard tier service and takes no percent discount; draft prices, dealer cost unknown; also gates the misting system records (owner 2026-10-30): an admin-only Misting system panel on Customer 360 for the install calibration (spray-rate math checked against the label's daily limit) and the tank refill log, via /api/admin/misting-records, which answer 404 and render no panel when off; and the customer app's Home card, GET /api/misting-system (off = `{ system: null }` with no read); strict opt-in via gateEnvValue, read at CALL time via mosquitoMistingLive(); ships DARK, off = the key is ignored and every estimate is byte-identical)
  *   GATE_DEAD_ANIMAL_REMOVAL=true (owner 2026-10-26: the one-time Dead Rodent Removal & Odor Treatment line in the estimate engine: services.deadAnimalRemoval = { tier: reachable | attic | in_wall }, fixed tier prices, in_wall is a custom quote. NEW QUOTES ONLY: off = the estimator hides the choice and the engine refuses the input with a 400 failClosed error (DEAD_ANIMAL_REMOVAL_GATED); an estimate already saved with the line stays a normal estimate. Strict opt-in via gateEnvValue, read at CALL time via deadAnimalRemovalLive(); dark by default. Sends nothing to a customer.)
@@ -1425,15 +1423,6 @@ const gates = {
   // no old flow to roll back to).
   reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
-  // Digital business card — the card.issued email a customer gets after their
-  // FIRST completed visit (services/customer-card.js). The card row and the
-  // /card/:token page are NOT behind this gate (tokenized, unlisted,
-  // customer-initiated — same contract as the other public token pages); the
-  // gate covers ONLY the outbound email. Customer-facing auto-send → explicit
-  // opt-in in EVERY environment per house rule, so a dev/preview env with real
-  // SendGrid creds can't email real customers on a completion.
-  digitalBusinessCard: process.env.GATE_DIGITAL_BUSINESS_CARD === 'true',
-
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,
 
@@ -1769,14 +1758,6 @@ const gates = {
   // auto-writer pattern: opt-in in EVERY environment, kill = unset.
   // Spend rails: SEALED_EXAM_AUTO_MIN_ITEMS / SEALED_EXAM_AUTO_MAX_ITEMS.
   smsSealedExamAutoRun: process.env.GATE_SMS_SEALED_EXAM_AUTORUN === 'true',
-
-  // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
-  // replies for HISTORICAL inbound SMS that already have a human reply and
-  // feeds them to the existing judge, compressing months of per-intent
-  // score accumulation into days. Hourly batches, self-terminating once
-  // history is exhausted. Burns ~2 Anthropic calls per sample, so prod
-  // requires explicit opt-in; flip off (or leave — it no-ops) when done.
-  shadowBackfill: isProd ? process.env.GATE_SHADOW_BACKFILL === 'true' : true,
 
   // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
   // each draft_unsafe judgment into a fixed (harness surface × failure mode)
@@ -3155,9 +3136,8 @@ const gates = {
 
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,
-  // which is opt-in in EVERY environment, and sensitive reveal, which is off
-  // by default outside explicit prod enablement. Dev/staging running against
-  // prod snapshots otherwise silently mutates or exposes shared data.
+  // which is opt-in in EVERY environment. Dev/staging running against
+  // prod snapshots otherwise silently mutates shared data.
   //   Scanner cron is double-gated: cronJobs AND dataHygieneScanner.
   //   When dataHygieneAutoApply is OFF, would-be auto-tier proposals enqueue
   //   as pending tier='high' for manual review instead.
@@ -3166,8 +3146,6 @@ const gates = {
   // One extraction gate covers both Phase 4 call and SMS extractors.
   dataHygieneExtraction:       isProd ? process.env.GATE_DATA_HYGIENE_EXTRACTION === 'true' : true,
   dataHygieneAutoApply:                 process.env.GATE_DATA_HYGIENE_AUTO_APPLY === 'true',
-  // Vault decrypt/reveal is explicit opt-in in every shared environment.
-  dataHygieneSensitiveReveal: isProd ? process.env.GATE_DATA_HYGIENE_REVEAL === 'true' : false,
 
   // Inventory unit alias auto-fix (inventory-unit-review.js). Nightly sweep
   // that clears the unit-review queue's PURE-ALIAS rows only: an
@@ -3752,16 +3730,6 @@ const gates = {
   // switch = unset. No order is ever placed by this gate — that is PR 2's
   // GATE_AUTO_ORDER.
   autoReorder: gateEnvValue('GATE_AUTO_REORDER'),
-
-  // SiteOne savings-programs check (1st of the month, 9:00 AM ET): signs in
-  // with the order bot's stored SiteOne login, READS the Early Order Programs,
-  // promotions and Partners points (never adds to the cart, never changes the
-  // account, never orders), compares with last month's snapshot and posts ONE
-  // admin notification for new programs, programs ending within 30 days and
-  // points expiring within 60 days. CALL-time gateEnvValue in
-  // procurement/siteone-programs-check.js; off = { skipped: 'gated' } before
-  // any DB read or browser launch. Opt-in, dark by default; kill = unset.
-  siteOnePrograms: gateEnvValue('GATE_SITEONE_PROGRAMS_CHECK'),
 
   // SiteOne order by email (owner 2026-10-26, "OK DO OPTION B"): an admin
   // previews and sends ONE pickup-order email to SiteOne for an open restock
@@ -9797,13 +9765,6 @@ function estimateCallListLive() {
 }
 // GATE_ESTIMATE_CALL_LIST reader, on its own line so gate PRs never conflict.
 module.exports.estimateCallListLive = estimateCallListLive;
-
-// GATE_ONE_TEXT_PER_CUSTOMER_DAY read at CALL time, strict `=== 'true'`, dark in every environment.
-function oneTextPerCustomerDayLive() {
-  return process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY === 'true';
-}
-// GATE_ONE_TEXT_PER_CUSTOMER_DAY reader, on its own line so gate PRs never conflict.
-module.exports.oneTextPerCustomerDayLive = oneTextPerCustomerDayLive;
 
 // GATE_YARD_WRAPPED read at CALL time, strict `=== 'true'`, dark in every environment.
 function yardWrappedLive() {

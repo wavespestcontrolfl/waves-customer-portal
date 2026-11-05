@@ -217,7 +217,7 @@ describe('candidate selection (the SQL half of the webhook filter)', () => {
   test('a body must be present; opt keywords, reactions, consumed reschedule and lead replies are out; an enforced spam verdict is out', () => {
     expect(sql).toContain("NULLIF(TRIM(s.message_body), '') IS NOT NULL");
     expect(sql).toContain("COALESCE(s.message_type, '') <> ALL(?)");
-    const { PREHANDLED_INBOUND_TYPES } = require('../services/sms-shadow-backfill');
+    const { PREHANDLED_INBOUND_TYPES } = require('../services/sms-late-drafter')._internals;
     expect(PREHANDLED_INBOUND_TYPES).toEqual(expect.arrayContaining(['opt_out', 'opt_in', 'sms_reaction', 'reschedule_reply', 'lead_intake']));
     expect(compiled.bindings).toContainEqual(PREHANDLED_INBOUND_TYPES);
     expect(sql).toContain("COALESCE(s.metadata->'spam_verdict'->>'enforced', 'false') != 'true'");

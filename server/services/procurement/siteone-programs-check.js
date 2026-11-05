@@ -13,8 +13,8 @@
  * checkout. The browser is the order bot's egress-locked one
  * (adapters/siteone.js readSignedIn).
  *
- * Gate: GATE_SITEONE_PROGRAMS_CHECK, strict opt-in via gateEnvValue, read at
- * CALL time. Off → { skipped: 'gated' } before any DB read or browser launch.
+ * Runs from the owner's Mac (ops-oneshots/siteone-programs-monthly); the portal
+ * has no cron for it.
  *
  * Snapshot: JSON text in system_settings, key procurement.siteone_programs_snapshot (the
  * latest list, the diff source) plus one history row per month,
@@ -28,11 +28,9 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { raiseAdminAlert, breaksAlertRules } = require('../admin-alert-compose');
 
-const GATE = 'GATE_SITEONE_PROGRAMS_CHECK';
 const SNAPSHOT_KEY = 'procurement.siteone_programs_snapshot'; // the latest list: the diff source
 const HISTORY_PREFIX = `${SNAPSHOT_KEY}.`; // one row per month: procurement.siteone_programs_snapshot.YYYY-MM
 const HISTORY_KEEP_MONTHS = 24;
@@ -479,7 +477,6 @@ async function loadProgramHistory(conn = db, { months = 12 } = {}) {
  * Everything is injectable so tests never touch the network, a browser or the DB.
  */
 async function runSiteOneProgramsCheck(deps = {}) {
-  if (!gateEnvValue(GATE)) return { skipped: 'gated' };
   const conn = deps.conn || db;
   const now = deps.now ? new Date(deps.now) : new Date();
   const today = etDateString(now);
@@ -575,5 +572,4 @@ module.exports = {
   oldestKeptMonth,
   SNAPSHOT_KEY,
   HISTORY_PREFIX,
-  SITEONE_PROGRAMS_GATE: GATE,
 };

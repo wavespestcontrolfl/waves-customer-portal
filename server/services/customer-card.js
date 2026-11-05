@@ -8,10 +8,8 @@
  *   • the review QR — a /l short code (kind='card') targeting the Google
  *     review URL of the GBP nearest the customer, so scans are click-tracked
  *     and the target stays swappable without reissuing cards
- *   • the card.issued email — DARK behind GATE_DIGITAL_BUSINESS_CARD; the
- *     mint itself is ungated (a row + page reachable only by token).
  *
- * The card is a PASSIVE ask: nothing here sends SMS, and active review asks
+ * The card is a PASSIVE ask: nothing here sends SMS or email, and active review asks
  * stay in the review-request lanes. The card page hides its review section
  * for customers already flagged has_left_google_review.
  */
@@ -19,7 +17,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { gates } = require('../config/feature-gates');
 const { WAVES_LOCATIONS, resolveReviewLocation } = require('../config/locations');
 const { createTrackedShortLink } = require('./short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -176,18 +173,12 @@ async function resolveTechnicianId({ serviceRecordId, scheduledServiceId }) {
  * one card per customer, ever (unique customer_id). Never throws for the
  * caller's benefit — the dispatch completion flow fire-and-forgets this.
  *
- * suppressIssuedEmail: the mint itself is pure data setup (card row, promoter
- * enroll, tracked short link — no customer contact), but the card.issued email
- * is a customer send. Backdated quiet completions (backfill) pass true so the
- * visit stays silent; email_sent_at is left unstamped, so the email goes out
- * on the customer's next REAL completion instead (Codex P1, stale-sweep lane).
- *
  * firstVisitAt: the public card renders first_visit_completed_at as the
  * customer's "First visit" date. Backfills pass the backdated service-day
  * instant so a card minted off a stale closeout shows the day the visit
  * actually happened, not the office-entry day. Invalid/absent → now.
  */
-async function ensureCardForCompletion({ customerId, serviceRecordId = null, scheduledServiceId = null, suppressIssuedEmail = false, firstVisitAt = null }) {
+async function ensureCardForCompletion({ customerId, serviceRecordId = null, scheduledServiceId = null, firstVisitAt = null }) {
   const firstVisitStamp = () => (firstVisitAt instanceof Date && !Number.isNaN(firstVisitAt.getTime()) ? firstVisitAt : new Date());
   if (!customerId) return null;
 
@@ -275,79 +266,7 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
     }
   }
 
-  if (!suppressIssuedEmail) {
-    await maybeSendCardEmail(card, customer);
-  }
   return card;
-}
-
-/**
- * card.issued email — DARK until GATE_DIGITAL_BUSINESS_CARD=true. Idempotent
- * twice over: email_sent_at on the row, plus a customer-scoped idempotency
- * key at the send layer (same pattern as referral-invite-email.js).
- */
-async function maybeSendCardEmail(card, customer) {
-  if (!gates.digitalBusinessCard) return null;
-  if (!card || card.email_sent_at) return null;
-
-  const email = String(customer?.email || '').trim();
-  if (!email || !email.includes('@')) return null;
-
-  let techFirstName = 'Your Waves tech';
-  if (card.technician_id) {
-    const tech = await db('technicians').where({ id: card.technician_id }).first('name');
-    const first = firstNameOf(tech?.name);
-    if (first) techFirstName = first;
-  }
-
-  try {
-    const EmailTemplateLibrary = require('./email-template-library');
-    const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'card.issued',
-      to: email,
-      payload: {
-        first_name: String(customer.first_name || '').trim() || 'there',
-        tech_first_name: techFirstName,
-        card_url: `${publicPortalUrl()}/card/${card.share_token}`,
-      },
-      recipientType: 'customer',
-      recipientId: customer.id,
-      // One card email per customer — but the key carries a blocked-attempt
-      // generation because the email library dedupes terminally on 'blocked'
-      // rows. Same generation ⇒ concurrent attempts collapse to one send;
-      // a blocked result bumps the generation below so a LATER completion
-      // can retry once the suppression is corrected (Codex P2 #2588 r2).
-      idempotencyKey: `card.issued:customer:${customer.id}:b${card.email_blocked_count || 0}`,
-      triggerEventId: `card.issued:first_completion:${customer.id}`,
-      categories: ['digital_card'],
-      suppressProviderErrorLog: true,
-    });
-    // sendTemplate reports suppressions as { sent: false, blocked: true }
-    // instead of throwing — don't stamp those, so the send retries on a
-    // later completion if the suppression is corrected (Codex P2 on #2588).
-    if (!result?.sent) {
-      if (result?.blocked) {
-        await db('customer_cards').where({ id: card.id }).update({
-          email_blocked_count: db.raw('COALESCE(email_blocked_count, 0) + 1'),
-          updated_at: new Date(),
-        }).catch((err) => logger.warn(`[customer-card] blocked-count bump failed (cardId=${card.id} errType=${err?.name || 'Error'})`));
-      }
-      logger.info(`[customer-card] card.issued not sent (customerId=${customer.id} blocked=${!!result?.blocked} reason=${result?.reason || 'unknown'})`);
-      return null;
-    }
-    await db('customer_cards').where({ id: card.id }).update({
-      email_sent_at: new Date(),
-      updated_at: new Date(),
-    });
-    logger.info(`[customer-card] card.issued sent (customerId=${customer.id} cardId=${card.id})`);
-    return true;
-  } catch (err) {
-    const reason = err.status
-      ? `provider ${err.status}`
-      : require('./email-template-library').redactEmailAddresses(err.message);
-    logger.warn(`[customer-card] card.issued failed (customerId=${customer.id}): ${reason}`);
-    return null;
-  }
 }
 
 /**

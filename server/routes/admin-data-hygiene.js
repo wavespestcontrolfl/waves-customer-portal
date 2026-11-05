@@ -193,42 +193,6 @@ router.post('/proposals/:id/reject', async (req, res, next) => {
   }
 });
 
-router.post('/proposals/:id/reveal', requireAdmin, async (req, res, next) => {
-  try {
-    if (!isEnabled('dataHygieneSensitiveReveal')) {
-      return res.status(403).json({ error: 'Sensitive reveal is disabled' });
-    }
-
-    const proposal = await db('data_hygiene_proposals')
-      .where({ id: req.params.id })
-      .first();
-    if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
-    if (!proposal.is_sensitive) return res.status(422).json({ error: 'Proposal is not sensitive' });
-
-    const vault = await db('data_hygiene_sensitive_vault')
-      .where({ proposal_id: proposal.id, field: proposal.field })
-      .first();
-    if (!vault) return res.status(422).json({ error: 'Sensitive vault row missing for proposal' });
-
-    const raw = await vaultReadSensitive({
-      vault_id: vault.id,
-      actor_id: req.technicianId,
-      reason: 'data_hygiene_reveal',
-    });
-    if (!raw) return res.status(404).json({ error: 'Sensitive value not found' });
-
-    res.json({
-      proposalId: proposal.id,
-      field: proposal.field,
-      currentValue: raw.before_raw === undefined ? null : raw.before_raw,
-      proposedValue: raw.after_raw === undefined ? null : raw.after_raw,
-      readAuditLogId: raw.read_audit_log_id,
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
 router.post('/proposals/:id/approve', async (req, res, next) => {
   try {
     const result = await db.transaction(async (trx) => {

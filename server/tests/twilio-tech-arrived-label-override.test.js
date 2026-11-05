@@ -1,6 +1,5 @@
 /**
- * sendTechArrived label override (GATE_ONE_TEXT_PER_CUSTOMER_DAY): the one arrived text may name
- * every service it covers. No override = today's label from the reminder path's builder.
+ * sendTechArrived names the visit with the label from the reminder path's builder.
  */
 jest.mock("twilio", () => jest.fn());
 jest.mock("../config", () => ({
@@ -58,9 +57,4 @@ const serviceTypeUsed = () => smsTemplates.getTemplate.mock.calls.find((c) => c[
 test("no override: the label is the visit's own, as today", async () => {
   await TwilioService.sendTechArrived("cust-1", "Adam", { scheduledServiceId: "svc-1" });
   expect(serviceTypeUsed()).toBe("Quarterly Pest Control");
-});
-
-test("an override label replaces the visit's own in the same template", async () => {
-  await TwilioService.sendTechArrived("cust-1", "Adam", { scheduledServiceId: "svc-1", serviceLabel: "Pest Control & Lawn Care" });
-  expect(serviceTypeUsed()).toBe("Pest Control & Lawn Care");
 });
