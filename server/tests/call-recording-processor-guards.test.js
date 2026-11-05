@@ -1132,6 +1132,17 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(summarizeKnownCaller(null)).toBeNull();
   });
 
+  test('stamps what the pass knew about the caller, for the nightly call audit (owner ruling 2026-11-04, D1 A)', () => {
+    const { knownCallerAuditStamp } = CallRecordingProcessor._test;
+    expect(knownCallerAuditStamp(summarizeKnownCaller({ first_name: 'Ann', pipeline_stage: 'active_customer' }))).toBe('current_customer');
+    expect(knownCallerAuditStamp(summarizeKnownCaller({ first_name: 'Amy', pipeline_stage: 'at_risk' }))).toBe('current_customer');
+    expect(knownCallerAuditStamp(summarizeKnownCaller({ first_name: 'Jake', pipeline_stage: 'new_lead' }))).toBe('other_account');
+    // A lapsed account is not a current customer, even though the prompt hint calls it established.
+    expect(knownCallerAuditStamp(summarizeKnownCaller({ first_name: 'Old', pipeline_stage: 'churned' }))).toBe('other_account');
+    expect(knownCallerAuditStamp(null)).toBe('not_on_file');
+    expect(knownCallerAuditStamp(null, { lookupFailed: true })).toBe('lookup_failed');
+  });
+
   test('a new lead earns address-only trust when its on-file address validates server-side; the verdict is replayable by the audit context (owner ruling 2026-09-24, codex #4685 r1/r2)', async () => {
     const lead = (extra = {}) => summarizeKnownCaller({ id: 'lead-1', first_name: 'Form', pipeline_stage: 'new_lead', address_line1: '1234 Sample Palm Dr', address_line2: 'Unit 2', city: 'Venice', state: 'FL', zip: '34292', latitude: '27.1', longitude: '-82.4', ...extra });
     expect(lead()).toMatchObject({ accountType: 'open_lead', isExistingCustomer: false, addressTrusted: false, addressOnly: false });
