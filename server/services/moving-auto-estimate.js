@@ -12,6 +12,7 @@
  * draft: nothing goes to the customer from here.
  *
  * Free checks run first, so a move the office must price costs nothing: the
+ * old-house stop already ran, the
  * new-home estimate's own refusals (billing lane, address), a tenant account,
  * termite, misting or palm treatments on the plan, no earlier estimate to copy
  * the services from, a discount on that estimate, a plan that is not one pest
@@ -58,6 +59,7 @@ const NOTES = {
   no_source: 'There is no earlier estimate to copy the services from.',
   discount: 'The earlier estimate had a discount. Decide whether it carries over, then price the new home.',
   not_pest_only: 'The app prices only a plan of one pest service for now.',
+  stopped: 'The old-house visits already stopped, so the app cannot read the plan to copy. Price the new home by hand.',
   addon: 'The plan has an add-on service on its coming visits, which the new-home estimate would drop.',
   cadence: 'The app could not read the plan\'s visit schedule.',
   no_price: 'The app could not read the current visit price.',
@@ -80,38 +82,23 @@ function hadDiscount(inputs) {
     || (Array.isArray(inputs.serviceSpecificDiscountKeys) && inputs.serviceSpecificDiscountKeys.length > 0);
 }
 
-// The pest plan the move takes along, with its root row. The account's live
-// series and the series the old-house stop stopped for this move (found by
-// the stop's visit note) are read together, so a plan kept at another house
-// makes two and the office prices the move. Each root reads as its current
-// template (a scoped service or price edit lives in
+// The pest plan the move takes along: the account's live series, each read
+// as its current template (a scoped service or price edit lives in
 // recurring_template_overrides; the completed root stays historical). Null
-// unless the account has exactly one such plan, and it is a pest plan.
+// unless the account has exactly one live plan, and it is a pest plan, so a
+// plan kept at another house makes two and the office prices the move.
 async function movingPestPlan(move) {
-  const Moves = require('./customer-moves');
   const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
   const cols = await db('scheduled_services').columnInfo().catch(() => ({}));
   const columns = ['id', 'service_type', 'recurring_pattern', 'estimated_price', 'is_callback',
     ...(cols.recurring_template_overrides ? ['recurring_template_overrides'] : [])];
-  const notCallback = function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); };
   const live = await db('scheduled_services')
     .where({ customer_id: move.customer_id, recurring_ongoing: true })
     .whereNull('recurring_parent_id')
-    .where(notCallback)
+    .where(function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); })
     .whereNotNull('service_type')
     .select(columns);
-  const stopped = db('job_status_history')
-    .where({ to_status: 'cancelled' })
-    .whereIn('notes', Moves._private.moveJobVisitNotes(move.id))
-    .select('job_id');
-  const cancelled = await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', stopped)
-    .select(db.raw('COALESCE(recurring_parent_id, id) AS root_id'));
-  const liveIds = new Set(live.map((r) => String(r.id)));
-  const stoppedIds = [...new Set(cancelled.map((r) => String(r.root_id)))].filter((id) => !liveIds.has(id));
-  const stoppedRoots = stoppedIds.length
-    ? await db('scheduled_services').where({ customer_id: move.customer_id }).whereIn('id', stoppedIds).where(notCallback).select(columns)
-    : [];
-  const current = [...live, ...stoppedRoots].map((root) => overlayRecurringTemplateOverrides(root, cols)).filter((root) => root.is_callback !== true);
+  const current = live.map((root) => overlayRecurringTemplateOverrides(root, cols)).filter((root) => root.is_callback !== true);
   if (current.length !== 1) return null;
   const [root] = current;
   const name = String(root.service_type || '');
@@ -229,6 +216,9 @@ async function planFacts(move, today) {
 // The free checks, in order: a refusal code, or the facts the pricing needs.
 async function freeChecks(move, today = require('../utils/datetime-et').etDateString()) {
   const Moves = require('./customer-moves');
+  // Once the move job stopped (or started stopping) the old-house plans, the
+  // plan to copy is no longer live: the office prices the move.
+  if (move.pause_state || move.paused_at) return { code: 'stopped' };
   const customer = await db('customers').where({ id: move.customer_id }).first('contact_role');
   if (String((customer && customer.contact_role) || '').trim().toLowerCase() === 'tenant') return { code: 'tenant' };
   let source;

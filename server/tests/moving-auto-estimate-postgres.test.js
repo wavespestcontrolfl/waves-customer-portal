@@ -226,20 +226,14 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     expect(Lookup.performPropertyLookup).not.toHaveBeenCalled();
   });
 
-  test('after the old-house stop ran, the plan it stopped still gives the schedule and the price', async () => {
-    const s = await seed({ plan: { recurring_ongoing: false } });
-    const child = (await trx('scheduled_services').insert({
-      customer_id: customerId, status: 'cancelled', service_type: 'Monthly Pest Control Service', scheduled_date: day(30),
-      recurring_parent_id: s.root, recurring_pattern: 'monthly', property_id: oldHouseId,
-    }).returning('id'))[0].id;
-    await trx('job_status_history').insert({
-      job_id: child, from_status: 'pending', to_status: 'cancelled', transitioned_at: new Date(),
-      notes: `Customer moved out; plan stopped after the move-out date (moving flow, move pause ${s.move.id})`,
-    });
-    const facts = await Auto._private.freeChecks(s.move);
-    expect(facts.code).toBeUndefined();
-    expect(facts).toMatchObject({ cadence: { frequency: 'monthly', visits: 12 }, currentPrice: 50 });
-    expect(facts.pest).toMatchObject({ frequency: 'monthly' });
+  test('once the old-house stop ran (or started), the office prices the move, before any lookup', async () => {
+    const s = await seed({ plan: { recurring_ongoing: false }, move: { pause_state: 'paused', paused_at: new Date() } });
+    expect(await Auto.runMoveAutoEstimateJob()).toEqual({ drafted: 0, office: 1, skipped: 0, failed: 0 });
+    expect(Lookup.performPropertyLookup).not.toHaveBeenCalled();
+    expect((await moveRow(s.move.id)).auto_estimate_note).toContain('old-house visits already stopped');
+    // A stop that started and has not finished counts too.
+    await trx('customer_moves').where({ id: s.move.id }).update({ pause_state: null, auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null });
+    expect(await Auto._private.freeChecks(await moveRow(s.move.id))).toEqual({ code: 'stopped' });
   });
 
   test('a pest plan kept at another house makes two plans, so the office prices the move', async () => {
@@ -250,17 +244,6 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     await trx('scheduled_services').insert({
       customer_id: customerId, status: 'pending', service_type: 'Quarterly Pest Control Service', scheduled_date: day(5),
       is_recurring: true, recurring_pattern: 'quarterly', recurring_ongoing: true, property_id: otherHouseId, estimated_price: 120,
-    });
-    expect(await Auto._private.freeChecks(s.move)).toEqual({ code: 'not_pest_only' });
-    // Also after the old-house stop: the stopped plan and the kept one are still two.
-    await trx('scheduled_services').where({ id: s.root }).update({ recurring_ongoing: false });
-    const child = (await trx('scheduled_services').insert({
-      customer_id: customerId, status: 'cancelled', service_type: 'Monthly Pest Control Service', scheduled_date: day(30),
-      recurring_parent_id: s.root, recurring_pattern: 'monthly', property_id: oldHouseId,
-    }).returning('id'))[0].id;
-    await trx('job_status_history').insert({
-      job_id: child, from_status: 'pending', to_status: 'cancelled', transitioned_at: new Date(),
-      notes: `Customer moved out; plan stopped after the move-out date (moving flow, move pause ${s.move.id})`,
     });
     expect(await Auto._private.freeChecks(s.move)).toEqual({ code: 'not_pest_only' });
   });
