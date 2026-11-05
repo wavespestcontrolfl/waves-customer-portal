@@ -1207,11 +1207,14 @@ const TRIGGER_REGISTRY = {
     group: 'Alerts',
     rule: { area: 'System', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => {
+      // count = unread waiting items (owner 2026-11-04 "fix count"); total = every waiting item, read or not.
       const count = Number(p.count) || 0;
+      const total = Number(p.total) || 0;
       const areas = (Array.isArray(p.areas) ? p.areas : []).slice(0, 3);
+      const parts = [...areas.map((a) => `${a.area} ${a.count}`), ...(total > count ? [`${total} open in all`] : [])];
       return {
         title: count === 1 ? '1 item waits for you' : `${count} items wait for you`,
-        body: areas.map((a) => `${a.area} ${a.count}`).join(' \u00b7 ') || null,
+        body: parts.join(' \u00b7 ') || null,
         link: '/admin/dashboard?bell=open',
       };
     },

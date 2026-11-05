@@ -45,15 +45,18 @@ function waitsForPerson(item) {
     && (item.severity === 'needs-you' || item.severity === 'broken');
 }
 
-// { count, areas: [{ area, count }] } with areas busiest first (ties in the catalog's own area order), every area listed.
+// { count, total, areas: [{ area, count }] }. count = the waiting items nobody has read yet (owner 2026-11-04, "fix
+// count": the first banner said 334, the whole open backlog, most of it read weeks before); total = every waiting item;
+// areas = the unread ones by area, busiest first (ties in the catalog's own area order), every area listed.
 function summarize(items) {
+  const waiting = items.filter(waitsForPerson);
   const tally = new Map();
-  for (const item of items.filter(waitsForPerson)) tally.set(item.area, (tally.get(item.area) || 0) + 1);
+  for (const item of waiting.filter((w) => !w.readAt)) tally.set(item.area, (tally.get(item.area) || 0) + 1);
   const order = (area) => { const i = AREAS.indexOf(area); return i === -1 ? AREAS.length : i; };
   const areas = [...tally.entries()]
     .map(([area, count]) => ({ area, count }))
     .sort((a, b) => (b.count - a.count) || (order(a.area) - order(b.area)));
-  return { count: areas.reduce((sum, a) => sum + a.count, 0), areas };
+  return { count: areas.reduce((sum, a) => sum + a.count, 0), total: waiting.length, areas };
 }
 
 async function countWaiting() {
@@ -81,7 +84,7 @@ async function releaseDay(day) {
 }
 
 // The send for a day that has something waiting: claim the day, then the pushOnly banner. Never throws.
-async function claimAndSend(day, { count, areas }) {
+async function claimAndSend(day, { count, total, areas }) {
   let claimed;
   try {
     claimed = await claimDay(day);
@@ -95,13 +98,13 @@ async function claimAndSend(day, { count, areas }) {
   }
   try {
     const { triggerNotification } = require('./notification-triggers');
-    const result = await triggerNotification('waiting_summary', { count, areas, day }, { pushOnly: true });
+    const result = await triggerNotification('waiting_summary', { count, total, areas, day }, { pushOnly: true });
     if (!result || result.error || result.prefsUnavailable) {
       await releaseDay(day);
       logger.error(`[morning-banner] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})`);
       return { count, sent: false, error: 'dispatch_failed' };
     }
-    logger.info(`[morning-banner] ${day}: ${count} item(s) waiting, banner sent`);
+    logger.info(`[morning-banner] ${day}: ${count} unread of ${total} waiting, banner sent`);
     return { count, sent: true, result };
   } catch (err) {
     await releaseDay(day);
@@ -121,8 +124,9 @@ async function runMorningBanner({ now = new Date() } = {}) {
     logger.error(`[morning-banner] count failed: ${err?.message || 'error'}`);
     return { count: 0, sent: false, error: 'count_failed' };
   }
+  // Nothing unread = no banner, even with read items still open: the bell already shows those.
   if (summary.count === 0) {
-    logger.info(`[morning-banner] ${day}: 0 items waiting, no banner`);
+    logger.info(`[morning-banner] ${day}: 0 unread of ${summary.total} waiting, no banner`);
     return { count: 0, sent: false, skipped: 'nothing_waiting' };
   }
   return claimAndSend(day, summary);
