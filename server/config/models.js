@@ -165,21 +165,20 @@ function anthropicSupportsMidConversationTools(model) {
   return ANTHROPIC_MID_CONVERSATION_TOOLS.has(String(model || ''));
 }
 
-// Does `model` accept the Claude API's fast mode (`speed: "fast"` with the
-// fast-mode-2026-02-01 beta)? Opus 5.5, Opus 5 and Opus 4.8 only. Exact ids:
-// an unknown id is NOT supported (fail closed: the caller sends the ordinary
-// standard-speed request).
-const ANTHROPIC_FAST_MODE = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8']);
-function anthropicSupportsFastMode(model) {
-  return ANTHROPIC_FAST_MODE.has(String(model || ''));
-}
-
 // Fast mode's list price as a multiple of the model's standard per-token rates
 // (Anthropic's published fast-mode rates are exactly 2x for these two). The
-// cost report (llm-cost priceFor) prices a "<model>-fast" ledger row with it;
-// a fast-capable model missing here (Opus 4.8) is left unpriced, never billed
-// at the standard rate.
+// cost report (llm-cost priceFor) prices a "<model>-fast" ledger row with it.
 const ANTHROPIC_FAST_MODE_PRICE_MULTIPLIER = Object.freeze({ 'claude-opus-5-5': 2, 'claude-opus-5': 2 });
+
+// Does `model` get the Claude API's fast mode (`speed: "fast"` with the
+// fast-mode-2026-02-01 beta)? Only a model whose fast-mode price is known
+// above, so every fast call is priced and the spend alerts see it (Codex #7603
+// security review: Opus 4.8 accepts fast mode but has no price here, so it
+// stays at standard speed). Exact ids: an unknown id is NOT supported (fail
+// closed: the caller sends the ordinary standard-speed request).
+function anthropicSupportsFastMode(model) {
+  return Object.hasOwn(ANTHROPIC_FAST_MODE_PRICE_MULTIPLIER, String(model || ''));
+}
 
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS

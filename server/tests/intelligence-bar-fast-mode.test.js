@@ -70,7 +70,8 @@ describe('createIbMessage', () => {
     expect(options).toEqual({ headers: { 'x-other': '1' }, timeout: 5 });
   });
 
-  test.each(['claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-4-5', ''])('gate on + %j (no fast mode): the plain call', async (model) => {
+  // Opus 4.8 accepts fast mode but has no fast-mode price, so it must stay standard (Codex #7603 security review).
+  test.each(['claude-opus-4-8', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-4-5', ''])('gate on + %j (no fast mode): the plain call', async (model) => {
     process.env.GATE_IB_FAST_MODE = 'true';
     const anthropic = client();
     const p = params(model);
@@ -172,8 +173,10 @@ describe('gate + model registry', () => {
     if (saved === undefined) delete process.env.GATE_IB_FAST_MODE; else process.env.GATE_IB_FAST_MODE = saved;
   });
 
-  test('fast mode ids: Opus 5.5, Opus 5, Opus 4.8 only', () => {
-    for (const id of ['claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8']) expect(MODELS.anthropicSupportsFastMode(id)).toBe(true);
-    for (const id of ['claude-sonnet-5-5', 'claude-opus-4-7', 'claude-opus-5-5-preview', undefined, '']) expect(MODELS.anthropicSupportsFastMode(id)).toBe(false);
+  test('fast mode ids: only models with a known fast-mode price (Opus 5.5, Opus 5)', () => {
+    for (const id of ['claude-opus-5-5', 'claude-opus-5']) expect(MODELS.anthropicSupportsFastMode(id)).toBe(true);
+    // Opus 4.8 accepts fast mode but has no fast price, so it stays at standard speed (Codex #7603 security review).
+    for (const id of ['claude-opus-4-8', 'claude-sonnet-5-5', 'claude-opus-4-7', 'claude-opus-5-5-preview', 'toString', undefined, '']) expect(MODELS.anthropicSupportsFastMode(id)).toBe(false);
+    for (const id of Object.keys(MODELS.ANTHROPIC_FAST_MODE_PRICE_MULTIPLIER)) expect(MODELS.anthropicSupportsFastMode(id)).toBe(true);
   });
 });
