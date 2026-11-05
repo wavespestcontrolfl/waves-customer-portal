@@ -181,6 +181,10 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     expect(officeItems()).toHaveLength(0);
     expect(Sender.sendCustomerMessage).not.toHaveBeenCalled();
 
+    // The draft is marked only while the move still shows this attempt, this estimate and its address.
+    const Moves = require('../services/customer-moves');
+    expect(Moves.addressMatchesMove(NEW_ADDRESS, after)).toBe(true);
+
     // Once: a second run finds nothing to do, and spends nothing.
     jest.clearAllMocks();
     expect(await Auto.runMoveAutoEstimateJob()).toEqual({ drafted: 0, office: 0, skipped: 0, failed: 0 });
@@ -285,6 +289,36 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_state: 'office', auto_estimate_note: 'The office made the estimate.', auto_estimate_at: null });
     expect(officeItems()).toHaveLength(0);
     expect(Lookup.performPropertyLookup).not.toHaveBeenCalled();
+  });
+
+  test('a customer who sends another address while the draft saves gets a new attempt, never a draft marked for the wrong house', async () => {
+    const s = await seed();
+    // The save commits, then the customer's resubmit lands before the attempt is marked.
+    const Persistence = require('../services/admin-estimate-persistence');
+    const real = Persistence.createOrReuseAdminEstimate;
+    const spy = jest.spyOn(Persistence, 'createOrReuseAdminEstimate').mockImplementation(async (opts) => {
+      const out = await real(opts);
+      if (!opts.dryRun) {
+        await trx('customer_moves').where({ id: s.move.id }).update({
+          typed_address: '12 Other Road, Venice, FL 34285', normalized_address: JSON.stringify({ ...NEW_HOUSE, line1: '12 Other Road' }),
+        });
+      }
+      return out;
+    });
+    try {
+      // Inside the band: the engine's own price is the current one.
+      await trx('scheduled_services').where({ id: s.root }).update({ estimated_price: 1 });
+      expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ office: 1 });
+      const [[, , , opts]] = officeItems();
+      const price = Number(/The new visit price \(\$(\d+\.\d\d)\)/.exec(opts.detail)[1]);
+      await trx('scheduled_services').where({ id: s.root }).update({ estimated_price: price });
+      await trx('customer_moves').where({ id: s.move.id }).update({ auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null });
+      expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ drafted: 0, skipped: 1 });
+      // Not marked drafted for the new house; the claim is cleared for its own attempt.
+      expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_state: null, auto_estimate_at: null });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('a new address after a finished attempt clears it, so the new address gets its own; the same address does not', async () => {

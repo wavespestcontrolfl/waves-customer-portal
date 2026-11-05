@@ -359,9 +359,30 @@ async function autoEstimateMove(moveId, { now }) {
     expectedEngineResultDigest: price.digest,
   });
   if (saved.refused) return leaveToOffice(move, 'refused', { now, note: saved.refused.message });
-  await db('customer_moves').where({ id: move.id }).whereNull('auto_estimate_state').update({ auto_estimate_state: 'drafted', updated_at: now });
-  logger.info(`[moving-auto-estimate] drafted the new-home estimate for move ${move.id}`);
-  return 'drafted';
+  const outcome = await finishDraft(move, facts, saved.estimate && saved.estimate.id, now);
+  if (outcome === 'drafted') logger.info(`[moving-auto-estimate] drafted the new-home estimate for move ${move.id}`);
+  return outcome;
+}
+
+// Marks the attempt drafted under the move's row lock, only while the move
+// still shows this attempt's claim, this estimate and the address it priced.
+// A customer who sent another address after the save committed has a draft
+// for the old one (the resubmit already took it off their surfaces): the
+// claim is cleared so the new address gets its own attempt.
+async function finishDraft(move, facts, estimateId, now) {
+  const Moves = require('./customer-moves');
+  return db.transaction(async (trx) => {
+    const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
+    const ours = locked && !locked.auto_estimate_state && locked.auto_estimate_at
+      && new Date(locked.auto_estimate_at).getTime() === new Date(move.auto_estimate_at).getTime();
+    if (!ours) return 'skipped';
+    if (estimateId && String(locked.estimate_id || '') === String(estimateId) && Moves.addressMatchesMove(facts.source.move.address, locked)) {
+      await trx('customer_moves').where({ id: move.id }).update({ auto_estimate_state: 'drafted', updated_at: now });
+      return 'drafted';
+    }
+    await trx('customer_moves').where({ id: move.id }).update({ auto_estimate_at: null, updated_at: now });
+    return 'skipped';
+  });
 }
 
 /** The app-made new-home estimate job (scheduler, every 15 minutes). Off with GATE_MOVING_AUTO_ESTIMATE. */
