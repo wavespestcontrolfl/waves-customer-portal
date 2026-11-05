@@ -486,7 +486,14 @@ export default function PortalInboxTabV2({ onCount }) {
     try {
       const res = await markHandled(item);
       if (!DONE_STATUSES[item.kind].includes(handledStatus(item, res))) {
-        setRowErrors((prev) => ({ ...prev, [key]: "This changed before you could mark it handled. It is still open." }));
+        // The customer wrote again after the message this row showed: reload, so the row carries their new
+        // words and its next Mark handled covers them.
+        const wroteAgain = item.kind === "message" && res?.open === true;
+        setRowErrors((prev) => ({
+          ...prev,
+          [key]: wroteAgain ? "They wrote again after this. Their new words are shown now." : "This changed before you could mark it handled. It is still open.",
+        }));
+        if (wroteAgain) load();
         return;
       }
       dropRow(item);

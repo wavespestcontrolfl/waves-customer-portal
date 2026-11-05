@@ -567,21 +567,28 @@ describe("Portal inbox tab: answers in the portal", () => {
     expect(within(thread).queryByRole("button", { name: "Show earlier messages" })).toBeNull();
   });
 
-  it("marks a portal message handled through the message it showed; a newer message keeps it open", async () => {
+  it("marks a portal message handled through the message it showed; a newer message reloads the row with its words", async () => {
     let open = true;
+    let listed = message;
     adminFetch.mockImplementation(async (url) => {
-      if (url === "/admin/portal-inbox") return withReplies({ items: [message], total: 1 });
+      if (url === "/admin/portal-inbox") return withReplies({ items: [listed], total: 1 });
       if (url === "/admin/portal-inbox/messages/thread-1/handled") return { handled: true, open };
       return updated(url);
     });
     mount();
-    const row = (await screen.findByText("Lee Sample")).closest("[data-testid]");
-    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
-    expect(await within(row).findByText("This changed before you could mark it handled. It is still open.")).toBeInTheDocument();
+    await screen.findByText("Lee Sample");
+    // The customer writes again after the list loaded.
+    listed = { ...message, throughId: "msg-10", customerMessage: "Also, can you come Friday?" };
+    const row = () => screen.getByTestId("portal-row-message-thread-1");
+    fireEvent.click(within(row()).getByRole("button", { name: "Mark handled" }));
+    expect(await screen.findByText("They wrote again after this. Their new words are shown now.")).toBeInTheDocument();
+    expect(await screen.findByText(/Also, can you come Friday\?/)).toBeInTheDocument();
     expect(adminFetch).toHaveBeenCalledWith("/admin/portal-inbox/messages/thread-1/handled", { method: "POST", body: JSON.stringify({ throughId: "msg-9" }) });
+    // The next Mark handled covers the new message.
     open = false;
-    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    fireEvent.click(within(row()).getByRole("button", { name: "Mark handled" }));
     await waitFor(() => expect(screen.queryByText("Lee Sample")).toBeNull());
+    expect(adminFetch).toHaveBeenLastCalledWith("/admin/portal-inbox/messages/thread-1/handled", { method: "POST", body: JSON.stringify({ throughId: "msg-10" }) });
   });
 
   it("counts older portal messages in the Older line, and Close all older sums them", async () => {
