@@ -297,7 +297,9 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
   test('a delivered (not withheld) annual estimate sends normally', async () => {
     const TwilioService = require('../services/twilio');
     let capturedVerdict;
-    TwilioService.sendSMS.mockImplementationOnce(async (_to, _body, options) => {
+    let capturedBody;
+    TwilioService.sendSMS.mockImplementationOnce(async (_to, sentBody, options) => {
+      capturedBody = sentBody;
       capturedVerdict = await options.preSendCheck();
       if (!capturedVerdict.ok) return { success: false, sid: null, preSendBlocked: true, code: capturedVerdict.code, error: capturedVerdict.reason };
       return { success: true, sid: 'SM_fake' };
@@ -321,6 +323,9 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(capturedVerdict).toEqual({ ok: true });
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, channel: 'sms' });
+    // Owner 2026-11-04: texts say "Waves", never "Waves Pest Control".
+    expect(capturedBody).toMatch(/^Waves: here's the full /);
+    expect(capturedBody).not.toMatch(/Waves Pest Control/);
   });
 
   describe('GATE_SMS_LINK_WRAP dedupe (the wrap itself now runs inside sendCustomerMessage)', () => {

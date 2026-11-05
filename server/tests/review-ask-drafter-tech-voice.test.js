@@ -287,7 +287,7 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
     expect(await Drafter.draftTechVoice({ ...INPUT, serviceDate: yesterday() }))
       .toBe("Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}");
     expect(await Drafter.draftTechVoice({ ...INPUT, customer: { ...INPUT.customer, first_name: 'Sunset Vacation Rentals' }, recipientFirstName: 'Sunset', techName: null }))
-      .toBe("Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}");
+      .toBe("Hi, it's Waves. Thanks for having us out today. A Google review would really help: {review_url}");
   });
 
   // Owner 2026-10-27: a late close hands the drafter the visit's scheduled day (YYYY-MM-DD) when it
@@ -308,6 +308,8 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
     for (const b of [
       "Hi Marta, it's Adam from Waves. Thanks for having us out today. A Google review would really help: {review_url}",
       "Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}",
+      "Hi, it's Waves. Thanks for having us out today. A Google review would really help: {review_url}",
+      // The wording before 2026-11-04 (owner: texts say "Waves"), still on stored bodies.
       "Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}",
     ]) expect(Drafter.isFixedDay0Line(b)).toBe(true);
     // Every output of the fixed line is recognized, odd names included.
@@ -331,7 +333,7 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
     const { countSegments } = require('../services/messaging/segment-counter');
     const long = 'A'.repeat(180);
     const body = Drafter.__private.fixedDay0Line({ firstName: long, techName: long, stepKind: 'day0' });
-    expect(body).toBe("Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}");
+    expect(body).toBe("Hi, it's Waves. Thanks for having us out today. A Google review would really help: {review_url}");
     expect(Drafter.isFixedDay0Line(body)).toBe(true);
     const atCap = Drafter.__private.fixedDay0Line({ firstName: 'B'.repeat(20), techName: 'C'.repeat(20), stepKind: 'day0' });
     expect(atCap.startsWith(`Hi ${'B'.repeat(20)}, it's ${'C'.repeat(20)} from Waves.`)).toBe(true);
