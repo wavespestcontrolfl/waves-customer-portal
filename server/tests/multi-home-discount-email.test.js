@@ -129,12 +129,21 @@ function scenario({ targets = [], ledger = [], customers = [], payers = [], pref
 const target = (rootId, customerId, propertyId = null) => ({ customerId, rootId, propertyId });
 const emptyOut = () => ({ sources: 0, waiting: 0, sent: 0, deduped: 0, blocked: 0, failed: 0, skipped: 0, noAddress: 0 });
 
+// The invoice resolver's answer for a visit, from the tables as they are now: the profile's default payer while it is
+// active (no per-visit Bill-To in these fixtures unless a test passes its own payerOf).
+const payerFromTables = (tables) => async (_db, { customerId }) => {
+  const c = (tables.customers || []).find((r) => r.id === customerId);
+  const payer = c && c.payer_id != null ? (tables.payers || []).find((r) => String(r.id) === String(c.payer_id)) : null;
+  return payer && payer.active !== false ? String(payer.id) : null;
+};
+
 async function run(sc, send) {
   const out = emptyOut();
-  // The production price walk and lane resolver are faked: no extension to price, every home per application,
-  // unless a test says so.
+  // The production price walk, lane resolver and Bill-To resolver are faked: no extension to price, every home per
+  // application, each visit billed as its profile's default, unless a test says so.
   await processSource(sc.dbh, sc.estimate, {
     presetId: 'preset-1', today: TODAY, send, nextPrices: sc.nextPrices || (async () => null), laneOf: sc.laneOf || (async () => 'per_application'),
+    payerOf: sc.payerOf || payerFromTables(sc.tables || {}),
   }, out);
   return out;
 }
@@ -274,7 +283,7 @@ describe('who gets it, and the greeting', () => {
     expect(byTo['son@example.invalid'].payload.home_2_address).toBeUndefined();
   });
 
-  test('a payer that is inactive or has no usable AP email falls back to the profile\'s own email', async () => {
+  test('an inactive payer is self-pay (the profile\'s own email); an active payer with no usable AP email gets no email, nor does the homeowner', async () => {
     const sc = scenario({
       targets: [target('root-a', 'parents'), target('root-b', 'aunt')],
       ledger: [ledgerRow('root-a', 'applied'), ledgerRow('root-b', 'applied')],
@@ -286,8 +295,9 @@ describe('who gets it, and the greeting', () => {
       visits: { 'root-a': [visit('2026-11-14', '108.00')], 'root-b': [visit('2026-11-15', '108.00')] },
     });
     const send = sendOk();
-    await run(sc, send);
-    expect(send.mock.calls.map(([a]) => a.to).sort()).toEqual(['aunt@example.invalid', 'parents@example.invalid', 'son@example.invalid']);
+    const out = await run(sc, send);
+    expect(send.mock.calls.map(([a]) => a.to).sort()).toEqual(['parents@example.invalid', 'son@example.invalid']);
+    expect(out.noAddress).toBe(1);
   });
 
   test('no email address: no email for that group, logged; the other groups still go', async () => {
@@ -325,7 +335,7 @@ describe('who gets it, and the greeting', () => {
     const dbh = (name) => (name === 'notification_prefs' ? failing : original(name));
     dbh.raw = original.raw;
     const send = sendOk();
-    await expect(processSource(dbh, sc.estimate, { presetId: 'preset-1', today: TODAY, send, nextPrices: async () => null, laneOf: async () => 'per_application' }, emptyOut())).rejects.toThrow('relation missing');
+    await expect(processSource(dbh, sc.estimate, { presetId: 'preset-1', today: TODAY, send, nextPrices: async () => null, laneOf: async () => 'per_application', payerOf: async () => null }, emptyOut())).rejects.toThrow('relation missing');
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -921,6 +931,50 @@ describe('the kill switch holds at the provider boundary', () => {
     });
     expect(await run(sc(), send)).toMatchObject({ sent: 0, waiting: 1 });
     expect(requested).toBe(false);
+  });
+});
+
+describe('each home goes to the Bill-To of its own visits (Codex #7633 r2)', () => {
+  const PAYER_9 = { id: 9, display_name: 'Morgan Example', company_name: null, ap_email: 'job-payer@example.invalid', active: true };
+  const twoHomes = (extra = {}) => scenario({
+    targets: [target('root-a', 'parents')],
+    ledger: [ledgerRow('root-a', 'applied')],
+    customers: [customer('son'), customer('parents', { payer_id: extra.profilePayer ?? null })],
+    payers: [PAYER_9, { id: 7, display_name: 'Avery Example', company_name: null, ap_email: 'default-ap@example.invalid', active: true }],
+    visits: { 'root-a': [visit('2026-11-14', '108.00'), visit('2027-02-13', '108.00')] },
+  });
+  const sendTo = (send) => send.mock.calls.map(([a]) => a.to).sort();
+
+  test('every visit of the parents\' series bills to a per-job payer: that payer\'s AP email gets the home', async () => {
+    const sc = { ...twoHomes(), payerOf: async (_db, { customerId }) => (customerId === 'parents' ? '9' : null) };
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 2 });
+    expect(sendTo(send)).toEqual(['job-payer@example.invalid', 'son@example.invalid']);
+    const toPayer = send.mock.calls.map(([a]) => a).find((a) => a.to === 'job-payer@example.invalid');
+    expect(toPayer).toMatchObject({ recipientType: 'payer', recipientId: '9', payload: { greeting_name: 'Morgan', home_1_payment: 'Invoice to you by email' } });
+  });
+
+  test('visits pinned to self-pay: the profile\'s own email gets the home, never its default payer', async () => {
+    const sc = { ...twoHomes({ profilePayer: 7 }), payerOf: async () => null };
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 2 });
+    expect(sendTo(send)).toEqual(['parents@example.invalid', 'son@example.invalid']);
+  });
+
+  test('the series\' visits bill to different parties: who pays is unclear, the email waits', async () => {
+    const sc = { ...twoHomes({ profilePayer: 7 }), payerOf: async (_db, { customerId, visitId }) => (customerId === 'parents' && visitId === 'v-2027-02-13' ? '9' : null) };
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 1 });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  test('a payer-billed home whose payer has no usable AP email is not sent to the homeowner', async () => {
+    const sc = twoHomes({ profilePayer: 7 });
+    sc.tables.payers[1].ap_email = '';
+    const send = sendOk();
+    const out = await run(sc, send);
+    expect(out).toMatchObject({ sent: 1, noAddress: 1 });
+    expect(sendTo(send)).toEqual(['son@example.invalid']);
   });
 });
 

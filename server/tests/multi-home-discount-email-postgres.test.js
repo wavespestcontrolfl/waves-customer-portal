@@ -378,6 +378,36 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     });
   });
 
+  test('the parents\' visits bill to a per-job payer: that payer gets the home, not the profile', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      const [payer] = await trx('payers').insert({ display_name: 'Morgan Example', ap_email: `job-ap-${randomUUID()}@example.invalid`, active: true }).returning('*');
+      await trx('scheduled_services').whereIn('id', f.parentSeries.ids).update({ payer_id: payer.id });
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(await emailRun(trx)).toMatchObject({ sent: 2, failed: 0 });
+      const rows = await messages(f.estimateId);
+      const parents = await trx('customers').where({ id: f.parents }).first('email');
+      expect(rows.map((r) => r.recipient_email_snapshot)).not.toContain(parents.email);
+      const toPayer = rows.find((r) => r.recipient_email_snapshot === payer.ap_email);
+      expect(toPayer).toMatchObject({ recipient_type: 'payer' });
+      expect(toPayer.text_snapshot).toContain('How it is paid: Invoice to you by email');
+    });
+  });
+
+  test('the parents\' visits pinned to self-pay: the profile gets the home, never its default payer', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      const [payer] = await trx('payers').insert({ display_name: 'Avery Example', ap_email: `default-ap-${randomUUID()}@example.invalid`, active: true }).returning('*');
+      await trx('customers').where({ id: f.parents }).update({ payer_id: payer.id });
+      await trx('scheduled_services').whereIn('id', f.parentSeries.ids).update({ self_pay_override: true });
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(await emailRun(trx)).toMatchObject({ sent: 2, failed: 0 });
+      const rows = await messages(f.estimateId);
+      expect(rows.map((r) => r.recipient_email_snapshot)).not.toContain(payer.ap_email);
+      expect(rows.find((r) => r.recipient_id === f.parents)).toMatchObject({ recipient_type: 'customer' });
+    });
+  });
+
   test('a held target blocks the send; once it is no longer a target the email goes', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);

@@ -23,11 +23,13 @@
  * or in flight holds the next attempt (EMAIL_PROVIDER_RETRY_HELD), an accepted send counts even when its bookkeeping
  * failed. Nothing here re-sends on its own, so a failure can never double-send.
  *
- * WHO. Each home goes to its profile's active Bill-To payer's AP email (payers.ap_email, customers.payer_id) when it
- * has one, else to the profile's own email. Homes are grouped by paying address (case-insensitive); each group is one
- * email listing only the homes that address pays for. Greeting = the payer's display name (first word) when a home in the
- * group bills to a payer with that AP email, else the first home's profile first name. No address -> no email for that
- * group (logged). A profile whose portal-wide email switch (notification_prefs.email_enabled) is off, or whose switch
+ * WHO. Each home goes to its series' Bill-To, resolved for every upcoming visit by the resolver every invoice uses
+ * (payer.js resolveForInvoice: the visit's own payer, else its self-pay pin, else the profile's default payer; an
+ * inactive payer is self-pay). All visits must agree, or the email waits. A payer -> its AP email (none usable -> no
+ * email for that home; the homeowner is never told about billing a payer handles); self-pay -> the profile's own email.
+ * Homes are grouped by paying address (case-insensitive); each group is one email listing only the homes that address
+ * pays for. Greeting = the payer's display name (first word) when a home in the group bills to a payer with that AP
+ * email, else the first home's profile first name. No address -> no email for that group (logged). A profile whose portal-wide email switch (notification_prefs.email_enabled) is off, or whose switch
  * cannot be read, is left out of the send; suppression and the transactional stream go through sendTemplate as usual.
  *
  * AT THE PROVIDER HANDOFF (sendTemplate's withProviderHandoff), in PR 2's lock order (the family lock, each listed
@@ -170,6 +172,7 @@ async function loadSeriesFacts(dbh, { customerId, rootId }, today) {
     serviceName: clean(first?.service_type),
     cadence: first?.cadence || null,
     line: first?.line || null,
+    visitIds: upcoming.map((v) => String(v.id)),
     flatPriceCents: flat ? first.priceCents : null,
     startsDate: first?.date || null,
   };
@@ -364,6 +367,22 @@ async function billedPerVisit(dbh, { customer, facts }, ctx) {
   return BILLED_PER_VISIT_LANES.has(await (ctx.laneOf || liveLane)(dbh, { customer, facts, today: ctx.today }));
 }
 
+// Who pays a visit: the billing resolver every invoice uses (payer.js resolveForInvoice: the visit's own Bill-To payer,
+// else its self-pay pin, else the profile's default payer; an inactive payer is self-pay). null = the profile pays.
+async function visitPayer(dbh, { customerId, visitId }) {
+  const resolved = await require('./payer').resolveForInvoice({ database: dbh, customerId, scheduledServiceId: visitId, throwOnError: true });
+  return resolved.payerId != null ? String(resolved.payerId) : null;
+}
+
+// The series' Bill-To (Codex #7633 r2): every upcoming visit must resolve to the same payer (or all to self-pay), or the
+// home's paying party is unclear and the email waits; the email covers every visit from the next one.
+async function seriesPayer(dbh, { customerId, visitIds }, ctx) {
+  const resolve = ctx.payerOf || visitPayer;
+  const payers = new Set();
+  for (const visitId of visitIds) payers.add(await resolve(dbh, { customerId, visitId }));
+  return payers.size === 1 ? { payerId: [...payers][0] } : { unclear: true };
+}
+
 async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx) {
   const facts = await loadSeriesFacts(dbh, { customerId, rootId }, ctx.today);
   // A series of the sale with no upcoming visit (cancelled after it) is neither listed nor judged. It stays in the
@@ -374,11 +393,13 @@ async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx)
     ? await sourceHomeVerdict(dbh, ctx, facts, rootId)
     : await targetHomeVerdict(dbh, ctx, facts, rootId);
   const perVisit = await billedPerVisit(dbh, { customer: profile, facts }, ctx);
+  const billTo = await seriesPayer(dbh, { customerId: String(customerId), visitIds: facts.visitIds }, ctx);
   return {
     customerId: String(customerId),
     rootId: String(rootId),
     isSource,
-    stale: stale || !perVisit,
+    stale: stale || !perVisit || !!billTo.unclear,
+    payerId: billTo.payerId ?? null,
     address: await homeAddress(dbh, { customerId, propertyId, visit: facts.first, profile }),
     service: facts.serviceName,
     ...prices,
@@ -410,9 +431,9 @@ async function loadCustomers(dbh, ids, { lock = false } = {}) {
   return new Map(rows.map((r) => [String(r.id), r]));
 }
 
-// The ACTIVE Bill-To payers of those profiles that have a usable AP email, by payer id. `lock` reads them FOR SHARE.
-async function loadPayers(dbh, customers, { lock = false } = {}) {
-  const payerIds = [...new Set([...customers.values()].map((c) => c.payer_id).filter((v) => v != null))];
+// The ACTIVE payers among these Bill-To ids that have a usable AP email, by payer id. `lock` reads them FOR SHARE.
+async function loadPayers(dbh, ids, { lock = false } = {}) {
+  const payerIds = [...new Set(ids.filter((v) => v != null).map(String))].sort();
   if (!payerIds.length) return new Map();
   const query = dbh('payers').whereIn('id', payerIds).select('id', 'display_name', 'company_name', 'ap_email', 'active');
   const rows = lock ? await query.orderBy('id').forShare() : await query;
@@ -440,10 +461,11 @@ async function paymentCell(dbh, customer, payer) {
   }
 }
 
-// Where a profile's homes are emailed: its active Bill-To payer's AP email when it has one, else its own email.
-function routeFor(customer, payers) {
-  const payer = customer.payer_id != null ? payers.get(String(customer.payer_id)) || null : null;
-  const address = payer ? clean(payer.ap_email) : clean(customer.email);
+// Where a home's email goes: its series' Bill-To payer's AP email (no usable AP email -> no address: the homeowner is
+// never told about billing a payer handles), else the profile's own email.
+function routeFor(home, customer, payers) {
+  const payer = home.payerId != null ? payers.get(String(home.payerId)) || null : null;
+  const address = home.payerId != null ? clean(payer?.ap_email) : clean(customer.email);
   return { payer, address, key: lower(address) };
 }
 
@@ -455,12 +477,12 @@ async function groupByPayingAddress(dbh, homes, { customers, payers, optedOut })
     if (optedOut.has(home.customerId)) continue;
     const customer = customers.get(home.customerId);
     if (!customer) continue;
-    const { payer, address, key } = routeFor(customer, payers);
+    const { payer, address, key } = routeFor(home, customer, payers);
     if (!isEmailLike(address)) { noAddress.push(home); continue; }
     if (!groups.has(key)) groups.set(key, { key, address, payer: null, homes: [] });
     const group = groups.get(key);
     if (payer && !group.payer) group.payer = payer;
-    group.homes.push({ ...home, payerId: payer ? String(payer.id) : null, payment: await paymentCell(dbh, customer, payer) });
+    group.homes.push({ ...home, payment: await paymentCell(dbh, customer, payer) });
   }
   return { groups: [...groups.values()], noAddress };
 }
@@ -626,12 +648,15 @@ async function composeSource(conn, estimate, run, { lock = false } = {}) {
   const ledger = await loadLedgerRows(conn, estimate.id);
   if (openTargetReason(targets, ledger)) return { wait: 'target_open', roots, ids };
   const customers = await loadCustomers(conn, ids, { lock });
-  const ctx = { estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh: conn, nextPrices: run.nextPrices, laneOf: run.laneOf };
+  const ctx = {
+    estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh: conn,
+    nextPrices: run.nextPrices, laneOf: run.laneOf, payerOf: run.payerOf,
+  };
   const homes = await buildHomes(conn, ctx);
   // Every series of the sale gone (only a visit under way today): nothing to say about the new home yet.
   if (!homes.some((h) => h.isSource)) return { wait: 'no_source_home', roots, ids };
   if (homes.some((h) => h.stale)) return { wait: 'home_stale', roots, ids };
-  const payers = await loadPayers(conn, customers, { lock });
+  const payers = await loadPayers(conn, homes.map((h) => h.payerId), { lock });
   const optedOut = await loadEmailOptOuts(conn, ids, { lock });
   const { groups, noAddress } = await groupByPayingAddress(conn, homes, { customers, payers, optedOut });
   return { roots, ids, noAddress, sends: sendsFor(estimate.id, groups, customers) };
