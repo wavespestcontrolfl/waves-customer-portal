@@ -1598,6 +1598,9 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .first('service_type')
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
+      // Built once for every recipient, after the move landed, so the link
+      // checks see the new slot.
+      const differentTimeLine = await require('../services/reschedule-link').rescheduledTextLine(serviceId, { customerId: customer.id });
       sent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
         const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
         return renderRequiredSmsTemplate('appointment_rescheduled', {
@@ -1608,6 +1611,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           time: timeText,
           // "between 9:00 AM and 11:00 AM" — the phrase every reminder uses.
           window: spokenArrivalWindow(start),
+          different_time_line: differentTimeLine,
         }, {
           workflow: 'schedule_update_reschedule',
           entity_type: 'scheduled_service',
