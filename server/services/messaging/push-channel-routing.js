@@ -450,8 +450,10 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
-  const { title, link, category } = await resolvePushDestination(pushPresentation(messageType), messageType, { customerId, appointmentId, invoiceId });
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
+  // signedInOnly (GATE_APP_FIRST_ANY_DEVICE): the tap opens the signed-in app tab, never a report / receipt bearer page.
+  const presentation = pushPresentation(messageType);
+  const { title, link, category } = signedInOnly ? presentation : await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
     title,
@@ -475,6 +477,29 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
 function pushTag(messageType, { appointmentId = null, invoiceId = null, eventKey = null } = {}) {
   const scope = appFirstAnyDeviceLive() ? (appointmentId || invoiceId || eventKey) : null;
   return scope ? `push-routed:${messageType}:${scope}` : `push-routed:${messageType}`;
+}
+
+// GATE_APP_FIRST_ANY_DEVICE sends reach a device that may not have checked in for
+// weeks (Codex security #7581): logout cleanup is best-effort, so a former phone can
+// keep an active row. Such a push carries no bearer link: the body is the text's
+// first paragraph with any link removed (every routed template leads with the
+// greeting and the notice; its links sit on later lines, e.g. "Receipt: <link>"),
+// and the tap opens the signed-in app tab (sendPush signedInOnly). A line that lost
+// its link ends with a period instead of a colon. Gate off: the text as is.
+const LINK_IN_TEXT = /\s*\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S*/gi;
+function linkFreeBody(text) {
+  const first = String(text || '').split(/\n[ \t]*\n/)[0];
+  const lines = first.split('\n').map((line) => {
+    const stripped = line.replace(LINK_IN_TEXT, '');
+    if (stripped === line) return line;
+    const words = stripped.replace(/[\s:]+$/, '');
+    return /[.!?]$/.test(words) ? words : `${words}.`;
+  }).filter((line) => line.replace(/[\s.]/g, ''));
+  return lines.join('\n').trim() || 'Open the Waves app for the details.';
+}
+
+function pushBodyFor(anyDevice, body) {
+  return anyDevice ? linkFreeBody(body) : body;
 }
 
 // GATE_APP_FIRST_ANY_DEVICE applies to routed push_first sends only; a customer's
@@ -636,6 +661,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // active device, not a recent check-in. A customer's explicit App choice
     // keeps its own path and the 72 hour rule.
     const anyDevice = anyDeviceSend(explicitPushOnly);
+    const routedBody = pushBodyFor(anyDevice, body);
     const fresh = await hasFreshPushDevice(customerId, db, { anyDevice });
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
@@ -721,9 +747,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     deliveryOutcome = 'uncertain';
     const { delivered } = explicitPushOnly
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
-      : await sendPush(customerId, messageType, body, {
+      : await sendPush(customerId, messageType, routedBody, {
         shouldContinue: windowGuardFrom(preSendCheck),
         ...fanOutReach(anyDevice),
+        signedInOnly: anyDevice,
         appointmentId,
         invoiceId,
         eventKey: notificationEventKey,
@@ -747,7 +774,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       direction: 'outbound',
       from_phone: 'push',
       to_phone: String(to || '').slice(0, 20),
-      message_body: body,
+      message_body: routedBody,
       twilio_sid: null,
       status: 'sent',
       created_at: acceptedAt,
@@ -931,5 +958,5 @@ module.exports = {
   APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushTag, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };

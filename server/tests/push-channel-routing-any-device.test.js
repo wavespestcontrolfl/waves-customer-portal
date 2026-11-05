@@ -227,3 +227,41 @@ describe('collapse tag: two visits never replace each other on the phone (Codex 
     expect(tags).toEqual(['push-routed:appointment_reminder:visit-1', 'push-routed:appointment_reminder:visit-2']);
   });
 });
+
+describe('no bearer link reaches a device that may be stale (Codex security #7581)', () => {
+  const { linkFreeBody } = PushRouting._test;
+  const REMINDER = 'Hi Jane, your Waves Lawn Care is Thu, Nov 6, 9-11 AM.\n\nNeed a change? Reply here or tap wavespestcontrol.com/l/Zx9';
+
+  it('the body keeps the first paragraph and drops every link', () => {
+    expect(linkFreeBody(REMINDER)).toBe('Hi Jane, your Waves Lawn Care is Thu, Nov 6, 9-11 AM.');
+    expect(linkFreeBody('Hi Jane, your Waves Lawn Care report is ready: wavespestcontrol.com/l/Rp2')).toBe('Hi Jane, your Waves Lawn Care report is ready.');
+    expect(linkFreeBody('Hi Jane, Waves received your payment of $65.00. Thank you!\n\nReceipt: https://wavespestcontrol.com/l/Rc1')).toBe('Hi Jane, Waves received your payment of $65.00. Thank you!');
+    expect(linkFreeBody('Lawn watering:\nWater 1/2 inch tonight.')).toBe('Lawn watering:\nWater 1/2 inch tonight.');
+    expect(linkFreeBody('wavespestcontrol.com/l/x')).toBe('Open the Waves app for the details.');
+  });
+
+  it('gate on: the push, and its proof row, carry the link-free body and open the signed-in tab', async () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    mockDevices.push(device());
+    await send({ messageType: 'reminder_72h', body: REMINDER, notificationEventKey: 'reminder_72h:visit-1' });
+    const pushed = mockSendToCustomer.mock.calls[0][1];
+    expect(pushed.body).toBe('Hi Jane, your Waves Lawn Care is Thu, Nov 6, 9-11 AM.');
+    expect(pushed.body).not.toMatch(/wavespestcontrol\.com\/l\//);
+    expect(pushed.url).toBe('/?tab=visits');
+    expect(mockProofRows[0].message_body).toBe(pushed.body);
+  });
+
+  it('gate on: a report push opens the Documents tab, never the report token page', async () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    mockDevices.push(device());
+    await send({ messageType: 'service_report_v1', body: 'Hi Jane, your Waves Lawn Care report is ready: wavespestcontrol.com/l/Rp2' });
+    expect(mockSendToCustomer.mock.calls[0][1].url).toBe('/?tab=documents');
+    expect(mockSendToCustomer.mock.calls[0][1].body).toBe('Hi Jane, your Waves Lawn Care report is ready.');
+  });
+
+  it('gate off: a fresh device gets the text as is', async () => {
+    mockDevices.push(device({ updated_at: hoursAgo(1) }));
+    await send({ messageType: 'tech_en_route', body: 'Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t' });
+    expect(mockSendToCustomer.mock.calls[0][1].body).toBe('Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t');
+  });
+});
