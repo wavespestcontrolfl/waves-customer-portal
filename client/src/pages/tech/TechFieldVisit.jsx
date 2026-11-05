@@ -6,7 +6,20 @@ function RouteError({ error, busy, onRetry }) {
   return <div className="tf-alert tf-error" role="alert">{error}{busy && <p role="status">Current action is still in progress.</p>}<div><button type="button" className="tf-button" onClick={onRetry}>Retry route</button></div></div>;
 }
 
-export default function TechFieldVisit({ stop, loading, error, onBack, onRetry, busy, enRouteState, onSiteState, onEnRoute, onSite, onSync, onMove, children }) {
+// The visit job card (product checks, mix amounts, label limits, Order more)
+// opens from the Today visit (owner 2026-11-04); without a handler there is no button.
+// The card is per scheduled service, so a grouped stop (pest and lawn at one home)
+// gets one button for each member, named by its service.
+function JobCardButtons({ services, onJobCard }) {
+  if (!onJobCard) return null;
+  if (services.length <= 1) return <button type="button" className="tf-button" onClick={() => onJobCard(services[0])}>Job card</button>;
+  return services.map((row) => {
+    const name = row.serviceTypeDisplay || row.serviceType || row.service_type || 'Service';
+    return <button key={row.id} type="button" className="tf-button" onClick={() => onJobCard(row)}>Job card: {name}</button>;
+  });
+}
+
+export default function TechFieldVisit({ stop, loading, error, onBack, onRetry, busy, enRouteState, onSiteState, onEnRoute, onSite, onSync, onMove, onJobCard, children }) {
   const back = <button type="button" className="tf-button" onClick={onBack} disabled={busy}><ArrowLeft aria-hidden="true" />Today</button>;
   const routeError = error && <RouteError error={error} busy={busy} onRetry={onRetry} />;
   if (loading) return <>{back}<p role="status">Loading visit…</p></>;
@@ -33,6 +46,7 @@ export default function TechFieldVisit({ stop, loading, error, onBack, onRetry, 
       {!outOfSync && status === 'en_route' && <button type="button" className="tf-button" disabled={pending} onClick={() => onSite(service.id)}><MapPin aria-hidden="true" />On site</button>}
       {outOfSync && <button type="button" className="tf-button" disabled={pending} onClick={() => onSync(stop)}>Sync stop</button>}
       {live.length > 0 && <button type="button" className="tf-button" disabled={pending} onClick={() => onMove(service)}>Quick Move</button>}
+      <JobCardButtons services={stop.services} onJobCard={onJobCard} />
     </div>
     {pending && <p role="status">Updating visit…</p>}
     {feedback && <p role="status" className={`tf-alert ${feedback.isError ? 'tf-error' : ''}`}>{feedback.message}</p>}
