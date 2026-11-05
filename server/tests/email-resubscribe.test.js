@@ -302,6 +302,7 @@ describe('requestResubscribeEmail: the send claim is durable, the handoff re-che
             }
             if (method === 'insert') { events.push('claim-insert'); state.claimed = true; writes.push({ insert: args[0] }); return { returning: async () => [{ id: 'req-1' }] }; }
             if (method === 'update') { events.push('settle'); writes.push({ update: args[0] }); return Promise.resolve(1); }
+            if (method === 'forUpdate' && name === 'email_resubscribe_requests') events.push('row-lock');
             return b;
           };
         },
@@ -334,7 +335,7 @@ describe('requestResubscribeEmail: the send claim is durable, the handoff re-che
     lockCustomerEmail.mockImplementation(async (trx) => { events.push(`lock-${trx.label}`); });
     sendResubscribeConfirmation.mockImplementation(async (args) => { events.push('send'); expect(args.database.label).toBe('tx2'); expect(typeof args.providerBoundaryCheck).toBe('function'); return {}; });
     const out = await ask(dbh);
-    expect(events).toEqual(['tx1-start', 'lock-tx1', 'claim-insert', 'tx1-end', 'tx2-start', 'lock-tx2', 'send', 'settle', 'tx2-end']);
+    expect(events).toEqual(['tx1-start', 'lock-tx1', 'claim-insert', 'tx1-end', 'tx2-start', 'row-lock', 'lock-tx2', 'send', 'settle', 'tx2-end']);
     expect(writes[0].insert).toMatchObject({ email: 'pat@example.com', sent_at: NOW, outcome: JSON.stringify({ send_claimed: true }) });
     expect(writes[1].update).toMatchObject({ outcome: JSON.stringify({ sent: true }) });
     expect(out).toEqual({ state: 'sent', maskedEmail: 'p***@example.com', sentAt: NOW.toISOString() });

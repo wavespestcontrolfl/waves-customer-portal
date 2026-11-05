@@ -196,10 +196,11 @@ function hardBlockRefusal() {
 //     the claim stays (the 24 h cap holds and the link works), outcome { send_uncertain }, and the
 //     answer is 'sent'.
 // Returns { state: 'not_paused' | 'sent' | 'wait' | 'failed', maskedEmail?, sentAt?, nextAt? }.
-// Lock order: tx1 takes the address key then inserts a NEW request row; tx2 (a separate
-// transaction, after tx1 committed) takes only the address key and then updates that already
-// committed row. Neither takes a request row lock before the address key, so neither inverts
-// completeResubscribe's request row -> address key order.
+// Lock order: tx1 takes the address key then inserts a NEW request row (no other transaction can
+// hold a row that does not exist yet). tx2 (a separate transaction, after tx1 committed) locks
+// that request row FIRST (FOR UPDATE), then the address key, the same request row -> address key
+// order as completeResubscribe, so a confirmation pressed while the send is still in flight waits
+// on the row instead of deadlocking against the send's later settle() update.
 async function requestResubscribeEmail({ customerId, email, firstName = '' }, { dbh = db, now = new Date() } = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized) return { state: 'not_paused' };
@@ -229,14 +230,15 @@ async function requestResubscribeEmail({ customerId, email, firstName = '' }, { 
 
 // Transaction 2 of requestResubscribeEmail.
 async function sendClaimedConfirmation(trx, { claim, normalized, token, firstName, now }) {
+  // The request row first, then the address key (see the lock order note above).
+  const stillClaimed = await trx('email_resubscribe_requests').where({ id: claim.requestId }).forUpdate().first();
+  if (!stillClaimed || !stillClaimed.sent_at || stillClaimed.used_at) return { state: 'not_paused' };
   await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalized);
   const settle = (patch) => trx('email_resubscribe_requests').where({ id: claim.requestId }).update({ ...patch, updated_at: new Date() });
   const refuse = async () => {
     await settle({ sent_at: null, outcome: JSON.stringify({ send_refused: 'hard_block' }) });
     return { state: 'not_paused' };
   };
-  const stillClaimed = await trx('email_resubscribe_requests').where({ id: claim.requestId }).first();
-  if (!stillClaimed || !stillClaimed.sent_at || stillClaimed.used_at) return { state: 'not_paused' };
   if (await hasHardBlock(normalized, { dbh: trx })) return refuse();
   try {
     await require('./email-resubscribe-confirm').sendResubscribeConfirmation({
