@@ -382,6 +382,25 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     expect(officeItems()).toHaveLength(0);
   });
 
+  test('a resubmit with another address clears an unfinished attempt, so a stale claim never marks the new address', async () => {
+    const Moves = require('../services/customer-moves');
+    const { validateAddress, STATUSES } = require('../services/address-validation');
+    // An attempt claimed an hour ago whose lookup never came back.
+    const s = await seed({ move: { auto_estimate_at: new Date(Date.now() - 3600e3) } });
+    validateAddress.mockResolvedValueOnce({
+      status: STATUSES.VALIDATED_ACCEPT, inServiceArea: true,
+      normalized: { street_line_1: '12 Other Road', city: 'Venice', state: 'FL', postal_code: '34285' },
+    });
+    const check = await Moves.checkMoveAddress(await moveRow(s.move.id), '12 Other Road, Venice FL');
+    await Moves.submitMove(await moveRow(s.move.id), { checkId: check.checkId, moveOutDate: day(16) });
+    expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_at: null, auto_estimate_state: null });
+    // The next run tries the new address; nothing goes to the office for the dead attempt.
+    Lookup.performPropertyLookup.mockResolvedValue(countyLookup({ propertyType: 'Condo' }));
+    expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ office: 1 });
+    expect(Lookup.performPropertyLookup.mock.calls[0][0]).toBe('12 Other Road, Venice, FL 34285');
+    expect((await moveRow(s.move.id)).auto_estimate_note).toContain('county record');
+  });
+
   test('a unit address goes to the office before any lookup', async () => {
     const s = await seed({ move: { typed_address: '40 Sample Road Apt 4, Venice, FL 34285', normalized_address: JSON.stringify({ ...NEW_HOUSE, line2: 'Apt 4' }) } });
     expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ office: 1 });
