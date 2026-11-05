@@ -185,3 +185,19 @@ test('the territory technician can no longer take work and the line has no cover
 
   expect(current.day_technician_id).toBe('t2');
 });
+
+test('the territory technician is Off for the category: the bar is the cover\'s day (his slots are never admitted)', async () => {
+  const off = (id) => (id === 't1' ? 'deactivated' : 'qualified');
+  const offCtx = { db: fakeDb(), capabilityFor: off, territoryTechId: 't1', territoryCoverId: 't2' };
+  const current = await computeCurrentPlacement(UNASSIGNED, PREFS, offCtx);
+
+  expect(current.day_technician_id).toBe('t2');
+});
+
+test('Off for the category with no cover on the unit: still his day alone, as before the cover rule', async () => {
+  const off = (id) => (id === 't1' ? 'deactivated' : 'qualified');
+  const noCover = { db: fakeDb(), capabilityFor: off, territoryTechId: 't1', territoryCoverId: null };
+  const current = await computeCurrentPlacement(UNASSIGNED, PREFS, noCover);
+
+  expect(current.day_technician_id).toBe('t1');
+});

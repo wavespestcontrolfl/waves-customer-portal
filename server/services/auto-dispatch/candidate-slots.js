@@ -260,9 +260,10 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
 // is read on that technician's day alone, the only technician candidate
 // admission lets it move to (or, on a day he is off or absent, the line's
 // cover technician's day): a closer route it may not take must not set the
-// bar a legal move has to beat. An owner who is not assignable leaves the
-// cover's day (admission's only other technician); with no assignable cover,
-// or two owners in one unit (no candidate survives either way), the full list.
+// bar a legal move has to beat. An owner who is not assignable, or Off for the
+// category, leaves the cover's day (admission's only other technician); with no
+// assignable cover, or two owners in one unit (no candidate survives either
+// way), the owner's day or the full list as before.
 const CURRENT_DAY_TECH_UNRESOLVED = 'CURRENT_DAY_TECH_UNRESOLVED';
 async function currentDayTechs(service, ctx, dateStr, category) {
   if (service.technician_id) return [service.technician_id];
@@ -276,15 +277,13 @@ async function currentDayTechs(service, ctx, dateStr, category) {
     ids = Array.isArray(techs) ? techs.map((t) => t.id) : [];
     const own = owner ? ids.filter((id) => String(id) === String(owner)) : [];
     const cover = coverId ? ids.filter((id) => String(id) === String(coverId)) : [];
-    if (own.length) {
-      // The territory technician's day is the bar; on a day he is off or absent it is the cover's (the
-      // only other technician admission lets the visit move to that day).
-      const ownAway = cover.length ? await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: own }) : null;
-      ids = ownAway && ownAway.has(`${own[0]}:${dateStr}`) ? cover : own;
-    } else if (cover.length) {
-      // The territory technician cannot take work: the cover is the only technician admission leaves.
-      ids = cover;
-    }
+    // The bar is the territory technician's day while he can take this visit that day. When he cannot (not
+    // assignable, Off for the category, off or absent) it is the cover's: the only other technician admission
+    // lets the visit move to. Absences are read only when there is a cover to fall back to.
+    const ownCanTake = own.length > 0 && ctx.capabilityFor(own[0], category) !== 'deactivated'
+      && !(cover.length && (await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: own })).has(`${own[0]}:${dateStr}`));
+    if (cover.length && !ownCanTake) ids = cover;
+    else if (own.length) ids = own;
     if (ids.length > 1) away = await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: ids });
   } catch (err) {
     throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'The technicians who could work an unassigned visit\'s day could not be read', err);
