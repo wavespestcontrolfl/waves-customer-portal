@@ -6,11 +6,12 @@
 describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards', () => {
   beforeEach(() => { jest.resetModules(); });
 
-  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card' }) {
+  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {} }) {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       subtotal: '200.00', total: '200.00', discount_amount: '0.00',
       credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+      ...invoiceFields,
     };
     const card = {
       id: 'pm-1', customer_id: 'cust-1', method_type: methodType,
@@ -221,6 +222,28 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireCardMethod: true }))
         .rejects.toMatchObject({ code: 'CARD_METHOD_REQUIRED' });
       expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    // Codex security P2 (#7587): the LOCKED invoice must bill the booked visit only.
+    const bookedLines = [{ client_id: 'scheduled_svc-1_primary', amount: 180 }, { client_id: 'scheduled_svc-1_addon_a1', amount: 20 }];
+    test('requireBookedVisitLinesOnly: a checkout extra on the locked invoice refuses before Stripe', async () => {
+      const { StripeService, stripeClient } = load({
+        visit: visitToday(), contract: null,
+        invoiceFields: { scheduled_service_id: 'svc-1', line_items: JSON.stringify([...bookedLines, { description: 'Extra', amount: 300 }]) },
+      });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireBookedVisitLinesOnly: true }))
+        .rejects.toMatchObject({ code: 'TECH_CHARGE_EXTRAS' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test('requireBookedVisitLinesOnly: booked lines only proceed to Stripe', async () => {
+      const { StripeService, stripeClient } = load({
+        visit: visitToday(), contract: null,
+        invoiceFields: { scheduled_service_id: 'svc-1', line_items: JSON.stringify(bookedLines) },
+      });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireBookedVisitLinesOnly: true }))
+        .rejects.not.toMatchObject({ code: 'TECH_CHARGE_EXTRAS' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
     });
 
     test('the option without the visit lock is a caller error', async () => {

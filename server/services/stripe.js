@@ -2203,7 +2203,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, requireTechnicianCardOnFileFor = null, requireCardMethod = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, requireTechnicianCardOnFileFor = null, requireCardMethod = false, requireBookedVisitLinesOnly = false } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2320,6 +2320,12 @@ const StripeService = {
         // assertInvoiceCollectible right below.)
         assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
+        // Opt-in (a technician's card on file at the visit, GATE_TECH_CARD_ON_FILE): the LOCKED
+        // invoice bills the booked visit only; a checkout extra needs the customer at the door.
+        if (requireBookedVisitLinesOnly
+          && !require('./technician-visit-scope').invoiceChargesBookedVisitOnly(lockedInvoice)) {
+          throw Object.assign(new Error('Card on file covers the booked visit only. Take the extras by Tap to Pay or manual card with the customer.'), { code: 'TECH_CHARGE_EXTRAS' });
+        }
         // Opt-in (the Auto Pay hold charge mode): a bank debit before the invoice's authorized debit date refuses here,
         // before any credit apply or Stripe call.
         if (requireBankDebitDue) assertBankDebitDue(card, lockedInvoice);

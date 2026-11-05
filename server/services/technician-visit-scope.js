@@ -146,11 +146,37 @@ function technicianCardOnFileVisitOk(actor, row) {
     && dateOnly(row.scheduled_date) === etDateString();
 }
 
+// Card on file charges the booked visit only (Codex security #7587): every positive line must be one
+// the server built from the visit (its primary line, its booked add-ons, its price top-up). A line
+// added at checkout (extraLineItems: free description and price) needs the customer at the door, so
+// it is Tap to Pay or manual card. Discount lines (negative) are fine.
+function invoiceChargesBookedVisitOnly(invoice) {
+  const visitId = String(invoice?.scheduled_service_id || '');
+  if (!visitId) return false;
+  const booked = (clientId) => clientId === `scheduled_${visitId}_primary`
+    || clientId.startsWith(`scheduled_${visitId}_addon_`)
+    || clientId === `scheduled_price_topup_${visitId}`;
+  const lines = invoiceLines(invoice.line_items);
+  return !!lines && lines.every((line) => !(Number(line?.amount) > 0) || booked(String(line?.client_id || '')));
+}
+
+// invoices.line_items is jsonb (an array) or, on old rows, JSON text. Missing or unreadable = null,
+// which refuses (fail closed).
+function invoiceLines(raw) {
+  if (Array.isArray(raw)) return raw;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 // The unlocked check the card-on-file routes run first: the invoice is bound to a visit of its own
-// customer, and that visit passes technicianCardOnFileVisitOk.
+// customer, that visit passes technicianCardOnFileVisitOk, and the invoice bills the booked visit only.
 async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   if (!isTechnicianRequest(req)) return true;
-  if (!invoice?.scheduled_service_id) return false;
+  if (!invoice?.scheduled_service_id || !invoiceChargesBookedVisitOnly(invoice)) return false;
   const database = conn || require('../models/db');
   const row = await database('scheduled_services').where({ id: invoice.scheduled_service_id })
     .first('customer_id', 'technician_id', 'status', 'scheduled_date');
@@ -158,4 +184,4 @@ async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
     && technicianCardOnFileVisitOk(req, row);
 }
 
-module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile };
+module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly };

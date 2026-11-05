@@ -960,10 +960,11 @@ router.get('/:id', async (req, res, next) => {
     // the customer's other homes, so they are dropped (money fields kept),
     // like accountProperties on the technician Customer 360 payload.
     if (isTechnicianRequest(req)) {
-      invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
       // The visit payment sheet shows Card on File to a technician only when
-      // this invoice is one it may charge (GATE_TECH_CARD_ON_FILE).
+      // this invoice is one it may charge (GATE_TECH_CARD_ON_FILE), judged on
+      // the stored lines before the property strip below.
       invoice.tech_card_on_file = techCardOnFileLive() && await technicianMayChargeCardOnFile(req, invoice);
+      invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
     }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
     // service, not the invoice title). Modal-only; safe to attach for all GETs.
@@ -2078,7 +2079,7 @@ router.post('/:id/schedule-send', requireAdmin, invoiceScheduleSendHandler);
 async function technicianCardOnFileInvoice(req) {
   if (!isTechnicianRequest(req)) return { ok: true, invoice: null };
   const invoice = await db('invoices').where({ id: req.params.id })
-    .first('id', 'customer_id', 'scheduled_service_id');
+    .first('id', 'customer_id', 'scheduled_service_id', 'line_items');
   return { ok: !!invoice && techCardOnFileLive() && await technicianMayChargeCardOnFile(req, invoice), invoice };
 }
 
@@ -2149,6 +2150,7 @@ router.post('/:id/charge-card', async (req, res, next) => {
           requireInvoiceScheduledServiceBinding: true,
           requireTechnicianCardOnFileFor: { techRole: req.techRole, technicianId: req.technicianId },
           requireCardMethod: true,
+          requireBookedVisitLinesOnly: true,
         }
         // An admin ordered this charge explicitly: exempt from the default
         // collections dispute-hold guard (an operator may override a hold).

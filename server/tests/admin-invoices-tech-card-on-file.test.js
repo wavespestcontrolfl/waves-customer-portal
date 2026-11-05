@@ -64,7 +64,14 @@ const router = require('../routes/admin-invoices');
 
 const INVOICE_ID = '7c1d2e3f-0000-4a6b-9c3d-00000000a001';
 const VISIT_ID = '7c1d2e3f-0000-4a6b-9c3d-00000000b001';
-const invoiceRow = (fields = {}) => ({ id: INVOICE_ID, customer_id: 'cust-1', scheduled_service_id: VISIT_ID, ...fields });
+// The booked visit's own lines, as the server builds them, plus a checkout discount.
+const BOOKED_LINES = [
+  { client_id: `scheduled_${'7c1d2e3f-0000-4a6b-9c3d-00000000b001'}_primary`, description: 'Quarterly Pest Control Service', amount: 120 },
+  { client_id: `scheduled_${'7c1d2e3f-0000-4a6b-9c3d-00000000b001'}_addon_a1`, description: 'Booked add-on', amount: 15 },
+  { client_id: `scheduled_price_topup_${'7c1d2e3f-0000-4a6b-9c3d-00000000b001'}`, description: 'Scheduled price adjustment', amount: 2 },
+  { description: 'Checkout discount', amount: -10, discount_id: 'disc-1' },
+];
+const invoiceRow = (fields = {}) => ({ id: INVOICE_ID, customer_id: 'cust-1', scheduled_service_id: VISIT_ID, line_items: JSON.stringify(BOOKED_LINES), ...fields });
 const visitRow = (fields = {}) => ({
   id: VISIT_ID, customer_id: 'cust-1', technician_id: 'tech-1', status: 'on_site', scheduled_date: etDateString(), ...fields,
 });
@@ -127,7 +134,36 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       requireInvoiceScheduledServiceBinding: true,
       requireTechnicianCardOnFileFor: { techRole: 'technician', technicianId: 'tech-1' },
       requireCardMethod: true,
+      requireBookedVisitLinesOnly: true,
     });
+  });
+
+  // Codex security P2 (#7587): a line added at checkout (free description and price) is not part of
+  // the booked visit; card on file never charges it without the customer at the door.
+  test('gate on, an invoice with a checkout extra line: both routes answer 404 before Stripe', async () => {
+    mockRows.invoices = invoiceRow({ line_items: JSON.stringify([...BOOKED_LINES, { description: 'Extra treatment', quantity: 1, unit_price: 400, amount: 400 }]) });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-1' })).status).toBe(404);
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 529 })).status).toBe(404);
+    });
+    expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each([['missing', null], ['unreadable', '{not json']])('gate on, %s invoice lines refuse (fail closed)', async (_label, lines) => {
+    mockRows.invoices = invoiceRow({ line_items: lines });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 102.9 })).status).toBe(404);
+    });
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('gate on, a positive line that only looks booked for another visit is an extra too', async () => {
+    mockRows.invoices = invoiceRow({ line_items: JSON.stringify([...BOOKED_LINES, { client_id: 'scheduled_other-visit_primary', description: 'Other', amount: 80 }]) });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 209 })).status).toBe(404);
+    });
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   // Card only at the visit: a saved bank account, under any of its aliases, never reaches Stripe for a technician.
@@ -214,6 +250,13 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       const { status, body } = await read();
       expect(status).toBe(200);
       expect(body.tech_card_on_file).toBe(true);
+    });
+
+    test('an invoice with a checkout extra line: tech_card_on_file is false', async () => {
+      InvoiceService.getById.mockImplementation(async () => ({
+        ...invoiceRow({ line_items: [...BOOKED_LINES, { description: 'Extra treatment', amount: 400 }] }), total: 529,
+      }));
+      expect((await read()).body.tech_card_on_file).toBe(false);
     });
 
     test('gate off, or a visit not On Site: tech_card_on_file is false', async () => {
