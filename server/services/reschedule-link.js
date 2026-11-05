@@ -229,6 +229,10 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
 // window, unreviewed dispatch booking, no token, shortener failure) keeps
 // the reply line this text always ended with, so the customer is never left
 // without a way to ask for another time.
+// The template body takes {different_time_line} in a later release than
+// the senders that fill it: migrations run pre-deploy while the previous
+// release still serves, and a release that renders the body without the
+// value has getTemplate refuse the whole text.
 const RESCHEDULED_REPLY_LINE = 'Need a different time? Reply here.';
 
 async function rescheduledTextLine(scheduledServiceId, { customerId = null } = {}) {
