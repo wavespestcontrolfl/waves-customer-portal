@@ -122,8 +122,11 @@ const trackingThreadBellKey = (From, MessageSid) => {
 async function ringTrackingLineTextBell({ From, MessageSid, source, message }) {
   const { triggerNotification } = require('./notification-triggers');
   const arrivedAtMs = await receivedAtMs(MessageSid);
+  // The sender's name when one is on file for the number (owner 2026-11-04, admin-alert-names.js
+  // nameOnFileForPhone); a failed lookup rings without it.
+  const name = await require('./admin-alert-names').nameOnFileForPhone(db, From).catch(() => null);
   return triggerNotification('new_lead', {
-    name: 'Unknown sender',
+    name,
     twilioSid: MessageSid,
     phone: From,
     message: message || '',

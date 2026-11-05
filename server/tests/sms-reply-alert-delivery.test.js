@@ -2,6 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/admin-alert-names', () => ({ nameOnFileForPhone: jest.fn(async () => null) }));
 const db = require('../models/db');
 const { triggerNotification } = require('../services/notification-triggers');
 const delivery = require('../services/sms-reply-alert-delivery');
@@ -296,7 +297,7 @@ describe('tracking-line unknown-sender thread bell', () => {
     const [key, payload, options] = triggerNotification.mock.calls.at(-1);
     expect(key).toBe('new_lead');
     expect(payload).toMatchObject({
-      twilioSid: 'SM-t1', phone: input.From, message: 'Do you treat roaches?', source: 'wavespestcontrol.com',
+      name: null, twilioSid: 'SM-t1', phone: input.From, message: 'Do you treat roaches?', source: 'wavespestcontrol.com',
       textCount: 1, receivedAtMs: expect.any(Number), link: '/admin/communications?message=SM-t1',
     });
     expect(options).toMatchObject({ refreshOnDedupe: true, bumpOnRefresh: true });
@@ -308,6 +309,18 @@ describe('tracking-line unknown-sender thread bell', () => {
     // A redelivery of the text already on the row (a webhook retry) keeps the count.
     const shown = { read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-t1', textCount: 2, receivedAtMs: 0 } } };
     expect(await options.refreshPayload(shown, shown.metadata.payload)).toEqual({ payload: { textCount: 2 } });
+  });
+
+  test('the name on file for the number rides on the row (owner 2026-11-04); a failed lookup rings without it', async () => {
+    const { nameOnFileForPhone } = require('../services/admin-alert-names');
+    nameOnFileForPhone.mockResolvedValueOnce('Jane Fixture');
+    await ringTracking();
+    expect(nameOnFileForPhone).toHaveBeenCalledWith(db, input.From);
+    expect(triggerNotification.mock.calls.at(-1)[1].name).toBe('Jane Fixture');
+    nameOnFileForPhone.mockRejectedValueOnce(new Error('lookup failed'));
+    await ringTracking();
+    expect(triggerNotification).toHaveBeenCalledTimes(2);
+    expect(triggerNotification.mock.calls.at(-1)[1].name).toBeNull();
   });
 
   test('a later text from the same number keys the same row; another number keys its own', async () => {

@@ -22,6 +22,47 @@ async function lookupCustomerName(conn, customerId) {
   }
 }
 
+// A person's real name from a record's name fields, or null for a placeholder (call-commitments' one list).
+function realName(row, first = 'first_name', last = 'last_name') {
+  const name = [row?.[first], row?.[last]].filter(Boolean).join(' ').trim();
+  return name && !require('./call-commitments').isMissingName(name) ? name : null;
+}
+
+// The real names one source holds for a number, reduced to one person: undefined = no real name
+// here (try the next source); null = two or more different people (stop: name nobody); else the
+// newest spelling of the one name.
+const identityKey = (name) => String(name).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+function oneIdentity(names) {
+  const real = names.filter(Boolean);
+  if (!real.length) return undefined;
+  return new Set(real.map(identityKey)).size === 1 ? real[0] : null;
+}
+
+// The name on file for a phone number (owner 2026-10-21, first for the promise chaser's headline;
+// 2026-11-04: "it should be the name of the person rather than just the number, if possible, if we
+// have it on file"): the customer records carrying it, then estimates, then leads. At each step the
+// real names must agree on ONE person (duplicates of one person are common); two different people
+// on the number name nobody, and the lookup stops there: an estimate or lead must not pick between
+// them (Codex #6417 r4). Null when nothing on the number names one person. Throws on a failed read;
+// a caller keeps its alert without the name.
+async function nameOnFileForPhone(conn, phone) {
+  const commitments = require('./call-commitments');
+  const key = commitments.phoneDigits(phone);
+  if (!key || key.length < 10) return null;
+  const phones = [phone];
+  const customers = await commitments.phoneWhereAny(conn('customers'), 'phone', phones)
+    .whereNull('deleted_at').orderBy('created_at', 'desc').select('first_name', 'last_name');
+  const fromCustomers = oneIdentity(customers.map((c) => realName(c)));
+  if (fromCustomers !== undefined) return fromCustomers;
+  const estimates = await commitments.phoneWhereAny(conn('estimates'), 'customer_phone', phones)
+    .whereRaw("COALESCE(customer_name, '') <> ''").orderBy('created_at', 'desc').limit(50).select('customer_name');
+  const fromEstimates = oneIdentity(estimates.map((e) => realName(e, 'customer_name', null)));
+  if (fromEstimates !== undefined) return fromEstimates;
+  const leads = await commitments.phoneWhereAny(conn('leads'), 'phone', phones)
+    .whereNull('deleted_at').orderBy('created_at', 'desc').limit(50).select('first_name', 'last_name');
+  return oneIdentity(leads.map((l) => realName(l))) ?? null;
+}
+
 // A name typed by a customer can carry code-shaped characters (underscores, dots) that the
 // headline rule refuses; spaces read the same to a person.
 const tidyName = (name) => String(name || '').replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -73,4 +114,4 @@ function whyWithQuote({ lead = '', quote, tail = '', max = MAX_WHY_CHARS }) {
   return `${lead}“${cutAtWord(quote, room)}”${tail}`;
 }
 
-module.exports = { fullName, lookupCustomerName, tidyName, fitAction, shortDateET, redactedWords, whyWithQuote };
+module.exports = { fullName, lookupCustomerName, realName, nameOnFileForPhone, tidyName, fitAction, shortDateET, redactedWords, whyWithQuote };

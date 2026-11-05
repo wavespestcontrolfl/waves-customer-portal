@@ -204,15 +204,17 @@ const TRIGGER_REGISTRY = {
       // A text from a number with no customer record to a website or van-wrap line, the one caller that names a
       // text (sms-reply-alert-delivery.js ringTrackingLineTextBell): one row per sender, rewritten by each new text
       // like a known customer's thread row ("2 texts from wavespestcontrol.com"). It says who and what (owner
-      // audit 2026-10-01): the latest text in quotes, masked like every bell body, then the masked number. A text
-      // with no words is a photo (the webhook rings only for words or a photo).
+      // audit 2026-10-01): the latest text in quotes, masked like every bell body. Who: the name on file for the
+      // number (owner 2026-11-04) and the line they texted, else the line and the masked number. A text with no
+      // words is a photo (the webhook rings only for words or a photo).
       if (p.twilioSid) {
         const { redactedWords, whyWithQuote } = require('./admin-alert-names');
         const count = Math.floor(Number(p.textCount)) || 1;
         const words = redactedWords(p.message);
-        const body = whyWithQuote({ lead: words ? '' : 'Photo message', quote: words, tail: ` — unknown sender ${maskPhone(p.phone)}` });
+        const [who, tail] = p.name ? [p.name, ` — via ${p.source}`] : [p.source, ` — unknown sender ${maskPhone(p.phone)}`];
+        const body = whyWithQuote({ lead: words ? '' : 'Photo message', quote: words, tail });
         return {
-          title: `${count > 1 ? `${count} texts` : 'New text'} from ${p.source}`,
+          title: `${count > 1 ? `${count} texts` : 'New text'} from ${who}`,
           body,
           // The whole text for "Show full text" when the quote had to be cut.
           ...(body.includes(words) ? {} : { detail: words.slice(0, 1600) }),

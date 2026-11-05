@@ -135,7 +135,7 @@ describe('notification trigger push tags', () => {
     // owner to a lead that does not exist. It used to say only "Message in
     // the SMS inbox"; it quotes the text the way every bell body is masked.
     const sid = `SM${'0123456789abcdef'.repeat(2)}`;
-    const text = { name: 'Unknown sender', twilioSid: sid, source: 'wavespestcontrol.com', phone: '+12025550101', link: `/admin/communications?message=${sid}` };
+    const text = { name: null, twilioSid: sid, source: 'wavespestcontrol.com', phone: '+12025550101', link: `/admin/communications?message=${sid}` };
     const built = TRIGGER_REGISTRY.new_lead.build({ ...text, message: 'Please quote ants at 1000 Riverside Drive, call 941-555-0123', textCount: 1 });
 
     expect(built.title).toBe('New text from wavespestcontrol.com');
@@ -157,6 +157,11 @@ describe('notification trigger push tags', () => {
     const photo = TRIGGER_REGISTRY.new_lead.build({ ...text, message: '' });
     expect(photo.body).toBe('Photo message — unknown sender ***0101');
     expect(photo.detail).toBeUndefined();
+
+    // A name on file for the number leads instead of the bare number (owner 2026-11-04), with the line they texted.
+    const named = TRIGGER_REGISTRY.new_lead.build({ ...text, name: 'Jane Fixture', message: 'Do you treat roaches?', textCount: 2 });
+    expect(named.title).toBe('2 texts from Jane Fixture');
+    expect(named.body).toBe('“Do you treat roaches?” — via wavespestcontrol.com');
   });
 
   test('SMS reply trigger leads with a lead\'s CALL / TEXT choice and is unchanged without it', () => {
