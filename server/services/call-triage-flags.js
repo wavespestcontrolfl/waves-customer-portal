@@ -939,7 +939,9 @@ function duplicateAddressCards(list, dropped) {
 // only. The route decision, the flags and the routing verdict keep everything.
 // Callers pass the gate value in, so this stays pure. `callback_number_needed`
 // and `caller_phone_missing` are NOT here: the office needs a number to reach
-// the applicant back.
+// the applicant back. `caller_not_authorized` IS here: a vendor, lender or tax
+// office is not a customer who must be authorized to book (2026-11-04 audit: 6
+// vendor/applicant calls filed blocking address or authorization cards).
 const THIRD_PARTY_CALL_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
 const THIRD_PARTY_CUSTOMER_ONLY_CARDS = Object.freeze([
   'missing_service_address', 'low_confidence_address', 'missing_unit_number',
@@ -949,20 +951,41 @@ const THIRD_PARTY_CUSTOMER_ONLY_CARDS = Object.freeze([
   'missing_first_name', 'missing_last_name', 'missing_required_customer_fields', 'name_email_mismatch',
   'email_unverified', 'email_invalid',
   'no_sms_consent_captured', 'sms_consent_missing',
-  'not_confirmed', 'ambiguous_scheduling',
+  'not_confirmed', 'ambiguous_scheduling', 'caller_not_authorized',
 ]);
 
 function isThirdPartyCallNature(extraction) {
   return THIRD_PARTY_CALL_NATURES.has(extraction?.call_nature);
 }
 
-// A third-party call asks no service of its own only when it carries no
-// scheduling, no quote or price evidence and no service intent beyond the
-// 'quote_only' default the model files on applicant and vendor calls (AGENTS.md:
-// address cards drop on the service ask, never on a nature label alone). Unlike
-// callMakesNoServiceAsk, an existing-service intent (a callback, a complaint, a
-// cancellation) IS a service ask here: those promises keep their SLA tracking.
-// An applicant who asks for service at their own home keeps every card.
+// The intents the model files by default on applicant and vendor calls. They
+// say nothing about a property service by themselves (2026-11-04 audit: 4 of 6
+// vendor/applicant calls carried 'inspection_only', 1 'quote_only', with no
+// service category, pest or address).
+const THIRD_PARTY_DEFAULT_INTENTS = new Set(['quote_only', 'inspection_only']);
+
+// Any sign the call is about a property: a service category beyond 'other', a
+// pest, or a stated service address (street, city, postal code or raw text).
+function thirdPartyCallHasPropertyServiceEvidence(extraction) {
+  const sr = extraction?.service_request || {};
+  const category = String(sr.primary_service_category || '').trim();
+  if (category && category !== 'other') return true;
+  if (Array.isArray(sr.secondary_categories) && sr.secondary_categories.length) return true;
+  if (Array.isArray(sr.pests_observed) && sr.pests_observed.length) return true;
+  const addr = extraction?.property?.service_address || {};
+  return [addr.street_line_1, addr.city, addr.postal_code, addr.raw_text]
+    .some((part) => String(part || '').trim());
+}
+
+// PROMISE SLA (recordCallCommitments' thirdPartyCall flag): a third-party call
+// asks no service of its own only when it carries no scheduling, no quote or
+// price evidence and no service intent beyond the 'quote_only' default the model
+// files on applicant and vendor calls (AGENTS.md: address cards drop on the
+// service ask, never on a nature label alone). Unlike callMakesNoServiceAsk, an
+// existing-service intent (a callback, a complaint, a cancellation) IS a service
+// ask here: those promises keep their SLA tracking. An applicant who asks for
+// service at their own home keeps every card. This is the wide, promise-keeping
+// test; the card filter uses the narrower thirdPartyCallNeedsNoCustomerCards.
 function thirdPartyCallMakesNoServiceAsk(extraction) {
   const status = String(extraction?.scheduling?.status || 'none');
   if (!SCHEDULING_NO_ASK_STATUSES.has(status)) return false;
@@ -971,9 +994,28 @@ function thirdPartyCallMakesNoServiceAsk(extraction) {
   return !sr.service_intent || sr.service_intent === 'quote_only';
 }
 
+// CARDS ONLY (thirdPartyCustomerOnlyCards): the customer-record cards have
+// nothing to act on when the call carries no scheduling, no quote ask and no
+// property-service evidence, whatever default intent the model filed. The
+// 'quote_only' and 'inspection_only' defaults do not count as an ask, and
+// price_discussed does not count without a category, pest or address (a
+// technician's own pay is not a service price). It differs from
+// thirdPartyCallMakesNoServiceAsk on purpose: a staff promise on such a call
+// (a tax office's callback request) still keeps its follow-up tracking. Any
+// other intent (new service, an existing-service callback, complaint or
+// cancellation) is an ask and keeps the cards.
+function thirdPartyCallNeedsNoCustomerCards(extraction) {
+  const status = String(extraction?.scheduling?.status || 'none');
+  if (!SCHEDULING_NO_ASK_STATUSES.has(status)) return false;
+  const sr = extraction?.service_request || {};
+  if (sr.quote_requested === true || sr.quote_promised === true) return false;
+  if (thirdPartyCallHasPropertyServiceEvidence(extraction)) return false;
+  return !sr.service_intent || THIRD_PARTY_DEFAULT_INTENTS.has(sr.service_intent);
+}
+
 function thirdPartyCustomerOnlyCards(extraction, { gateOn = false } = {}) {
   if (gateOn !== true || !isThirdPartyCallNature(extraction)) return [];
-  if (!thirdPartyCallMakesNoServiceAsk(extraction)) return [];
+  if (!thirdPartyCallNeedsNoCustomerCards(extraction)) return [];
   return [...THIRD_PARTY_CUSTOMER_ONLY_CARDS];
 }
 
