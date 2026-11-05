@@ -46,13 +46,11 @@ const NOTIFICATION_CUSTOMER_ID_SQL = `NULLIF(COALESCE(metadata->>'customerId', m
 function scopeAdminFeedToRole(query, role, technicianId = null) {
   if (!role || role === 'admin') return query;
   let keys = [];
-  let promiseKeys = [];
   try {
     const { TRIGGER_REGISTRY } = require('./notification-triggers');
-    const visible = Object.entries(TRIGGER_REGISTRY).filter(([, trigger]) => trigger.techVisible);
-    keys = visible.map(([key]) => key);
-    // Promise alerts: the registry's declaration of a follow-up Waves owes (rule.promise).
-    promiseKeys = visible.filter(([, trigger]) => trigger.rule?.promise === true).map(([key]) => key);
+    keys = Object.entries(TRIGGER_REGISTRY)
+      .filter(([, trigger]) => trigger.techVisible)
+      .map(([key]) => key);
   } catch (err) {
     logger.warn(`[notifications] role-scope registry load failed: ${err.message}`);
   }
@@ -64,26 +62,20 @@ function scopeAdminFeedToRole(query, role, technicianId = null) {
     `COALESCE(metadata->>'triggerKey', '') IN (${keys.map(() => '?').join(', ')})`,
     keys,
   );
-  // GATE_TECH_LOGIN_PRIVACY: a technician login also sees a customer's row only
-  // for a customer on its own route (the Communications routes' rule). A row
-  // with no customer stays visible, as today, except a promise alert with no
-  // customer (owner 2026-11-04): the one-hour pager's list and the overdue
-  // watchdog's summary name several customers' promises, and a promise to a
-  // caller with no customer record is office work, which the Promises tab
-  // keeps from a technician too. That holds whether or not the caller names
-  // a technician; callers that pass no technicianId keep the key-only scope
-  // otherwise.
+  // GATE_TECH_LOGIN_PRIVACY: a technician login sees an alert only for a
+  // customer on its own route (owner 2026-10-25, the Communications routes'
+  // rule). An alert with no customer is the office's (owner 2026-11-04): an
+  // unknown caller's voicemail, a phone failure to a number no one customer
+  // owns, the one-hour pager's list and the overdue watchdog's summary. That
+  // holds whether or not the caller names a technician; a caller that passes
+  // no technicianId keeps the key-only scope for customer rows.
   if (role === 'technician' && require('../config/feature-gates').techLoginPrivacyLive?.()) {
-    const officePromises = `NOT (COALESCE(metadata->>'triggerKey', '') IN (${promiseKeys.map(() => '?').join(', ')}) AND ${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL)`;
-    const ownPromises = promiseKeys.length ? scoped.whereRaw(officePromises, promiseKeys) : scoped;
-    if (!technicianId) return ownPromises;
+    const customerRows = scoped.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NOT NULL`);
+    if (!technicianId) return customerRows;
     const { technicianCustomerIdsSubquery } = require('./technician-visit-scope');
     const ownCustomers = technicianCustomerIdsSubquery({ techRole: 'technician', technicianId }, db)
       .clearSelect().select(db.raw('scheduled_services.customer_id::text'));
-    return ownPromises.where(function customerlessOrOwn() {
-      this.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL`)
-        .orWhereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
-    });
+    return customerRows.whereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
   }
   return scoped;
 }

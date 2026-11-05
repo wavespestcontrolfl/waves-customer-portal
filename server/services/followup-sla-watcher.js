@@ -43,7 +43,7 @@ const commitments = require('./call-commitments');
 const { etDateString, etCalendarDayOf, etParts, formatETTime } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { raiseAdminAlert, composeAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
-const { fitAction, tidyName, shortDateET, redactedWords, listWords } = require('./admin-alert-names');
+const { fitAction, tidyName, shortDateET, redactedWords, listWords, nameOnFileForPhone } = require('./admin-alert-names');
 const { stripEmoji } = require('../utils/strip-emoji');
 const {
   STAFF_APPROVED_SMS_TYPES, STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered,
@@ -52,8 +52,8 @@ const {
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
 // bell reaches the staff who work the Owed tab. With GATE_TECH_LOGIN_PRIVACY
-// on, a technician never sees this list: a promise alert with no customer is
-// office work (notification-service's privacy rule).
+// on, a technician never sees this list: an alert with no customer is the
+// office's (notification-service's privacy rule).
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
 const ESTIMATE_SENT_SMS_TYPE = 'estimate_sent';
@@ -583,8 +583,8 @@ async function spokenNames(callIds) {
 // Who each listed promise is owed to, by promise id: the linked customer's
 // name on file; else the name the caller gave on that call; else, for a
 // caller with no customer record, the one person the records on the number
-// name (the promise-chaser bell's resolveCallerName: customers, then
-// estimates, then leads). A promise none of them names keeps its masked
+// name (admin-alert-names.js nameOnFileForPhone: customers, then estimates,
+// then leads). A promise none of them names keeps its masked
 // number (byPerson). Best effort: a failed read names nobody new and never
 // fails the tick.
 async function namesFor(rows) {
@@ -606,7 +606,10 @@ async function namesFor(rows) {
     const key = !found && !r.customer_id ? phoneKey(contactPhone(r)) : null;
     if (key) {
       if (!onNumber.has(key)) {
-        onNumber.set(key, await require('./promise-chaser-bell').resolveCallerName({ id: r.call_log_id, customer_id: null, from_phone: contactPhone(r) }));
+        onNumber.set(key, await nameOnFileForPhone(db, contactPhone(r)).catch((err) => {
+          logger.warn(`[followup-sla] name on file not read: ${err.message}`);
+          return null;
+        }));
       }
       const name = showableName(onNumber.get(key));
       found = name ? { name } : null;

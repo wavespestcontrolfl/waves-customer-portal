@@ -776,6 +776,4 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
 module.exports = {
   sweepPromiseChasers, ringForCall,
   describePromise,
-  // The follow-up pager names an unlinked caller on its list by the same rule.
-  resolveCallerName,
 };

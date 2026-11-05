@@ -1408,9 +1408,12 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       activeAdmins = await recipientQuery.select('id', 'role');
       // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
       // for a customer on its own route (technicianServicesCustomer, the rule the
-      // Communications routes use). No customer on the event = today's routing.
+      // Communications routes use). An event with no customer is the office's
+      // (owner 2026-11-04; the bell's scopeAdminFeedToRole rule): no technician.
       const scopeCid = demoCid || payload?.scopeCustomerId;
-      if (require('../config/feature-gates').techLoginPrivacyLive?.() && scopeCid && activeAdmins.some((u) => u.role === 'technician')) {
+      if (require('../config/feature-gates').techLoginPrivacyLive?.() && !scopeCid) {
+        activeAdmins = activeAdmins.filter((u) => u.role !== 'technician');
+      } else if (require('../config/feature-gates').techLoginPrivacyLive?.() && activeAdmins.some((u) => u.role === 'technician')) {
         const { technicianServicesCustomer } = require('./technician-visit-scope');
         const own = await Promise.all(activeAdmins.map(async (u) => {
           if (u.role !== 'technician') return true;
