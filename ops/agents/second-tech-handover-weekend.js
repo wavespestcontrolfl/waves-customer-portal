@@ -46,7 +46,9 @@
 //     blackout range holding the new day);
 //   - leaves --to free at the visit's window on the new date (pick-technician technicianFreeAt) and does
 //     not overlap a window this run already gave --to (earlier customers' new dates AND the technician-only
-//     moves of the same run), so two customers cannot land on one hour;
+//     moves of the same run), so two customers cannot land on one hour. A weekend customer's own technician-only
+//     hours count only while that customer moves and the visit keeps its date: when a customer stays whole or a
+//     visit gets a new date, its old hours are given back and every customer is decided again (resolveWeekendMoves);
 //   - for a visit whose date changes: is not a visit the app keeps still (the series' first visit, a
 //     'rescheduled' request, a grouped stop, a date_exception, an unplaced hand-off, a visit held by
 //     someone else or by nobody, a staff lock / exclusion / customer confirmation, a customer-chosen
@@ -250,45 +252,85 @@ function anchorChange(parent, anchor) {
   return { series_id: parent.id, nth: anchor.nth, weekday: anchor.weekday, old_nth: oldNth, old_weekday: oldWeekday };
 }
 
+const overlaps = (a, b) => a.s < b.e && b.s < a.e;
+/** Reserve or give back one window on --to, by identity (two visits can share a start and an end). */
+const hold = (taken, w) => taken.set(w.date, [...(taken.get(w.date) || []), w]);
+const unhold = (taken, w) => taken.set(w.date, (taken.get(w.date) || []).filter((o) => o !== w));
+
 /**
- * Decide every weekend customer. `candidates` = [{ customer_id, series: [{ parent, live, chain, needsDates }] }]
- * in a stable order. `start` = --start: no new date before it. `seed` = the windows the run's technician-only moves already
- * hold on --to, Map(date -> [{ s, e }]).
- * Resolves to { kept: Map(customerId -> reason), newDates: Map(visitId -> date), anchors: [anchorChange] }.
+ * One customer's turn in a pass. `mine` = its own technician-only windows, Map(visitId -> window); `late` = the ids among
+ * them the pass did not reserve up front. Resolves to { failure } or { solved }, and leaves `taken` holding exactly the
+ * hours the customer gives --to.
  */
-async function resolveWeekendMoves({ candidates, from, workDays, start, today, facts, free, seed = new Map() }) {
+async function customerTurn(customer, mine, late, ctx) {
+  const { taken } = ctx;
+  const holds = [];
+  const keep = (w) => { hold(taken, w); holds.push(w); };
+  // A late window is held now, so the customer's own new dates avoid it as they avoid a window reserved up front.
+  for (const id of late) keep(mine.get(id));
+  const solved = [];
+  let failure = null;
+  for (const series of customer.series) {
+    // Every series of the customer moves to --to, so each must keep its weekday under top-up (header, THE MOVE MUST STICK).
+    if (!keepsWeekday(series.parent, ctx.today)) { failure = 'cadence_drift'; break; }
+    const result = series.needsDates ? await resolveSeries(series, ctx) : { ok: true, dates: new Map(), anchor: null, spans: [] };
+    if (!result.ok) { failure = result.reason; break; }
+    solved.push({ series, result });
+    // The next series of this customer must not take the hour this one just took.
+    for (const s of result.spans) keep({ ...s, dated: true });
+  }
+  const redated = new Set(solved.flatMap(({ result }) => [...result.dates.keys()]));
+  // A late window whose visit keeps its date keeps its hour on --to: an earlier customer's new date may not sit on it.
+  const clash = (w) => (taken.get(w.date) || []).some((o) => o.dated && overlaps(o, w));
+  if (!failure && late.some((id) => !redated.has(id) && clash(mine.get(id)))) failure = 'busy';
+  if (failure) {
+    // Give back every hour the customer holds, the up-front reservations too: the customer stays whole.
+    for (const w of [...holds, ...mine.values()]) unhold(taken, w);
+    return { failure };
+  }
+  // A visit with a new date gives back its old hour.
+  for (const id of redated) if (mine.has(id)) unhold(taken, mine.get(id));
+  return { solved };
+}
+
+/** One pass over the customers in order. An own window in `released` is reserved only at its customer's turn. */
+async function decidePass({ candidates, own, released, seed, ...rest }) {
+  const taken = new Map([...seed].map(([d, list]) => [d, [...list]]));
+  for (const [id, w] of own) if (!released.has(id)) hold(taken, w);
+  const ctx = { ...rest, taken };
   const kept = new Map();
   const newDates = new Map();
   const anchors = [];
-  const taken = new Map([...seed].map(([d, list]) => [d, [...list]]));
   for (const customer of candidates) {
-    const ctx = { from, workDays, start, today, facts, free, taken };
-    const solved = [];
-    let failure = null;
-    for (const series of customer.series) {
-      // Every series of the customer moves to --to, so each must keep its weekday under top-up (header, THE MOVE MUST STICK).
-      if (!keepsWeekday(series.parent, today)) { failure = 'cadence_drift'; break; }
-      const result = series.needsDates ? await resolveSeries(series, ctx) : { ok: true, dates: new Map(), anchor: null, spans: [] };
-      if (!result.ok) { failure = result.reason; break; }
-      solved.push({ series, result });
-      // The next series of this customer must not take the hour this one just took.
-      for (const s of result.spans) taken.set(s.date, [...(taken.get(s.date) || []), { s: s.s, e: s.e }]);
-    }
-    if (failure) {
-      // Give back the hours the customer's earlier series took; the customer stays whole.
-      for (const { result } of solved) {
-        for (const s of result.spans) taken.set(s.date, (taken.get(s.date) || []).filter((o) => !(o.s === s.s && o.e === s.e)));
-      }
-      kept.set(customer.customer_id, failure);
-      continue;
-    }
-    for (const { series, result } of solved) {
+    const mine = new Map([...own].filter(([, w]) => w.customer_id === customer.customer_id));
+    const turn = await customerTurn(customer, mine, [...mine.keys()].filter((id) => released.has(id)), ctx);
+    if (turn.failure) { kept.set(customer.customer_id, turn.failure); continue; }
+    for (const { series, result } of turn.solved) {
       for (const [id, date] of result.dates) newDates.set(id, date);
       const change = anchorChange(series.parent, result.anchor);
       if (change) anchors.push(change);
     }
   }
   return { kept, newDates, anchors };
+}
+
+/**
+ * Decide every weekend customer. `candidates` = [{ customer_id, series: [{ parent, live, chain, needsDates }] }]
+ * in a stable order. `start` = --start: no new date before it. `seed` = the windows the run's technician-only moves of
+ * other customers hold on --to, Map(date -> [{ s, e }]). `own` = the weekend customers' own technician-only windows,
+ * Map(visitId -> { customer_id, date, s, e }): reserved up front, so an earlier customer cannot take a later one's hour.
+ * Resolves to { kept: Map(customerId -> reason), newDates: Map(visitId -> date), anchors: [anchorChange] }.
+ */
+async function resolveWeekendMoves({ candidates, from, workDays, start, today, facts, free, seed = new Map(), own = new Map() }) {
+  const released = new Set();
+  for (;;) {
+    const out = await decidePass({ candidates, own, released, seed, from, workDays, start, today, facts, free });
+    // An up-front reservation whose visit does not keep its hour on --to (its customer stays with --from, or it gets a new
+    // date) misled the customers decided before it: give it back and decide every customer again. `released` only grows.
+    const stale = [...own].filter(([id, w]) => !released.has(id) && (out.kept.has(w.customer_id) || out.newDates.has(id)));
+    if (!stale.length) return out;
+    for (const [id] of stale) released.add(id);
+  }
 }
 
 // ---- reads (SELECT only) ----------------------------------------------------
@@ -376,18 +418,24 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
   }));
   if (!candidates.length) return { kept: new Map(), newDates: new Map(), anchors: [] };
   const facts = await loadWeekendFacts(db, { to, from, start, today, now, candidates, lockNeighbors });
-  // The hours the run's technician-only moves already give --to.
+  // The hours the run's technician-only moves give --to: other customers' always; a weekend customer's own only while that
+  // customer moves and the visit keeps its date (resolveWeekendMoves gives the rest back).
+  const weekendIds = new Set(candidates.map((c) => c.customer_id));
   const seed = new Map();
+  const own = new Map();
   for (const m of plan.ids.moves.filter((x) => !('to_date' in x))) {
     const span = spanOf(visitById.get(m.visit_id));
-    if (span) seed.set(m.date, [...(seed.get(m.date) || []), span]);
+    const parent = parentById.get(m.series_id);
+    if (!span) continue;
+    if (parent && weekendIds.has(parent.customer_id)) own.set(m.visit_id, { customer_id: parent.customer_id, date: m.date, ...span });
+    else seed.set(m.date, [...(seed.get(m.date) || []), span]);
   }
   const { technicianFreeAt } = require(path.join(root, 'services', 'scheduling', 'pick-technician'));
   const free = (v, date) => technicianFreeAt({
     conn: db, technicianId: to, date, windowStart: v.window_start, windowEnd: effectiveWindowEnd(v),
     durationMinutes: Number(v.estimated_duration_minutes) > 0 ? Number(v.estimated_duration_minutes) : undefined, excludeServiceIds: [v.id],
   });
-  return resolveWeekendMoves({ candidates, from, workDays, start, today, facts, free, seed });
+  return resolveWeekendMoves({ candidates, from, workDays, start, today, facts, free, seed, own });
 }
 
 module.exports = {

@@ -741,7 +741,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     return f;
   };
   const run = (candidates, o = {}) => weekend.resolveWeekendMoves({
-    candidates, from: OWNER, workDays: MON_THU, start: o.start || START, today: TODAY, facts: o.facts || clearFacts(candidates), free: o.free || (async () => true), seed: o.seed,
+    candidates, from: OWNER, workDays: MON_THU, start: o.start || START, today: TODAY, facts: o.facts || clearFacts(candidates), free: o.free || (async () => true), seed: o.seed, own: o.own,
   });
   const dow = (d) => new Date(`${d}T12:00:00Z`).getUTCDay();
 
@@ -975,6 +975,61 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     expect(out.newDates.has(ok.series[0].live[0].id)).toBe(false);
     // The Thursday the first series briefly took is free again for the next customer.
     expect(out.newDates.get(next.series[0].live[0].id)).toBe('2099-07-09');
+  });
+
+  test('a weekend customer that stays whole gives back its weekday hours; the customers decided before it are decided again', async () => {
+    // B's own Thursday 9-10 visit holds the hour on the hire while B may move. B stays whole: its Saturday is customer-placed.
+    const a = series(SAT, { count: 1 });
+    const b = series(SAT, { count: 1 });
+    const own = () => new Map([['V-b-thu', { customer_id: b.customer_id, date: '2099-07-09', s: 540, e: 600 }]]);
+    const placed = (candidates) => { const f = clearFacts(candidates); f.stayStill.set(b.series[0].live[0].id, 'person_placed'); return f; };
+    for (const order of [[a, b], [b, a]]) {
+      const out = await run(order, { own: own(), facts: placed(order) });
+      expect(out.kept.get(b.customer_id)).toBe('person_placed');
+      expect(out.newDates.get(a.series[0].live[0].id)).toBe('2099-07-09'); // the hour B gave back, in either order
+    }
+    // The control: while B moves, its Thursday hour stays reserved and A takes the Monday.
+    const moving = await run([a, b], { own: own() });
+    expect(moving.kept.size).toBe(0);
+    expect(moving.newDates.get(a.series[0].live[0].id)).toBe('2099-07-13');
+  });
+
+  test('a weekday visit that gets a new date gives back its old hour, and the customers decided before it are decided again', async () => {
+    // C: a custom 21-day series, Mon 07-13 (a weekday visit the run hands over, 9-10) and Sat 08-01. The hire is busy on
+    // 08-03, so the series cannot stay on Mon 07-13 (its next visit would land on 08-03): it moves to Tue 07-14 / Tue 08-04.
+    const parentC = { id: 'P-c21', customer_id: 'C-c21', service_type: 'Pest', recurring_pattern: 'custom', recurring_nth: null, recurring_weekday: null, recurring_interval_days: 21 };
+    const liveC = ['2099-07-13', '2099-08-01'].map((d, i) => ({
+      id: `V-c21-${i}`, series_id: 'P-c21', recurring_parent_id: 'P-c21', is_recurring: true, scheduled_date: d, status: 'confirmed',
+      technician_id: OWNER, window_start: '09:00:00', window_end: '10:00:00',
+    }));
+    const c = { customer_id: 'C-c21', series: [{ parent: parentC, live: liveC, chain: liveC, needsDates: true }] };
+    const d = series('2099-07-12', { count: 1 }); // D's Sunday visit: Mon 07-13 is its nearest day
+    const own = new Map([['V-c21-0', { customer_id: 'C-c21', date: '2099-07-13', s: 540, e: 600 }]]);
+    const out = await run([d, c], { own, free: async (v, date) => date !== '2099-08-03' });
+    expect(out.kept.size).toBe(0);
+    expect(out.newDates.get(d.series[0].live[0].id)).toBe('2099-07-13'); // the hour C's Monday visit gave back
+    expect(out.newDates.get('V-c21-0')).toBe('2099-07-14');
+    expect(out.newDates.get('V-c21-1')).toBe('2099-08-04');
+  });
+
+  test('a customer decided again hands over a weekday visit only when no new date took its hour: never two visits on one hour', async () => {
+    // Q's own Thursday and R's own Monday (9-10) hold their hours; the hire is free only on those two days. R stays whole.
+    const p = series(SAT, { count: 1 });
+    const q = series(SAT, { count: 1 });
+    const r = series(SAT, { count: 1 });
+    const own = new Map([
+      ['V-q-thu', { customer_id: q.customer_id, date: '2099-07-09', s: 540, e: 600 }],
+      ['V-r-mon', { customer_id: r.customer_id, date: '2099-07-13', s: 540, e: 600 }],
+    ]);
+    const f = clearFacts([p, q, r]);
+    f.stayStill.set(r.series[0].live[0].id, 'person_placed');
+    const out = await run([p, q, r], { own, facts: f, free: async (v, date) => ['2099-07-09', '2099-07-13'].includes(date) });
+    // Q and R both stay whole in the first pass, so their hours are given back; P then takes Thursday 9-10, and Q's
+    // Thursday 9-10 visit cannot go to the hire on top of it.
+    expect(out.newDates.get(p.series[0].live[0].id)).toBe('2099-07-09');
+    expect(out.kept.get(q.customer_id)).toBe('busy');
+    expect(out.kept.get(r.customer_id)).toBe('person_placed');
+    expect(out.newDates.size).toBe(1);
   });
 
   test('isMonthBased matches rebooker.isMonthBasedRecurrence for every pattern the scheduler places', () => {

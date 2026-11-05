@@ -340,6 +340,21 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     expect(p.ids.moves.find((m) => m.visit_id === mondaySeries.kids[0].id).to_date).toBe('2099-07-13');
   });
 
+  test('a weekend customer that stays whole gives back its weekday hour: the next customer may take it', async () => {
+    const w = await world();
+    // K stays whole (a reminder already went out for its Saturday), so its Thursday 09:00 visit stays with the owner.
+    const k = await customer();
+    const kSat = await weekendSeries(w.ownerId, k, { dates: ['2099-07-18'] });
+    await knex('appointment_reminders').insert({ scheduled_service_id: kSat.kids[0].id, customer_id: k.customerId, appointment_time: '2099-07-18T13:00:00Z', reminder_72h_sent: true, source: 'test' });
+    const kThu = await weekendSeries(w.ownerId, k, { dates: ['2099-07-09'] });
+    // A's Saturday 07-11 09:00: Thursday 07-09 is the nearest work day, and K's Thursday visit no longer holds that hour.
+    const a = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });
+    const p = await plan(w);
+    expect(p.ids.kept).toEqual([{ customer_id: k.customerId, reason: 'reminder_sent' }]);
+    expect(p.ids.moves.find((m) => m.visit_id === a.kids[0].id).to_date).toBe('2099-07-09');
+    expect(p.ids.moves.some((m) => m.visit_id === kThu.kids[0].id)).toBe(false); // K's Thursday stays with the owner
+  });
+
   test('a busy hour keeps the customer whole: the hire already holds 09:00 on every legal day', async () => {
     const w = await world();
     const c = await customer();
