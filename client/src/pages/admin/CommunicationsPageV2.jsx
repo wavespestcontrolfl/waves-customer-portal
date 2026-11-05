@@ -314,6 +314,7 @@ function insertTabAfter(tabs, tab, anchors) {
   return [...tabs.slice(0, at), tab, ...tabs.slice(at)];
 }
 const SMS_LOG_PAGE_SIZE = 500;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Short reviewer-facing labels for an Agent Review draft's intended_actions
 // (Codex r3 P1) — the promise a reviewer must see BEFORE sending copy that
@@ -1842,9 +1843,12 @@ export function SmsTab({
     const params = new URLSearchParams(window.location.search);
     const phone = params.get("phone");
     const queryFromNumber = findKnownWavesNumber(params.get("fromNumber"));
+    // A technician's Text link names the customer too: the server refuses a technician's text with no customer.
+    const linkedCustomerId = params.get("customerId");
     if (phone) {
       setToNumber(phone);
       setToSearch("");
+      if (linkedCustomerId && UUID_PATTERN.test(linkedCustomerId) && !selectedCustomerId) setSelectedCustomerId(linkedCustomerId);
       if (queryFromNumber && !loadedMessageDraft) {
         selectSmsRecipient(phone, queryFromNumber, selectedCustomerId);
       }
@@ -3873,7 +3877,8 @@ export function SmsTab({
               customer={customer}
               onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
             />{" "}
-            {/* Plus — attachment menu */}
+            {/* Plus — attachment menu. Photo upload is office-only (the upload route answers a technician 403). */}
+            {!smsIsTechnicianRole && (
             <div className="relative">
               {" "}
               <Button
@@ -3928,7 +3933,8 @@ export function SmsTab({
                   </button>{" "}
                 </div>
               )}
-            </div>{" "}
+            </div>
+            )}{" "}
           </div>
         </div>
         {/* Attachment tray */}

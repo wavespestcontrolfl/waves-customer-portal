@@ -177,3 +177,15 @@ describe('funnelServiceLines / buildFunnelAvailability', () => {
     expect(lineTech.lineOfferRanking).not.toHaveBeenCalled();
   });
 });
+
+describe('buildBookingAvailability — technicianId (public reschedule keeps the visit\'s technician)', () => {
+  test('find-time searches that one technician\'s days', async () => {
+    await build([slotOf('tech-home', '09:00')], { technicianId: 'tech-home' });
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ technicianId: 'tech-home' }));
+  });
+
+  test('without it, find-time searches every technician, as before', async () => {
+    await build([slotOf('tech-home', '09:00')]);
+    expect(findAvailableSlots.mock.calls[0][0].technicianId).toBeUndefined();
+  });
+});

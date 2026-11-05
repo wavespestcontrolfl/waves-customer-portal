@@ -72,7 +72,11 @@ describe('tech knowledge Staff authentication', () => {
     });
   });
 
-  test.each(['admin', 'technician'])('allows the %s Staff role', async (role) => {
+  test.each([
+    // An admin keeps the exact context; a technician's answer is limited to field categories.
+    ['admin', { source: 'tech_field' }, null],
+    ['technician', { source: 'tech_field', audience: 'technician' }, { source: 'tech_field', audience: 'technician' }],
+  ])('allows the %s Staff role', async (role, queryContext, lookupContext) => {
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/tech/knowledge/query`, {
         method: 'POST',
@@ -88,7 +92,13 @@ describe('tech knowledge Staff authentication', () => {
         answer: 'Use the label rate.',
         sources: ['Label'],
       });
-      expect(mockQuery).toHaveBeenCalledWith('What rate?', { source: 'tech_field' });
+      expect(mockQuery).toHaveBeenCalledWith('What rate?', queryContext);
+
+      const lookup = await fetch(`${baseUrl}/tech/knowledge/lookup?topic=rate`, {
+        headers: { Authorization: `Bearer ${role}` },
+      });
+      expect(lookup.status).toBe(200);
+      expect(mockLookup).toHaveBeenCalledWith('rate', lookupContext);
     });
   });
 });

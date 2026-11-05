@@ -13,7 +13,7 @@ const { checkConsentForPurpose } = require('../services/messaging/validators/con
 // Route internals for the payload/update mapping (mirrors the mocks in
 // notifications-preferences.test.js — the route file only needs these to load).
 jest.mock('express', () => ({
-  Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn() }),
+  Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn(), post: jest.fn() }),
 }));
 jest.mock('joi', () => ({}));
 jest.mock('../middleware/auth', () => ({ authenticate: jest.fn() }));

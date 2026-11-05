@@ -71,7 +71,9 @@ export function moveStatusText(move) {
 }
 
 // The move pause (GATE_MOVING_PAUSE, owner Q4) for a submitted move: the
-// reminder text and the pause, or null when neither has happened.
+// reminder text and the pause, or null when neither has happened. A move with
+// a new address reads as the old-house stop (GATE_MOVING_STOP_AT_MOVE_OUT):
+// it is never held for an address, so it has no last day.
 export function movePauseText(move) {
   if (!move || move.status !== "submitted") return null;
   const parts = [];
@@ -81,12 +83,19 @@ export function movePauseText(move) {
     else if (move.pause_reminder_sent === false) parts.push(`Reminder text not sent (${day})`);
     else parts.push(`Reminder text tried ${day}, result unknown`);
   }
+  const stop = !!parseAddress(move.normalized_address);
   if (move.pause_state === "paused") {
-    parts.push(`Visits paused after ${dayOnly(move.move_out_date)}, held until ${dayOnly(move.pause_ends_on)}`);
+    parts.push(stop
+      ? `Old-house visits stopped after ${dayOnly(move.move_out_date)}`
+      : `Visits paused after ${dayOnly(move.move_out_date)}, held until ${dayOnly(move.pause_ends_on)}`);
   } else if (move.pause_state === "office") {
-    parts.push(`Pause left to the office: ${move.pause_note || "pause the visits by hand"}`);
+    parts.push(stop
+      ? `Old-house visits left to the office: ${move.pause_note || "handle them by hand"}`
+      : `Pause left to the office: ${move.pause_note || "pause the visits by hand"}`);
   } else if (move.paused_at) {
-    parts.push(`Pause started ${shortDate(move.paused_at)}, not finished yet`);
+    parts.push(stop
+      ? `Old-house stop started ${shortDate(move.paused_at)}, not finished yet`
+      : `Pause started ${shortDate(move.paused_at)}, not finished yet`);
   }
   return parts.length ? parts.join(". ") : null;
 }

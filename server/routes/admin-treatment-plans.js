@@ -4,6 +4,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-defaults');
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+const { stripKeysDeep, deepStripPriceTokens } = require('../services/protocol-reader');
 const db = require('../models/db');
 const Joi = require('joi');
 
@@ -38,11 +39,25 @@ function plannerOptions(req) {
 // this response.
 // `stockAdvisory: true` when /complete takes this lawn visit's stock below zero instead of
 // refusing (the same classifier), so the full completion form drops its inventory hold too. Absent otherwise.
-function projectPlanResponse(plan) {
-  if (!plan || typeof plan !== 'object' || !plan.propertyGate || typeof plan.propertyGate !== 'object') return plan;
-  const { billingMode: _billingMode, ...propertyGate } = plan.propertyGate;
-  const stockAdvisory = require('../services/stock-advisory').isLawnTsStockAdvisoryCompletion({ service_type: propertyGate.service });
-  return { ...plan, propertyGate, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
+//
+// A technician also gets no vendor price or job cost (technician visibility audit
+// A3): the plan repeats each product under protocol.base / conditional and
+// mixCalculator.conditionalOptions, so the owner-only keys are removed at every
+// depth, and priced protocol lines ("($2.18)") lose their dollar tokens as on the
+// Protocols page. TreatmentPlanPanel reads none of these fields.
+const TECHNICIAN_PLAN_OWNER_ONLY_KEYS = new Set([
+  'bestPrice', 'costPerUnit', 'costUnit', 'needsPricing',
+  'materialCost', 'materialCostSource', 'materialCostDetail', 'materialCostSummary',
+]);
+
+function projectPlanResponse(plan, { technician = false } = {}) {
+  let projected = plan;
+  if (plan && typeof plan === 'object' && plan.propertyGate && typeof plan.propertyGate === 'object') {
+    const { billingMode: _billingMode, ...propertyGate } = plan.propertyGate;
+    const stockAdvisory = require('../services/stock-advisory').isLawnTsStockAdvisoryCompletion({ service_type: propertyGate.service });
+    projected = { ...plan, propertyGate, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
+  }
+  return technician ? deepStripPriceTokens(stripKeysDeep(projected, TECHNICIAN_PLAN_OWNER_ONLY_KEYS)) : projected;
 }
 
 // Every technician request is pinned to a current/recent assigned visit —
@@ -64,7 +79,7 @@ router.get('/:serviceId', async (req, res, next) => {
     const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan: projectPlanResponse(plan) });
+    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req) }) });
   } catch (err) {
     next(err);
   }
@@ -76,7 +91,7 @@ router.post('/:serviceId/build', async (req, res, next) => {
     const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan: projectPlanResponse(plan) });
+    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req) }) });
   } catch (err) {
     next(err);
   }

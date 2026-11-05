@@ -38,4 +38,19 @@ describe('knowledge_base reads skip admin-deactivated rows', () => {
     kbFtsQuery('large patch', true, 5);
     expect(mockCalls.some(([m, arg]) => m === 'where' && arg && arg.active === true)).toBe(false);
   });
+
+  // Technician visibility audit B3: the trust gate filters review state, never category.
+  test('a category limit (a technician search) filters the category on both paths; no limit adds none', () => {
+    const categoryCalls = () => mockCalls.filter(([m, col]) => m === 'whereIn' && col === 'category');
+    kbFtsQuery('large patch', true, 5, ['protocols', 'chemicals']);
+    kbIlikeQuery('%large patch%', true, 5, ['protocols', 'chemicals']);
+    expect(categoryCalls()).toEqual([
+      ['whereIn', 'category', ['protocols', 'chemicals']],
+      ['whereIn', 'category', ['protocols', 'chemicals']],
+    ]);
+    mockCalls.length = 0;
+    kbFtsQuery('large patch', true, 5);
+    kbIlikeQuery('%large patch%', true, 5);
+    expect(categoryCalls()).toEqual([]);
+  });
 });

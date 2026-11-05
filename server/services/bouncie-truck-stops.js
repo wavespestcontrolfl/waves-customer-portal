@@ -159,6 +159,6 @@ async function loadTruckDay(conn, imei, { fromMs, toMs, maxGapMeters, now = Date
 }
 
 module.exports = {
-  loadTruckStops, loadTruckTrips, loadTruckDay, stopsFromTrips, tripList, tripPointsFromPayload, addToTrips, MIN_STOP_MINUTES,
+  loadTruckStops, loadTruckTrips, loadTruckDay, stopsFromTrips, tripList, tripPointsFromPayload, addToTrips, parsePayload, MIN_STOP_MINUTES,
   EARLY_READ_MS,
 };

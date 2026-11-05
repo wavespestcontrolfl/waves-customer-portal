@@ -134,6 +134,7 @@ const {
   techSafeListRow, techSafeListFilters, techSafeSort,
   techSafe360Payload,
   TECH_LIST_STRIPPED_FIELDS, TECH_360_STRIPPED_KEYS, TECH_360_STRIPPED_CUSTOMER_FIELDS,
+  TECH_360_STRIPPED_PREFERENCE_FIELDS,
 } = customersRouter._private;
 
 const daysFromNow = (n) => etDateString(addETDays(new Date(), n));
@@ -458,6 +459,33 @@ describe('techSafe360Payload: Away Watch', () => {
     });
     expect(out).not.toHaveProperty('awayWatchEnabled');
     expect(out.preferences).toEqual({ gate_code: '1234' });
+  });
+});
+
+describe('techSafe360Payload: access codes', () => {
+  const prefs = {
+    property_gate_code: '0000', neighborhood_gate_code: '1111', garage_code: '2222', lockbox_code: '3333',
+    side_gate_access: 'Latch on left', parking_notes: 'Park on street', access_notes: 'Ring bell',
+    pet_details: 'Small dog', special_instructions: 'Call first',
+  };
+
+  test('a technician gets no gate, garage or lockbox codes and no access notes; other preferences stay', () => {
+    const out = techSafe360Payload({ customer: { id: 'c1' }, preferences: { ...prefs } });
+    for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) expect(out.preferences).not.toHaveProperty(field);
+    expect(out.preferences).toEqual({ pet_details: 'Small dog', special_instructions: 'Call first' });
+  });
+
+  test('the strip covers every access field the schema stores', () => {
+    expect([...TECH_360_STRIPPED_PREFERENCE_FIELDS].sort()).toEqual([
+      'access_notes', 'garage_code', 'lockbox_code', 'neighborhood_gate_code',
+      'parking_notes', 'property_gate_code', 'side_gate_access',
+    ]);
+  });
+
+  test('stripping does not change the caller\'s preferences object', () => {
+    const input = { customer: { id: 'c1' }, preferences: { ...prefs } };
+    techSafe360Payload(input);
+    expect(input.preferences.property_gate_code).toBe('0000');
   });
 });
 

@@ -3,6 +3,9 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const KBService = require('../services/knowledge-base');
 const logger = require('../services/logger');
+const {
+  TECHNICIAN_KNOWLEDGE_CATEGORIES, knowledgeAudience, technicianKnowledgeRow, technicianKnowledgeRows,
+} = require('../services/knowledge/technician-categories');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // A technician reads the knowledge base; every write, verify, flag and paid
@@ -26,8 +29,13 @@ router.get('/search', async (req, res, next) => {
   try {
     const { q, category, limit } = req.query;
     if (!q) return res.status(400).json({ error: 'q param required' });
-    const results = await KBService.search(q, { category, limit: parseInt(limit) || 20 });
-    res.json({ results, query: q });
+    // A technician reads field categories only, vendor prices removed.
+    const technician = Boolean(knowledgeAudience(req));
+    const results = await KBService.search(q, {
+      category, limit: parseInt(limit) || 20,
+      ...(technician ? { categories: TECHNICIAN_KNOWLEDGE_CATEGORIES } : {}),
+    });
+    res.json({ results: technician ? technicianKnowledgeRows(results) : results, query: q });
   } catch (err) { next(err); }
 });
 
@@ -38,12 +46,14 @@ router.get('/', async (req, res, next) => {
   try {
     const { category, status, confidence, limit = 50, page = 1, sort, order } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
+    const technician = Boolean(knowledgeAudience(req));
     const { entries, total } = await KBService.list({
       category, status, confidence,
       limit: parseInt(limit), offset,
       sort: sort || 'updated_at', order: order || 'desc',
+      ...(technician ? { categories: TECHNICIAN_KNOWLEDGE_CATEGORIES } : {}),
     });
-    res.json({ entries, total, page: parseInt(page) });
+    res.json({ entries: technician ? technicianKnowledgeRows(entries) : entries, total, page: parseInt(page) });
   } catch (err) { next(err); }
 });
 
@@ -54,6 +64,12 @@ router.get('/:id', async (req, res, next) => {
   try {
     const entry = await KBService.getById(req.params.id);
     if (!entry) return res.status(404).json({ error: 'Not found' });
+    if (knowledgeAudience(req)) {
+      // Audit findings quote the article, so a technician gets the field article alone.
+      const fieldEntry = technicianKnowledgeRow(entry);
+      if (!fieldEntry) return res.status(404).json({ error: 'Not found' });
+      return res.json({ entry: fieldEntry, audits: [] });
+    }
     const audits = await KBService.getAudits(req.params.id);
     res.json({ entry, audits });
   } catch (err) { next(err); }

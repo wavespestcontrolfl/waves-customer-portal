@@ -5,7 +5,8 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled, accountSavedProperties } = require('../services/account-properties');
 const PropertyTexts = require('../services/property-notification-prefs');
-const { gateEnvValue } = require('../config/feature-gates');
+const rateLimit = require('express-rate-limit');
+const { gateEnvValue, portalEmailResubscribeLive } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -482,6 +483,25 @@ async function ensurePrefs(customerId) {
 }
 
 
+// GATE_PORTAL_EMAIL_RESUBSCRIBE: the holder's own address on file, for the "Turn emails
+// back on" flow. The app never releases an unsubscribe itself: it can only ask for one
+// confirmation email to this address (POST /email-resubscribe below). Contacts are out.
+async function holderEmailForResubscribe(customerId) {
+  const row = await db('customers').where({ id: customerId }).first('email', 'first_name');
+  return deliverableEmail(row?.email) ? { email: String(row.email).trim(), firstName: row.first_name || '' } : null;
+}
+
+// Gate off, a contact session, or no deliverable address: the field is absent.
+async function emailResubscribeField(req) {
+  if (!portalEmailResubscribeLive() || req.contactSession) return null;
+  try {
+    const holder = await holderEmailForResubscribe(req.customerId);
+    return holder ? await require('../services/email-resubscribe').resubscribeStatus(holder.email, { dbh: db }) : null;
+  } catch {
+    return null; // a read problem must not fail the whole preferences screen
+  }
+}
+
 // Build the account-level preferences payload: per-property toggles/contacts
 // come from the current customer; delivery channels come from the account's
 // primary profile.
@@ -491,6 +511,7 @@ async function loadPreferencePayload(req) {
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
   const accountHasEmail = await accountEmailAvailable(req.customerId, primaryId);
   const billingHasEmail = await customerEmailAvailable(req.customerId) || deliverableEmail(prefs.billing_email);
+  const emailResubscribe = await emailResubscribeField(req);
   return {
     ...preferencePayload({
       ...prefs,
@@ -507,6 +528,8 @@ async function loadPreferencePayload(req) {
     // Email/Both offer keys on the ACCOUNT having an address — not on the
     // currently-selected property row alone.
     channelEmailAvailable: accountHasEmail,
+    // Never changes emailEnabled; absent unless the holder's address carries a customer unsubscribe.
+    ...(emailResubscribe ? { emailResubscribe } : {}),
   };
 }
 
@@ -633,6 +656,41 @@ router.get('/preferences', async (req, res, next) => {
     res.json(await loadPreferencePayload(req));
   } catch (err) {
     next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/notifications/email-resubscribe — GATE_PORTAL_EMAIL_RESUBSCRIBE
+// The account holder asks for ONE "Turn Waves emails back on?" email to their own
+// address on file. Only a click on its button (public-email-resubscribe.js) undoes
+// the unsubscribe. Answers { state: 'not_paused' | 'sent' | 'failed' }; 'sent' carries
+// maskedEmail and sentAt. At most one email per address per 24 h.
+// =========================================================================
+const emailResubscribeLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many requests. Try again in a few minutes.' },
+});
+
+router.post('/email-resubscribe', (req, res, next) => {
+  if (!portalEmailResubscribeLive()) return res.status(404).json({ state: 'off' });
+  if (req.contactSession) return res.status(403).json({ error: 'Account holders only', code: 'HOLDER_SESSION_ONLY' });
+  return next();
+}, emailResubscribeLimiter, async (req, res, next) => {
+  try {
+    const holder = await holderEmailForResubscribe(req.customerId);
+    if (!holder) return res.json({ state: 'not_paused' });
+    return res.json(await require('../services/email-resubscribe').requestResubscribeEmail({
+      customerId: req.customerId, email: holder.email, firstName: holder.firstName,
+    }, { dbh: db }));
+  } catch (err) {
+    // A database error carries the SQL with the address binding, and the shared error
+    // middleware logs message and stack: log the error word only and answer here.
+    logger.error(`[email-resubscribe] request failed (${require('../services/email-resubscribe').errorWord(err)})`);
+    return res.status(500).json({ state: 'failed' });
   }
 });
 

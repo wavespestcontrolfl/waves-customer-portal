@@ -47,6 +47,17 @@
  * it never uses up the base. Social Security, Medicare, Additional Medicare and income tax
  * withholding never change. Without `unemploymentExempt` the output is exactly what it was.
  *
+ * SIMPLE IRA (owner 2026-11-04, B2 A; no gate, a caller that passes no `simple` gets exactly the
+ * output it got before): a caller may pass `simple` = { deferralBp | deferralCents, ytdDeferralCents,
+ * ytdCompensationCents } for a participant. The employee's deferral (a percent of gross rounded
+ * half-up to the cent, or a fixed amount per check) is not federal income tax wages (IRC 402(k)): income
+ * tax withholding runs on gross minus the deferral and W-2 box 1 / Form 941 line 2 read that figure. It
+ * stays Social Security, Medicare and FUTA wages (IRC 3121(v)(1)(A), 3306(r)(1)) and Florida RT-6 wages,
+ * so those bases do not change. The deferral is held to the year's limit (TAX_YEARS
+ * simpleDeferralLimitCents; the age 50+ catch-up and the 110% limit are NOT modelled) and to what the check
+ * pays after taxes. Waves also owes a 2% nonelective contribution on the participant's compensation, capped
+ * at the 401(a)(17) figure over the year (simpleEmployerCents); it is not on the paycheck.
+ *
  * The tax year is the pay date's calendar year, because wages are taxed when
  * paid. A pay date in a year without tables throws: the calculator never
  * falls back to an older year's tables. Money is integer cents; each tax line
@@ -104,6 +115,11 @@ const TAX_YEARS = {
     },
     // IRS Topic 751: the 2026 Social Security wage base.
     socialSecurityWageBase: 184500,
+    // IRS Notice 2025-67: the 2026 SIMPLE IRA employee deferral limit, and the 401(a)(17) compensation
+    // limit that caps the 2% employer contribution. In cents. The catch-up and the 110% limit are not
+    // modelled. The 2027 block arrives with the 2027 tables.
+    simpleDeferralLimitCents: 1700000,
+    simpleCompensationCapCents: 36000000,
   },
 };
 
@@ -115,6 +131,8 @@ const ADDITIONAL_MEDICARE_THRESHOLD_CENTS = 20000000n;
 const FUTA_BP = 60n;
 const STATE_AND_FUTA_WAGE_BASE_CENTS = 700000n;
 const FLORIDA_NEW_EMPLOYER_RATE_BP = 270;
+// The SIMPLE IRA 2% nonelective employer contribution.
+const SIMPLE_EMPLOYER_BP = 200n;
 
 // Florida minimum wage, effective-dated (Fla. Const. art. X, s. 24(c), as amended 2020: $15.00 on
 // 30 Sep 2026; the 2027 rate is computed 30 Sep 2027 and takes effect 1 Jan 2028, so the table ends
@@ -221,6 +239,46 @@ function wholeCents(value, label) {
   return BigInt(value);
 }
 
+// The employee's SIMPLE IRA deferral for this check, in cents: the percent of gross or the fixed amount,
+// never more than gross or what is left of the year's limit.
+function simpleDeferral(gross, simple, limitCents) {
+  if (simple == null) return 0n;
+  if (simple.deferralBp != null && simple.deferralCents != null) {
+    throw new Error('SIMPLE IRA savings is a percent or a dollar amount, not both');
+  }
+  const bp = wholeCents(simple.deferralBp, 'SIMPLE IRA percent');
+  if (bp > 10000n) throw new Error('SIMPLE IRA percent cannot be more than 100');
+  const wanted = simple.deferralBp != null ? roundDiv(gross * bp, 10000n) : wholeCents(simple.deferralCents, 'SIMPLE IRA dollars per check');
+  return min(wanted, min(gross, max0(BigInt(limitCents) - wholeCents(simple.ytdDeferralCents, 'Year-to-date SIMPLE IRA savings'))));
+}
+
+// The largest deferral up to `wanted` that the check pays together with the income tax withheld on the pay
+// left after it (a smaller deferral raises that tax). deferral + tax never falls as the deferral grows, so
+// a binary search over whole cents finds it. A wanted deferral of 0 runs no withholding at all.
+function affordableDeferral(wanted, available, withheldAfter) {
+  let low = 0n;
+  let high = wanted;
+  while (low < high) {
+    const mid = (low + high + 1n) / 2n;
+    if (mid + withheldAfter(mid) <= available) low = mid;
+    else high = mid - 1n;
+  }
+  return low;
+}
+
+// A participant's SIMPLE IRA lines: the federal income tax wages (gross less the deferral), the compensation
+// and Waves' 2% on it, up to the year's 401(a)(17) cap (year-to-date pay counts). Nothing without `simple`.
+function simpleLines(gross, deferral, simple, yearTables) {
+  if (simple == null) return {};
+  const room = max0(BigInt(yearTables.simpleCompensationCapCents) - wholeCents(simple.ytdCompensationCents, 'Year-to-date SIMPLE IRA compensation'));
+  return toNumbers({
+    incomeTaxWagesCents: gross - deferral,
+    simpleCompensationCents: gross,
+    simpleDeferralCents: deferral,
+    simpleEmployerCents: roundDiv(min(gross, room) * SIMPLE_EMPLOYER_BP, 10000n),
+  });
+}
+
 const toNumbers = (obj) => Object.fromEntries(
   Object.entries(obj).map(([k, v]) => [k, typeof v === 'bigint' ? Number(v) : v]),
 );
@@ -247,6 +305,7 @@ function computePaycheck({
   flsaCovered,
   unemploymentExempt,
   ytdUnemploymentWages,
+  simple,
 }) {
   const taxYear = taxYearOf(payDate);
   const tables = schedulesForYear(taxYear);
@@ -303,11 +362,16 @@ function computePaycheck({
   const futa = roundDiv(capWages * FUTA_BP, 10000n);
   const floridaReemployment = roundDiv(capWages * BigInt(reemploymentRateBp), 10000n);
 
-  const { withheld, lines } = incomeTaxWithholding(gross, BigInt(periods), w4, tables);
   // A tiny check with extra Step 4(c) withholding can owe more than it pays.
   // Withhold what the check covers and report the rest; never a negative net.
   const available = max0(gross - socialSecurity - medicare - additionalMedicare);
-  const federalIncomeTax = min(withheld, available);
+  // SIMPLE IRA: the deferral lowers the wages income tax is withheld on (Pub. 15-T line 1a), not the FICA wages.
+  // Taxes come first: a check that cannot pay its taxes and the whole deferral saves what is left.
+  const yearTables = TAX_YEARS[taxYear];
+  const wanted = simpleDeferral(gross, simple, yearTables.simpleDeferralLimitCents);
+  const deferral = affordableDeferral(wanted, available, (d) => incomeTaxWithholding(gross - d, BigInt(periods), w4, tables).withheld);
+  const { withheld, lines } = incomeTaxWithholding(gross - deferral, BigInt(periods), w4, tables);
+  const federalIncomeTax = min(withheld, available - deferral);
 
   return {
     taxYear,
@@ -333,14 +397,15 @@ function computePaycheck({
       socialSecurityEmployeeCents: socialSecurity,
       medicareEmployeeCents: medicare,
       additionalMedicareCents: additionalMedicare,
-      netPayCents: gross - federalIncomeTax - socialSecurity - medicare - additionalMedicare,
+      netPayCents: gross - federalIncomeTax - socialSecurity - medicare - additionalMedicare - deferral,
       socialSecurityEmployerCents: socialSecurity,
       medicareEmployerCents: medicare,
       futaCents: futa,
       floridaReemploymentCents: floridaReemployment,
     }),
     // Separate bases for the tax forms. Federal income tax wages and SIMPLE IRA
-    // compensation equal gross (Section 125 HSA money is in neither); Social
+    // compensation equal gross (Section 125 HSA money is in neither), except that
+    // a participant's SIMPLE IRA deferral comes off the income tax wages (below); Social
     // Security, Medicare, FUTA and RT-6 wages are the taxableWages block below.
     // Qualified overtime (W-2 box 12 code TT) counts only for a technician the
     // federal overtime law covers. The employer HSA money is box 12 code W.
@@ -350,6 +415,7 @@ function computePaycheck({
       qualifiedOvertimeCents: flsaCovered === true ? overtimePremium + lineOvertimePremium : 0n,
       hsaEmployerCents: hsaEmployer,
     }) : {}),
+    ...simpleLines(gross, deferral, simple, yearTables),
     taxableWages: toNumbers({
       socialSecurityCents: socialSecurityWages,
       medicareCents: gross,

@@ -5,6 +5,9 @@ const { etDateString } = require('../../utils/datetime-et');
 const { dispatchWithFallback } = require('../llm/call');
 const { isEnabled, kbSpeciesQaLive, kbCustomerAudienceLive } = require('../../config/feature-gates');
 const { KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES } = require('./customer-safe-categories');
+const {
+  TECHNICIAN_KNOWLEDGE_CATEGORIES, isTechnicianAudience, technicianKnowledgeRow, technicianKnowledgeRows,
+} = require('./technician-categories');
 
 // Callers whose answer goes to staff, never to a customer. Every other
 // source (ai_assistant, lead_agent, content_agent, unknown) is treated as
@@ -82,6 +85,15 @@ function qaLaneFor(source) {
 // minutes-long DEEP turn is unacceptable. The DEEP tier writes/audits the
 // wiki content offline; this path just reads it back fast.
 
+// Limits a knowledge_base read to the categories the caller may see: the
+// customer-safe list for a customer-facing caller (GATE_KB_CUSTOMER_AUDIENCE),
+// the field-category list for a technician. Staff admin reads are unchanged.
+function limitToAudience(builder, { customerOnly, technicianOnly }) {
+  if (customerOnly) builder.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+  if (technicianOnly) builder.whereIn('category', TECHNICIAN_KNOWLEDGE_CATEGORIES);
+  return builder;
+}
+
 // Every read here uses `active IS NOT FALSE`: an admin's active=false hides
 // the article, and a legacy row with no flag (NULL) counts as on.
 class WikiQA {
@@ -107,13 +119,17 @@ class WikiQA {
     // GATE_KB_CUSTOMER_AUDIENCE: a customer-facing caller reads only the
     // customer-safe categories, on every knowledge_base read below.
     const customerOnly = this.customerAudienceOnly(context.source);
+    // A technician's answer draws only on field categories, with vendor prices
+    // removed from every article the model reads (owner ruling 2026-11-04).
+    const technicianOnly = isTechnicianAudience(context);
+    const scope = { customerOnly, technicianOnly };
     const lane = qaLaneFor(context.source);
 
     // Build live index directly from knowledge_base (not the compiled _summaries.md)
     const indexQuery = db('knowledge_base')
       .whereRaw('active IS NOT FALSE') // NULL counts as on, the same rule as the article load below
       .whereNot('path', 'like', 'wiki/_%');
-    if (customerOnly) indexQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+    limitToAudience(indexQuery, scope);
     const indexRows = await runRead(execution, indexQuery
       .select('path', 'title', 'summary', 'category')
       .orderBy('category'), 'knowledge index');
@@ -126,7 +142,9 @@ class WikiQA {
       return { answer, articlesUsed: [] };
     }
 
-    const liveIndex = indexRows
+    // The routing model reads titles and summaries too: a technician's index
+    // goes through the same projection as the articles.
+    const liveIndex = (technicianOnly ? technicianKnowledgeRows(indexRows) : indexRows)
       .map(r => `${r.path} [${r.category}]: ${r.title} — ${r.summary || ''}`)
       .join('\n');
 
@@ -185,7 +203,7 @@ ${liveIndex}`,
               .orWhere('title', 'ilike', `%${kw}%`);
           }
         });
-      if (fallbackQuery && customerOnly) fallbackQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+      if (fallbackQuery) limitToAudience(fallbackQuery, scope);
       const fallbackArticles = fallbackQuery ? await runRead(execution, fallbackQuery
         .limit(5)
         .select('path'), 'knowledge fallback') : [];
@@ -206,8 +224,14 @@ ${liveIndex}`,
         .whereIn('path', paths)
         .whereRaw('active IS NOT FALSE'); // an admin's active=false hides the row (NULL counts as on), as in every other reader
       // A routed path outside the allowlist can never load for a customer caller.
-      if (customerOnly) articleQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
-      kbArticles = await runRead(execution, articleQuery.select('path', 'title', 'content'), 'knowledge articles');
+      limitToAudience(articleQuery, scope);
+      kbArticles = await runRead(execution, articleQuery.select('path', 'title', 'content', 'category'), 'knowledge articles');
+      if (technicianOnly) {
+        // Vendor prices come out of the text; the refs list only articles that loaded.
+        kbArticles = technicianKnowledgeRows(kbArticles);
+        const loaded = new Set(kbArticles.map((a) => a.path));
+        paths = paths.filter((p) => loaded.has(p));
+      }
     }
     const articles = [...kbArticles, ...species];
     const refs = [...paths, ...species.map((a) => a.path)];
@@ -287,14 +311,18 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
   /**
    * Quick lookup by topic — used by other services for fast retrieval.
    */
-  async lookup(topic) {
-    const article = await db('knowledge_base')
+  async lookup(topic, context = null) {
+    const query = db('knowledge_base')
       .whereRaw('active IS NOT FALSE')
       .where(function () {
         this.where('title', 'ilike', `%${topic}%`)
           .orWhereRaw("tags::text ILIKE ?", [`%${topic.toLowerCase()}%`]);
-      })
-      .first();
+      });
+    if (isTechnicianAudience(context)) {
+      const article = await query.whereIn('category', TECHNICIAN_KNOWLEDGE_CATEGORIES).first();
+      return technicianKnowledgeRow(article)?.content || null;
+    }
+    const article = await query.first();
 
     return article?.content || null;
   }
@@ -323,11 +351,13 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     if (context && this.customerAudienceOnly(context.source)) {
       searchQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
     }
+    const technicianOnly = isTechnicianAudience(context);
+    if (technicianOnly) searchQuery.whereIn('category', TECHNICIAN_KNOWLEDGE_CATEGORIES);
     const results = await runRead(execution, searchQuery
       .select('id', 'path', 'title', 'summary', 'category', 'tags', 'word_count', 'last_compiled')
       .limit(limit), 'knowledge search');
 
-    return results;
+    return technicianOnly ? technicianKnowledgeRows(results) : results;
   }
 
   /**
@@ -346,7 +376,10 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     if (this.customerAudienceOnly(context?.source)) {
       articleQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
     }
-    const articles = await runRead(execution, articleQuery.select('path', 'title', 'content'), 'knowledge articles');
+    const technicianOnly = isTechnicianAudience(context);
+    if (technicianOnly) articleQuery.whereIn('category', TECHNICIAN_KNOWLEDGE_CATEGORIES);
+    let articles = await runRead(execution, articleQuery.select('path', 'title', 'content', 'category'), 'knowledge articles');
+    if (technicianOnly) articles = technicianKnowledgeRows(articles);
 
     const answer = `Found ${results.length} relevant article(s):\n\n` +
       articles.map(a => `**${a.title}**\n${(a.content || '').substring(0, 500)}...`).join('\n\n---\n\n');
@@ -413,17 +446,21 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
   /**
    * Get all articles in a specific category.
    */
-  async getCategory(category) {
-    return db('knowledge_base').where({ category }).whereRaw('active IS NOT FALSE').select('path', 'title', 'summary', 'content', 'tags');
+  async getCategory(category, context = null) {
+    const rows = await db('knowledge_base').where({ category }).whereRaw('active IS NOT FALSE').select('path', 'title', 'summary', 'content', 'tags');
+    // Every row here has the requested category; the technician projection keys on it.
+    return isTechnicianAudience(context) ? technicianKnowledgeRows(rows.map((r) => ({ ...r, category }))) : rows;
   }
 
   /**
    * List all active articles (used by dispatch module).
    */
-  async listAll() {
-    return db('knowledge_base').whereRaw('active IS NOT FALSE')
+  async listAll(context = null) {
+    const query = db('knowledge_base').whereRaw('active IS NOT FALSE')
       .select('path', 'title', 'category', 'summary', 'tags', 'word_count', 'last_compiled')
       .orderBy('category');
+    if (isTechnicianAudience(context)) return technicianKnowledgeRows(await query.whereIn('category', TECHNICIAN_KNOWLEDGE_CATEGORIES));
+    return query;
   }
 }
 

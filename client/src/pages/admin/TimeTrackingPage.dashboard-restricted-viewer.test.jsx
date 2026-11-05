@@ -51,7 +51,8 @@ it("hides Jobs Done / Utilization (and the per-tech Jobs/Revenue/Utilization) fo
   // Aggregate "Today's Labor" stat cards — Revenue/Jobs Done/Utilization
   // all derive from fields the server never sent this viewer.
   expect(screen.getByText("Total Hours")).toBeInTheDocument();
-  expect(screen.getByText("Labor Cost")).toBeInTheDocument();
+  // Labor cost implies a coworker wage: office-only.
+  expect(screen.queryByText("Labor Cost")).not.toBeInTheDocument();
   expect(screen.queryByText("Jobs Done")).not.toBeInTheDocument();
   expect(screen.queryByText("Utilization")).not.toBeInTheDocument();
 
@@ -92,6 +93,15 @@ it("codex round-3 P2: hides the OT summary text and the bar chart's overtime spl
   // No Reg/OT key either: this viewer's bars carry no overtime split.
   expect(screen.queryByText("Reg")).not.toBeInTheDocument();
   expect(screen.queryByText("OT")).not.toBeInTheDocument();
+});
+
+it("control: an admin viewer still sees the Labor Cost tile", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  stubFetch({ ...BASE_RESPONSE, viewerRole: "admin" });
+  render(<DashboardTab showToast={() => {}} />);
+
+  await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
+  expect(screen.getByText("Labor Cost")).toBeInTheDocument();
 });
 
 it("control: an admin viewer sees the OT summary text", async () => {
