@@ -178,6 +178,8 @@ maybeDescribe('admin alert quiet policy (live Postgres)', () => {
     expect(await run('shadow')).toMatchObject({ mode: 'shadow', expire: { total: 1, byCategory: { alert: 1 } } });
     expect((await get(quiet.id)).done_at).toBeNull();
     expect((await get(quiet.id)).read_at).toBeNull();
+    // Shadow writes nothing at all, not even its cursor.
+    expect(await db('system_settings').where({ key: 'admin_alert_quiet_cursor_shadow' }).first()).toBeUndefined();
   });
 
   test('the cap per tick leaves the rest for the next tick', async () => {

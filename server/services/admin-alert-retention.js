@@ -615,11 +615,16 @@ const defaultQuietIo = (conn, scope = null) => ({
   record: (summary) => recordAudit('admin_alert_quiet_fall_off.close', summary),
 });
 
-// Per mode: what the pass does with the rows it judged due, and its budget for them. The per-tick cap bounds real
-// closes only: a preview (shadow, the dry-run script) counts every due row it reads, up to maxBatches pages.
+// Per mode: what the pass does with the rows it judged due, its budget for them, and where it keeps its place. The
+// per-tick cap bounds real closes only: a preview (shadow, the dry-run script) counts every due row it reads, up to
+// maxBatches pages. Shadow writes nothing, not even a cursor: each shadow pass starts again at the oldest row.
+const NO_PLACE = { load: async () => null, save: async () => {} };
 const QUIET_MODES = {
-  shadow: { verb: 'would close', budget: () => Infinity, act: async (_io, due) => due.length },
-  true: { verb: 'closed', budget: (cap) => cap, act: (io, due, ctx) => io.expire(due, ctx) },
+  shadow: { verb: 'would close', budget: () => Infinity, place: () => NO_PLACE, act: async (_io, due) => due.length },
+  true: {
+    verb: 'closed', budget: (cap) => cap, act: (io, due, ctx) => io.expire(due, ctx),
+    place: (io) => ({ load: (mode) => io.loadCursor(mode), save: (mode, cursor) => io.saveCursor(mode, cursor) }),
+  },
 };
 
 /**
@@ -639,7 +644,8 @@ async function runAdminAlertQuietPolicy({
     expire: { total: 0, byCategory: {} }, kept: { refreshed: 0 }, held: { periodic: 0 },
   };
   const cutoff = new Date(now.getTime() - QUIET_HOURS * HOUR_MS);
-  let cursor = await io.loadCursor(mode);
+  const place = handler.place(io);
+  let cursor = await place.load(mode);
   let reachedEnd = false;
   for (let batch = 0; batch < maxBatches; batch += 1) {
     // Never read more rows than the tick may still close, so every row read is judged.
@@ -655,7 +661,7 @@ async function runAdminAlertQuietPolicy({
     summary.written += await handler.act(io, due, { runId, now });
     if (reachedEnd) break;
   }
-  await io.saveCursor(mode, reachedEnd ? null : cursor);
+  await place.save(mode, reachedEnd ? null : cursor);
   // false: the pass stopped on its cap or its page limit with rows left, so a preview's count is a floor.
   summary.complete = reachedEnd;
   logger.info(`[alert-quiet-fall-off] ${mode}: scanned ${summary.scanned}, ${handler.verb} ${summary.written}, held ${summary.held.periodic}, kept ${summary.kept.refreshed}, by category ${JSON.stringify(summary.expire.byCategory)}, complete ${summary.complete}`);

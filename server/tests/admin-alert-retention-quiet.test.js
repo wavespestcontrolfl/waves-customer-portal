@@ -67,6 +67,7 @@ describe('GATE_ALERT_QUIET_FALL_OFF', () => {
     expect(out).toMatchObject({ mode: 'shadow', scanned: 3, written: 3, expire: { total: 3, byCategory: { alert: 2, schedule: 1 } } });
     expect(calls.expired).toEqual([]);
     expect(calls.recorded).toEqual([]);
+    expect(calls.saved).toEqual([]);
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shadow: scanned 3, would close 3'));
   });
 
@@ -76,6 +77,8 @@ describe('GATE_ALERT_QUIET_FALL_OFF', () => {
     const partial = await retention.runAdminAlertQuietPolicy({ now, mode: 'shadow', io: stopped.io, batchSize: 2, cap: 1, maxBatches: 2 });
     expect(partial).toMatchObject({ written: 4, expire: { total: 4 }, complete: false });
     expect(stopped.calls.limits).toEqual([2, 2]);
+    // A partial preview keeps no place either: the next shadow pass starts again at the oldest row.
+    expect(stopped.calls.saved).toEqual([]);
     const whole = fakeIo({ pages: pages() });
     const full = await retention.runAdminAlertQuietPolicy({ now, mode: 'shadow', io: whole.io, batchSize: 2, cap: 1 });
     expect(full).toMatchObject({ written: 5, complete: true });
