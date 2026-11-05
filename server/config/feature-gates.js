@@ -9917,6 +9917,19 @@ function alertSendToClaudeLive() {
 }
 // GATE_ALERT_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
 module.exports.alertSendToClaudeLive = alertSendToClaudeLive;
+
+// GATE_IB_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-03: "it should be
+// for any issue, even ones that dont have an issue mid day, but ideas"). On, the Intelligence Bar box (the Cmd+K palette
+// and the mobile sheet) carries a free "Send to Claude" button beside Ask: it makes NO model call, writes one admin
+// notification row in Claude's queue, and the Mac launcher opens a Claude tab that scopes the idea
+// (services/admin-claude-ideas.js). Off = no button, the send and cancel routes answer 404 and /status says
+// `{ enabled: false }`.
+function ibSendToClaudeLive() {
+  return process.env.GATE_IB_SEND_TO_CLAUDE === 'true';
+}
+// GATE_IB_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
+module.exports.ibSendToClaudeLive = ibSendToClaudeLive;
+
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
 

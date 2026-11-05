@@ -406,7 +406,7 @@ series price guard, an unbilled visit, first-application invoices that disagree)
 new class joins only after the same read. Never offered, whatever else the row says: the customer-contact categories,
 `review`, `internal_admin_alert`, and a row whose metadata or registry rule declares `contact: true` or `promise: true`.
 Everything else stays with the owner. The list route marks each such row `sendToClaude: true` for the admin role
-(`withSendToClaudeFields`). One tap and an optional note (`POST /api/admin/notifications/:id/send-to-claude`, admin only,
+(`withSendToClaudeFields`). One tap and an optional note (`POST /api/admin/notifications/:id/send-to-claude`, owner login only (ib-access `ibFullAccess`; Codex security review on #7548),
 fenced on the version the bell served like Done) moves the row into Claude's queue: Activity-only, `who = 'claude'`, `claudeQueue` =
 `sent-to-claude`, severity `broken` if it was broken and `needs-you` otherwise, and a `sentToClaude` stamp that holds
 trusted facts only (Codex security reviews): when, who sent it, the alert's `kind` (its trigger key or dedupe-key class),
@@ -424,6 +424,23 @@ notif-dispatch launcher opens one Claude tab per sent row (its own kind, not cou
 gets the stamp's ids only; it never texts, emails or calls a customer,
 never moves money, and closes the row with what fixed it when the fix is live. `needs-me` marks a sent row `sent: true`,
 so the queue tab leaves it to its own tab.
+
+**Send an idea to Claude from the Intelligence Bar box** (owner 2026-11-03: "it should be for any issue, even ones that dont
+have an issue mid day, but ideas"; `GATE_IB_SEND_TO_CLAUDE`). The owner types or dictates an idea in the Cmd+K / mobile
+box and taps the free **Send to Claude** button beside Ask (no model call; Ask stays the paid path). `POST /api/admin/claude-ideas`
+(`server/services/admin-claude-ideas.js`) writes one row through `notifyAdmin`, not `raiseAdminAlert`: it is not an alert,
+it carries the owner's own words. Shape: category `system`, title `Idea for Claude`, body `An idea from the owner.`, no
+`detail`, link `/admin`, Activity-only (`feed` `activity`, `who` `claude`, `severity` `needs-you`, `claudeQueue`
+`sent-to-claude`), **`ownerOnly: true`**, and a `sentToClaude` stamp with `kind` `owner-idea`, `idea` (the full cleaned idea,
+4,000 characters at most; the words live here and nowhere else), `at`, `by`, `records` (UUID-shaped ids),
+`page.route` (a plain `/admin/...` path or null), `viewedDate`, `pasted` and `was`. The dedupe key is `owner-idea:<16 hex of
+sha1 of the lowercased, whitespace-collapsed idea>`, so the same idea while its row is open answers `duplicate` and writes
+nothing. The 10-second Undo (`POST /api/admin/claude-ideas/:id/cancel`, `markAdminIdeaCancelled`) closes the row as done by the
+admin ("Cancelled by the owner.") under the same dedupe lock unless `sentToClaude.startedAt` is set. An `ownerOnly` row (metadata) is for the owner login alone
+(`ibFullAccess`; Codex security review round 4): the Recently done list (`getAdminDoneNotifications`, `fullAccess`) and the
+Activity feed (`getActivity`, `fullAccess`, focus included) leave it out for any other login, and `PUT /:id/done` and
+`PUT /:id/reopen` answer such a login 404 `not_found`, as for an unknown row. The Mac's `markAdminDone` is not affected. The Mac launcher opens a
+Claude tab that scopes the idea and asks the owner.
 
 ## 6. What is enforced today
 
