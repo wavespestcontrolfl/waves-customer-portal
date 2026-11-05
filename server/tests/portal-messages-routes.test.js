@@ -115,6 +115,20 @@ describe('customer portal messages routes', () => {
     });
   });
 
+  test('a customer can write 20 messages an hour; the next is refused before the service', async () => {
+    mockService.customerPost.mockResolvedValue({ id: MSG, from: 'you', body: 'Hi', createdAt: '2026-11-04T20:00:00.000Z' });
+    const statuses = [];
+    await withServer(async (base) => {
+      for (let i = 0; i < 22; i += 1) {
+        statuses.push((await fetch(base, { method: 'POST', headers: signedIn, body: JSON.stringify({ body: `Hi ${i}` }) })).status);
+      }
+    });
+    // Earlier tests in this file posted too (one limiter per process), so count from the first refusal.
+    expect(statuses).toContain(429);
+    expect(statuses.slice(statuses.indexOf(429))).toEqual(statuses.slice(statuses.indexOf(429)).map(() => 429));
+    expect(mockService.customerPost.mock.calls.length).toBeLessThanOrEqual(20);
+  });
+
   test('a page time is passed on as ISO; a service refusal keeps its status and words', async () => {
     mockService.customerThread.mockResolvedValue({ messages: [], hasMore: false, unread: 0 });
     mockService.markRead.mockRejectedValueOnce(new PortalMessageError('not_found', 404));
