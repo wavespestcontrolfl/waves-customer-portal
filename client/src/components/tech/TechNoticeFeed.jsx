@@ -174,17 +174,19 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       // A photo card's date is re-read from the live visit on every poll
       // (visit-prep-tech-alert.js refreshPhotoCardDates), so a card already
       // on screen takes the new payload when the visit moves (Codex #5303 r6).
-      const photoPayloads = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type)).map((n) => [n.id, n.payload]));
+      // A schedule-change card is re-read the same way, and can change kind
+      // too (a moved visit, one now on another route, a cancellation:
+      // tech-visit-notifications.js refreshVisitCards).
+      const refreshedCards = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type) || VISIT_TYPES.has(n.type)).map((n) => [n.id, n]));
       setActive((prev) => {
         const gone = prev.filter((n) => !listed.has(n.id));
         gone.forEach((n) => { seenIds.current.delete(n.id); seenAt.current.delete(n.id); });
         let refreshed = false;
         const kept = prev.filter((n) => !gone.includes(n)).map((n) => {
-          if (!photoPayloads.has(n.id)) return n;
-          const payload = photoPayloads.get(n.id);
-          if (JSON.stringify(payload) === JSON.stringify(n.payload)) return n;
+          const latest = refreshedCards.get(n.id);
+          if (!latest || (latest.type === n.type && JSON.stringify(latest.payload) === JSON.stringify(n.payload))) return n;
           refreshed = true;
-          return { ...n, payload };
+          return { ...n, type: latest.type, payload: latest.payload };
         });
         if (gone.length === 0 && fresh.length === 0 && !refreshed) return prev;
         return [...kept, ...fresh];

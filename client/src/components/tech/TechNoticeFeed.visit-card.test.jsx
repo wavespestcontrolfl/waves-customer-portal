@@ -3,7 +3,7 @@
 // tech-visit-notifications.js as one card shape, and never auto-dismisses
 // them: the card stays until the tech taps "Got it" (a dismiss, not a read).
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, waitFor, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechNoticeFeed from './TechNoticeFeed';
 
@@ -62,6 +62,20 @@ describe('TechNoticeFeed — visit cards', () => {
     localStorage.clear();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it('a card already on screen takes the server\'s re-read: a new time, then a cancellation under the same id', async () => {
+    const movedAgain = { ...ASSIGNED, type: 'visit_rescheduled', payload: { ...ASSIGNED.payload, previous_when: 'Thu Sep 10, 9–11 AM', when: 'Mon Sep 14, 8–9 AM', actor: 'by the office', changed_again: true } };
+    const cancelled = { ...ASSIGNED, type: 'visit_cancelled', payload: { ...ASSIGNED.payload, headline: 'Visit cancelled', actor: null } };
+    stubFeed((poll) => (poll === 1 ? [ASSIGNED] : poll === 2 ? [movedAgain] : [cancelled]));
+    render(<TechNoticeFeed />);
+    await act(async () => { await Promise.resolve(); });
+    expect(await screen.findByTestId('visit-notice')).toHaveTextContent('Assigned by Virginia');
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await waitFor(() => expect(screen.getByTestId('visit-notice')).toHaveTextContent('Now Mon Sep 14, 8–9 AM'));
+    expect(screen.getByTestId('visit-notice')).toHaveTextContent('Changed again by the office');
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await waitFor(() => expect(screen.getByTestId('visit-notice')).toHaveTextContent('Visit cancelled'));
   });
 
   it.each([

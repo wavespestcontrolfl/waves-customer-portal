@@ -1203,9 +1203,9 @@ const CARD_VISIT_KEY_SQL = (alias) => `COALESCE(${alias}.payload->>'visit_id', $
 // SQL that is true for a visit card whose visit no longer leaves it anything
 // to say, for a query over tech_notifications under `alias`: the visit's day
 // has passed, or the visit is on this tech's route and the tech already
-// arrived or it ended (a visit on another route keeps its moved-off card).
-// `today` is the ET date the read is judged against. Other card types never
-// match it.
+// arrived or it ended (a visit on another route keeps its moved-off card; a
+// cancellation card stays until its visit is back and reached). `today` is
+// the ET date the read is judged against. Other card types never match it.
 function staleVisitCardSql(alias, today) {
   const holderDone = DONE_FOR_HOLDER.map((status) => `'${status}'`).join(', ');
   const visitId = cardVisitIdSql(alias);
@@ -1215,8 +1215,13 @@ function staleVisitCardSql(alias, today) {
       // A customer-pick hand-off keeps a placeholder day until the customer
       // picks, so its day never counts as passed.
       + ` (hv.scheduled_date < ?::date AND NOT (hv.customer_pick_by IS NOT NULL AND hv.window_start IS NULL))`
-      // The visit is (back) on this tech's route and the tech reached it.
-      + ` OR (hv.technician_id = ${alias}.technician_id AND (hv.arrived_at IS NOT NULL OR hv.status IN (${holderDone})))))`
+      // The visit is (back) on this tech's route and the tech reached it or
+      // it ended. A cancellation card is the notice of that end (a plan
+      // pause skips the visit and writes one, holds.js applyHoldSkips), so it
+      // goes only once the visit is back and reached.
+      + ` OR (hv.technician_id = ${alias}.technician_id AND (`
+      + ` (${alias}.type <> 'visit_cancelled' AND (hv.arrived_at IS NOT NULL OR hv.status IN (${holderDone})))`
+      + ` OR (${alias}.type = 'visit_cancelled' AND hv.status IN ('on_site', 'completed'))))))`
       // No visit row left to read: the card's own day decides.
       + ` OR (${alias}.payload->>'date' < ? AND NOT EXISTS (SELECT 1 FROM scheduled_services gone WHERE gone.id = ${visitId}))`
       + '))',
@@ -1328,8 +1333,9 @@ function movedOffCard(row, live, view) {
   };
 }
 
-// The visit was cancelled on the tech's own route. A card that already said
-// so keeps its own "Cancelled by …".
+// The visit was cancelled on the tech's own route, or skipped by a plan
+// pause (which notifies it as a cancellation, holds.js applyHoldSkips). A
+// card that already said so keeps its own headline and "Cancelled by …".
 function cancelledCard(row, live, view) {
   const payload = row.payload || {};
   const own = row.type === 'visit_cancelled';
@@ -1337,7 +1343,8 @@ function cancelledCard(row, live, view) {
     ...row,
     type: 'visit_cancelled',
     payload: {
-      ...payload, headline: 'Visit cancelled', when: view.when, date: view.date, actor: own ? payload.actor : null,
+      ...payload, headline: (own && payload.headline) || 'Visit cancelled', when: view.when, date: view.date,
+      actor: own ? payload.actor : null,
       changed_at: own || !live.cancelled_at ? null : new Date(live.cancelled_at).toISOString(),
     },
   };
@@ -1392,7 +1399,7 @@ function liveCard(row, live, mover, soonWhen = null) {
   if (!live || !VISIT_CARD_TYPES.includes(row.type)) return row;
   const view = { when: visitWhen(live), date: dateOnly(live.scheduled_date), ...moveSince(row, mover) };
   if (String(live.technician_id || '') !== String(row.technician_id)) return movedOffCard(row, live, view);
-  if (String(live.status) === 'cancelled') return cancelledCard(row, live, view);
+  if (['cancelled', 'skipped'].includes(String(live.status))) return cancelledCard(row, live, view);
   if (row.type === 'visit_unassigned' || row.type === 'visit_cancelled') return backOnRouteCard(row, view);
   return onRouteCard(row, live, view, soonWhen);
 }

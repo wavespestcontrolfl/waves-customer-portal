@@ -259,6 +259,20 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
     expect(stillOpen).toEqual([shownOnTop]);
   });
 
+  test('a plan pause\'s skip keeps its cancellation card on the tech\'s route until it is acknowledged', async () => {
+    const tech = await makeTech('Fixture Tech');
+    const { formatWhen } = require('../services/tech-visit-notifications');
+    const visit = await makeVisit(tech, 'Paused', tomorrow, '10:00', '11:00', { status: 'skipped' });
+    await card(tech, visit, 'visit_assigned', { date: tomorrow, when: formatWhen(tomorrow, '10:00', '11:00'), actor: 'by the office', customer_name: 'Paused' }, daysAgo(9));
+    const skipCard = await card(tech, visit, 'visit_cancelled', { date: tomorrow, when: formatWhen(tomorrow, '10:00', '11:00'), headline: 'Visit cancelled', actor: 'by the customer online', customer_name: 'Paused' }, daysAgo(1));
+
+    const read = await call('/schedule-changes', 'get', { technicianId: tech.id });
+    expect(read.changes).toHaveLength(1);
+    expect(read.changes[0]).toMatchObject({ id: skipCard, soon: true, type: 'visit_cancelled', payload: { headline: 'Visit cancelled', actor: 'by the customer online' } });
+    const feed = await call('/', 'get', { technicianId: tech.id, query: {} });
+    expect(feed.notifications.map((n) => n.id)).toEqual([skipCard]);
+  });
+
   test('Got it clears the visit\'s older open cards too, so none takes its place', async () => {
     const tech = await makeTech('Fixture Tech');
     const { formatWhen } = require('../services/tech-visit-notifications');

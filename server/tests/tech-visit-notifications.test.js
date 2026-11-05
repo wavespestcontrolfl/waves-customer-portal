@@ -1472,6 +1472,12 @@ describe('an open card read against its visit as it is now (owner 2026-11-04)', 
     expect(liveCard(gone, live(), null)).toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route' } });
   });
 
+  test('a plan pause\'s skip stays a cancellation card, never "Back on your route"', () => {
+    const skipped = cardRow('visit_cancelled', { when: 'Thu Nov 5, 8–9 AM', headline: 'Visit cancelled', actor: 'by the customer online' });
+    expect(liveCard(skipped, live({ status: 'skipped' }), null))
+      .toMatchObject({ type: 'visit_cancelled', payload: { headline: 'Visit cancelled', actor: 'by the customer online' } });
+  });
+
   test('a customer-pick hand-off keeps its "picks a day" text', () => {
     const row = cardRow('visit_rescheduled', { when: 'the customer picks a day by Wed 8 PM' });
     expect(liveCard(row, live({ window_start: null, window_end: null, customer_pick_by: new Date('2026-11-05T01:00:00Z') }), null)).toBe(row);
