@@ -13,6 +13,8 @@ const mockResetState = () => {
     failedRows: [],
     customer: { id: 'cust-1', first_name: 'Jane', last_name: 'Doe', phone: '+19415550142', secondary_phone: null, active: true, deleted_at: null },
     openKeys: [],
+    // The newest metadata.lastFailureAt any row of the key holds, open or Done (the guard's max() read).
+    lastFailureAt: null,
   });
 };
 mockResetState();
@@ -26,6 +28,7 @@ jest.mock('../models/db', () => {
   const resolveFirst = (table) => {
     if (table === 'sms_log') return mockState.logRow;
     if (table === 'customers') return mockState.customer;
+    if (table === 'notifications') return { at: mockState.lastFailureAt };
     return null;
   };
   const builder = (table) => new Proxy({}, {
@@ -43,9 +46,12 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-// notifyAdmin stands in for the database: one OPEN row per dedupeKey, as dedupeOpenOnly does.
+// notifyAdmin stands in for the database: one OPEN row per dedupeKey, as dedupeOpenOnly does. Every raise, a
+// fresh row or a quiet refresh of the open one, stores its newest failure. Done = delete the key from mockRows.
 const mockRows = new Map();
 const mockNotify = jest.fn(async (category, title, body, opts) => {
+  const at = opts.metadata?.lastFailureAt;
+  if (at && !(mockState.lastFailureAt >= at)) mockState.lastFailureAt = at;
   if (mockRows.has(opts.dedupeKey)) return { id: mockRows.get(opts.dedupeKey), deduped: true };
   mockRows.set(opts.dedupeKey, `row-${mockRows.size + 1}`);
   return { id: mockRows.get(opts.dedupeKey) };
@@ -150,6 +156,43 @@ describe('dead number alert: when it rings', () => {
     const [, , body, opts] = mockNotify.mock.calls[0];
     expect(body).toBe("2 texts in a row to …0142 failed since Jun 29: the carrier can't reach the phone.");
     expect(opts.detail).toBe(`${body} Check the number with the customer.`);
+  });
+
+  test('the open row takes a newer count quietly, under the same transaction', async () => {
+    mockState.failedRows = failedAt('06-29', '11-04');
+    await fail();
+    const [, , , opts] = mockNotify.mock.calls[0];
+    expect(opts.metadata.lastFailureAt).toBe(sentAt('11-04').toISOString());
+    expect(opts.refreshOnDedupe).toBe(true);
+    expect(opts.standingRefresh()).toEqual({ quiet: true });
+    expect(opts.trx).toBeDefined();
+  });
+
+  test('a retried callback after the row is Done raises nothing', async () => {
+    mockState.failedRows = failedAt('06-29', '11-04');
+    await fail();
+    mockRows.clear(); // a person marked it Done
+    await fail();
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  test('a late callback for an older failure in the same run raises nothing after Done', async () => {
+    mockState.failedRows = failedAt('06-29', '07-10', '11-04');
+    await fail();
+    mockRows.clear();
+    await fail({ MessageSid: 'SM-old-0' });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failure sent after the Done row\'s newest failure raises a fresh row', async () => {
+    mockState.failedRows = failedAt('06-29', '11-04');
+    await fail();
+    mockRows.clear();
+    mockState.failedRows = failedAt('06-29', '11-04', '11-05');
+    await fail({ MessageSid: 'SM3' });
+    expect(mockNotify).toHaveBeenCalledTimes(2);
+    expect(mockNotify.mock.calls[1][3].metadata.lastFailureAt).toBe(sentAt('11-05').toISOString());
+    expect(mockRows.size).toBe(1);
   });
 
   test.each([

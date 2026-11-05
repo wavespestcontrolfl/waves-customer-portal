@@ -10,8 +10,10 @@
  * - Called from the Twilio delivery callback (routes/twilio-webhook.js POST /status). Both entry points never
  *   throw: the callback and its other handlers must not feel a failure here. Logs carry codes only, never a
  *   name or a phone number.
- * - Dedupe: one OPEN row per customer + number (`dead-number:<customerId>:<last10>`, dedupeOpenOnly). A person's
- *   Done lets a later failed text raise a fresh row (RERING in admin-alert-retention.js, kind 'event').
+ * - Dedupe: one OPEN row per customer + number (`dead-number:<customerId>:<last10>`, dedupeOpenOnly); a newer
+ *   failure updates the open row's count without ringing. Each row stores the send time of its newest failure
+ *   (`lastFailureAt`), so after a person's Done only a failure sent later raises a fresh row; a retried or late
+ *   callback raises nothing (RERING in admin-alert-retention.js, kind 'event').
  * - Close (done-when `phone_replaced`): the row closes when a text sent after the number's last failure is
  *   delivered, or when the customer's phone and secondary phone no longer end in those 10 digits. Both are judged
  *   at the customer's next delivered text (closeDeadNumberAlerts), which is when a new number first gets used.
@@ -131,23 +133,38 @@ async function handleDeadNumberFailure({ sid, status, errorCode, to } = {}) {
     if (failed.length < MIN_FAILURES) return null;
 
     const since = failed[0];
+    const lastFailureAt = failed[failed.length - 1].toISOString();
+    const dedupeKey = dedupeKeyFor(customer.id, key);
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const { why, detail } = copyFor({ count: failed.length, key, since, errorCode });
-    return await raiseAdminAlert('customer', {
-      area: 'Customers',
-      action: actionFor(customer),
-      why,
-      severity: 'needs-you',
-      link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
-      subject: { type: 'customer', id: String(customer.id) },
-      doneWhen: 'phone_replaced',
-      who: 'person',
-    }, {
-      bell: true,
-      dedupeKey: dedupeKeyFor(customer.id, key),
-      dedupeOpenOnly: true,
-      detail,
-      metadata: { customerId: customer.id, phoneLast4: key.slice(-4), failedCount: failed.length },
+    return await db.transaction(async (trx) => {
+      // Under the key's own lock (notifyAdmin takes the same one; advisory locks are re-entrant): a row, open or
+      // Done, already raised for this run's newest failure means a retried or late callback carries no news.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+      const prior = await trx('notifications').where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+        .first(trx.raw("max(metadata->>'lastFailureAt') as at"));
+      if (prior?.at && prior.at >= lastFailureAt) return null;
+      return raiseAdminAlert('customer', {
+        area: 'Customers',
+        action: actionFor(customer),
+        why,
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+        subject: { type: 'customer', id: String(customer.id) },
+        doneWhen: 'phone_replaced',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey,
+        dedupeOpenOnly: true,
+        // An open row takes the newer count and newest failure without ringing: a person already has it.
+        refreshOnDedupe: true,
+        standingRefresh: () => ({ quiet: true }),
+        trx,
+        detail,
+        metadata: { customerId: customer.id, phoneLast4: key.slice(-4), failedCount: failed.length, lastFailureAt },
+      });
     });
   } catch (err) {
     logger.warn(`[dead-number-alert] not raised (${err?.code || err?.name || 'error'})`);
