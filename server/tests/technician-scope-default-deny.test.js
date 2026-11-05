@@ -114,7 +114,16 @@ describe('matcher', () => {
     ['GET', '/api/ai/admin/calls', false],
     ['GET', '/api/tech/timetracking/entries', true],
     ['POST', '/api/admin/timesheets/approve', false],
-    ['POST', '/api/admin/timesheets/dispute', true],
+    // The dispute router is admin-only and no technician screen offers it (owner 2026-11-04, D5 A).
+    ['POST', '/api/admin/timesheets/dispute', false],
+    // The link builders are requireAdmin routes; a technician never reached them (owner 2026-11-04).
+    ['POST', '/api/admin/communications/reschedule-link', false],
+    ['POST', '/api/admin/communications/reservice-link', false],
+    ['POST', '/api/admin/communications/customer-link', false],
+    // Kept although the router refuses them today: card on file goes live behind a gate (#7587).
+    ['POST', '/api/admin/invoices/11111111-2222-4333-8444-555555555555/charge-card-quote', true],
+    // A technician's own hours (GET /my-hours) ride the own-timesheet entry.
+    ['GET', '/api/tech/timetracking/my-hours', true],
     ['GET', '/api/admin/auth/me', true],
     ['GET', '/api/admin/feature-flags', true],
     ['GET', '/api/admin/drafts', false],
