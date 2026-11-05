@@ -7,6 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/territory', () => ({
   ...jest.requireActual('../services/territory'),
   territoryTechnicianFor: jest.fn(),
+  territoryCoverFor: jest.fn(),
 }));
 jest.mock('../services/scheduling/line-technician', () => ({ liveServiceLine: jest.fn() }));
 
@@ -99,6 +100,7 @@ describe('candidateFromSlot — territory rule', () => {
 
 describe('a grouped move keeps every member in its own territory (Codex r1 P2 on #7182)', () => {
   const { unitTerritoryTechnician, NO_SINGLE_TERRITORY } = _internals;
+  beforeEach(() => { territory.territoryCoverFor.mockReset().mockResolvedValue(null); });
   const geo = { lat: 27.05, lng: -82.4 };
   const lawnRow = { id: 'visit-lawn', technician_id: null, customer_id: 'cust-1', service_id: 'svc-lawn', service_type: 'Lawn Fertilization' };
   const ctxWith = (siblingRows) => ({

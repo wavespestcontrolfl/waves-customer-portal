@@ -258,22 +258,29 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
 // is skipped (CURRENT_DAY_TECH_UNRESOLVED), never guessed. A visit with a
 // territory technician (GATE_TERRITORY_NIGHT_RUN, unitTerritoryTechnician)
 // is read on that technician's day alone, the only technician candidate
-// admission lets it move to: a closer route it may not take must not set the
+// admission lets it move to (or, on a day he is off or absent, the line's
+// cover technician's day): a closer route it may not take must not set the
 // bar a legal move has to beat. An owner who is not assignable, or two owners
 // in one unit (no candidate survives either way), keeps the full list.
 const CURRENT_DAY_TECH_UNRESOLVED = 'CURRENT_DAY_TECH_UNRESOLVED';
 async function currentDayTechs(service, ctx, dateStr, category) {
   if (service.technician_id) return [service.technician_id];
-  const owner = ctx.territoryTechId !== undefined
-    ? ctx.territoryTechId
-    : await unitTerritoryTechnician(service, resolveGeo(service), ctx);
+  const { techId: owner, coverId } = ctx.territoryTechId !== undefined
+    ? { techId: ctx.territoryTechId, coverId: ctx.territoryCoverId || null }
+    : await unitTerritory(service, resolveGeo(service), ctx);
   let ids;
   let away = new Set();
   try {
     const techs = await applyAssignable(ctx.db('technicians')).select('technicians.id');
     ids = Array.isArray(techs) ? techs.map((t) => t.id) : [];
     const own = owner ? ids.filter((id) => String(id) === String(owner)) : [];
-    if (own.length) ids = own;
+    const cover = coverId ? ids.filter((id) => String(id) === String(coverId)) : [];
+    if (own.length) {
+      // The territory technician's day is the bar; on a day he is off or absent it is the cover's (the
+      // only other technician admission lets the visit move to that day).
+      const ownAway = cover.length ? await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: own }) : null;
+      ids = ownAway && ownAway.has(`${own[0]}:${dateStr}`) ? cover : own;
+    }
     if (ids.length > 1) away = await absentTechDays(ctx.db, { dateFrom: dateStr, dateTo: dateStr, technicianIds: ids });
   } catch (err) {
     throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'The technicians who could work an unassigned visit\'s day could not be read', err);
@@ -850,8 +857,13 @@ async function movingUnitIds(service, ctx) {
 //     filtered.
 //   other_territory (GATE_TERRITORY_NIGHT_RUN, territoryTechnicianForVisit):
 //     an unassigned pest / termite visit goes only to the technician who
-//     owns its ZIP.
+//     owns its ZIP, or to the line's cover technician when the owner has no
+//     candidate at all (dropCoverWhenOwnerHas: his day off, absence, full days).
 const slotTechId = (slot) => slot.technician && slot.technician.id;
+// The territory technician, or the unit's cover technician (territoryCoverId; dropCoverWhenOwnerHas below
+// keeps the cover's slots only when the territory technician has none).
+const isTerritoryHolder = (techId, h) => String(techId) === String(h.territoryTechId)
+  || (!!h.territoryCoverId && String(techId) === String(h.territoryCoverId));
 const HARD_FILTERS = [
   ['after_hours', (slot) => hhmmToMin(slot.end_time) > DAY_CLOSE],
   ['blackout', (slot, h) => inBlackout(slot.date, h.prefs.blackout)],
@@ -861,7 +873,7 @@ const HARD_FILTERS = [
   ['preferred_time', (slot, h) => violatesPreferredTime(slot.start_time, h.prefs)],
   ['mowing_day', (slot, h) => mowingDays.blocksLive(slot.date, h.mowing)],
   ['other_tech', (slot, h) => h.ctx.keepTech === true && !!h.service.technician_id && String(slotTechId(slot)) !== String(h.service.technician_id)],
-  ['other_territory', (slot, h) => !!h.territoryTechId && String(slotTechId(slot)) !== String(h.territoryTechId)],
+  ['other_territory', (slot, h) => !!h.territoryTechId && !isTerritoryHolder(slotTechId(slot), h)],
 ];
 
 // One find-time slot through the auto-dispatch HARD filters, as a candidate;
@@ -889,6 +901,17 @@ function candidateFromSlot(slot, hard) {
     capability_level: cap,
     find_time_score: slot.score,
   };
+}
+
+// Territory first, cover second (owner 2026-10-30; the cover keeps the hire's days off): when the
+// territory technician has at least one candidate, the cover technician's are dropped (counted under
+// other_territory). The territory technician's own days, absences and full days decide "has none".
+function dropCoverWhenOwnerHas(candidates, { territoryTechId, territoryCoverId, drops }) {
+  if (!territoryTechId || !territoryCoverId) return candidates;
+  if (!candidates.some((c) => String(c.technician_id) === String(territoryTechId))) return candidates;
+  const kept = candidates.filter((c) => String(c.technician_id) !== String(territoryCoverId));
+  drops.other_territory += candidates.length - kept.length;
+  return kept;
 }
 
 // How many same-day starts one technician's day can hold at a 60-minute step.
@@ -968,7 +991,7 @@ async function withDryWindowCandidates(scored, { prefs, findTimeArgs, slots, fle
   const have = new Set(scored.map(candidateKey));
   const fresh = ranked.filter((c) => !have.has(candidateKey(c)));
   if (!fresh.length) return { candidates: scored };
-  return live ? { candidates: scored.concat(fresh) } : { candidates: scored, shadow_candidates: fresh };
+  return live ? { candidates: dropCoverWhenOwnerHas(scored.concat(fresh), { ...hard, drops }) } : { candidates: scored, shadow_candidates: fresh };
 }
 
 // The dates a move may land on. Within ± tolerance days of the visit's
@@ -1095,7 +1118,7 @@ function searchSummary(dateFrom, dateTo, slots, searchedDates) {
  * ZIP, else its map position, else the customer row. Gates are read off the module at call
  * time: a partial feature-gates mock reads off.
  */
-async function territoryTechnicianForVisit(service, geo) {
+async function territoryOfVisit(service, geo) {
   const gates = require('../../config/feature-gates');
   if (typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return null;
   if (service.technician_id) return null;
@@ -1105,16 +1128,42 @@ async function territoryTechnicianForVisit(service, geo) {
       serviceId: service.service_id || null, serviceKey: service.service_key_snapshot || null, serviceType: service.service_type || null,
     });
     if (!territory.TERRITORY_LINES.includes(line)) return null;
-    return await territory.territoryTechnicianFor(null, {
+    const techId = await territory.territoryTechnicianFor(null, {
       zip: service.service_address_zip || null,
       lat: geo ? geo.lat : null,
       lng: geo ? geo.lng : null,
       customerId: service.customer_id || null,
     });
+    return techId ? { techId, line } : null;
   } catch (err) {
     logger.warn(`[auto-dispatch] territory unreadable for visit ${service.id} (no area rule): ${err.message}`);
     return null;
   }
+}
+
+async function territoryTechnicianForVisit(service, geo) {
+  const own = await territoryOfVisit(service, geo);
+  return own ? own.techId : null;
+}
+
+/**
+ * The cover technician of a territory (territory.territoryCoverFor: the technician the line's card
+ * row names besides the territory technician), or null: no cover, or an unreadable card (logged;
+ * the territory technician alone then, never a wider admission).
+ */
+async function territoryCoverOf({ techId, line }, db) {
+  try {
+    return await territory.territoryCoverFor(db || null, line, techId);
+  } catch (err) {
+    logger.warn(`[auto-dispatch] territory cover unreadable for line ${line} (territory technician only): ${err.message}`);
+    return null;
+  }
+}
+
+/** The cover technician for an unassigned visit (apply.js write fence), or null. Gate off, no territory, no cover: null. */
+async function territoryCoverForVisit(service, geo) {
+  const own = await territoryOfVisit(service, geo);
+  return own ? territoryCoverOf(own, null) : null;
 }
 
 // Two restricted members that name different territory technicians: no slot can satisfy both.
@@ -1127,23 +1176,36 @@ const NO_SINGLE_TERRITORY = 'no-single-territory';
  * member = that technician; two different ones = NO_SINGLE_TERRITORY (every candidate
  * drops and the stop keeps its place); none = null. The apply-time member guard checks the
  * same rule against the committed rows (apply.js assertInOwnTerritory).
+ * { techId, coverId }: coverId is the unit's cover technician, the one every restricted
+ * member's line names besides the territory technician; members that name different
+ * covers, or a member with none, leave coverId null (the territory technician only).
  */
-async function unitTerritoryTechnician(service, geo, ctx) {
-  const own = await territoryTechnicianForVisit(service, geo);
+async function unitTerritory(service, geo, ctx) {
+  const members = [];
+  const own = await territoryOfVisit(service, geo);
+  if (own) members.push(own);
   const siblingIds = ((ctx.groupContext && ctx.groupContext.siblings) || []).map((sib) => sib.id);
-  if (!siblingIds.length) return own;
   const gates = require('../../config/feature-gates');
-  if (typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return own;
-  const db = ctx.db || require('../../models/db');
-  const rows = await db('scheduled_services').whereIn('id', siblingIds)
-    .select('id', 'technician_id', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'service_address_zip', 'lat', 'lng');
-  const named = new Set(own ? [String(own)] : []);
-  for (const row of rows) {
-    const tech = await territoryTechnicianForVisit(row, row.lat != null && row.lng != null ? { lat: row.lat, lng: row.lng } : null);
-    if (tech) named.add(String(tech));
+  if (siblingIds.length && typeof gates.territoryNightRunLive === 'function' && gates.territoryNightRunLive()) {
+    const db = ctx.db || require('../../models/db');
+    const rows = await db('scheduled_services').whereIn('id', siblingIds)
+      .select('id', 'technician_id', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'service_address_zip', 'lat', 'lng');
+    for (const row of rows) {
+      const member = await territoryOfVisit(row, row.lat != null && row.lng != null ? { lat: row.lat, lng: row.lng } : null);
+      if (member) members.push(member);
+    }
   }
-  if (named.size > 1) return NO_SINGLE_TERRITORY;
-  return named.size ? [...named][0] : null;
+  if (!members.length) return { techId: null, coverId: null };
+  const named = new Set(members.map((m) => String(m.techId)));
+  if (named.size > 1) return { techId: NO_SINGLE_TERRITORY, coverId: null };
+  const covers = [];
+  for (const member of members) covers.push(await territoryCoverOf(member, ctx.db));
+  const sameCover = covers.every((c) => c && String(c) === String(covers[0]));
+  return { techId: siblingIds.length ? [...named][0] : members[0].techId, coverId: sameCover ? covers[0] : null };
+}
+
+async function unitTerritoryTechnician(service, geo, ctx) {
+  return (await unitTerritory(service, geo, ctx)).techId;
 }
 
 async function findValidCandidateSlots(service, prefs, baseCtx) {
@@ -1155,10 +1217,12 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // Read once: candidate generation, the cap and the current placement all
   // use the same answer. Gate off: null, no read. The territory technician
   // likewise: candidate admission and the current day share one answer.
+  const unitTerritoryOf = await unitTerritory(service, geo, grouped);
   const ctx = {
     ...grouped,
     evalConflict: await readCurrentConflict(service, grouped),
-    territoryTechId: await unitTerritoryTechnician(service, geo, grouped),
+    territoryTechId: unitTerritoryOf.techId,
+    territoryCoverId: unitTerritoryOf.coverId,
   };
   // GATE_AUTO_DISPATCH_MOWING_DAYS: the unit's mowing rule (shadow or true),
   // or null — gate off, nothing is read.
@@ -1247,9 +1311,9 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // re-checks both authoritatively, grouped members' derived starts included).
   const admitted = flexRules.admit(slots.concat(await conflictSameDaySlots(service, current, slots, findTimeArgs)), drops);
   const hard = {
-    service, prefs, ctx, category, siblingDates, drops, territoryTechId, mowing,
+    service, prefs, ctx, category, siblingDates, drops, territoryTechId, territoryCoverId: ctx.territoryCoverId || null, mowing,
   };
-  const candidates = admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean);
+  const candidates = dropCoverWhenOwnerHas(admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean), hard);
 
   // Gate off: find-time's best-first order, top SCORE_CAP survivors (see
   // rankSurvivorsForSharedModel). Gate on: SLOT_TAKEN candidates dropped and
@@ -1288,7 +1352,7 @@ async function mowingShadowCandidates(admitted, run) {
   });
   const shadowCtx = { ...ctx, evalConflict };
   const asTrue = { ...hard, ctx: shadowCtx, drops: { ...hard.drops, mowing_day: 0 }, mowing: { ...mowing, mode: 'true' } };
-  const candidates = admitted.map((slot) => candidateFromSlot(slot, asTrue)).filter(Boolean);
+  const candidates = dropCoverWhenOwnerHas(admitted.map((slot) => candidateFromSlot(slot, asTrue)).filter(Boolean), asTrue);
   const ranked = await rankSurvivorsForSharedModel(service, geo, candidates, shadowCtx, asTrue.drops);
   return (await withDryWindowCandidates(ranked, { ...run, hard: asTrue })).candidates;
 }
@@ -1306,11 +1370,12 @@ module.exports = {
   findValidCandidateSlots,
   computeCurrentPlacement,
   territoryTechnicianForVisit,
+  territoryCoverForVisit,
   inBlackout,
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    candidateFromSlot, unitTerritoryTechnician, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
+    candidateFromSlot, unitTerritoryTechnician, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

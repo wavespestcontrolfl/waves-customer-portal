@@ -560,15 +560,18 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
 
 // The candidate side restricts the whole unit (candidate-slots unitTerritoryTechnician); this re-checks the
 // rows at apply (the moving visit in makeMoveGuard, its committed siblings in makeMemberGuard), so a move
-// never gives a visit another territory's technician. No receiving technician: nobody gets the visit.
+// never gives a visit another territory's technician (its line's cover technician may take it). No receiving technician: nobody gets the visit.
 async function assertInOwnTerritory(rows, targetTechId, refuse) {
   // Gate off: no read at all (read off the module: a partial feature-gates mock reads off).
   const gates = require('../../config/feature-gates');
   if (!targetTechId || typeof gates.territoryNightRunLive !== 'function' || !gates.territoryNightRunLive()) return;
-  const { territoryTechnicianForVisit } = require('./candidate-slots');
+  const { territoryTechnicianForVisit, territoryCoverForVisit } = require('./candidate-slots');
   for (const row of rows) {
     const own = await territoryTechnicianForVisit(row, resolveGeo(row));
-    if (own && String(own) !== String(targetTechId)) throw refuse(row.id, 'belongs to another technician\'s territory');
+    if (!own || String(own) === String(targetTechId)) continue;
+    // The line's cover technician may take it too (the territory technician's day off; candidate-slots admits him then).
+    const cover = await territoryCoverForVisit(row, resolveGeo(row));
+    if (!cover || String(cover) !== String(targetTechId)) throw refuse(row.id, 'belongs to another technician\'s territory');
   }
 }
 

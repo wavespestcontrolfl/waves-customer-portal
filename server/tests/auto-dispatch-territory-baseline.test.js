@@ -52,7 +52,7 @@ const dayRow = (id, technicianId, geo) => ({
 });
 
 // t1 (the territory technician) runs far from the visit; t2 passes next door.
-function fakeDb() {
+function fakeDb({ absent = [] } = {}) {
   const dayRows = [dayRow('far', 't1', FAR), dayRow('near', 't2', NEAR)];
   const db = (table) => {
     let techIds = null;
@@ -63,6 +63,7 @@ function fakeDb() {
     q.whereIn = (column, ids) => { if (/technician_id$/.test(column)) techIds = ids.map(String); return q; };
     q.select = async () => {
       if (table === 'technicians') return [{ id: 't1' }, { id: 't2' }];
+      if (table === 'technician_absences') return absent.map((technician_id) => ({ technician_id, absence_date: DATE }));
       if (table === 'scheduled_services') return dayRows.filter((row) => row.technician_id == null || (techIds || []).includes(row.technician_id));
       return [];
     };
@@ -147,4 +148,25 @@ test('a visit with a technician is measured on its own technician\'s day, no ter
   expect(current.day_technician_id).toBeUndefined();
   expect(current.technician_id).toBe('t2');
   expect(territory.territoryTechnicianFor).not.toHaveBeenCalled();
+});
+
+test('the territory technician is absent that day: the bar is the cover technician\'s day (the only other technician candidates may use)', async () => {
+  const away = { db: fakeDb({ absent: ['t1'] }), capabilityFor: () => 'qualified', territoryTechId: 't1', territoryCoverId: 't2' };
+  const current = await computeCurrentPlacement(UNASSIGNED, PREFS, away);
+
+  expect(current.day_technician_id).toBe('t2');
+});
+
+test('the territory technician works that day: his day stays the bar even with a cover', async () => {
+  const here = { db: fakeDb(), capabilityFor: () => 'qualified', territoryTechId: 't1', territoryCoverId: 't2' };
+  const current = await computeCurrentPlacement(UNASSIGNED, PREFS, here);
+
+  expect(current.day_technician_id).toBe('t1');
+});
+
+test('absent with no cover on the unit: still his day alone, as before the cover rule', async () => {
+  const noCover = { db: fakeDb({ absent: ['t1'] }), capabilityFor: () => 'qualified', territoryTechId: 't1', territoryCoverId: null };
+  const current = await computeCurrentPlacement(UNASSIGNED, PREFS, noCover);
+
+  expect(current.day_technician_id).toBe('t1');
 });
