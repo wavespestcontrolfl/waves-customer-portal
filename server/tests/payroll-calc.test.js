@@ -429,6 +429,22 @@ describe('computePaycheck: SIMPLE IRA (employee deferral and Waves 2%)', () => {
     expect(extra.netPayCents).toBe(0);
   });
 
+  test('saving less raises the tax, so the savings are solved with the tax they leave: no tax shortfall (Codex pre-push P0)', () => {
+    // $920 gross, $500 extra withholding, ask to save everything: the tax on what is left must still be paid in full.
+    const w4 = { ...W4_SINGLE, step4cExtraWithholding: '500' };
+    const check = paycheck({ w4, simple: { deferralBp: 10000 } });
+    const fica = check.socialSecurityEmployeeCents + check.medicareEmployeeCents;
+    expect(check.federalIncomeTaxShortfallCents).toBe(0);
+    expect(check.federalIncomeTaxCents).toBeGreaterThanOrEqual(50000);
+    expect(check.simpleDeferralCents + check.federalIncomeTaxCents + fica).toBeLessThanOrEqual(92000);
+    // The largest amount that fits: one cent more would not be paid with its tax.
+    expect(paycheck({ w4, simple: { deferralCents: check.simpleDeferralCents + 1 } }).simpleDeferralCents).toBe(check.simpleDeferralCents);
+    const sameTax = paycheck({ w4, simple: { deferralCents: check.simpleDeferralCents } });
+    expect(sameTax.federalIncomeTaxCents).toBe(check.federalIncomeTaxCents);
+    expect(check.netPayCents).toBeGreaterThanOrEqual(0);
+    expect(check.netPayCents).toBeLessThan(2);
+  });
+
   test('the 2% is figured on compensation up to the yearly cap, counting the year to date', () => {
     expect(paycheck({ simple: {} }).simpleEmployerCents).toBe(1840);
     const nearCap = paycheck({ simple: { ytdCompensationCents: 35950000 } });

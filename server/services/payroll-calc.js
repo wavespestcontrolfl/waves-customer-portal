@@ -252,6 +252,20 @@ function simpleDeferral(gross, simple, limitCents) {
   return min(wanted, min(gross, max0(BigInt(limitCents) - wholeCents(simple.ytdDeferralCents, 'Year-to-date SIMPLE IRA savings'))));
 }
 
+// The largest deferral up to `wanted` that the check pays together with the income tax withheld on the pay
+// left after it (a smaller deferral raises that tax). deferral + tax never falls as the deferral grows, so
+// a binary search over whole cents finds it. A wanted deferral of 0 runs no withholding at all.
+function affordableDeferral(wanted, available, withheldAfter) {
+  let low = 0n;
+  let high = wanted;
+  while (low < high) {
+    const mid = (low + high + 1n) / 2n;
+    if (mid + withheldAfter(mid) <= available) low = mid;
+    else high = mid - 1n;
+  }
+  return low;
+}
+
 // A participant's SIMPLE IRA lines: the federal income tax wages (gross less the deferral), the compensation
 // and Waves' 2% on it, up to the year's 401(a)(17) cap (year-to-date pay counts). Nothing without `simple`.
 function simpleLines(gross, deferral, simple, yearTables) {
@@ -352,12 +366,10 @@ function computePaycheck({
   // Withhold what the check covers and report the rest; never a negative net.
   const available = max0(gross - socialSecurity - medicare - additionalMedicare);
   // SIMPLE IRA: the deferral lowers the wages income tax is withheld on (Pub. 15-T line 1a), not the FICA wages.
-  // Taxes come first: a check that cannot pay its taxes and the whole deferral saves what is left. The
-  // withholding is worked out on the wanted deferral, then again on the deferral the check can pay.
+  // Taxes come first: a check that cannot pay its taxes and the whole deferral saves what is left.
   const yearTables = TAX_YEARS[taxYear];
   const wanted = simpleDeferral(gross, simple, yearTables.simpleDeferralLimitCents);
-  const wantedTax = incomeTaxWithholding(gross - wanted, BigInt(periods), w4, tables).withheld;
-  const deferral = min(wanted, max0(available - wantedTax));
+  const deferral = affordableDeferral(wanted, available, (d) => incomeTaxWithholding(gross - d, BigInt(periods), w4, tables).withheld);
   const { withheld, lines } = incomeTaxWithholding(gross - deferral, BigInt(periods), w4, tables);
   const federalIncomeTax = min(withheld, available - deferral);
 
