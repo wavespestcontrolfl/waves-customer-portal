@@ -148,7 +148,10 @@ async function connectedCalls(dbi, peers, since) {
       connected
         .where((placed) => placed.where('cl.direction', 'outbound').whereRaw(personCallBackSql('cl')))
         .orWhere((answered) => answered.where('cl.direction', 'inbound').where('cl.answered_by', 'human'))
+        // The call agent's verdict speaks for INBOUND calls only. An outbound call
+        // qualifies through personCallBackSql alone (customer leg completed, long enough).
         .orWhere((agent) => agent
+          .where('cl.direction', 'inbound')
           .where('cl.processing_status', 'processed')
           .where('cl.v2_extraction_status', 'valid')
           .whereRaw("cl.ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")

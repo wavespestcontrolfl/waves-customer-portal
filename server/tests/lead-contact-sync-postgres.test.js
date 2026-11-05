@@ -113,6 +113,47 @@ jest.setTimeout(30000);
     expect((await read(l.id)).status).toBe('contacted');
   });
 
+  const agentVerdict = JSON.stringify({ meta: { is_voicemail: 'false' } });
+  const outboundCall = (fields = {}) => callRow({
+    direction: 'outbound', from_phone: '+19415550199', to_phone: PHONE, source: 'admin-click',
+    processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: agentVerdict, ...fields,
+  });
+
+  test('an outbound call with a non-voicemail verdict but a customer leg that did not complete moves nothing', async () => {
+    const l = await lead();
+    await outboundCall({ metadata: JSON.stringify({ customer_leg: { status: 'no-answer', duration_seconds: 90 } }) });
+    expect((await sync()).moved).toBe(0);
+    expect((await read(l.id)).status).toBe('new');
+  });
+
+  test('an outbound call with a completed customer leg under the minimum duration moves nothing', async () => {
+    const l = await lead();
+    await outboundCall({ metadata: JSON.stringify({ customer_leg: { status: 'completed', duration_seconds: 20 } }) });
+    expect((await sync()).moved).toBe(0);
+    expect((await read(l.id)).status).toBe('new');
+  });
+
+  test('an outbound call from a source outside the staff bridge list moves nothing even with the agent verdict', async () => {
+    const l = await lead();
+    await outboundCall({ source: 'collections_voice' });
+    expect((await sync()).moved).toBe(0);
+    expect((await read(l.id)).status).toBe('new');
+  });
+
+  test('an outbound call that passes the staff callback predicate moves the lead', async () => {
+    const l = await lead();
+    await outboundCall({ metadata: JSON.stringify({ customer_leg: { status: 'completed', duration_seconds: 75 } }) });
+    expect((await sync()).byEvidence).toEqual({ live_conversation: 1 });
+    expect((await read(l.id)).status).toBe('contacted');
+  });
+
+  test('an inbound call with the agent\'s non-voicemail verdict moves the lead', async () => {
+    const l = await lead();
+    await callRow({ answered_by: 'ai_agent', processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: agentVerdict });
+    expect((await sync()).byEvidence).toEqual({ live_conversation: 1 });
+    expect((await read(l.id)).status).toBe('contacted');
+  });
+
   test('the call that created the lead is not its own evidence', async () => {
     const l = await lead();
     await callRow({ processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }), metadata: JSON.stringify({ lead_id: l.id }) });
