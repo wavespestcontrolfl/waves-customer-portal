@@ -130,6 +130,32 @@ describe('bank lines -> money out', () => {
     expect(totals.other_spending).toBe(300);
   });
 
+  test('real transfer wording cancels; an unrelated same-amount pair stays in', () => {
+    const real = { ...opts, pool: ['capital-one-checking-3965', 'capital-one-checking-3098'] };
+    const { totals } = classifySpend([
+      line({ account: 'capital-one-checking-3965', amount: 500, description: 'TRANSFER WITHDRAWAL To ....3098' }),
+      line({ account: 'capital-one-checking-3098', amount: 500, direction: 'credit', description: 'Capital One Bank' }),
+      line({ account: 'capital-one-checking-3098', amount: 250, description: 'Capital One Bank' }),
+      line({ account: 'capital-one-checking-3965', amount: 250, direction: 'credit', description: 'TRANSFER DEPOSIT From ....3098' }),
+      // a $100 payment out and an unrelated $100 deposit two days apart: no transfer wording, so both stay
+      line({ account: 'capital-one-checking-3965', amount: 100, description: 'ZELLE TO SOMEONE' }),
+      line({ account: 'capital-one-checking-3098', amount: 100, direction: 'credit', description: 'MOBILE DEPOSIT' }),
+      // a transfer that names a third account is money leaving the pool
+      line({ account: 'capital-one-checking-3965', amount: 70, description: 'TRANSFER WITHDRAWAL To ....7777' }),
+      line({ account: 'capital-one-checking-3098', amount: 70, direction: 'credit', description: 'Capital One Bank' }),
+    ], real);
+    expect(totals).toEqual({ products_fuel: 0, ai_software: 0, card_payments_off_feed: 0, other_spending: 170 });
+  });
+
+  test('a card payment cancels only against a card credit that reads as a payment; "Capital One Bank" is no card payment', () => {
+    const { totals } = classifySpend([
+      line({ account: 'checking-a', amount: 60, description: 'CAPITAL ONE' }),
+      line({ account: 'card-f', amount: 60, direction: 'credit', day: '2026-10-11', description: 'AMAZON REFUND' }),
+      line({ account: 'checking-b', amount: 40, description: 'Capital One Bank' }),
+    ], opts);
+    expect(totals).toEqual({ products_fuel: 0, ai_software: 0, card_payments_off_feed: 60, other_spending: 40 });
+  });
+
   test('a feed-card payment and its card credit both drop out; a payment to a card off the feed is its own line', () => {
     const { totals } = classifySpend([
       line({ account: 'checking-a', amount: 400, description: 'CAPITAL ONE MOBILE PYMT' }),
@@ -260,16 +286,26 @@ describe('computeForecast', () => {
     expect(withPlan.missing.find((m) => m.kind === 'card_payoff_plan')).toBeUndefined();
   });
 
-  test('a hire is its own line; a real payroll check on the same day replaces that occurrence', () => {
+  test('a hire is its own line to its last date; a real check (maybe another employee) never cancels it, but asks', () => {
     const r = computeForecast(base({
       items: [{ kind: 'hire', label: 'Tech', amount_cents: 100000, cadence: 'weekly', first_date: '2027-01-08', active: true }],
       payroll: [{ payDay: '2027-01-15', cashCostUsd: 1200 }],
     }));
     const hire = r.weeks.map((w) => w.money_out.hire);
-    expect(hire.filter((h) => h > 0)).toHaveLength(3); // Jan 8, 22, 29 (Jan 15 has a real check)
+    expect(hire.filter((h) => h > 0)).toHaveLength(4); // Jan 8, 15, 22, 29
     expect(r.weeks[10].money_out.payroll).toBe(1200);
+    expect(r.missing).toContainEqual({ kind: 'hire_overlaps_pay_runs', label: 'Tech', first_pay_day: '2027-01-15' });
     expect(r.weeks[12].end_booked_with_hire).toBeLessThan(r.weeks[12].end_booked);
     expect(r.lowest.booked_with_hire.week_start).toBe('2027-01-25');
+  });
+
+  test('a payoff plan that has ended leaves the card payment line in', () => {
+    const lines = [{ id: 'p', day: '2026-10-05', account: 'checking-b', direction: 'debit', amount: 1600, description: 'CAPITAL ONE', category: null }];
+    const r = computeForecast(base({ bankLines: lines, items: [
+      { kind: 'card_payoff', label: 'Old plan', amount_cents: 50000, cadence: 'monthly', first_date: '2026-08-01', last_date: '2026-10-31', active: true },
+    ] }));
+    expect(r.weeks[1].money_out.card_payments_off_feed).toBe(200);
+    expect(r.missing).toContainEqual({ kind: 'card_payoff_plan', weekly_usd: 200 });
   });
 
   test('no live balance: every end balance is a change from today', () => {

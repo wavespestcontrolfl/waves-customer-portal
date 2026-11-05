@@ -125,7 +125,19 @@ function seasonRatios(receipts, trailingDays, windowDays) {
 
 // ── Bank lines -> money-out lines ───────────────────────────────────────────────────────────────────
 const norm = (s) => String(s || '').toUpperCase().replace(/[^A-Z& ]+/g, ' ').replace(/\s+/g, ' ').trim();
-const CARD_PAYMENT_RE = /CAPITAL ONE|AMEX EPAYMENT|AMERICAN EXPRESS|\bCITI\b|CARD PAYMENT|CRCARDPMT|CR CARD PMT|CARDMEMBER/;
+// A card payment from checking reads "CAPITAL ONE"; "Capital One Bank" is the other side of a transfer
+// between the checking accounts (prod wording, 2026-11-05), so it is never a card payment.
+const CARD_PAYMENT_RE = /CAPITAL ONE(?! BANK)|AMEX EPAYMENT|AMERICAN EXPRESS|\bCITI\b|CARD PAYMENT|CRCARDPMT|CR CARD PMT|CARDMEMBER/;
+const CARD_PAYMENT_CREDIT_RE = /\bPYMT\b|\bPAYMENT\b|\bPMT\b/;
+// One side of a transfer between the checking accounts names it: "TRANSFER WITHDRAWAL To ....3098" /
+// "TRANSFER DEPOSIT From ....3965" (the other account's last 4 digits).
+const TRANSFER_RE = /\bTRANSFER\b|\bXFER\b/i;
+const lastFour = (label) => (String(label || '').match(/(\d{4})$/) || [])[1] || null;
+function transferEvidence(debit, credit) {
+  const names = (line, other) => TRANSFER_RE.test(String(line.description || ''))
+    && (!lastFour(other.account) || String(line.description || '').includes(lastFour(other.account)));
+  return names(debit, credit) || names(credit, debit);
+}
 const CARD_RETURN_RE = /\bRETURN(ED)?\b/;
 // Payroll funding to the Mercury paycheck account is the pay run's money, counted from payroll checks.
 const PAYROLL_FUNDING_RE = /\bMERCURY\b/;
@@ -161,11 +173,13 @@ function classifySpend(lines, { pool, feedCards, from, to }) {
       if (match) { used.add(d.id); used.add(match.id); }
     }
   };
-  // 1. Matched transfers between pool accounts cancel (decision 2 A). Unmatched transfer lines stay in:
-  //    that money really left the pool (another bank, savings, a payroll account).
-  pair((d) => inPool.has(d.account), (c, d) => inPool.has(c.account) && c.account !== d.account, 2);
-  // 2. A payment to a feed card is the card's own charges again: both sides out.
-  pair((d) => inPool.has(d.account), (c) => isFeedCard.has(c.account), 3);
+  // 1. Matched transfers between pool accounts cancel (decision 2 A): the same amount, opposite sides,
+  //    two days apart at most, and one side names it a transfer to the other account. Anything else stays
+  //    in: that money really left the pool (another bank, savings, a payroll account).
+  pair((d) => inPool.has(d.account), (c, d) => inPool.has(c.account) && c.account !== d.account && transferEvidence(d, c), 2);
+  // 2. A payment to a feed card is the card's own charges again: both sides out, when both read as one.
+  pair((d) => inPool.has(d.account) && CARD_PAYMENT_RE.test(norm(d.description)),
+    (c) => isFeedCard.has(c.account) && CARD_PAYMENT_CREDIT_RE.test(norm(c.description)), 3);
 
   const totals = { products_fuel: 0, ai_software: 0, card_payments_off_feed: 0, other_spending: 0 };
   for (const l of sorted) {
@@ -326,17 +340,18 @@ function computeForecast(input) {
   const perVisit = trailing.visits > 0 ? spend.totals.products_fuel / trailing.visits : 0;
 
   const items = (input.items || []).filter((i) => i.active !== false);
-  const payoffItems = items.filter((i) => i.kind === 'card_payoff');
+  // A payoff plan that has ended no longer stands in for the card payments.
+  const payoffItems = items.filter((i) => i.kind === 'card_payoff' && (!i.last_date || i.last_date >= today));
   if (!payoffItems.length && weekly.card_payments_off_feed > 0) missing.push({ kind: 'card_payoff_plan', weekly_usd: round2(weekly.card_payments_off_feed) });
 
   // Card owed today: past charges not yet paid.
   addTo(out.card_owed, today, Number(input.opening?.cardOwedUsd) || 0);
 
   // Payroll checks: full cost on the pay date; the tax deposits later are the same money.
-  const checkDays = new Set();
+  let firstCheckDay = null;
   for (const c of input.payroll || []) {
     if (c.payDay < today || c.payDay > windowEnd) continue;
-    checkDays.add(c.payDay);
+    if (!firstCheckDay || c.payDay < firstCheckDay) firstCheckDay = c.payDay;
     addTo(out.payroll, c.payDay, Number(c.cashCostUsd) || 0);
   }
   for (const t of input.taxRows || []) {
@@ -345,7 +360,10 @@ function computeForecast(input) {
   for (const item of items) {
     const days = occurrences(item, today, windowEnd);
     if (item.kind === 'hire') {
-      for (const h of hireCosts(item, days)) if (!checkDays.has(h.day)) addTo(out.hire, h.day, h.usd);
+      // A check is never matched to the planned hire (it may be another employee's): the item runs to
+      // its last date. When pay runs exist from its dates on, the owner is asked to end it.
+      for (const h of hireCosts(item, days)) addTo(out.hire, h.day, h.usd);
+      if (firstCheckDay && days.some((d) => d >= firstCheckDay)) missing.push({ kind: 'hire_overlaps_pay_runs', label: item.label, first_pay_day: firstCheckDay });
     } else {
       for (const d of days) addTo(out.planned, d, (Number(item.amount_cents) || 0) / 100);
     }

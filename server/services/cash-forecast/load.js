@@ -55,13 +55,15 @@ async function readVisits(database, { from, to }) {
       (COALESCE(ss.is_callback, false) OR EXISTS (
         SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND COALESCE(sr.is_callback, false))) AS is_callback,
       (COALESCE(ss.service_type, '') ~* ?) AS free_type,
+      EXISTS (SELECT 1 FROM invoices i LEFT JOIN service_records sr2 ON sr2.id = i.service_record_id
+        WHERE COALESCE(i.scheduled_service_id, sr2.scheduled_service_id) = ss.id AND i.status <> ALL(?::text[])) AS has_invoice,
       (COALESCE(ss.service_type, '') ~* ? AND COALESCE(ss.estimated_price, 0) <= 0) AS unpriced_consultation,
       c.billing_mode, c.waveguard_tier, c.monthly_rate
     FROM scheduled_services ss
     JOIN customers c ON c.id = ss.customer_id
     WHERE ss.scheduled_date BETWEEN ?::date AND ?::date
       AND (ss.status = 'completed' OR ss.status <> ALL(?::text[]))`,
-  [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
+  [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, DEAD_INVOICE_STATUSES, CONSULTATION_SERVICE_TYPE_SQL_REGEX, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
 }
 
 // Invoices behind completed visits (linked by the visit or by its service record), live ones only.
@@ -282,7 +284,8 @@ async function loadForecastInput({
       if (value > 0) completed.push({ id: v.id, day: doneDay, value });
     } else if (v.scheduled_day >= today && v.scheduled_day <= windowEnd) {
       if (v.payer_billed) payerBilled = { count: payerBilled.count + 1 };
-      booked.push({ day: v.scheduled_day, value });
+      // A visit already invoiced is counted once: as its open invoice (or as a draft, listed apart).
+      booked.push({ day: v.scheduled_day, value: v.has_invoice ? 0 : value });
     }
   }
   if (payerBilled.count) missing.push({ kind: 'payer_billed_visits', count: payerBilled.count });

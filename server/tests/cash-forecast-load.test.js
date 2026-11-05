@@ -92,7 +92,7 @@ describe('loadForecastInput', () => {
     const input = await loadForecastInput({ database, now: NOW, readCashBalances: cashOk, readStripeBalance: async () => ({}) });
     expect(input.today).toBe('2026-11-05');
     const visits = database.calls.find((c) => /FROM scheduled_services ss/.test(c.sql));
-    expect(visits.bindings.slice(2, 4)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
+    expect(visits.bindings.slice(3, 5)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
     const bank = database.calls.find((c) => /FROM bank_transactions bt/.test(c.sql));
     expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f'], '2026-08-28', '2026-11-11']); // trailing Sep 7 - Nov 1 +- 10 days; USD only
     for (const c of database.calls) expect(c.sql).not.toMatch(/current_date|now\(\)/i);
@@ -136,6 +136,7 @@ describe('loadForecastInput', () => {
           visit({ id: 'c2', status: 'completed', scheduled_day: '2026-09-01', completed_day: '2026-09-01', effective_price: 50 }),
           visit({ id: 'c3', status: 'completed', scheduled_day: '2026-10-21', completed_day: '2026-10-21', billing_mode: 'monthly_membership' }),
           visit({ id: 'b1', scheduled_day: '2026-11-05' }),
+          visit({ id: 'b3', scheduled_day: '2026-11-06', has_invoice: true }),
           visit({ id: 'b2', scheduled_day: '2026-11-12', payer_billed: true }),
           visit({ id: 'old', scheduled_day: '2026-11-04' }),
         ]],
@@ -153,7 +154,8 @@ describe('loadForecastInput', () => {
     ]);
     // trailing Sep 7 - Nov 1: c1 and c3 (the member visit counts as a visit, not as cash work); c2 is before it
     expect(input.trailing).toMatchObject({ visits: 2, workValueUsd: 100 });
-    expect(input.booked).toEqual([{ day: '2026-11-05', value: 100 }, { day: '2026-11-12', value: 0 }]);
+    // b3 is already invoiced: it counts once, as its invoice
+    expect(input.booked).toEqual([{ day: '2026-11-05', value: 100 }, { day: '2026-11-06', value: 0 }, { day: '2026-11-12', value: 0 }]);
     expect(input.openInvoices).toEqual([{ amountUsd: 40, ageDays: 10, processing: false }, { amountUsd: 25, ageDays: 0, processing: true }]);
     expect(input.taxRows).toEqual([{ dueDay: '2026-12-15', amountUsd: 400 }]);
     expect(input.missing).toEqual(expect.arrayContaining([
