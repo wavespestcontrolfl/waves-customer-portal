@@ -260,9 +260,13 @@ function tenPercentOff(beforeCents, afterCents) {
   return Math.abs((beforeCents - afterCents) - Math.round((beforeCents * MULTI_HOME_PERCENT) / 100)) <= 1;
 }
 
-// A visit carrying the preset carries it at exactly MULTI_HOME_PERCENT percent.
-function carriesTenPercent(visit) {
-  return String(visit.discount_type || '').toLowerCase() === 'percentage' && Number(visit.discount_amount) === MULTI_HOME_PERCENT;
+// A visit carrying the preset carries it at exactly MULTI_HOME_PERCENT percent, and its price shows that whole cut: the
+// stored gross (primary_line_price, which PR 2 stamps) less 10% is the visit's price. A capped or partial reduction
+// (discount_max_dollars) or a visit with no stored gross cannot prove it.
+function carriesTenPercent(visit, netCents) {
+  return String(visit.discount_type || '').toLowerCase() === 'percentage'
+    && Number(visit.discount_amount) === MULTI_HOME_PERCENT
+    && tenPercentOff(cents(visit.primary_line_price), netCents);
 }
 
 async function targetStillCurrent(dbh, { row, facts, presetId, rootId, nextPrices }) {
@@ -270,7 +274,7 @@ async function targetStillCurrent(dbh, { row, facts, presetId, rootId, nextPrice
   const visitDiscount = facts.first.discount_id ? String(facts.first.discount_id) : null;
   const carries = !!(presetId && visitDiscount === String(presetId));
   if (visitDiscount && !carries) return false;
-  if (carries && !carriesTenPercent(facts.first)) return false;
+  if (carries && !carriesTenPercent(facts.first, facts.flatPriceCents)) return false;
   if (row.status === STATUS_APPLIED && facts.flatPriceCents !== cents(row.price_after)) return false;
   if (row.status === STATUS_APPLIED && !tenPercentOff(cents(row.price_before), cents(row.price_after))) return false;
   if (row.status === STATUS_ALREADY && detailOf(row).reason === ALREADY_CARRIED_REASON && !carries) return false;

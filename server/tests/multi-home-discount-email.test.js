@@ -629,7 +629,7 @@ describe('the ledger is history: another home is checked again before any email'
   const { targetStillCurrent } = require('../services/multi-home-discount-email')._private;
   const facts = (price, extra = {}) => ({ first: { discount_id: null, ...extra }, flatPriceCents: price, startsDate: '2026-11-14' });
   // A visit carrying the preset as PR 2 stamps it (discountFields): the percentage and its amount.
-  const carried = { discount_id: 'preset-1', discount_type: 'percentage', discount_amount: 10 };
+  const carried = { discount_id: 'preset-1', discount_type: 'percentage', discount_amount: 10, primary_line_price: '120.00' };
   const applied = { status: 'applied', price_before: '120.00', price_after: '108.00' };
   const none = async () => null;
 
@@ -666,6 +666,10 @@ describe('the ledger is history: another home is checked again before any email'
     const row = { status: 'already_discounted', detail: { reason: 'all_upcoming_visits_carry_it' } };
     expect(await targetStillCurrent(null, { row, facts: facts(11400, { ...carried, discount_amount: 5 }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
     expect(await targetStillCurrent(null, { row, facts: facts(10800, { ...carried, discount_type: 'fixed' }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
+    // 10% on the label but capped at $5: the price shows a $5 cut, not 10%.
+    expect(await targetStillCurrent(null, { row, facts: facts(11500, carried), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
+    // No stored gross: the cut cannot be proven.
+    expect(await targetStillCurrent(null, { row, facts: facts(10800, { ...carried, primary_line_price: null }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
   });
 
   test('every next extension must price the same (production walk); an unfinished walk is unproven', async () => {
