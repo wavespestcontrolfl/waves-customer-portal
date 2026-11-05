@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WikiQA = require('../services/knowledge/wiki-qa');
+const { knowledgeAudience } = require('../services/knowledge/technician-categories');
 
 // Tech field Q&A — Staff-authenticated, mobile-optimized responses.
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -12,7 +13,7 @@ router.post('/query', async (req, res, next) => {
     const { question } = req.body;
     if (!question) return res.status(400).json({ error: 'Question required' });
 
-    const result = await WikiQA.query(question, { source: 'tech_field' });
+    const result = await WikiQA.query(question, { source: 'tech_field', ...(knowledgeAudience(req) || {}) });
     res.json({ answer: result.answer, sources: result.articleTitles || [] });
   } catch (err) { next(err); }
 });
@@ -20,7 +21,7 @@ router.post('/query', async (req, res, next) => {
 // GET /api/tech/knowledge/lookup?topic=celsius
 router.get('/lookup', async (req, res, next) => {
   try {
-    const content = await WikiQA.lookup(req.query.topic || '');
+    const content = await WikiQA.lookup(req.query.topic || '', knowledgeAudience(req));
     if (!content) return res.json({ found: false, content: null });
     res.json({ found: true, content: content.substring(0, 3000) });
   } catch (err) { next(err); }
