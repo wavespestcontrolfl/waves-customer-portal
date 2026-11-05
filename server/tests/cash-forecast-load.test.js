@@ -10,7 +10,10 @@ jest.mock('../services/cash-forecast/inputs', () => ({
   getSettings: jest.fn(async () => ({ floor_cents: null, last_year_receipts: {}, updated_at: null })),
   listItems: jest.fn(async () => []),
 }));
-jest.mock('../services/open-balance', () => ({ applyOpenSelfPayPredicates: jest.fn((q) => q) }));
+jest.mock('../services/open-balance', () => ({
+  applyOpenSelfPayPredicates: jest.fn((q) => q),
+  rowIsSelfPayDue: jest.fn(async (customerId, row) => row.invoice_number !== 'PAYER-OWNED'),
+}));
 jest.mock('../services/monthly-dues-eligibility', () => ({
   DUES_COHORT_COLUMNS: ['id', 'monthly_rate', 'billing_day', 'billing_mode'],
   applyDuesCohort: jest.fn((q) => q),
@@ -166,7 +169,11 @@ describe('loadForecastInput', () => {
 
   test('visits: completed cash work is the cohort and the trailing baseline; open visits are booked; facts listed', async () => {
     const database = fakeDb({
-      tables: { invoices: [{ sent_day: '2026-10-26', status: 'sent', total: 60, credit_applied: 10, amount_paid: 10 }] },
+      tables: { invoices: [
+        { sent_day: '2026-10-26', status: 'sent', total: 60, credit_applied: 10, amount_paid: 10, invoice_number: 'A-1', customer_id: 'k1' },
+        // the live payer re-check says a payer owns this one: left out
+        { sent_day: '2026-10-27', status: 'sent', total: 90, invoice_number: 'PAYER-OWNED', customer_id: 'k2' },
+      ] },
       raw: [
         [/FROM scheduled_services ss/, [
           visit({ id: 'c1', status: 'completed', scheduled_day: '2026-10-20', completed_day: '2026-10-20' }),

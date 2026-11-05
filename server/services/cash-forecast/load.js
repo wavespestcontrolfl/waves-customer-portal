@@ -10,7 +10,7 @@ const logger = require('../logger');
 const plaidSync = require('../plaid-sync');
 const StripeBanking = require('../stripe-banking');
 const { resolveBillingLane, membershipDuesCoverVisit, completionInvoiceAmount } = require('../billing-lane');
-const { applyOpenSelfPayPredicates } = require('../open-balance');
+const { applyOpenSelfPayPredicates, rowIsSelfPayDue } = require('../open-balance');
 const { autopayActivePredicate } = require('../autopay-eligibility');
 const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('../no-cost-visit-types');
 const { DUES_COHORT_COLUMNS, applyDuesCohort, autopayGuard, laneGuard, monthlyDuesVerdict } = require('../monthly-dues-eligibility');
@@ -154,15 +154,19 @@ function groupBy(rows, key) {
 }
 
 // Open self-pay invoices, by the shared definition (open-balance.js): presented, not payer-owned, not on
-// a statement, not withdrawn to a payer, something still owed; archived ones are left out.
+// a statement, not withdrawn to a payer, something still owed, and the live payer re-check per row
+// (rowIsSelfPayDue, fail-closed: a row it cannot resolve is left out); archived ones are left out too.
 async function readOpenInvoices(database) {
-  return applyOpenSelfPayPredicates(database('invoices'))
+  const rows = await applyOpenSelfPayPredicates(database('invoices'))
     .whereNull('invoices.paid_at')
     .whereNull('invoices.archived_at')
     .select(
       database.raw(`${ET_DAY('COALESCE(invoices.sent_at, invoices.created_at)')} AS sent_day`),
+      'invoices.customer_id', 'invoices.scheduled_service_id', 'invoices.invoice_number',
       'invoices.status', 'invoices.total', 'invoices.credit_applied', 'invoices.amount_paid',
     );
+  const due = await Promise.all(rows.map((r) => rowIsSelfPayDue(r.customer_id, r, { database })));
+  return rows.filter((_, n) => due[n]);
 }
 
 async function readDrafts(database) {
