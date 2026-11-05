@@ -3,7 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import { CustomerReactionLines, SmsLikeBadges, reactionVerb } from "./SmsLikeControls";
+import { OfficeLikeButton, CustomerReactionLines, SmsLikeBadges, reactionVerb } from "./SmsLikeControls";
 
 // GATE_SMS_LIKE: a customer's like is one short labeled line on our text.
 const THUMB = "\u{1F44D}";
@@ -42,4 +42,22 @@ it("omits the time when the like has none; reads the lines on our text only", ()
   render(<SmsLikeBadges message={{ id: "out", direction: "outbound" }} badges={new Map([["out", [{ id: "r", emoji: THUMB }]]])} />);
   expect(screen.getByTitle("The customer reacted to this text")).toHaveTextContent(`${THUMB} Liked`);
   expect(screen.getByTitle("The customer reacted to this text").textContent).not.toContain("·");
+});
+
+// The like route is closed to technicians, so the button is not offered to one.
+it("offers the Like button to an admin and to an unknown role, never to a technician", () => {
+  const key = "waves_admin_user";
+  const roleOf = (role) => localStorage.setItem(key, JSON.stringify({ role }));
+  localStorage.clear();
+  roleOf("technician");
+  const tech = render(<OfficeLikeButton messageId="m1" customerName="Pat" />);
+  expect(tech.container).toBeEmptyDOMElement();
+  tech.unmount();
+  roleOf("admin");
+  const admin = render(<OfficeLikeButton messageId="m1" customerName="Pat" />);
+  expect(screen.getByRole("button", { name: "Text a thumbs-up to Pat" })).toBeInTheDocument();
+  admin.unmount();
+  localStorage.clear();
+  render(<OfficeLikeButton messageId="m1" customerName="Pat" />);
+  expect(screen.getByRole("button", { name: "Text a thumbs-up to Pat" })).toBeInTheDocument();
 });

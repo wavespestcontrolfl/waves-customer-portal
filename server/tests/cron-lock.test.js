@@ -25,6 +25,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const {
   runExclusive, lockHeldByAnySession, recordJobStart, recordJobEnd,
 } = require('../utils/cron-lock');
@@ -701,6 +702,107 @@ describe('cron-lock runExclusive', () => {
 
     expect(body).not.toHaveBeenCalled();
     expect(result).toEqual({ skipped: true, reason: 'no_connection' });
+  });
+});
+
+describe('cron-lock runExclusive waitForLockMs (opt-in wait for a busy lease)', () => {
+  const lockQueries = (conn) => conn.query.mock.calls
+    .map(([arg]) => arg).filter((arg) => arg.text.includes('pg_try_advisory_lock'));
+
+  // A held lock that frees after `busyAnswers` busy try-lock answers.
+  function connBusyThenFree(busyAnswers) {
+    let busyLeft = busyAnswers;
+    return {
+      query: jest.fn(async ({ text }) => {
+        if (text.includes('pg_try_advisory_lock')) {
+          if (busyLeft > 0) { busyLeft -= 1; return { rows: [{ locked: false }] }; }
+          return { rows: [{ locked: true }] };
+        }
+        return { rows: [] };
+      }),
+    };
+  }
+
+  beforeEach(() => { jest.clearAllMocks(); jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('busy lock then free: waits, retries every 15 s, runs the body, unlocks', async () => {
+    const conn = connBusyThenFree(3); // first try + two retries busy, the 3rd retry wins
+    db.client.acquireConnection.mockResolvedValue(conn);
+    const body = jest.fn().mockResolvedValue({ status: 'completed' });
+
+    const pending = runExclusive('wait-job', body, { recordHealth: false, waitForLockMs: 25 * 60 * 1000 });
+    await jest.advanceTimersByTimeAsync(14 * 1000);
+    expect(body).not.toHaveBeenCalled();
+    expect(lockQueries(conn)).toHaveLength(1); // no retry before 15 s
+    await jest.advanceTimersByTimeAsync(2 * 1000);
+    expect(lockQueries(conn)).toHaveLength(2);
+    await jest.advanceTimersByTimeAsync(30 * 1000);
+
+    await expect(pending).resolves.toEqual({ status: 'completed' });
+    expect(body).toHaveBeenCalledTimes(1);
+    expect(lockQueries(conn)).toHaveLength(4);
+    expect(lockQueries(conn).every((q) => q.values[0] === 'cron:wait-job')).toBe(true);
+    expect(conn.query.mock.calls.map(([a]) => a.text).some((t) => t.includes('pg_advisory_unlock'))).toBe(true);
+    expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('lease acquired after waiting'));
+  });
+
+  test('busy past the deadline: same lease_held skip shape, body never runs, no unlock', async () => {
+    const conn = mockConnection(false);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    const body = jest.fn();
+
+    const pending = runExclusive('wait-job', body, { recordHealth: false, waitForLockMs: 60 * 1000 });
+    await jest.advanceTimersByTimeAsync(61 * 1000);
+
+    await expect(pending).resolves.toEqual({ skipped: true, reason: 'lease_held' });
+    expect(body).not.toHaveBeenCalled();
+    expect(lockQueries(conn)).toHaveLength(5); // first try + retries at 15, 30, 45, 60 s
+    expect(conn.query.mock.calls.map(([a]) => a.text).some((t) => t.includes('pg_advisory_unlock'))).toBe(false);
+    expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('gave up waiting for the lease'));
+  });
+
+  test('option absent: a busy lock skips at once with a single try-lock (unchanged)', async () => {
+    const conn = mockConnection(false);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    const body = jest.fn();
+
+    await expect(runExclusive('wait-job', body, { recordHealth: false })).resolves.toEqual({ skipped: true, reason: 'lease_held' });
+    expect(lockQueries(conn)).toHaveLength(1);
+    expect(jest.getTimerCount()).toBe(0);
+    expect(body).not.toHaveBeenCalled();
+  });
+
+  test('a free lock never waits even with the option on', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    const body = jest.fn().mockResolvedValue('ran');
+
+    await expect(runExclusive('wait-job', body, { recordHealth: false, waitForLockMs: 60 * 1000 })).resolves.toBe('ran');
+    expect(lockQueries(conn)).toHaveLength(1);
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('waiting up to'));
+  });
+
+  test('nested call (the real 4:20 / 4:40 shape) waits on the OUTER session, no second connection', async () => {
+    const answers = { 'cron:outer-job': [true], 'cron:inner-job': [false, false, true] };
+    const conn = {
+      query: jest.fn(async ({ text, values }) => {
+        if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: answers[values[0]].shift() }] };
+        return { rows: [] };
+      }),
+    };
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    const pending = runExclusive('outer-job', async () =>
+      runExclusive('inner-job', async () => 'nested-ok', { recordHealth: false, waitForLockMs: 5 * 60 * 1000 }),
+    { recordHealth: false });
+    await jest.advanceTimersByTimeAsync(40 * 1000);
+
+    await expect(pending).resolves.toBe('nested-ok');
+    expect(db.client.acquireConnection).toHaveBeenCalledTimes(1);
+    expect(lockQueries(conn).map((q) => q.values[0])).toEqual(['cron:outer-job', 'cron:inner-job', 'cron:inner-job', 'cron:inner-job']);
   });
 });
 

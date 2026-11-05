@@ -7,6 +7,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { VISIT_CARD_TYPES, hiddenVisitCardSql, staleVisitCardSql, rankedVisitCards, refreshVisitCards } = require('../services/tech-visit-notifications');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -51,6 +53,11 @@ router.get('/', async (req, res, next) => {
       // still on the route (reassigned / rescheduled / cancelled → hidden).
       q = photoAlerts.scopePhotoCardsToLiveVisits(q, db);
     }
+    // A schedule-change card shows only while it says something true about
+    // its visit, by the same rules as the Today page's own read (below), so
+    // the "notices on Today" count and the floating fallback agree with it.
+    const hidden = hiddenVisitCardSql('tech_notifications', etDateString(new Date()));
+    q = q.whereRaw(`NOT ${hidden.sql}`, hidden.bindings);
     if (unreadOnly) q = q.where({ read: false });
     // FRESH non-storm rows outrank everything else inside the 20-row window,
     // so a storm burst never crowds them out. The priority is
@@ -90,7 +97,7 @@ router.get('/', async (req, res, next) => {
       .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN COALESCE((payload->>'stage')::int, 0) ELSE 0 END DESC")
       .orderBy('created_at', 'desc')
       .limit(20);
-    let parsed = rows.map(parseRow);
+    let parsed = await refreshVisitCards(rows.map(parseRow), db);
     if (photoAlerts.isEnabled()) parsed = await photoAlerts.refreshPhotoCardDates(parsed, db);
     res.json({ notifications: parsed });
   } catch (err) { next(err); }
@@ -101,41 +108,48 @@ router.get('/', async (req, res, next) => {
 // own card (`soon`), the rest folded into one summary (owner ruling
 // 2026-10-03). The main feed above returns 20 rows, too few for a nightly
 // auto-dispatch run, so these have their own read.
-const SCHEDULE_CHANGE_TYPES = ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled'];
+const SCHEDULE_CHANGE_TYPES = VISIT_CARD_TYPES;
 // Rows per list (soon cards, folded rows); the summary's count and "clear
 // all" cover the whole open set, past this cap (Codex #5783 P2).
 const SCHEDULE_CHANGE_LIMIT = 300;
 const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+const UUID_RE = new RegExp(UUID_PATTERN, 'i');
 
-// The open schedule-change cards for one tech, with the visit row joined on
-// its uuid primary key (the payload id is pattern-checked before the cast,
-// so a malformed one joins nothing instead of failing the read).
-function openScheduleChanges(technicianId) {
-  return db('tech_notifications as n')
+// The open schedule-change cards for one tech that still say something true
+// about their visit: one card per visit (rankedVisitCards), none for a past
+// day or a visit the tech already reached (staleVisitCardSql). The visit row
+// is joined on its uuid primary key (the payload id is pattern-checked before
+// the cast, so a malformed one joins nothing instead of failing the read).
+// `asOf` is the read the tech sees: its ET day judges "past".
+function openScheduleChanges(technicianId, asOf) {
+  const stale = staleVisitCardSql('n', etDateString(asOf));
+  return db.from(rankedVisitCards(db, technicianId, soonDays(asOf)).as('n'))
     .leftJoin('scheduled_services as s', function joinVisit() {
       this.on('s.id', '=', db.raw(`CASE WHEN n.payload->>'visit_id' ~* '${UUID_PATTERN}' THEN (n.payload->>'visit_id')::uuid END`));
     })
-    .where('n.technician_id', technicianId)
-    .whereNull('n.dismissed_at')
-    .whereIn('n.type', SCHEDULE_CHANGE_TYPES);
+    .where('n.visit_rank', 1)
+    .whereRaw(`NOT ${stale.sql}`, stale.bindings);
 }
 
-// `soon` in SQL: the card's new or previous day is today or tomorrow (ET) as
-// of `asOf`; a card written before the ISO days existed falls back to the
-// visit's day. Clear-all passes the read's own as_of, so an ET midnight
-// between the read and the tap never clears a card the tech saw as its own
-// today/tomorrow card (pre-push audit P1).
+// Today and tomorrow (ET) as of a read.
+function soonDays(asOf) {
+  return [etDateString(asOf), etDateString(addETDays(asOf, 1))];
+}
+
+// `soon` in SQL, over openScheduleChanges: any open card of the visit has a
+// new or previous day of today or tomorrow (ET) as of `asOf`
+// (`visit_touches_soon`, so a newer card never hides an older card's move off
+// or onto today), or the visit's day as it is now is today or tomorrow (a
+// visit moved there with no card of its own surfaces through its older card).
+// Clear-all passes the read's own as_of, so an ET midnight between the read
+// and the tap never clears a card the tech saw as its own today/tomorrow card
+// (pre-push audit P1).
 function soonSql(asOf) {
-  const { etDateString, addETDays } = require('../utils/datetime-et');
-  const now = asOf;
-  const days = [etDateString(now), etDateString(addETDays(now, 1))];
   return {
-    // prior_day_unknown: an old assignment card that never recorded the slot
-    // it left (backfill 20261003150000) — kept as its own card.
-    sql: "COALESCE(n.payload->>'date' IN (?, ?) OR n.payload->>'previous_date' IN (?, ?)"
-      + " OR (n.payload->>'date' IS NULL AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?))"
-      + " OR n.payload->>'prior_day_unknown' = 'true', false)",
-    bindings: [...days, ...days, ...days],
+    // The visit's day as it is now counts only while it is this tech's: a
+    // former holder reads nothing of a reassigned visit's new schedule.
+    sql: "COALESCE(n.visit_touches_soon OR (s.technician_id = n.technician_id AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)), false)",
+    bindings: soonDays(asOf),
   };
 }
 
@@ -149,36 +163,43 @@ router.get('/schedule-changes', async (req, res, next) => {
   try {
     const asOf = new Date();
     const soon = soonSql(asOf);
-    const columns = ['n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at'];
+    const columns = ['n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at', 'n.technician_id', 'n.visit_soon_when'];
     const [soonRows, laterRows, totals] = await Promise.all([
-      openScheduleChanges(req.technicianId)
+      openScheduleChanges(req.technicianId, asOf)
         .where('n.created_at', '<=', asOf)
         .whereRaw(soon.sql, soon.bindings)
+        // In visit order, so today's stops lead tomorrow's (this tech's
+        // visits only; one now on another route goes last).
+        .orderByRaw('CASE WHEN s.technician_id = n.technician_id THEN s.scheduled_date END ASC NULLS LAST, CASE WHEN s.technician_id = n.technician_id THEN s.window_start END ASC NULLS LAST')
         .orderBy('n.created_at', 'desc')
         .limit(SCHEDULE_CHANGE_LIMIT)
         .select(columns),
-      openScheduleChanges(req.technicianId)
+      openScheduleChanges(req.technicianId, asOf)
         .where('n.created_at', '<=', asOf)
         .whereRaw(`NOT ${soon.sql}`, soon.bindings)
         .orderBy('n.created_at', 'desc')
         .limit(SCHEDULE_CHANGE_LIMIT)
         .select(columns),
-      openScheduleChanges(req.technicianId)
+      openScheduleChanges(req.technicianId, asOf)
         .where('n.created_at', '<=', asOf)
         .whereRaw(`NOT ${soon.sql}`, soon.bindings)
         .count('* as n'),
     ]);
-    const changes = [
+    const changes = await refreshVisitCards([
       ...soonRows.map((row) => ({ ...parseRow(row), soon: true })),
       ...laterRows.map((row) => ({ ...parseRow(row), soon: false })),
-    ];
+    ], db);
     res.json({ changes, later_total: Number(totals[0]?.n) || 0, as_of: asOf.toISOString() });
   } catch (err) { next(err); }
 });
 
-// POST /dismiss-batch { as_of } — "Got it, clear all" on the summary card:
-// every open NON-soon schedule-change card of this tech written by `as_of`
-// (the read the tech was looking at). Soon cards keep their own Got it.
+// POST /dismiss-batch { as_of, keep_ids } — "Got it, clear all" on the
+// summary card: every open NON-soon schedule-change card of this tech written
+// by `as_of` (the read the tech was looking at), with the older cards of the
+// same visits that the read folded under them, so none of those comes back
+// as the visit's card. Soon cards keep their own Got it: `keep_ids` are the
+// soon cards that read showed, kept even when a move since has taken their
+// visit off today and tomorrow (soon also reads the visit's day now).
 router.post('/dismiss-batch', async (req, res, next) => {
   try {
     // A non-empty timestamp string only: new Date(null) is a valid 1970
@@ -186,14 +207,23 @@ router.post('/dismiss-batch', async (req, res, next) => {
     const raw = req.body?.as_of;
     const asOf = typeof raw === 'string' && raw.trim() ? new Date(raw) : null;
     if (!asOf || Number.isNaN(asOf.getTime())) return res.status(400).json({ error: 'as_of is required' });
+    const keepIds = Array.isArray(req.body?.keep_ids)
+      ? req.body.keep_ids.filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, SCHEDULE_CHANGE_LIMIT)
+      : [];
     const soon = soonSql(asOf);
-    const ids = openScheduleChanges(req.technicianId)
+    const shown = () => openScheduleChanges(req.technicianId, asOf)
       .where('n.created_at', '<=', asOf)
       .whereRaw(`NOT ${soon.sql}`, soon.bindings)
-      .select('n.id');
+      .whereNotIn('n.id', keepIds);
     const dismissed = await db('tech_notifications')
-      .whereIn('id', ids)
+      .where('technician_id', req.technicianId)
+      .whereIn('type', SCHEDULE_CHANGE_TYPES)
+      .where('created_at', '<=', asOf)
       .whereNull('dismissed_at')
+      .where(function shownOrFolded() {
+        this.whereIn('id', shown().select('n.id'))
+          .orWhereIn(db.raw("payload->>'visit_id'"), shown().select(db.raw("n.payload->>'visit_id'")));
+      })
       .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
     res.json({ success: true, dismissed });
   } catch (err) { next(err); }
@@ -227,6 +257,19 @@ router.post('/:id/dismiss', async (req, res, next) => {
       // #4403 round 24).
       .update({ read: true, dismissed_at: new Date(), updated_at: new Date(),
         payload: db.raw("COALESCE(payload, '{}'::jsonb) - 'superseded_at'") });
+    // A schedule-change card speaks for its visit's older open cards (the
+    // feeds show one per visit): Got it clears those too, or the next older
+    // one would take its place.
+    const visitId = parsePayload(row.payload).visit_id;
+    if (SCHEDULE_CHANGE_TYPES.includes(row.type) && visitId) {
+      await db('tech_notifications')
+        .where('technician_id', req.technicianId)
+        .whereIn('type', SCHEDULE_CHANGE_TYPES)
+        .whereNull('dismissed_at')
+        .whereRaw("payload->>'visit_id' = ?", [String(visitId)])
+        .where('created_at', '<=', row.created_at)
+        .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
+    }
 
     res.json({ success: true });
   } catch (err) { next(err); }

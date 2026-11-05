@@ -90,8 +90,31 @@ describe('notification trigger push tags', () => {
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 1, areas: [{ area: 'Billing', count: 1 }] }).title).toBe('1 item waits for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 2, areas: [{ area: 'Billing', count: 2 }] }).title).toBe('2 items wait for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 3, areas: [] }).body).toBeNull();
+    // Owner 2026-11-04 "fix count": read items still open show as "N open in all" after the unread areas.
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 39, total: 334, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2 \u00b7 334 open in all');
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 12, total: 12, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2');
     expect(TRIGGER_REGISTRY.waiting_summary).toMatchObject({ label: 'Morning summary: items waiting for you', category: 'alert', priority: 'normal', group: 'Alerts' });
     expect(TRIGGER_REGISTRY.waiting_summary.techVisible).toBeUndefined();
+  });
+
+  // GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner").
+  test('open_visits_nudge carries the text\'s words, opens the tech close-out page and has no bell-row rule beyond fyi', () => {
+    const built = TRIGGER_REGISTRY.open_visits_nudge.build({
+      headline: '3 visits from today are still open',
+      lines: ['9:00 AM - Ana R. - Pest Control (not started)', '+2 more'],
+      day: '2026-11-04',
+    });
+    expect(built.title).toBe('3 visits from today are still open');
+    expect(built.body).toBe('Tap to close out.\n9:00 AM - Ana R. - Pest Control (not started)\n+2 more');
+    expect(built.link).toBe('/tech');
+    expect(TRIGGER_REGISTRY.open_visits_nudge.build({}).body).toBe('Tap to close out.');
+    expect(TRIGGER_REGISTRY.open_visits_nudge).toMatchObject({ category: 'alert', priority: 'normal', group: 'Alerts', rule: { severity: 'fyi' } });
+    expect(TRIGGER_REGISTRY.open_visits_nudge.techVisible).toBeUndefined();
+  });
+
+  test('open_visits_nudge gets a per-ET-day push tag', () => {
+    expect(__private.pushTagFor('open_visits_nudge', { day: '2026-11-04' })).toBe('waves-open_visits_nudge-2026-11-04');
+    expect(__private.pushTagFor('open_visits_nudge', { day: '2026-11-05' })).not.toBe(__private.pushTagFor('open_visits_nudge', { day: '2026-11-04' }));
   });
 
   test('bill payment error trigger highlights ACH checkout failures', () => {
@@ -1031,6 +1054,58 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     }
   });
 
+  // GATE_OWNER_NUDGE_BANNER: pushOnly + onlyUserIds reaches only the named admin, never a bell row, only while its gate is on.
+  test.each([['true', 1], [undefined, 0]])('GATE_OWNER_NUDGE_BANNER=%p: the pushOnly open_visits_nudge banner sends %p push(es) to the owner alone, never a bell row', async (gate, pushes) => {
+    const PushService = require('../services/push-notifications');
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'owner-1', role: 'admin' }, { id: 'admin-2', role: 'admin' }]) : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+    PushService.sendToAdminUsers.mockClear();
+    if (gate) process.env.GATE_OWNER_NUDGE_BANNER = gate;
+    try {
+      const stats = await triggerNotification(
+        'open_visits_nudge',
+        { headline: '2 visits from today are still open', lines: ['9:00 AM - Ana R. - Pest Control'], day: '2026-11-04' },
+        { pushOnly: true, adminOnly: true, onlyUserIds: ['owner-1'] },
+      );
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(pushes);
+      if (!pushes) {
+        expect(stats.policySilenced).toBe(true);
+        return;
+      }
+      const [adminIds, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
+      expect(adminIds).toEqual(['owner-1']);
+      expect(payloadFor('owner-1')).toMatchObject({
+        title: '2 visits from today are still open', body: 'Tap to close out.\n9:00 AM - Ana R. - Pest Control', url: '/tech',
+        tag: 'waves-open_visits_nudge-2026-11-04', sound: 'waves-reminder.caf', priority: 'normal',
+      });
+    } finally {
+      delete process.env.GATE_OWNER_NUDGE_BANNER;
+      gateSpy.mockRestore();
+    }
+  });
+
+  test('onlyUserIds naming nobody who is active sends no push (the nudge then falls back to the text)', async () => {
+    const PushService = require('../services/push-notifications');
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-2', role: 'admin' }]) : tableMock([])
+    ));
+    PushService.sendToAdminUsers.mockClear();
+    try {
+      const stats = await triggerNotification('open_visits_nudge', { headline: 'x', lines: [], day: '2026-11-04' }, { pushOnly: true, onlyUserIds: ['owner-1'] });
+      expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+      expect(stats.push?.sent ?? 0).toBe(0);
+    } finally {
+      gateSpy.mockRestore();
+    }
+  });
+
   // GATE_ALERT_CATALOG=watch (bell rebuild step D1): this silence returns before NotificationService.create, so it
   // leaves the muted record itself; otherwise every muted registry event (payments, dashboard alerts) went uncounted.
   test.each([['watch', 1], [undefined, 0]])('GATE_ALERT_CATALOG=%p: a registry event the bell policy silences leaves %p muted record(s)', async (mode, rows) => {
@@ -1342,6 +1417,18 @@ describe('bell banner triggers', () => {
     // It sits right after sms_reply.
     const keys = Object.keys(TRIGGER_REGISTRY);
     expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
+  });
+
+  test('new_lead_email (GATE_RING_NEW_CONTACTS) builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+    const lead = TRIGGER_REGISTRY.new_lead_email;
+    expect(lead).toEqual(expect.objectContaining({ category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
+    expect(lead.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });
+    expect(lead.build(bannerPayload)).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(lead.build({}).link).toBe('/admin/email');
+    await triggerNotification('new_lead_email', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    const sent = PushService.sendToAdminUsers.mock.calls.at(-1)[1]('admin-1');
+    expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_email-n-42', sound: 'waves-lead.caf' });
   });
 
   test('the banner is tagged by its row, so a refresh ring replaces it, and a second row never does', () => {

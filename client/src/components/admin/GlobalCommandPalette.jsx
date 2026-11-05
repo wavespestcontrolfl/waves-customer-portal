@@ -27,6 +27,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import DictationButton from "../tech/DictationButton";
 import useDictationPending from "../../hooks/dictationPending";
+import { useSendToClaudeIdea, SendToClaudeButton, SendToClaudeNote, SendToClaudeRow } from "./SendToClaudeIdea";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
@@ -515,6 +516,18 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setAttachmentNotice(null);
     setAttachmentBusy(false);
   }, [setAttachmentBusy]);
+
+  // The free "Send to Claude" beside Ask (GATE_IB_SEND_TO_CLAUDE): no model call, nothing on the Ask path.
+  const claudeIdea = useSendToClaudeIdea({
+    open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, dictationUsedRef, pageData: ibPageData, route: location.pathname,
+    onSent: () => {
+      dictationUsedRef.current = false;
+      pastedRef.current = false;
+      setPrompt("");
+      resetAttachments();
+    },
+    onRestore: setPrompt,
+  });
 
   // With threads enabled, a context change no longer wipes the conversation
   // (operating-terminal scope, owner-ratified 2026-08-31): the thread
@@ -1064,6 +1077,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         attachmentNotice={attachmentNotice}
         addAttachments={addAttachments}
         removeAttachment={removeAttachment}
+        claudeIdea={claudeIdea}
       />
     );
   }
@@ -1271,6 +1285,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             {attachmentNotice}
           </div>
         )}
+        <SendToClaudeRow claude={claudeIdea} hidden={loading} />
         {showThreads && !loading && (
           <div style={{ flex: 1, overflow: "auto", padding: "10px 18px 14px" }}>
             <div
@@ -1533,6 +1548,7 @@ function MobileSheet({
   attachmentNotice,
   addAttachments,
   removeAttachment,
+  claudeIdea,
 }) {
   const fileInputRef = useRef(null);
   useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.mobile);
@@ -1759,7 +1775,9 @@ function MobileSheet({
             >
               {loading ? "Thinking…" : attachmentsLoading ? "Attaching…" : "Ask"}
             </button>
+            <SendToClaudeButton claude={claudeIdea} variant="mobile" hidden={loading} />
           </div>}
+          <SendToClaudeNote claude={claudeIdea} variant="mobile" showHelp={Boolean(prompt.trim())} />
         </div>
         {/* Body: scrollable region below the input */}
         <div

@@ -7,6 +7,9 @@
  *      push only between 7:00 AM and 9:00 PM Eastern. Outside those hours the bell row stays and no banner is sent
  *      (the 8 AM summary banner covers them).
  *   B. messenger_reply (a Facebook message) pushes at any hour, like a text.
+ *   C. new_lead_email (a lead created from an email, or an email that completed a quote request) pushes at any hour, like
+ *      a text, behind its own gate GATE_RING_NEW_CONTACTS instead of GATE_BELL_BANNERS (owner 2026-11-04, "ring new"). Its
+ *      writer names the kind with notifyAdmin's `bannerKind` option, which is never stored on the row.
  *
  * NotificationService.notifyAdmin calls bannerAfterWrite(result, { metadata, trx }) once per write. The banner goes
  * out only after the bell row is durable: a write on the caller's transaction waits for the OUTERMOST commit (a
@@ -19,11 +22,13 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
 
-// nightQuiet: no banner at night (9:00 PM to 7:00 AM Eastern).
+// nightQuiet: no banner at night (9:00 PM to 7:00 AM Eastern). gate: the feature-gates reader that turns the kind on,
+// GATE_BELL_BANNERS (bellBannersLive) unless the kind names its own.
 const BELL_BANNER_KINDS = Object.freeze({
   sms_operational_followup: Object.freeze({ nightQuiet: true }),
   call_commitment_overdue: Object.freeze({ nightQuiet: true }),
   messenger_reply: Object.freeze({ nightQuiet: false }),
+  new_lead_email: Object.freeze({ nightQuiet: false, gate: 'ringNewContactsLive' }),
 });
 
 const QUIET_FROM_HOUR = 21;
@@ -36,10 +41,11 @@ function isNightQuiet(date = new Date()) {
   return hour >= QUIET_FROM_HOUR || hour < QUIET_UNTIL_HOUR;
 }
 
-// GATE_BELL_BANNERS, read at call time. A missing reader (a test that mocks feature-gates) or a throw reads as off.
-function bannersLive() {
+// The kind's gate (GATE_BELL_BANNERS, or the kind's own), read at call time. A missing reader (a test that mocks
+// feature-gates) or a throw reads as off.
+function bannersLive(kind) {
   try {
-    return require('../config/feature-gates').bellBannersLive?.() === true;
+    return require('../config/feature-gates')[BELL_BANNER_KINDS[kind]?.gate || 'bellBannersLive']?.() === true;
   } catch {
     return false;
   }
@@ -67,7 +73,7 @@ function skipReason(result, metadata) {
   const row = ringedRow(result);
   const caller = metaOf(metadata);
   if (!isBannerKind(caller.triggerKey)) return 'not_banner_kind';
-  if (!bannersLive()) return 'gate_off';
+  if (!bannersLive(caller.triggerKey)) return 'gate_off';
   if (!row) return 'did_not_ring';
   const meta = { ...caller, ...metaOf(row.metadata) };
   // An Activity-only or quiet row is no ring (the watchdog's backlog summary is one); a row routed to Claude's queue

@@ -247,6 +247,7 @@ async function buildCompletionCommsContext({
   scheduledServiceId = null,
   originDate = null,
   knex = db,
+  excludeCalls = false,
 } = {}) {
   if (!customerId) return { text: '', floor: null, reason: '', serviceLine: null, promptHint: '' };
   const { floor, reason, serviceLine } = await resolveContextWindow({
@@ -254,7 +255,9 @@ async function buildCompletionCommsContext({
   });
 
   const [calls, sms, emails] = await Promise.all([
-    knex('call_log')
+    // excludeCalls (a technician's report draft; owner 2026-11-04): the call
+    // channel is never read, so no call summary or transcript reaches the prompt.
+    excludeCalls ? [] : knex('call_log')
       .where({ customer_id: customerId })
       .where('created_at', '>=', floor)
       .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
@@ -539,6 +542,7 @@ async function buildCustomerWordsContext({
   scheduledServiceId = null,
   originDate = null,
   knex = db,
+  excludeCalls = false,
 } = {}) {
   if (!customerId) return { text: '', promptHint: '' };
   const { floor, reason, serviceLine } = await resolveContextWindow({
@@ -546,7 +550,10 @@ async function buildCustomerWordsContext({
   });
   // Rows that format to nothing (a call with no summary) are dropped before
   // each channel's cap, so they never push an older real line out.
-  const perChannel = await Promise.all(CUSTOMER_WORDS_CHANNELS.map((channel) => channel.read(knex, customerId, floor)
+  const channels = excludeCalls
+    ? CUSTOMER_WORDS_CHANNELS.filter((channel) => channel.name !== 'call')
+    : CUSTOMER_WORDS_CHANNELS;
+  const perChannel = await Promise.all(channels.map((channel) => channel.read(knex, customerId, floor)
     .then((rows) => rows.filter(channel.keep)
       .map((row) => ({ ts: contextTs(channel.ts(row)), line: channel.line(row) }))
       .filter((entry) => entry.line)
@@ -563,7 +570,9 @@ async function buildCustomerWordsContext({
   // The window's anchor day in Eastern time, like every line (the shared
   // window label prints the UTC date).
   const etReason = floor ? reason.replace(`(${contextDate(floor)})`, `(${etDay(floor)})`) : reason;
-  const promptHint = `Recent contact with this customer (${etReason}). Texts and emails are the customer's own words. A call entry is an AI summary of a conversation between the customer and Waves: use only what it says the customer reported, never what Waves said or promised. It is never a finding: use it only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote it, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`;
+  const promptHint = excludeCalls
+    ? `Recent contact with this customer (${etReason}). Texts and emails are the customer's own words. They are never a finding: use them only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote them, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`
+    : `Recent contact with this customer (${etReason}). Texts and emails are the customer's own words. A call entry is an AI summary of a conversation between the customer and Waves: use only what it says the customer reported, never what Waves said or promised. It is never a finding: use it only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote it, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`;
   return { text, promptHint };
 }
 

@@ -438,12 +438,25 @@ router.post('/jobs/:id/cancel', async (req, res) => {
   });
 });
 
+// Revenue and the revenue-ranked score fields (owner ruling D2 A 2026-11-04:
+// the Scores tab is owner-only). estimated_revenue falls back to the
+// customer's monthly rate, which Customer 360 also keeps from a technician.
+const OWNER_ONLY_JOB_KEYS = [
+  'estimated_revenue', 'job_score', 'score', 'score_breakdown', 'breakdown',
+  'priority', 'upsell_flags', 'protect_slot', 'is_high_value',
+];
+function withoutOwnerOnlyJobKeys(job) {
+  const rest = { ...job };
+  for (const key of OWNER_ONLY_JOB_KEYS) delete rest[key];
+  return rest;
+}
+
 // GET /api/dispatch/jobs?date=YYYY-MM-DD&techId=uuid&status=scheduled
 router.get('/jobs', async (req, res) => {
   try {
     const { date, techId, status } = req.query;
     const jobs = await canonicalJobs({ date, techId, status, scope: req });
-    res.json(jobs);
+    res.json(isTechnicianRequest(req) ? jobs.map(withoutOwnerOnlyJobKeys) : jobs);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

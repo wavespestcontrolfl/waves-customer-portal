@@ -89,6 +89,97 @@ describe('firstAskLockChoice', () => {
   });
 });
 
+// GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): the second off reason, "Already left a review".
+describe('the second off reason (GATE_REVIEW_ALREADY_REVIEWED)', () => {
+  const lockWas = process.env.GATE_REVIEW_FIRST_ASK_LOCK;
+  const gateWas = process.env.GATE_REVIEW_ALREADY_REVIEWED;
+  afterEach(() => {
+    if (lockWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = lockWas;
+    if (gateWas === undefined) delete process.env.GATE_REVIEW_ALREADY_REVIEWED; else process.env.GATE_REVIEW_ALREADY_REVIEWED = gateWas;
+  });
+  const { reviewAlreadyReviewedLive } = require('../config/feature-gates');
+  const neverAsked = fakeDb({ customer: { id: 'cust-1' } });
+  const choose = (optOutReason) => ReviewService.firstAskLockChoice({ customerId: 'cust-1', requestReview: false, optOutReason }, neverAsked);
+
+  test('the gate is strict: only the exact string true turns it on', () => {
+    for (const value of [undefined, '', 'TRUE', '1', 'yes', 'false']) {
+      if (value === undefined) delete process.env.GATE_REVIEW_ALREADY_REVIEWED; else process.env.GATE_REVIEW_ALREADY_REVIEWED = value;
+      expect(reviewAlreadyReviewedLive()).toBe(false);
+      expect(ReviewService.firstAskOptOutReasons()).toEqual(['complaint_on_site']);
+    }
+    process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
+    expect(reviewAlreadyReviewedLive()).toBe(true);
+    expect(ReviewService.firstAskOptOutReasons()).toEqual(['complaint_on_site', 'already_left_review']);
+  });
+
+  test('gate off: "Already left a review" is not a reason, so the first ask stays on', async () => {
+    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+    delete process.env.GATE_REVIEW_ALREADY_REVIEWED;
+    expect(await choose('already_left_review')).toEqual({ requestReview: true, forcedOn: true, optOutReason: null });
+  });
+
+  test('gate on: "Already left a review" turns the first ask off and is saved; the complaint still works', async () => {
+    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+    process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
+    expect(await choose('already_left_review')).toEqual({ requestReview: false, forcedOn: false, optOutReason: 'already_left_review' });
+    expect(await choose('complaint_on_site')).toEqual({ requestReview: false, forcedOn: false, optOutReason: 'complaint_on_site' });
+    expect(await choose('customer_busy')).toEqual({ requestReview: true, forcedOn: true, optOutReason: null });
+    expect(ReviewService.ALREADY_LEFT_REVIEW_REASON).toBe('already_left_review');
+  });
+
+  test('the first-ask lock off: the new gate alone changes nothing', async () => {
+    delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
+    process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
+    expect(await choose('already_left_review')).toBeNull();
+  });
+});
+
+describe('alreadyReviewedForVisit', () => {
+  // scheduled_services joined to customers, then the newest linked live google_reviews row.
+  function reviewedDb({ customer, review, fail = false }) {
+    const seen = {};
+    const conn = (table) => {
+      const q = {};
+      for (const name of ['join', 'where', 'whereNull', 'whereNotNull']) q[name] = (...args) => { (seen[table] = seen[table] || []).push([name, ...args]); return q; };
+      q.orderBy = (...args) => { (seen[table] = seen[table] || []).push(['orderBy', ...args]); return q; };
+      q.first = async () => {
+        if (fail) throw new Error('read failed');
+        return table === 'google_reviews' ? review : customer;
+      };
+      return q;
+    };
+    return { conn, seen };
+  }
+  const read = (opts) => ReviewService.alreadyReviewedForVisit('svc-1', reviewedDb(opts).conn);
+
+  test('marked, with a linked live review: the Eastern date of the newest review', async () => {
+    const fake = reviewedDb({ customer: { id: 'cust-1', has_left_google_review: true, review_marked_at: new Date('2026-03-01T15:00:00Z') },
+      review: { review_created_at: new Date('2025-01-01T20:06:00Z') } });
+    expect(await ReviewService.alreadyReviewedForVisit('svc-1', fake.conn)).toEqual({ reviewedOn: '2025-01-01' });
+    expect(fake.seen.google_reviews).toEqual(expect.arrayContaining([['where', { customer_id: 'cust-1' }], ['whereNull', 'missing_since'], ['orderBy', 'review_created_at', 'desc']]));
+  });
+
+  test('the date is the Eastern calendar day, not the UTC one', async () => {
+    expect(await read({ customer: { id: 'cust-1', has_left_google_review: true }, review: { review_created_at: new Date('2025-01-01T03:00:00Z') } }))
+      .toEqual({ reviewedOn: '2024-12-31' });
+  });
+
+  test('marked, no linked review: the day the mark was set; neither known: no date', async () => {
+    expect(await read({ customer: { id: 'cust-1', has_left_google_review: true, review_marked_at: new Date('2026-10-14T16:00:00Z') }, review: undefined }))
+      .toEqual({ reviewedOn: '2026-10-14' });
+    expect(await read({ customer: { id: 'cust-1', has_left_google_review: true, review_marked_at: null }, review: undefined }))
+      .toEqual({ reviewedOn: null });
+  });
+
+  test('not marked, an unknown visit, no id and a read failure are all null (today\'s box)', async () => {
+    expect(await read({ customer: { id: 'cust-1', has_left_google_review: false }, review: { review_created_at: new Date() } })).toBeNull();
+    expect(await read({ customer: { id: 'cust-1', has_left_google_review: null } })).toBeNull();
+    expect(await read({ customer: undefined })).toBeNull();
+    expect(await ReviewService.alreadyReviewedForVisit(null, reviewedDb({ customer: { id: 'x', has_left_google_review: true } }).conn)).toBeNull();
+    expect(await read({ customer: { id: 'cust-1', has_left_google_review: true }, fail: true })).toBeNull();
+  });
+});
+
 describe('firstAskLockVisit', () => {
   // scheduled_services joined to services: one row, or a read that throws.
   function visitDb(row, { fail = false } = {}) {

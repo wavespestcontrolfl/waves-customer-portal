@@ -67,8 +67,7 @@ import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/sche
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import {
   MAX_REVIEW_DELAY_MS,
-  COMPLAINT_ON_SITE_REASON,
-  FIRST_ASK_OPT_OUT_PROMPT,
+  FIRST_ASK_OPT_OUT_REASONS,
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
   completionReportTextExpected,
@@ -76,11 +75,14 @@ import {
   completionReviewSuppressionReason,
   completionTimeOnSiteBody,
   completionWillReview,
+  alreadyReviewedFrom,
   customReviewTimeProblem,
+  firstAskReasonsFrom,
   firstReviewAskFrom,
   formatReentryStepperMinutes,
   nextReviewChoice,
   normalizeReviewTiming,
+  pickFirstAskOptOutReason,
   reviewBoxLabel,
   reviewDelayMinutesOf,
   reviewOptOutFields,
@@ -12445,9 +12447,14 @@ export function CompletionPanel({
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
   // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): the server's read that this visit's customer was
-  // never asked, and the one reason the tech confirmed for turning the box off.
+  // never asked, and the reason the tech confirmed for turning the box off.
   const [reviewFirstAsk, setReviewFirstAsk] = useState(false);
   const [reviewOptOutReason, setReviewOptOutReason] = useState(null);
+  // GATE_REVIEW_ALREADY_REVIEWED: the server's read that this visit's customer is marked as already
+  // reviewed ({ reviewedOn } or null), and the off reasons a first ask may carry. Kept, like
+  // reviewFirstAsk, when the preview is cleared (box off).
+  const [reviewAlreadyReviewed, setReviewAlreadyReviewed] = useState(null);
+  const [reviewFirstAskReasons, setReviewFirstAskReasons] = useState(() => firstAskReasonsFrom(null));
   const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   // Server preview of the "Automatic" send time + whether cadence mode owns
@@ -14206,6 +14213,8 @@ export function CompletionPanel({
     visitOutcome,
     customerConcernInteraction:
       isCustomerConcernInteraction(customerInteraction),
+    // GATE_REVIEW_ALREADY_REVIEWED; the one-time recap box keeps its own rule.
+    alreadyReviewed: !oneTimeRecapOnly && !!reviewAlreadyReviewed,
   });
   const willReview = completionWillReview({
     oneTimeRecapOnly,
@@ -14274,6 +14283,11 @@ export function CompletionPanel({
       fetchReviewSendPreview().then((data) => {
         const firstAsk = firstReviewAskFrom(data);
         if (!gone && firstAsk !== null) setReviewFirstAsk(firstAsk);
+        // GATE_REVIEW_ALREADY_REVIEWED: an answer (not a failed read) also says whether the customer is marked reviewed.
+        if (!gone && data) {
+          setReviewAlreadyReviewed(alreadyReviewedFrom(data));
+          setReviewFirstAskReasons(firstAskReasonsFrom(data));
+        }
       });
       return () => { gone = true; };
     }
@@ -14283,6 +14297,11 @@ export function CompletionPanel({
       // then turns itself back on unless the one reason was confirmed.
       const firstAsk = firstReviewAskFrom(data);
       if (firstAsk !== null) setReviewFirstAsk(firstAsk);
+      // The already-reviewed read lands the same way: the box then shows the mark instead of an ask.
+      if (data) {
+        setReviewAlreadyReviewed(alreadyReviewedFrom(data));
+        setReviewFirstAskReasons(firstAskReasonsFrom(data));
+      }
       if (cancelled) return;
       setReviewSendPreview(data);
       if (data) previewFailureNoticedRef.current = false;
@@ -14299,9 +14318,13 @@ export function CompletionPanel({
   useEffect(() => {
     if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
   }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
-  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk });
+  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn });
   const handleReviewToggle = (checked) => {
-    const next = nextReviewChoice({ checked, firstAsk: reviewFirstAsk, confirmOptOut: () => window.confirm(FIRST_ASK_OPT_OUT_PROMPT) });
+    const next = nextReviewChoice({
+      checked,
+      firstAsk: reviewFirstAsk,
+      pickOptOutReason: () => pickFirstAskOptOutReason(reviewFirstAskReasons, (text) => window.confirm(text)),
+    });
     setRequestReview(next.requestReview);
     setReviewOptOutReason(next.reviewOptOutReason);
   };
@@ -15650,7 +15673,7 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
-    setReviewOptOutReason(savedDraft.reviewOptOutReason === COMPLAINT_ON_SITE_REASON ? COMPLAINT_ON_SITE_REASON : null);
+    setReviewOptOutReason(FIRST_ASK_OPT_OUT_REASONS.includes(savedDraft.reviewOptOutReason) ? savedDraft.reviewOptOutReason : null);
     // An untouched picker (legacy drafts stored null for it) keeps whatever
     // is showing now — including the first-visit 5; a tap or a deliberate
     // clear is restored and locks out the late prefill.

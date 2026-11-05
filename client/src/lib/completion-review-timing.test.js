@@ -8,10 +8,16 @@ import {
   reviewSendPreviewPath,
   timedReviewHint,
   completionReviewHint,
+  ALREADY_LEFT_REVIEW_REASON,
   COMPLAINT_ON_SITE_REASON,
   FIRST_REVIEW_ASK_LABEL,
+  alreadyReviewedFrom,
+  completionReviewSuppressionReason,
+  completionWillReview,
+  firstAskReasonsFrom,
   firstReviewAskFrom,
   nextReviewChoice,
+  pickFirstAskOptOutReason,
   reviewBoxLabel,
   reviewOptOutFields,
 } from './completion-review-timing';
@@ -67,15 +73,46 @@ describe('the first review ask box (GATE_REVIEW_FIRST_ASK_LOCK)', () => {
     expect(firstReviewAskFrom(null)).toBeNull();
   });
 
-  test('toggling: checking always turns it on; unchecking a first ask needs the confirmed reason', () => {
-    const yes = () => true;
-    const no = () => false;
-    expect(nextReviewChoice({ checked: true, firstAsk: true, confirmOptOut: no })).toEqual({ requestReview: true, reviewOptOutReason: null });
-    expect(nextReviewChoice({ checked: false, firstAsk: true, confirmOptOut: yes })).toEqual({ requestReview: false, reviewOptOutReason: COMPLAINT_ON_SITE_REASON });
-    expect(nextReviewChoice({ checked: false, firstAsk: true, confirmOptOut: no })).toEqual({ requestReview: true, reviewOptOutReason: null });
+  test('toggling: checking always turns it on; unchecking a first ask needs a confirmed reason', () => {
+    const complaint = () => COMPLAINT_ON_SITE_REASON;
+    const none = () => null;
+    expect(nextReviewChoice({ checked: true, firstAsk: true, pickOptOutReason: none })).toEqual({ requestReview: true, reviewOptOutReason: null });
+    expect(nextReviewChoice({ checked: false, firstAsk: true, pickOptOutReason: complaint })).toEqual({ requestReview: false, reviewOptOutReason: COMPLAINT_ON_SITE_REASON });
+    expect(nextReviewChoice({ checked: false, firstAsk: true, pickOptOutReason: () => ALREADY_LEFT_REVIEW_REASON }))
+      .toEqual({ requestReview: false, reviewOptOutReason: 'already_left_review' });
+    expect(nextReviewChoice({ checked: false, firstAsk: true, pickOptOutReason: none })).toEqual({ requestReview: true, reviewOptOutReason: null });
     const never = vi.fn();
-    expect(nextReviewChoice({ checked: false, firstAsk: false, confirmOptOut: never })).toEqual({ requestReview: false, reviewOptOutReason: null });
+    expect(nextReviewChoice({ checked: false, firstAsk: false, pickOptOutReason: never })).toEqual({ requestReview: false, reviewOptOutReason: null });
     expect(never).not.toHaveBeenCalled();
+  });
+
+  test('picking the reason: one reason on offer asks today\'s one question', () => {
+    const yes = vi.fn(() => true);
+    expect(pickFirstAskOptOutReason([COMPLAINT_ON_SITE_REASON], yes)).toBe(COMPLAINT_ON_SITE_REASON);
+    expect(yes).toHaveBeenCalledTimes(1);
+    expect(yes.mock.calls[0][0]).toMatch(/The only reason to skip it is: Complaint on site/);
+    expect(pickFirstAskOptOutReason([COMPLAINT_ON_SITE_REASON], () => false)).toBeNull();
+  });
+
+  test('picking the reason with both on offer (GATE_REVIEW_ALREADY_REVIEWED): "already reviewed" first, then the complaint', () => {
+    const both = [COMPLAINT_ON_SITE_REASON, ALREADY_LEFT_REVIEW_REASON];
+    const answers = (...values) => { const fn = vi.fn(() => values.shift()); return fn; };
+    const first = answers(true);
+    expect(pickFirstAskOptOutReason(both, first)).toBe(ALREADY_LEFT_REVIEW_REASON);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(first.mock.calls[0][0]).toMatch(/already leave a Google review/);
+    const second = answers(false, true);
+    expect(pickFirstAskOptOutReason(both, second)).toBe(COMPLAINT_ON_SITE_REASON);
+    expect(second.mock.calls[1][0]).toMatch(/complaint on site/);
+    expect(pickFirstAskOptOutReason(both, answers(false, false))).toBeNull();
+  });
+
+  test('the off reasons on offer: the known ones the server lists, else only the complaint', () => {
+    expect(firstAskReasonsFrom({ firstAskReasons: ['complaint_on_site', 'already_left_review'] })).toEqual(['complaint_on_site', 'already_left_review']);
+    expect(firstAskReasonsFrom({ firstAskReasons: ['complaint_on_site', 'made_up'] })).toEqual(['complaint_on_site']);
+    expect(firstAskReasonsFrom({ firstAskReasons: [] })).toEqual(['complaint_on_site']);
+    expect(firstAskReasonsFrom({ at: 'x' })).toEqual(['complaint_on_site']);
+    expect(firstAskReasonsFrom(null)).toEqual(['complaint_on_site']);
   });
 
   test('the body carries the reason only beside a first ask turned off', () => {
@@ -184,5 +221,32 @@ describe('the Automatic hint while the ask goes out after the report text', () =
     expect(completionReportTextExpected({ effectiveSendSms: false, customerPhone: '+19415550100' })).toBe(false);
     expect(completionReportTextExpected({ effectiveSendSms: true, customerPhone: '' })).toBe(false);
     expect(completionReportTextExpected({ effectiveSendSms: true, customerPhone: undefined })).toBe(true);
+  });
+});
+
+describe('a customer already marked as reviewed (GATE_REVIEW_ALREADY_REVIEWED)', () => {
+  test('the mark is read only when the server sent it as an object', () => {
+    expect(alreadyReviewedFrom({ alreadyReviewed: { reviewedOn: '2025-01-01' } })).toEqual({ reviewedOn: '2025-01-01' });
+    expect(alreadyReviewedFrom({ alreadyReviewed: { reviewedOn: null } })).toEqual({ reviewedOn: null });
+    expect(alreadyReviewedFrom({ alreadyReviewed: { reviewedOn: 7 } })).toEqual({ reviewedOn: null });
+    expect(alreadyReviewedFrom({ alreadyReviewed: null })).toBeNull();
+    expect(alreadyReviewedFrom({ alreadyReviewed: true })).toBeNull();
+    expect(alreadyReviewedFrom({ at: 'x' })).toBeNull();
+    expect(alreadyReviewedFrom(null)).toBeNull();
+  });
+
+  test('it suppresses the ask after every visit-fact reason, and nothing else changes', () => {
+    expect(completionReviewSuppressionReason({ alreadyReviewed: true })).toBe('already_reviewed');
+    expect(completionReviewSuppressionReason({ alreadyReviewed: true, customerConcernInteraction: true })).toBe('customer_concern');
+    expect(completionReviewSuppressionReason({ alreadyReviewed: true, isIncompleteVisit: true })).toBe('incomplete');
+    expect(completionReviewSuppressionReason({ alreadyReviewed: false })).toBeNull();
+    expect(completionWillReview({ requestReview: true, reviewSuppressionReason: 'already_reviewed' })).toBe(false);
+  });
+
+  test('the label names the mark and its Eastern date, or the mark alone', () => {
+    expect(reviewBoxLabel({ reviewSuppressionReason: 'already_reviewed', reviewedOn: '2025-01-01' })).toBe('Already left a Google review (Jan 1, 2025)');
+    expect(reviewBoxLabel({ reviewSuppressionReason: 'already_reviewed', reviewedOn: '2025-10-28' })).toBe('Already left a Google review (Oct 28, 2025)');
+    expect(reviewBoxLabel({ reviewSuppressionReason: 'already_reviewed', reviewedOn: null })).toBe('Already left a Google review');
+    expect(reviewBoxLabel({ reviewSuppressionReason: 'customer_concern', reviewedOn: '2025-01-01' })).toBe('Review request suppressed');
   });
 });

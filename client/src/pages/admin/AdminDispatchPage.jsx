@@ -63,10 +63,13 @@ const TAB_LIST = [
   // No Matching or Booking tab (schedule audit S2/S3, owner 2026-10-31):
   // both showed fixed example slots and rules that never ran. A
   // ?tab=match or ?tab=csr link falls back like any other unknown tab.
+  // Scores ranks jobs by revenue: an owner-only tab (owner 2026-11-04, D2 A).
+  // GET /api/dispatch/jobs also drops the revenue fields for a technician.
   {
     key: TABS.REVENUE,
     label: "Scores",
     Icon: TrendingUp,
+    adminOnly: true,
   },
   // No Insights tab (owner 2026-11-02): its drive share was a fixed 22%,
   // its completion rate counted every future visit, and its tech and

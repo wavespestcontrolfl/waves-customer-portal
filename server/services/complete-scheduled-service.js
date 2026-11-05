@@ -3292,8 +3292,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // completion profile and both dark gates are known.
       customerRecapMode,
       requestReview: requestReviewPosted,
-      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK): the one reason a never-asked customer's review ask
-      // may be turned off. Read only below, through ReviewService.firstAskLockChoice.
+      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK), or "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED):
+      // the reasons a never-asked customer's review ask may be turned off. Read only below, through
+      // ReviewService.firstAskLockChoice.
       reviewOptOutReason,
       // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
       // honored below unless the fixed text was asked for and not honored. Absent on the full form.
@@ -3399,7 +3400,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       stationRosterSeen,
     } = completionInput.body;
     // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
-    // WITHOUT the "Complaint on site" reason stays on. Only a tech's explicit requestReview:false on a real,
+    // WITHOUT an off reason ("Complaint on site"; "Already left a review" under GATE_REVIEW_ALREADY_REVIEWED) stays on. Only a tech's explicit requestReview:false on a real,
     // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
     // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior. Gate
     // off: no read at all, requestReview is the posted value.
@@ -8319,6 +8320,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+        // "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED): the tech's off reason for a first review ask
+        // marks the customer as reviewed in this transaction, beside the record that says why, so every later
+        // ask skips them (already_reviewed). An existing mark keeps its own date.
+        if (reviewFirstAskLock?.optOutReason
+          && reviewFirstAskLock.optOutReason === require('./review-request').ALREADY_LEFT_REVIEW_REASON) {
+          await trx('customers')
+            .where({ id: svc.customer_id })
+            .where((q) => q.whereNull('has_left_google_review').orWhere('has_left_google_review', false))
+            .update({ has_left_google_review: true, review_marked_at: new Date(), updated_at: new Date() });
+        }
         // The station sheet's checks, in this transaction under the roster lock
         // (visit-station-facts.js); the full form's sync stays post-commit.
         await require('./visit-station-facts').writeSheetStationChecksInCompletion(trx, {

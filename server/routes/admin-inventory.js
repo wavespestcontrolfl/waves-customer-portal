@@ -9,7 +9,7 @@ const { countActiveRestockRequests, restockMeta } = require('../services/invento
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
-const { buildWaveGuardInventoryForecast, DEFAULT_FORECAST_DAYS } = require('../services/waveguard-inventory-forecast');
+const { buildWaveGuardInventoryForecast, forecastForTechnician, DEFAULT_FORECAST_DAYS } = require('../services/waveguard-inventory-forecast');
 const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
 const {
   normalizeInventoryUnit,
@@ -630,10 +630,15 @@ function normalizeAvailabilityStatus(value) {
 // fields only. Vendor pricing rows, catalog costs, and cached best-price
 // data are owner-only (2026-08-25 role lockdown) — hiding the Vendors &
 // Pricing tabs means nothing here may leak the same data (codex P1).
+// needsPricing, the vendor SKU, the auto-reorder vendor and the reorder
+// quantity are vendor and pricing state too (technician visibility audit
+// A17, 2026-11-04); this list matches admin-dispatch.js
+// CATALOG_OWNER_ONLY_FIELDS. Read only: the owner's edit forms are untouched.
 const OWNER_ONLY_PRODUCT_FIELDS = [
   'bestPrice', 'bestVendor', 'bestVendorPricingId', 'bestPriceAmountCached',
   'bestPriceVendorIdCached', 'bestPriceUpdatedAt', 'bestPriceStatus',
   'costPerUnit', 'costUnit', 'monthlyCost',
+  'needsPricing', 'sku', 'autoReorderVendorId', 'reorderQuantity',
 ];
 function stripOwnerPricing(mapped) {
   const safe = { ...mapped, vendorPricing: [], unitPrices: null };
@@ -937,9 +942,13 @@ function protocolTemplateCounts() {
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const { search, category, needsPricing, stock, sort = 'name', page = 1, limit = 50 } = req.query;
+    const { search, category, stock, sort = 'name', page = 1, limit = 50 } = req.query;
+    const isAdminRequest = req.techRole === 'admin';
+    // A technician's list carries no price or pricing flag, so a sort or a
+    // filter on one would give the hidden value back as an order or a subset.
+    const needsPricing = isAdminRequest ? req.query.needsPricing : undefined;
 
-    let query = db('products_catalog').orderBy(sort === 'price' ? 'best_price' : 'name');
+    let query = db('products_catalog').orderBy(isAdminRequest && sort === 'price' ? 'best_price' : 'name');
     if (search) query = query.where(function () {
       this.whereILike('name', `%${search}%`).orWhereILike('active_ingredient', `%${search}%`);
     });
@@ -1015,7 +1024,6 @@ router.get('/', async (req, res, next) => {
       pendingApprovals = parseInt(r.count);
     } catch { /* table not created yet */ }
 
-    const isAdminRequest = req.techRole === 'admin';
     res.json({
       products: products.map(p => {
         const mapped = mapProduct(p, pricingMap[p.id] || []);
@@ -1023,8 +1031,8 @@ router.get('/', async (req, res, next) => {
       }),
       stats: {
         total: parseInt(stats?.total || 0),
-        priced: parseInt(stats?.priced || 0),
-        needsPrice: parseInt(stats?.needs_price || 0),
+        priced: isAdminRequest ? parseInt(stats?.priced || 0) : null,
+        needsPrice: isAdminRequest ? parseInt(stats?.needs_price || 0) : null,
         avgPrice: isAdminRequest && stats?.avg_price ? parseFloat(stats.avg_price).toFixed(2) : null,
         pendingApprovals,
       },
@@ -2932,8 +2940,9 @@ router.get('/stats', async (req, res, next) => {
       return res.json({
         products: {
           total: parseInt(productStats.total_products),
-          priced: parseInt(productStats.priced),
-          needsPrice: parseInt(productStats.needs_price),
+          // The pricing flag is owner-only (A17): no priced / needs-price split.
+          priced: null,
+          needsPrice: null,
           lowStock: parseInt(productStats.low_stock || 0),
           avgPrice: null,
         },
@@ -2966,7 +2975,8 @@ router.get('/waveguard-forecast', async (req, res, next) => {
       days: req.query.days || DEFAULT_FORECAST_DAYS,
       limit: req.query.limit || 150,
     });
-    res.json({ forecast });
+    // Product totals for everyone; customer names only on the technician's own visits.
+    res.json({ forecast: req.techRole === 'admin' ? forecast : await forecastForTechnician(forecast, { technicianId: req.technicianId }) });
   } catch (err) { next(err); }
 });
 

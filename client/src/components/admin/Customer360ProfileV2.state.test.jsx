@@ -262,7 +262,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'))).toHaveLength(2);
   });
 
-  it('preserves technician texting when admin-only conversation history is unavailable', async () => {
+  it('preserves technician texting when the admin-only conversation route is closed to it', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.endsWith('/customer-a')) {
@@ -292,7 +292,11 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(sends).toHaveLength(1);
     expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', fromNumber: chosenLine, body: 'Service update' });
     expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toBe(false);
-    expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(false);
+    // The technician's thread comes from the SMS log, not the admin-only /comms route; its own unread count is scoped
+    // to this customer.
+    expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/comms'))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/communications/log?customerId=customer-a'))).toBe(true);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count?customerId=customer-a'))).toBe(true);
   }, 10000);
 
   it('refreshes the profile and timeline once after an admin message is sent', async () => {
@@ -752,6 +756,8 @@ describe('Customer360ProfileV2 profile state', () => {
   });
 
   it('shows the account-owner appointment-SMS box CHECKED when no preference is stored', async () => {
+    // These pages (billing, booking) are office views: a technician's copy omits them.
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     // Opt-OUT semantics (20260725000001): an absent preference means the
     // account holder IS included, so a strict `=== true` here would render the
     // box unchecked while the send path actually texts them.
@@ -1173,6 +1179,8 @@ describe('Customer360ProfileV2 profile state', () => {
   });
 
   it('flags partially refunded payments in overview Recent Transactions', async () => {
+    // These pages (billing, booking) are office views: a technician's copy omits them.
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     // A partial refund must not render like an untouched paid row — the
     // gross amount would read as fully collected while Lifetime Rev drops.
     const detail = customerDetail('customer-a', 'Avery');
@@ -1194,6 +1202,8 @@ describe('Customer360ProfileV2 profile state', () => {
   });
 
   it('never renders stale customer actions when a customer switch fails', async () => {
+    // These pages (billing, booking) are office views: a technician's copy omits them.
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     let failSecond = false;
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
@@ -1213,7 +1223,7 @@ describe('Customer360ProfileV2 profile state', () => {
       <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />,
     );
     expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
-    expect(screen.getByRole('switch')).toBeDisabled();
+    expect(screen.getByRole('link', { name: 'Book Appt' })).toBeInTheDocument();
 
     failSecond = true;
     rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
@@ -1230,6 +1240,8 @@ describe('Customer360ProfileV2 profile state', () => {
   });
 
   it('ignores a late response from the previously selected customer', async () => {
+    // These pages (billing, booking) are office views: a technician's copy omits them.
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     const first = deferred();
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);

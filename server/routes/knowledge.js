@@ -1,6 +1,7 @@
 // server/routes/knowledge.js
 const router = require('express').Router();
 const WikiQA = require('../services/knowledge/wiki-qa');
+const { knowledgeAudience, technicianKnowledgeRow } = require('../services/knowledge/technician-categories');
 
 let db;
 function getDb() {
@@ -12,15 +13,17 @@ function getDb() {
 router.get('/', async (req, res) => {
   try {
     const { category, search } = req.query;
+    // A technician reads field categories only; null (admin) leaves every read as it was.
+    const audience = knowledgeAudience(req);
     if (search) {
-      const results = await WikiQA.search(search);
+      const results = await WikiQA.search(search, 20, audience);
       return res.json(results);
     }
     if (category) {
-      const results = await WikiQA.getCategory(category);
+      const results = await WikiQA.getCategory(category, audience);
       return res.json(results);
     }
-    const all = await WikiQA.listAll();
+    const all = await WikiQA.listAll(audience);
     res.json(all);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -34,7 +37,10 @@ router.get('/article', async (req, res) => {
     if (!articlePath) return res.status(400).json({ error: 'path required' });
     const article = await getDb()('knowledge_base').where('path', articlePath).first();
     if (!article) return res.status(404).json({ error: 'Article not found' });
-    res.json(article);
+    if (!knowledgeAudience(req)) return res.json(article);
+    const fieldArticle = technicianKnowledgeRow(article);
+    if (!fieldArticle) return res.status(404).json({ error: 'Article not found' });
+    res.json(fieldArticle);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -46,7 +52,7 @@ router.post('/query', async (req, res) => {
   try {
     const { question, context } = req.body;
     if (!question) return res.status(400).json({ error: 'question required' });
-    const result = await WikiQA.query(question, context || {});
+    const result = await WikiQA.query(question, { ...(context || {}), ...(knowledgeAudience(req) || {}) });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

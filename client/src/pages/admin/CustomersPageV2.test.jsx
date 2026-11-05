@@ -158,6 +158,57 @@ describe('CustomersPageV2 workflow state', () => {
     expect(screen.getAllByRole('button', { name: 'Call via Waves' }).length).toBeGreaterThan(0);
   });
 
+  // The Map plots coordinates the server withholds from a technician, and three filters read fields it also
+  // withholds (cards, status, balance): they would be empty or count as active and change nothing.
+  it.each(['/admin/customers', '/admin/customers?view=map'])('gives a technician no Map and no cards, status or balance filter at %s', async (entry) => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.queryByRole('button', { name: 'Map', exact: true })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Filter customers' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    expect(dialog.getByText('Last visited')).toBeInTheDocument();
+    expect(dialog.getByText('Tier')).toBeInTheDocument();
+    expect(dialog.queryByText('Cards on file')).not.toBeInTheDocument();
+    expect(dialog.queryByText('Status')).not.toBeInTheDocument();
+    expect(dialog.queryByRole('button', { name: 'Has Balance' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the Map and the cards, status and balance filters for an admin', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.getByRole('button', { name: 'Map', exact: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Filter customers' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    expect(dialog.getByText('Cards on file')).toBeInTheDocument();
+    expect(dialog.getByText('Status')).toBeInTheDocument();
+    expect(dialog.getByRole('button', { name: 'Has Balance' })).toBeInTheDocument();
+  });
+
+  it('names the customer in a technician\'s SMS link and leaves an admin\'s link as it was', async () => {
+    const withPhone = { ...list, customers: [{ ...list.customers[0], phone: '+15555550104' }] };
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(withPhone) : response({})));
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    const tech = render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    const techHrefs = screen.getAllByRole('link', { name: /SMS|Messages/ }).map((a) => a.getAttribute('href'));
+    expect(techHrefs.length).toBeGreaterThan(0);
+    for (const href of techHrefs) {
+      expect(href).toContain('customerId=customer-a');
+      expect(href).toContain('thread=customer-a');
+    }
+    tech.unmount();
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    for (const a of screen.getAllByRole('link', { name: /SMS|Messages/ })) {
+      expect(a.getAttribute('href')).toBe('/admin/communications?phone=%2B15555550104');
+    }
+  });
+
   it('preserves the admin Opportunities navigation', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
     render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);

@@ -13,6 +13,7 @@ const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
 const { etDateString } = require('../utils/datetime-et');
 const { normalizeKitKey, isValidKitKey } = require('../services/kit-key');
+const techProjection = require('../services/equipment-tech-projection');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -178,7 +179,9 @@ router.get('/equipment', async (req, res, next) => {
       };
     });
 
-    res.json({ equipment: enriched });
+    // A technician gets operational columns only: no purchase, book,
+    // depreciation or tax figures (owner 2026-10-03, again 2026-11-04).
+    res.json({ equipment: techProjection.isTechnicianCaller(req) ? enriched.map(techProjection.stripEquipmentRow) : enriched });
   } catch (err) {
     next(err);
   }
@@ -451,7 +454,7 @@ router.post('/equipment/:id/maintenance', async (req, res, next) => {
     await db('equipment').where({ id: req.params.id }).update(equipmentUpdates);
 
     logger.info(`Maintenance logged for ${equipment.name}: ${service_type}`);
-    res.status(201).json({ maintenance: log });
+    res.status(201).json({ maintenance: techProjection.isTechnicianCaller(req) ? techProjection.stripMaintenanceRecord(log) : log });
   } catch (err) {
     next(err);
   }
@@ -486,7 +489,7 @@ router.post('/equipment/:id/calibration', async (req, res, next) => {
     });
 
     logger.info(`Calibration logged for ${equipment.name}`);
-    res.status(201).json({ calibration: log });
+    res.status(201).json({ calibration: techProjection.isTechnicianCaller(req) ? techProjection.stripMaintenanceRecord(log) : log });
   } catch (err) {
     next(err);
   }
@@ -503,7 +506,7 @@ router.get('/equipment/:id/calibration-history', async (req, res, next) => {
       })
       .orderBy('performed_at', 'desc');
 
-    res.json({ calibrations: records });
+    res.json({ calibrations: techProjection.isTechnicianCaller(req) ? techProjection.mapRows(records, techProjection.stripMaintenanceRecord) : records });
   } catch (err) {
     next(err);
   }
@@ -513,35 +516,13 @@ router.get('/equipment/:id/calibration-history', async (req, res, next) => {
 // TANK MIXES
 // =========================================================================
 
-// Owner-only per-ounce catalog cost (ADMIN-BUG-R64): cost_per_oz and
-// cost_in_tank are derived straight from products_catalog.best_price
-// (unitCost = best_price / unit_size_oz), and unitSizeOz stays visible to
-// technicians on GET /inventory — so leaving these two per-line fields in a
-// technician response lets best_price be reconstructed exactly
-// (cost_per_oz * unitSizeOz). cost_per_tank / cost_per_1000sf are left
-// alone: EquipmentPage.jsx deliberately shows techs the $/tank and
-// $/1,000 sq ft totals (OWNER_ONLY_EQUIPMENT_TABS keeps only Job Costs and
-// Analytics owner-only), so stripping those would break an intended
-// tech-facing feature, not close a leak.
-function stripMixOwnerOnlyCost(mix) {
-  const wasString = typeof mix.products === 'string';
-  let prods;
-  try {
-    prods = wasString ? JSON.parse(mix.products) : (mix.products || []);
-  } catch {
-    prods = [];
-  }
-  if (!Array.isArray(prods)) return mix;
-  const stripped = prods.map((p) => {
-    if (!p || (p.cost_per_oz === undefined && p.cost_in_tank === undefined)) return p;
-    const { cost_per_oz: _costPerOz, cost_in_tank: _costInTank, ...rest } = p;
-    return rest;
-  });
-  // Preserve the column's original shape (jsonb comes back parsed from a
-  // real DB; this route's own recalculate/create paths JSON.stringify it
-  // before persisting) — never change the response's field type.
-  return { ...mix, products: wasString ? JSON.stringify(stripped) : stripped };
-}
+// Chemical cost is owner-only (ADMIN-BUG-R64, then owner ruling D3 A
+// 2026-11-04): cost_per_oz and cost_in_tank come straight from
+// products_catalog.best_price (unitCost = best_price / unit_size_oz), and
+// unitSizeOz stays visible to technicians on GET /inventory, so they would
+// give the price back; cost_per_tank and cost_per_1000sf are the same cost
+// summed. A technician gets the recipe and the rates only
+// (services/equipment-tech-projection.js stripMixCosts).
 
 // GET /tank-mixes — list all
 router.get('/tank-mixes', async (req, res, next) => {
@@ -568,7 +549,7 @@ router.get('/tank-mixes', async (req, res, next) => {
         : m;
     });
     const isAdminRequest = req.techRole === 'admin';
-    const out = isAdminRequest ? withFlags : withFlags.map(stripMixOwnerOnlyCost);
+    const out = isAdminRequest ? withFlags : withFlags.map(techProjection.stripMixCosts);
     res.json({ tank_mixes: out, mixes: out });
   } catch (err) {
     next(err);
@@ -747,7 +728,7 @@ router.post('/tank-mixes/:id/recalculate', async (req, res, next) => {
 
     logger.info(`Tank mix recalculated: ${updated.name} — $${costs.cost_per_tank}/tank`);
     const responseMix = { ...updated, ...(costs.cost_incomplete ? { cost_incomplete: true } : {}) };
-    res.json({ tank_mix: req.techRole === 'admin' ? responseMix : stripMixOwnerOnlyCost(responseMix) });
+    res.json({ tank_mix: req.techRole === 'admin' ? responseMix : techProjection.stripMixCosts(responseMix) });
   } catch (err) {
     next(err);
   }

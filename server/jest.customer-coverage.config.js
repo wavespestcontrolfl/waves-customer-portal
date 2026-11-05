@@ -33,6 +33,8 @@ module.exports = {
     '<rootDir>/tests/notification-admin-dedupe-window.test.js',
     '<rootDir>/tests/notification-admin-dedupe-refresh.test.js',
     '<rootDir>/tests/notification-inbound-sms-read-admin.test.js',
+    // Claude's-queue readers and fenced writers (Send to Claude #7498/#7546, ideas #7548).
+    '<rootDir>/tests/notification-admin-claude-queue.test.js',
   ],
   collectCoverage: true,
   collectCoverageFrom: [

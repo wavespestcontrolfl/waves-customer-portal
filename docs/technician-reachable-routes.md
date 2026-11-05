@@ -44,6 +44,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/communications/send-prep` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
 | POST | `/api/admin/communications/sms` | admin-communications |
+| GET | `/api/admin/communications/unread-count` | admin-communications |
 | GET | `/api/admin/consultations/:scheduledServiceId/estimate` | admin-consultations |
 | GET | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
 | POST | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
@@ -119,7 +120,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/drafts/stats` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/equipment-maintenance` | admin-equipment-maintenance |
 | GET | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})` | admin-equipment-maintenance |
-| GET | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/mileage` | admin-equipment-maintenance |
 | GET | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/records` | admin-equipment-maintenance |
 | GET | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/schedules` | admin-equipment-maintenance |
 | GET | `/api/admin/equipment-maintenance/alerts` | admin-equipment-maintenance |
@@ -130,7 +130,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/equipment-systems` | admin-equipment-systems |
 | GET | `/api/admin/equipment-systems/:id` | admin-equipment-systems |
 | GET | `/api/admin/equipment-systems/calibrations` | admin-equipment-systems |
-| GET | `/api/admin/equipment-systems/reconciliation` | admin-equipment-systems |
 | GET | `/api/admin/equipment/equipment` | admin-equipment |
 | GET | `/api/admin/equipment/equipment/:id/calibration-history` | admin-equipment |
 | GET | `/api/admin/equipment/kit-keys` | admin-equipment |
