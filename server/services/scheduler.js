@@ -9319,7 +9319,9 @@ function initScheduledJobs() {
   // DAILY 10:20 AM — Move pause (moving PR 2b, owner Q4): the one reminder
   // text a week before move-out for a customer with no new address, then the
   // pause of the plans at the house left, then the close of a pause past 60
-  // days. Gate read per tick (GATE_MOVING_PAUSE), so a flip needs no restart.
+  // days. With GATE_MOVING_STOP_AT_MOVE_OUT the pause step also stops the
+  // old-house plans of a move with a new address not applied by move-out.
+  // Gates read per tick (GATE_MOVING_PAUSE), so a flip needs no restart.
   // =========================================================================
   cron.schedule('20 10 * * *', async () => {
     if (!require('../config/feature-gates').movingPauseLive()) return;
