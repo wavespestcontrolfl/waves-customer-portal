@@ -129,18 +129,30 @@ async function recentSentRequest(email, { dbh = db, now = new Date() } = {}) {
     .first();
 }
 
+// What a request sent inside the 24 h cap means now. 'sent' = its link still works (unused,
+// not expired), so the app says "check your email". 'wait' = the link was used or has expired,
+// the cap still holds, and a new email can go out at nextAt (sent_at + 24 h).
+function windowAnswer(request, maskedEmail, now) {
+  const sentAt = new Date(request.sent_at);
+  if (!request.used_at && new Date(request.expires_at) > now) return { state: 'sent', maskedEmail, sentAt: sentAt.toISOString() };
+  return { state: 'wait', maskedEmail, nextAt: new Date(sentAt.getTime() + RESEND_WINDOW_MS).toISOString() };
+}
+
 // What the app shows for the holder's own address: null (nothing to do),
-// { state: 'paused', maskedEmail } or { state: 'sent', maskedEmail, sentAt }.
+// { state: 'paused', maskedEmail, nextAt? } (nextAt = a link was already used today; ask again
+// after it) or { state: 'sent', maskedEmail, sentAt } (a usable link was emailed).
 // A bounce / spam complaint / do-not-email row hides the block, so the app
 // never reveals why. Never throws: a read problem shows nothing.
-async function resubscribeStatus(email, { dbh = db } = {}) {
+async function resubscribeStatus(email, { dbh = db, now = new Date() } = {}) {
   try {
     const normalized = normalizeEmail(email);
     if (!normalized || !(await releasableUnsubscribes(normalized, { dbh })).length) return null;
     if (await hasHardBlock(normalized, { dbh })) return null;
     const maskedEmail = maskEmail(normalized);
-    const sent = await recentSentRequest(normalized, { dbh });
-    return sent ? { state: 'sent', maskedEmail, sentAt: new Date(sent.sent_at).toISOString() } : { state: 'paused', maskedEmail };
+    const recent = await recentSentRequest(normalized, { dbh, now });
+    if (!recent) return { state: 'paused', maskedEmail };
+    const { state, nextAt, ...rest } = windowAnswer(recent, maskedEmail, now);
+    return state === 'sent' ? { state, ...rest } : { state: 'paused', maskedEmail, nextAt };
   } catch (err) {
     logger.warn(`[email-resubscribe] status lookup failed (${errorWord(err)})`);
     return null;
@@ -149,9 +161,11 @@ async function resubscribeStatus(email, { dbh = db } = {}) {
 
 // POST /api/notifications/email-resubscribe, after the route checked the gate and the session.
 // Under the per-address lock: nothing releasable or a hard block = send nothing; an email sent in
-// the last 24 h = send nothing, answer with that one; else create the request and send. The lock
+// the last 24 h = send nothing, answer 'sent' while its link still works, else 'wait'; else create the request and send. The lock
 // stays held through the send (short timeout), so two taps cannot send twice.
-// Returns { state: 'not_paused' | 'sent' | 'failed', maskedEmail?, sentAt? }.
+// Returns { state: 'not_paused' | 'sent' | 'wait' | 'failed', maskedEmail?, sentAt?, nextAt? }.
+// Lock order is address key first, then a NEW request row (nobody else can hold that row), so
+// it never inverts completeResubscribe's request row -> address key order.
 async function requestResubscribeEmail({ customerId, email, firstName = '' }, { dbh = db, now = new Date() } = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized) return { state: 'not_paused' };
@@ -162,7 +176,7 @@ async function requestResubscribeEmail({ customerId, email, firstName = '' }, { 
     }
     const maskedEmail = maskEmail(normalized);
     const recent = await recentSentRequest(normalized, { dbh: trx, now });
-    if (recent) return { state: 'sent', maskedEmail, sentAt: new Date(recent.sent_at).toISOString() };
+    if (recent) return windowAnswer(recent, maskedEmail, now);
 
     const token = newToken();
     const [request] = await trx('email_resubscribe_requests').insert({
@@ -286,10 +300,10 @@ function sendgridTargets(rows) {
 // 404); `clearById` = the note to stamp on each; `versionById` = each cleared
 // row's row version at the pre-read. Anything else (no key, no
 // service group id, timeout, HTTP error) leaves its rows out and is logged.
-async function clearSendgridBeforeRelease(email) {
+async function clearSendgridBeforeRelease(email, { dbh = db } = {}) {
   const result = { clearedIds: [], outcomes: [], clearById: {}, versionById: {} };
   try {
-    const rows = await releasableUnsubscribes(email);
+    const rows = await releasableUnsubscribes(email, { dbh });
     for (const [stored, lists] of sendgridTargets(rows)) {
       const results = await clearAddressLists(stored, lists);
       const at = new Date().toISOString();
@@ -325,21 +339,31 @@ async function findRequest(token, { dbh = db, now = new Date() } = {}) {
   return { status: 'open', request };
 }
 
-// The click. SendGrid first, then (one transaction, under the address lock) release only
-// the rows SendGrid confirmed. The request is marked used ONLY when no releasable row is
-// left afterwards; a failed clear or a row that changed in between leaves it open so the
-// button works again. Returns 'done' (rows released), 'already' (nothing was left to
-// release) or 'retry'.
+// The click. Serialized per request and re-validated before any side effect: one transaction
+// takes the request row FOR UPDATE first, so a concurrent or late second POST waits, then sees
+// used_at and answers 'already' with no SendGrid call and no release (it can never clear a NEW
+// unsubscribe after the first POST consumed the token). While the row lock is held (and NOT the
+// address lock) SendGrid is cleared for the releasable rows, then the address lock is taken and
+// only the rows SendGrid confirmed are released. Lock order is request row -> address key;
+// requestResubscribeEmail takes the address key and then inserts a different, new row, so the
+// two never take each other's locks in opposite orders. The request is marked used ONLY when no
+// releasable row is left; a failed clear or a row that changed in between leaves it open so the
+// button works again. Returns 'done' (rows released), 'already' (used, or nothing left to
+// release), 'expired' or 'retry'.
 async function completeResubscribe(request, { dbh = db, now = new Date() } = {}) {
-  const pre = await clearSendgridBeforeRelease(request.email);
   return dbh.transaction(async (trx) => {
-    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalizeEmail(request.email));
+    const locked = await trx('email_resubscribe_requests').where({ id: request.id }).forUpdate().first();
+    if (!locked || !locked.sent_at) return 'expired';
+    if (locked.used_at) return 'already';
+    if (new Date(locked.expires_at) <= now) return 'expired';
+    const pre = await clearSendgridBeforeRelease(locked.email, { dbh: trx });
+    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalizeEmail(locked.email));
     const released = await releaseOwnUnsubscribes({
-      email: request.email, customerId: request.customer_id, requestId: request.id,
+      email: locked.email, customerId: locked.customer_id, requestId: locked.id,
       onlyIds: pre.clearedIds, versionById: pre.versionById, sendgridClear: pre.clearById,
     }, { dbh: trx });
-    if ((await releasableUnsubscribes(request.email, { dbh: trx })).length) return 'retry';
-    await trx('email_resubscribe_requests').where({ id: request.id }).whereNull('used_at')
+    if ((await releasableUnsubscribes(locked.email, { dbh: trx })).length) return 'retry';
+    await trx('email_resubscribe_requests').where({ id: locked.id })
       .update({ used_at: now, updated_at: now, outcome: JSON.stringify({ released_ids: released.map((r) => r.id) }) });
     return released.length ? 'done' : 'already';
   });

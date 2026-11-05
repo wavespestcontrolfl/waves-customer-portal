@@ -240,6 +240,29 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
       });
     });
 
+    test('after the link was used, a new unsubscribe inside 24 h is a wait (no email, no usable link); status is paused with nextAt; after 24 h a new email goes out', async () => {
+      await inRolledBackTx(async (trx) => {
+        const email = `${uniq()}@example.com`;
+        await sup(trx, { email });
+        expect((await ask(trx, email)).state).toBe('sent');
+        const [row] = await requestsFor(trx, email);
+        // The customer clicked (used) and then unsubscribed again.
+        await trx('email_resubscribe_requests').where({ id: row.id }).update({ used_at: new Date() });
+        const nextAt = new Date(row.sent_at.getTime() + 24 * 3600 * 1000).toISOString();
+        expect(await ask(trx, email)).toEqual({ state: 'wait', maskedEmail: `${email[0]}***@example.com`, nextAt });
+        expect(await service.resubscribeStatus(email, { dbh: trx })).toEqual({ state: 'paused', maskedEmail: `${email[0]}***@example.com`, nextAt });
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(1);
+        expect(await requestsFor(trx, email)).toHaveLength(1);
+        // An early-expired link inside the window is a wait too.
+        await trx('email_resubscribe_requests').where({ id: row.id }).update({ used_at: null, expires_at: new Date(Date.now() - 1000) });
+        expect((await ask(trx, email)).state).toBe('wait');
+        // After 24 h the cap is over.
+        await trx('email_resubscribe_requests').where({ id: row.id }).update({ sent_at: new Date(Date.now() - 25 * 3600 * 1000) });
+        expect((await ask(trx, email)).state).toBe('sent');
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(2);
+      });
+    });
+
     test('findRequest: unknown / never sent / expired / used / open, by token', async () => {
       await inRolledBackTx(async (trx) => {
         const email = `${uniq()}@example.com`;
@@ -340,6 +363,49 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
         expect(await service.completeResubscribe(request)).toBe('retry');
         expect((await db('email_suppressions').where({ id: row.id }).first()).status).toBe('active');
         expect((await db('email_resubscribe_requests').where({ id: request.id }).first()).used_at).toBeNull();
+      });
+    });
+
+    test('a second completion after the first marked the request used makes no SendGrid call and releases nothing, even if a NEW block exists', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      await withCommitted(async (email) => {
+        global.fetch = jest.fn(async () => ({ ok: true, status: 204 }));
+        await sup(db, { email });
+        const request = await openRequest(email);
+        expect(await service.completeResubscribe(request)).toBe('done');
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        // The customer unsubscribes again; the SAME (stale, still-open-looking) snapshot is replayed late.
+        const fresh = await sup(db, { email });
+        global.fetch.mockClear();
+        expect(await service.completeResubscribe(request)).toBe('already');
+        expect(global.fetch).not.toHaveBeenCalled();
+        expect((await db('email_suppressions').where({ id: fresh.id }).first()).status).toBe('active');
+      });
+    });
+
+    test('two concurrent completions of one request release once: the second waits on the request row, then sees it used', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      await withCommitted(async (email) => {
+        global.fetch = jest.fn(() => new Promise((resolve) => { setTimeout(() => resolve({ ok: true, status: 204 }), 150); }));
+        const row = await sup(db, { email });
+        const request = await openRequest(email);
+        const results = await Promise.all([service.completeResubscribe(request), service.completeResubscribe(request)]);
+        expect(results.sort()).toEqual(['already', 'done']);
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect((await db('email_suppressions').where({ id: row.id }).first()).status).toBe('released');
+      });
+    });
+
+    test('an expired request is refused before any SendGrid call or release', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      await withCommitted(async (email) => {
+        global.fetch = jest.fn(async () => ({ ok: true, status: 204 }));
+        const row = await sup(db, { email });
+        const request = await openRequest(email);
+        await db('email_resubscribe_requests').where({ id: request.id }).update({ expires_at: new Date(Date.now() - 1000) });
+        expect(await service.completeResubscribe(request)).toBe('expired');
+        expect(global.fetch).not.toHaveBeenCalled();
+        expect((await db('email_suppressions').where({ id: row.id }).first()).status).toBe('active');
       });
     });
   });

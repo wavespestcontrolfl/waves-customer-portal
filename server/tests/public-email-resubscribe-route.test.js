@@ -185,6 +185,16 @@ describe('POST /:token', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('pat@example.com');
   });
 
+  test('a request that expired between the page and the press: the expired page (form) or 404 JSON', async () => {
+    jest.spyOn(Resub, 'completeResubscribe').mockResolvedValue('expired');
+    const form = await post();
+    expect(form.status).toBe(404);
+    expect(await form.text()).toContain('This link has expired or was already used.');
+    const json = await post(TOKEN, { form: false });
+    expect(json.status).toBe(404);
+    expect(await json.json()).toEqual({ success: false, state: 'expired' });
+  });
+
   test('a used token never touches SendGrid or the database again', async () => {
     request.used_at = new Date();
     const complete = jest.spyOn(Resub, 'completeResubscribe');

@@ -35,7 +35,7 @@ import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
 import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
-import { etDateString, formatETDateTime } from '../lib/timezone';
+import { etDateString, formatETDateTime, formatETTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
 import {
@@ -4240,6 +4240,8 @@ const EMAIL_RESUBSCRIBE_COPY = {
   button: 'Turn emails back on',
   sent: (maskedEmail) => `Check your email. We sent a link to ${maskedEmail}. Open it to turn emails back on.`,
   failed: "We couldn't send the email. Please try again later.",
+  // `time` is an Eastern wall-clock time such as "3:42 PM".
+  wait: (time) => `We already sent a link today. You can ask for a new one after ${time}.`,
 };
 
 function EmailResubscribeNotice({ resubscribe }) {
@@ -4250,6 +4252,9 @@ function EmailResubscribeNotice({ resubscribe }) {
   if (!current || current.state === 'not_paused') return null;
   const maskedEmail = current.maskedEmail || resubscribe?.maskedEmail || 'your email';
   const sent = current.state === 'sent';
+  // A link was already sent (and used) inside the 24 h cap: no new email until nextAt.
+  const nextAt = current.nextAt ? new Date(current.nextAt) : null;
+  const waiting = !sent && !!nextAt && nextAt.getTime() > Date.now();
   const ask = async () => {
     if (busy) return;
     setBusy(true);
@@ -4265,9 +4270,10 @@ function EmailResubscribeNotice({ resubscribe }) {
   return (
     <div data-testid="email-resubscribe" style={{ marginTop: 16, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
       <div role="status">{sent ? EMAIL_RESUBSCRIBE_COPY.sent(maskedEmail) : EMAIL_RESUBSCRIBE_COPY.paused(maskedEmail)}</div>
+      {waiting && <div style={{ marginTop: 6 }}>{EMAIL_RESUBSCRIBE_COPY.wait(formatETTime(nextAt))}</div>}
       {failed && <div role="alert" style={{ marginTop: 6 }}>{EMAIL_RESUBSCRIBE_COPY.failed}</div>}
       {!sent && (
-        <button data-glass-accent="" type="button" disabled={busy} onClick={ask} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>
+        <button data-glass-accent="" type="button" disabled={busy || waiting} onClick={ask} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>
           {EMAIL_RESUBSCRIBE_COPY.button}
         </button>
       )}

@@ -85,6 +85,7 @@ router.post('/:token', async (req, res) => {
     const { status, request } = await Resub.findRequest(req.params.token);
     if (status === 'unknown' || status === 'expired') return expired(req, res);
     const result = status === 'used' ? 'already' : await Resub.completeResubscribe(request);
+    if (result === 'expired') return expired(req, res);
     if (result === 'retry') logger.warn(`[email-resubscribe] release incomplete for request id=${request.id}`);
     if (!isFormSubmission(req)) {
       return res.status(result === 'retry' ? 503 : 200).json({ success: result !== 'retry', state: result });

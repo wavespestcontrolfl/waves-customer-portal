@@ -156,6 +156,12 @@ describe('GET /preferences: emailResubscribe', () => {
     expect((await holderGet()).body.emailResubscribe).toEqual({ state: 'sent', maskedEmail: 'p***@example.com', sentAt: '2026-11-04T12:00:00.000Z' });
   });
 
+  test('gate on, paused with nextAt (the link was already used today): the field carries nextAt', async () => {
+    gateOn();
+    Resub.resubscribeStatus.mockResolvedValue({ state: 'paused', maskedEmail: 'p***@example.com', nextAt: '2026-11-05T12:00:00.000Z' });
+    expect((await holderGet()).body.emailResubscribe).toEqual({ state: 'paused', maskedEmail: 'p***@example.com', nextAt: '2026-11-05T12:00:00.000Z' });
+  });
+
   test('gate on, nothing paused (or the service reads nothing): the field is absent', async () => {
     gateOn();
     Resub.resubscribeStatus.mockResolvedValue(null);
@@ -206,6 +212,7 @@ describe('POST /email-resubscribe', () => {
   test.each([
     ['not_paused', { state: 'not_paused' }],
     ['failed', { state: 'failed' }],
+    ['wait', { state: 'wait', maskedEmail: 'p***@example.com', nextAt: '2026-11-05T12:00:00.000Z' }],
   ])('gate on: %s is passed through', async (_name, answer) => {
     gateOn();
     Resub.requestResubscribeEmail.mockResolvedValue(answer);

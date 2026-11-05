@@ -64,3 +64,36 @@ it('shows nothing when the payload has no emailResubscribe field', async () => {
   await screen.findByText('Connected to your Waves app.');
   expect(screen.queryByTestId('email-resubscribe')).not.toBeInTheDocument();
 });
+
+// The expected text is computed in America/New_York here, independent of the machine zone.
+const NEXT_AT = new Date(Date.now() + 5 * 3600 * 1000);
+const etTime = (d) => d.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true });
+
+it('a paused payload with a future nextAt shows the wait line in Eastern time and a disabled button', async () => {
+  api.getNotificationPrefs.mockResolvedValue({ appPreferencesAvailable: true, pushEnabled: true,
+    emailResubscribe: { state: 'paused', maskedEmail: 'q***@example.invalid', nextAt: NEXT_AT.toISOString() } });
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  expect(await screen.findByText(`We already sent a link today. You can ask for a new one after ${etTime(NEXT_AT)}.`)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Turn emails back on' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Turn emails back on' }));
+  expect(api.requestEmailResubscribe).not.toHaveBeenCalled();
+});
+
+it('a wait answer to the tap shows the same line, keeps the button, disabled', async () => {
+  api.requestEmailResubscribe.mockResolvedValue({ state: 'wait', maskedEmail: 'q***@example.invalid', nextAt: NEXT_AT.toISOString() });
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  await screen.findByText(/are off because of an unsubscribe link\.$/);
+  fireEvent.click(screen.getByRole('button', { name: 'Turn emails back on' }));
+  expect(await screen.findByText(/^We already sent a link today\. You can ask for a new one after /)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Turn emails back on' })).toBeDisabled();
+  expect(screen.queryByText(/^Check your email\./)).not.toBeInTheDocument();
+});
+
+it('a nextAt in the past does not disable the button', async () => {
+  api.getNotificationPrefs.mockResolvedValue({ appPreferencesAvailable: true, pushEnabled: true,
+    emailResubscribe: { state: 'paused', maskedEmail: 'q***@example.invalid', nextAt: new Date(Date.now() - 1000).toISOString() } });
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  await screen.findByText(/are off because of an unsubscribe link\.$/);
+  expect(screen.queryByText(/We already sent a link today/)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Turn emails back on' })).toBeEnabled();
+});
