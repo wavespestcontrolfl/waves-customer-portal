@@ -408,6 +408,27 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     });
   });
 
+  test('an upcoming visit of the parents\' home paid ahead: no email says each visit is billed after it is done', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      await trx('scheduled_services').where({ id: f.parentSeries.ids[0] }).update({ prepaid_amount: 108, prepaid_at: NOW, prepaid_method: 'check' });
+      expect(await emailRun(trx)).toMatchObject({ sent: 0, waiting: 1, failed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+  });
+
+  test('staff set the Multi-Home preset to 5%: PR 2 applies 5%, and the email naming 10% never goes', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await trx('discounts').where({ discount_key: 'multi_home' }).update({ amount: 5 });
+      expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ applied: 1 });
+      expect(await emailRun(trx)).toMatchObject({ sent: 0, waiting: 1, failed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(await messages(f.estimateId)).toHaveLength(0);
+    });
+  });
+
   test('a held target blocks the send; once it is no longer a target the email goes', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);

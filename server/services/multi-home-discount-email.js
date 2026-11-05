@@ -85,6 +85,9 @@ const ALREADY_CARRIED_REASON = 'all_upcoming_visits_carry_it';
 // ... and when its plan was sold with the preset netted into the price.
 const ALREADY_SOLD_REASON = 'sold_with_multi_home_discount';
 const MAX_HOMES = 8;
+// The template's fixed copy names the figure ("Multi-Home 10%", "every visit is 10% off"): every listed home must be
+// discounted by exactly this percent (Codex #7633 r3), whatever the editable preset row says today.
+const MULTI_HOME_PERCENT = 10;
 const HOME_FIELDS = ['address', 'service', 'regular', 'discount', 'price', 'starts', 'payment'];
 const VISITS_PER_YEAR = Object.freeze({ monthly: 12, bimonthly: 6, quarterly: 4, semiannual: 2 });
 const STATUS_APPLIED = 'applied';
@@ -157,7 +160,8 @@ async function loadSeriesFacts(dbh, { customerId, rootId }, today) {
   const { PLAN_ROW_SQL, CADENCE_SQL, LINE_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(
     `SELECT s.id, s.scheduled_date, s.estimated_price, s.primary_line_price, s.discount_id, s.service_type, s.property_id,
-            s.service_address_line1, s.service_address_line2, ${CADENCE_SQL} AS cadence, ${LINE_SQL} AS line
+            s.service_address_line1, s.service_address_line2, s.discount_type, s.discount_amount, s.prepaid_amount,
+            ${CADENCE_SQL} AS cadence, ${LINE_SQL} AS line
        FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
       WHERE (s.id = ? OR s.recurring_parent_id = ?) AND s.customer_id = ? AND s.scheduled_date >= ?
         AND s.status IN ('pending', 'confirmed') AND ${PLAN_ROW_SQL}
@@ -173,6 +177,8 @@ async function loadSeriesFacts(dbh, { customerId, rootId }, today) {
     cadence: first?.cadence || null,
     line: first?.line || null,
     visitIds: upcoming.map((v) => String(v.id)),
+    // A visit paid ahead (POST /admin/schedule/:id/prepaid stamps prepaid_amount) is not billed after it is done.
+    prepaid: upcoming.some((v) => Number(v.prepaid_amount) > 0),
     flatPriceCents: flat ? first.priceCents : null,
     startsDate: first?.date || null,
   };
@@ -248,12 +254,25 @@ const detailOf = (row) => {
 // failed send can delay it). Another home counts only while its upcoming visits are flat at the price the row
 // recorded (applied), still carry the preset when that is how it counted (already discounted, visits carried it),
 // carry no other appointment discount, and every next extension prices the same.
+// `afterCents` is `beforeCents` less exactly MULTI_HOME_PERCENT (one cent of rounding).
+function tenPercentOff(beforeCents, afterCents) {
+  if (!(beforeCents > 0) || afterCents == null) return false;
+  return Math.abs((beforeCents - afterCents) - Math.round((beforeCents * MULTI_HOME_PERCENT) / 100)) <= 1;
+}
+
+// A visit carrying the preset carries it at exactly MULTI_HOME_PERCENT percent.
+function carriesTenPercent(visit) {
+  return String(visit.discount_type || '').toLowerCase() === 'percentage' && Number(visit.discount_amount) === MULTI_HOME_PERCENT;
+}
+
 async function targetStillCurrent(dbh, { row, facts, presetId, rootId, nextPrices }) {
   if (!row || !facts.first || facts.flatPriceCents == null) return false;
   const visitDiscount = facts.first.discount_id ? String(facts.first.discount_id) : null;
   const carries = !!(presetId && visitDiscount === String(presetId));
   if (visitDiscount && !carries) return false;
+  if (carries && !carriesTenPercent(facts.first)) return false;
   if (row.status === STATUS_APPLIED && facts.flatPriceCents !== cents(row.price_after)) return false;
+  if (row.status === STATUS_APPLIED && !tenPercentOff(cents(row.price_before), cents(row.price_after))) return false;
   if (row.status === STATUS_ALREADY && detailOf(row).reason === ALREADY_CARRIED_REASON && !carries) return false;
   return nextSpawnsAt(dbh, rootId, facts.flatPriceCents, nextPrices);
 }
@@ -289,7 +308,7 @@ async function soldTargetSale(dbh, rootId) {
 // its recurring slice the stored percent of its stored discountable base (one cent of rounding). Only then does each
 // series of the sale carry it. Missing fields fail closed.
 function saleDiscountCoversEveryLine(md) {
-  if (!md || md.type !== 'PERCENT' || md.capped !== false) return false;
+  if (!md || md.type !== 'PERCENT' || Number(md.value) !== MULTI_HOME_PERCENT || md.capped !== false) return false;
   if (!Array.isArray(md.excludedServices) || md.excludedServices.length) return false;
   const baseCents = cents(md.recurringDiscountableBase);
   const sliceCents = cents(md.recurringAmount);
@@ -398,7 +417,7 @@ async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx)
     customerId: String(customerId),
     rootId: String(rootId),
     isSource,
-    stale: stale || !perVisit || !!billTo.unclear,
+    stale: stale || !perVisit || facts.prepaid || !!billTo.unclear,
     payerId: billTo.payerId ?? null,
     address: await homeAddress(dbh, { customerId, propertyId, visit: facts.first, profile }),
     service: facts.serviceName,
@@ -648,6 +667,7 @@ async function composeSource(conn, estimate, run, { lock = false } = {}) {
   const ledger = await loadLedgerRows(conn, estimate.id);
   if (openTargetReason(targets, ledger)) return { wait: 'target_open', roots, ids };
   const customers = await loadCustomers(conn, ids, { lock });
+  if (lock) await lockReferencedPayers(conn, { customers, roots, today: run.today });
   const ctx = {
     estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh: conn,
     nextPrices: run.nextPrices, laneOf: run.laneOf, payerOf: run.payerOf,
@@ -660,6 +680,20 @@ async function composeSource(conn, estimate, run, { lock = false } = {}) {
   const optedOut = await loadEmailOptOuts(conn, ids, { lock });
   const { groups, noAddress } = await groupByPayingAddress(conn, homes, { customers, payers, optedOut });
   return { roots, ids, noAddress, sends: sendsFor(estimate.id, groups, customers) };
+}
+
+// Every payer row these homes could bill to, active or not (the profiles' defaults and the upcoming visits' own
+// Bill-To), FOR SHARE before ownership is resolved (Codex #7633 r3): a payer reactivated or re-pointed after this read
+// would otherwise route the email by a state the request no longer matches. The visits themselves are only read.
+async function lockReferencedPayers(trx, { customers, roots, today }) {
+  const { rows } = await trx.raw(
+    `SELECT DISTINCT s.payer_id FROM scheduled_services s
+      WHERE (s.id = ANY(?::uuid[]) OR s.recurring_parent_id = ANY(?::uuid[])) AND s.payer_id IS NOT NULL AND s.scheduled_date >= ?`,
+    [roots, roots, today],
+  );
+  const refs = [...[...customers.values()].map((c) => c.payer_id), ...(rows || []).map((r) => r.payer_id)];
+  const payerIds = [...new Set(refs.filter((v) => v != null).map(String))].sort();
+  if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id').forShare().select('id');
 }
 
 // The source estimate as the scan read it: still accepted, same profile, same accept time (so still in the window).
@@ -761,7 +795,7 @@ module.exports = {
   TEMPLATE_KEY,
   _private: {
     openTargetReason, sourcePrices, targetPrices, groupByPayingAddress, greetingFor, payloadFor, homeCells, idempotencyKeyFor,
-    weekdayDate, money, sortHomes, paymentCell, processSource, loadLedgerRows, sendGroups, failedRecently, earlierAttemptVerdict, targetStillCurrent, soldTargetSale, saleDiscountCoversEveryLine, sourceHomeVerdict, targetHomeVerdict, unchangedSinceSale, MAX_HOMES, HOME_FIELDS,
+    weekdayDate, money, sortHomes, paymentCell, processSource, loadLedgerRows, sendGroups, failedRecently, earlierAttemptVerdict, targetStillCurrent, soldTargetSale, saleDiscountCoversEveryLine, tenPercentOff, lockReferencedPayers, sourceHomeVerdict, targetHomeVerdict, unchangedSinceSale, MAX_HOMES, HOME_FIELDS,
     routeFor, sendsFor, composeSource, sendTimeHandoff,
     RETRY_BACKOFF_MS, CATEGORY,
   },

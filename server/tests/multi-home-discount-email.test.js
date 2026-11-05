@@ -62,7 +62,7 @@ function fakeDb({ tables = {}, visits = {}, rawError = null }) {
       whereNotNull(col) { rows = rows.filter((r) => r[col] != null); return q; },
       whereNull(col) { rows = rows.filter((r) => r[col] == null); return q; },
       orderBy() { return q; },
-      forShare() { return q; },
+      forShare() { dbh.shared.push({ table: name, ids: rows.map((r) => r.id) }); return q; },
       distinct() { return q; },
       select() { return q; },
       first() { return Promise.resolve(rows[0]); },
@@ -73,11 +73,14 @@ function fakeDb({ tables = {}, visits = {}, rawError = null }) {
   // Advisory locks are recorded in order; a series in `busy` refuses its maintenance try-lock.
   dbh.locks = [];
   dbh.busy = new Set();
+  dbh.shared = [];
+  dbh.visitPayers = [];
   dbh.raw = jest.fn(async (sql, params) => {
     if (/pg_(try_)?advisory_xact_lock/.test(sql)) {
       dbh.locks.push(params.join(':'));
       return { rows: [{ locked: !dbh.busy.has(String(params[1])) }] };
     }
+    if (/DISTINCT s\.payer_id/.test(sql)) return { rows: dbh.visitPayers };
     if (rawError) throw rawError;
     return { rows: visits[params[0]] || [] };
   });
@@ -625,14 +628,16 @@ describe('a failed send is never replayed from stored copy and is retried by the
 describe('the ledger is history: another home is checked again before any email', () => {
   const { targetStillCurrent } = require('../services/multi-home-discount-email')._private;
   const facts = (price, extra = {}) => ({ first: { discount_id: null, ...extra }, flatPriceCents: price, startsDate: '2026-11-14' });
-  const applied = { status: 'applied', price_after: '108.00' };
+  // A visit carrying the preset as PR 2 stamps it (discountFields): the percentage and its amount.
+  const carried = { discount_id: 'preset-1', discount_type: 'percentage', discount_amount: 10 };
+  const applied = { status: 'applied', price_before: '120.00', price_after: '108.00' };
   const none = async () => null;
 
   test('applied: the visits must still be flat at the recorded discounted price', async () => {
-    expect(await targetStillCurrent(null, { row: applied, facts: facts(10800, { discount_id: 'preset-1' }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(true);
+    expect(await targetStillCurrent(null, { row: applied, facts: facts(10800, carried), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(true);
     // Staff removed the discount (price back to the regular one) or repriced the series.
     expect(await targetStillCurrent(null, { row: applied, facts: facts(12000), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
-    expect(await targetStillCurrent(null, { row: applied, facts: facts(9900, { discount_id: 'preset-1' }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
+    expect(await targetStillCurrent(null, { row: applied, facts: facts(9900, carried), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
     // Visits no longer flat.
     expect(await targetStillCurrent(null, { row: applied, facts: facts(null), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
   });
@@ -643,16 +648,29 @@ describe('the ledger is history: another home is checked again before any email'
 
   test('already discounted because the visits carried it: they must still carry it', async () => {
     const row = { status: 'already_discounted', detail: { reason: 'all_upcoming_visits_carry_it' } };
-    expect(await targetStillCurrent(null, { row, facts: facts(10800, { discount_id: 'preset-1' }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(true);
+    expect(await targetStillCurrent(null, { row, facts: facts(10800, carried), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(true);
     expect(await targetStillCurrent(null, { row, facts: facts(10800), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
     // Sold with the discount netted in: no visit stamp to check, the current flat price stands.
     const sold = { status: 'already_discounted', detail: JSON.stringify({ reason: 'sold_with_multi_home_discount' }) };
     expect(await targetStillCurrent(null, { row: sold, facts: facts(10800), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(true);
   });
 
+  test('the discount must be exactly the 10% the email names: an applied row or a carried visit at another percent is not current', async () => {
+    const { tenPercentOff } = require('../services/multi-home-discount-email')._private;
+    expect(tenPercentOff(12000, 10800)).toBe(true);
+    expect(tenPercentOff(12000, 10801)).toBe(true);
+    expect(tenPercentOff(12000, 11400)).toBe(false);
+    expect(tenPercentOff(null, 10800)).toBe(false);
+    const fivePercent = { status: 'applied', price_before: '120.00', price_after: '114.00' };
+    expect(await targetStillCurrent(null, { row: fivePercent, facts: facts(11400, { ...carried, discount_amount: 5 }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
+    const row = { status: 'already_discounted', detail: { reason: 'all_upcoming_visits_carry_it' } };
+    expect(await targetStillCurrent(null, { row, facts: facts(11400, { ...carried, discount_amount: 5 }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
+    expect(await targetStillCurrent(null, { row, facts: facts(10800, { ...carried, discount_type: 'fixed' }), presetId: 'preset-1', rootId: 'r', nextPrices: none })).toBe(false);
+  });
+
   test('every next extension must price the same (production walk); an unfinished walk is unproven', async () => {
     const at = (prices) => async () => ({ unverified: false, prices });
-    const ok = { row: applied, facts: facts(10800, { discount_id: 'preset-1' }), presetId: 'preset-1', rootId: 'r' };
+    const ok = { row: applied, facts: facts(10800, carried), presetId: 'preset-1', rootId: 'r' };
     expect(await targetStillCurrent(null, { ...ok, nextPrices: at([108, 108]) })).toBe(true);
     expect(await targetStillCurrent(null, { ...ok, nextPrices: at([108, 120]) })).toBe(false);
     expect(await targetStillCurrent(null, { ...ok, nextPrices: async () => ({ unverified: true, prices: [] }) })).toBe(false);
@@ -978,3 +996,44 @@ describe('each home goes to the Bill-To of its own visits (Codex #7633 r2)', () 
   });
 });
 
+describe('round 3: exactly 10%, no prepaid visit, every payer row held at the handoff', () => {
+  const { saleDiscountCoversEveryLine } = email._private;
+
+  test('a sale made at another percent never sends the 10% copy', async () => {
+    expect(saleDiscountCoversEveryLine(md({ value: 5, recurringAmount: 20 }))).toBe(false);
+    const sc = scenario({ customers: [customer('son')], estimateData: { summary: { manualDiscount: md({ value: 5, recurringAmount: 20 }) } } });
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 1 });
+  });
+
+  test('an upcoming visit paid ahead is not billed after it is done: the email waits', async () => {
+    const sc = scenario({
+      targets: [target('root-a', 'parents')],
+      ledger: [ledgerRow('root-a', 'applied')],
+      customers: [customer('son'), customer('parents')],
+      visits: { 'root-a': [visit('2026-11-14', '108.00', { prepaid_amount: '108.00' })] },
+    });
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 1 });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  test('the handoff holds every referenced payer row FOR SHARE, an inactive one too, before ownership is resolved', async () => {
+    const sc = scenario({
+      targets: [target('root-a', 'parents')],
+      ledger: [ledgerRow('root-a', 'applied')],
+      customers: [customer('son'), customer('parents', { payer_id: 7 })],
+      payers: [{ id: 7, display_name: 'Off Payer', company_name: null, ap_email: 'off@example.invalid', active: false },
+        { id: 9, display_name: 'Job Payer', company_name: null, ap_email: 'job@example.invalid', active: true }],
+      visits: { 'root-a': [visit('2026-11-14', '108.00')] },
+    });
+    sc.dbh.visitPayers = [{ payer_id: 9 }];
+    const send = jest.fn(async (args) => {
+      const verdict = await args.withProviderHandoff(async () => {});
+      return verdict.ok ? { sent: true } : { sent: false, aborted: true };
+    });
+    expect(await run(sc, send)).toMatchObject({ sent: 2 });
+    const payerLocks = sc.dbh.shared.filter((l) => l.table === 'payers').map((l) => l.ids);
+    expect(payerLocks[0]).toEqual([7, 9]);
+  });
+});
