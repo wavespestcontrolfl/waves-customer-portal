@@ -132,15 +132,15 @@ describe('openToCloser (the system closers\' selection)', () => {
     const query = { whereNull: (...a) => { calls.push(['outer.whereNull', ...a]); return query; }, where: (fn) => { calls.push(['where']); fn(inner); return query; } };
     return { query, calls };
   };
-  const { openToCloser, isPersonDoneBy, PERSON_DONE_BY_SQL } = NotificationService._private;
+  const { openToCloser, isPersonDoneBy } = NotificationService._private;
 
-  test('a system closer selects rows not done OR done by a person (PERSON_DONE_BY_SQL, NULL done_by is not a person)', () => {
+  test('a system closer selects rows not done OR done by a person or the quiet fall-off (REOPENABLE_DONE_BY_SQL, NULL done_by is not a person)', () => {
     const { query, calls } = record();
     expect(openToCloser(query, 'procurement')).toBe(query);
     expect(calls).toEqual([
       ['where'],
       ['whereNull', 'done_at'],
-      ['orWhereRaw', `COALESCE(${PERSON_DONE_BY_SQL}, false)`],
+      ['orWhereRaw', `COALESCE(${NotificationService._private.REOPENABLE_DONE_BY_SQL}, false)`],
     ]);
   });
 
@@ -160,7 +160,7 @@ describe('openToCloser (the system closers\' selection)', () => {
 
 describe('reopenAdminDone', () => {
   const TOKEN = '2026-09-30 12:00:00.123456+00';
-  const { PERSON_DONE_BY_SQL } = NotificationService._private;
+  const { PERSON_DONE_BY_SQL, REOPENABLE_DONE_BY_SQL } = NotificationService._private;
   beforeEach(() => {
     for (const fn of ['where', 'whereNotNull', 'whereRaw', 'update', 'first']) db.__q[fn].mockClear();
     db.raw.mockClear();
@@ -173,8 +173,21 @@ describe('reopenAdminDone', () => {
     expect(db.__q.where).toHaveBeenCalledWith({ id: 'n1', recipient_type: 'admin' });
     expect(db.__q.whereNotNull).toHaveBeenCalledWith('done_at');
     expect(db.__q.whereRaw).toHaveBeenCalledWith('done_at = ?::timestamptz', [TOKEN]);
-    expect(db.__q.whereRaw).toHaveBeenCalledWith(PERSON_DONE_BY_SQL);
-    expect(db.__q.update).toHaveBeenCalledWith({ done_at: null, done_by: null, resolution: null });
+    expect(db.__q.whereRaw).toHaveBeenCalledWith(REOPENABLE_DONE_BY_SQL);
+    // The done fields clear and a hold stamp (metadata.quietHoldFrom) lands in the same write.
+    expect(db.__q.update).toHaveBeenCalledWith({ done_at: null, done_by: null, resolution: null, metadata: expect.any(String) });
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining("COALESCE(metadata, '{}'::jsonb) || ?::jsonb"), [expect.stringMatching(/^\{"quietHoldFrom":"\d{4}-/)]);
+  });
+
+  test('a quiet-72h close is reopenable and a person-only reading of PERSON_DONE_BY_SQL stays unchanged', () => {
+    const { isPersonDoneBy, isReopenableDoneBy } = NotificationService._private;
+    expect(REOPENABLE_DONE_BY_SQL).toContain(PERSON_DONE_BY_SQL);
+    expect(REOPENABLE_DONE_BY_SQL).toContain("done_by = 'quiet-72h'");
+    expect(PERSON_DONE_BY_SQL).not.toContain('quiet-72h');
+    expect(isPersonDoneBy('quiet-72h')).toBe(false);
+    expect(isReopenableDoneBy('quiet-72h')).toBe(true);
+    expect(isReopenableDoneBy('claude')).toBe(true);
+    for (const by of ['relevance', 'retention', 'quiet-72h-x', 'supersede', '', null]) expect(isReopenableDoneBy(by)).toBe(false);
   });
 
   test('without a token nothing is written', async () => {

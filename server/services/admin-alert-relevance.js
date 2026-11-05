@@ -1292,13 +1292,14 @@ function classify(row, { anyMode = false } = {}) {
 function candidateQuery(cursor) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
-    // Open rows, and rows a PERSON marked done (openToCloser's rule): when the
+    // Open rows, and rows a PERSON (or the quiet fall-off, admin-alert-quiet-fall-off.js) marked done
+    // (openToCloser's rule; the fall-off's stamp is not `retired`, so a row it closed stays judgeable): when the
     // subject moves on, the sweep takes the close over so their Reopen can't
     // bring back an obsolete alert. A row any system component closed is left.
     // Bounded to the Recently done window (7 days), the only place a Reopen is
     // offered, so a person-done row is not re-read by every sweep forever.
     .where((q) => q.whereNull('done_at').orWhere((p) => p
-      .whereRaw(`COALESCE(${require('./notification-service')._private.PERSON_DONE_BY_SQL}, false)`)
+      .whereRaw(`COALESCE(${require('./notification-service')._private.REOPENABLE_DONE_BY_SQL}, false)`)
       .whereRaw("done_at >= now() - interval '7 days'")))
     .whereRaw("metadata->'retired' IS NULL")
     .where((q) => {
