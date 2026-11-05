@@ -6,14 +6,15 @@
 describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards', () => {
   beforeEach(() => { jest.resetModules(); });
 
-  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) } }) {
+  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {}, consents = [], activePlan = null, autopayToggle = null }) {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       subtotal: '200.00', total: '200.00', discount_amount: '0.00',
       credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+      ...invoiceFields,
     };
     const card = {
-      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      id: 'pm-1', customer_id: 'cust-1', method_type: methodType,
       stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
     };
     let chargeAttempt = null;
@@ -34,6 +35,9 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'service_records') return record;
         if (table === 'annual_prepay_terms') return { status: 'payment_pending', prepay_invoice_id: 'inv-1' };
         if (table === 'customer_contracts') return contract;
+        if (table === 'payment_method_consents') return consents[0] || null;
+        if (table === 'payment_plans') return activePlan;
+        if (table === 'autopay_log') return autopayToggle;
         // Only the applied-prepayment marker lookup (it binds 'scheduled_service_prepaid') sees the marker.
         if (table === 'payments') return markerLookup ? appliedMarker : null;
         return null;
@@ -53,7 +57,11 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
       });
-      chain.select = jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      chain.select = jest.fn(async () => {
+        if (table === 'payment_method_consents') return consents;
+        const row = await chain.first();
+        return row ? [row] : [];
+      });
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -180,6 +188,151 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: option }))
         .rejects.not.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
       expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+  });
+
+  // requireTechnicianCardOnFileFor (GATE_TECH_CARD_ON_FILE, owner 2026-11-04 D4 A): a technician's
+  // card-on-file charge re-judges the visit on the row the charge holds locked. A visit that moved to
+  // another technician, to another day, or that the technician has not reached refuses before Stripe.
+  describe('requireTechnicianCardOnFileFor', () => {
+    const { etDateString, addETDays } = jest.requireActual('../utils/datetime-et');
+    const tech = { techRole: 'technician', technicianId: 'tech-1' };
+    const visitToday = (fields = {}) => ({
+      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'completed', scheduled_date: etDateString(), ...fields,
+    });
+    const guards = { requireSelfPayScheduledServiceId: 'svc-1', requireTechnicianCardOnFileFor: tech };
+
+    test.each([
+      ['the visit moved to another technician', visitToday({ technician_id: 'tech-2' })],
+      ['the visit is on another day', visitToday({ scheduled_date: etDateString(addETDays(new Date(), -1)) })],
+      ['the technician has not reached the visit', visitToday({ status: 'en_route' })],
+      ['the visit is On Site but not completed', visitToday({ status: 'on_site' })],
+      ['the visit was cancelled', visitToday({ status: 'cancelled' })],
+    ])('%s: the charge refuses before Stripe', async (_label, visit) => {
+      const { StripeService, stripeClient } = load({ visit, contract: null });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', guards))
+        .rejects.toMatchObject({ code: 'TECH_VISIT_NOT_CHARGEABLE' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['completed', visitToday()],
+    ])('its own visit today, %s: the charge proceeds to Stripe', async (_label, visit) => {
+      const { StripeService, stripeClient } = load({ visit, contract: null });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', guards))
+        .rejects.not.toMatchObject({ code: 'TECH_VISIT_NOT_CHARGEABLE' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    test.each(['ach', 'us_bank_account', 'bank', 'bank_account'])('requireCardMethod: a saved %s method refuses before Stripe', async (methodType) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, methodType });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireCardMethod: true }))
+        .rejects.toMatchObject({ code: 'CARD_METHOD_REQUIRED' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    // Codex security P2 (#7587): the LOCKED invoice must bill the booked visit only.
+    const bookedLines = [{ client_id: 'scheduled_svc-1_primary', amount: 180 }, { client_id: 'scheduled_svc-1_addon_a1', amount: 20 }];
+    test('requireBookedVisitLinesOnly: a checkout extra on the locked invoice refuses before Stripe', async () => {
+      const { StripeService, stripeClient } = load({
+        visit: visitToday(), contract: null,
+        invoiceFields: { scheduled_service_id: 'svc-1', line_items: JSON.stringify([...bookedLines, { description: 'Extra', amount: 300 }]) },
+      });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireBookedVisitLinesOnly: true }))
+        .rejects.toMatchObject({ code: 'TECH_CHARGE_EXTRAS' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test('requireBookedVisitLinesOnly: booked lines only proceed to Stripe', async () => {
+      const { StripeService, stripeClient } = load({
+        visit: visitToday(), contract: null,
+        invoiceFields: { scheduled_service_id: 'svc-1', line_items: JSON.stringify(bookedLines) },
+      });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireBookedVisitLinesOnly: true }))
+        .rejects.not.toMatchObject({ code: 'TECH_CHARGE_EXTRAS' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    test.each([
+      ['a card-hold consent only', [{ consent_text_version: 'v12_2026-10-01', source: 'estimate_card_hold' }]],
+      ['no consent row', []],
+    ])('requireGeneralChargeConsent: %s refuses before Stripe', async (_label, consents) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, consents });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireGeneralChargeConsent: true }))
+        .rejects.toMatchObject({ code: 'CARD_CONSENT_REQUIRED' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test('requireGeneralChargeConsent: a visit-and-invoice consent proceeds to Stripe', async () => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, consents: [{ consent_text_version: 'v12_2026-10-01', source: 'pay_page' }] });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireGeneralChargeConsent: true }))
+        .rejects.not.toMatchObject({ code: 'CARD_CONSENT_REQUIRED' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    // Codex security P2 (#7587 r4): completion commits the visit as completed before it applies a cash
+    // prepayment to the invoice. In that window the technician charge (which sends
+    // requireNoUnappliedVisitPrepayment) refuses; once the prepayment marker is booked, it proceeds.
+    test.each([
+      ['not yet applied to this invoice', null, true],
+      ['applied to this invoice', { id: 'pay-1' }, false],
+    ])('a cash prepayment on the completed visit, %s', async (_label, appliedMarker, refuses) => {
+      const { StripeService, stripeClient } = load({
+        visit: visitToday({ prepaid_method: 'cash', prepaid_amount: '40.00' }), contract: null, appliedMarker,
+      });
+      const charge = StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: true });
+      if (refuses) await expect(charge).rejects.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      else await expect(charge).rejects.not.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
+    });
+
+    // Codex security P2 (#7587 r5): a plan may have no reminder sequence for refuseWhenDunningStopped.
+    test.each([
+      ['an active payment plan', { id: 'plan-1' }, true],
+      ['no active payment plan', null, false],
+    ])('refuseWhenActivePaymentPlan: %s on the locked invoice', async (_label, activePlan, refuses) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, activePlan });
+      const charge = StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, refuseWhenActivePaymentPlan: true });
+      if (refuses) await expect(charge).rejects.toMatchObject({ code: 'ACTIVE_PAYMENT_PLAN' });
+      else await expect(charge).rejects.not.toMatchObject({ code: 'ACTIVE_PAYMENT_PLAN' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
+    });
+
+    // Pre-push audit P0 (#7587): the technician charge sends requirePerformedVisit; a completed visit whose
+    // current closeout performed no treatment refuses under the visit lock.
+    test.each(['inspection_only', 'customer_declined', 'incomplete'])(
+      'requirePerformedVisit: a completed visit closed out as %s refuses before Stripe', async (visitOutcome) => {
+        const { StripeService, stripeClient } = load({
+          visit: visitToday(), contract: null, record: { status: 'completed', structured_notes: JSON.stringify({ visitOutcome }) },
+        });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requirePerformedVisit: true }))
+          .rejects.toMatchObject({ code: 'VISIT_NOT_COMPLETED' });
+        expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      },
+    );
+
+    // Codex security P2 (#7587 r6): the latest Auto Pay toggle, read under the customer row lock.
+    test.each([
+      ['turned Auto Pay off', { event_type: 'autopay_disabled' }, true],
+      ['turned Auto Pay back on', { event_type: 'autopay_enabled' }, false],
+      ['never enrolled (no toggle history)', null, false],
+    ])('refuseWhenAutopayOptedOut: a customer who %s', async (_label, autopayToggle, refuses) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, autopayToggle });
+      const charge = StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, refuseWhenAutopayOptedOut: true });
+      if (refuses) await expect(charge).rejects.toMatchObject({ code: 'AUTOPAY_OPTED_OUT' });
+      else await expect(charge).rejects.not.toMatchObject({ code: 'AUTOPAY_OPTED_OUT' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
+      const db = require('../models/db');
+      const customerLocks = db.mock.calls.map(([table], i) => [table, db.mock.results[i].value])
+        .filter(([table, chain]) => table === 'customers' && chain.forUpdate.mock.calls.length > 0);
+      expect(customerLocks.length).toBeGreaterThan(0);
+    });
+
+    test('the option without the visit lock is a caller error', async () => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireTechnicianCardOnFileFor: tech }))
+        .rejects.toThrow('requireTechnicianCardOnFileFor needs requireSelfPayScheduledServiceId.');
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     });
   });
 });

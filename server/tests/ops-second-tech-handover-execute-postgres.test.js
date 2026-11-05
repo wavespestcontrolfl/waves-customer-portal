@@ -315,6 +315,39 @@ describeDb('second-tech-handover --execute on PostgreSQL', () => {
     expect((await get(w.tue.id)).technician_id).toBe(w.ownerId);
   });
 
+  test('--zips refuses NO_COVER_TECH unless every territory line has an assignable, not-Off cover for --to; without --zips no cover is needed', async () => {
+    const w = await world();
+    const priorCard = await knex('service_line_techs').select('*');
+    const card = (line, home, gap) => ({ service_category: line, home_technician_id: home, gap_technician_id: gap });
+    // A syntactically valid PLAN ID that matches nothing: a run that gets past the cover check stops at PLAN_MISMATCH.
+    const stale = { from: w.ownerId, to: w.hireId, start: START, today: TODAY, now: NOW, planId: '0'.repeat(64), outDir, zips: ['34293'] };
+    const filesBefore = fs.readdirSync(outDir).length;
+    try {
+      await knex('service_line_techs').del();
+      await expect(exec.executeHandover(knex, stale)).rejects.toMatchObject({ code: 'NO_COVER_TECH', message: expect.stringContaining('general, mosquito, rodent, termite') });
+      // A card naming only the hire is no cover.
+      await knex('service_line_techs').insert(['general', 'mosquito', 'rodent', 'termite'].map((line) => card(line, w.hireId, null)));
+      await expect(exec.executeHandover(knex, stale)).rejects.toMatchObject({ code: 'NO_COVER_TECH' });
+      // The owner is the cover on three lines; termite still lacks one (the owner is switched Off there).
+      await knex('service_line_techs').del();
+      await knex('service_line_techs').insert(['general', 'mosquito', 'rodent', 'termite'].map((line) => card(line, w.hireId, w.ownerId)));
+      await knex('technician_capabilities').insert({ technician_id: w.ownerId, service_category: 'termite', active: false, capability_level: 'qualified' });
+      await expect(exec.executeHandover(knex, stale)).rejects.toMatchObject({ code: 'NO_COVER_TECH', message: expect.stringContaining('termite') });
+      await knex('technician_capabilities').where({ technician_id: w.ownerId }).del();
+      // Covered on all four lines: the cover check passes and the run reaches the PLAN ID check.
+      await expect(exec.executeHandover(knex, stale)).rejects.toMatchObject({ code: 'PLAN_MISMATCH' });
+      // No --zips (today's run): no cover is needed, even with an empty card.
+      await knex('service_line_techs').del();
+      await expect(exec.executeHandover(knex, { ...stale, zips: undefined })).rejects.toMatchObject({ code: 'PLAN_MISMATCH' });
+    } finally {
+      await knex('technician_capabilities').where({ technician_id: w.ownerId }).del();
+      await knex('service_line_techs').del();
+      if (priorCard.length) await knex('service_line_techs').insert(priorCard);
+    }
+    expect(fs.readdirSync(outDir).length).toBe(filesBefore);
+    expect((await get(w.mon.id)).technician_id).toBe(w.ownerId);
+  });
+
   test('the run refuses while the auto-dispatch writer lock is held, and frees the lock when it ends', async () => {
     const w = await world();
     const holder = await knex.client.acquireConnection();

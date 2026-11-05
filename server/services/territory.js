@@ -26,6 +26,65 @@ function normalizeZip(value) {
 // tree & shrub (line 'lawn') stay with the service-line map (owner 2026-10-30).
 const TERRITORY_LINES = Object.freeze(['general', 'mosquito', 'rodent', 'termite']);
 
+/**
+ * COVER (owner 2026-10-25 "the owner covers every gap the tech cannot fulfill", 2026-10-30
+ * territories by ZIP): the technician who takes a territory line's work when its territory
+ * technician `techId` cannot (days off, absence, full days). It is the technician the line's
+ * card row names (home, else gap) who is not `techId`: `entry` is { homeId, gapId } or null
+ * (no card row). Pure. null = the line has no cover.
+ */
+function coverTechnicianId(entry, techId) {
+  if (!entry || !techId) return null;
+  return [entry.homeId, entry.gapId].find((id) => id && String(id) !== String(techId)) || null;
+}
+
+const cardEntryOf = (row) => (row ? { homeId: row.home_technician_id || null, gapId: row.gap_technician_id || null } : null);
+
+/** The cover of one territory line for `techId` per the saved card, or null. Throws only on an unreadable database. */
+async function territoryCoverFor(conn, line, techId) {
+  if (!techId || !TERRITORY_LINES.includes(line)) return null;
+  const db = conn || defaultDb;
+  const row = await db('service_line_techs').where({ service_category: line }).first('home_technician_id', 'gap_technician_id');
+  return coverTechnicianId(cardEntryOf(row), techId);
+}
+
+/**
+ * The territory lines on which `techId` has NO usable cover, in TERRITORY_LINES order ([] = all covered).
+ * The write guards use it (the Service lines save, the handover run): a cover must be named on the line's
+ * card row, not be `techId`, be assignable (technician-eligibility isAssignable) and not be switched Off
+ * for the line (technician-capabilities stateOf). `rows` = the card as it will be saved
+ * ([{ service_category, home_technician_id, gap_technician_id }]); omitted = the saved card.
+ * Reads only; throws only on an unreadable database.
+ */
+async function lacksCoverLines(conn, techId, rows = null) {
+  const db = conn || defaultDb;
+  const { isAssignable } = require('./technician-eligibility');
+  const { stateOf } = require('./technician-capabilities');
+  const card = rows || await db('service_line_techs').whereIn('service_category', TERRITORY_LINES)
+    .select('service_category', 'home_technician_id', 'gap_technician_id');
+  const cover = new Map(TERRITORY_LINES.map((line) => [line, coverTechnicianId(cardEntryOf(card.find((r) => r.service_category === line)), techId)]));
+  const ids = [...new Set([...cover.values()].filter(Boolean))];
+  const techs = ids.length ? await db('technicians').whereIn('id', ids).select('id', 'employment_status', 'field_dispatchable') : [];
+  const caps = ids.length
+    ? await db('technician_capabilities').whereIn('technician_id', ids).whereIn('service_category', TERRITORY_LINES)
+      .select('technician_id', 'service_category', 'capability_level', 'active')
+    : [];
+  const usable = (line) => {
+    const id = cover.get(line);
+    const tech = techs.find((t) => String(t.id) === String(id));
+    const cap = caps.find((c) => String(c.technician_id) === String(id) && c.service_category === line);
+    return !!id && isAssignable(tech) && stateOf(cap || null) !== 'off';
+  };
+  return TERRITORY_LINES.filter((line) => !usable(line));
+}
+
+/** Every technician who owns at least one ZIP (distinct, non-null territory_zips.technician_id). */
+async function territoryTechnicianIds(conn) {
+  const db = conn || defaultDb;
+  const rows = await db('territory_zips').whereNotNull('technician_id').distinct('technician_id');
+  return rows.map((r) => r.technician_id);
+}
+
 let shapes = null;
 // [{ zip, box: [minLng, minLat, maxLng, maxLat], polygons }], read once on first use.
 function zipShapes() {
@@ -162,6 +221,10 @@ async function territoryReadout(conn, { today, ahead, back }) {
 
 module.exports = {
   TERRITORY_LINES,
+  coverTechnicianId,
+  territoryCoverFor,
+  lacksCoverLines,
+  territoryTechnicianIds,
   normalizeZip,
   zipForPoint,
   territoryForZip,

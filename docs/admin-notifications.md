@@ -258,6 +258,12 @@ customer's message by this rule.
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
+   A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
+   `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
+   30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,
+   "Customers — Jane D.'s phone can't get texts" (`dedupeKey` `dead-number:<customerId>:<last10>`, open-only,
+   done-when `phone_replaced`). It closes at the customer's next delivered text when that text went to the dead
+   number and was sent after its last failure, or the number is no longer their phone or secondary phone.
    A standing backlog (overdue promises past five) is a count on its page, never a bell:
    its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
    Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
