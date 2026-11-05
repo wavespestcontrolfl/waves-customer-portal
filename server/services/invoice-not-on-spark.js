@@ -1,6 +1,6 @@
 'use strict';
 
-// Emailed invoices not paid with Spark: one standing office bell (owner 2026-11-05:
+// Emailed invoices not linked to Spark: one standing office bell (owner 2026-11-05:
 // "if we have an invoice in email, that isn't linked to Spark, we should have an admin
 // notification for it"; the business uses Spark only for expenses, plus the business
 // debit card).
@@ -22,10 +22,11 @@
 // Window: expenses dated 14 days ago through 3 days ago (ET calendar days). The 3-day
 // grace lets the card charge post and the hourly matcher link it.
 //
-// Paid with Spark but not linked yet: the matcher parks a charge for review when its
-// bank words differ from the invoice's vendor (OPEN-METEO.COM vs "OpenMeteo GmbH").
-// An unlinked invoice whose exact amount sits unmatched on an OK account inside the
-// matcher's own date window was paid the right way, so it is not a bell item.
+// Waiting for review: the matcher parks a charge when its bank words differ from the
+// invoice's vendor (OPEN-METEO.COM vs "OpenMeteo GmbH"). An unlinked invoice whose
+// exact amount sits unmatched on an OK account inside the matcher's own date window
+// (and not rejected for this expense) stays on the list, worded as waiting for review.
+// Amount and date alone are no proof of payment, so nothing is ever hidden on them.
 //
 // GATE_INVOICE_NOT_ON_SPARK (strict 'true', read at call time) and
 // INVOICE_OK_ACCOUNT_LABELS (comma list of bank_transactions.account_label values that
@@ -95,17 +96,18 @@ function buildVendorList(rows, { okLabels, from, to }) {
     seen.add(id);
     const label = row.account_label ? String(row.account_label) : '';
     if (label && okLabels.has(label)) continue;
-    // No link, but its exact amount is unmatched on Spark or the debit in the matcher's window.
-    if (!label && row.ok_candidate === true) continue;
     const key = vendorKeyOf(row.vendor_name);
     let vendor = vendors.get(key);
     if (!vendor) {
-      vendor = { key, name: vendorNameOf(row.vendor_name), count: 0, cents: 0, noCharge: 0, accounts: new Set(), newest: '' };
+      vendor = { key, name: vendorNameOf(row.vendor_name), count: 0, cents: 0, noCharge: 0, review: 0, accounts: new Set(), newest: '' };
       vendors.set(key, vendor);
     }
     vendor.count += 1;
     vendor.cents += Math.round(amount * 100);
-    if (label) vendor.accounts.add(accountWords(label)); else vendor.noCharge += 1;
+    // No link: a same-amount unmatched charge on an OK account is a review hint only.
+    if (label) vendor.accounts.add(accountWords(label));
+    else if (row.ok_candidate === true) vendor.review += 1;
+    else vendor.noCharge += 1;
     if (date >= vendor.newest) { vendor.newest = date; vendor.name = vendorNameOf(row.vendor_name); }
   }
   return [...vendors.values()]
@@ -115,7 +117,8 @@ function buildVendorList(rows, { okLabels, from, to }) {
       count: v.count,
       total: v.cents / 100,
       noCharge: v.noCharge,
-      kinds: [...(v.noCharge ? ['no_charge'] : []), ...(v.accounts.size ? ['other_account'] : [])],
+      review: v.review,
+      kinds: [...(v.noCharge ? ['no_charge'] : []), ...(v.accounts.size ? ['other_account'] : []), ...(v.review ? ['awaiting_review'] : [])],
       accounts: [...v.accounts].sort(),
       newest: v.newest,
     }))
@@ -127,6 +130,7 @@ function paidWords(vendor) {
   const parts = [];
   if (vendor.accounts.length) parts.push(`paid from ${vendor.accounts.join(', ')}`);
   if (vendor.noCharge) parts.push('no card charge found');
+  if (vendor.review) parts.push('a same-amount Spark or debit charge waits for review');
   return parts.join(' and ');
 }
 
@@ -151,7 +155,7 @@ function whyFor(vendors) {
   }
   const invoices = vendors.reduce((sum, v) => sum + v.count, 0);
   const total = vendors.reduce((sum, v) => sum + v.total, 0);
-  return `${plural(invoices, 'invoice')} worth ${moneyWords(total)} from ${plural(vendors.length, 'vendor')} were not paid with Spark`;
+  return `${plural(invoices, 'invoice')} worth ${moneyWords(total)} from ${plural(vendors.length, 'vendor')} were not linked to Spark`;
 }
 
 // The bell for a non-empty list (pure): the composeAdminAlert spec plus the detail
@@ -160,7 +164,7 @@ function composeList(vendors) {
   const count = vendors.length;
   const invoices = vendors.reduce((sum, v) => sum + v.count, 0);
   const total = Math.round(vendors.reduce((sum, v) => sum + v.total, 0) * 100) / 100;
-  const action = count === 1 ? "check one vendor's invoices not paid with Spark" : `check ${count} vendors' invoices not paid with Spark`;
+  const action = count === 1 ? "check one vendor's invoices not linked to Spark" : `check ${count} vendors' invoices not linked to Spark`;
   const lines = vendors.slice(0, DETAIL_MAX_LINES).map((v) => (
     `${v.name} · ${plural(v.count, 'invoice')} · ${moneyWords(v.total)} · ${paidWords(v)} · newest ${shortDateET(new Date(`${v.newest}T12:00:00Z`))}`
   ));
@@ -214,7 +218,7 @@ async function raiseList(composed, dedupeKey) {
 async function closeList(database, dedupeKey) {
   if (!alertEpisodesLive()) return 0;
   return require('./admin-alert-episodes').closeAdminAlertKeys(database, [dedupeKey], 'count_zero', {
-    resolution: 'Every emailed invoice from the last 14 days was paid with Spark or the business debit card',
+    resolution: 'Every emailed invoice from the last 14 days is linked to a Spark or business debit charge',
   });
 }
 
@@ -234,9 +238,14 @@ function loadRows(database, { from, to, okLabels }) {
     .whereRaw('x.expense_date between ?::date and ?::date', [from, to])
     .select(
       'x.id as expense_id', 'x.vendor_name', 'x.amount', database.raw("to_char(x.expense_date, 'YYYY-MM-DD') as expense_date"), 'bt.account_label',
+      // A link the owner rejected for this expense (rejectedExpenseIds / lastUnlink, as
+      // bank-import rejectedTargets reads them) is no hint. No jsonb ? operator: knex
+      // reads ? as a binding.
       database.raw(`exists (select 1 from bank_transactions c where c.direction = 'debit' and c.status = 'unmatched'
         and c.account_label in (${ok.map(() => '?').join(', ')}) and c.amount = x.amount
-        and c.txn_date between x.expense_date - ?::int and x.expense_date + ?::int) as ok_candidate`,
+        and c.txn_date between x.expense_date - ?::int and x.expense_date + ?::int
+        and not (coalesce(c.suggestion->'rejectedExpenseIds', '[]'::jsonb) @> to_jsonb(x.id::text))
+        and coalesce(c.suggestion->'lastUnlink'->>'expenseId', '') <> x.id::text) as ok_candidate`,
       [...ok, EXPENSE_DATE_WINDOW_DAYS, EXPENSE_DATE_WINDOW_DAYS]),
     );
 }

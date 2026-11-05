@@ -1,4 +1,4 @@
-// Emailed invoices not paid with Spark (owner 2026-11-05): the vendor list, the one
+// Emailed invoices not linked to Spark (owner 2026-11-05): the vendor list, the one
 // standing bell built from it (copy passes the admin notification rule), when a
 // refresh rings, and the close at zero. The DB read is a thin query; the list logic
 // is pure and tested on rows in the shape that query returns.
@@ -90,7 +90,7 @@ describe('the vendor list', () => {
     ].sort((a, b) => a[0].localeCompare(b[0])));
   });
 
-  test('no link but an unmatched same-amount charge on Spark or the debit (parked for review) counts as paid with Spark', () => {
+  test('no link but an unmatched same-amount charge on Spark or the debit stays listed, worded as waiting for review', () => {
     const out = list([
       row({ vendor_name: 'Parked Co', ok_candidate: true }),
       row({ vendor_name: 'Missing Co', ok_candidate: false }),
@@ -98,7 +98,20 @@ describe('the vendor list', () => {
       row({ vendor_name: 'Old Card Co', account_label: 'capital-one-card-8804', ok_candidate: true }),
     ]);
     expect(out.map((v) => [v.name, v.kinds])).toEqual([
-      ['Missing Co', ['no_charge']], ['Old Card Co', ['other_account']],
+      ['Missing Co', ['no_charge']], ['Old Card Co', ['other_account']], ['Parked Co', ['awaiting_review']],
+    ]);
+    expect(whyFor(out.filter((v) => v.name === 'Parked Co'))).toBe(
+      'Parked Co: 1 invoice ($42.10) a same-amount Spark or debit charge waits for review',
+    );
+  });
+
+  test('one unmatched charge never hides invoices: two same-amount invoices from different vendors both stay listed', () => {
+    const out = list([
+      row({ vendor_name: 'Vendor One', amount: '100.00', ok_candidate: true }),
+      row({ vendor_name: 'Vendor Two', amount: '100.00', ok_candidate: true }),
+    ]);
+    expect(out.map((v) => [v.name, v.count, v.kinds])).toEqual([
+      ['Vendor One', 1, ['awaiting_review']], ['Vendor Two', 1, ['awaiting_review']],
     ]);
   });
 
@@ -142,7 +155,7 @@ describe('the bell', () => {
   test('three vendors: a rule-clean Tax-page bell with plain words', () => {
     const composed = composeList(three());
     const alert = composeAdminAlert(composed.spec);
-    expect(alert.headline).toBe("Billing — check 3 vendors' invoices not paid with Spark");
+    expect(alert.headline).toBe("Billing — check 3 vendors' invoices not linked to Spark");
     expect(alert.why).toBe('OpenMeteo: 1 invoice ($313) no card charge found; Anthropic: 22 invoices ($220) paid from ••3098; and 1 more');
     expect(alert.link).toBe('/admin/tax?tab=expenses');
     expect(alert.metadata).toMatchObject({ area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'count_zero', subject: { type: 'check', id: Spark.DEDUPE_KEY } });
@@ -156,16 +169,16 @@ describe('the bell', () => {
 
   test('one vendor reads in the singular', () => {
     const alert = composeAdminAlert(composeList(list([row()])).spec);
-    expect(alert.headline).toBe("Billing — check one vendor's invoices not paid with Spark");
+    expect(alert.headline).toBe("Billing — check one vendor's invoices not linked to Spark");
     expect(alert.why).toBe('Acme Supply: 1 invoice ($42.10) no card charge found');
   });
 
   test('a vendor name the rule cannot carry falls back to counts', () => {
     const vendors = list([row({ vendor_name: 'Acme [Legacy] Co', amount: '12' }), row({ vendor_name: 'Acme [Legacy] Co', amount: '8' })]);
-    expect(whyFor(vendors)).toBe('2 invoices worth $20 from 1 vendor were not paid with Spark');
+    expect(whyFor(vendors)).toBe('2 invoices worth $20 from 1 vendor were not linked to Spark');
     expect(() => composeAdminAlert(composeList(vendors).spec)).not.toThrow();
     const long = list([row({ vendor_name: `${'Very Long Vendor Name '.repeat(6)}`, amount: '12' })]);
-    expect(whyFor(long)).toBe('1 invoice worth $12 from 1 vendor were not paid with Spark');
+    expect(whyFor(long)).toBe('1 invoice worth $12 from 1 vendor were not linked to Spark');
   });
 
   test('a long list stays rule-clean and the detail names how many more there are', () => {
@@ -214,7 +227,7 @@ describe('runInvoiceNotOnSpark', () => {
     expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
     const [category, headline, why, opts] = episodes.raiseAdminAlertWithReopen.mock.calls[0];
     expect(category).toBe('tax');
-    expect(headline).toBe("Billing — check one vendor's invoices not paid with Spark");
+    expect(headline).toBe("Billing — check one vendor's invoices not linked to Spark");
     expect(why).toMatch(/^Acme Supply: 1 invoice/);
     expect(opts).toMatchObject({
       dedupeKey: 'invoice-not-on-spark', bellDefault: true, refreshOnDedupe: true, bumpOnRefresh: true, link: '/admin/tax?tab=expenses',
@@ -246,7 +259,7 @@ describe('runInvoiceNotOnSpark', () => {
     episodes.closeAdminAlertKeys.mockResolvedValueOnce(1);
     await expect(Spark.runInvoiceNotOnSpark({ ...base, rows: [] })).resolves.toEqual({ count: 0, outcome: 'closed' });
     expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(database, ['invoice-not-on-spark'], 'count_zero', {
-      resolution: 'Every emailed invoice from the last 14 days was paid with Spark or the business debit card',
+      resolution: 'Every emailed invoice from the last 14 days is linked to a Spark or business debit charge',
     });
     await expect(Spark.runInvoiceNotOnSpark({ ...base, rows: [] })).resolves.toEqual({ count: 0, outcome: 'clear' });
   });
@@ -266,7 +279,7 @@ describe('runInvoiceNotOnSpark', () => {
     gates.alertEpisodesLive.mockReturnValue(false);
     await Spark.runInvoiceNotOnSpark({ ...base, rows: [row()] });
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('tax', "Billing — check one vendor's invoices not paid with Spark", expect.any(String), expect.objectContaining({
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('tax', "Billing — check one vendor's invoices not linked to Spark", expect.any(String), expect.objectContaining({
       dedupeKey: 'invoice-not-on-spark', bellDefault: true, refreshOnDedupe: true,
     }));
     await Spark.runInvoiceNotOnSpark({ ...base, rows: [] });

@@ -5373,7 +5373,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:37AM — Emailed invoices not paid with Spark (GATE_INVOICE_NOT_ON_SPARK;
+  // DAILY 7:37AM — Emailed invoices not linked to Spark (GATE_INVOICE_NOT_ON_SPARK;
   // returns before any read when off). Owner 2026-11-05: one standing Tax bell
   // lists, by vendor, the emailed vendor invoices dated 3 to 14 days ago whose
   // paying bank or card line is on an account outside INVOICE_OK_ACCOUNT_LABELS,

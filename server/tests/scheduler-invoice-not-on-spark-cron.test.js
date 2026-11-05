@@ -1,5 +1,5 @@
 /**
- * Emailed invoices not paid with Spark in its own daily 7:37 ET cron (server/services/scheduler.js, '37 7 * * *'):
+ * Emailed invoices not linked to Spark in its own daily 7:37 ET cron (server/services/scheduler.js, '37 7 * * *'):
  * gate off reads nothing; on, the list runs under runExclusive, so a deploy overlap never raises it twice,
  * and a failed run is logged, never thrown out of the tick.
  *
