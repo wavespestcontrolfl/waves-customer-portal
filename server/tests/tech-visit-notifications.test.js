@@ -1442,6 +1442,15 @@ describe('an open card read against its visit as it is now (owner 2026-11-04)', 
       .toMatchObject({ type: 'visit_cancelled', payload: { headline: 'Visit cancelled', actor: null, changed_at: '2026-11-03T15:00:00.000Z' } });
   });
 
+  test('an older card that took the visit off (or onto) today or tomorrow gives the "Was" line', () => {
+    const row = cardRow('visit_rescheduled', { when: 'Thu Nov 5, 8–9 AM', previous_when: 'Wed Oct 28, 8–9 AM', actor: 'by auto-dispatch' });
+    const out = liveCard(row, live(), null, 'Wed Nov 4, 9–10 AM');
+    expect(out).toMatchObject({ type: 'visit_rescheduled', payload: { previous_when: 'Wed Nov 4, 9–10 AM', when: 'Thu Nov 5, 8–9 AM', actor: 'by auto-dispatch' } });
+    expect(out.payload.changed_again).toBeUndefined();
+    // The card's own slot is no news: left as written.
+    expect(liveCard(row, live(), null, 'Thu Nov 5, 8–9 AM')).toBe(row);
+  });
+
   test('a customer-pick hand-off keeps its "picks a day" text', () => {
     const row = cardRow('visit_rescheduled', { when: 'the customer picks a day by Wed 8 PM' });
     expect(liveCard(row, live({ window_start: null, window_end: null, customer_pick_by: new Date('2026-11-05T01:00:00Z') }), null)).toBe(row);

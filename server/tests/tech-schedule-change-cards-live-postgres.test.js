@@ -183,6 +183,29 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
     expect(feed.notifications.find((n) => n.payload.customer_name === 'Retimed').payload.when).toBe(said(tomorrow, '13:00', '14:00'));
   });
 
+  test('a visit moved off today, then again, keeps one card on top that names today\'s slot; Clear all leaves it', async () => {
+    const tech = await makeTech('Fixture Tech');
+    const { formatWhen } = require('../services/tech-visit-notifications');
+    const nextWeek = et.etDateString(et.addETDays(new Date(), 7));
+    const visit = await makeVisit(tech, 'Twomoves', farOut, '09:00', '10:00');
+    const offToday = await card(tech, visit, 'visit_rescheduled', { date: nextWeek, previous_date: today, when: formatWhen(nextWeek, '09:00', '10:00'), previous_when: formatWhen(today, '09:00', '10:00'), actor: 'by auto-dispatch', customer_name: 'Twomoves' }, daysAgo(3));
+    const later = await card(tech, visit, 'visit_rescheduled', { date: farOut, previous_date: nextWeek, when: formatWhen(farOut, '09:00', '10:00'), previous_when: formatWhen(nextWeek, '09:00', '10:00'), actor: 'by auto-dispatch', customer_name: 'Twomoves' }, daysAgo(2));
+
+    const read = await call('/schedule-changes', 'get', { technicianId: tech.id });
+    expect(read.later_total).toBe(0);
+    expect(read.changes).toHaveLength(1);
+    expect(read.changes[0]).toMatchObject({
+      id: later, soon: true, type: 'visit_rescheduled',
+      payload: { previous_when: formatWhen(today, '09:00', '10:00'), when: formatWhen(farOut, '09:00', '10:00') },
+    });
+    expect(read.changes[0]).not.toHaveProperty('visit_soon_when');
+
+    const result = await call('/dismiss-batch', 'post', { technicianId: tech.id, body: { as_of: read.as_of } });
+    expect(result).toEqual({ success: true, dismissed: 0 });
+    const stillOpen = await db('tech_notifications').where({ technician_id: tech.id }).whereNull('dismissed_at').pluck('id');
+    expect(stillOpen.sort()).toEqual([offToday, later].sort());
+  });
+
   test('Got it clears the visit\'s older open cards too, so none takes its place', async () => {
     const tech = await makeTech('Fixture Tech');
     const { formatWhen } = require('../services/tech-visit-notifications');

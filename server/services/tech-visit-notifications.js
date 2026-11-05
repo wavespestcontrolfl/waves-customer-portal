@@ -1240,13 +1240,31 @@ function hiddenVisitCardSql(alias, today) {
 
 // One tech's open visit cards, each ranked within its visit, newest first
 // (`visit_rank` 1 speaks for the visit): the Today read takes rank 1 in one
-// pass instead of a per-card lookup (45 ms -> 7 ms on a 290-card account).
-function rankedVisitCards(conn, technicianId) {
+// pass instead of a per-card lookup (45 ms -> 10 ms on a 290-card account).
+// `days` = [today, tomorrow] (ET) of the read. Every card also carries what
+// the visit's OTHER open cards say about those days, so the card that speaks
+// for the visit keeps an older card's news: `visit_touches_soon` (any card of
+// the visit was on, or moved onto, today or tomorrow) and `visit_soon_when`
+// (the newest such card's today/tomorrow slot, for the "Was" line).
+function rankedVisitCards(conn, technicianId, days) {
+  const [today, tomorrow] = days;
+  const visit = `PARTITION BY ${CARD_VISIT_KEY_SQL('tn')}`;
+  const touches = "(tn.payload->>'date' IN (?, ?) OR tn.payload->>'previous_date' IN (?, ?))";
   return conn('tech_notifications as tn')
     .where('tn.technician_id', technicianId)
     .whereNull('tn.dismissed_at')
     .whereIn('tn.type', VISIT_CARD_TYPES)
-    .select('tn.*', conn.raw(`row_number() OVER (PARTITION BY ${CARD_VISIT_KEY_SQL('tn')} ORDER BY tn.created_at DESC, tn.id DESC) AS visit_rank`));
+    .select(
+      'tn.*',
+      conn.raw(`row_number() OVER (${visit} ORDER BY tn.created_at DESC, tn.id DESC) AS visit_rank`),
+      // prior_day_unknown: an old assignment card that never recorded the
+      // slot it left (backfill 20261003150000) — kept on top, as before.
+      conn.raw(`bool_or(${touches} OR tn.payload->>'prior_day_unknown' = 'true') OVER (${visit}) AS visit_touches_soon`, [today, tomorrow, today, tomorrow]),
+      conn.raw(`(array_agg(CASE WHEN tn.payload->>'previous_date' IN (?, ?) THEN tn.payload->>'previous_when' ELSE tn.payload->>'when' END)`
+        + ` FILTER (WHERE ${touches}) OVER (${visit} ORDER BY tn.created_at DESC, tn.id DESC`
+        + ' ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING))[1] AS visit_soon_when',
+      [today, tomorrow, today, tomorrow, today, tomorrow]),
+    );
 }
 
 // Who made a move, from reschedule_log.initiated_by (a label, never a staff
@@ -1284,10 +1302,15 @@ function firstName(name) {
 }
 
 // One card against its visit row as it is now. `mover` is the newest
-// reschedule_log move of the visit. Pure: returns a new row, never the input.
-function liveCard(row, live, mover) {
+// reschedule_log move of the visit; `soonWhen` is the today/tomorrow slot an
+// older open card of the same visit named (rankedVisitCards). Pure: returns
+// a new row, never the input.
+function liveCard(row, live, mover, soonWhen = null) {
   const payload = row.payload || {};
   if (!live || !['visit_assigned', 'visit_rescheduled'].includes(row.type)) return row;
+  // An older card put the visit on (or took it off) today or tomorrow: that
+  // slot is the "Was" the tech needs, not this card's own.
+  const olderSoon = soonWhen && soonWhen !== payload.when && soonWhen !== payload.previous_when ? soonWhen : null;
   const movedSince = mover && row.created_at && new Date(mover.created_at) > new Date(row.created_at) ? mover : null;
   const changedAt = movedSince ? new Date(movedSince.created_at).toISOString() : null;
   const actor = movedSince ? moverText(movedSince.initiated_by) : null;
@@ -1314,16 +1337,17 @@ function liveCard(row, live, mover) {
     };
   }
   if (when !== payload.when) {
-    // "Was" is what the card last told the tech; "Now" is the visit today.
+    // "Was" is what the cards last told the tech; "Now" is the visit today.
     return {
       ...row,
       type: 'visit_rescheduled',
       payload: {
-        ...payload, previous_when: payload.when || null, previous_date: payload.date || null,
+        ...payload, previous_when: olderSoon || payload.when || null, previous_date: olderSoon ? null : (payload.date || null),
         when, date, actor, changed_at: changedAt, changed_again: true,
       },
     };
   }
+  if (olderSoon) return { ...row, type: 'visit_rescheduled', payload: { ...payload, previous_when: olderSoon, previous_date: null } };
   const line = bookedLine(row, live);
   return line ? { ...row, payload: { ...payload, actor_line: line } } : row;
 }
@@ -1355,10 +1379,10 @@ async function refreshVisitCards(rows, conn = db) {
   ]);
   const visitById = new Map(visits.map((visit) => [String(visit.id), visit]));
   const moveById = new Map(moves.map((move) => [String(move.scheduled_service_id), move]));
-  return rows.map((row) => {
+  return rows.map(({ visit_soon_when: soonWhen = null, ...row }) => {
     const id = String(row.payload?.visit_id || '');
     if (!VISIT_CARD_TYPES.includes(row.type) || !visitById.has(id)) return row;
-    return liveCard(row, visitById.get(id), moveById.get(id) || null);
+    return liveCard(row, visitById.get(id), moveById.get(id) || null, soonWhen);
   });
 }
 

@@ -78,6 +78,11 @@ describe('GET /schedule-changes', () => {
       expect(cards.whereIn[0]).toEqual(['tn.type', ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']]);
       // One card per visit: ranked within its visit, newest first.
       expect(cards.select[0][1].sql).toMatch(/^row_number\(\) OVER \(PARTITION BY COALESCE\(tn\.payload->>'visit_id', tn\.id::text\) ORDER BY tn\.created_at DESC, tn\.id DESC\) AS visit_rank$/);
+      // …carrying what ANY open card of the visit says about today/tomorrow.
+      expect(cards.select[0][2].sql).toContain("tn.payload->>'prior_day_unknown' = 'true'");
+      expect(cards.select[0][2].sql).toMatch(/AS visit_touches_soon$/);
+      expect(cards.select[0][2].bindings).toEqual([today, tomorrow, today, tomorrow]);
+      expect(cards.select[0][3].sql).toMatch(/AS visit_soon_when$/);
       expect(cards.as).toBe('n');
     }
     for (const q of [soonQ, laterQ, countQ]) {
@@ -93,12 +98,10 @@ describe('GET /schedule-changes', () => {
       expect(q.whereRaw[0][0]).toMatch(/^NOT \(n\.type IN \(/);
       expect(q.whereRaw[0][1]).toEqual([today, today]);
     }
-    expect(soonQ.whereRaw[1][0]).toMatch(/^COALESCE\(/);
-    // An old assignment card that never recorded the slot it left stays its own card.
-    expect(soonQ.whereRaw[1][0]).toContain("n.payload->>'prior_day_unknown' = 'true'");
-    // The visit's day as it is now counts too, not only the card's own days.
-    expect(soonQ.whereRaw[1][0]).toContain("OR to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)");
-    expect(soonQ.whereRaw[1][1]).toEqual([today, tomorrow, today, tomorrow, today, tomorrow]);
+    // Soon: any open card of the visit touches today/tomorrow, or the visit's
+    // day as it is now does.
+    expect(soonQ.whereRaw[1][0]).toBe("COALESCE(n.visit_touches_soon OR to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?), false)");
+    expect(soonQ.whereRaw[1][1]).toEqual([today, tomorrow]);
     expect(laterQ.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
     expect(countQ.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
     // Soon cards in visit order: today's stops lead tomorrow's.
@@ -146,7 +149,8 @@ describe('POST /dismiss-batch', () => {
     await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: '2026-10-04T03:59:00.000Z' } }, res, (e) => { throw e; });
     // The hide rules judge "past" on the read's day too.
     expect(chains[2].whereRaw[0][1]).toEqual(['2026-10-03', '2026-10-03']);
-    expect(chains[2].whereRaw[1][1]).toEqual(['2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04']);
+    expect(chains[2].whereRaw[1][1]).toEqual(['2026-10-03', '2026-10-04']);
+    expect(chains[1].select[0][2].bindings).toEqual(['2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04']);
   });
 
   test.each([

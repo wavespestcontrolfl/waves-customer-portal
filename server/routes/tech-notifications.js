@@ -122,7 +122,7 @@ const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 // `asOf` is the read the tech sees: its ET day judges "past".
 function openScheduleChanges(technicianId, asOf) {
   const stale = staleVisitCardSql('n', etDateString(asOf));
-  return db.from(rankedVisitCards(db, technicianId).as('n'))
+  return db.from(rankedVisitCards(db, technicianId, soonDays(asOf)).as('n'))
     .leftJoin('scheduled_services as s', function joinVisit() {
       this.on('s.id', '=', db.raw(`CASE WHEN n.payload->>'visit_id' ~* '${UUID_PATTERN}' THEN (n.payload->>'visit_id')::uuid END`));
     })
@@ -130,22 +130,23 @@ function openScheduleChanges(technicianId, asOf) {
     .whereRaw(`NOT ${stale.sql}`, stale.bindings);
 }
 
-// `soon` in SQL: the card's new or previous day, or the visit's day as it is
-// now, is today or tomorrow (ET) as of `asOf`: a visit moved onto tomorrow
-// with no card of its own surfaces through its older card. Clear-all passes
-// the read's own as_of, so an ET midnight between the read and the tap never
-// clears a card the tech saw as its own today/tomorrow card (pre-push audit
-// P1).
+// Today and tomorrow (ET) as of a read.
+function soonDays(asOf) {
+  return [etDateString(asOf), etDateString(addETDays(asOf, 1))];
+}
+
+// `soon` in SQL, over openScheduleChanges: any open card of the visit has a
+// new or previous day of today or tomorrow (ET) as of `asOf`
+// (`visit_touches_soon`, so a newer card never hides an older card's move off
+// or onto today), or the visit's day as it is now is today or tomorrow (a
+// visit moved there with no card of its own surfaces through its older card).
+// Clear-all passes the read's own as_of, so an ET midnight between the read
+// and the tap never clears a card the tech saw as its own today/tomorrow card
+// (pre-push audit P1).
 function soonSql(asOf) {
-  const now = asOf;
-  const days = [etDateString(now), etDateString(addETDays(now, 1))];
   return {
-    // prior_day_unknown: an old assignment card that never recorded the slot
-    // it left (backfill 20261003150000) — kept as its own card.
-    sql: "COALESCE(n.payload->>'date' IN (?, ?) OR n.payload->>'previous_date' IN (?, ?)"
-      + " OR to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)"
-      + " OR n.payload->>'prior_day_unknown' = 'true', false)",
-    bindings: [...days, ...days, ...days],
+    sql: "COALESCE(n.visit_touches_soon OR to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?), false)",
+    bindings: soonDays(asOf),
   };
 }
 
@@ -159,7 +160,7 @@ router.get('/schedule-changes', async (req, res, next) => {
   try {
     const asOf = new Date();
     const soon = soonSql(asOf);
-    const columns = ['n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at', 'n.technician_id'];
+    const columns = ['n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at', 'n.technician_id', 'n.visit_soon_when'];
     const [soonRows, laterRows, totals] = await Promise.all([
       openScheduleChanges(req.technicianId, asOf)
         .where('n.created_at', '<=', asOf)
