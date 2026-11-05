@@ -119,7 +119,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1834,6 +1834,26 @@ async function spelledEmailTrusted({ extracted, dictationEmailPayload, corrected
     .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
     .catch(() => true);
   return !ownedByAnyone;
+}
+
+// GATE_CALL_SPELLED_EMAIL_SETTLES: an active do-not-email row on EITHER spelling
+// keeps the 2026-09-25 hold (a Google address matches a row under any dot
+// spelling of its mailbox). Fails closed: a failed lookup keeps the hold.
+async function eitherSpellingSuppressed({ email, otherSpelling }) {
+  try {
+    const { suppressionCoversEmail } = require('../utils/email-equivalence');
+    for (const address of [email, otherSpelling]) {
+      const row = await db('email_suppressions')
+        .where(suppressionCoversEmail(address))
+        .where({ status: 'active' })
+        .first('id');
+      if (row) return true;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[call-proc] Spelled-email suppression check failed, keeping the hold: ${err.code || err.name}`);
+    return true;
+  }
 }
 
 // GATE_CALL_EMAIL_CHECKS: an address whose domain has no mail server was set
@@ -13300,11 +13320,27 @@ const CallRecordingProcessor = {
     // candidates into dictationEmailPayload so the standard decoder-only
     // forced-card path below files ONE card with both spellings for the
     // office to read back, instead of either extractor's guess winning.
+    // GATE_CALL_SPELLED_EMAIL_SETTLES (owner 2026-11-04, "A"): when the letters
+    // the caller spelled settle which pass was right, and neither spelling is on
+    // the do-not-email list, the decoder's adopt stands. The spelled-email trust
+    // below then drops the read-back card and the first-touch hold, as it does
+    // when the passes agree. The extraction keeps both spellings, so a hard
+    // bounce of the saved one can be traced to the other.
     if (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2) {
-      const held = applyEmailDisagreementHold(extracted, dictationEmailPayload);
-      extracted = held.extracted;
-      dictationEmailPayload = held.dictationEmailPayload;
-      logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+      const settled = isEnabled('callSpelledEmailSettles')
+        ? spelledLettersSettleEmailDisagreement(extracted, dictationEmailPayload)
+        : null;
+      if (settled && !(await eitherSpellingSuppressed(settled))) {
+        const next = { ...extracted, email_spelling_settled: { email: settled.email, other_spelling: settled.otherSpelling } };
+        delete next.email_candidates;
+        extracted = next;
+        logger.info(`[call-proc] Spelled letters settled the V1/V2 email disagreement on ${maskSid(callSid)}`);
+      } else {
+        const held = applyEmailDisagreementHold(extracted, dictationEmailPayload);
+        extracted = held.extracted;
+        dictationEmailPayload = held.dictationEmailPayload;
+        logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+      }
     }
 
     // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a DNS check on the address this
@@ -25940,6 +25976,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  eitherSpellingSuppressed,
   callMakeupStep,
   fileNameSpellingCard,
   contactPassTrigger,
