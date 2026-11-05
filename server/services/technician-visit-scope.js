@@ -175,8 +175,8 @@ function invoiceLines(raw) {
 }
 
 // The unlocked check the card-on-file routes run first: the invoice is bound to a visit of its own
-// customer, that visit passes technicianCardOnFileVisitOk, the invoice bills the booked visit only, and
-// no active payment plan owns it.
+// customer, that visit passes technicianCardOnFileVisitOk, the invoice bills the booked visit only, no
+// active payment plan owns it, and the customer has not turned Auto Pay off.
 async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   if (!isTechnicianRequest(req)) return true;
   if (!invoice?.id || !invoice.scheduled_service_id || !invoiceChargesBookedVisitOnly(invoice)) return false;
@@ -185,7 +185,9 @@ async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
     .first('customer_id', 'technician_id', 'status', 'scheduled_date');
   if (!row || String(row.customer_id) !== String(invoice.customer_id) || !technicianCardOnFileVisitOk(req, row)) return false;
   // An active payment plan owns the invoice's collection: the office collects it.
-  return !(await database('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id'));
+  if (await database('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id')) return false;
+  // A customer who turned Auto Pay off is not charged off-session from the visit.
+  return !(await require('./payment-method-consents').autopayOptedOut(invoice.customer_id, { dbh: database }));
 }
 
 module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly };

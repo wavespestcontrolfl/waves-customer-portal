@@ -6,7 +6,7 @@
 describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards', () => {
   beforeEach(() => { jest.resetModules(); });
 
-  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {}, consents = [], activePlan = null }) {
+  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {}, consents = [], activePlan = null, autopayToggle = null }) {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       subtotal: '200.00', total: '200.00', discount_amount: '0.00',
@@ -37,6 +37,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'customer_contracts') return contract;
         if (table === 'payment_method_consents') return consents[0] || null;
         if (table === 'payment_plans') return activePlan;
+        if (table === 'autopay_log') return autopayToggle;
         // Only the applied-prepayment marker lookup (it binds 'scheduled_service_prepaid') sees the marker.
         if (table === 'payments') return markerLookup ? appliedMarker : null;
         return null;
@@ -295,6 +296,23 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       if (refuses) await expect(charge).rejects.toMatchObject({ code: 'ACTIVE_PAYMENT_PLAN' });
       else await expect(charge).rejects.not.toMatchObject({ code: 'ACTIVE_PAYMENT_PLAN' });
       expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
+    });
+
+    // Codex security P2 (#7587 r6): the latest Auto Pay toggle, read under the customer row lock.
+    test.each([
+      ['turned Auto Pay off', { event_type: 'autopay_disabled' }, true],
+      ['turned Auto Pay back on', { event_type: 'autopay_enabled' }, false],
+      ['never enrolled (no toggle history)', null, false],
+    ])('refuseWhenAutopayOptedOut: a customer who %s', async (_label, autopayToggle, refuses) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, autopayToggle });
+      const charge = StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, refuseWhenAutopayOptedOut: true });
+      if (refuses) await expect(charge).rejects.toMatchObject({ code: 'AUTOPAY_OPTED_OUT' });
+      else await expect(charge).rejects.not.toMatchObject({ code: 'AUTOPAY_OPTED_OUT' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
+      const db = require('../models/db');
+      const customerLocks = db.mock.calls.map(([table], i) => [table, db.mock.results[i].value])
+        .filter(([table, chain]) => table === 'customers' && chain.forUpdate.mock.calls.length > 0);
+      expect(customerLocks.length).toBeGreaterThan(0);
     });
 
     test('the option without the visit lock is a caller error', async () => {

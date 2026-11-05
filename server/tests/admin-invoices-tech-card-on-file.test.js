@@ -143,7 +143,20 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       requireBookedVisitLinesOnly: true,
       requireNoUnappliedVisitPrepayment: true,
       refuseWhenActivePaymentPlan: true,
+      refuseWhenAutopayOptedOut: true,
     });
+  });
+
+  // Codex security P2 (#7587 r6): a customer who turned Auto Pay off is not charged off-session from the
+  // visit, even on a card whose consent predates the opt-out (the latest toggle decides).
+  test('gate on, a customer whose latest Auto Pay toggle is off: both routes answer 404 before Stripe', async () => {
+    mockRows.autopay_log = { event_type: 'autopay_disabled' };
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-1' })).status).toBe(404);
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 102.9 })).status).toBe(404);
+    });
+    expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   // Codex security P2 (#7587 r5): an active payment plan owns the invoice's collection, with or
@@ -304,6 +317,13 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
     test('an invoice on an active payment plan: tech_card_on_file is false', async () => {
       mockRows.payment_plans = { id: 'plan-1' };
       expect((await read()).body.tech_card_on_file).toBe(false);
+    });
+
+    test('a customer who turned Auto Pay off: tech_card_on_file is false; turned back on: true', async () => {
+      mockRows.autopay_log = { event_type: 'autopay_disabled' };
+      expect((await read()).body.tech_card_on_file).toBe(false);
+      mockRows.autopay_log = { event_type: 'autopay_enabled' };
+      expect((await read()).body.tech_card_on_file).toBe(true);
     });
 
     test('gate off, or a visit not completed: tech_card_on_file is false', async () => {
