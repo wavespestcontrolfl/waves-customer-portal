@@ -47,6 +47,12 @@ const para = (text) => `<p style="margin-bottom:0">${text}</p>`;
 // A form submit from the GET page gets HTML; any other POST (fetch, curl) gets JSON.
 const isFormSubmission = (req) => !!(req.is('application/x-www-form-urlencoded') || req.is('multipart/form-data'));
 
+// The button that POSTs the link's token back (the confirm page, and again on the retry page).
+const confirmForm = (token) => `
+          <form method="POST" action="/api/public/email-resubscribe/${escapeHtml(token)}">
+            <button type="submit" class="btn">${PAGE.confirmButton}</button>
+          </form>`;
+
 function expired(req, res) {
   if (req.method === 'POST' && !isFormSubmission(req)) return res.status(404).json({ success: false, state: 'expired' });
   return page(res, 404, PAGE.expiredHeading, para(PAGE.expiredBody));
@@ -71,12 +77,9 @@ router.get('/:token', async (req, res) => {
     if (status === 'used' || !(await Resub.releasableUnsubscribes(request.email)).length) {
       return page(res, 200, PAGE.doneHeading, para(PAGE.doneAlreadyBody));
     }
-    const action = `/api/public/email-resubscribe/${escapeHtml(req.params.token)}`;
     return page(res, 200, PAGE.confirmHeading, `
           <p>${PAGE.confirmBody(`<span class="email">${escapeHtml(request.email)}</span>`)}</p>
-          <form method="POST" action="${action}">
-            <button type="submit" class="btn">${PAGE.confirmButton}</button>
-          </form>
+          ${confirmForm(req.params.token)}
           <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">${PAGE.confirmNote}</p>
         `);
   } catch (err) {
@@ -96,7 +99,7 @@ router.post('/:token', async (req, res) => {
     if (!isFormSubmission(req)) {
       return res.status(result === 'retry' ? 503 : 200).json({ success: result !== 'retry', state: result });
     }
-    if (result === 'retry') return page(res, 503, PAGE.retryHeading, para(PAGE.retryBody));
+    if (result === 'retry') return page(res, 503, PAGE.retryHeading, `<p>${PAGE.retryBody}</p>${confirmForm(req.params.token)}`);
     if (result === 'already') return page(res, 200, PAGE.doneHeading, para(PAGE.doneAlreadyBody));
     return page(res, 200, PAGE.successHeading, para(PAGE.successBody(`<span class="email">${escapeHtml(request.email)}</span>`)));
   } catch (err) {

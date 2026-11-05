@@ -164,6 +164,14 @@ describe('POST /:token', () => {
     expect(html).toContain(heading);
     expect(html).toContain(body);
     if (result === 'done') expect(html).toContain('pat@example.com');
+    // Only the retry page offers the button again (same form, same token); done/already do not.
+    const form = `<form method="POST" action="/api/public/email-resubscribe/${TOKEN}">`;
+    if (result === 'retry') {
+      expect(html).toContain(form);
+      expect(html).toContain('Turn emails back on');
+    } else {
+      expect(html).not.toContain(form);
+    }
     expect(complete).toHaveBeenCalledWith(request);
   });
 
