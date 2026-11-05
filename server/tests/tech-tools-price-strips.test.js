@@ -193,6 +193,19 @@ describe('B3 search_knowledge_base', () => {
     expect(snippet).not.toMatch(/Best Price|Test Vendor|\$/);
   });
 
+  test('a priced title loses its price for a technician, in both corpora; an admin keeps it', async () => {
+    mockUnifiedSearch.mockResolvedValue({
+      claudeopedia: [{ id: 1, title: 'Sample Herbicide ($139.50)', category: 'chemicals' }],
+      wiki: [{ id: 7, title: 'Sample Fungicide ($48.00 per bag)', category: 'products' }],
+    });
+    state.knowledge_entries = [{ id: 7, summary: 'Rotate after two uses.' }];
+    const tech = await executeTechTool('search_knowledge_base', { query: 'sample' }, TECHNICIAN);
+    expect(tech.results.map((x) => x.title)).toHaveLength(2);
+    for (const { title } of tech.results) expect(title).not.toMatch(/\$|139|48\.00/);
+    const admin = await executeTechTool('search_knowledge_base', { query: 'sample' }, {});
+    expect(admin.results.map((x) => x.title)).toEqual(expect.arrayContaining(['Sample Herbicide ($139.50)']));
+  });
+
   test('an admin workflow search passes no category limit and keeps the page as stored', async () => {
     const r = await executeTechTool('search_knowledge_base', { query: 'herbicide' }, {});
     expect(mockUnifiedSearch.mock.calls[0][1]).not.toHaveProperty('kbCategories');

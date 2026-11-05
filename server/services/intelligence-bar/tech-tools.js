@@ -631,7 +631,7 @@ async function searchKnowledgeBase(query, { forTech = false, technician = false 
       limit: 5, trustedOnly: true,
       ...(technician ? { kbCategories: TECHNICIAN_KNOWLEDGE_CATEGORIES } : {}),
     });
-    // Vendor price lines and dollar tokens never reach a technician's snippet.
+    // Vendor price lines and dollar tokens never reach a technician's title or snippet.
     const clean = (text) => (technician ? technicianText(text) : text);
 
     // unifiedSearch returns metadata only — attach snippets: each page's first
@@ -659,8 +659,9 @@ async function searchKnowledgeBase(query, { forTech = false, technician = false 
     // Interleave the two corpora (wiki first — field outcomes lead, matching
     // the admin tool's presentation) so a populated KB can never push every
     // wiki hit past the cap, and vice versa.
-    const wikiResults = (wiki || []).map((r) => ({ title: r.title, category: r.category, snippet: clean(wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null) }));
-    const kbResults = (claudeopedia || []).map((r) => ({ title: r.title, category: r.category, snippet: kbSnippetById[r.id] || null }));
+    // Titles too: a field article may carry a price in its title.
+    const wikiResults = (wiki || []).map((r) => ({ title: clean(r.title), category: r.category, snippet: clean(wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null) }));
+    const kbResults = (claudeopedia || []).map((r) => ({ title: clean(r.title), category: r.category, snippet: kbSnippetById[r.id] || null }));
     const results = [];
     for (let i = 0; results.length < 5 && (i < wikiResults.length || i < kbResults.length); i++) {
       if (i < wikiResults.length) results.push(wikiResults[i]);
