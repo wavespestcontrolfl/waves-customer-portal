@@ -504,6 +504,14 @@ function StormCard({ n, onReview, onDismiss }) {
   );
 }
 
+// Where a visit that left this route is now (a card the server could not
+// name a holder on says only that the visit is on another route).
+function visitNowLine(p) {
+  if (p.ended) return `Now ${p.ended}`;
+  if (p.now_with) return `Now with ${p.now_with}`;
+  return p.now_elsewhere ? 'Now on another route' : 'Now unassigned';
+}
+
 // A schedule change on the tech's own route (tech-visit-notifications.js).
 // Headline + who + the details the server composed; "Got it" dismisses.
 function VisitCard({ n, onDismiss }) {
@@ -518,7 +526,7 @@ function VisitCard({ n, onDismiss }) {
     lines.push([p.service_type, p.when].filter(Boolean).join(' · '));
     if (n.type === 'visit_assigned' && p.address) lines.push(p.address);
     // `ended`: the visit finished (cancelled / completed …) before this card landed — name that, not a holder.
-    if (n.type === 'visit_unassigned') lines.push(p.ended ? `Now ${p.ended}` : (p.now_with ? `Now with ${p.now_with}` : 'Now unassigned'));
+    if (n.type === 'visit_unassigned') lines.push(visitNowLine(p));
   }
   // The server reads the card against its visit as it is now
   // (tech-visit-notifications.js refreshVisitCards): how a new visit came in,

@@ -84,6 +84,14 @@ function swapPartners(changes) {
   return partners;
 }
 
+// Where a visit that left this route is now. A card the server could not
+// name a holder on says only that the visit is on another route.
+function nowLine(p) {
+  if (p.ended) return `Now ${p.ended}`;
+  if (p.now_with) return `Now with ${p.now_with}`;
+  return p.now_elsewhere ? 'Now on another route' : 'Now unassigned';
+}
+
 function detailLines(change) {
   const p = change.payload || {};
   const lines = [];
@@ -96,7 +104,7 @@ function detailLines(change) {
   } else {
     lines.push({ text: [p.service_type, p.when].filter(Boolean).join(' · ') });
     if (change.type === 'visit_assigned' && p.address) lines.push({ text: p.address });
-    if (change.type === 'visit_unassigned') lines.push({ text: p.ended ? `Now ${p.ended}` : (p.now_with ? `Now with ${p.now_with}` : 'Now unassigned') });
+    if (change.type === 'visit_unassigned') lines.push({ text: nowLine(p) });
   }
   lines.push({ text: actorLine(change) });
   return lines.filter((line) => line.text);

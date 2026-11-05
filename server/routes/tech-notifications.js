@@ -146,7 +146,9 @@ function soonDays(asOf) {
 // (pre-push audit P1).
 function soonSql(asOf) {
   return {
-    sql: "COALESCE(n.visit_touches_soon OR to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?), false)",
+    // The visit's day as it is now counts only while it is this tech's: a
+    // former holder reads nothing of a reassigned visit's new schedule.
+    sql: "COALESCE(n.visit_touches_soon OR (s.technician_id = n.technician_id AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)), false)",
     bindings: soonDays(asOf),
   };
 }
@@ -166,8 +168,9 @@ router.get('/schedule-changes', async (req, res, next) => {
       openScheduleChanges(req.technicianId, asOf)
         .where('n.created_at', '<=', asOf)
         .whereRaw(soon.sql, soon.bindings)
-        // In visit order, so today's stops lead tomorrow's.
-        .orderByRaw('s.scheduled_date ASC NULLS LAST, s.window_start ASC NULLS LAST')
+        // In visit order, so today's stops lead tomorrow's (this tech's
+        // visits only; one now on another route goes last).
+        .orderByRaw('CASE WHEN s.technician_id = n.technician_id THEN s.scheduled_date END ASC NULLS LAST, CASE WHEN s.technician_id = n.technician_id THEN s.window_start END ASC NULLS LAST')
         .orderBy('n.created_at', 'desc')
         .limit(SCHEDULE_CHANGE_LIMIT)
         .select(columns),

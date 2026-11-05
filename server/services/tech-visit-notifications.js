@@ -1201,31 +1201,34 @@ const VISIT_TYPES_SQL = VISIT_CARD_TYPES.map((type) => `'${type}'`).join(', ');
 const CARD_VISIT_KEY_SQL = (alias) => `COALESCE(${alias}.payload->>'visit_id', ${alias}.id::text)`;
 
 // SQL that is true for a visit card whose visit no longer leaves it anything
-// to say, for a query over tech_notifications under `alias`: the visit's day
-// has passed, or the visit is on this tech's route and the tech already
-// arrived or it ended (a visit on another route keeps its moved-off card; a
-// cancellation card stays until its visit is back and reached). `today` is
-// the ET date the read is judged against. Other card types never match it.
+// to say, for a query over tech_notifications under `alias`: on this tech's
+// route, the visit's day has passed or the tech already arrived or it ended
+// (a cancellation card stays until its visit is back and reached); on
+// another route, the card's own day has passed. `today` is the ET date the
+// read is judged against. Other card types never match it.
 function staleVisitCardSql(alias, today) {
   const holderDone = DONE_FOR_HOLDER.map((status) => `'${status}'`).join(', ');
   const visitId = cardVisitIdSql(alias);
   return {
     sql: `(${alias}.type IN (${VISIT_TYPES_SQL}) AND (`
       + ` EXISTS (SELECT 1 FROM scheduled_services hv WHERE hv.id = ${visitId} AND (`
-      // A customer-pick hand-off keeps a placeholder day until the customer
-      // picks, so its day never counts as passed.
+      // On this tech's route: the visit's day passed (a customer-pick
+      // hand-off keeps a placeholder day until the customer picks, so it
+      // never counts), or the tech reached it or it ended. A cancellation
+      // card is the notice of that end (a plan pause skips the visit and
+      // writes one, holds.js applyHoldSkips), so it goes only once the visit
+      // is back and reached.
+      + ` (hv.technician_id = ${alias}.technician_id AND (`
       + ` (hv.scheduled_date < ?::date AND NOT (hv.customer_pick_by IS NOT NULL AND hv.window_start IS NULL))`
-      // The visit is (back) on this tech's route and the tech reached it or
-      // it ended. A cancellation card is the notice of that end (a plan
-      // pause skips the visit and writes one, holds.js applyHoldSkips), so it
-      // goes only once the visit is back and reached.
-      + ` OR (hv.technician_id = ${alias}.technician_id AND (`
-      + ` (${alias}.type <> 'visit_cancelled' AND (hv.arrived_at IS NOT NULL OR hv.status IN (${holderDone})))`
-      + ` OR (${alias}.type = 'visit_cancelled' AND hv.status IN ('on_site', 'completed'))))))`
+      + ` OR (${alias}.type <> 'visit_cancelled' AND (hv.arrived_at IS NOT NULL OR hv.status IN (${holderDone})))`
+      + ` OR (${alias}.type = 'visit_cancelled' AND hv.status IN ('on_site', 'completed'))))`
+      // On another route (or none): the card's own day decides; a former
+      // holder reads nothing of the visit's new schedule.
+      + ` OR (hv.technician_id IS DISTINCT FROM ${alias}.technician_id AND ${alias}.payload->>'date' < ?)))`
       // No visit row left to read: the card's own day decides.
       + ` OR (${alias}.payload->>'date' < ? AND NOT EXISTS (SELECT 1 FROM scheduled_services gone WHERE gone.id = ${visitId}))`
       + '))',
-    bindings: [today, today],
+    bindings: [today, today, today],
   };
 }
 
@@ -1304,10 +1307,6 @@ function bookedLine(card, live) {
   return null;
 }
 
-function firstName(name) {
-  return name ? String(name).trim().split(/\s+/)[0] || null : null;
-}
-
 // The newest move of the visit logged after the card, as the card names it
 // (who, and when), or nothing.
 function moveSince(row, mover) {
@@ -1315,20 +1314,22 @@ function moveSince(row, mover) {
   return { actor: moverText(mover.initiated_by), changedAt: new Date(mover.created_at).toISOString() };
 }
 
-// The visit sits on another route now (or on none): "Moved off your route",
-// naming who holds it now and whether it ended. A card that already said so
-// keeps its own "Reassigned by …" unless a later move names someone else.
-function movedOffCard(row, live, view) {
+// The visit sits on another route now (or on none). The former holder reads
+// nothing of it as it is now (Codex security review, #7569): no new time, no
+// later mover, no new holder's name. A moved-off card stays as written while
+// it still names the holder; otherwise the card says only that the visit
+// left, with its own time.
+function movedOffCard(row, live) {
   const payload = row.payload || {};
-  const status = String(live.status);
+  // The writer names the holder by technicians.name (composeCard now_with).
+  const holder = live.technician_id ? (live.holder_name || null) : null;
+  if (row.type === 'visit_unassigned' && !payload.ended && (payload.now_with || null) === holder) return row;
   return {
     ...row,
     type: 'visit_unassigned',
     payload: {
-      ...payload, headline: 'Moved off your route', when: view.when, date: view.date,
-      actor: view.actor || (row.type === 'visit_unassigned' ? payload.actor : null), changed_at: view.changedAt,
-      now_with: live.technician_id ? firstName(live.holder_name) : null,
-      ended: TERMINAL_VISIT_STATUSES.has(status) ? (ENDED_LABELS[status] || status.replace(/_/g, ' ')) : null,
+      ...payload, headline: 'Moved off your route', previous_when: null, actor: null, changed_at: null,
+      now_with: null, ended: null, now_elsewhere: Boolean(live.technician_id),
     },
   };
 }
@@ -1397,8 +1398,8 @@ function onRouteCard(row, live, view, soonWhen) {
 // the input.
 function liveCard(row, live, mover, soonWhen = null) {
   if (!live || !VISIT_CARD_TYPES.includes(row.type)) return row;
+  if (String(live.technician_id || '') !== String(row.technician_id)) return movedOffCard(row, live);
   const view = { when: visitWhen(live), date: dateOnly(live.scheduled_date), ...moveSince(row, mover) };
-  if (String(live.technician_id || '') !== String(row.technician_id)) return movedOffCard(row, live, view);
   if (['cancelled', 'skipped'].includes(String(live.status))) return cancelledCard(row, live, view);
   if (row.type === 'visit_unassigned' || row.type === 'visit_cancelled') return backOnRouteCard(row, view);
   return onRouteCard(row, live, view, soonWhen);

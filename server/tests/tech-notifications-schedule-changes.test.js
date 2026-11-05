@@ -96,16 +96,17 @@ describe('GET /schedule-changes', () => {
       // nothing left to say, judged on the read's ET day (the real rules: the
       // Postgres suite).
       expect(q.whereRaw[0][0]).toMatch(/^NOT \(n\.type IN \(/);
-      expect(q.whereRaw[0][1]).toEqual([today, today]);
+      expect(q.whereRaw[0][1]).toEqual([today, today, today]);
     }
     // Soon: any open card of the visit touches today/tomorrow, or the visit's
     // day as it is now does.
-    expect(soonQ.whereRaw[1][0]).toBe("COALESCE(n.visit_touches_soon OR to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?), false)");
+    // The visit's day now counts only while the visit is this tech's.
+    expect(soonQ.whereRaw[1][0]).toBe("COALESCE(n.visit_touches_soon OR (s.technician_id = n.technician_id AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)), false)");
     expect(soonQ.whereRaw[1][1]).toEqual([today, tomorrow]);
     expect(laterQ.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
     expect(countQ.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
     // Soon cards in visit order: today's stops lead tomorrow's.
-    expect(soonQ.orderByRaw[0][0]).toBe('s.scheduled_date ASC NULLS LAST, s.window_start ASC NULLS LAST');
+    expect(soonQ.orderByRaw[0][0]).toBe('CASE WHEN s.technician_id = n.technician_id THEN s.scheduled_date END ASC NULLS LAST, CASE WHEN s.technician_id = n.technician_id THEN s.window_start END ASC NULLS LAST');
     expect(soonQ.limit[0]).toEqual([300]);
     expect(laterQ.limit[0]).toEqual([300]);
 
@@ -150,7 +151,7 @@ describe('POST /dismiss-batch', () => {
     // 11:59 PM ET Oct 3 read; the tap lands after midnight.
     await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: '2026-10-04T03:59:00.000Z' } }, res, (e) => { throw e; });
     // The hide rules judge "past" on the read's day too.
-    expect(chains[2].whereRaw[0][1]).toEqual(['2026-10-03', '2026-10-03']);
+    expect(chains[2].whereRaw[0][1]).toEqual(['2026-10-03', '2026-10-03', '2026-10-03']);
     expect(chains[2].whereRaw[1][1]).toEqual(['2026-10-03', '2026-10-04']);
     expect(chains[1].select[0][2].bindings).toEqual(['2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04']);
   });

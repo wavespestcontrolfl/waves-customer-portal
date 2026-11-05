@@ -92,7 +92,6 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
   }
 
   const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
-  const firstNameOf = (tech) => String(tech.name).split(' ')[0];
 
   beforeAll(async () => {
     db = require('../models/db');
@@ -156,8 +155,9 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
 
     expect([...byName.keys()].sort()).toEqual(['Cancelled', 'Handedover', 'Later', 'Phoned', 'Pulledin', 'Retimed', 'Twice']);
     // Soon cards in visit order: today first, then tomorrow by its hour.
+    // (A visit now on another route goes last: its new time is not this tech's to read.)
     expect(body.changes.filter((c) => c.soon).map((c) => c.payload.customer_name))
-      .toEqual(['Phoned', 'Pulledin', 'Twice', 'Retimed', 'Handedover', 'Cancelled']);
+      .toEqual(['Phoned', 'Pulledin', 'Twice', 'Retimed', 'Cancelled', 'Handedover']);
     expect(body.later_total).toBe(1);
 
     expect(byName.get('Retimed')).toMatchObject({
@@ -171,7 +171,7 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
       payload: { when: said(tomorrow, '08:00', '09:00'), previous_when: said(farOut, '16:00', '17:00'), changed_again: true, actor: null },
     });
     expect(byName.get('Twice').id).toBe(twiceNewer);
-    expect(byName.get('Handedover')).toMatchObject({ type: 'visit_unassigned', payload: { headline: 'Moved off your route', now_with: 'Otherfixture', ended: null } });
+    expect(byName.get('Handedover')).toMatchObject({ type: 'visit_unassigned', payload: { headline: 'Moved off your route', now_with: null, now_elsewhere: true, ended: null } });
     expect(byName.get('Cancelled')).toMatchObject({ type: 'visit_cancelled', payload: { headline: 'Visit cancelled', actor: null } });
     expect(byName.get('Phoned')).toMatchObject({ type: 'visit_assigned', payload: { actor_line: 'Booked from a phone call (AI)' } });
     expect(byName.get('Later')).toMatchObject({ type: 'visit_assigned', soon: false });
@@ -222,24 +222,33 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
     });
   });
 
-  test('a moved-off card follows its visit: back on this route with no card of its own, or with a new holder', async () => {
+  test('a moved-off card: back on this route with no card of its own, or frozen for a former holder (no new time, no new holder)', async () => {
     const tech = await makeTech('Fixture Tech');
     const first = await makeTech('Firstholder Hire');
     const second = await makeTech('Secondholder Hire');
     const { formatWhen } = require('../services/tech-visit-notifications');
     const back = await makeVisit(tech, 'Cameback', tomorrow, '11:00', '12:00');
-    await card(tech, back, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '11:00', '12:00'), headline: 'Moved off your route', now_with: 'Firstholder', actor: 'by the office', customer_name: 'Cameback' }, daysAgo(2));
-    const away = await makeVisit(second, 'Stillaway', tomorrow, '12:00', '13:00');
-    await card(tech, away, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '12:00', '13:00'), headline: 'Moved off your route', now_with: firstNameOf(first), actor: 'by the office', customer_name: 'Stillaway' }, daysAgo(2));
+    await card(tech, back, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '11:00', '12:00'), headline: 'Moved off your route', now_with: first.name, actor: 'by the office', customer_name: 'Cameback' }, daysAgo(2));
+    // Handed on again, and re-timed far out: the card keeps its own time and names no one.
+    const away = await makeVisit(second, 'Stillaway', farOut, '09:00', '10:00');
+    await card(tech, away, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '12:00', '13:00'), headline: 'Moved off your route', now_with: first.name, actor: 'by the office', customer_name: 'Stillaway' }, daysAgo(2));
+    // Still with the holder the card names: as written.
+    const same = await makeVisit(second, 'Sameholder', farOut, '10:00', '11:00');
+    await card(tech, same, 'visit_unassigned', { date: tomorrow, when: formatWhen(tomorrow, '10:00', '11:00'), headline: 'Moved off your route', now_with: second.name, actor: 'by Virginia', customer_name: 'Sameholder' }, daysAgo(2));
     // Back on this route and already reached: nothing left to say.
     const reached = await makeVisit(tech, 'Reachedback', today, '09:00', '10:00', { status: 'on_site', arrived_at: new Date() });
-    await card(tech, reached, 'visit_unassigned', { date: today, when: formatWhen(today, '09:00', '10:00'), headline: 'Moved off your route', now_with: 'Firstholder', actor: 'by the office', customer_name: 'Reachedback' }, daysAgo(2));
+    await card(tech, reached, 'visit_unassigned', { date: today, when: formatWhen(today, '09:00', '10:00'), headline: 'Moved off your route', now_with: first.name, actor: 'by the office', customer_name: 'Reachedback' }, daysAgo(2));
 
     const body = await call('/schedule-changes', 'get', { technicianId: tech.id });
     const byName = new Map(body.changes.map((c) => [c.payload.customer_name, c]));
-    expect([...byName.keys()].sort()).toEqual(['Cameback', 'Stillaway']);
+    expect([...byName.keys()].sort()).toEqual(['Cameback', 'Sameholder', 'Stillaway']);
     expect(byName.get('Cameback')).toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route', now_with: null } });
-    expect(byName.get('Stillaway')).toMatchObject({ type: 'visit_unassigned', payload: { now_with: 'Secondholder' } });
+    expect(byName.get('Stillaway')).toMatchObject({
+      type: 'visit_unassigned', soon: true,
+      payload: { when: formatWhen(tomorrow, '12:00', '13:00'), date: tomorrow, now_with: null, now_elsewhere: true, actor: null },
+    });
+    expect(JSON.stringify(byName.get('Stillaway'))).not.toContain(second.name);
+    expect(byName.get('Sameholder')).toMatchObject({ type: 'visit_unassigned', payload: { now_with: second.name, actor: 'by Virginia' } });
   });
 
   test('Clear all never takes a card the read showed on its own, even after a move took its visit off today', async () => {
