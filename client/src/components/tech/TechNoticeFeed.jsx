@@ -6,7 +6,8 @@
  *     `visit_rescheduled` / `visit_cancelled` (tech-visit-notifications.js) —
  *     no auto-dismiss: it waits until the tech taps "Got it"
  *   - a text card for `tech_line_sms` (tech-line.js: a text to the tech's own
- *     Twilio line) — same kept-until-"Got it" rule and the same on-screen cap
+ *     Twilio line) — same kept-until-"Got it" rule and the same on-screen cap;
+ *     Reply texts back from the tech's line when the card names a visit
  *   - a tracking card for `follow_through_tracking` (no-show-detector.js: a
  *     missing-departure/arrival warning on one of this tech's own visits) —
  *     same kept-until-"Got it" rule and cap, sharing the visit-card slot
@@ -49,6 +50,7 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 import { useTechBasePath } from './techBasePath';
 import { formatETDateOnly } from '../../lib/timezone';
+import { LineTextCompose } from '../../pages/tech/VisitBriefPanel';
 
 const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
@@ -144,7 +146,7 @@ async function apiGet(path) {
   return res.ok ? res.json() : Promise.reject(new Error(`${res.status}`));
 }
 
-export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false }) {
+export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false, techLine = null, request = null }) {
   const elsewhere = placement === 'elsewhere';
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
@@ -332,7 +334,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
             <VisitCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
           {TEXT_TYPES.has(n.type) && (
-            <TextCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
+            <TextCard n={n} onDismiss={() => dismissVisitCard(n.id)} techLine={techLine} request={request} />
           )}
           {TRACKING_TYPES.has(n.type) && (
             <TrackingCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
@@ -581,12 +583,20 @@ function PhotoCard({ n, onDismiss }) {
   );
 }
 
-// A text on the tech's own Twilio line (tech-line.js). The office sees the
-// same thread in /admin/communications; this card is the tech's copy, kept
-// until "Got it" like a visit card. Replying from the line is a later PR.
-function TextCard({ n, onDismiss }) {
+// A text on the tech's own Twilio line (tech-line.js), or a customer's text to
+// the office relayed to the visit's tech (visit-tech-relay.js). The office
+// sees the same thread in /admin/communications; this card is the tech's copy,
+// kept until "Got it" like a visit card. Reply opens the visit's compose box:
+// POST /api/tech/line/sms texts the customer of `reply_visit_id` from the
+// tech's own line. The server names that visit only for the tech's own visit
+// when the phone on file is the one that texted, so a tech without a line, or
+// a card without the visit, gets no Reply.
+function TextCard({ n, onDismiss, techLine = null, request = null }) {
   const p = n.payload || {};
   const media = Number(p.media_count || 0);
+  const [replyOpen, setReplyOpen] = useState(false);
+  const [sending, setSending] = useState(false);
+  const canReply = Boolean(p.reply_visit_id && techLine?.line && request);
   return (
     <div style={cardStyle(COLORS.ink)} data-testid="tech-line-text">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
@@ -598,7 +608,21 @@ function TextCard({ n, onDismiss }) {
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {p.body || (media > 0 ? `${media} photo${media === 1 ? '' : 's'}` : '(empty message)')}
       </div>
-      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+      {canReply && replyOpen && (
+        <div style={{ marginBottom: 12 }}>
+          <LineTextCompose
+            line={techLine.line}
+            onSend={(body) => request('/tech/line/sms', { method: 'POST', body: JSON.stringify({ scheduledServiceId: p.reply_visit_id, body }) })}
+            onClose={() => setReplyOpen(false)}
+            onBusyChange={setSending}
+          />
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {canReply && !replyOpen && <button onClick={() => setReplyOpen(true)} style={btnPrimary}>Reply</button>}
+        {/* A send in flight keeps the card (and its pending compose) on screen. */}
+        <button onClick={onDismiss} disabled={sending} style={{ ...btnSecondary, flex: 1, opacity: sending ? 0.6 : 1 }}>Got it</button>
+      </div>
     </div>
   );
 }

@@ -899,6 +899,9 @@ export default function TechHomePage({ section = 'today' }) {
         inlineScheduleChanges={section === 'today' && !selectedVisitKey && scheduleFeedReady}
         placement={section === 'today' && !selectedVisitKey ? 'page' : 'elsewhere'}
         navigationBusy={navigationBusy}
+        // A text card's Reply sends from the tech's own line.
+        techLine={techLine}
+        request={techRequest}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a

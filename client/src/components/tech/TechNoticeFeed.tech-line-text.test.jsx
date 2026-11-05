@@ -51,6 +51,42 @@ describe('TechNoticeFeed — tech line text card', () => {
     expect(cards[1]).toHaveTextContent('Gate code is 4412, dog is friendly');
   });
 
+  // Reply (C17): the server names the visit (reply_visit_id) only for the tech's own visit when
+  // the phone on file texted; Reply sends from the tech's own line through POST /tech/line/sms.
+  const LINE = { line: { number: '+19413529161', formatted: '(941) 352-9161', label: 'Tech line' } };
+  const REPLYABLE = { ...TEXT, payload: { ...TEXT.payload, reply_visit_id: 'svc-1' } };
+
+  it('Reply texts back from the tech\'s line through the visit the card names; Got it waits for the send', async () => {
+    stubFeed([REPLYABLE]);
+    let finishSend;
+    const request = vi.fn(() => new Promise((resolve) => { finishSend = resolve; }));
+    render(<TechNoticeFeed techLine={LINE} request={request} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(await screen.findByRole('button', { name: 'Reply' }));
+    expect(screen.getByTestId('line-text-compose')).toHaveTextContent('Text from your line (941) 352-9161');
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Be there in 10' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(request).toHaveBeenCalledWith('/tech/line/sms', {
+      method: 'POST', body: JSON.stringify({ scheduledServiceId: 'svc-1', body: 'Be there in 10' }),
+    });
+    expect(screen.getByRole('button', { name: 'Got it' })).toBeDisabled();
+    await act(async () => { finishSend({ ok: true }); });
+    expect(await screen.findByText('Sent.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Got it' })).not.toBeDisabled();
+  });
+
+  it.each([
+    ['the tech holds no line', REPLYABLE, null],
+    ['the line could not be checked', REPLYABLE, { unknown: true }],
+    ['the card names no visit', TEXT, LINE],
+  ])('no Reply when %s', async (_label, card, techLine) => {
+    stubFeed([card]);
+    render(<TechNoticeFeed techLine={techLine} request={vi.fn()} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(await screen.findByTestId('tech-line-text')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reply' })).not.toBeInTheDocument();
+  });
+
   it('stays until "Got it" (dismiss); the reminder timer never marks it read', async () => {
     const calls = stubFeed([TEXT]);
     render(<TechNoticeFeed />);
