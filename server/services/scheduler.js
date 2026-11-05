@@ -4886,13 +4886,13 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 10 MIN (offset 6) — Admin alert quiet fall-off (owner 2026-11-04: "IF THE ALERT IS OVER 3 DAYS
   // OLD,, IT SHOULD FALL OFF"). Marks done, never deletes, an open admin bell row with no new activity for
-  // 72 hours (admin-alert-quiet-fall-off.js). GATE_ALERT_QUIET_FALL_OFF: unset = no query, `shadow` = count and
+  // 72 hours (the quiet policy of admin-alert-retention.js). GATE_ALERT_QUIET_FALL_OFF: unset = no query, `shadow` = count and
   // log, write nothing, `true` = close. runExclusive: a deploy overlap must not run two passes over the same page.
   // =========================================================================
   cron.schedule('6,16,26,36,46,56 * * * *', async () => {
     try {
       if (require('../config/feature-gates').alertQuietFallOffMode() === 'off') return;
-      await runExclusive('admin-alert-quiet-fall-off', () => require('./admin-alert-quiet-fall-off').runAdminAlertQuietFallOff());
+      await runExclusive('admin-alert-quiet-fall-off', () => require('./admin-alert-retention').runAdminAlertQuietPolicy());
     } catch (err) {
       logger.error(`[alert-quiet-fall-off] tick failed: ${err.message}`);
     }

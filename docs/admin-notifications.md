@@ -328,21 +328,25 @@ customer's message by this rule.
    still holds after the old one expired; `RERING` in the module names each one, caps the ones a
    sweep raises again with no new event, and skips an overdue-promise row while its promise is open.
    `server/scripts/undo-admin-alert-retention.js` reopens one run.
-   Quiet fall-off (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
-   `GATE_ALERT_QUIET_FALL_OFF`, `server/services/admin-alert-quiet-fall-off.js`, every 10 minutes): an open bell row
-   with no new activity for 72 hours is marked done (`done_by` `quiet-72h`, resolution "No new activity for 3 days"),
-   never deleted. Last activity is the latest of `created_at`, `metadata.rungAt`, `observedAt`, `lastFailureAt` and
-   `quietHoldFrom`; a quiet refresh is not news. These stay (owner ruling 2026-11-05, "A": money alerts stay until settled): the
-   `billing`, `payment`, `dispute`, `refund`, `tax`, `payout`, `payroll` and `llm_cost` categories
-   (`KEEP_UNTIL_SETTLED_CATEGORIES` in the module, one line each; `payment_failed` and `bill_payment_error` both write
-   `payment`). A person marks them done; a dispute alert stays until then, which covers "until the dispute closes".
-   Also kept: Activity-only rows, Claude-queue rows, and the rows of an emitter that raises
-   a fresh row by itself while its condition holds (the `periodic` entries of `RERING` in the retention module).
-   Recently done offers Reopen for a `quiet-72h` row; the Reopen stamps `metadata.quietHoldFrom`, so the row gets 72
-   more hours. A new emission with changed content rings a fallen-off alert back, as after a person's Done, and a
-   ringing refresh drops the hold stamp. `shadow` counts and logs, writes nothing.
-   `server/scripts/quiet-fall-off-dry-run.js` prints what would close; `server/scripts/reopen-quiet-fall-off.js
-   --since <ISO> [--apply]` reopens what the rule closed since then.
+   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
+   `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
+   `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`
+   registry, version-fenced writer and cursor helpers, and differs in cadence (its own cron, every 10 minutes, its own
+   lock and its own cursor key) and rules. An open bell row with no new activity for 72 hours is marked done
+   (`done_by` `quiet-72h`, resolution "No new activity for 3 days"), never deleted, read state untouched, at most 200
+   rows a tick. Last activity is the latest of `created_at`, `metadata.rungAt`, `observedAt`, `lastFailureAt` and
+   `quietHoldFrom`; a quiet refresh is not news. These stay (owner ruling 2026-11-05, "A": money alerts stay until
+   settled): the `billing`, `payment`, `dispute`, `refund`, `tax`, `payout`, `payroll` and `llm_cost` categories
+   (`KEEP_UNTIL_SETTLED_CATEGORIES`, one line each; `payment_failed` and `bill_payment_error` both write `payment`).
+   A person marks them done; a dispute alert stays until then, which covers "until the dispute closes". Also kept:
+   Activity-only rows, Claude-queue rows, and the rows of an emitter that raises a fresh row by itself while its
+   condition holds (the row's first `RERING` match is `periodic`: held, never closed). Recently done offers Reopen for a
+   `quiet-72h` row; the Reopen stamps `metadata.quietHoldFrom`, so the row gets 72 more hours (a relevance re-arm
+   stamps it too, and a quiet refresh keeps the row's own stamp). A new emission with changed content rings a
+   fallen-off alert back, as after a person's Done, and a ringing refresh drops the stamp. `shadow` counts and logs,
+   writes nothing. A run is recorded (audit_log `admin_alert_quiet_fall_off.close`, `metadata.retention` on each row)
+   only when it closed a row. `server/scripts/quiet-fall-off-dry-run.js` prints what would close;
+   `server/scripts/reopen-quiet-fall-off.js (--since <ISO> | --run <id>) [--apply]` reopens what the policy closed.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,
    `resolution`), the GitHub inbox model. Reading a row only stops it counting as unread; a
    done row leaves the bell, its unread count and mark-all-read. A row goes done when the

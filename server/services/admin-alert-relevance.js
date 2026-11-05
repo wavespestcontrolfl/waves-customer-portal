@@ -1292,7 +1292,7 @@ function classify(row, { anyMode = false } = {}) {
 function candidateQuery(cursor) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
-    // Open rows, and rows a PERSON (or the quiet fall-off, admin-alert-quiet-fall-off.js) marked done
+    // Open rows, and rows a PERSON (or the quiet fall-off, admin-alert-retention.js) marked done
     // (openToCloser's rule; the fall-off's stamp is not `retired`, so a row it closed stays judgeable): when the
     // subject moves on, the sweep takes the close over so their Reopen can't
     // bring back an obsolete alert. A row any system component closed is left.
@@ -1465,7 +1465,7 @@ function putBack(row) {
   if (Number.isNaN(ourDone.getTime())) return 0;
   return sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row)
     .where({ done_at: ourDone })
-    // A re-arm is news: it also stamps the quiet fall-off's hold (admin-alert-quiet-fall-off.js), so a row older than
+    // A re-arm is news: it also stamps the quiet fall-off's hold (admin-alert-retention.js), so a row older than
     // 72 hours is not closed again 10 minutes after the put-back. The retire's own after-write put-back (above) is
     // not: that restores the bell exactly as it was.
     .update({ ...undone(ourDone), metadata: db.raw("(metadata - 'retired') || ?::jsonb", [JSON.stringify({ [doneState().QUIET_HOLD_KEY]: new Date().toISOString() })]) });

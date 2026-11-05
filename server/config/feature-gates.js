@@ -7453,7 +7453,7 @@ function alertRetentionMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
-// GATE_ALERT_QUIET_FALL_OFF read at CALL time: 'shadow', 'true' or 'off' (services/admin-alert-quiet-fall-off.js).
+// GATE_ALERT_QUIET_FALL_OFF read at CALL time: 'shadow', 'true' or 'off' (services/admin-alert-retention.js).
 // 'shadow' (trimmed, any case) counts and logs the open bell rows that would fall off after 72 quiet hours,
 // writing nothing; 'true' marks them done. Anything else is off: no query. Unset is the kill.
 function alertQuietFallOffMode() {

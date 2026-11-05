@@ -1,7 +1,7 @@
 /**
- * Admin alert quiet fall-off against live Postgres: what falls off, what stays, the gate states, the guarded
- * write, Reopen and its 72-hour hold, a ring bringing a fallen-off alert back, the relevance sweep leaving
- * quiet-72h rows alone, and the undo script's function. Synthetic data only; every fixture row carries the title
+ * The quiet policy of admin-alert-retention.js against live Postgres: what falls off, what stays, the gate states,
+ * the fenced write, Reopen and its 72-hour hold (also across a concurrent quiet refresh), a ring bringing a fallen-off
+ * alert back, both policies together, the relevance sweep and the undo function. Synthetic data only; every fixture row carries the title
  * below and the pass is scoped to it, so it never touches another suite's rows.
  */
 const SKIP = !process.env.DATABASE_URL;
@@ -10,9 +10,9 @@ const maybeDescribe = SKIP ? describe.skip : describe;
 const HOUR = 60 * 60 * 1000;
 const TITLE = 'Quiet fall-off fixture alert';
 
-maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
+maybeDescribe('admin alert quiet policy (live Postgres)', () => {
   let db;
-  let fallOff;
+  let retention;
   let NotificationService;
   const made = [];
   const fixtures = { customers: [], scheduled_services: [] };
@@ -23,20 +23,20 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
 
   beforeAll(() => {
     db = require('../models/db');
-    fallOff = require('../services/admin-alert-quiet-fall-off');
+    retention = require('../services/admin-alert-retention');
     NotificationService = require('../services/notification-service');
   });
   afterAll(async () => {
     await db('notifications').where({ title: TITLE }).del();
-    await clearRetentionCursors();
+    await clearCursors();
     if (runIds.length) await db('audit_log').whereRaw("metadata->>'runId' = ANY(?::text[])", [runIds]).del();
     for (const table of ['scheduled_services', 'customers']) {
       if (fixtures[table].length) await db(table).whereIn('id', fixtures[table]).del();
     }
     await db.destroy();
   });
-  const clearRetentionCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_shadow', 'admin_alert_retention_cursor_true']).del();
-  beforeEach(async () => { await db('notifications').where({ title: TITLE }).del(); await clearRetentionCursors(); });
+  const clearCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_shadow', 'admin_alert_retention_cursor_true', 'admin_alert_quiet_cursor_shadow', 'admin_alert_quiet_cursor_true']).del();
+  beforeEach(async () => { await db('notifications').where({ title: TITLE }).del(); await clearCursors(); });
 
   const bell = async (row) => {
     const [r] = await db('notifications').insert({
@@ -48,15 +48,19 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
   };
   const get = (id) => db('notifications').where({ id }).first();
   const meta = (r) => (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata);
-  const run = (mode, extra = {}) => fallOff.runAdminAlertQuietFallOff({ now, mode, scope, ...extra });
+  const run = (mode, extra = {}) => {
+    runIds.push((extra.now || now).toISOString());
+    return retention.runAdminAlertQuietPolicy({ now, mode, scope, ...extra });
+  };
 
-  test('a quiet row closes: who, why, read at the close; nothing deleted', async () => {
+  test('a quiet row closes: who, why; read state untouched; nothing deleted', async () => {
     const quiet = await bell({});
     const out = await run('true');
-    expect(out).toMatchObject({ closed: 1 });
+    expect(out).toMatchObject({ written: 1 });
     const row = await get(quiet.id);
     expect([row.done_by, row.resolution, row.done_at.getTime()]).toEqual(['quiet-72h', 'No new activity for 3 days', now.getTime()]);
-    expect(row.read_at.getTime()).toBe(now.getTime());
+    expect(row.read_at).toBeNull();
+    expect(meta(row).retention).toMatchObject({ run: now.toISOString(), rule: 'quiet72' });
   });
 
   test('a person\'s earlier read stands', async () => {
@@ -73,12 +77,12 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     const badHold = await bell({ metadata: { quietHoldFrom: BAD } });
     const badHoldFresh = await bell({ metadata: { quietHoldFrom: BAD, lastFailureAt: ago(10).toISOString() } });
     const out = await run('true');
-    expect(out.closed).toBe(2);
+    expect(out.written).toBe(2);
     for (const r of [badRung, badHold]) expect((await get(r.id)).done_by).toBe('quiet-72h');
     for (const r of [badRungFresh, badHoldFresh]) expect((await get(r.id)).done_at).toBeNull();
     // 'now' and 'infinity' parse in Postgres but are not stamps this code writes: they never keep a row alive.
     const words = await bell({ metadata: { rungAt: 'now', observedAt: 'infinity' } });
-    expect((await run('true')).closed).toBe(1);
+    expect((await run('true')).written).toBe(1);
     expect((await get(words.id)).done_by).toBe('quiet-72h');
   });
 
@@ -88,7 +92,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     const observed = await bell({ metadata: { observedAt: ago(10).toISOString() } });
     const failed = await bell({ metadata: { lastFailureAt: ago(10).toISOString() } });
     const justUnder = await bell({ metadata: { rungAt: ago(71.9).toISOString() } });
-    expect((await run('true')).closed).toBe(0);
+    expect((await run('true')).written).toBe(0);
     for (const r of [rung, bumped, observed, failed, justUnder]) expect((await get(r.id)).done_at).toBeNull();
   });
 
@@ -96,7 +100,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     const oldRung = await bell({ metadata: { rungAt: ago(80).toISOString() } });
     const junk = await bell({ metadata: { rungAt: 'not a time', observedAt: '2026-13-99', lastFailureAt: 12 } });
     const future = await bell({ metadata: { rungAt: new Date(now.getTime() + 400 * HOUR).toISOString() } });
-    expect((await run('true')).closed).toBe(3);
+    expect((await run('true')).written).toBe(3);
     for (const r of [oldRung, junk, future]) expect((await get(r.id)).done_by).toBe('quiet-72h');
   });
 
@@ -104,16 +108,16 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     const activity = await bell({ metadata: { feed: 'activity' } });
     const queued = await bell({ metadata: { claudeQueue: 'idea', who: 'claude', feed: 'activity' } });
     const sentOnly = await bell({ metadata: { sentToClaude: { at: ago(90).toISOString() } } });
-    expect((await run('true')).closed).toBe(0);
+    expect((await run('true')).written).toBe(0);
     for (const r of [activity, queued, sentOnly]) expect((await get(r.id)).done_at).toBeNull();
   });
 
   test('every money category stays open after 4 quiet days while a system row closes in the same pass', async () => {
     const kept = {};
-    for (const category of fallOff.KEEP_UNTIL_SETTLED_CATEGORIES) kept[category] = await bell({ category });
+    for (const category of retention.KEEP_UNTIL_SETTLED_CATEGORIES) kept[category] = await bell({ category });
     const system = await bell({ category: 'system' });
     expect(Object.keys(kept)).toEqual(['billing', 'payment', 'dispute', 'refund', 'tax', 'payout', 'payroll', 'llm_cost']);
-    expect((await run('true')).closed).toBe(1);
+    expect((await run('true')).written).toBe(1);
     for (const [category, row] of Object.entries(kept)) expect([category, (await get(row.id)).done_at]).toEqual([category, null]);
     expect((await get(system.id)).done_by).toBe('quiet-72h');
   });
@@ -122,7 +126,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     const billing = await bell({ category: 'billing' });
     const payment = await bell({ category: 'payment' });
     const other = await bell({ category: 'schedule' });
-    expect((await run('true')).closed).toBe(1);
+    expect((await run('true')).written).toBe(1);
     expect((await get(billing.id)).done_at).toBeNull();
     expect((await get(payment.id)).done_at).toBeNull();
     expect((await get(other.id)).done_by).toBe('quiet-72h');
@@ -139,13 +143,12 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
   test('payroll-mercury-key-send (an event entry listed first) falls off; payroll-mercury-key (periodic) stays', async () => {
     const send = await bell({ metadata: { dedupeKey: 'payroll-mercury-key-send:fixture' } });
     const poll = await bell({ metadata: { dedupeKey: 'payroll-mercury-key:fixture' } });
-    expect((await run('true')).closed).toBe(1);
+    expect((await run('true')).written).toBe(1);
     expect((await get(send.id)).done_by).toBe('quiet-72h');
     expect((await get(poll.id)).done_at).toBeNull();
   });
 
-  test('for every registry prefix the fall-off holds a row exactly when retention\'s own matcher calls it periodic', async () => {
-    const retention = require('../services/admin-alert-retention');
+  test('for every registry prefix the policy holds a row exactly when retention\'s own matcher calls it periodic', async () => {
     const made = [];
     for (const entry of retention.RERING) {
       for (const prefix of entry.prefixes) {
@@ -160,28 +163,11 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     }
   });
 
-  test('a generic registry with an event entry before an overlapping periodic prefix: the earlier entry wins', async () => {
-    const registry = [
-      { emitter: 'a-event', prefixes: ['zz-key-send'], kind: 'event' },
-      { emitter: 'a-periodic', prefixes: ['zz-key'], kind: 'periodic' },
-      { emitter: 'b-periodic-first', prefixes: ['yy-key'], kind: 'periodic' },
-      { emitter: 'b-event-later', prefixes: ['yy-key-send'], kind: 'event' },
-    ];
-    const keys = { 'zz-key-send:1': false, 'zz-key:1': true, 'yy-key:1': true, 'yy-key-send:1': true, 'other:1': false };
-    const rows = {};
-    for (const key of Object.keys(keys)) rows[key] = await bell({ metadata: { dedupeKey: key } });
-    const hold = fallOff.periodicHoldSql(registry);
-    const mayClose = await scope(db('notifications').whereRaw(hold.sql, hold.bindings).select('id'));
-    const mayCloseIds = new Set(mayClose.map((r) => r.id));
-    // The hold SQL is TRUE for rows the rule may close; a held row is one it does not return.
-    for (const [key, held] of Object.entries(keys)) expect([key, !mayCloseIds.has(rows[key].id)]).toEqual([key, held]);
-  });
-
   test('a row that is already done, and a customer row, are untouched', async () => {
     const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
     const done = await bell({ done_at: ago(2), done_by: person, resolution: 'Called them' });
     const customer = await bell({ recipient_type: 'customer' });
-    expect((await run('true')).closed).toBe(0);
+    expect((await run('true')).written).toBe(0);
     expect((await get(done.id)).done_by).toBe(person);
     expect((await get(customer.id)).done_at).toBeNull();
   });
@@ -189,27 +175,46 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
   test('gate off and gate shadow write nothing; shadow counts', async () => {
     const quiet = await bell({});
     expect(await run('off')).toEqual({ skipped: true, reason: 'gate_off' });
-    expect(await run('shadow')).toMatchObject({ wouldClose: 1, closed: 0, byCategory: { alert: 1 } });
+    expect(await run('shadow')).toMatchObject({ mode: 'shadow', expire: { total: 1, byCategory: { alert: 1 } } });
     expect((await get(quiet.id)).done_at).toBeNull();
     expect((await get(quiet.id)).read_at).toBeNull();
   });
 
   test('the cap per tick leaves the rest for the next tick', async () => {
     for (let i = 0; i < 5; i += 1) await bell({});
-    expect((await run('true', { pageSize: 2, cap: 3 })).closed).toBe(3);
-    expect((await run('true', { pageSize: 2, cap: 3 })).closed).toBe(2);
+    expect((await run('true', { batchSize: 2, cap: 3 })).written).toBe(3);
+    // The capped tick saved its place under the quiet policy's own cursor key, never the nightly one.
+    const keys = (await db('system_settings').whereIn('key', ['admin_alert_quiet_cursor_true', 'admin_alert_retention_cursor_true']).select('key', 'value')).filter((r) => r.value);
+    expect(keys.map((r) => r.key)).toEqual(['admin_alert_quiet_cursor_true']);
+    expect((await run('true', { batchSize: 2, cap: 3 })).written).toBe(2);
+    const cleared = await db('system_settings').where({ key: 'admin_alert_quiet_cursor_true' }).first('value');
+    expect(cleared?.value ?? null).toBeNull();
   });
 
-  test('the guarded UPDATE does not close a row whose rungAt moved after the read', async () => {
+  test('the fenced write does not close a row that was rung after the read', async () => {
     const rang = await bell({});
     const quiet = await bell({});
-    const cutoff = ago(72);
-    const candidates = await fallOff.selectCandidates(db, { cutoff, now, cursor: null, limit: 10, scope });
-    expect(candidates.map((c) => c.id).sort()).toEqual([rang.id, quiet.id].sort());
+    const io = retention.defaultQuietIo(db, scope);
+    const rows = await io.page({ cutoff: ago(72), cursor: null, limit: 10 });
+    expect(rows.map((r) => r.id).sort()).toEqual([rang.id, quiet.id].sort());
     await db('notifications').where({ id: rang.id }).update({ metadata: JSON.stringify({ rungAt: ago(0.01).toISOString() }) });
-    const landed = await fallOff.closeBatch(db, candidates.map((c) => c.id), { cutoff, now, scope });
-    expect(landed.map((r) => r.id)).toEqual([quiet.id]);
+    expect(await io.expire(rows, { runId: 'fence-test', now })).toBe(1);
     expect((await get(rang.id)).done_at).toBeNull();
+    expect((await get(quiet.id)).done_by).toBe('quiet-72h');
+  });
+
+  test('a run is recorded only when it closed a row, and one run can be undone by its id', async () => {
+    const quiet = await bell({});
+    const later = ago(-1, now);
+    // Earlier tests share this suite's `now` as their run id; start from a clean log.
+    await db('audit_log').where({ action: 'admin_alert_quiet_fall_off.close' }).whereRaw("metadata->>'runId' = ANY(?::text[])", [[now.toISOString(), later.toISOString()]]).del();
+    expect((await run('true')).written).toBe(1);
+    expect((await run('true', { now: later })).written).toBe(0);
+    const audited = await db('audit_log').where({ action: 'admin_alert_quiet_fall_off.close' }).whereRaw("metadata->>'runId' = ANY(?::text[])", [[now.toISOString(), later.toISOString()]]).select(db.raw("metadata->>'runId' AS run"));
+    expect(audited.map((r) => r.run)).toEqual([now.toISOString()]);
+    expect(await retention.reopenQuietFallOff({ run: later.toISOString(), scope })).toMatchObject({ found: 0 });
+    expect(await retention.reopenQuietFallOff({ run: now.toISOString(), apply: true, now, scope })).toMatchObject({ found: 1, reopened: 1 });
+    expect((await get(quiet.id)).done_at).toBeNull();
   });
 
   describe('Reopen', () => {
@@ -229,9 +234,9 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       expect([reopened.done_at, reopened.done_by, reopened.resolution]).toEqual([null, null, null]);
       expect(meta(reopened).quietHoldFrom).toBe(now.toISOString());
 
-      expect((await run('true', { now: ago(-71, now) })).closed).toBe(0);
+      expect((await run('true', { now: ago(-71, now) })).written).toBe(0);
       expect((await get(quiet.id)).done_at).toBeNull();
-      expect((await run('true', { now: ago(-73, now) })).closed).toBe(1);
+      expect((await run('true', { now: ago(-73, now) })).written).toBe(1);
       expect((await get(quiet.id)).done_by).toBe('quiet-72h');
     });
 
@@ -245,7 +250,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       const retained = await retention.runAdminAlertRetention({ now, mode: 'true', scope });
       runIds.push(retained.runId);
       expect(retained.expire.total).toBe(0);
-      expect((await run('true')).closed).toBe(0);
+      expect((await run('true')).written).toBe(0);
       expect((await get(old.id)).done_at).toBeNull();
 
       // 73 hours on: the fall-off closes it again; retention still sees a 3-day-old sign of life and does not.
@@ -253,7 +258,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       const retainedLater = await retention.runAdminAlertRetention({ now: later, mode: 'true', scope });
       runIds.push(retainedLater.runId);
       expect(retainedLater.expire.total).toBe(0);
-      expect((await run('true', { now: later })).closed).toBe(1);
+      expect((await run('true', { now: later })).written).toBe(1);
       expect((await get(old.id)).done_by).toBe('quiet-72h');
     });
 
@@ -279,12 +284,12 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       const a = await bell({});
       const other = await bell({ done_at: ago(1), done_by: 'relevance', resolution: 'Moved on' });
       await run('true');
-      const before = await fallOff.reopenQuietFallOff({ since: ago(1).toISOString(), scope });
+      const before = await retention.reopenQuietFallOff({ since: ago(1).toISOString(), scope });
       expect(before).toEqual({ found: 1, reopened: 0, byCategory: { alert: 1 } });
       expect((await get(a.id)).done_by).toBe('quiet-72h');
-      const late = await fallOff.reopenQuietFallOff({ since: ago(-1).toISOString(), apply: true, scope });
+      const late = await retention.reopenQuietFallOff({ since: ago(-1).toISOString(), apply: true, scope });
       expect(late.found).toBe(0);
-      const applied = await fallOff.reopenQuietFallOff({ since: ago(1).toISOString(), apply: true, now, scope });
+      const applied = await retention.reopenQuietFallOff({ since: ago(1).toISOString(), apply: true, now, scope });
       expect(applied).toMatchObject({ found: 1, reopened: 1 });
       expect((await get(a.id)).done_at).toBeNull();
       expect(meta(await get(a.id)).quietHoldFrom).toBe(now.toISOString());
@@ -320,7 +325,7 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
       expect(meta(row).rungAt).toBeTruthy();
       expect(meta(row).quietHoldFrom).toBeUndefined();
       // And the freshly rung row survives the next pass.
-      expect((await run('true')).closed).toBe(0);
+      expect((await run('true')).written).toBe(0);
     });
 
     test('a dedupeOpenOnly emitter raises a fresh row once the old one fell off', async () => {
@@ -358,10 +363,70 @@ maybeDescribe('admin alert quiet fall-off (live Postgres)', () => {
     expect(meta(back).retired).toBeUndefined();
     expect(meta(back).quietHoldFrom).toEqual(expect.any(String));
 
-    expect((await run('true', { now: ago(-71, now) })).closed).toBe(0);
+    expect((await run('true', { now: ago(-71, now) })).written).toBe(0);
     expect((await get(bellRow.id)).done_at).toBeNull();
-    expect((await run('true', { now: ago(-73, now) })).closed).toBe(1);
+    expect((await run('true', { now: ago(-73, now) })).written).toBe(1);
     expect((await get(bellRow.id)).done_by).toBe('quiet-72h');
+  });
+
+  describe('a quiet refresh that read the row before the hold was stamped keeps the hold', () => {
+    const key = 'quiet-hold-race:1';
+    const emit = (body, standingRefresh) => NotificationService.notifyAdmin('alert', TITLE, body, {
+      dedupeKey: key, refreshOnDedupe: true, ringOnRefresh: () => false, standingRefresh,
+    });
+    // The emitter reads the done row and calls standingRefresh inside its keyed lock; whatever it does there commits
+    // before the emitter's own quiet UPDATE, which is the interleaving of a Reopen between the read and the write.
+    const closedStandingRow = async () => {
+      const first = await emit('First text.');
+      made.push(first.id);
+      await db('notifications').where({ id: first.id }).update({ created_at: ago(100) });
+      expect((await run('true')).written).toBe(1);
+      return first;
+    };
+
+    test('a Reopen between the read and the write: quietHoldFrom stays, the Reopen stands, and the next tick does not close the row', async () => {
+      const first = await closedStandingRow();
+      const { t } = await db('notifications').where({ id: first.id }).first(db.raw('done_at::text AS t'));
+      const reopenMidRefresh = async () => {
+        expect(await NotificationService.reopenAdminDone(first.id, { expectedDoneAt: t, now })).toBe('reopened');
+        return { quiet: true, body: 'Second text, changed.' };
+      };
+      const out = await emit('Second text, changed.', reopenMidRefresh);
+      expect(out).toMatchObject({ id: first.id, refreshed: true, rung: false });
+      const row = await get(first.id);
+      expect(row.body).toBe('Second text, changed.');
+      expect(row.done_at).toBeNull();
+      expect(meta(row).quietHoldFrom).toBe(now.toISOString());
+      expect((await run('true', { now: ago(-1, now) })).written).toBe(0);
+      expect((await get(first.id)).done_at).toBeNull();
+    });
+
+    test('a relevance re-arm between the read and the write: the same', async () => {
+      const { etDateString } = require('../utils/datetime-et');
+      const relevance = require('../services/admin-alert-relevance');
+      const [customer] = await db('customers').insert({ first_name: 'Race', phone: '+15555557012' }).returning('id');
+      fixtures.customers.push(customer.id);
+      const [visit] = await db('scheduled_services').insert({
+        customer_id: customer.id, scheduled_date: etDateString(ago(72)), service_type: 'General Pest Control', status: 'on_site',
+      }).returning('id');
+      fixtures.scheduled_services.push(visit.id);
+      const retiredAt = ago(1);
+      const dedupeKey = `stale-visit:${visit.id}:race`;
+      const standing = await bell({
+        read_at: retiredAt, done_at: retiredAt, done_by: 'relevance', resolution: 'Visit is no longer in progress',
+        metadata: { dedupeKey, scheduled_service_id: visit.id, retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: retiredAt.toISOString() } },
+      });
+      const rearmMidRefresh = async () => {
+        await relevance.runAdminAlertRelevanceSweep({ now });
+        return { quiet: true, body: 'Second text, changed.' };
+      };
+      await NotificationService.notifyAdmin('alert', TITLE, 'Second text, changed.', { dedupeKey, refreshOnDedupe: true, ringOnRefresh: () => false, standingRefresh: rearmMidRefresh });
+      const row = await get(standing.id);
+      expect(row.done_at).toBeNull();
+      expect(meta(row).quietHoldFrom).toEqual(expect.any(String));
+      expect((await run('true', { now: ago(-1, now) })).written).toBe(0);
+      expect((await get(standing.id)).done_at).toBeNull();
+    });
   });
 
   test('the relevance sweep does not re-arm or re-judge a quiet-72h row, and the row carries no retired stamp', async () => {

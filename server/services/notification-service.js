@@ -143,7 +143,7 @@ const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
 // ops digest keeps metadata.resolved, its dedupeKey is dropped, ...).
 const PERSON_DONE_BY_SQL = "(done_by ~ '^[0-9]+$' OR done_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR done_by = 'claude')";
 
-// The quiet fall-off rule's closer (admin-alert-quiet-fall-off.js, owner 2026-11-04: "IF THE ALERT IS
+// The quiet fall-off rule's closer (admin-alert-retention.js, owner 2026-11-04: "IF THE ALERT IS
 // OVER 3 DAYS OLD,, IT SHOULD FALL OFF"). A system close, but a plain one: the row keeps its dedupeKey and
 // every other state, so a person can put it back. The owner page promises Reopen for these rows.
 const QUIET_FALL_OFF_DONE_BY = 'quiet-72h';
@@ -156,6 +156,13 @@ const QUIET_HOLD_KEY = 'quietHoldFrom';
 // person closed it") for every other caller (the proofreader's personHeld, cancellation-processor, the
 // relevance sweep's own reading of a hold); only these two decisions widen.
 const REOPENABLE_DONE_BY_SQL = `(${PERSON_DONE_BY_SQL} OR done_by = '${QUIET_FALL_OFF_DONE_BY}')`;
+
+// A QUIET refresh of a standing row writes its metadata from the row it read earlier. A Reopen that committed between
+// that read and this write stamped quietHoldFrom (the earlier read cannot have it), so the write keeps the DATABASE
+// row's hold in SQL, atomically: the merged JSON loses any hold it carries, then the row's own current hold goes back
+// in. A ringing refresh (second binding true) drops the hold, as it always did. jsonb_exists is the function behind
+// the `?` operator, which knex would read as a binding.
+const KEEP_DB_HOLD_SQL = `(?::jsonb - '${QUIET_HOLD_KEY}') || CASE WHEN ?::boolean THEN '{}'::jsonb WHEN jsonb_exists(metadata, '${QUIET_HOLD_KEY}') THEN jsonb_build_object('${QUIET_HOLD_KEY}', metadata -> '${QUIET_HOLD_KEY}') ELSE '{}'::jsonb END`;
 
 function cleanResolution(text) {
   const plain = String(stripEmoji(text) || '').replace(/\s+/g, ' ').trim();
@@ -783,7 +790,7 @@ const NotificationService = {
             const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
+              metadata: trx.raw(KEEP_DB_HOLD_SQL, [JSON.stringify(mergedMetadata), shouldRing]), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
             await trx('notifications').where({ id: existing.id }).update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
             return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
@@ -1405,6 +1412,7 @@ module.exports._private = {
   isReopenableDoneBy,
   PERSON_DONE_BY_SQL,
   REOPENABLE_DONE_BY_SQL,
+  KEEP_DB_HOLD_SQL,
   QUIET_FALL_OFF_DONE_BY,
   QUIET_HOLD_KEY,
   DONE_CLEARED,
