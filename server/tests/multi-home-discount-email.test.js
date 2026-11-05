@@ -786,3 +786,22 @@ describe('the provider handoff composes the whole email again under the locks', 
     }
   });
 });
+
+describe('a series of the sale cancelled after it', () => {
+  test('is neither listed nor judged: the email goes for the series still booked', async () => {
+    const sc = scenario({ customers: [customer('son')], sourceExtra: { roots: new Set(['root-son', 'root-son-cancelled']) } });
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 1, waiting: 0 });
+    const { payload } = send.mock.calls[0][0];
+    expect(payload).toMatchObject({ home_1_address: '10 New Home Lane', home_1_price: '$90.00' });
+    expect(payload.home_2_address).toBeUndefined();
+  });
+
+  test('when no series of the sale has an upcoming visit, the email waits', async () => {
+    const sc = scenario({ customers: [customer('son')], sourceExtra: { roots: new Set(['root-son-cancelled']) } });
+    const send = sendOk();
+    expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 1 });
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+

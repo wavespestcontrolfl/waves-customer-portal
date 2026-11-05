@@ -330,6 +330,9 @@ async function targetHomeVerdict(dbh, ctx, facts, rootId) {
 
 async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx) {
   const facts = await loadSeriesFacts(dbh, { customerId, rootId }, ctx.today);
+  // A series of the sale with no upcoming visit (cancelled after it) is neither listed nor judged. It stays in the
+  // source's roots, so it is never another home's target, and the sale still counts it (seriesCount below).
+  if (isSource && !facts.first) return null;
   const profile = ctx.customers.get(String(customerId));
   const { prices, stale } = isSource
     ? await sourceHomeVerdict(dbh, ctx, facts, rootId)
@@ -348,7 +351,8 @@ async function buildHome(dbh, { customerId, rootId, propertyId, isSource }, ctx)
 async function buildHomes(dbh, ctx) {
   const homes = [];
   for (const rootId of ctx.source.roots) {
-    homes.push(await buildHome(dbh, { customerId: ctx.source.customerId, rootId, propertyId: ctx.source.propertyId, isSource: true }, ctx));
+    const home = await buildHome(dbh, { customerId: ctx.source.customerId, rootId, propertyId: ctx.source.propertyId, isSource: true }, ctx);
+    if (home) homes.push(home);
   }
   for (const t of ctx.targets) {
     homes.push(await buildHome(dbh, { customerId: t.customerId, rootId: t.rootId, propertyId: t.propertyId, isSource: false }, ctx));
@@ -584,6 +588,8 @@ async function composeSource(conn, estimate, run, { lock = false } = {}) {
   const customers = await loadCustomers(conn, ids, { lock });
   const ctx = { estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh: conn, nextPrices: run.nextPrices };
   const homes = await buildHomes(conn, ctx);
+  // Every series of the sale gone (only a visit under way today): nothing to say about the new home yet.
+  if (!homes.some((h) => h.isSource)) return { wait: 'no_source_home', roots, ids };
   if (homes.some((h) => h.stale)) return { wait: 'home_stale', roots, ids };
   const payers = await loadPayers(conn, customers, { lock });
   const optedOut = await loadEmailOptOuts(conn, ids, { lock });

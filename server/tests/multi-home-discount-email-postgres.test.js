@@ -322,6 +322,20 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     });
   });
 
+  test('a sale that booked two series, one cancelled after it: the email still goes for the series still booked', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      const second = await series(trx, { customerId: f.son, propertyId: f.sonHome, price: 90, sourceEstimateId: f.estimateId });
+      await trx('scheduled_services').whereIn('id', second.ids).update({ status: 'cancelled' });
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(await emailRun(trx)).toMatchObject({ sent: 2, waiting: 0, failed: 0 });
+      const sonRow = (await messages(f.estimateId)).find((r) => r.recipient_id === f.son);
+      // Two series in the sale: the 10% cannot be split from its stored slice, so the home shows its current price only.
+      expect(sonRow.text_snapshot).toContain('Per application: $90.00');
+      expect(sonRow.text_snapshot).not.toContain('Regular:');
+    });
+  });
+
   test('a held target blocks the send; once it is no longer a target the email goes', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);
