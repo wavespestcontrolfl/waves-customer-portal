@@ -767,7 +767,8 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
 const IDENTITY_RULES = {
   true: {
     load: (...args) => require('./call-promise-phone-evidence').loadPhoneEvidence(...args),
-    witness: (record, commitment) => require('./call-promise-phone-evidence').phoneWitness(record, commitment),
+    // A text queued before the promise never keeps it, whenever it went out (writtenAfterAsk, as for any promise).
+    witness: (record, commitment) => writtenAfterAsk(record, commitment) && require('./call-promise-phone-evidence').phoneWitness(record, commitment),
     types: () => ['sms', 'call'],
   },
   false: { load: (...args) => loadCustomerEvidence(...args), witness: (...args) => customerWitness(...args), types: (...args) => customerWitnessTypes(...args) },

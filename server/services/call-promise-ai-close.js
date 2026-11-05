@@ -123,7 +123,7 @@ function candidateBase(conn, callIds) {
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b, 'cl.source'))
     .modify((b) => { if (callIds) b.whereIn('cc.call_log_id', callIds); })
     .select('cc.*', 'cl.customer_id as call_customer_id', 'cl.from_phone as call_from_phone', 'cl.to_phone as call_to_phone',
-      ...CALL_TIMING.map((c) => `cl.${c} as call_${c}`), conn.raw('cl.created_at::text as cursor_at'));
+      'cl.twilio_call_sid as call_twilio_call_sid', ...CALL_TIMING.map((c) => `cl.${c} as call_${c}`), conn.raw('cl.created_at::text as cursor_at'));
 }
 
 function listCandidates(conn, { callIds = null, limit = CANDIDATE_LIMIT, cursor = null } = {}) {
@@ -155,7 +155,7 @@ const IDENTITY = {
   true: {
     properties: async () => [],
     context: () => ({ phone_keyed: true }),
-    message: (row) => ({ any_customer_phone: false, phone_identity: phoneIdentityOf(phoneCallOf(row)) }),
+    message: (row) => ({ any_customer_phone: false, phone_identity: phoneIdentityOf(phoneCallOf(row)), source_call_id: row.call_log_id, source_call_sid: row.call_twilio_call_sid }),
     proof: { identity: 'phone' },
     // Readable (witnessState): only while its gate is on and the number could not be anyone's.
     readable: async (conn, call) => !!call && callPromiseAiNoCustomerLive() && !(await sharedPhoneReason(conn, call)),
@@ -343,9 +343,9 @@ function witnessFingerprint(record) {
 // { fingerprint } when the record is still an admissible witness, { missing: true } when it is not, { unknown:
 // true } when a truncated source may be hiding it. A source that failed outright throws (nothing is decided on it).
 async function witnessState(conn, row, { ref, thread = false, now = new Date() }) {
-  const call = await conn('call_log').where({ id: row.call_log_id }).first('id', 'customer_id', 'from_phone', 'to_phone', ...CALL_TIMING);
+  const call = await conn('call_log').where({ id: row.call_log_id }).first('id', 'customer_id', 'from_phone', 'to_phone', 'twilio_call_sid', ...CALL_TIMING);
   if (!await identityOf(call?.customer_id).readable(conn, call)) return { missing: true };
-  const joined = { ...row, call_customer_id: call.customer_id, call_from_phone: call.from_phone, call_to_phone: call.to_phone,
+  const joined = { ...row, call_customer_id: call.customer_id, call_from_phone: call.from_phone, call_to_phone: call.to_phone, call_twilio_call_sid: call.twilio_call_sid,
     ...Object.fromEntries(CALL_TIMING.map((c) => [`call_${c}`, call[c]])) };
   const after = await evidenceBoundary(conn, joined, callOf(joined), { endOf: callEnd });
   if (!after) return { missing: true };

@@ -30,6 +30,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { smsContactSelects, callContactSelects, operatorReply, personCallBack, smsDelivered } = require('./staff-contact');
+const { callStartedAtSql } = require('./sms-pending-conversations');
 
 // Model calls per Eastern day for promises on calls with no customer, across the watchdog pass and the
 // Owed-queue pass (owner 2026-11-05: about $0.05 a day expected; 10 calls caps the worst case near $0.33).
@@ -76,11 +77,20 @@ async function loadPhoneEvidence(conn, commitment, message, now) {
       .select('id', 'direction', 'status', 'message_type', 'message_body', 'created_at', 'from_phone', ...smsContactSelects(conn),
         conn.raw(`CASE WHEN sms_log.metadata->>'scheduled_sms_log_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
           THEN (SELECT q.created_at FROM sms_log q WHERE q.id = (sms_log.metadata->>'scheduled_sms_log_id')::uuid) END as scheduled_at`)),
-    // Calls both ways, with the transcript the customer path reads and who placed or answered them.
+    // Calls both ways, with the transcript the customer path reads and who placed or answered them. A call is dated by
+    // when it STARTED (callStartedAtSql): a row inserted after hangup (a status callback, a recording recovery) has a
+    // created_at later than the call, which would put a call that began before the promise after it. The promise's own
+    // call is never evidence, by row or by Twilio sid (a recovery row can carry a different id for the same call).
+    // created_at only prefilters (a call starts no later than its row was inserted).
     call: require('./voice-agent/relay-protocol').whereNotSandboxCall(conn('call_log'))
       .whereRaw(`${callPeer} = ?`, [key])
-      .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
-      .select('id', 'direction', 'status', 'duration_seconds', 'transcription', 'answered_by', 'created_at', ...callContactSelects(conn)),
+      .whereRaw('id IS DISTINCT FROM ?', [message.source_call_id ?? null])
+      .whereRaw('twilio_call_sid IS DISTINCT FROM ?', [message.source_call_sid ?? null])
+      .where('created_at', '>', after)
+      .whereRaw(`${callStartedAtSql('call_log')} > ?`, [after]).whereRaw(`${callStartedAtSql('call_log')} <= ?`, [now])
+      .orderBy('created_at', 'desc').limit(LIMIT + 1)
+      .select('id', 'direction', 'status', 'duration_seconds', 'transcription', 'answered_by', 'created_at', ...callContactSelects(conn),
+        conn.raw(`${callStartedAtSql('call_log')} as started_at`)),
   };
   const entries = Object.entries(sources);
   const results = await Promise.allSettled(entries.map(([, query]) => query));
@@ -93,7 +103,10 @@ async function loadPhoneEvidence(conn, commitment, message, now) {
     for (const row of result.value.slice(0, LIMIT)) {
       const text = String(row.message_body || row.transcription || '');
       if (text.length > TEXT_LIMIT) failures.push(`${type}_body_truncated`);
-      records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, TEXT_LIMIT) });
+      // A call's time is its start; every reader of a record's created_at (the witness test, the match time) then
+      // reads the call's start, never a fallback column.
+      const time = type === 'call' ? { created_at: row.started_at } : {};
+      records.push({ ...row, ...time, ref: `${type}:${row.id}`, type, text: text.slice(0, TEXT_LIMIT) });
     }
   });
   return { records, failures };

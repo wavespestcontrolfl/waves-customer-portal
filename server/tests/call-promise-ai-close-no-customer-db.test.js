@@ -421,6 +421,44 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
     });
   });
 
+  describe('the evidence boundary', () => {
+    test('a staff text queued before the promise\'s call and delivered after it does not close it; a text written after the call does', async () => {
+      const w = await world();
+      const [queued] = await db('sms_log').insert({ direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, customer_id: null, message_type: 'manual',
+        status: 'scheduled', message_body: 'Scheduled earlier', metadata: person, created_at: new Date(w.startedAt.getTime() - 60 * 60 * 1000) }).returning('id');
+      made.smsIds.push(queued.id);
+      await addSms(w, { metadata: JSON.stringify({ human_authored: true, scheduled_sms_log_id: queued.id }) });
+      expect(await run(w)).toMatchObject({ model_calls: 0, closed: 0 });
+      expect(modelCalls()).toBe(0);
+      const fresh = await world();
+      const written = await addSms(fresh);
+      say(fresh, fulfilledBy(`sms:${written}`, 'time frames: Tuesday between two and four'));
+      expect(await run(fresh)).toMatchObject({ closed: 1 });
+    });
+
+    test('a call row inserted after hangup is dated by when the call started: one that began before the promise ended is no evidence', async () => {
+      const w = await world();
+      // Inserted 1 minute after the promise's call ended, 200 seconds long: it started before the promise was made.
+      await addCall(w, { metadata: JSON.stringify({ source: 'twilio_recording_status_recovered' }), created_at: after(w, 1), duration_seconds: 200 });
+      expect(await run(w)).toMatchObject({ model_calls: 0, closed: 0 });
+      expect(modelCalls()).toBe(0);
+      // The same row inserted well after the promise, so that it started after it: evidence.
+      const ok = await world();
+      await addCall(ok, { metadata: JSON.stringify({ source: 'twilio_recording_status_recovered' }), created_at: after(ok, 150) });
+      expect(await run(ok)).toMatchObject({ model_calls: 1 });
+    });
+
+    test('the promise\'s own call is never its witness, by row id or by Twilio sid', async () => {
+      const w = await world();
+      await db('call_log').where({ id: w.call.id }).update({ duration_seconds: 200, answered_by: 'human' });
+      const message = (over) => ({ created_at: new Date(w.startedAt.getTime() - DAY), phone_identity: w.phone.slice(2), source_call_id: null, source_call_sid: null, ...over });
+      const ids = async (over) => (await evidence.loadPhoneEvidence(db, {}, message(over), new Date())).records.filter((r) => r.type === 'call').map((r) => r.id);
+      expect(await ids({})).toContain(w.call.id);
+      expect(await ids({ source_call_id: w.call.id })).not.toContain(w.call.id);
+      expect(await ids({ source_call_sid: w.call.twilio_call_sid })).not.toContain(w.call.id);
+    });
+  });
+
   describe('a close is re-judged', () => {
     test('it stands while the call has no customer and the gate is on; it reopens when the call gains a customer, or the gate goes off', async () => {
       const w = await world();
