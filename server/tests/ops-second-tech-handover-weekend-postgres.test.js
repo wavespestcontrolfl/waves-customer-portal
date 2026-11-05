@@ -218,6 +218,33 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-11');
   });
 
+  test('rollback puts a day back only when it is still safe: a booking in the freed window, a confirmation or a lock keeps the visit with the hire', async () => {
+    const w = await world();
+    const s = await weekendSeries(w.ownerId, await customer());
+    const result = await execute(w, await plan(w));
+    // The owner booked the freed Saturday hour (another customer, held by --from); the customer confirmed the second new day;
+    // staff locked the third.
+    await knex('scheduled_services').insert(base(await customer(), w.ownerId, { scheduled_date: '2099-07-11', status: 'confirmed', recurring_pattern: null, is_recurring: false }));
+    await knex('scheduled_services').where({ id: s.kids[1].id }).update({ customer_confirmed: true });
+    await knex('scheduled_services').where({ id: s.kids[2].id }).update({ auto_dispatch_locked: true });
+    const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn() });
+    expect(undo.visitsRestored).toBe(0);
+    expect(new Set(undo.skipped.visits)).toEqual(new Set(s.kids.map((k) => k.id)));
+    expect(undo.skipped.anchors).toEqual([s.parent.id]);
+    expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-09');
+    expect(await get(s.kids[0].id)).toMatchObject({ technician_id: w.hireId });
+  });
+
+  test('a confirmation or lock that lands after the plan was read stops the run: the plan is re-read under the locks', async () => {
+    const w = await world();
+    const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });
+    const p = await plan(w);
+    await knex('scheduled_services').where({ id: s.kids[0].id }).update({ customer_confirmed: true });
+    created.plans.push(p.planId);
+    await expect(exec.executeHandover(knex, { ...args(w), planId: p.planId, outDir, refresh: jest.fn() })).rejects.toMatchObject({ code: 'PLAN_MISMATCH' });
+    expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-11');
+  });
+
   test('a customer stays whole when the hire is out on the only legal days, or a visit is confirmed; nothing of theirs changes', async () => {
     const w = await world();
     const out = await weekendSeries(w.ownerId, await customer());

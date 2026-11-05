@@ -65,6 +65,14 @@
 //   or call, and no per-visit staff message, can come from these writes. The one message is
 //   the hire's summary card (a tech_notifications row; no push).
 //
+// LOCK ORDER for a date move (the app's own, rebooker.js series mover): series-maintenance fences, then the date-wide occupancy
+// lock of every day a visit leaves or lands on (a booking that probed availability waits), then the tech-day locks. The plan is
+// recomputed after the locks, so --to's availability is read under them. The visit UPDATE is also pinned to no customer
+// confirmation, no staff lock or exclusion, no date exception and the same hand-off date. ROLLBACK of a date move re-checks
+// before it puts a day back: --from is free at the kept window (technicianFreeAt, under the occupancy lock), the customer has not
+// confirmed the new day, no lock or exclusion was set and no reminder is sent or inside the band; otherwise the visit stays
+// with --to and is listed.
+//
 // --weekend-move (the day-60 run, planner header and second-tech-handover-weekend.js): a date move writes
 // scheduled_date (the new day), technician_id = --to, route_order NULL, the tracking-link expiry that follows
 // the date (track_token_expires_at, the rebooker's own helper), and the hand-off date rebase the series
@@ -93,6 +101,9 @@ const root = path.join(__dirname, '..', '..', 'server');
 const planner = require('./second-tech-handover');
 const { isAssignable, normalizeWorkDays, assertAssignableTechnician } = require(path.join(root, 'services', 'technician-eligibility'));
 const { lockTechDays } = require(path.join(root, 'services', 'scheduling', 'tech-day-lock'));
+const { acquireOccupancyLocks } = require(path.join(root, 'services', 'scheduling', 'occupancy'));
+const { technicianFreeAt } = require(path.join(root, 'services', 'scheduling', 'pick-technician'));
+const { loadReminderFreeze } = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
 const { sendTechNotification } = require(path.join(root, 'services', 'tech-notify'));
 const auditLog = require(path.join(root, 'services', 'audit-log'));
 const { etParts, etDateString } = require(path.join(root, 'utils', 'datetime-et'));
@@ -233,6 +244,16 @@ function buildRollbackRecord({ planId, from, to, start, lines, zips, weekendMove
   };
 }
 
+/**
+ * The day fences, in the app's order (rebooker's series mover): the date-wide occupancy lock of every day a DATE move leaves
+ * or lands on first (a booking that probed availability waits for this run, and the re-planned availability below reads under
+ * it), then the tech-day locks.
+ */
+async function lockDays(trx, moves, from, to) {
+  await acquireOccupancyLocks(trx, moves.filter((m) => m.to_date).flatMap((m) => [m.date, m.to_date]));
+  await lockTechDays(trx, moves.flatMap(dayLocksOf(from, to)));
+}
+
 /** Tech-day locks a move takes: --from and --to on the day it leaves, --to on the day it lands. */
 const dayLocksOf = (from, to) => (m) => [
   { techId: from, date: m.date }, { techId: to, date: m.date }, ...(m.to_date ? [{ techId: to, date: m.to_date }] : []),
@@ -256,8 +277,12 @@ async function moveVisit(trx, m, { from, to, old }) {
     .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [m.date]);
   let patch = { technician_id: to, route_order: null, updated_at: trx.fn.now() };
   if (m.to_date) {
+    // Pinned to the row as the plan read it, and to the protections the plan checked: a customer confirmation, a staff lock or
+    // exclusion, a date exception or a hand-off that landed since keeps the visit where it is (the run aborts, nothing is written).
     query = query.where({ status: old.status })
-      .whereRaw('window_start IS NOT DISTINCT FROM ?::time', [old.ws]).whereRaw('window_end IS NOT DISTINCT FROM ?::time', [old.we]);
+      .whereRaw('window_start IS NOT DISTINCT FROM ?::time', [old.ws]).whereRaw('window_end IS NOT DISTINCT FROM ?::time', [old.we])
+      .whereRaw('customer_confirmed IS NOT TRUE').whereRaw('auto_dispatch_locked IS NOT TRUE').whereRaw('auto_dispatch_excluded IS NOT TRUE')
+      .whereRaw('date_exception IS NOT TRUE').whereRaw('recurring_dispatch_due_date::text IS NOT DISTINCT FROM ?', [old.due]);
     patch = {
       ...patch,
       scheduled_date: m.to_date,
@@ -329,7 +354,7 @@ async function executeHandover(db, opts) {
       // Fence recurring maintenance for every planned series, then the tech-day fence every
       // assignment writer takes, for every day the moves touch. Both hold through commit.
       await lockSeriesMaintenance(trx, first.ids.retemplate);
-      await lockTechDays(trx, first.ids.moves.flatMap(dayLocksOf(from, to)));
+      await lockDays(trx, first.ids.moves, from, to);
       const plan = await planOrRefuse(trx, { from, to, start, today, lines, zips, weekendMove, now });
       if (plan.planId !== planId) throw mismatch(plan.planId);
 
@@ -451,6 +476,22 @@ function restoreQuery(trx, v, to) {
   return query;
 }
 
+/**
+ * A date move goes back only to a day that is still free and still safe to move to: --from is free at the kept window (the
+ * occupancy probe, with the day's occupancy lock held), the customer has not confirmed the new day, no staff lock or exclusion
+ * was set, and no reminder for it is sent or inside the reminder band. A technician-only restore is not a date change.
+ */
+async function restoreDateBlocked(trx, v, now) {
+  if (!v.to_date) return false;
+  const row = await trx('scheduled_services').where({ id: v.id }).forUpdate().first('customer_confirmed', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+  if (!row || row.customer_confirmed === true || row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return true;
+  const freeze = await loadReminderFreeze(trx, [v.id], now);
+  if (freeze.failed || freeze.frozen.has(v.id)) return true;
+  return !(await technicianFreeAt({
+    conn: trx, technicianId: v.technician_id, date: v.date, windowStart: v.window_start, windowEnd: v.window_end, excludeServiceIds: [v.id],
+  }));
+}
+
 /** What a restored visit gets back: technician and route number, and for a date move its old day and hand-off date. */
 function restorePatch(trx, v) {
   const patch = { technician_id: v.technician_id, route_order: v.route_order ?? null, updated_at: trx.fn.now() };
@@ -498,7 +539,7 @@ async function rollbackHandover(db, opts) {
   try {
     result = await db.transaction(async (trx) => {
       await lockSeriesMaintenance(trx, record.series.map((s) => s.id));
-      await lockTechDays(trx, record.visits.flatMap(dayLocksOf(from, to)));
+      await lockDays(trx, record.visits, from, to);
       await assertRunCommitted(trx, record.run_id);
       const skipped = { series: [], visits: [], territory: [], anchors: [] };
       let seriesRestored = 0;
@@ -516,7 +557,7 @@ async function rollbackHandover(db, opts) {
         }
       }
       for (const v of record.visits) {
-        if (!fromCanTake.get(v.date)) { skipped.visits.push(v.id); continue; }
+        if (!fromCanTake.get(v.date) || await restoreDateBlocked(trx, v, now)) { skipped.visits.push(v.id); continue; }
         // Only a visit still on the day the run moved it (the day this rollback locked), and still in no group (the
         // planner's GROUPED rule: a service_visits row that is not dissolved), goes back.
         const n = await restoreQuery(trx, v, to)
