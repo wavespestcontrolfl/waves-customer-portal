@@ -87,6 +87,7 @@ function budgetRow(over = {}) {
   return {
     created_at: new Date('2026-11-02T06:57:56.492Z'), campaign_name: 'Test Search', previous_mode: 'stop', new_mode: 'base',
     previous_budget: '0.05', new_budget: '5.00', reason: 'Hold: base until 2026-11-08 (set in the portal)', trigger: 'manual',
+    google_ads_updated: true,
     ...over,
   };
 }
@@ -150,7 +151,17 @@ describe('buildAdsHealth', () => {
     expect(changeQueries[1]).toContain("change_event.client_type = 'GOOGLE_ADS_API' AND change_event.change_resource_type = 'CAMPAIGN'");
     // Postgres: the same window as a real instant, never a naive string.
     expect(callsFor('ad_budget_log')[0]).toContainEqual(['where', 'created_at', '>=', SINCE]);
-    expect(mockDb.raw).toHaveBeenCalledWith(expect.stringContaining('FROM ad_negative_keywords k'), [SINCE, SINCE, SINCE]);
+    expect(mockDb.raw).toHaveBeenCalledWith(expect.stringContaining('FROM ad_negative_keywords k'), [SINCE, SINCE, SINCE, SINCE]);
+  });
+
+  test('a budget change saved in the portal only says it never reached Google', async () => {
+    mockGetCustomer.mockReturnValue(null);
+    mockTables.ad_budget_log = [budgetRow({ google_ads_updated: false })];
+
+    const { timeline } = await buildAdsHealth(NOW);
+
+    expect(timeline[0].what).toBe('Budget $0.05 → $5.00 (stop → base), not sent to Google Ads');
+    expect(callsFor('ad_budget_log')[0]).toContainEqual(expect.arrayContaining(['select', 'google_ads_updated']));
   });
 
   test('a budget change made in Google reads as before → after, and other changes name their fields', async () => {
@@ -224,7 +235,8 @@ describe('buildAdsHealth', () => {
       google: { sent: 99, pending: 7, failed: 0, partial: 3 },
       meta: { sent: 103, pending: 0, failed: 2, partial: 0 },
     });
-    // Meta test events are not real uploads.
+    // Dry runs are not uploads: Google validation-only rows and Meta test events stay out of the counts.
+    expect(callsFor('google_ads_conversion_uploads')[0]).toContainEqual(['where', 'validate_only', false]);
     expect(callsFor('meta_conversion_uploads')[0]).toContainEqual(['where', 'test_mode', false]);
     expect(callsFor('google_ads_conversion_uploads')[0]).toContainEqual(['where', 'created_at', '>=', SINCE]);
   });
@@ -274,7 +286,9 @@ describe('buildAdsHealth', () => {
     mockGetCustomer.mockReturnValue(null);
     mockNegativeRows = [
       { kind: 'blocked', at: new Date('2026-11-02T17:41:00.000Z'), campaign_name: 'Test Search', who: 'Owner word list', n: 16, words: 'ant bait, cheap' },
-      { kind: 'declined', at: new Date('2026-11-03T13:05:00.000Z'), campaign_name: 'Test Search', who: 'Pat Owner', n: 1, words: 'free' },
+      { kind: 'not_blocked', at: new Date('2026-11-03T13:05:00.000Z'), campaign_name: 'Test Search', who: 'Pat Owner', n: 1, words: 'free' },
+      { kind: 'unblocked', at: new Date('2026-11-03T10:00:00.000Z'), campaign_name: 'Test Search', who: 'Pat Owner', n: 1, words: 'rats' },
+      { kind: 'delisted', at: new Date('2026-11-04T12:00:00.000Z'), campaign_name: null, who: 'Pat Owner', n: 2, words: 'diy, fleas' },
     ];
     mockTables['ad_campaigns as c'] = [{
       campaign_name: 'Test Search', who: null,
@@ -289,19 +303,31 @@ describe('buildAdsHealth', () => {
         what: 'Hold lifted', detail: 'It held the ad at base until 2026-11-08.',
       },
       {
+        at: '2026-11-04T12:00:00.000Z', source: 'waves', who: 'Pat Owner', via: 'Waves portal', campaign: null,
+        what: 'Took 2 words off the negative word list', detail: 'diy, fleas',
+      },
+      {
         at: '2026-11-03T13:05:00.000Z', source: 'waves', who: 'Pat Owner', via: 'Waves portal', campaign: 'Test Search',
-        what: 'Declined negative keyword', detail: 'free',
+        what: 'Advisor word not blocked', detail: 'free',
+      },
+      {
+        at: '2026-11-03T10:00:00.000Z', source: 'waves', who: 'Pat Owner', via: 'Waves portal', campaign: 'Test Search',
+        what: 'Unblocked a negative keyword', detail: 'rats',
       },
       {
         at: '2026-11-02T17:41:00.000Z', source: 'waves', who: 'Owner word list', via: 'Waves portal', campaign: 'Test Search',
         what: 'Blocked 16 negative keywords', detail: 'ant bait, cheap',
       },
     ]);
-    // A person is named only where the row proves it: an Undo writes the undoer over decided_by, so a block names
-    // decided_by only while removed_at is empty, and owner list rows (never undone, no decided_by) name the list.
+    // Each event claims only what its row proves. An Undo writes the undoer over decided_by, so a block names
+    // decided_by only while removed_at is empty; owner list rows (never undone, no decided_by) name the list.
     const [sql] = mockDb.raw.mock.calls.find(([, bindings]) => bindings);
     expect(sql).toContain("CASE WHEN k.source = 'owner_list' THEN 'Owner word list' WHEN k.removed_at IS NULL THEN k.decided_by END");
-    expect(sql).toContain("CASE WHEN k.source = 'owner_list' THEN 'Owner word list' ELSE k.decided_by END");
+    // A Google unblock is an Undo only: owner list removals can close rows Google never had, so they are list changes.
+    expect(sql).toContain("WHERE k.source <> 'owner_list' AND k.removed_at >= ?");
+    expect(sql).toContain('FROM ad_negative_words w\n     WHERE w.removed_at >= ?');
+    // A refused Add reads like a Decline in the row, so the event names the outcome, not a choice.
+    expect(sql).toContain("WHERE k.source <> 'owner_list' AND k.state IN ('declined', 'failed') AND k.decided_at >= ?");
     const holdQuery = callsFor('ad_campaigns as c')[0];
     expect(holdQuery).toContainEqual(['where', 'c.platform', 'google_ads']);
     expect(holdQuery).toContainEqual(['whereRaw', expect.stringContaining("'budget_hold_cleared' ->> 'at'"), [SINCE]]);

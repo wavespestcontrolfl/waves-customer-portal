@@ -189,7 +189,10 @@ async function budgetChanges(since) {
     .where('created_at', '>=', since)
     .orderBy('created_at', 'desc')
     .limit(MAX_TIMELINE)
-    .select('created_at', 'campaign_name', 'previous_mode', 'new_mode', 'previous_budget', 'new_budget', 'reason', 'trigger');
+    .select('created_at', 'campaign_name', 'previous_mode', 'new_mode', 'previous_budget', 'new_budget', 'reason', 'trigger',
+      'google_ads_updated');
+  // google_ads_updated false = the change was saved in the portal only (live push off, or the push failed), so
+  // Google may still run the old amount. The Ads page's budget history shows the same flag as "Sent to Google".
   return rows.map((row) => ({
     at: iso(row.created_at),
     source: 'waves',
@@ -197,7 +200,8 @@ async function budgetChanges(since) {
     via: 'Waves portal',
     campaign: row.campaign_name,
     what: `Budget ${dollars(row.previous_budget)} → ${dollars(row.new_budget)}`
-      + (row.previous_mode === row.new_mode ? '' : ` (${row.previous_mode || 'none'} → ${row.new_mode})`),
+      + (row.previous_mode === row.new_mode ? '' : ` (${row.previous_mode || 'none'} → ${row.new_mode})`)
+      + (row.google_ads_updated ? '' : ', not sent to Google Ads'),
     detail: row.reason || null,
   }));
 }
@@ -220,12 +224,17 @@ async function holdLifts(since) {
   }));
 }
 
-// One row per action, minute, campaign and person, so a batch (the 16-word starter list) reads as one line.
-// A person is named only where the row proves it, because these tables keep no history of who did what:
-// - decided_by is the advisor word's Add or Decline until an Undo writes the undoer over it (undoNegative), so it
-//   names the person who blocked a word only while removed_at is empty, and the undoer once it is set.
-// - Owner list rows are never undone (undoNegative refuses them) and the list writes no decided_by, so their blocks
-//   and removals read 'Owner word list'.
+// One row per action, minute, campaign and person, so a batch (the 16-word starter list) reads as one line. These
+// tables keep no history, so each event claims only what its row proves (negative-keyword-actions.js):
+// - blocked: pushed_at is set only when Google accepted the block. decided_by names the advisor word's Add only
+//   while removed_at is empty, because an Undo writes the undoer over it. Owner list rows read 'Owner word list'.
+// - not_blocked: a person acted on an advisor word and it was not blocked: a Decline, or an Add that the portal
+//   refused (a protected word reads 'declined', a converting one 'failed'). The row does not say which, so the
+//   event names the outcome and the person who acted, not a choice.
+// - unblocked: an Undo, the only way an advisor or manual word is removed. It runs only on a word live in Google and
+//   saves only after Google removed it, so decided_by is the undoer.
+// - delisted: a word taken off the owner's list, by ad_negative_words.removed_by. Google is told only for the
+//   campaigns where the word was live, and the rows do not keep that, so this is the list change, not a Google one.
 const NEGATIVE_EVENTS_SQL = `
   WITH ev AS (
     SELECT 'blocked' AS kind, k.pushed_at AS at, k.text, k.campaign_id,
@@ -233,14 +242,17 @@ const NEGATIVE_EVENTS_SQL = `
       FROM ad_negative_keywords k
      WHERE k.pushed_at >= ?
     UNION ALL
-    SELECT 'declined', k.decided_at, k.text, k.campaign_id, k.decided_by
+    SELECT 'not_blocked', k.decided_at, k.text, k.campaign_id, k.decided_by
       FROM ad_negative_keywords k
-     WHERE k.state = 'declined' AND k.decided_at >= ?
+     WHERE k.source <> 'owner_list' AND k.state IN ('declined', 'failed') AND k.decided_at >= ?
     UNION ALL
-    SELECT 'unblocked', k.removed_at, k.text, k.campaign_id,
-           CASE WHEN k.source = 'owner_list' THEN 'Owner word list' ELSE k.decided_by END
+    SELECT 'unblocked', k.removed_at, k.text, k.campaign_id, k.decided_by
       FROM ad_negative_keywords k
-     WHERE k.removed_at >= ?
+     WHERE k.source <> 'owner_list' AND k.removed_at >= ?
+    UNION ALL
+    SELECT 'delisted', w.removed_at, w.text, NULL::uuid, w.removed_by
+      FROM ad_negative_words w
+     WHERE w.removed_at >= ?
   )
   SELECT ev.kind, date_trunc('minute', ev.at) AS at, c.campaign_name, COALESCE(t.name, ev.actor) AS who,
          count(*)::int AS n, string_agg(ev.text, ', ' ORDER BY ev.text) AS words
@@ -251,17 +263,23 @@ const NEGATIVE_EVENTS_SQL = `
    ORDER BY 2 DESC
    LIMIT ${MAX_TIMELINE}`;
 
-const NEGATIVE_VERB = { blocked: 'Blocked', declined: 'Declined', unblocked: 'Unblocked' };
+const some = (n, noun) => (n === 1 ? `a ${noun}` : `${n} ${noun}s`);
+const NEGATIVE_WHAT = {
+  blocked: (n) => `Blocked ${some(n, 'negative keyword')}`,
+  not_blocked: (n) => (n === 1 ? 'Advisor word not blocked' : `${n} advisor words not blocked`),
+  unblocked: (n) => `Unblocked ${some(n, 'negative keyword')}`,
+  delisted: (n) => `Took ${some(n, 'word')} off the negative word list`,
+};
 
 async function negativeChanges(since) {
-  const { rows } = await db.raw(NEGATIVE_EVENTS_SQL, [since, since, since]);
+  const { rows } = await db.raw(NEGATIVE_EVENTS_SQL, [since, since, since, since]);
   return rows.map((row) => ({
     at: iso(row.at),
     source: 'waves',
     who: row.who || 'Waves portal',
     via: 'Waves portal',
     campaign: row.campaign_name || null,
-    what: `${NEGATIVE_VERB[row.kind]} ${row.n === 1 ? 'negative keyword' : `${row.n} negative keywords`}`,
+    what: NEGATIVE_WHAT[row.kind](row.n),
     detail: row.words,
   }));
 }
@@ -290,7 +308,8 @@ async function buildAdsHealth(now = new Date()) {
     attempt('The budget log', notes, [], () => budgetChanges(since)),
     attempt('Lifted holds', notes, [], () => holdLifts(since)),
     attempt('Negative keyword decisions', notes, [], () => negativeChanges(since)),
-    attempt('Google upload counts', notes, null, () => uploadCounts(db('google_ads_conversion_uploads'), since)),
+    // Live uploads only: Google validation runs (validate_only) and Meta test events are dry runs.
+    attempt('Google upload counts', notes, null, () => uploadCounts(db('google_ads_conversion_uploads').where('validate_only', false), since)),
     attempt('Meta upload counts', notes, null, () => uploadCounts(db('meta_conversion_uploads').where('test_mode', false), since)),
   ]);
   const names = new Map((serving?.campaigns || []).map((c) => [c.id, c.name]));
