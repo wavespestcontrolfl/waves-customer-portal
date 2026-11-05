@@ -96,6 +96,10 @@ describe('loadForecastInput', () => {
     const bank = database.calls.find((c) => /FROM bank_transactions bt/.test(c.sql));
     expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f'], '2026-08-28', '2026-11-11']); // trailing Sep 7 - Nov 1 +- 10 days; USD only
     for (const c of database.calls) expect(c.sql).not.toMatch(/current_date|now\(\)/i);
+    // open invoices include 'overdue'; a pay run's net goes out on the pay date and the 941 return is never a payment
+    expect(database.calls.find((c) => /i\.credit_applied, i\.amount_paid/.test(c.sql)).bindings).toEqual([['sent', 'viewed', 'overdue', 'processing']]);
+    expect(database.calls.find((c) => /FROM payroll_checks pc/.test(c.sql)).sql).toMatch(/pc\.net_cents/);
+    expect(database.calls.find((c) => /FROM tax_filing_calendar/.test(c.sql)).sql).toMatch(/filing_type <> 'payroll_941'/);
   });
 
   test('opening pool: available else current, USD only; card owed; partial when an account is left out', async () => {
@@ -147,6 +151,7 @@ describe('loadForecastInput', () => {
         [/i\.credit_applied, i\.status/, [{ sent_day: '2026-10-20', total: 100, credit_applied: 20, status: 'paid', paid_day: '2026-10-25', paid_amount: 80 }]],
         [/i\.status = 'draft'/, [{ n: 2, total: 300 }]],
         [/FROM tax_filing_calendar/, [{ due_day: '2026-11-20', amount_due: null }, { due_day: '2026-12-15', amount_due: 500, amount_paid: 100 }]],
+        [/FROM payroll_checks pc/, [{ pay_day: '2026-11-13', cost_cents: 81234 }]],
         [/WITH last AS/, [{ account_label: 'old-card', last_day: '2026-10-27', debits_30d: 900 }]],
       ],
     });
@@ -157,11 +162,14 @@ describe('loadForecastInput', () => {
     ]);
     // trailing Sep 7 - Nov 1: c1 and c3 (the member visit counts as a visit, not as cash work); c2 is before it
     expect(input.trailing).toMatchObject({ visits: 2, workValueUsd: 100 });
-    // b3 is already invoiced: it counts once, as its invoice
-    expect(input.booked).toEqual([{ day: '2026-11-05', value: 100 }, { day: '2026-11-06', value: 0 }, { day: '2026-11-12', value: 0 }]);
+    // b3 is already invoiced: its cash comes once, as its invoice, but it is still booked work
+    expect(input.booked).toEqual([
+      { day: '2026-11-05', value: 100, work: 100 }, { day: '2026-11-06', value: 0, work: 100 }, { day: '2026-11-12', value: 0, work: 0 },
+    ]);
     expect(input.openInvoices).toEqual([{ amountUsd: 40, ageDays: 10, processing: false }, { amountUsd: 25, ageDays: 0, processing: true }]);
     expect(input.invoiceCohort).toEqual([{ value: 80, ageDays: 16, paid: [{ lagDays: 5, amount: 80 }] }]);
     expect(input.taxRows).toEqual([{ dueDay: '2026-12-15', amountUsd: 400 }]);
+    expect(input.payroll).toEqual([{ payDay: '2026-11-13', cashCostUsd: 812.34 }]);
     expect(input.missing).toEqual(expect.arrayContaining([
       { kind: 'payer_billed_visits', count: 1 },
       { kind: 'completed_visits_not_billed', count: 1, usd: 50 },

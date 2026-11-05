@@ -240,6 +240,17 @@ describe('computeForecast', () => {
     expect(r.missing).toContainEqual({ kind: 'last_year_months', months: ['2025-09', '2025-10', '2025-11', '2025-12', '2026-01'] });
   });
 
+  test('an invoiced booked visit is still booked work: new work never refills it', () => {
+    const flat = { '2025-09': 300000, '2025-10': 310000, '2025-11': 300000, '2025-12': 310000, '2026-01': 310000 };
+    const r = computeForecast(base({
+      trailing: { visits: 0, workValueUsd: 5600, prepaySalesUsd3m: 0 }, // $100 a day
+      settings: { last_year_receipts: flat },
+      booked: [{ day: '2026-11-10', value: 0, work: 1000 }], // invoiced: no cash from the visit itself
+    }));
+    expect(r.weeks[2].money_in.new_work).toBe(300); // week 1 has no gap, as if the visit were not invoiced
+    expect(r.weeks[1].money_in.visits).toBe(0);
+  });
+
   test('with last-year months: new work fills the gap above booked work, never below it', () => {
     const flat = { '2025-09': 300000, '2025-10': 310000, '2025-11': 300000, '2025-12': 310000, '2026-01': 310000 };
     const r = computeForecast(base({

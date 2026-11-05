@@ -22,7 +22,7 @@ const COHORT_DAYS = 150;
 const CASH_LANES = new Set(['per_visit', 'per_application', 'one_time']);
 const CLOSED_VISIT_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
 const DEAD_INVOICE_STATUSES = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES;
-const OPEN_INVOICE_STATUSES = ['sent', 'viewed', 'processing'];
+const OPEN_INVOICE_STATUSES = ['sent', 'viewed', 'overdue', 'processing'];
 const ET_DAY = (col) => `to_char((${col}) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')`;
 const DAY = (col) => `to_char(${col}, 'YYYY-MM-DD')`;
 const usd = (n) => Number(n) || 0;
@@ -169,23 +169,25 @@ async function readCardsOffFeed(database, { feedLabels, since }) {
     GROUP BY 1, 2 ORDER BY 1`, [since, feedLabels]).then((r) => r.rows);
 }
 
+// A finalized check pays its net (and the employer's HSA money) on the pay date; the withheld and employer
+// taxes and the savings leave later, on the payroll tax rows' due dates (readTaxRows).
 async function readPayroll(database, { from, to }) {
   return database.raw(`
     SELECT ${DAY('pc.pay_date')} AS pay_day,
-      (pc.gross_cents + COALESCE(pc.employer_social_security_cents, 0) + COALESCE(pc.employer_medicare_cents, 0)
-        + COALESCE(pc.futa_cents, 0) + COALESCE(pc.fl_reemployment_cents, 0) + COALESCE(pc.simple_employer_cents, 0)
-        + COALESCE(pc.hsa_employer_cents, 0)) AS cost_cents
+      (COALESCE(pc.net_cents, 0) + COALESCE(pc.hsa_employer_cents, 0)) AS cost_cents
     FROM payroll_checks pc JOIN payroll_runs pr ON pr.id = pc.run_id
     WHERE pc.pay_date BETWEEN ?::date AND ?::date AND pr.status = 'finalized' AND pr.voided_at IS NULL
       AND COALESCE(pc.status, '') <> 'void'`, [from, to]).then((r) => r.rows);
 }
 
-// Payroll tax rows are the pay runs' money (counted on the pay date), so they are left out here.
+// Tax payments due in the window, payroll deposits included (payroll-tax-calendar.js: the monthly 941
+// deposit, SIMPLE savings, the quarterly RT-6, the employer 2%). The quarterly Form 941 is a return that
+// the monthly deposits already paid, so it is left out.
 async function readTaxRows(database, { from, to }) {
   return database.raw(`
     SELECT ${DAY('due_date')} AS due_day, filing_type, amount_due, amount_paid FROM tax_filing_calendar
     WHERE due_date BETWEEN ?::date AND ?::date AND COALESCE(status, '') NOT IN ('paid', 'filed')
-      AND filing_type NOT LIKE 'payroll%'`, [from, to]).then((r) => r.rows);
+      AND filing_type <> 'payroll_941'`, [from, to]).then((r) => r.rows);
 }
 
 async function readCash(readCashBalances) {
@@ -288,8 +290,9 @@ async function loadForecastInput({
       if (value > 0) completed.push({ id: v.id, day: doneDay, value });
     } else if (v.scheduled_day >= today && v.scheduled_day <= windowEnd) {
       if (v.payer_billed) payerBilled = { count: payerBilled.count + 1 };
-      // A visit already invoiced is counted once: as its open invoice (or as a draft, listed apart).
-      booked.push({ day: v.scheduled_day, value: v.has_invoice ? 0 : value });
+      // A visit already invoiced brings its cash once, as its open invoice (or a draft, listed apart),
+      // but it is still booked work when the expected line compares work to last year's pace.
+      booked.push({ day: v.scheduled_day, value: v.has_invoice ? 0 : value, work: value });
     }
   }
   if (payerBilled.count) missing.push({ kind: 'payer_billed_visits', count: payerBilled.count });

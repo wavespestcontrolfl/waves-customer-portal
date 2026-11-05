@@ -10,7 +10,8 @@
  * Rules (decision page): a dollar counts once, at the step it has reached (visit -> invoice -> payment
  * -> payout); card money reaches the bank 2 business days after it is paid; prepaid visits bring no new
  * cash; a card charge counts when it posts, never again as the card payment; a card balance is money
- * owed, not cash. Payroll counts its full cost on the pay date, never again as the tax deposit.
+ * owed, not cash. A pay run pays its net on the pay date and its taxes on the deposit rows' due dates;
+ * a planned hire (no deposit rows yet) counts its full cost on the pay date, the safe side.
  */
 const { addETDays, addETBusinessDays, etDateString, etWeekStart } = require('../../utils/datetime-et');
 const { RATES } = require('../payroll-calc');
@@ -283,10 +284,10 @@ function computeForecast(input) {
     const w = weekOf(weeks, v.day);
     if (w === null) continue;
     bookedVisits[w] += 1;
-    if (v.value > 0) {
-      bookedValue[w] += v.value;
-      spread(inBooked.visits, v.day, v.value, visitCurve.curve, land);
-    }
+    // work = the visit's value as booked work (for the expected line); value = the cash still to come
+    // from it (0 once it is invoiced: the invoice brings that cash).
+    bookedValue[w] += Number(v.work ?? v.value) || 0;
+    if (v.value > 0) spread(inBooked.visits, v.day, v.value, visitCurve.curve, land);
   }
 
   // Open invoices: P(paid on day t | still open at age s), from the invoice curve.
@@ -351,7 +352,7 @@ function computeForecast(input) {
   // Card owed today: past charges not yet paid.
   addTo(out.card_owed, today, Number(input.opening?.cardOwedUsd) || 0);
 
-  // Payroll checks: full cost on the pay date; the tax deposits later are the same money.
+  // Pay runs: net pay on the pay date (the loader); their tax deposits are tax rows below.
   let firstCheckDay = null;
   for (const c of input.payroll || []) {
     if (c.payDay < today || c.payDay > windowEnd) continue;
