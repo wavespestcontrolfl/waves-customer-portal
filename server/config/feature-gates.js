@@ -6449,6 +6449,16 @@ function ibOpenaiBackupLive() {
   return process.env.GATE_IB_OPENAI_BACKUP === 'true';
 }
 
+// GATE_IB_FAST_MODE read at CALL time — strict `=== 'true'`, dark. SPEND GATE:
+// Opus fast mode bills at a premium rate. On, the Intelligence Bar's Anthropic
+// call asks for `speed: "fast"` (beta fast-mode-2026-02-01) when the served
+// model supports it (services/intelligence-bar/fast-mode.js), and retries once
+// at standard speed on a 429 or an unsupported-speed 400. Off = today's
+// request, byte for byte. Kill: unset.
+function ibFastModeLive() {
+  return process.env.GATE_IB_FAST_MODE === 'true';
+}
+
 // GATE_IB_BILLING_MODE_EDIT read at CALL time — strict `=== 'true'`, dark.
 // The Intelligence Bar's update_customer billing type + per-application fee
 // edit (services/intelligence-bar/billing-mode-change.js). Kill: unset.
@@ -9820,6 +9830,8 @@ module.exports.ibToolSearchLive = ibToolSearchLive;
 module.exports.ibToolAdditionsLive = ibToolAdditionsLive;
 // GATE_IB_OPENAI_BACKUP reader, on its own line so gate PRs never conflict.
 module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
+// GATE_IB_FAST_MODE reader, on its own line so gate PRs never conflict.
+module.exports.ibFastModeLive = ibFastModeLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
 // GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.

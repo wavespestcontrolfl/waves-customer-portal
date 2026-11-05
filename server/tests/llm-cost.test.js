@@ -600,4 +600,26 @@ postgres('llm cost (PostgreSQL)', () => {
     await expect(llmCost.runLlmCostCheck({ now: NOW, conn: app, fetchImpl: jest.fn(async () => ({ ok: false, status: 500 })) })).rejects.toThrow(/500/);
     expect(mockRaise).not.toHaveBeenCalled();
   });
+  describe('fast-speed Anthropic models', () => {
+    const base = {
+      input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5, reasoning: null,
+      tiers: [{ minPromptTokens: 200000, input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10, reasoning: null }],
+    };
+    const prices = new Map([['claude-opus-5-5', base], ['claude-opus-5', { ...base, input: 5, output: 25, tiers: [] }], ['claude-opus-4-8', base]]);
+
+    test('<model>-fast prices at 2x the base model, rates and tiers', () => {
+      expect(llmCost.priceFor(prices, 'claude-opus-5-5-fast')).toEqual({
+        input: 8, output: 40, cacheRead: 0.8, cacheWrite: 10, reasoning: null,
+        tiers: [{ minPromptTokens: 200000, input: 16, output: 60, cacheRead: 1.6, cacheWrite: 20, reasoning: null }],
+      });
+      expect(llmCost.priceFor(prices, 'claude-opus-5-fast')).toMatchObject({ input: 10, output: 50, tiers: [] });
+      expect(llmCost.priceFor(prices, 'claude-opus-5-5')).toBe(base);
+    });
+
+    test('a fast key whose base has no multiplier or no price is unpriced', () => {
+      expect(llmCost.priceFor(prices, 'claude-opus-4-8-fast')).toBeNull();
+      expect(llmCost.priceFor(new Map(), 'claude-opus-5-5-fast')).toBeNull();
+      expect(llmCost.priceFor(prices, 'claude-sonnet-5-5-fast')).toBeNull();
+    });
+  });
 });
