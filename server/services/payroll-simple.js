@@ -19,6 +19,7 @@ const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const {
   PayrollError, calendarDate, validate, requireUuid, lockW2Technician, MAX_NOTE,
 } = require('./payroll-w4');
+const { lockPayrollMutations } = require('./payroll-lock');
 
 const MAX_DOLLARS_PER_CHECK = 1000000;
 // The first day of the Schwab plan (owner 2026-11-04). No election may start before it, so a form signed
@@ -144,6 +145,9 @@ async function recordSimple(technicianId, input, actor, conn = db) {
   if (effectiveOn < PLAN_START) throw new PayrollError(400, 'First pay date cannot be before the plan starts (January 1, 2027)');
   const actorId = (actor && typeof actor === 'object' ? actor.id : actor) || null;
   return conn.transaction(async (trx) => {
+    // Finalize reads the election under this lock and then freezes the checks; an election saved in between
+    // would not be in the frozen figures, so saving one waits for a finalize or void in progress.
+    await lockPayrollMutations(trx);
     await lockW2Technician(trx, technicianId, 'SIMPLE IRA');
     const [inserted] = await trx('payroll_simple_ira_elections').insert({
       technician_id: technicianId,

@@ -32,6 +32,7 @@ const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
 const payrollSimple = require('../services/payroll-simple');
+const payrollRunsLock = require('../services/payroll-lock');
 const { readFormFigures } = require('../services/payroll-form-figures');
 
 jest.setTimeout(60000);
@@ -41,6 +42,8 @@ const W2 = '2026-09-21'; // pay Fri 2026-10-02
 
 postgres('payroll SIMPLE IRA elections and pay runs', () => {
   let database;
+  let holderDb;
+  let callerDb;
   let trx;
   let server;
   let baseUrl;
@@ -101,6 +104,8 @@ postgres('payroll SIMPLE IRA elections and pay runs', () => {
       throw new Error('Use an isolated local/CI database or labeled private QA database');
     }
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    holderDb = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    callerDb = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
     const app = express();
     app.use(express.json());
     app.use('/api/admin/payroll', router);
@@ -121,6 +126,8 @@ postgres('payroll SIMPLE IRA elections and pay runs', () => {
   afterAll(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
     if (database) await database.destroy();
+    if (holderDb) await holderDb.destroy();
+    if (callerDb) await callerDb.destroy();
   });
 
   describe('the election table', () => {
@@ -170,6 +177,30 @@ postgres('payroll SIMPLE IRA elections and pay runs', () => {
       await election(id, { participant: false, effective_on: '2026-10-01', created_at: new Date(Date.now() + 60000) });
       expect(await payrollSimple.currentSimpleFor(id, '2026-10-02', trx)).toMatchObject({ participant: false, deferralBp: null });
       expect(await payrollSimple.simpleInputFor(id, '2026-10-02', { deferral: 0, compensation: 0 }, trx)).toBeUndefined();
+    });
+  });
+
+  describe('payroll mutation lock (separate connections)', () => {
+    // A finalize holds this lock while it reads the election and freezes the checks. Saving an election takes the same
+    // lock first, so a held lock shows as a timeout (55P03) and a free one as the ordinary 404 for an unknown person.
+    const callerWith = (timeout) => ({
+      transaction: (work) => callerDb.transaction(async (t) => {
+        await t.raw(`SET LOCAL lock_timeout = '${timeout}'`);
+        return work(t);
+      }),
+    });
+
+    it('saving an election waits while a pay run finalize holds the payroll lock', async () => {
+      const holder = await holderDb.transaction();
+      await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [payrollRunsLock.PAYROLL_LOCK_NS, payrollRunsLock.PAYROLL_LOCK_KEY]);
+      const input = { participant: true, signedOn: '2026-10-20' };
+      try {
+        const timedOut = await payrollSimple.recordSimple(randomUUID(), input, ADMIN_ID, callerWith('300ms')).catch((err) => err);
+        expect(timedOut.code).toBe('55P03');
+      } finally {
+        await holder.commit();
+      }
+      await expect(payrollSimple.recordSimple(randomUUID(), input, ADMIN_ID, callerWith('300ms'))).rejects.toMatchObject({ status: 404 });
     });
   });
 
