@@ -36,7 +36,7 @@ import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
 import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
-import { etDateString, formatETDateTime } from '../lib/timezone';
+import { etDateString, formatETDateTime, formatETTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
 import {
@@ -4233,6 +4233,55 @@ function NotificationLabelDisclosure({ label, description }) {
   );
 }
 
+// GATE_PORTAL_EMAIL_RESUBSCRIBE: the account holder's own address carries an unsubscribe the
+// customer made by email link. The app cannot undo it (a phone code does not prove the mailbox);
+// the button asks for ONE email to that address, and only its link turns emails back on.
+const EMAIL_RESUBSCRIBE_COPY = {
+  paused: (maskedEmail) => `Emails to ${maskedEmail} are off because of an unsubscribe link.`,
+  button: 'Turn emails back on',
+  sent: (maskedEmail) => `Check your email. We sent a link to ${maskedEmail}. Open it to turn emails back on.`,
+  failed: "We couldn't send the email. Please try again later.",
+  // `time` is an Eastern wall-clock time such as "3:42 PM".
+  wait: (time) => `We already sent a link today. You can ask for a new one after ${time}.`,
+};
+
+function EmailResubscribeNotice({ resubscribe }) {
+  const [answer, setAnswer] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const current = answer || resubscribe;
+  if (!current || current.state === 'not_paused') return null;
+  const maskedEmail = current.maskedEmail || resubscribe?.maskedEmail || 'your email';
+  const sent = current.state === 'sent';
+  // A link was already sent (and used) inside the 24 h cap: no new email until nextAt.
+  const nextAt = current.nextAt ? new Date(current.nextAt) : null;
+  const waiting = !sent && !!nextAt && nextAt.getTime() > Date.now();
+  const ask = async () => {
+    if (busy) return;
+    setBusy(true);
+    setFailed(false);
+    try {
+      const res = await api.requestEmailResubscribe();
+      if (res?.state === 'failed') setFailed(true);
+      else setAnswer(res);
+    } catch {
+      setFailed(true);
+    } finally { setBusy(false); }
+  };
+  return (
+    <div data-testid="email-resubscribe" style={{ marginTop: 16, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+      <div role="status">{sent ? EMAIL_RESUBSCRIBE_COPY.sent(maskedEmail) : EMAIL_RESUBSCRIBE_COPY.paused(maskedEmail)}</div>
+      {waiting && <div style={{ marginTop: 6 }}>{EMAIL_RESUBSCRIBE_COPY.wait(formatETTime(nextAt))}</div>}
+      {failed && <div role="alert" style={{ marginTop: 6 }}>{EMAIL_RESUBSCRIBE_COPY.failed}</div>}
+      {!sent && (
+        <button data-glass-accent="" type="button" disabled={busy || waiting} onClick={ask} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>
+          {EMAIL_RESUBSCRIBE_COPY.button}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function AppNotificationSettings({ prefs, app, saving, onSave }) {
   const [expanded, setExpanded] = useState(false);
   const settingsId = useId();
@@ -5778,6 +5827,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 ? 'Delivery methods apply across your account. Turn appointment alerts on or off under Property notifications below.'
                 : 'Choose how you receive each update.'}
             </p>
+            <EmailResubscribeNotice resubscribe={prefs.emailResubscribe} />
             <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
           </div>
           <div style={{ padding: '4px 18px 12px' }}>

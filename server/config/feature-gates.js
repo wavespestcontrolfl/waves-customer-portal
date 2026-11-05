@@ -10505,6 +10505,16 @@ function dayReplanMode() {
 // GATE_DAY_REPLAN reader, on its own line so gate PRs never conflict.
 module.exports.dayReplanMode = dayReplanMode;
 
+// GATE_PORTAL_EMAIL_RESUBSCRIBE read at CALL time (so a flip needs no redeploy); strict `=== 'true'`,
+// dark by default. Owner 2026-11-04 (gap #18, "confirm email"): an account holder whose own address carries
+// an email unsubscribe can ask in the app for ONE "Turn Waves emails back on?" email; only a click on its
+// button (public-email-resubscribe.js) releases the block (services/email-resubscribe.js). Off = nothing changes.
+function portalEmailResubscribeLive() {
+  return process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE === 'true';
+}
+// GATE_PORTAL_EMAIL_RESUBSCRIBE reader, on its own line so gate PRs never conflict.
+module.exports.portalEmailResubscribeLive = portalEmailResubscribeLive;
+
 // GATE_OWNER_NUDGE_BANNER read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-04 "banner": the owner's open-visit nudge arrives as a Waves Admin banner instead of a text
 // (services/tech-open-visit-nudge.js). Off = the text, as today, and bell-policy keeps open_visits_nudge silent.
