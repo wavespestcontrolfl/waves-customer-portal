@@ -741,14 +741,24 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     return f;
   };
   const run = (candidates, o = {}) => weekend.resolveWeekendMoves({
-    candidates, from: OWNER, workDays: MON_THU, today: TODAY, facts: o.facts || clearFacts(candidates), free: o.free || (async () => true), seed: o.seed,
+    candidates, from: OWNER, workDays: MON_THU, start: o.start || START, today: TODAY, facts: o.facts || clearFacts(candidates), free: o.free || (async () => true), seed: o.seed,
   });
   const dow = (d) => new Date(`${d}T12:00:00Z`).getUTCDay();
 
-  test('candidate days: --to work days within ±5 days, nearest first, a tie takes the earlier date', () => {
-    expect(weekend.candidateDates(SAT, MON_THU, TODAY)).toEqual(['2099-07-09', '2099-07-13', '2099-07-08', '2099-07-14', '2099-07-07', '2099-07-15', '2099-07-06', '2099-07-16']);
-    // Nothing inside the 73 h freeze margin (today + 4 days).
-    expect(weekend.candidateDates('2099-07-02', MON_THU, '2099-06-30')).toEqual(['2099-07-06', '2099-07-07']);
+  test('candidate days: --to work days within ±5 days, nearest first, a tie takes the earlier date, none before --start', () => {
+    expect(weekend.candidateDates(SAT, MON_THU, TODAY, START)).toEqual(['2099-07-09', '2099-07-13', '2099-07-08', '2099-07-14', '2099-07-07', '2099-07-15', '2099-07-06', '2099-07-16']);
+    // Nothing inside the 73 h freeze margin (today + 4 days), here with the earliest --start the run allows.
+    expect(weekend.candidateDates('2099-07-02', MON_THU, '2099-06-30', '2099-07-04')).toEqual(['2099-07-06', '2099-07-07']);
+    // Nothing before --start, the first solo day: with a Friday --start the Saturday keeps only the next week's days.
+    expect(weekend.candidateDates(SAT, MON_THU, TODAY, FRI)).toEqual(['2099-07-13', '2099-07-14', '2099-07-15', '2099-07-16']);
+  });
+
+  test('a new date is never before --start: with a Friday --start the Saturday visit takes the Monday after, not the Thursday before', async () => {
+    const late = series(SAT, { count: 1 });
+    expect((await run([late], { start: FRI })).newDates.get(late.series[0].live[0].id)).toBe('2099-07-13');
+    // The control: with a Monday --start the same Saturday takes the Thursday before it.
+    const control = series(SAT, { count: 1 });
+    expect((await run([control])).newDates.get(control.series[0].live[0].id)).toBe('2099-07-09');
   });
 
   test('Sat -> Thu (-2), Sun -> Mon (+1), Fri -> Thu (-1): the first visit and every later one, re-anchored on the new weekday', async () => {
@@ -800,8 +810,10 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     }
   });
 
-  test('a projection that leaves a recurring visit on a day off keeps the customer whole (no visit may stay behind on a Saturday)', async () => {
-    // A custom 21-day series: Thursday 07-09, then 07-30 (Thursday) is fine; add a stray visit whose projected date equals its own Saturday.
+  test('a day gap that is not whole weeks keeps the customer whole: top-up would walk the series back onto a day off (cadence_drift)', async () => {
+    // A custom 9-day series, Thu 07-09 and Sat 07-18. A Tue 07-07 / Thu 07-16 re-date would fit both visits,
+    // but top-up hops 9 days from the latest visit: its next child for the hire is Sat 07-25.
+    expect(dow(hop('2099-07-16', 'custom', 1, { intervalDays: 9 }))).toBe(6);
     const parentRow = { id: 'P-stay', customer_id: 'C-stay', service_type: 'Pest', recurring_pattern: 'custom', recurring_nth: null, recurring_weekday: null, recurring_interval_days: 9 };
     const live = ['2099-07-09', '2099-07-18'].map((d, i) => ({
       id: `V-stay-${i}`, series_id: 'P-stay', recurring_parent_id: 'P-stay', is_recurring: true, scheduled_date: d, status: 'confirmed',
@@ -809,10 +821,20 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     }));
     const c = { customer_id: 'C-stay', series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
     const out = await run([c]);
-    // Thu 07-09 stays, the second visit (Sat 07-18, 9 days later) projects to itself on a day off: not accepted as is.
-    expect(out.kept.size).toBe(0);
-    expect(out.newDates.get('V-stay-1')).toBe('2099-07-16'); // the series re-dated from the first candidate day that leaves no visit on a day off (Tue 07-07)
-    for (const v of out.newDates.values()) expect(MON_THU).toContain(dow(v));
+    expect(out.kept.get('C-stay')).toBe('cadence_drift');
+    expect(out.newDates.size).toBe(0);
+    // Daily and a custom 30 days drift the same way (a custom 21 days is whole weeks: the day-gap test above moves it).
+    for (const [pattern, days] of [['daily', null], ['custom', 30]]) {
+      const d = series(SAT, { pattern, count: 1, parentExtra: { recurring_interval_days: days } });
+      expect((await run([d])).kept.get(d.customer_id)).toBe('cadence_drift');
+    }
+    // A drifting series with no visit to re-date keeps its customer too: it moves to --to with the rest.
+    const two = series(SAT, { count: 1 });
+    const thu = { id: 'V-drift-0', series_id: 'P-drift', recurring_parent_id: 'P-drift', is_recurring: true, scheduled_date: '2099-07-09', status: 'confirmed', technician_id: OWNER, window_start: '13:00:00', window_end: '14:00:00' };
+    two.series.push({ parent: { ...parentRow, id: 'P-drift', customer_id: two.customer_id }, live: [thu], chain: [thu], needsDates: false });
+    const both = await run([two]);
+    expect(both.kept.get(two.customer_id)).toBe('cadence_drift');
+    expect(both.newDates.size).toBe(0);
   });
 
   test('a cancelled or skipped middle occurrence does not shift the later dates (seasonal Feb-Oct and monthly walks count the real cadence steps)', async () => {
@@ -876,7 +898,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     expect((await run([c], { facts: clearFacts([c], { blackout: layers }) })).newDates.get(c.series[0].live[0].id)).toBe('2099-07-13');
     const absent = new Set(['2099-07-09', '2099-07-13']);
     expect((await run([c], { facts: clearFacts([c], { absentDates: absent }) })).newDates.get(c.series[0].live[0].id)).toBe('2099-07-08');
-    const all = new Set(weekend.candidateDates(SAT, MON_THU, TODAY));
+    const all = new Set(weekend.candidateDates(SAT, MON_THU, TODAY, START));
     expect((await run([c], { facts: clearFacts([c], { absentDates: all }) })).kept.get(c.customer_id)).toBe('absence');
     expect((await run([series('2099-07-02', { count: 1 })], {})).newDates.size).toBe(1); // 07-06 is 6 days out: fine
     const tooSoon = series('2099-07-04', { count: 1 }); // Sat; Mon 07-06 is the only legal day and 07-02 is under the margin
@@ -930,7 +952,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     expect(first).toBe('2099-07-09');
     expect(second).not.toBe(first); // the second customer takes the next free day, never the same hour
     // When every candidate day already holds the hour, the customer stays whole.
-    const seed = new Map(weekend.candidateDates(SAT, MON_THU, TODAY).map((d) => [d, [{ s: 540, e: 600 }]]));
+    const seed = new Map(weekend.candidateDates(SAT, MON_THU, TODAY, START).map((d) => [d, [{ s: 540, e: 600 }]]));
     expect((await run([series(SAT, { count: 1 })], { seed })).kept.size).toBe(1);
     // A technician-only move of the same run holds its hour too.
     const half = new Map([['2099-07-09', [{ s: 570, e: 630 }]]]);

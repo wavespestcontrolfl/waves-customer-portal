@@ -47,7 +47,7 @@
 //            the rollback file. Each ZIP must be a territory_zips row. Without --zips: today's run.
 //   --weekend-move  the DAY-60 second run (owner 2026-10-28, question 1 = C): the weekend customers the first run kept
 //            with the owner move to --to, and each of their live visits dated >= --start that sits on a --to day off
-//            moves to a --to work day (±5 days, the flex tier's bound; the time and window stay), with no customer
+//            moves to a --to work day on or after --start (±5 days, the flex tier's bound; the time and window stay), with no customer
 //            message. Needs --to; --start must be at least 4 days after today (START_TOO_SOON). The rules, the
 //            re-anchor of month-based series (so top-up keeps the new weekday) and the "kept whole" reasons are in
 //            the header of second-tech-handover-weekend.js. Without it, a weekend customer stays whole as before.

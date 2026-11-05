@@ -21,11 +21,14 @@
 // Saturday. So a month-based series is RE-ANCHORED: the parent gets recurrenceOrdinalOptions(<the new
 // date of its first live visit>), the stamp SmartRebooker.rescheduleSeries writes (rebooker.js,
 // recurring_nth + recurring_weekday). A day-gap pattern (weekly, biweekly, every_6_weeks, custom) hops a
-// fixed gap from the latest visit, so it keeps the new weekday with no write. Never a date_exception
+// fixed gap from the latest visit, so a gap of whole weeks keeps the new weekday with no write. A gap that
+// is not whole weeks (daily, a custom 9 or 30 days) walks top-up's later visits through every weekday and
+// back onto a --to day off, so no move sticks: a customer with such a series (also one with no visit to
+// re-date) stays whole with --from (cadence_drift). Never a date_exception
 // (top-up would keep landing on the old day). Lawn never moves, so there is no round anchor.
 //
-// THE PROJECTION. The new anchor is tried on each --to work day inside ±FLEX_TIER_RADIUS_DAYS of the
-// first live visit's date, nearest first, ties the EARLIER date. For a candidate, EVERY live visit of the
+// THE PROJECTION. The new anchor is tried on each --to work day on or after --start (the first solo day)
+// inside ±FLEX_TIER_RADIUS_DAYS of the first live visit's date, nearest first, ties the EARLIER date. For a candidate, EVERY live visit of the
 // series dated >= --start is projected from it with the functions top-up uses (the seeder's
 // nextRecurringDate: addETMonthsByWeekday for months, a day gap otherwise), hopping as many cadence steps
 // as separate the visits today, so a cancelled middle slot does not shift the rest. A candidate is
@@ -75,6 +78,9 @@ const DEFAULT_MINUTES = 60;
 const isMonthBased = (pattern) => pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || MONTH_PATTERNS.has(pattern);
 
 const dayDiff = (a, b) => Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86400000);
+/** Does top-up keep the series on one weekday? A month walk does (re-anchored on the parent); a day gap only in whole weeks. */
+const keepsWeekday = (parent, today) => isMonthBased(parent.recurring_pattern)
+  || dayDiff(today, nextRecurringDate(today, parent.recurring_pattern, 1, { intervalDays: parent.recurring_interval_days })) % 7 === 0;
 const minutes = (t) => {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ''));
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
@@ -99,12 +105,12 @@ function spanOf(v) {
   return { s, e: e !== null && e > s ? e : s + (Number(v.estimated_duration_minutes) > 0 ? Number(v.estimated_duration_minutes) : DEFAULT_MINUTES) };
 }
 
-/** Candidate first dates, nearest first, ties the earlier date: --to work days within ±5 days and past the freeze margin. */
-function candidateDates(current, workDays, today) {
+/** Candidate first dates, nearest first, ties the earlier date: --to work days within ±5 days, on or after --start and past the freeze margin. */
+function candidateDates(current, workDays, today, start) {
   const out = [];
   for (let delta = -FLEX_TIER_RADIUS_DAYS; delta <= FLEX_TIER_RADIUS_DAYS; delta += 1) {
     const date = shiftDateStr(current, delta);
-    if (workDays.includes(dayOfWeekOfDate(date)) && date >= shiftDateStr(today, MIN_DAYS_OUT)) out.push({ date, delta });
+    if (workDays.includes(dayOfWeekOfDate(date)) && date >= start && date >= shiftDateStr(today, MIN_DAYS_OUT)) out.push({ date, delta });
   }
   return out.sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta) || a.delta - b.delta).map((c) => c.date);
 }
@@ -225,7 +231,7 @@ async function tryCandidate(series, a0, ctx) {
 async function resolveSeries(series, ctx) {
   const first = series.chain[0];
   if (!first) return { ok: false, reason: 'no_legal_date' };
-  const candidates = candidateDates(first.scheduled_date, ctx.workDays, ctx.today);
+  const candidates = candidateDates(first.scheduled_date, ctx.workDays, ctx.today, ctx.start);
   let reason = 'no_legal_date';
   for (let i = 0; i < candidates.length; i += 1) {
     const result = await tryCandidate(series, candidates[i], ctx);
@@ -246,19 +252,22 @@ function anchorChange(parent, anchor) {
 
 /**
  * Decide every weekend customer. `candidates` = [{ customer_id, series: [{ parent, live, chain, needsDates }] }]
- * in a stable order. `seed` = the windows the run's technician-only moves already hold on --to, Map(date -> [{ s, e }]).
+ * in a stable order. `start` = --start: no new date before it. `seed` = the windows the run's technician-only moves already
+ * hold on --to, Map(date -> [{ s, e }]).
  * Resolves to { kept: Map(customerId -> reason), newDates: Map(visitId -> date), anchors: [anchorChange] }.
  */
-async function resolveWeekendMoves({ candidates, from, workDays, today, facts, free, seed = new Map() }) {
+async function resolveWeekendMoves({ candidates, from, workDays, start, today, facts, free, seed = new Map() }) {
   const kept = new Map();
   const newDates = new Map();
   const anchors = [];
   const taken = new Map([...seed].map(([d, list]) => [d, [...list]]));
   for (const customer of candidates) {
-    const ctx = { from, workDays, today, facts, free, taken };
+    const ctx = { from, workDays, start, today, facts, free, taken };
     const solved = [];
     let failure = null;
     for (const series of customer.series) {
+      // Every series of the customer moves to --to, so each must keep its weekday under top-up (header, THE MOVE MUST STICK).
+      if (!keepsWeekday(series.parent, today)) { failure = 'cadence_drift'; break; }
       const result = series.needsDates ? await resolveSeries(series, ctx) : { ok: true, dates: new Map(), anchor: null, spans: [] };
       if (!result.ok) { failure = result.reason; break; }
       solved.push({ series, result });
@@ -378,7 +387,7 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
     conn: db, technicianId: to, date, windowStart: v.window_start, windowEnd: effectiveWindowEnd(v),
     durationMinutes: Number(v.estimated_duration_minutes) > 0 ? Number(v.estimated_duration_minutes) : undefined, excludeServiceIds: [v.id],
   });
-  return resolveWeekendMoves({ candidates, from, workDays, today, facts, free, seed });
+  return resolveWeekendMoves({ candidates, from, workDays, start, today, facts, free, seed });
 }
 
 module.exports = {
