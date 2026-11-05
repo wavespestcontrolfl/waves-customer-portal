@@ -22,6 +22,11 @@
 // Window: expenses dated 14 days ago through 3 days ago (ET calendar days). The 3-day
 // grace lets the card charge post and the hourly matcher link it.
 //
+// Paid with Spark but not linked yet: the matcher parks a charge for review when its
+// bank words differ from the invoice's vendor (OPEN-METEO.COM vs "OpenMeteo GmbH").
+// An unlinked invoice whose exact amount sits unmatched on an OK account inside the
+// matcher's own date window was paid the right way, so it is not a bell item.
+//
 // GATE_INVOICE_NOT_ON_SPARK (strict 'true', read at call time) and
 // INVOICE_OK_ACCOUNT_LABELS (comma list of bank_transactions.account_label values that
 // count as paid the right way). Gate off or the list unset = the daily cron does
@@ -90,6 +95,8 @@ function buildVendorList(rows, { okLabels, from, to }) {
     seen.add(id);
     const label = row.account_label ? String(row.account_label) : '';
     if (label && okLabels.has(label)) continue;
+    // No link, but its exact amount is unmatched on Spark or the debit in the matcher's window.
+    if (!label && row.ok_candidate === true) continue;
     const key = vendorKeyOf(row.vendor_name);
     let vendor = vendors.get(key);
     if (!vendor) {
@@ -212,14 +219,26 @@ async function closeList(database, dedupeKey) {
 }
 
 // Thin read: emailed expenses in the window, each with the account of the line that
-// matched it (null = none). matched_expense_id is unique, so one expense is one row.
-function loadRows(database, { from, to }) {
+// matched it (null = none) and ok_candidate: an unmatched debit of the exact amount on
+// an OK account inside the matcher's date window. matched_expense_id is unique, so one
+// expense is one row.
+function loadRows(database, { from, to, okLabels }) {
+  // The matcher's own window (receipt date vs card posting drift), read lazily so the
+  // pure list logic and its tests do not load the bank import module.
+  const { EXPENSE_DATE_WINDOW_DAYS } = require('./bank-import');
+  const ok = [...okLabels];
   return database('expenses as x')
     .leftJoin('bank_transactions as bt', 'bt.matched_expense_id', 'x.id')
     .whereExists(function emailBooked() { this.select(database.raw('1')).from('emails as e').whereRaw('e.expense_id = x.id'); })
     .where('x.amount', '>', 0)
     .whereRaw('x.expense_date between ?::date and ?::date', [from, to])
-    .select('x.id as expense_id', 'x.vendor_name', 'x.amount', database.raw("to_char(x.expense_date, 'YYYY-MM-DD') as expense_date"), 'bt.account_label');
+    .select(
+      'x.id as expense_id', 'x.vendor_name', 'x.amount', database.raw("to_char(x.expense_date, 'YYYY-MM-DD') as expense_date"), 'bt.account_label',
+      database.raw(`exists (select 1 from bank_transactions c where c.direction = 'debit' and c.status = 'unmatched'
+        and c.account_label in (${ok.map(() => '?').join(', ')}) and c.amount = x.amount
+        and c.txn_date between x.expense_date - ?::int and x.expense_date + ?::int) as ok_candidate`,
+      [...ok, EXPENSE_DATE_WINDOW_DAYS, EXPENSE_DATE_WINDOW_DAYS]),
+    );
 }
 
 /**
@@ -236,7 +255,7 @@ async function runInvoiceNotOnSpark({ database = db, gateEnabled, now = new Date
     return { skipped: 'no_ok_accounts' };
   }
   const window = windowFor(now);
-  const vendors = buildVendorList(rows ?? await loadRows(database, window), { okLabels, ...window });
+  const vendors = buildVendorList(rows ?? await loadRows(database, { ...window, okLabels }), { okLabels, ...window });
   if (!vendors.length) {
     const closed = Number(await closeList(database, dedupeKey)) || 0;
     return { count: 0, outcome: closed ? 'closed' : 'clear' };
@@ -255,5 +274,5 @@ async function runInvoiceNotOnSpark({ database = db, gateEnabled, now = new Date
 module.exports = {
   runInvoiceNotOnSpark,
   DEDUPE_KEY,
-  _private: { parseOkLabels, windowFor, buildVendorList, composeList, whyFor, ringOnNewVendor, accountWords, GRACE_DAYS, WINDOW_DAYS },
+  _private: { parseOkLabels, windowFor, buildVendorList, composeList, whyFor, ringOnNewVendor, accountWords, loadRows, GRACE_DAYS, WINDOW_DAYS },
 };

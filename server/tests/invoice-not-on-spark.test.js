@@ -90,6 +90,18 @@ describe('the vendor list', () => {
     ].sort((a, b) => a[0].localeCompare(b[0])));
   });
 
+  test('no link but an unmatched same-amount charge on Spark or the debit (parked for review) counts as paid with Spark', () => {
+    const out = list([
+      row({ vendor_name: 'Parked Co', ok_candidate: true }),
+      row({ vendor_name: 'Missing Co', ok_candidate: false }),
+      // a linked line on another account is still other_account, whatever the candidate flag says
+      row({ vendor_name: 'Old Card Co', account_label: 'capital-one-card-8804', ok_candidate: true }),
+    ]);
+    expect(out.map((v) => [v.name, v.kinds])).toEqual([
+      ['Missing Co', ['no_charge']], ['Old Card Co', ['other_account']],
+    ]);
+  });
+
   test('amount zero or less and missing ids are left out', () => {
     expect(list([row({ amount: '0' }), row({ amount: '-5.00' }), row({ amount: null }), row({ expense_id: null })])).toEqual([]);
   });
