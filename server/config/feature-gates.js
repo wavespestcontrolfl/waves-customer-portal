@@ -10582,3 +10582,12 @@ function nightPassWaitLive() {
 }
 // GATE_NIGHT_PASS_WAIT reader, on its own line so gate PRs never conflict.
 module.exports.nightPassWaitLive = nightPassWaitLive;
+
+// GATE_DEAD_NUMBER_ALERT read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-04 "fix check": a customer's number that fails two texts with Twilio 30003 / 30005 raises one bell
+// row naming the customer (services/dead-number-alert.js). Off = nothing is read or raised, as today.
+function deadNumberAlertLive() {
+  return process.env.GATE_DEAD_NUMBER_ALERT === 'true';
+}
+// GATE_DEAD_NUMBER_ALERT reader, on its own line so gate PRs never conflict.
+module.exports.deadNumberAlertLive = deadNumberAlertLive;
