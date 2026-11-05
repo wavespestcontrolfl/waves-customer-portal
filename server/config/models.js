@@ -165,6 +165,15 @@ function anthropicSupportsMidConversationTools(model) {
   return ANTHROPIC_MID_CONVERSATION_TOOLS.has(String(model || ''));
 }
 
+// Does `model` accept the Claude API's fast mode (`speed: "fast"` with the
+// fast-mode-2026-02-01 beta)? Opus 5.5, Opus 5 and Opus 4.8 only. Exact ids:
+// an unknown id is NOT supported (fail closed: the caller sends the ordinary
+// standard-speed request).
+const ANTHROPIC_FAST_MODE = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8']);
+function anthropicSupportsFastMode(model) {
+  return ANTHROPIC_FAST_MODE.has(String(model || ''));
+}
+
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
@@ -866,6 +875,7 @@ module.exports = {
   anthropicThinksByDefault,
   anthropicSupportsToolSearch,
   anthropicSupportsMidConversationTools,
+  anthropicSupportsFastMode,
   ANTHROPIC_THINKING_REQUIRED_RE,
   anthropicThinkingAlwaysOn,
   DEEP,

@@ -118,6 +118,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
+const { createIbMessage, ibRequestedEffort } = require('../services/intelligence-bar/fast-mode');
 const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -4046,9 +4047,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       stepLimitReached = finalRound;
       currentMessages = toolAdditions.beforeCall(currentMessages, finalRound);
       const requestMessages = withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages);
-      const response = await modelCaller.call({ finalRound, ask: () => ledgerCall('anthropic', model, () => anthropic.messages.create({
+      const response = await modelCaller.call({ finalRound, ask: () => ledgerCall('anthropic', model, () => createIbMessage(anthropic, {
         model: model,
-        ...anthropicEffortConfig(model),
+        // INTELLIGENCE_BAR_EFFORT (IB only) wins over the global pin; unset or invalid = the pin.
+        ...anthropicEffortConfig(model, ibRequestedEffort()),
         max_tokens: anthropicMaxTokens(model, context === 'tech' ? 1024 : 4096),
         // 1h TTL on the tools+system prefix: operator queries routinely arrive
         // more than 5 minutes apart, so the default TTL expired between them
@@ -4072,7 +4074,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       logger.info(
         `[intelligence-bar] usage round=${round} in=${usage.input_tokens ?? 0} ` +
         `cache_write=${usage.cache_creation_input_tokens ?? 0} ` +
-        `cache_read=${usage.cache_read_input_tokens ?? 0} out=${usage.output_tokens ?? 0}`
+        `cache_read=${usage.cache_read_input_tokens ?? 0} out=${usage.output_tokens ?? 0} ` +
+        `speed=${usage.speed || 'standard'}`
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
