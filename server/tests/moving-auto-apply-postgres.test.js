@@ -175,6 +175,29 @@ postgres('moving: apply on accept (live Postgres)', () => {
     expect(await Moves.autoApplyAcceptedMoves()).toEqual({ applied: 0, waiting: 0, office: 0, failed: 0 });
   });
 
+  test('old-house visits Apply never cancels ring the office before the app applies the move', async () => {
+    const s = await seed();
+    const oneOff = await insertVisit({ service_type: 'WDO Inspection', scheduled_date: AFTER_1, property_id: oldHouseId });
+    // The item must be written first: one that does not persist leaves the move for the next run.
+    Notifications.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    expect(await Moves.autoApplyAcceptedMoves()).toEqual({ applied: 0, waiting: 0, office: 0, failed: 1 });
+    expect((await moveRow(s.move.id)).status).toBe('submitted');
+    expect(await statusOf(s.pestAfter)).toBe('pending');
+
+    jest.clearAllMocks();
+    expect(await Moves.autoApplyAcceptedMoves()).toEqual({ applied: 1, waiting: 0, office: 0, failed: 0 });
+    const left = Notifications.notifyAdmin.mock.calls.filter(([, , , opts]) => opts?.metadata?.kind === 'moving_auto_apply_left_booked');
+    expect(left).toHaveLength(1);
+    const [[, title, why, opts]] = left;
+    expect(title).toBe("Customers — check Pat Sample's old-house visits");
+    expect(why).toBe('They accepted the new-home estimate, and 1 visit at the old house stays booked.');
+    expect(opts).toMatchObject({ bell: true, refreshOnDedupe: true, dedupeKey: `moving_auto_apply_left_booked:${s.move.id}` });
+    expect(opts.detail).toMatch(/^Still booked at 1 Old Street, Bradenton, FL 34205: WDO Inspection .+\. Apply move never cancels these\. Cancel any that should not run\.$/);
+    // The move applied; the one-time visit stays for the office.
+    expect((await moveRow(s.move.id)).closed_reason).toBe('applied');
+    expect(await statusOf(oneOff)).toBe('pending');
+  });
+
   test('an estimate not accepted yet is never applied', async () => {
     const s = await seed({ estimate: { status: 'sent', accepted_at: null } });
     expect(await Moves.autoApplyAcceptedMoves()).toEqual({ applied: 0, waiting: 0, office: 0, failed: 0 });

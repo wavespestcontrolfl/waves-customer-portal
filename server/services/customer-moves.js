@@ -1709,6 +1709,33 @@ async function raiseAutoApplyAlert(move, err) {
   if (!notif || notif.suppressed) logger.warn(`[customer-moves] auto-apply office item did not persist for move ${move.id}; the next run tries again`);
 }
 
+// The old-house visits Apply never cancels (one-time visits after move-out,
+// open visits dated between move-out and today): an office click reads them
+// on the preview, so with no click the office gets them in one ringing item,
+// written BEFORE the move closes. A list that changes refreshes the item.
+async function raiseAutoApplyLeftBooked(move, preview, left) {
+  const customer = await db('customers').where({ id: move.customer_id }).first('first_name', 'last_name');
+  const name = [customer && customer.first_name, customer && customer.last_name].filter(Boolean).join(' ').trim() || 'a customer';
+  const notif = await raiseAdminAlert('service', {
+    area: 'Customers',
+    action: cutAtWord(`check ${name}'s old-house visits`, MAX_HEADLINE_CHARS - 'Customers — '.length),
+    why: cutAtWord(`They accepted the new-home estimate, and ${left.length === 1 ? '1 visit at the old house stays' : `${left.length} visits at the old house stay`} booked.`, MAX_WHY_CHARS),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
+    subject: { type: 'customer', id: move.customer_id },
+    doneWhen: 'move_handled',
+    who: 'person',
+  }, {
+    detail: `Still booked at ${preview.fromAddress}: ${left.map((v) => `${v.name} ${prettyDate(v.date)}`).join(', ')}. Apply move never cancels these. Cancel any that should not run.`,
+    icon: '🚚',
+    bell: true,
+    dedupeKey: `moving_auto_apply_left_booked:${move.id}`,
+    refreshOnDedupe: true,
+    metadata: { customerId: move.customer_id, moveId: move.id, kind: 'moving_auto_apply_left_booked' },
+  });
+  if (!notif || notif.suppressed) throw new Error('moving auto-apply left-booked item did not persist');
+}
+
 // When the move's estimate was accepted, or null.
 async function acceptedAt(move) {
   const row = await db('estimates').where({ id: move.estimate_id }).first('accepted_at');
@@ -1724,8 +1751,11 @@ async function autoApplyMove(moveId, { now }) {
   const move = await db('customer_moves').where({ id: moveId }).first('id', 'customer_id', 'status', 'estimate_id');
   if (!move || move.status !== 'submitted' || !move.estimate_id) return 'waiting';
   try {
-    const { version } = await applyMovePreview(move.customer_id, move.id);
-    const result = await applyMove(move.customer_id, move.id, { version, actorId: null, now, auto: true });
+    const preview = await applyMovePreview(move.customer_id, move.id);
+    const left = [...(preview.oneOffs || []), ...(preview.pastOpen || [])];
+    // No item, no apply this run: the office hears before the move closes.
+    if (left.length) await raiseAutoApplyLeftBooked(move, preview, left);
+    const result = await applyMove(move.customer_id, move.id, { version: preview.version, actorId: null, now, auto: true });
     return result && result.applied ? 'applied' : 'waiting';
   } catch (err) {
     if (!(err instanceof MoveError)) throw err;
