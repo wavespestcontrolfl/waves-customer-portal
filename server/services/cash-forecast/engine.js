@@ -233,12 +233,14 @@ function occurrences(item, from, to) {
 
 // A hire's cash cost per check: gross + employer Social Security and Medicare, plus FUTA and Florida
 // reemployment tax on the first $7,000 of the calendar year (payroll-calc.js RATES). Counted on the
-// pay date, so a 941 deposit due after the window never hides it (Fable round 1).
-function hireCosts(item, days) {
+// pay date, so a 941 deposit due after the window never hides it (Fable round 1). `before` = the item's
+// own checks earlier in the same calendar year, which already used part of the $7,000.
+function hireCosts(item, days, before = []) {
   const grossCents = Number(item.amount_cents) || 0;
   const fica = RATES.socialSecurityBp + RATES.medicareBp;
   const capped = RATES.futaBp + RATES.floridaNewEmployerBp;
   const ytd = new Map();
+  for (const day of before) ytd.set(day.slice(0, 4), (ytd.get(day.slice(0, 4)) || 0) + grossCents);
   return days.map((day) => {
     const year = day.slice(0, 4);
     const before = ytd.get(year) || 0;
@@ -368,7 +370,8 @@ function computeForecast(input) {
       // A check is never matched to the planned hire (it may be another employee's): the item runs to
       // its last date. Once pay runs exist from its dates on, they project that pay themselves, so the
       // owner is asked to end the item.
-      for (const h of hireCosts(item, days)) addTo(out.hire, h.day, h.usd);
+      const earlier = occurrences(item, `${today.slice(0, 4)}-01-01`, addDays(today, -1));
+      for (const h of hireCosts(item, days, earlier)) addTo(out.hire, h.day, h.usd);
       if (firstCheckDay && days.some((d) => d >= firstCheckDay)) missing.push({ kind: 'hire_overlaps_pay_runs', label: item.label, first_pay_day: firstCheckDay });
     } else {
       for (const d of days) addTo(out.planned, d, (Number(item.amount_cents) || 0) / 100);

@@ -198,6 +198,11 @@ describe('planned items', () => {
     const costs = hireCosts({ amount_cents: 400000 }, ['2026-12-24', '2026-12-31', '2027-01-07']);
     expect(costs.map((c) => c.usd)).toEqual([4000 + 306 + 132, 4000 + 306 + 99, 4000 + 306 + 132]);
   });
+
+  test('checks earlier in the same year already used part of the $7,000', () => {
+    const costs = hireCosts({ amount_cents: 400000 }, ['2026-12-24'], ['2026-12-17']);
+    expect(costs.map((c) => c.usd)).toEqual([4000 + 306 + 99]); // $3,000 of the cap left
+  });
 });
 
 describe('computeForecast', () => {
