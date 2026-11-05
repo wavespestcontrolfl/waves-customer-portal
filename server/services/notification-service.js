@@ -1143,13 +1143,15 @@ const NotificationService = {
   // badge ordering section (admin-unread.js) computes counts inside its
   // advisory-lock transaction and must not borrow a second pool
   // connection while holding one.
-  async getAdminUnreadCount({ role, technicianId = null } = {}, trx = null) {
-    const [{ count }] = await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // An owner-only row (metadata.ownerOnly) counts for the owner login only (`fullAccess`), as getAdminNotifications lists it.
+  async getAdminUnreadCount({ role, technicianId = null, fullAccess = false } = {}, trx = null) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       (trx || db)('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ))
-      .whereNull('read_at')
-      .count('* as count');
+      .whereNull('read_at');
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    const [{ count }] = await query.count('* as count');
     return parseInt(count);
   },
 

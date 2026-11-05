@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
     b.modify = jest.fn((fn) => { fn(b); return b; });
     b.first = jest.fn(async (...a) => { mockState.calls.push([table, 'first', ...a]); return mockState.first.length ? mockState.first.shift() : null; });
     b.update = jest.fn(async (patch) => { mockState.calls.push([table, 'update', patch]); return mockState.update; });
+    b.count = jest.fn(async (...a) => { mockState.calls.push([table, 'count', ...a]); return [{ count: '2' }]; });
     return b;
   };
   const raw = jest.fn((expr, bindings) => { mockState.calls.push(['raw', expr, bindings]); return { expr, bindings }; });
@@ -71,6 +72,17 @@ describe('getAdminNotifications owner-only rows', () => {
   });
   test('fullAccess lists them', async () => {
     await NotificationService.getAdminNotifications(51, 0, { role: 'admin', fullAccess: true });
+    expect(rawTexts()).not.toEqual(expect.arrayContaining([ownerOnlySql]));
+  });
+});
+
+describe('getAdminUnreadCount owner-only rows', () => {
+  const ownerOnlySql = "COALESCE(metadata->>'ownerOnly', '') <> 'true'";
+  test('an owner-only row counts for the owner login alone (the default does not count it)', async () => {
+    expect(await NotificationService.getAdminUnreadCount({ role: 'admin' })).toBe(2);
+    expect(rawTexts()).toEqual(expect.arrayContaining([ownerOnlySql]));
+    mockState.calls = [];
+    expect(await NotificationService.getAdminUnreadCount({ role: 'admin', fullAccess: true })).toBe(2);
     expect(rawTexts()).not.toEqual(expect.arrayContaining([ownerOnlySql]));
   });
 });

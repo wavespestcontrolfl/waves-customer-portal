@@ -64,7 +64,8 @@ function withSendCopyToClaudeFields(rows, { role, fullAccess = false } = {}) {
 // The parent's category and kind as the stamp keeps them: a plain lowercase name or null, never free text.
 const categoryOrNull = (category) => (CATEGORY_RE.test(String(category || '')) ? category : null);
 function kindOrNull(meta) {
-  const kind = meta.triggerKey || String(meta.dedupeKey || '').split(':')[0];
+  const key = String(meta.dedupeKey || '');
+  const kind = meta.triggerKey || (key.includes(':') ? key.split(':')[0] : null);
   return KIND_RE.test(String(kind || '')) ? kind : null;
 }
 // The ids of the records the parent names (UUID-shaped only).
