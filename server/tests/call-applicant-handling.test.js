@@ -160,6 +160,14 @@ describe('2. customer-only cards', () => {
       expect(withGate(noEvidence('vendor_or_partner', { price_discussed: true }))).toContain('missing_service_address');
     });
 
+    test('the promise-SLA predicate is unchanged: inspection_only and price talk still count as a service ask there', () => {
+      expect(thirdPartyCallMakesNoServiceAsk(noEvidence('vendor_or_partner'))).toBe(false);
+      expect(thirdPartyCallMakesNoServiceAsk(noEvidence('job_applicant'))).toBe(false);
+      expect(thirdPartyCallMakesNoServiceAsk(noEvidence('vendor_or_partner', { price_discussed: true }))).toBe(false);
+      expect(thirdPartyCallMakesNoServiceAsk(noEvidence('vendor_or_partner', { service_intent: 'quote_only' }))).toBe(true);
+      expect(withGate(noEvidence('vendor_or_partner'))).toContain('caller_not_authorized');
+    });
+
     test('callback_number_needed and caller_phone_missing are never dropped', () => {
       expect(THIRD_PARTY_CUSTOMER_ONLY_CARDS).not.toContain('callback_number_needed');
       expect(THIRD_PARTY_CUSTOMER_ONLY_CARDS).not.toContain('caller_phone_missing');
@@ -193,7 +201,6 @@ describe('2. customer-only cards', () => {
         const ext = noEvidence('job_applicant');
         ext.property.service_address = { ...ext.property.service_address, ...address };
         expect(withGate(ext)).toEqual([]);
-        expect(thirdPartyCallMakesNoServiceAsk(ext)).toBe(false);
       }
       for (const status of ['requested', 'confirmed', 'offered']) {
         const ext = noEvidence('vendor_or_partner');
