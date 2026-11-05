@@ -9336,6 +9336,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — The app-made new-home estimate (owner 2026-11-04 option A):
+  // a submitted in-area move with no estimate gets the office's own estimate,
+  // priced by the server, once, as a draft; a move the app cannot price rings
+  // the office. Gate read per tick (GATE_MOVING_AUTO_ESTIMATE).
+  // =========================================================================
+  cron.schedule('3,18,33,48 * * * *', async () => {
+    if (!require('../config/feature-gates').movingAutoEstimateLive()) return;
+    try {
+      await runExclusive('moving-auto-estimate', async () => {
+        const result = await require('./moving-auto-estimate').runMoveAutoEstimateJob();
+        if (result.drafted || result.office || result.failed) logger.info(`[moving-auto-estimate] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-auto-estimate] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Apply on accept (owner 2026-11-04 option A): a move whose
   // new-home estimate the customer accepted is applied through Apply move's
   // own preview and confirm, with no office click; a refusal rings the office
