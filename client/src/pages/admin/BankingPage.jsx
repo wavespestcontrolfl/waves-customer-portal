@@ -21,6 +21,7 @@ import {
 } from "../../components/ui";
 import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import {
+  CalendarRange,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -48,6 +49,7 @@ import {
   formatETDateTime,
 } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import CashForecastTab, { useCashForecastAvailable } from "../../components/admin/CashForecastTab";
 import useIsMobile from "../../hooks/useIsMobile";
 import { reportError } from "../../lib/reportError";
 const API = import.meta.env.VITE_API_URL || "/api";
@@ -146,6 +148,22 @@ const BANKING_SECTIONS = [
     Icon: Download,
   },
 ];
+// The section row, with the owner-only Cash forecast tab when it is available
+// (useCashForecastAvailable).
+const BANKING_NAV = {
+  plain: { sections: BANKING_SECTIONS, grid: "grid-cols-2 md:grid-cols-4" },
+  forecast: {
+    sections: [
+      ...BANKING_SECTIONS,
+      {
+        key: "forecast",
+        label: "Cash forecast",
+        Icon: CalendarRange,
+      },
+    ],
+    grid: "grid-cols-2 md:grid-cols-5",
+  },
+};
 
 // ═══════════════════════════════════════════════════════════════
 // PAYOUTS TAB
@@ -2003,6 +2021,7 @@ function CashTodayCard({ balance, balanceError, refreshKey }) {
 
 export default function BankingPage() {
   const [tab, setTab] = useState("payouts");
+  const nav = BANKING_NAV[useCashForecastAvailable() ? "forecast" : "plain"];
   const isMobile = useIsMobile(640);
   const [balance, setBalance] = useState(null);
   const [stats, setStats] = useState(null);
@@ -2069,7 +2088,7 @@ export default function BankingPage() {
       <AdminCommandHeader
         title="Banking"
         icon={Landmark}
-        sections={BANKING_SECTIONS}
+        sections={nav.sections}
         activeKey={tab}
         onSectionChange={setTab}
         action={{
@@ -2081,7 +2100,7 @@ export default function BankingPage() {
           },
           disabled: balanceError || !available || available <= 0,
         }}
-        navGridClassName="grid-cols-2 md:grid-cols-4"
+        navGridClassName={nav.grid}
         variant="workspace"
       />
       {/* Hero balance — Stripe account label, big balance, payout actions */}
@@ -2329,6 +2348,7 @@ export default function BankingPage() {
       {tab === "cashflow" && <CashFlowTab />}
       {tab === "reconciliation" && <ReconciliationTab />}
       {tab === "exports" && <ExportsTab />}
+      {tab === "forecast" && <CashForecastTab />}
       {/* Payout Modal */}
       {payoutModalMethod && (
         <PayoutModal
