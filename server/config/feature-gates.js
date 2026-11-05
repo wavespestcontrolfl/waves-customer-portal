@@ -493,6 +493,7 @@
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
  *   GATE_MONDAY_REVIEW_BELL=true (owner 2026-11-02, "build all", B2: one needs-you bell every Monday 9:20 AM ET for the work that sits, built from the 2026-09-30 rule item 6. Lines, each only when its count is above zero: needs-you alerts unread 14+ days (before the 30-day retention sweep expires them), overdue promises to callers, completed visits whose only invoice is an unsent draft, past-dated visits still open. One row per Monday (dedupeKey monday-review:<ET date>) with a detail line and page for each list; last week's row closes first, and an all-zero week raises nothing. Admin only: sends nothing to a customer, no paid API, writes only admin notifications. Read at call time via mondayReviewBellLive(), strict 'true', dark by default; off = the Monday cron returns before any read. Rollback = unset.)
  *   GATE_MORNING_BANNER=true (owner 2026-11-03, "ok add", choice C: at 8:00 AM ET each day ONE phone banner tells the owner how many items wait for him and opens his alert list. It counts the open bell alerts that need a person (needs-you or broken, not done, not Activity-only, not sent to Claude) and replaces a banner for each of his other action items. Zero items = no banner. Push only, no bell row, admin phones only, with the per-admin Push Settings switch for the waiting_summary type; sends nothing to a customer, no paid API. At most one banner per ET day (sms_send_claims row morning_banner:<ET date>). Read at call time via morningBannerLive(), strict 'true', dark by default; off = the 8 AM job returns before any read and the waiting_summary type stays silent in the bell policy.)
+ *   GATE_OWNER_NUDGE_BANNER=true (owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge (services/tech-open-visit-nudge.js) reaches him as a Waves Admin phone banner instead of a text. Push only, no bell row, owner only, same words as the text, a tap opens /tech, reminder sound. The banner counts only when a phone accepted it; otherwise the same text goes out as today, so the nudge is never lost. Never both. Still needs GATE_TECH_OPEN_VISIT_NUDGE. Sends nothing to a customer, no paid API (it saves the text's Twilio cost). Read at call time via ownerNudgeBannerLive(), strict 'true', dark by default; off = the owner still gets the text, byte-identical, and the open_visits_nudge type stays silent in the bell policy. Rollback = unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -5683,6 +5684,9 @@ const gates = {
   // GATE_MORNING_BANNER: read at CALL time via morningBannerLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   morningBanner: process.env.GATE_MORNING_BANNER === 'true',
+  // GATE_OWNER_NUDGE_BANNER: read at CALL time via ownerNudgeBannerLive(); this entry is for logGateStatus, so the boot log
+  // shows the flip.
+  ownerNudgeBanner: process.env.GATE_OWNER_NUDGE_BANNER === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -10432,3 +10436,12 @@ function dayReplanMode() {
 }
 // GATE_DAY_REPLAN reader, on its own line so gate PRs never conflict.
 module.exports.dayReplanMode = dayReplanMode;
+
+// GATE_OWNER_NUDGE_BANNER read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-04 "banner": the owner's open-visit nudge arrives as a Waves Admin banner instead of a text
+// (services/tech-open-visit-nudge.js). Off = the text, as today, and bell-policy keeps open_visits_nudge silent.
+function ownerNudgeBannerLive() {
+  return process.env.GATE_OWNER_NUDGE_BANNER === 'true';
+}
+// GATE_OWNER_NUDGE_BANNER reader, on its own line so gate PRs never conflict.
+module.exports.ownerNudgeBannerLive = ownerNudgeBannerLive;

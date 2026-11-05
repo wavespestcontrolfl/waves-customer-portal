@@ -65,6 +65,11 @@ const GATED_TRIGGER_BELL_ALLOWLIST = new Set(['bill_payment_error']);
 // pushOnly, so it never writes a bell row, but the policy still gates the push once per event. Read only while the gate is on.
 const MORNING_BANNER_TRIGGER_BELL_ALLOWLIST = new Set(['waiting_summary']);
 
+// GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge arrives as a phone banner instead of
+// a text): pushOnly like the morning banner, so no bell row, but the policy still gates the push once per event. Read only
+// while the gate is on.
+const OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST = new Set(['open_visits_nudge']);
+
 
 const TRIGGER_BELL_DENYLIST = new Set([
   'payment_succeeded',
@@ -254,13 +259,16 @@ function ringsAsCustomerAlert({ triggerKey = null, declared = null } = {}) {
   return declared?.contact === true || declared?.promise === true || GATED_TRIGGER_BELL_ALLOWLIST.has(triggerKey);
 }
 
-// A trigger on the always-ringing allowlist, or on the morning banner's while GATE_MORNING_BANNER is on (read at call
-// time; guarded like customerAlertsRingLive: a test that mocks feature-gates without the reader reads it as off).
+// A trigger on the always-ringing allowlist, or on a banner's while its gate is on (GATE_MORNING_BANNER,
+// GATE_OWNER_NUDGE_BANNER; read at call time; guarded like customerAlertsRingLive: a test that mocks feature-gates
+// without the reader reads it as off).
 function onAllowlist(triggerKey) {
   if (TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;
-  if (!MORNING_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return false;
+  const reader = MORNING_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey) ? 'morningBannerLive'
+    : OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey) ? 'ownerNudgeBannerLive' : null;
+  if (!reader) return false;
   const gates = require('../config/feature-gates');
-  return typeof gates.morningBannerLive === 'function' && gates.morningBannerLive();
+  return typeof gates[reader] === 'function' && gates[reader]();
 }
 
 async function bellAllowed({ category, triggerKey, options = {}, declared = null } = {}) {
@@ -294,6 +302,7 @@ module.exports = {
     TRIGGER_BELL_ALLOWLIST,
     GATED_TRIGGER_BELL_ALLOWLIST,
     MORNING_BANNER_TRIGGER_BELL_ALLOWLIST,
+    OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST,
     TRIGGER_BELL_DENYLIST,
     CATEGORY_BELL_ALLOWLIST,
     loadCategoryOverrides,
