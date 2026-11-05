@@ -572,8 +572,8 @@ jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfi
         const after = await db('email_resubscribe_requests').where({ id: request.id }).first();
         expect(after.used_at).toBeInstanceOf(Date);
         expect(after.outcome).toEqual({ refused: 'hard_block' });
-        // A second press finds the link used and still makes no call.
-        expect(await service.completeResubscribe(request)).toBe('already');
+        // A second press (and a reopen) still reads expired, never "You're all set", and makes no call.
+        expect(await service.completeResubscribe(request)).toBe('expired');
         expect(global.fetch).not.toHaveBeenCalled();
       });
     });

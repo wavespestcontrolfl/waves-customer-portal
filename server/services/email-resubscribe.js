@@ -397,9 +397,20 @@ async function findRequest(token, { dbh = db, now = new Date() } = {}) {
   if (!isTokenShape(token)) return { status: 'unknown' };
   const request = await dbh('email_resubscribe_requests').where({ token_hash: hashToken(token) }).first();
   if (!request || !request.sent_at) return { status: 'unknown' };
-  if (request.used_at) return { status: 'used', request };
+  if (request.used_at) return { status: refusedLink(request) ? 'expired' : 'used', request };
   if (new Date(request.expires_at) <= now) return { status: 'expired', request };
   return { status: 'open', request };
+}
+
+// A link completeResubscribe invalidated for a hard block (used_at + outcome.refused) stays the
+// generic 'expired' on every later open or press, never "You're all set" (the blocks still stand).
+function refusedLink(row) {
+  if (!row || !row.used_at || !row.outcome) return false;
+  let outcome = row.outcome;
+  if (typeof outcome === 'string') {
+    try { outcome = JSON.parse(outcome); } catch { return false; }
+  }
+  return !!(outcome && outcome.refused);
 }
 
 // The click. Serialized per request and re-validated before any side effect: one transaction
@@ -422,7 +433,7 @@ async function completeResubscribe(request, { dbh = db, now = new Date() } = {})
   return dbh.transaction(async (trx) => {
     const locked = await trx('email_resubscribe_requests').where({ id: request.id }).forUpdate().first();
     if (!locked || !locked.sent_at) return 'expired';
-    if (locked.used_at) return 'already';
+    if (locked.used_at) return refusedLink(locked) ? 'expired' : 'already';
     if (new Date(locked.expires_at) <= now) return 'expired';
     await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalizeEmail(locked.email));
     if (await hasHardBlock(locked.email, { dbh: trx })) {

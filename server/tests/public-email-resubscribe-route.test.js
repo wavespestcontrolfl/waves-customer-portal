@@ -122,6 +122,24 @@ describe('GET /:token is read-only', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('a link refused for a hard block stays the generic expired page on every reopen and re-press', async () => {
+    request.used_at = new Date();
+    request.outcome = { refused: 'hard_block' };
+    const complete = jest.spyOn(Resub, 'completeResubscribe');
+    for (let i = 0; i < 2; i += 1) {
+      const page = await get();
+      expect(page.status).toBe(404);
+      expect(await page.text()).toContain('This link has expired or was already used.');
+      const press = await post();
+      expect(press.status).toBe(404);
+      const html = await press.text();
+      expect(html).toContain('This link has expired or was already used.');
+      expect(html).not.toContain("You're all set.");
+    }
+    expect(complete).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
+  });
+
   test("a used link, or an address with nothing left to release, says You're all set and writes nothing", async () => {
     request.used_at = new Date();
     let res = await get();
