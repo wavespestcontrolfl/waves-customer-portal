@@ -253,6 +253,17 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-11');
   });
 
+  test('rollback leaves a date move alone while the visit\'s current day is inside the freeze, with or without a reminder row', async () => {
+    const w = await world();
+    const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });
+    const result = await execute(w, await plan(w));
+    // 2099-07-07 12:00Z: the old Saturday (07-11) is 4 days out, but Thursday 07-09 09:00 is 49 hours out. No reminder row exists.
+    const early = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: new Date('2099-07-07T12:00:00Z'), refresh: jest.fn() });
+    expect(early.visitsRestored).toBe(0);
+    expect(early.skipped.visits).toEqual([s.kids[0].id]);
+    expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-09');
+  });
+
   test('rollback leaves a date move alone once the old day is inside the freeze margin', async () => {
     const w = await world();
     const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });

@@ -71,7 +71,7 @@
 // confirmation, no staff lock or exclusion, no date exception and the same hand-off date. ROLLBACK of a date move re-checks
 // before it puts a day back: --from is free at the kept window (technicianFreeAt, under the occupancy lock), the customer has not
 // confirmed the new day, no lock, exclusion, date exception or pending reschedule request was set, the old day is still outside
-// the freeze margin and no reminder is sent or inside the band; otherwise the visit stays
+// the freeze margin, its current day is outside the freeze (ownScheduleFrozen) and no reminder is sent or inside the band; otherwise the visit stays
 // with --to and is listed.
 //
 // --weekend-move (the day-60 run, planner header and second-tech-handover-weekend.js): a date move writes
@@ -106,6 +106,7 @@ const { acquireOccupancyLocks } = require(path.join(root, 'services', 'schedulin
 const { technicianFreeAt } = require(path.join(root, 'services', 'scheduling', 'pick-technician'));
 const { loadReminderFreeze } = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
 const { shiftDateStr } = require(path.join(root, 'services', 'auto-dispatch', 'dates'));
+const { ownScheduleFrozen } = require(path.join(root, 'services', 'auto-dispatch', 'flex-tier'));
 const { sendTechNotification } = require(path.join(root, 'services', 'tech-notify'));
 const auditLog = require(path.join(root, 'services', 'audit-log'));
 const { etParts, etDateString } = require(path.join(root, 'utils', 'datetime-et'));
@@ -488,11 +489,12 @@ async function restoreDateBlocked(trx, v, now) {
   // The day it would go back to must clear the freeze margin (the 73 h reminder freeze) from now: a visit moved Saturday -> Thursday
   // cannot be put back on a Saturday that is now inside it, though its current day is not.
   if (v.date < shiftDateStr(etDateString(now), 4)) return true;
-  const row = await trx('scheduled_services').where({ id: v.id }).forUpdate()
-    .first('status', 'date_exception', 'customer_confirmed', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+  const row = await trx('scheduled_services').where({ id: v.id }).forUpdate().first();
   // Only a pending or confirmed visit: a customer's reschedule request ('rescheduled') or a date exception recorded since is theirs to keep.
   if (!row || !['pending', 'confirmed'].includes(row.status) || row.date_exception === true) return true;
   if (row.customer_confirmed === true || row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return true;
+  // The visit's CURRENT day inside the freeze (73 h) keeps it too, whether or not it has a reminder row yet.
+  if (await ownScheduleFrozen(trx, { ...row, scheduled_date: v.to_date }, now)) return true;
   const freeze = await loadReminderFreeze(trx, [v.id], now);
   if (freeze.failed || freeze.frozen.has(v.id)) return true;
   return !(await technicianFreeAt({

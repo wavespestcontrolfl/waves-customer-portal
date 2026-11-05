@@ -730,13 +730,13 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     return { customer_id: customer, series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
   };
   const facts = (over = {}) => ({
-    blackout: null, absentDates: new Set(), prefs: new Map(), neighbors: new Map(), stayStill: new Map(), noWeekends: new Map(), ...over,
+    blackout: null, absentDates: new Set(), prefs: new Map(), neighbors: new Map(), stayStill: new Map(), noWeekends: new Map(), anchors: new Map(), ...over,
   });
   const clearFacts = (candidates, over = {}) => {
     const f = facts(over);
     for (const c of candidates) {
       f.prefs.set(c.customer_id, { preferred_day_indexes: [], blackout: null });
-      for (const s of c.series) for (const v of s.live) { f.neighbors.set(v.id, { prev: null, next: null }); f.stayStill.set(v.id, null); }
+      for (const s of c.series) for (const v of s.live) { f.neighbors.set(v.id, { prev: null, next: null }); f.stayStill.set(v.id, null); f.anchors.set(v.id, v.scheduled_date); }
     }
     return f;
   };
@@ -842,6 +842,19 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     expect((await run([c], { facts: f })).kept.get(c.customer_id)).toBe('neighbor');
   });
 
+  test("the flex tier's cumulative allowance: a visit auto-dispatch already moved can only go ±5 days of its durable original date; an unknown anchor fails closed", async () => {
+    const c = series(SAT, { count: 1 });
+    const id = c.series[0].live[0].id;
+    const f = clearFacts([c]);
+    // Originally Friday 07-03: Thursday 07-09 is 6 days from it, so the Wednesday 07-08 (5 days) is the nearest legal day.
+    f.anchors.set(id, '2099-07-03');
+    expect((await run([c], { facts: f })).newDates.get(id)).toBe('2099-07-08');
+    f.anchors.set(id, null);
+    expect((await run([c], { facts: f })).kept.get(c.customer_id)).toBe('anchor_unknown');
+    f.anchors.set(id, '2099-06-20');
+    expect((await run([c], { facts: f })).kept.get(c.customer_id)).toBe('anchor_budget');
+  });
+
   test('blackout, absence and the freeze margin push a date to the next candidate; every candidate gone keeps the customer whole', async () => {
     const c = series(SAT, { count: 1 });
     const layers = { dates: new Set(['2099-07-09']), weeklyDaysOff: new Set(), closedHolidays: new Set() };
@@ -915,11 +928,12 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     const customer = ok.customer_id;
     bad.customer_id = customer;
     bad.series[0].parent.customer_id = customer;
-    const f = clearFacts([ok, bad], {});
+    const next = series(SAT, { count: 1 });
+    const f = clearFacts([ok, bad, next]);
     f.stayStill.set(bad.series[0].live[0].id, 'held');
     const joined = { customer_id: customer, series: [...ok.series, ...bad.series] };
-    const next = series(SAT, { count: 1 });
-    const out = await run([joined, next], { facts: (() => { for (const c of [next]) { f.prefs.set(c.customer_id, { preferred_day_indexes: [], blackout: null }); f.neighbors.set(next.series[0].live[0].id, { prev: null, next: null }); f.stayStill.set(next.series[0].live[0].id, null); } f.prefs.set(customer, { preferred_day_indexes: [], blackout: null }); return f; })() });
+    f.prefs.set(customer, { preferred_day_indexes: [], blackout: null });
+    const out = await run([joined, next], { facts: f });
     expect(out.kept.get(customer)).toBe('held');
     expect(out.newDates.has(ok.series[0].live[0].id)).toBe(false);
     // The Thursday the first series briefly took is free again for the next customer.

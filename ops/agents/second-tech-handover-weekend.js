@@ -25,7 +25,8 @@
 // nextRecurringDate: addETMonthsByWeekday for months, a day gap otherwise), hopping as many cadence steps
 // as separate the visits today, so a cancelled middle slot does not shift the rest. A candidate is
 // accepted only when EVERY projected date:
-//   - is within ±5 days of that visit's current date (this is also what catches the month boundary: a 1st
+//   - is within ±5 days of that visit's current date and of its durable original date (the flex tier's cumulative allowance:
+//     route-tiers resolveAnchor; an unknown anchor fails closed) (this is also what catches the month boundary: a 1st
 //     Saturday moved two days earlier lands in the previous month as a 5th / last Thursday, projects a
 //     month away from the visit's date, and the next candidate is tried);
 //   - is a --to work day, at least 4 days after today (the 73 h freeze margin), not a company blackout,
@@ -139,6 +140,10 @@ function topUpDate(date, parent, skipWeekends, facts) {
 function dateProblem(v, date, ctx) {
   const { facts, parent, workDays, today, skipWeekends } = ctx;
   if (Math.abs(dayDiff(v.scheduled_date, date)) > FLEX_TIER_RADIUS_DAYS) return 'projection';
+  // The flex tier's cumulative allowance: ±5 days of the visit's durable original date too (route-tiers resolveAnchor), unknown fails closed.
+  const anchor = facts.anchors.get(v.id);
+  if (!anchor) return 'anchor_unknown';
+  if (Math.abs(dayDiff(anchor, date)) > FLEX_TIER_RADIUS_DAYS) return 'anchor_budget';
   if (!workDays.includes(dayOfWeekOfDate(date))) return 'projection';
   if (date < shiftDateStr(today, MIN_DAYS_OUT)) return 'inside_freeze';
   if (isBlackedOut(date, facts.blackout)) return 'company_blackout';
@@ -281,7 +286,10 @@ async function loadWeekendFacts(db, { to, from, start, today, now = new Date(), 
   }
   // null = unreadable: no entry for any visit = 'neighbor' (fail closed).
   const neighbors = (await loadSeriesNeighbors(db, visits.filter((v) => v.recurring_parent_id))) || new Map();
+  const routeTiers = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
+  const anchorMap = await routeTiers.loadAnchorMap(db, visits.map((v) => v.id));
   return {
+    anchors: new Map(visits.map((v) => [v.id, routeTiers.resolveAnchor(v, anchorMap)])),
     blackout: await loadBlackout(db, lo, hi), absentDates: new Set(absentRows.map((r) => toDateStr(r.absence_date))), prefs, neighbors,
     stayStill: await loadStayStill(db, visits, now), noWeekends, from,
   };
