@@ -100,6 +100,19 @@ describe('PortalMessages thread', () => {
     expect(api.getPortalMessages).toHaveBeenLastCalledWith(page[0].createdAt);
   });
 
+  it('an empty thread that gets more than one page while hidden keeps the rest reachable', async () => {
+    api.getPortalMessages.mockResolvedValueOnce({ messages: [], hasMore: false, unread: 0 });
+    render(<PortalMessages />);
+    await screen.findByText(/No messages yet|Write a message/);
+    const page = Array.from({ length: 50 }, (_, i) => ({
+      id: `e${i}`, from: 'waves', body: `Update ${i}`, createdAt: new Date(Date.UTC(2026, 10, 4, 13, i)).toISOString(),
+    }));
+    api.getPortalMessages.mockResolvedValueOnce({ messages: page, hasMore: true, unread: 51 });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(await screen.findByText('Update 49')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Show earlier messages' })).toBeInTheDocument();
+  });
+
   it('shows Try again when the thread cannot load, and loads it on retry', async () => {
     api.getPortalMessages.mockRejectedValueOnce(new Error('offline'));
     render(<PortalMessages />);

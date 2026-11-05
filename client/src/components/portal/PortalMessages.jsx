@@ -122,7 +122,7 @@ function useThread() {
       .then((d) => {
         if (!live.current || !Array.isArray(d?.messages)) return;
         const held = new Set(messagesRef.current.map((m) => m.id));
-        if (d.hasMore === true && held.size > 0 && !d.messages.some((m) => held.has(m.id))) {
+        if (d.hasMore === true && !d.messages.some((m) => held.has(m.id))) {
           setMessages(d.messages);
           setHasMore(true);
           return;
