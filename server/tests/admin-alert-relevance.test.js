@@ -104,6 +104,10 @@ jest.mock('../models/db', () => {
             if (!v || typeof v !== 'object' || !v.__raw) return [col, v];
             const sql = String(v.__raw);
             if (/^COALESCE\(\w+, \?(::timestamptz)?\)$/.test(sql)) return [col, r[col] ?? v.bindings[0]];
+            // The takeover's resolution: a quiet fall-off close takes the new closer's words, any other keeps its own.
+            if (/^CASE WHEN done_by = 'quiet-72h' THEN \?::text ELSE COALESCE\(resolution, \?::text\) END$/.test(sql)) {
+              return [col, r.done_by === 'quiet-72h' ? v.bindings[0] : (r.resolution ?? v.bindings[1])];
+            }
             if (/^CASE WHEN read_at = \?::timestamptz THEN NULL ELSE read_at END$/.test(sql)) {
               return [col, r.read_at instanceof Date && r.read_at.getTime() === v.bindings[0].getTime() ? null : r.read_at];
             }

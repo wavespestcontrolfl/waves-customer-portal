@@ -1335,13 +1335,14 @@ function classify(row, { anyMode = false } = {}) {
 function candidateQuery(cursor) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
-    // Open rows, and rows a PERSON marked done (openToCloser's rule): when the
+    // Open rows, and rows a PERSON (or the quiet fall-off, admin-alert-retention.js) marked done
+    // (openToCloser's rule; the fall-off's stamp is not `retired`, so a row it closed stays judgeable): when the
     // subject moves on, the sweep takes the close over so their Reopen can't
     // bring back an obsolete alert. A row any system component closed is left.
     // Bounded to the Recently done window (7 days), the only place a Reopen is
     // offered, so a person-done row is not re-read by every sweep forever.
     .where((q) => q.whereNull('done_at').orWhere((p) => p
-      .whereRaw(`COALESCE(${require('./notification-service')._private.PERSON_DONE_BY_SQL}, false)`)
+      .whereRaw(`COALESCE(${require('./notification-service')._private.REOPENABLE_DONE_BY_SQL}, false)`)
       .whereRaw("done_at >= now() - interval '7 days'")))
     .whereRaw("metadata->'retired' IS NULL")
     .where((q) => {
@@ -1507,7 +1508,10 @@ function putBack(row) {
   if (Number.isNaN(ourDone.getTime())) return 0;
   return sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row)
     .where({ done_at: ourDone })
-    .update(undone(ourDone));
+    // A re-arm is news: it also stamps the quiet fall-off's hold (admin-alert-retention.js), so a row older than
+    // 72 hours is not closed again 10 minutes after the put-back. The retire's own after-write put-back (above) is
+    // not: that restores the bell exactly as it was.
+    .update({ ...undone(ourDone), metadata: db.raw("(metadata - 'retired') || ?::jsonb", [JSON.stringify({ [doneState().QUIET_HOLD_KEY]: new Date().toISOString() })]) });
 }
 
 // The emitters in the table are one-shot: a booking cancelled or a visit or

@@ -30,7 +30,7 @@ jest.mock('../models/db', () => {
     return b;
   };
   const fn = jest.fn((table) => builder(table));
-  fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn(async () => {}); trx.fn = { now: () => new Date('2026-10-01T15:00:00Z') }; return cb(trx); };
+  fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn((sql, bindings) => (String(sql).includes('jsonb_exists') ? bindings[0] : undefined)); trx.fn = { now: () => new Date('2026-10-01T15:00:00Z') }; return cb(trx); };
   return fn;
 });
 

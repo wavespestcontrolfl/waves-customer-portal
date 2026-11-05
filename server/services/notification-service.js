@@ -145,6 +145,27 @@ const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
 // ops digest keeps metadata.resolved, its dedupeKey is dropped, ...).
 const PERSON_DONE_BY_SQL = "(done_by ~ '^[0-9]+$' OR done_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR done_by = 'claude')";
 
+// The quiet fall-off rule's closer (admin-alert-retention.js, owner 2026-11-04: "IF THE ALERT IS
+// OVER 3 DAYS OLD,, IT SHOULD FALL OFF"). A system close, but a plain one: the row keeps its dedupeKey and
+// every other state, so a person can put it back. The owner page promises Reopen for these rows.
+const QUIET_FALL_OFF_DONE_BY = 'quiet-72h';
+// metadata.quietHoldFrom: stamped by a Reopen. The fall-off rule counts it as activity, so a reopened
+// alert gets 72 more hours before it can fall off again. A ringing refresh drops it (rungAt says it all).
+const QUIET_HOLD_KEY = 'quietHoldFrom';
+
+// Whose close a Reopen button may undo, and which done rows another SYSTEM closer may take over
+// (openToCloser): a person's close, or the quiet fall-off's. PERSON_DONE_BY_SQL keeps its meaning ("a
+// person closed it") for every other caller (the proofreader's personHeld, cancellation-processor, the
+// relevance sweep's own reading of a hold); only these two decisions widen.
+const REOPENABLE_DONE_BY_SQL = `(${PERSON_DONE_BY_SQL} OR done_by = '${QUIET_FALL_OFF_DONE_BY}')`;
+
+// A QUIET refresh of a standing row writes its metadata from the row it read earlier. A Reopen that committed between
+// that read and this write stamped quietHoldFrom (the earlier read cannot have it), so the write keeps the DATABASE
+// row's hold in SQL, atomically: the merged JSON loses any hold it carries, then the row's own current hold goes back
+// in. A ringing refresh (second binding true) drops the hold, as it always did. jsonb_exists is the function behind
+// the `?` operator, which knex would read as a binding.
+const KEEP_DB_HOLD_SQL = `(?::jsonb - '${QUIET_HOLD_KEY}') || CASE WHEN ?::boolean THEN '{}'::jsonb WHEN jsonb_exists(metadata, '${QUIET_HOLD_KEY}') THEN jsonb_build_object('${QUIET_HOLD_KEY}', metadata -> '${QUIET_HOLD_KEY}') ELSE '{}'::jsonb END`;
+
 function cleanResolution(text) {
   const plain = String(stripEmoji(text) || '').replace(/\s+/g, ' ').trim();
   return plain ? truncateAtWord(plain, MAX_RESOLUTION_CHARS) : null;
@@ -161,7 +182,8 @@ function doneColumns({ by, resolution = null, at = new Date(), keepExisting = fa
     // reopen could restore), so PERSON_DONE_BY_SQL refuses its reopen. The
     // first done_at, the person's resolution and their read still stand.
     done_by: columns.done_by,
-    resolution: conn.raw('COALESCE(resolution, ?)', [columns.resolution]),
+    // A quiet fall-off row taken over by a real close carries the new closer's words, not "No new activity".
+    resolution: conn.raw(`CASE WHEN done_by = '${QUIET_FALL_OFF_DONE_BY}' THEN ?::text ELSE COALESCE(resolution, ?::text) END`, [columns.resolution, columns.resolution]),
     read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [columns.done_at]),
   };
 }
@@ -171,6 +193,10 @@ const UUID_DONE_BY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 function isPersonDoneBy(by) {
   const text = String(by ?? '');
   return /^[0-9]+$/.test(text) || UUID_DONE_BY_RE.test(text) || text === 'claude';
+}
+// The JS twin of REOPENABLE_DONE_BY_SQL.
+function isReopenableDoneBy(by) {
+  return isPersonDoneBy(by) || String(by ?? '') === QUIET_FALL_OFF_DONE_BY;
 }
 
 // The ONE row selection every SYSTEM closer uses for its closing UPDATE (a
@@ -188,7 +214,8 @@ function isPersonDoneBy(by) {
 // whereNull('done_at'). Columns are unqualified, like doneColumns' own.
 function openToCloser(query, by) {
   if (isPersonDoneBy(by)) return query.whereNull('done_at');
-  return query.where((q) => q.whereNull('done_at').orWhereRaw(`COALESCE(${PERSON_DONE_BY_SQL}, false)`));
+  // A quiet fall-off close is reopenable like a person's, so a real close of the subject takes it over too.
+  return query.where((q) => q.whereNull('done_at').orWhereRaw(`COALESCE(${REOPENABLE_DONE_BY_SQL}, false)`));
 }
 
 // `scheduledServiceId` (app property scope, PR 3): the five appointment keys
@@ -424,7 +451,8 @@ function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
     // A ringing refresh clears the done fields (below), so a relevance
     // retirement stamp on the row is stale: dropped, or the sweep would never
     // judge this row again (admin-alert-relevance.js candidateQuery).
-    const { retired: _retired, ...standing } = existingMeta;
+    // The same for the quiet fall-off's Reopen hold (rungAt, stamped below, now says when the row last had news).
+    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, ...standing } = existingMeta;
     const merged = { ...standing, ...metadata, rungAt: new Date().toISOString() };
     // A DEFINED non-owner audience only — a caller outside ops-digest.js
     // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
@@ -764,7 +792,7 @@ const NotificationService = {
             const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
+              metadata: trx.raw(KEEP_DB_HOLD_SQL, [JSON.stringify(mergedMetadata), shouldRing]), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
             await trx('notifications').where({ id: existing.id }).update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
             return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
@@ -1124,7 +1152,7 @@ const NotificationService = {
   // keyset-paged on (done_at, id) like the bell list, so every row in the
   // window stays reachable however many closed after it. done_at_token is
   // done_at::text at full precision: the cursor source, and the fence a
-  // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
+  // reopen must echo back (see reopenAdminDone). reopenable: a person closed it, or the quiet fall-off did.
   async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null, fullAccess = false } = {}) {
     const query = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
@@ -1138,7 +1166,7 @@ const NotificationService = {
       .select(
         'id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at',
         db.raw('done_at::text AS done_at_token'),
-        db.raw(`COALESCE(${PERSON_DONE_BY_SQL}, false) AS reopenable`),
+        db.raw(`COALESCE(${REOPENABLE_DONE_BY_SQL}, false) AS reopenable`),
       )
       .orderByRaw('done_at DESC, id DESC')
       .limit(limit);
@@ -1229,18 +1257,23 @@ const NotificationService = {
   // expectedDoneAt (required): the done_at token the Recently-done list served
   // (done_at::text, full precision). A stale list must not clear a NEWER
   // completion of the same row, so the row is reopened only while its done_at
-  // still equals the token. Only a row a PERSON closed can be reopened
-  // (PERSON_DONE_BY_SQL). Returns 'reopened', 'changed' (still done, but not
+  // still equals the token. Only a row a PERSON closed, or the quiet fall-off
+  // closed, can be reopened (REOPENABLE_DONE_BY_SQL). The reopen stamps
+  // metadata.quietHoldFrom (any reopened row: the fall-off rule waits 72 hours
+  // from it). Returns 'reopened', 'changed' (still done, but not
   // by the close the caller saw), 'not_reopenable' (a system close) or
   // 'not_found' (missing, or not done any more).
-  async reopenAdminDone(notificationId, { expectedDoneAt } = {}, connection = db) {
+  async reopenAdminDone(notificationId, { expectedDoneAt, now = new Date() } = {}, connection = db) {
     if (expectedDoneAt == null || expectedDoneAt === '') return 'changed';
     const updated = await connection('notifications')
       .where({ id: notificationId, recipient_type: 'admin' })
       .whereNotNull('done_at')
       .whereRaw('done_at = ?::timestamptz', [String(expectedDoneAt)])
-      .whereRaw(PERSON_DONE_BY_SQL)
-      .update(DONE_CLEARED);
+      .whereRaw(REOPENABLE_DONE_BY_SQL)
+      .update({
+        ...DONE_CLEARED,
+        metadata: connection.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [QUIET_HOLD_KEY]: now.toISOString() })]),
+      });
     if (updated > 0) return 'reopened';
     const row = await connection('notifications')
       .where({ id: notificationId, recipient_type: 'admin' })
@@ -1378,7 +1411,12 @@ module.exports._private = {
   doneColumns,
   openToCloser,
   isPersonDoneBy,
+  isReopenableDoneBy,
   PERSON_DONE_BY_SQL,
+  REOPENABLE_DONE_BY_SQL,
+  KEEP_DB_HOLD_SQL,
+  QUIET_FALL_OFF_DONE_BY,
+  QUIET_HOLD_KEY,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,
   MAX_ADMIN_BODY_CHARS,
