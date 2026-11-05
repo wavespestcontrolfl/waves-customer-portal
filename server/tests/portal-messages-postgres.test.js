@@ -462,10 +462,12 @@ maybeDescribe('portal messages (live Postgres)', () => {
     listed = mineOf((await portalInbox.list()).items);
     expect(listed[0]).toMatchObject({ customerMessage: 'Thanks, one more thing', lastAnswer: 'Answer one.' });
 
-    // Mark handled stamps it once and closes its bell; a second Mark handled finds nothing open.
-    expect(await portalInbox.markMessageHandled(row.id, { technicianId: null, role: 'admin' })).toEqual({ handled: true });
+    // Mark handled through the newest message stamps it once and closes its bell; a second finds nothing open.
+    expect(await portalInbox.markMessageHandled(row.id, listed[0].throughId, { technicianId: null, role: 'admin' })).toEqual({ handled: true, open: false });
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
-    expect(await portalInbox.markMessageHandled(row.id, { technicianId: null, role: 'admin' })).toEqual({ handled: false });
+    expect(await portalInbox.markMessageHandled(row.id, listed[0].throughId, { technicianId: null, role: 'admin' })).toEqual({ handled: false, open: false });
+    // A message id that is not this thread's customer message is not something to mark.
+    expect(await portalInbox.markMessageHandled(row.id, randomUUID(), { technicianId: null, role: 'admin' })).toBeNull();
     expect(mineOf((await portalInbox.list()).items)).toEqual([]);
 
     // Close all older: a thread whose open message is 20 days old is stamped handled; nothing is sent.
@@ -485,6 +487,36 @@ maybeDescribe('portal messages (live Postgres)', () => {
     process.env.GATE_PORTAL_MESSAGES = 'false';
     expect(mineOf((await portalInbox.list()).items)).toEqual([]);
     delete process.env.GATE_PORTAL_INBOX;
+  });
+
+  test('a thread\'s bell follows the thread: no close over a newer customer message, no late ring after an answer', async () => {
+    process.env.GATE_PORTAL_INBOX = 'true';
+    const portalInbox = require('../services/portal-inbox');
+    const { closeItemBells, ringOffice } = PortalMessages.__private;
+    const pat = await customer();
+    const m1 = await PortalMessages.customerPost({ customer: pat, body: 'Can you come Monday?' });
+    const [row] = await thread(pat.id);
+    const m2 = await PortalMessages.customerPost({ customer: pat, body: 'Or Tuesday works.' });
+    // Mark handled through the message the screen showed (m1): m2 came after, so the item and its bell stay.
+    expect(await portalInbox.markMessageHandled(row.id, m1.id, actor)).toEqual({ handled: true, open: true });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+    const item = (await portalInbox.list()).items.find((i) => i.kind === 'message' && i.id === row.id);
+    expect(item).toMatchObject({ customerMessage: 'Or Tuesday works.', throughId: m2.id });
+
+    // An answer's bell close that runs after a newer customer message (it saved and rang first) leaves its bell.
+    await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Tuesday at 9.', actor });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    await PortalMessages.customerPost({ customer: pat, body: 'Great, see you then.' });
+    expect(await closeItemBells('message', row.id, actor)).toBe(0);
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+
+    // A late ring for a message an answer already covered raises nothing.
+    await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'See you Tuesday.', actor });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    jest.clearAllMocks();
+    await ringOffice(pat, row.id, m2);
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    expect(portalAskPush.pushPortalAsk).not.toHaveBeenCalled();
   });
 
   test('an answer to a portal message closes its bell, and the customer sees both sides in order', async () => {

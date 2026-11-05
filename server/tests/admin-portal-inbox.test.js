@@ -180,29 +180,33 @@ describe('admin portal inbox routes', () => {
 
   describe('POST /messages/:id/handled', () => {
     const THREAD = '66666666-6666-4666-8666-666666666666';
-    const post = (base, who, id) => fetch(`${base}/messages/${id}/handled`, { method: 'POST', headers: auth(who), body: '{}' });
+    const THROUGH = '77777777-7777-4777-8777-777777777777';
+    const post = (base, who, id, body = { throughId: THROUGH }) => fetch(`${base}/messages/${id}/handled`, { method: 'POST', headers: auth(who), body: JSON.stringify(body) });
 
-    test('404 while GATE_PORTAL_MESSAGES is off, 403 for a technician, 400 for a bad id', async () => {
+    test('404 while GATE_PORTAL_MESSAGES is off, 403 for a technician, 400 for a bad id or no throughId', async () => {
       process.env.GATE_PORTAL_INBOX = 'true';
       await withServer(async (base) => {
         expect((await post(base, 'admin', THREAD)).status).toBe(404);
         process.env.GATE_PORTAL_MESSAGES = 'true';
         expect((await post(base, 'tech', THREAD)).status).toBe(403);
         expect((await post(base, 'admin', 'not-a-uuid')).status).toBe(400);
+        expect((await post(base, 'admin', THREAD, {})).status).toBe(400);
+        expect((await post(base, 'admin', THREAD, { throughId: 'x' })).status).toBe(400);
       });
       expect(mockService.markMessageHandled).not.toHaveBeenCalled();
     });
 
-    test('passes the thread and the actor and answers whether it closed it', async () => {
+    test('passes the thread, the message it covers and the actor; answers the outcome, or 404 for an unknown message', async () => {
       process.env.GATE_PORTAL_INBOX = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'true';
-      mockService.markMessageHandled.mockResolvedValueOnce({ handled: false });
+      mockService.markMessageHandled.mockResolvedValueOnce({ handled: true, open: true }).mockResolvedValueOnce(null);
       await withServer(async (base) => {
         const res = await post(base, 'admin', THREAD);
         expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ handled: false });
+        expect(await res.json()).toEqual({ handled: true, open: true });
+        expect((await post(base, 'admin', THREAD)).status).toBe(404);
       });
-      expect(mockService.markMessageHandled).toHaveBeenCalledWith(THREAD, { technicianId: 'admin-1', role: 'admin' });
+      expect(mockService.markMessageHandled).toHaveBeenCalledWith(THREAD, THROUGH, { technicianId: 'admin-1', role: 'admin' });
     });
   });
 });

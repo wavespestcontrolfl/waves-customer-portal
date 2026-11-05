@@ -122,6 +122,18 @@ function openMessages(conn = db) {
   return openMessageScope(conn('conversations as cv'));
 }
 
+// Runs fn(trx, open) on the portal thread's locked conversations row, with whether the thread waits on the
+// office right now. Every change to a thread's admin bells goes through here (Mark handled, an answer's close,
+// a customer message's ring), and saving a message writes the same row, so a bell change and a newer message
+// cannot cross: a bell closes only when nothing is left open, and rings only while the thread is open.
+async function onLockedThread(threadId, fn) {
+  return db.transaction(async (trx) => {
+    await trx('conversations').where({ id: threadId }).forUpdate().first('id');
+    const open = Boolean(await openMessages(trx).where('cv.id', threadId).first('cv.id'));
+    return fn(trx, open);
+  });
+}
+
 async function countOf(query) {
   const row = await query.clone().count({ n: '*' }).first();
   return Number(row?.n || 0);
@@ -231,10 +243,17 @@ const LAST_ANSWER_SQL = `(
   ORDER BY o.created_at DESC LIMIT 1
 )`;
 
+// The newest customer message of the thread: what Mark handled covers when the office presses it.
+const THROUGH_SQL = `(
+  SELECT m.id FROM messages m WHERE m.conversation_id = cv.id AND m.direction = 'inbound'
+  ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+)`;
+
 function messageItem(row) {
   return {
     kind: 'message',
     id: row.id,
+    throughId: row.through_id,
     createdAt: row.created_at,
     customer: customerOf(row),
     customerMessage: cut(row.unanswered),
@@ -249,7 +268,8 @@ async function listMessages(cutoff, op) {
     .orderBy('cv.last_inbound_at', 'desc')
     .limit(LIST_CAP)
     .select('cv.id', 'cv.last_inbound_at as created_at', 'cv.customer_id', 'c.first_name', 'c.last_name', 'c.phone',
-      db.raw(HAS_TEXTS_SQL), db.raw(`${UNANSWERED_SQL} AS unanswered`), db.raw(`${LAST_ANSWER_SQL} AS last_answer`));
+      db.raw(HAS_TEXTS_SQL), db.raw(`${UNANSWERED_SQL} AS unanswered`), db.raw(`${LAST_ANSWER_SQL} AS last_answer`),
+      db.raw(`${THROUGH_SQL} AS through_id`));
   return rows.map(messageItem);
 }
 
@@ -433,25 +453,43 @@ async function closeBookingsOlder(trx, cutoff, alertActor) {
   return require('./notification-service').markAdminDone(ids, alertActor, trx);
 }
 
-// The thread's Mark handled stamp, merged into its metadata.
-const handledPatch = (conn, now) => ({
-  metadata: conn.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('handledAt', ?::text)", [now.toISOString()]),
-  updated_at: now,
-});
-
-// The open portal-message threads at or before the cutoff, stamped handled. Returns their ids.
+// The open portal-message threads at or before the cutoff, stamped handled through their own newest customer
+// message (the row's last_inbound_at), so a message saved after it opens the thread again. Returns their ids.
 async function closeMessagesOlder(trx, cutoff, now) {
-  const rows = await openMessages(trx).where('cv.last_inbound_at', '<=', cutoff).update(handledPatch(trx, now)).returning('id');
+  const rows = await openMessages(trx).where('cv.last_inbound_at', '<=', cutoff)
+    .update({ metadata: trx.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('handledAt', last_inbound_at)"), updated_at: now })
+    .returning('id');
   return rows.map((r) => r.id || r);
 }
 
-// Mark handled on a portal message item (GATE_PORTAL_MESSAGES): stamps the thread handled only while it is
-// still open (an answer or another Mark handled may have come first), then closes its bells. Sends nothing.
-async function markMessageHandled(threadId, actor, now = new Date()) {
-  const rows = await openMessages().where('cv.id', threadId).update(handledPatch(db, now)).returning('id');
-  if (!rows.length) return { handled: false };
-  await closeAlertsWhenHandled('portalConversationId', threadId, actor);
-  return { handled: true };
+// Mark handled on a portal message item (GATE_PORTAL_MESSAGES), through the newest customer message the office
+// saw (`throughId`, the item's throughId): a message saved after it keeps the item open. On the locked thread
+// row the stamp only moves forward, and the thread's bells close only when nothing is left open, in the same
+// transaction. Sends nothing. Returns { handled, open }, or null when throughId is not a customer message of
+// this thread.
+async function markMessageHandled(threadId, throughId, actor) {
+  return onLockedThread(threadId, async (trx, wasOpen) => {
+    const seen = await trx('messages').where({ id: throughId, conversation_id: threadId, channel: 'portal', direction: 'inbound' }).first('created_at');
+    if (!seen) return null;
+    if (!wasOpen) return { handled: false, open: false };
+    const rows = await openMessages(trx).where('cv.id', threadId)
+      .whereRaw("coalesce((cv.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz) < ?", [seen.created_at])
+      .update({
+        metadata: trx.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('handledAt', ?::text)", [new Date(seen.created_at).toISOString()]),
+        updated_at: new Date(),
+      })
+      .returning('id');
+    const open = Boolean(await openMessages(trx).where('cv.id', threadId).first('cv.id'));
+    if (!open) {
+      await closeAlerts('portalConversationId', [threadId], {
+        by: String(actor.technicianId || 'admin'),
+        role: actor.role,
+        technicianId: actor.technicianId || null,
+        resolution: 'Handled in Communications → Portal',
+      }, trx);
+    }
+    return { handled: rows.length > 0, open };
+  });
 }
 
 // Close every open item at or before `cutoff` in ONE transaction. Sends no
@@ -487,6 +525,7 @@ module.exports = {
   openRequestScope,
   openBookingScope,
   openMessageScope,
+  onLockedThread,
   markMessageHandled,
   windowCutoff,
   summary,

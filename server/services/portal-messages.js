@@ -177,14 +177,12 @@ async function closeItemWith(trx, kind, id, customerId) {
 // The item's open admin bells close once the answer is saved. Never throws: the answer is the record.
 async function closeItemBells(kind, id, actor) {
   try {
-    const { closeAlerts } = require('./portal-inbox');
-    // A message item's id is its thread's id, which is what that thread's bells carry.
-    return await closeAlerts(ALERT_KEY[kind], [id], {
-      by: String(actor.technicianId || 'admin'),
-      role: actor.role || 'admin',
-      technicianId: actor.technicianId || null,
-      resolution: ANSWERED_NOTE,
-    });
+    const { closeAlerts, onLockedThread } = require('./portal-inbox');
+    const by = { by: String(actor.technicianId || 'admin'), role: actor.role || 'admin', technicianId: actor.technicianId || null, resolution: ANSWERED_NOTE };
+    // A message item's id is its thread's id, which is what that thread's bells carry. They close on the locked
+    // thread row, and only when the answer left nothing open: a newer customer message keeps its bell.
+    if (kind === 'message') return await onLockedThread(id, (trx, open) => (open ? 0 : closeAlerts(ALERT_KEY.message, [id], by, trx)));
+    return await closeAlerts(ALERT_KEY[kind], [id], by);
   } catch (err) {
     logger.warn(`[portal-messages] could not close the bells of ${kind} ${id}: ${err.message}`);
     return 0;
@@ -383,8 +381,10 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
   return { message: staffView(saved.message), closed: saved.closed, notice };
 }
 
-// One admin bell per thread: a later message rewrites the standing bell and rings it again. Then the phone
-// page, only when the bell really rang. Never throws: the message is the record.
+// One admin bell per thread: a later message rewrites the standing bell and rings it again. It rings on the
+// locked thread row and only while the thread waits on the office (an answer saved first means a late ring
+// would stand for nothing). Then the phone page, only when the bell really rang. Never throws: the message is
+// the record.
 async function ringOffice(customer, threadId, message) {
   try {
     const { raiseAdminAlert, breaksAlertRules } = require('./admin-alert-compose');
@@ -393,25 +393,28 @@ async function ringOffice(customer, threadId, message) {
     // The customer's words, redacted and cut like every bell body; a quote the headline rules refuse (a second
     // sentence, a date) falls back to a plain why. The whole message is in the bell's full text either way.
     const quoted = whyWithQuote({ lead: 'They wrote in the portal: ', quote: redactedWords(message.body) });
-    const result = await raiseAdminAlert('alert', {
-      area: 'Comms',
-      action: fitAction('Comms', name, [(who) => `Answer ${who}'s portal message`, (who) => `Answer ${who}`]),
-      why: breaksAlertRules(quoted) ? 'They wrote in the portal and are waiting for an answer' : quoted,
-      severity: 'needs-you',
-      link: '/admin/communications#tab=portal',
-      subject: { type: 'customer', id: String(customer.id) },
-      doneWhen: 'customer_answered',
-      who: 'person',
-    }, {
-      bell: true,
-      dedupeKey: `portal-message:${threadId}`,
-      dedupeOpenOnly: true,
-      refreshOnDedupe: true,
-      bumpOnRefresh: true,
-      detail: message.body,
-      metadata: { customerId: customer.id, portalConversationId: threadId, portalMessageId: message.id },
+    const rang = await require('./portal-inbox').onLockedThread(threadId, async (_trx, open) => {
+      if (!open) return false;
+      const result = await raiseAdminAlert('alert', {
+        area: 'Comms',
+        action: fitAction('Comms', name, [(who) => `Answer ${who}'s portal message`, (who) => `Answer ${who}`]),
+        why: breaksAlertRules(quoted) ? 'They wrote in the portal and are waiting for an answer' : quoted,
+        severity: 'needs-you',
+        link: '/admin/communications#tab=portal',
+        subject: { type: 'customer', id: String(customer.id) },
+        doneWhen: 'customer_answered',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: `portal-message:${threadId}`,
+        dedupeOpenOnly: true,
+        refreshOnDedupe: true,
+        bumpOnRefresh: true,
+        detail: message.body,
+        metadata: { customerId: customer.id, portalConversationId: threadId, portalMessageId: message.id },
+      });
+      return Boolean(result?.id) && !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false));
     });
-    const rang = Boolean(result?.id) && !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false));
     if (rang) {
       const { pushPortalAsk, shortName } = require('./portal-ask-push');
       void pushPortalAsk({
@@ -518,5 +521,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, itemCustomerWith, claimNotice },
+  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice },
 };

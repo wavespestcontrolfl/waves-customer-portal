@@ -96,14 +96,21 @@ router.post('/reply', requireLive, async (req, res, next) => {
   }
 });
 
-// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/messages/:id/handled -> { handled }
-// Mark handled on a customer's portal message item: the thread is stamped handled (only while still open) and
-// its bells close. Sends nothing. handled:false = an answer or another Mark handled got there first.
+// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/messages/:id/handled { throughId } -> { handled, open }
+// Mark handled on a customer's portal message item, through the newest customer message the screen showed (the
+// item's throughId): the thread is stamped handled through it and its bells close when nothing is left open.
+// Sends nothing. handled:false = an answer or another Mark handled got there first; open:true = the customer
+// wrote again after throughId, so the item stays.
+const handledSchema = Joi.object({ throughId: Joi.string().uuid().required() });
 router.post('/messages/:id/handled', requireLive, async (req, res, next) => {
   if (!portalMessagesLive()) return res.status(404).json({ enabled: false });
   if (Joi.string().uuid().validate(req.params.id).error) return res.status(400).json({ error: 'id must be a UUID' });
+  const { error, value } = handledSchema.validate(req.body || {});
+  if (error) return res.status(400).json({ error: error.message });
   try {
-    res.json(await portalInbox.markMessageHandled(req.params.id, { technicianId: req.technicianId, role: req.techRole }));
+    const result = await portalInbox.markMessageHandled(req.params.id, value.throughId, { technicianId: req.technicianId, role: req.techRole });
+    if (!result) return res.status(404).json({ error: 'This message is gone.' });
+    res.json(result);
   } catch (err) { next(err); }
 });
 
