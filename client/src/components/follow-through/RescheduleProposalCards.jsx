@@ -160,6 +160,16 @@ function PreviewReview({ preview, who, Text }) {
 }
 
 
+// A technician's proposal carries no transcript quote: it reads the request in plain words.
+function RequestLines({ requested, quote, Text }) {
+  if (!quote) return <Text>Requested time: {requested}</Text>;
+  return <>
+    <Text>Requested time identified from transcript: {requested}</Text>
+    <Text>Transcript excerpt attributed to the caller (speaker attribution may be inferred): “{quote}”</Text>
+    <Text tone="muted">Verify the speaker attribution and call context before applying this change.</Text>
+  </>;
+}
+
 function ProposalCard({ row, ui, busy, selection, onSelection, preview, onPreview, onApply, onDismiss, openCall }) {
   const { Card, Button, Text, Link } = ui;
   const who = nameFor(preview?.customer || row);
@@ -171,9 +181,7 @@ function ProposalCard({ row, ui, busy, selection, onSelection, preview, onPrevie
 
   return <Card>
     <Text tone="title">Reschedule request · {who}</Text>
-    <Text>Requested time identified from transcript: {requested}</Text>
-    {quote && <Text>Transcript excerpt attributed to the caller (speaker attribution may be inferred): “{quote}”</Text>}
-    <Text tone="muted">Verify the speaker attribution and call context before applying this change.</Text>
+    <RequestLines requested={requested} quote={quote} Text={Text} />
     <Text tone="muted">Call {callTime(row.call_at)}{row.phone ? ` · Customer primary phone: ${row.phone}` : ''}</Text>
 
     <CandidateReview {...{ candidates, selected, selection, busy, who, ui, onSelection, row }} />

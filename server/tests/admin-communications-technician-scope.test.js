@@ -31,6 +31,9 @@ jest.mock('../services/technician-visit-scope', () => ({
   technicianCurrentVisitFilter: jest.fn((req, q) => q),
 }));
 jest.mock('../services/twilio', () => ({}));
+const mockDraft = jest.fn(async () => ({ ok: true, text: 'Thanks, see you soon.' }));
+jest.mock('../services/llm/call', () => ({ ...jest.requireActual('../services/llm/call'), dispatchWithFallback: (...a) => mockDraft(...a) }));
+jest.mock('../utils/recruiting-thread-scope', () => ({ ...jest.requireActual('../utils/recruiting-thread-scope'), isRecruitingPhone: jest.fn(async () => false) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('@anthropic-ai/sdk', () => (function Anthropic() { return { messages: { create: jest.fn() } }; }));
 const mockSendPrep = jest.fn(async () => ({ ok: true }));
@@ -136,5 +139,89 @@ describe('routes', () => {
   test('GET /agent-draft for a technician requires an on-route customer', async () => {
     expect((await call('GET', `/api/admin/communications/agent-draft?phone=9415550100`, 'tech')).status).toBe(403);
     expect((await call('GET', `/api/admin/communications/agent-draft?customerId=${CUSTOMER}`, 'tech')).status).toBe(404);
+  });
+});
+
+describe('AI draft reads own-customer texts only (B13)', () => {
+  const PHONE = '9415550100';
+  function draftTables(sharing, spy) {
+    db.mockImplementation((table) => {
+      const q = chain(null);
+      if (table === 'customers') {
+        q.whereRaw = jest.fn((sql, bindings) => { spy.slotSql = sql; spy.bindings = bindings; return q; });
+        q.then = (resolve, reject) => Promise.resolve(sharing).then(resolve, reject);
+      }
+      if (table === 'sms_log') {
+        q.whereIn = jest.fn((...args) => { spy.historyWhereIn = args; return q; });
+      }
+      return q;
+    });
+  }
+
+  test('a technician is refused when an off-route customer holds the number in a secondary slot, and every phone slot was checked', async () => {
+    const spy = {};
+    draftTables([{ id: 'c-own' }, { id: 'c-other' }], spy);
+    scope.technicianServicesCustomer.mockImplementation(async (_req, id) => id === 'c-own');
+    const res = await call('POST', '/api/admin/communications/ai-draft', 'tech', { customerPhone: PHONE });
+    expect(res.status).toBe(404);
+    for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'secondary_phone']) {
+      expect(spy.slotSql).toContain(`COALESCE(${col}, '')`);
+    }
+    expect(spy.bindings).toEqual(Array(5).fill(PHONE));
+    expect(mockDraft).not.toHaveBeenCalled();
+  });
+
+  test('a technician with only own customers on the number drafts from texts of its own customers only', async () => {
+    const spy = {};
+    draftTables([{ id: 'c-own' }], spy);
+    scope.technicianServicesCustomer.mockImplementation(async () => true);
+    const res = await call('POST', '/api/admin/communications/ai-draft', 'tech', { customerPhone: PHONE });
+    expect(res.status).toBe(200);
+    expect(spy.historyWhereIn).toEqual(['sms_log.customer_id', 'SCOPED_CUSTOMER_IDS']);
+  });
+
+  test('an admin draft reads the number unscoped, as before', async () => {
+    const spy = {};
+    draftTables([], spy);
+    const res = await call('POST', '/api/admin/communications/ai-draft', 'admin', { customerPhone: PHONE });
+    expect(res.status).toBe(200);
+    expect(spy.historyWhereIn).toBeUndefined();
+    expect(spy.slotSql).toBeUndefined();
+  });
+});
+
+describe('a technician texts from an office line or its own line only (B16)', () => {
+  const allowed = router._technicianAllowedFromNumber;
+  const OFFICE = '+19412972817';
+  const MAIN = '+19412975749';
+  const OWN_LINE = '+19413529161';
+  const tech = { techRole: 'technician', technician: { id: 'tech-1', twilio_number: OWN_LINE } };
+
+  test('office lines and the technician\'s own tech line are kept', () => {
+    expect(allowed(tech, OFFICE)).toBe(OFFICE);
+    expect(allowed(tech, MAIN)).toBe(MAIN);
+    expect(allowed(tech, OWN_LINE)).toBe(OWN_LINE);
+  });
+
+  test('another technician\'s line, the recruiting line and a tracking line are ignored', () => {
+    const other = { techRole: 'technician', technician: { id: 'tech-1', twilio_number: '+19413529999' } };
+    expect(allowed(other, OWN_LINE)).toBeUndefined();
+    expect(allowed(tech, '+18559260203')).toBeUndefined();
+    expect(allowed(tech, '+19412412459')).toBeUndefined();
+  });
+
+  test('a technician with no line of its own cannot pick a tech line; no fromNumber stays empty', () => {
+    const noLine = { techRole: 'technician', technician: { id: 'tech-1', twilio_number: null } };
+    expect(allowed(noLine, OWN_LINE)).toBeUndefined();
+    expect(allowed(tech, undefined)).toBeUndefined();
+  });
+
+  test('an admin keeps any line it asks for', () => {
+    expect(allowed({ techRole: 'admin', technician: { id: 'admin-1' } }, OWN_LINE)).toBe(OWN_LINE);
+  });
+
+  test('the send route judges the requested line through this rule', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-communications.js'), 'utf8');
+    expect(src).toMatch(/const fromNumber = technicianAllowedFromNumber\(req, requestedFromNumber\);/);
   });
 });

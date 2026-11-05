@@ -1048,7 +1048,9 @@ app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthen
       .applyAssignable(require('./models/db')('technicians'))
       .select('id', 'name', 'role', 'phone', 'active')
       .orderBy('name');
-    res.json({ technicians: techs });
+    // A technician gets its own phone and coworkers' names only (owner
+    // 2026-11-04, "Own number only"); an admin response is unchanged.
+    res.json({ technicians: require('./services/technician-picker-rows').technicianPickerRows(techs, req) });
   } catch (err) { next(err); }
 });
 app.use('/api/admin/data-hygiene', require('./routes/admin-data-hygiene'));

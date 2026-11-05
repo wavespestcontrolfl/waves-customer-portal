@@ -90,6 +90,27 @@ describe('reschedule proposal review', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  // Owner 2026-11-04 (D1 A): a technician's proposal has no transcript quote and no phone.
+  it('reads the request in plain words when the feed carries no quote or phone', async () => {
+    const { phone: _phone, proposal, ...rest } = ROW;
+    adminFetch.mockResolvedValue({ ...FEED, proposals: [{ ...rest, proposal: { proposed_start_at: proposal.proposed_start_at } }] });
+    render(<RescheduleProposalCards ui={ui} openCall={false} />);
+    await screen.findByText(/^Requested time: /);
+    expect(screen.queryByText(/transcript/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/speaker attribution/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Customer primary phone/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Dismiss proposal' })).toBeInTheDocument();
+  });
+
+  it('keeps the transcript wording, quote and phone for the office feed', async () => {
+    adminFetch.mockResolvedValue(FEED);
+    render(<RescheduleProposalCards ui={ui} />);
+    await screen.findByText(/^Requested time identified from transcript: /);
+    expect(screen.getByText(/Please move it to one Thursday afternoon/)).toBeInTheDocument();
+    expect(screen.getByText(/Verify the speaker attribution/)).toBeInTheDocument();
+    expect(screen.getByText(/Customer primary phone: \+15555550176/)).toBeInTheDocument();
+  });
+
   it('requires an explicit ambiguous appointment, previews exact series times, then applies the bound preview', async () => {
     adminFetch.mockImplementation(async (url, options) => {
       if (url.endsWith('/preview')) return PREVIEW;
