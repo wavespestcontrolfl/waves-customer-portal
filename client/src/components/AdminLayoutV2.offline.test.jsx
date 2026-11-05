@@ -592,7 +592,10 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     localStorage.setItem("waves_tech_route_snapshot", JSON.stringify({ techId: "tech-1" }));
     vi.stubGlobal("fetch", vi.fn(async (url) => (String(url).endsWith("/admin/auth/me")
       ? response(200, TECH)
-      : response(401, { error: "Session expired" }))));
+      // A technician's Messages badge polls its own unread count at start: that call is answered, the route call is not.
+      : String(url).includes("/communications/unread-count")
+        ? response(200, { conversations: 0, messages: 0 })
+        : response(401, { error: "Session expired" }))));
     renderAt();
     expect(await screen.findByText("Saved route content")).toBeInTheDocument();
     await act(async () => {
