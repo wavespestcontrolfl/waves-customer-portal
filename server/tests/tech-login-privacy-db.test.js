@@ -112,8 +112,11 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       await bell('sms-unknown-sender', 'sms_reply', { payload: { threadId: null, twilioSid: 'SM-fixture' } });
       await bell('sandy-no-context', 'sandy_transfer_no_context', { callSid: 'CA-fixture' });
       await bell('payment-admin-only', 'payment_failed', { payload: { customerId: customer.b } });
+      // The follow-up pager's list names several customers' promises and carries no one customer.
+      await bell('missed-list', 'call_commitment_overdue', { dedupeKey: 'followup-sla-rolling:fixture', missed_commitment_ids: ['fixture-promise'] });
     });
 
+    // Neither technician sees the follow-up pager's list (missed-list): it is no one customer's row.
     test('gate on: a technician sees own-customer rows and customer-less rows, not another technician\'s customer', async () => {
       process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
       expect(await titles({ role: 'technician', technicianId: ids.techA })).toEqual([
@@ -132,7 +135,7 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
     test('gate off: a technician sees every tech-visible row, as before', async () => {
       delete process.env.GATE_TECH_LOGIN_PRIVACY;
       const seen = await titles({ role: 'technician', technicianId: ids.techA });
-      expect(seen).toEqual(expect.arrayContaining(['sms-other', 'reschedule-other', 'followup-other', 'promise-other', 'report-other']));
+      expect(seen).toEqual(expect.arrayContaining(['sms-other', 'reschedule-other', 'followup-other', 'promise-other', 'report-other', 'missed-list']));
       expect(seen).not.toContain('payment-admin-only');
     });
 
@@ -144,6 +147,7 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       const all = await total({ role: 'technician' }); // no technicianId: key-only scope
       expect(all).toBeGreaterThan(before);
       expect(await NotificationService.markReadAdmin(rows['sms-other'], tech)).toBe(false);
+      expect(await NotificationService.markReadAdmin(rows['missed-list'], tech)).toBe(false);
       expect(await NotificationService.markReadAdmin(rows['sms-own'], tech)).toBe(true);
       expect(await NotificationService.markAdminDone([rows['reschedule-other']], { by: ids.techA, ...tech })).toBe(0);
       expect(await NotificationService.markAdminDone([rows['reschedule-own']], { by: ids.techA, ...tech })).toBe(1);
