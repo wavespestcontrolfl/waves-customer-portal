@@ -1305,9 +1305,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     };
     const officeApprovalRecheck = async ({ trx }) => {
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
-        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days', 'customer_pick_by',
+        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days', 'customer_pick_by', 'technician_id',
           'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
           'date_exception', 'date_exception_cadence_date');
+      // Both movers save the offered slot's technician (offerTechnicianScope kept the one this request read):
+      // a staff reassignment since then refuses on the LOCKED row, missed visits too, never overwritten.
+      if (String(locked?.technician_id || '') !== String(svc.technician_id || '')) {
+        throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+          statusCode: 409, isOperational: true, code: 'SLOT_TAKEN',
+        });
+      }
       // The size rule the page disclosed, judged again on the locked row for EVERY commit (a missed visit
       // too): a series re-anchor can change the regular date while the date and window the expect fence
       // pins stay put, and the single-versus-series decision was made on the unlocked read.
