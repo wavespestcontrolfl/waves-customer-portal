@@ -1471,7 +1471,8 @@ function fixedDay0Line({ firstName, techName, stepKind }) {
   const name = firstName ? fit(gsmSafeName(firstName, "")) : "";
   const tech = fit(gsmSafeName(personFirstName(techName), ""));
   const hello = name ? `Hi ${name}, ` : "Hi, ";
-  const who = tech ? `it's ${tech} from Waves.` : "it's Waves Pest Control.";
+  // Owner 2026-11-04: texts say "Waves", never "Waves Pest Control".
+  const who = tech ? `it's ${tech} from Waves.` : "it's Waves.";
   const thanks = stepKind === "day_after" ? "Thanks for having us out." : "Thanks for having us out today.";
   return `${hello}${who} ${thanks} A Google review would really help: {review_url}`;
 }
@@ -1479,8 +1480,9 @@ function fixedDay0Line({ firstName, techName, stepKind }) {
 // A body this fixed line wrote (any name / tech / day wording), so retry
 // reuse can tell it from a writer draft after the gate is rolled back.
 // Names may hold periods or commas ("A.J."), so each is matched up to its
-// fixed neighbor, never by excluding punctuation (#6423 r3).
-const FIXED_DAY0_RE = /^Hi(?: .+?)?, it's (?:.+? from Waves|Waves Pest Control)\. Thanks for having us out(?: today)?\. A Google review would really help: \{review_url\}$/;
+// fixed neighbor, never by excluding punctuation (#6423 r3). "Waves Pest Control" is the
+// wording before 2026-11-04, still on stored bodies.
+const FIXED_DAY0_RE = /^Hi(?: .+?)?, it's (?:.+? from Waves|Waves|Waves Pest Control)\. Thanks for having us out(?: today)?\. A Google review would really help: \{review_url\}$/;
 function isFixedDay0Line(body) {
   return FIXED_DAY0_RE.test(String(body || ""));
 }

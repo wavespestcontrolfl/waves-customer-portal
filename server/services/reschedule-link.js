@@ -222,4 +222,22 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
   }
 }
 
-module.exports = { buildRescheduleLink, smsLineFor, hasUnblockedVisitGroup };
+// The appointment_rescheduled text's closing line, its {different_time_line}
+// (owner 2026-11-04: "for texts that say need a different time, shouldnt we
+// be linking the reschedule links"). The self-serve link when the builder
+// above makes one; every refusal (grouped stop, inside the move notice
+// window, unreviewed dispatch booking, no token, shortener failure) keeps
+// the reply line this text always ended with, so the customer is never left
+// without a way to ask for another time.
+// The template body takes {different_time_line} in a later release than
+// the senders that fill it: migrations run pre-deploy while the previous
+// release still serves, and a release that renders the body without the
+// value has getTemplate refuse the whole text.
+const RESCHEDULED_REPLY_LINE = 'Need a different time? Reply here.';
+
+async function rescheduledTextLine(scheduledServiceId, { customerId = null } = {}) {
+  const { url } = await buildRescheduleLink(scheduledServiceId, { customerId });
+  return url ? `Need a different time? Reschedule here: ${url}` : RESCHEDULED_REPLY_LINE;
+}
+
+module.exports = { buildRescheduleLink, smsLineFor, hasUnblockedVisitGroup, rescheduledTextLine, RESCHEDULED_REPLY_LINE };

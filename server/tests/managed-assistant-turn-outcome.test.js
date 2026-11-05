@@ -74,6 +74,8 @@ describe('managed assistant — the turn recorder sees how the stream ended', ()
     global.fetch = fetchFor([{ event: 'error', data: { type: 'overloaded_error' } }, text('never read')]);
     const res = await turn();
     expect(res.reply).toMatch(/having trouble right now/);
+    // Owner rulings: texts are never signed (2026-09-26) and say "Waves" (2026-11-04).
+    expect(res.reply).not.toMatch(/Waves Pest Control|—\s*Waves/);
     expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'session_error_event' });
     expect(mockInsert).toHaveBeenCalledWith('agent_messages', expect.objectContaining({ role: 'assistant', content: res.reply }));
   });
