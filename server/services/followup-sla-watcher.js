@@ -40,8 +40,11 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
 const commitments = require('./call-commitments');
-const { etDateString, etCalendarDayOf, etParts } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf, etParts, formatETTime } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { raiseAdminAlert, composeAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
+const { fitAction, tidyName, shortDateET, redactedWords, listWords } = require('./admin-alert-names');
+const { stripEmoji } = require('../utils/strip-emoji');
 const {
   STAFF_APPROVED_SMS_TYPES, STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered,
   operatorSentSql, smsContactSelects, callContactSelects,
@@ -538,21 +541,176 @@ async function listOpenWaves(now) {
   return all;
 }
 
-function whoFor(row) {
-  const name = [row.customer_first_name, row.customer_last_name].filter(Boolean).join(' ');
-  if (name) return name;
-  const digits = String(contactPhone(row) || '').replace(/\D/g, '');
-  return digits ? `caller ***${digits.slice(-4)}` : 'unknown caller';
-}
-
 const WHAT = { callback: 'callback', send_estimate: 'quote', schedule_visit: 'time to come out' };
 
-function etTime(value) {
-  return new Date(value).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+// What the rolling list says (owner 2026-11-04: "bring more clarity to this
+// admin notification, make it actionable, instead of numbers we should use
+// their name, if available"), by the bell rule (docs/admin-notifications.md):
+// a headline that says what to do and for whom, a one-sentence why, and every
+// promise in `detail` with who, what to do, when it was promised and due, and
+// the promise as the call recorded it.
+const AREA = 'Comms';
+const PROMISE_WORDS_CHARS = 180;
+
+// A name the bell can show: not blank, not a placeholder ("Unknown",
+// "Caller"), and free of anything the alert rule refuses in a headline or why
+// (an emoji, a second sentence); else null.
+function showableName(...parts) {
+  const name = stripEmoji(tidyName(parts.filter(Boolean).join(' ')));
+  return name && !commitments.isMissingName(name) && !breaksAlertRules(name) ? name : null;
 }
 
-function describe(row) {
-  return `${WHAT[row.kind] || 'follow-up'} promised to ${whoFor(row)} at ${etTime(promisedAt(row))} (due ${etTime(row.sla_due_at)})`;
+// The name the caller gave on each call (its valid V2 extraction), with the
+// organization they named, by call id.
+async function spokenNames(callIds) {
+  const ids = [...new Set(callIds.filter(Boolean).map(String))];
+  if (!ids.length) return new Map();
+  const calls = await db('call_log').whereIn('id', ids).where('v2_extraction_status', 'valid').select('id',
+    db.raw("ai_extraction_enriched #>> '{caller,name_full}' AS name_full"),
+    db.raw("ai_extraction_enriched #>> '{caller,first_name}' AS first_name"),
+    db.raw("ai_extraction_enriched #>> '{caller,last_name}' AS last_name"),
+    db.raw("ai_extraction_enriched #>> '{caller,organization_name}' AS organization_name"));
+  const names = new Map();
+  for (const c of calls) {
+    const name = showableName(c.name_full) || showableName(c.first_name, c.last_name);
+    if (name) names.set(String(c.id), { name, org: showableName(c.organization_name) });
+  }
+  return names;
+}
+
+// Who each listed promise is owed to, by promise id: the linked customer's
+// name on file; else the name the caller gave on that call; else, for a
+// caller with no customer record, the one person the records on the number
+// name (the promise-chaser bell's resolveCallerName: customers, then
+// estimates, then leads). A promise none of them names keeps its masked
+// number (byPerson). Best effort: a failed read names nobody new and never
+// fails the tick.
+async function namesFor(rows) {
+  const names = new Map();
+  const unnamed = [];
+  for (const r of rows) {
+    const onFile = showableName(r.customer_first_name, r.customer_last_name);
+    if (onFile) names.set(String(r.id), { name: onFile });
+    else unnamed.push(r);
+  }
+  if (!unnamed.length) return names;
+  const spoken = await spokenNames(unnamed.map((r) => r.call_log_id)).catch((err) => {
+    logger.warn(`[followup-sla] caller names not read: ${err.message}`);
+    return new Map();
+  });
+  const onNumber = new Map();
+  for (const r of unnamed) {
+    let found = spoken.get(String(r.call_log_id));
+    const key = !found && !r.customer_id ? phoneKey(contactPhone(r)) : null;
+    if (key) {
+      if (!onNumber.has(key)) {
+        onNumber.set(key, await require('./promise-chaser-bell').resolveCallerName({ id: r.call_log_id, customer_id: null, from_phone: contactPhone(r) }));
+      }
+      const name = showableName(onNumber.get(key));
+      found = name ? { name } : null;
+    }
+    if (found) names.set(String(r.id), found);
+  }
+  return names;
+}
+
+// The listed promises by person, in list order (the oldest due first): one
+// person per customer, or per number for a caller with no customer record.
+// Each carries the name the bell shows, else the masked number, and its full
+// list label, which adds the organization they named.
+function byPerson(rows, names) {
+  const people = new Map();
+  for (const r of rows) {
+    const phone = phoneKey(contactPhone(r));
+    const key = r.customer_id ? `customer:${r.customer_id}` : (phone ? `phone:${phone}` : `promise:${r.id}`);
+    if (!people.has(key)) {
+      const known = names.get(String(r.id));
+      const name = known?.name || (phone ? `caller ***${phone.slice(-4)}` : 'unknown caller');
+      people.set(key, { name, label: known?.org ? `${name} (${known.org})` : name, rows: [] });
+    }
+    people.get(key).rows.push(r);
+  }
+  return [...people.values()];
+}
+
+// A time as a person says it: "4:04 PM" on the day the list is written,
+// "Nov 3, 4:04 PM" before it; null when there is none.
+function spokenTime(value, now) {
+  const at = value ? new Date(value) : null;
+  if (!at || Number.isNaN(at.getTime())) return null;
+  const time = formatETTime(at).replace(/\s/g, ' ');
+  return etDateString(at) === etDateString(now) ? time : `${shortDateET(at)}, ${time}`;
+}
+
+// What to do about each kind of promise: its line in the full list, and the
+// headline action that names the person. A promise made for a text or an
+// email says so.
+const TODO = {
+  callback: { line: (how) => `${how.verb} back`, headline: (who, how) => `${how.verb} ${who} back` },
+  send_estimate: { line: (how) => `send the quote${how.by}`, headline: (who, how) => `send ${who} the quote${how.by}` },
+  schedule_visit: { line: (how) => `send a visit time${how.by}`, headline: (who, how) => `send ${who} a visit time${how.by}` },
+};
+const HOW = { sms: { verb: 'text', by: ' by text' }, email: { verb: 'email', by: ' by email' } };
+const howOf = (r) => HOW[r.channel] || { verb: 'call', by: '' };
+
+// The why: the one promise's call and deadline; one person's several
+// promises and the first deadline; or, for several people, as many names as
+// fit and the oldest deadline.
+function whyOf(people, now) {
+  const [first] = people;
+  const oldest = first.rows[0];
+  const due = spokenTime(oldest.sla_due_at, now);
+  if (people.length === 1 && first.rows.length === 1) {
+    const made = spokenTime(promisedAt(oldest), now);
+    return `Promised ${made ? `on the ${made} call` : 'on a call'} and due by ${due}; no follow-up yet.`;
+  }
+  if (people.length === 1) return `${first.rows.length} promises from calls; the first was due by ${due}, with no follow-up yet.`;
+  const names = people.map((p) => p.name);
+  for (let shown = names.length; shown >= 1; shown -= 1) {
+    const text = `${listWords(names.slice(0, shown), names.length - shown)}; the oldest was due by ${due}.`;
+    if (text.length <= MAX_WHY_CHARS) return text;
+  }
+  return cutAtWord(`${listWords(names.slice(0, 1), names.length - 1)}; the oldest was due by ${due}.`, MAX_WHY_CHARS);
+}
+
+// The full list: one entry per promise, grouped by person, with what to do,
+// when it was promised and due, and the promise as the call recorded it
+// (masked like every bell body, cut at a word).
+function detailOf(people, now) {
+  const lines = ['Promises made on calls with no follow-up within an hour (8 AM–8 PM):'];
+  for (const person of people) {
+    for (const r of person.rows) {
+      const made = spokenTime(promisedAt(r), now);
+      const words = r.description ? cutAtWord(redactedWords(r.description), PROMISE_WORDS_CHARS) : '';
+      lines.push(`• ${person.label}: ${TODO[r.kind].line(howOf(r))} (${made ? `promised ${made}, ` : ''}due ${spokenTime(r.sla_due_at, now)})${words ? `\n  ${words}` : ''}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// The rolling list as an admin alert: composeAdminAlert's spec and the full
+// list for `detail` (a fresh post), and the text exactly as a fresh post of it
+// is stored (composed, then NotificationService's emoji strip and brevity
+// guard) with the alert's own fields (an in-place rewrite).
+function listAlert(onList, names, link, now) {
+  const people = byPerson(onList, names);
+  const [first] = people;
+  let action = `follow up with ${people.length} people`;
+  if (people.length === 1 && first.rows.length === 1) {
+    const r = first.rows[0];
+    const how = howOf(r);
+    action = fitAction(AREA, first.name, [(who) => TODO[r.kind].headline(who, how), (who) => TODO[r.kind].headline(who, { ...how, by: '' })]);
+  } else if (people.length === 1) {
+    action = fitAction(AREA, first.name, [(who) => `follow up with ${who}`]);
+  }
+  const spec = {
+    area: AREA, action, why: whyOf(people, now), severity: 'needs-you', link,
+    subject: { type: 'check', id: ROLLING_KEY }, doneWhen: 'count_zero', who: 'person',
+  };
+  const detail = detailOf(people, now);
+  const alert = composeAdminAlert(spec);
+  const stored = NotificationService.normalizeAdminText({ category: 'alert', title: alert.headline, body: alert.why, detail });
+  return { spec, detail, stored, metadata: alert.metadata };
 }
 
 // The promises this pager owns right now: SLA kinds whose one-hour
@@ -725,6 +883,12 @@ async function runInner({ now = new Date() } = {}) {
       return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: onList.length, alerted, changed, unverified: unverified.size };
     }
   }
+  // The list's words, worked out before the publishing lock. One miss opens
+  // its call; several open the Owed list.
+  const link = onList.length === 1 && onList[0].call_log_id
+    ? `/admin/communications#tab=calls&call=${encodeURIComponent(onList[0].call_log_id)}`
+    : '/admin/communications#tab=owed';
+  const list = onList.length ? listAlert(onList, await namesFor(onList), link, now) : null;
   // Publish in ONE transaction that first locks and reloads every listed
   // promise: if staff changed any of them since the scan (a new deadline,
   // a dismissal, a snooze — anything that moves updated_at) or it closed,
@@ -748,19 +912,10 @@ async function runInner({ now = new Date() } = {}) {
     }
     const ids = onList.map((r) => String(r.id)).sort();
     const fresh = ids.filter((id) => !shown.includes(id));
-    // Stored the way NotificationService stores admin text (emoji stripped
-    // — owner ruling), so an in-place rewrite matches a fresh post exactly.
-    const { stripEmoji } = require('../utils/strip-emoji');
-    const title = stripEmoji(`${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`);
-    const body = stripEmoji(`Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`);
-    // One miss opens its call; several open the Owed list.
-    const link = onList.length === 1 && onList[0].call_log_id
-      ? `/admin/communications#tab=calls&call=${encodeURIComponent(onList[0].call_log_id)}`
-      : '/admin/communications#tab=owed';
     if (fresh.length) {
       const key = `${ROLLING_KEY}:${now.toISOString()}`;
-      const notif = await NotificationService.notifyAdmin('alert', title, body, {
-        link, dedupeKey: key, bell: true, trx,
+      const notif = await raiseAdminAlert('alert', list.spec, {
+        dedupeKey: key, bell: true, trx, detail: list.detail,
         metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
       });
       if (!notif?.id || notif.suppressed) return;
@@ -775,11 +930,9 @@ async function runInner({ now = new Date() } = {}) {
     // emptied → read and flagged (a returning miss posts fresh); fewer
     // items or changed details → rewritten in place, read state kept.
     if (!shown.length) return;
-    // The brevity guard's form of this text (one-sentence body, full list in
-    // `detail`), exactly as the fresh post above is stored.
-    const next = NotificationService.normalizeAdminText({ category: 'alert', title, body });
-    const patch = ids.length
-      ? { title: next.title, body: next.body, detail: next.detail, link, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
+    // The text exactly as the fresh post above is stored.
+    const patch = list
+      ? { title: list.stored.title, body: list.stored.body, detail: list.stored.detail, link, metadata: JSON.stringify({ ...meta, ...list.metadata, missed_commitment_ids: ids }) }
       : {
         ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: emptiedText, at: now, keepExisting: true, conn: trx }),
         metadata: JSON.stringify({ ...meta, emptied: true }),

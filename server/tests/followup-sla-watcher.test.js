@@ -16,7 +16,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), ga
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/callback-cards', () => ({ ...jest.requireActual('../services/callback-cards'), enabled: jest.fn(() => true), prepareCallbackCards: jest.fn() }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutLayers: jest.fn(async () => ({ dates: new Set() })) }));
-jest.mock('../services/voice-agent/relay-protocol', () => ({ whereNotSandboxCall: jest.fn((qb) => qb.whereRaw('not_sandbox')) }));
+jest.mock('../services/voice-agent/relay-protocol', () => ({ ...jest.requireActual('../services/voice-agent/relay-protocol'), whereNotSandboxCall: jest.fn((qb) => qb.whereRaw('not_sandbox')) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
   return {
@@ -106,7 +106,10 @@ const STAFF_CONTACT = {
   call_log: { source: 'admin-click', v2_extraction_status: 'valid', is_voicemail: 'false' },
   sms_log: { status: 'delivered', message_type: 'manual', operator_sent: true },
 };
-function mockDb({ activity = {}, call = null, standingRow = null, settled = [], lockedStamp = {}, hints = {} } = {}) {
+// `spoken`: the caller names the calls' extractions hold ({ id, name_full,
+// organization_name }), or a function (to throw). `onNumber`: the customers
+// on a caller's number, for the promise-chaser name lookup.
+function mockDb({ activity = {}, call = null, standingRow = null, settled = [], lockedStamp = {}, hints = {}, spoken = [], onNumber = [] } = {}) {
   log = [];
   const updates = [];
   db.raw = (sql) => sql;
@@ -122,7 +125,7 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
       return q;
     };
     for (const name of ['where', 'orWhere', 'orWhereRaw', 'whereRaw', 'whereNot', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereIn',
-      'orWhereIn', 'whereNotExists', 'whereNotIn', 'forUpdate', 'orderBy']) q[name] = chain(name);
+      'orWhereIn', 'whereNotExists', 'whereNotIn', 'forUpdate', 'orderBy', 'limit']) q[name] = chain(name);
     q.modify = (fn) => { fn(q); return q; };
     q.first = async () => {
       if (table === 'call_commitments') {
@@ -134,6 +137,8 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
     };
     q.select = async (...cols) => {
       if (table === 'call_log' && cols.includes('duration_seconds')) return call ? [call] : [];
+      if (table === 'call_log' && cols.some((c) => /AS name_full/.test(String(c)))) return typeof spoken === 'function' ? spoken() : spoken;
+      if (table === 'customers' && cols.join() === 'first_name,last_name') return onNumber;
       if (table === 'call_log' && cols.includes('twilio_call_sid') && !cols.includes('duration_seconds')) {
         // The promise calls the callback quote check reads (SID, linkage, number).
         const ids = entry.calls.filter(([m, col]) => m === 'whereIn' && col === 'id').flatMap(([, , v]) => v);
@@ -217,10 +222,14 @@ test('a new miss posts the rolling list fresh, unread, at the top of the feed', 
   expect(result).toMatchObject({ missed: 1, alerted: 1 });
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   const [, title, body, opts] = rollingCall();
-  expect(title).toBe('1 missed follow-up in the last 24 hours');
-  expect(body).toContain('callback promised to Test Caller');
+  // What to do, for whom, and why now (owner 2026-11-04); the full list in `detail`.
+  expect(title).toBe('Comms — call Test Caller back');
+  expect(body).toBe('Promised on the 2:00 PM call and due by 3:00 PM; no follow-up yet.');
+  expect(opts.detail).toContain('• Test Caller: call back (promised 2:00 PM, due 3:00 PM)');
   // One miss opens its call; several open the Owed list.
   expect(opts).toMatchObject({ dedupeKey: `${ROLLING_KEY}:${NOW.toISOString()}`, bell: true, link: '/admin/communications#tab=calls&call=call-a', metadata: { missed_commitment_ids: ['a'] } });
+  // Composed by the alert rule (docs/admin-notifications.md), its fields on the row.
+  expect(opts.metadata).toMatchObject({ triggerKey: 'call_commitment_overdue', area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'count_zero', subject: { type: 'check', id: ROLLING_KEY } });
   // Posted inside the same transaction that retires the older posts.
   expect(opts.trx).toBe(db);
 });
@@ -229,8 +238,8 @@ test('the rolling list has no cap', async () => {
   mockDb();
   listOpenCommitments.mockResolvedValue(Array.from({ length: 12 }, (_, i) => row(`r${i}`)));
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(12);
-  expect(rollingCall()[1]).toBe('12 missed follow-ups in the last 24 hours');
-  expect(rollingCall()[2].split('\n').filter((l) => l.startsWith('•'))).toHaveLength(12);
+  expect(rollingCall()[1]).toBe('Comms — follow up with 12 people');
+  expect(rollingCall()[3].detail.split('\n').filter((l) => l.startsWith('•'))).toHaveLength(12);
 });
 
 test('the same list as the latest post — read or not — is not re-posted', async () => {
@@ -243,15 +252,17 @@ test('the same list as the latest post — read or not — is not re-posted', as
 });
 
 test('a listed promise whose details changed is rewritten in place, read state kept', async () => {
-  const updates = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title: '1 missed follow-up in the last 24 hours', body: 'old text' } });
+  const updates = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title: 'Comms — call Test Caller back', body: 'old text' } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   await runFollowUpSlaWatcher({ now: NOW });
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   expect(updates).toHaveLength(1);
-  // The brevity guard's form: a one-sentence body, the whole list in `detail`.
-  expect(updates[0].patch.body.length).toBeLessThanOrEqual(110);
-  expect(updates[0].patch.detail).toContain('callback promised to Test Caller');
+  // The fresh post's form: a one-sentence body, the whole list in `detail`.
+  expect(updates[0].patch.body).toBe('Promised on the 2:00 PM call and due by 3:00 PM; no follow-up yet.');
+  expect(updates[0].patch.detail).toContain('• Test Caller: call back');
   expect(updates[0].patch.read_at).toBeUndefined();
+  // A post from before the alert rule gains its fields.
+  expect(JSON.parse(updates[0].patch.metadata)).toMatchObject({ area: 'Comms', who: 'person', missed_commitment_ids: ['a'] });
 });
 
 test('a standing single-miss post from before the link change is rewritten quietly when only its link differs', async () => {
@@ -291,7 +302,7 @@ test('a new miss joining the list re-posts it and retires the older post', async
   const updates = mockDb({ standingRow: posted(['a']) });
   listOpenCommitments.mockResolvedValue([row('a'), row('b', { call_log_id: 'call-b' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).alerted).toBe(1);
-  expect(rollingCall()[1]).toBe('2 missed follow-ups in the last 24 hours');
+  expect(rollingCall()[1]).toBe('Comms — follow up with 2 people');
   expect(rollingCall()[3].link).toBe('/admin/communications#tab=owed');
   expect(updates).toHaveLength(1);
   expect(updates[0]).toMatchObject({ table: 'notifications', patch: { done_by: 'followup-sla', resolution: 'Replaced by a newer missed-follow-up list' } });
@@ -303,11 +314,96 @@ test('items only dropping off rewrite the latest post in place, read state kept 
   await runFollowUpSlaWatcher({ now: NOW });
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   expect(updates).toHaveLength(1);
-  expect(updates[0].patch.title).toBe('1 missed follow-up in the last 24 hours');
+  expect(updates[0].patch.title).toBe('Comms — call Test Caller back');
   // Down to one miss, the standing post now opens that call.
   expect(updates[0].patch.link).toBe('/admin/communications#tab=calls&call=call-a');
   expect(updates[0].patch.read_at).toBeUndefined();
   expect(JSON.parse(updates[0].patch.metadata).missed_commitment_ids).toEqual(['a']);
+});
+
+// Owner 2026-11-04: "bring more clarity to this admin notification, make it
+// actionable, instead of numbers we should use their name, if available".
+describe('the list names people and says what to do', () => {
+  const unlinked = (id, extra = {}) => row(id, { customer_id: null, customer_first_name: null, customer_last_name: null, from_phone: '+19415550123', ...extra });
+
+  test('a caller with no customer record goes by the name they gave on the call, with their organization, not the number', async () => {
+    mockDb({ spoken: [{ id: 'call-a', name_full: 'Sam Sample', organization_name: 'Example Supply Co' }] });
+    listOpenCommitments.mockResolvedValue([unlinked('a')]);
+    await runFollowUpSlaWatcher({ now: NOW });
+    const [, title, body, opts] = rollingCall();
+    expect(title).toBe('Comms — call Sam Sample back');
+    expect(opts.detail).toContain('• Sam Sample (Example Supply Co): call back');
+    expect([title, body, opts.detail].join('\n')).not.toContain('0123');
+  });
+
+  test.each([
+    ['a linked customer goes by the name on file, whatever the call heard', [row('a')], { spoken: [{ id: 'call-a', name_full: 'Sam Sample' }] }, 'Comms — call Test Caller back'],
+    ['no name on the call: the one person the records on the number name', [unlinked('a')], { onNumber: [{ first_name: 'Pat', last_name: 'Example' }] }, 'Comms — call Pat Example back'],
+    ['a placeholder name on the call counts as none', [unlinked('a')], { spoken: [{ id: 'call-a', name_full: 'Unknown' }] }, 'Comms — call caller ***0123 back'],
+    ['a name the alert rule refuses counts as none', [unlinked('a')], { spoken: [{ id: 'call-a', name_full: 'Sam Sample!!' }] }, 'Comms — call caller ***0123 back'],
+    ['no name anywhere: the masked number', [unlinked('a')], {}, 'Comms — call caller ***0123 back'],
+    ['the name read fails: the masked number, and the list still posts', [unlinked('a')], { spoken: () => { throw new Error('read failed'); } }, 'Comms — call caller ***0123 back'],
+  ])('%s', async (_label, rows, scenario, title) => {
+    mockDb(scenario);
+    listOpenCommitments.mockResolvedValue(rows);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).alerted).toBe(1);
+    expect(rollingCall()[1]).toBe(title);
+  });
+
+  test('one person with several promises is one person to follow up with', async () => {
+    mockDb();
+    listOpenCommitments.mockResolvedValue([
+      row('a'),
+      row('b', { customer_id: 'cust-a', kind: 'send_estimate', call_started_at: et('14:30').toISOString() }),
+    ]);
+    await runFollowUpSlaWatcher({ now: NOW });
+    expect(rollingCall()[1]).toBe('Comms — follow up with Test Caller');
+    expect(rollingCall()[2]).toBe('2 promises from calls; the first was due by 3:00 PM, with no follow-up yet.');
+  });
+
+  test('several people are counted in the headline and named in the why, oldest first, as many as fit', async () => {
+    mockDb();
+    listOpenCommitments.mockResolvedValue([
+      row('b', { customer_first_name: 'Sam', customer_last_name: 'Sample', call_started_at: et('14:30').toISOString() }),
+      row('a'),
+    ]);
+    await runFollowUpSlaWatcher({ now: NOW });
+    expect(rollingCall()[1]).toBe('Comms — follow up with 2 people');
+    expect(rollingCall()[2]).toBe('Test Caller and Sam Sample; the oldest was due by 3:00 PM.');
+
+    NotificationService.notifyAdmin.mockClear();
+    mockDb();
+    const last = ['Ashworth-Example', 'Brightwater-Example', 'Copperfield-Example', 'Dunmore-Example', 'Everhart-Example', 'Fairweather-Example'];
+    listOpenCommitments.mockResolvedValue(last.map((name, i) => row(`p${i}`, { customer_first_name: 'Test', customer_last_name: name })));
+    await runFollowUpSlaWatcher({ now: NOW });
+    const why = rollingCall()[2];
+    expect(why.length).toBeLessThanOrEqual(110);
+    expect(why).toMatch(/^Test Ashworth-Example, Test Brightwater-Example(, .+)? and \d more; the oldest was due by 3:00 PM\.$/);
+  });
+
+  test('each promise says what to do and how, when it was promised and due, and the promise as recorded, masked', async () => {
+    mockDb();
+    const MORNING = et('09:30', '2026-09-27');
+    listOpenCommitments.mockResolvedValue([
+      // 7:30 PM the evening before is due 8:30 AM: the earlier day carries its date.
+      row('q', { customer_first_name: 'Quinn', customer_last_name: 'Example', kind: 'send_estimate', channel: 'sms', call_started_at: et('19:30').toISOString(),
+        description: 'Agent will text a quote for the mosquito service to 941-555-0199.' }),
+      row('v', { customer_first_name: 'Val', customer_last_name: 'Example', kind: 'schedule_visit', call_started_at: et('07:00', '2026-09-27').toISOString(),
+        description: `Agent will find a time ${'and check the calendar '.repeat(12)}` }),
+      row('c', { customer_first_name: 'Cal', customer_last_name: 'Example', channel: 'sms', call_started_at: et('07:10', '2026-09-27').toISOString() }),
+    ]);
+    await runFollowUpSlaWatcher({ now: MORNING });
+    const lines = rollingCall()[3].detail.split('\n');
+    expect(lines[0]).toBe('Promises made on calls with no follow-up within an hour (8 AM–8 PM):');
+    expect(lines[1]).toBe('• Quinn Example: send the quote by text (promised Sep 26, 7:30 PM, due 8:30 AM)');
+    expect(lines[2]).toBe('  Agent will text a quote for the mosquito service to ***0199.');
+    expect(lines[3]).toBe('• Val Example: send a visit time (promised 7:00 AM, due 9:00 AM)');
+    expect(lines[4].length).toBeLessThanOrEqual(2 + 180);
+    expect(lines[4]).toMatch(/^ {2}Agent will find a time and check the calendar .*…$/);
+    // A promise with no recorded words is one line.
+    expect(lines[5]).toBe('• Cal Example: text back (promised 7:10 AM, due 9:00 AM)');
+    expect(lines).toHaveLength(6);
+  });
 });
 
 test('an emptied list is retired and flagged, so a miss that returns later (e.g. after a snooze) is posted fresh', async () => {
