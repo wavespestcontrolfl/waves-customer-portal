@@ -515,6 +515,14 @@ async function install(page, server, state) {
         contentType: "text/csv",
         body: "date,amount\n2026-09-08,100\n",
       });
+    // Cash today card (GATE_CASH_FORECAST, dark): the gate-off route answers
+    // 404 and the card renders nothing, so this is an expected request.
+    if (key === "GET /api/admin/banking/cash-today")
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: '{"error":"Not found"}',
+      });
     if (!handlers.has(key)) {
       state.unmatched.push(key);
       return route.fulfill({

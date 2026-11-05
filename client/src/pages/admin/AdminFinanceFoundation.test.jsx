@@ -740,3 +740,73 @@ describe("Finance workflow preservation", () => {
     expect(requests.some((r) => r.key === "GET /api/admin/tax/bank-import/ledger/inbox")).toBe(true);
   });
 });
+
+describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
+  const cashToday = {
+    fetched_at: "2026-11-05T15:00:00.000Z",
+    accounts: [
+      {
+        name: "Synthetic Checking", mask: "1111", account_label: "Synthetic Checking",
+        account_type: "bank", available: 1000, current: 1100, currency: "USD",
+        balance_as_of: "2026-11-05T13:30:00Z",
+      },
+      {
+        name: "Second Checking", mask: "2222", account_label: "Second Checking",
+        account_type: "bank", available: null, current: 250.5, currency: "USD",
+        balance_as_of: null,
+      },
+    ],
+    cards: [
+      {
+        name: "Synthetic Card", mask: "3333", account_label: "Synthetic Card",
+        account_type: "card", available: 5000, current: 400, currency: "USD",
+        balance_as_of: null,
+      },
+    ],
+    unavailable: [
+      { institution_name: "Synthetic Bank", reason: "login_required" },
+      { institution_name: "Other Bank", reason: "error" },
+    ],
+    in_transit: {
+      total: 300,
+      payouts: [{ amount: 300, arrival_day: "2026-11-06", status: "in_transit", bank_last_four: "9999" }],
+    },
+    totals: { bank_usd: 1250.5, owed_usd: 400, in_transit_usd: 300 },
+  };
+
+  it("shows balances, the Stripe parts, the total and the muted lines", async () => {
+    overrides.set("GET /api/admin/banking/cash-today", () => response(cashToday));
+    open(BankingPage);
+    expect(await screen.findByText("Cash today")).toBeInTheDocument();
+    expect(screen.getByText(/Synthetic Checking ••1111/)).toBeInTheDocument();
+    expect(screen.getByText(/as of Nov 5, 8:30 AM ET/)).toBeInTheDocument();
+    expect(screen.getByText("as of the last bank update")).toBeInTheDocument();
+    expect(screen.getByText("Stripe: available and pending")).toBeInTheDocument();
+    expect(screen.getByText("Stripe payouts on the way")).toBeInTheDocument();
+    expect(screen.getByText(/next arrives/)).toHaveTextContent("11/6/2026");
+    // 1250.50 + (1500 + 100) + 300
+    expect(screen.getByText("$3,150.50")).toBeInTheDocument();
+    expect(screen.getByText("Total")).toBeInTheDocument();
+    expect(screen.getByText("Owed on card ••3333: $400.00 (not counted)")).toBeInTheDocument();
+    expect(screen.getByText("Synthetic Bank needs a new sign-in: Tax page → Live bank feeds")).toBeInTheDocument();
+    expect(screen.getByText("Other Bank balance is unavailable right now")).toBeInTheDocument();
+  });
+
+  it("labels the total honestly when the Stripe balance failed", async () => {
+    overrides.set("GET /api/admin/banking/cash-today", () => response(cashToday));
+    overrides.set("GET /api/admin/banking/balance", () => response({ error: "down" }, 503));
+    open(BankingPage);
+    expect(await screen.findByText("Total without Stripe")).toBeInTheDocument();
+    expect(screen.queryByText("Stripe: available and pending")).not.toBeInTheDocument();
+  });
+
+  it.each([403, 404, 500])("renders nothing when the card read answers %i", async (status) => {
+    overrides.set("GET /api/admin/banking/cash-today", () => response({ error: "no" }, status));
+    open(BankingPage);
+    await waitFor(() =>
+      expect(requests.some((r) => r.key === "GET /api/admin/banking/cash-today")).toBe(true),
+    );
+    await screen.findByText("MTD Deposited");
+    expect(screen.queryByText("Cash today")).not.toBeInTheDocument();
+  });
+});

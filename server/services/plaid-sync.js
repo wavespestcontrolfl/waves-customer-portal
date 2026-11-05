@@ -994,6 +994,72 @@ async function syncAllItems() {
   return { items: results.length, results, matchingPasses, matchingError };
 }
 
+// ── cash today (read-only) ──────────────────────────────────────────────────
+
+// One stored+live account pair → the card's row. Bank accounts count cash as
+// the available balance, else the current one; cards report what is owed.
+function cashBalanceEntry(stored, live) {
+  const b = (live && live.balances) || {};
+  return {
+    name: stored.name || null,
+    mask: stored.mask || null,
+    account_label: stored.account_label || null,
+    account_type: stored.account_type,
+    available: b.available != null ? Number(b.available) : null,
+    current: b.current != null ? Number(b.current) : null,
+    currency: b.iso_currency_code || 'USD',
+    balance_as_of: b.last_updated_datetime || null,
+  };
+}
+
+// One connection's balances from Plaid's FREE /accounts/get read. Never throws
+// for a single connection; never calls /accounts/balance/get (paid per call).
+async function readItemCashBalances(item) {
+  const unavailable = (reason) => ({ unavailable: { institution_name: item.institution_name || null, reason } });
+  if (item.status === 'login_required') return unavailable('login_required');
+  let accessToken = null;
+  try {
+    accessToken = await decryptToken(db, item.access_token_enc);
+  } catch (err) {
+    logger.warn(`[plaid-sync] cash balance token read failed: ${err.message}`);
+    return unavailable('token_unreadable');
+  }
+  if (!accessToken) return unavailable('token_unreadable');
+  let live;
+  try {
+    ({ accounts: live } = await plaid.getAccounts(accessToken));
+  } catch (err) {
+    return unavailable(isLoginRequired(err) ? 'login_required' : 'error');
+  }
+  const liveById = new Map((live || []).map(a => [a.account_id, a]));
+  const stored = await db('plaid_accounts').where({ plaid_item_id: item.id, enabled: true });
+  const entries = stored
+    .filter(a => liveById.has(a.account_id))
+    .map(a => cashBalanceEntry(a, liveById.get(a.account_id)));
+  return { entries };
+}
+
+// Balances for the owner's Cash today card. READ-ONLY: writes nothing (no
+// status update, no failure record, no audit row) and sends nothing.
+async function readCashBalances() {
+  const items = await db('plaid_items').whereNotIn('status', ['removed', 'setup']).orderBy('created_at', 'asc');
+  const accounts = [];
+  const cards = [];
+  const unavailable = [];
+  for (const item of items) {
+    let r;
+    try {
+      r = await readItemCashBalances(item);
+    } catch (err) {
+      logger.warn(`[plaid-sync] cash balance read failed: ${err.message}`);
+      r = { unavailable: { institution_name: item.institution_name || null, reason: 'error' } };
+    }
+    if (r.unavailable) unavailable.push(r.unavailable);
+    for (const e of r.entries || []) (e.account_type === 'card' ? cards : accounts).push(e);
+  }
+  return { accounts, cards, unavailable };
+}
+
 module.exports = {
   getStatus,
   createLinkToken,
@@ -1004,6 +1070,7 @@ module.exports = {
   disconnectItem,
   syncItem,
   syncAllItems,
+  readCashBalances,
   // pure helpers (tests)
   mapTransaction,
   defaultLabel,
