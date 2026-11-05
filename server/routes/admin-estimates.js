@@ -3208,12 +3208,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       } else {
         try {
           const smsContext = { workflow: 'admin_estimate_send', entity_type: 'estimate', entity_id: estimate.id };
-          const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, smsContext, { noVariants: !!options.reviewedMessages });
-          if (!currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
-          // An unreviewed update takes estimate_updated while it is on; a reviewed send delivers the reviewed body.
+          const smsVars = { first_name: firstName, estimate_url: smsViewUrl };
+          // The template this text uses must be on. A reviewed send delivers the reviewed body: a normal-wording review
+          // needs estimate_sent on; an updated one had estimate_updated checked before the claim. An unreviewed update
+          // takes estimate_updated while it is on, else estimate_sent (GATE_ESTIMATE_UPDATED_WORDING).
+          const reviewedUpdatedText = options.reviewedMessages?.smsTemplate === updatedWording.UPDATED_SMS_TEMPLATE_KEY;
+          const currentSmsBody = reviewedUpdatedText ? null : (options.reviewedMessages
+            ? await smsTemplatesRouter.getTemplate('estimate_sent', smsVars, smsContext, { noVariants: true })
+            : (await deliverySms(updatedSend, smsVars, smsContext)).body);
+          if (!reviewedUpdatedText && !currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
           const smsBody = options.reviewedMessages
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
-            : (updatedSend ? (await deliverySms(true, { first_name: firstName, estimate_url: smsViewUrl }, smsContext)).body : currentSmsBody);
+            : currentSmsBody;
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
           // EVERY claimed member of a grouped send, not only the anchor: a
           // county warning landing on a sibling before the provider call

@@ -2944,6 +2944,32 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     expect(email.sendTemplate.mock.calls[0][0]).toMatchObject({ templateKey: 'estimate.delivery', versionId: 'synthetic-email-version' });
   });
 
+  test.each([['reviewed', true], ['unreviewed', false]])('a %s update texts with estimate_updated on even while estimate_sent is off', async (_name, reviewed) => {
+    smsTemplates.getTemplate.mockImplementation(async (key, vars) => (key === 'estimate_updated'
+      ? `Updated estimate: ${vars.estimate_url.replace(/^https:\/\//, '')}` : null));
+    if (reviewed) {
+      const preview = await invoke('/:id/send-preview', 'get');
+      expect(preview.body.messages.sms).toMatch(/^Updated estimate: /);
+      const response = await invoke('/:id/send', 'post', {
+        sendMethod: 'both', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+      });
+      expect(response.statusCode).toBe(200);
+    } else {
+      row.status = 'sending';
+      expect((await router.sendEstimateNow(structuredClone(row), 'both', { callerPreClaimed: true })).sent).toBe(true);
+    }
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe('Updated estimate: portal.wavespestcontrol.com/s/synthetic-sms');
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a normal-wording send still needs estimate_sent on', async () => {
+    liveScope = DELIVERED_SCOPE;
+    smsTemplates.getTemplate.mockImplementation(async () => null);
+    row.status = 'sending';
+    await router.sendEstimateNow(structuredClone(row), 'sms', { callerPreClaimed: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('an unreviewed send (auto-send, a schedule with no review) decides from the row it delivers', async () => {
     row.status = 'sending';
     const result = await router.sendEstimateNow(structuredClone(row), 'both', { callerPreClaimed: true });
