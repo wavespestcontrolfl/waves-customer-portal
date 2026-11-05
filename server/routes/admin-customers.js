@@ -3078,6 +3078,33 @@ router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, 
   } catch (err) { next(err); }
 });
 
+// "Same family" link (owner 2026-11-04): staff group customer profiles so the 10% Multi-Home Discount counts them as one
+// family. It never writes customers.has_multi_home, sends nothing and changes no price. Admin only.
+router.get('/:id/multi-home-family', requireAdmin, async (req, res, next) => {
+  try {
+    const family = require('../services/multi-home-family');
+    if (!family.isUuid(req.params.id)) return res.status(400).json({ error: 'Invalid customer id' });
+    return res.json(await family.familyMembers(db, req.params.id));
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/multi-home-family', requireAdmin, async (req, res, next) => {
+  try {
+    const family = require('../services/multi-home-family');
+    const otherCustomerId = req.body?.otherCustomerId;
+    if (!family.isUuid(req.params.id) || !family.isUuid(otherCustomerId)) return res.status(400).json({ error: 'otherCustomerId must be a customer id' });
+    return res.json(await family.linkFamily(db, { customerId: req.params.id, otherCustomerId, actorId: req.technicianId }));
+  } catch (err) { next(err); }
+});
+
+router.delete('/:id/multi-home-family', requireAdmin, async (req, res, next) => {
+  try {
+    const family = require('../services/multi-home-family');
+    if (!family.isUuid(req.params.id)) return res.status(400).json({ error: 'Invalid customer id' });
+    return res.json(await family.unlinkFamily(db, { customerId: req.params.id, actorId: req.technicianId }));
+  } catch (err) { next(err); }
+});
+
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
     const canChangeAppointmentAddress = require('../config/feature-gates').isEnabled('editApptAddress');
