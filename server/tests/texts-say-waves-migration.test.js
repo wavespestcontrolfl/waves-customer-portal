@@ -30,3 +30,21 @@ test('the audit actions fit audit_log.action (varchar 96)', () => {
   expect(migration._AUDIT_ACTION.length).toBeLessThanOrEqual(96);
   expect(migration._AUDIT_ROLLBACK_ACTION.length).toBeLessThanOrEqual(96);
 });
+
+describe('20261105000100_optin_text_says_waves (owner 2026-11-04 "change": consent texts too)', () => {
+  const optin = require('../models/migrations/20261105000100_optin_text_says_waves');
+
+  test('the opt-in request says "Waves" and keeps every placeholder and the consent wording', () => {
+    expect(optin._KEY).toBe('recipient_optin_request');
+    expect(optin._AFTER).toBe(optin._BEFORE.replace('Waves Pest Control', 'Waves'));
+    expect(optin._AFTER).not.toMatch(/Waves Pest Control/);
+    expect(optin._AFTER).toContain('service texts from Waves for {property_address}.');
+    expect(placeholders(optin._AFTER)).toEqual(['{account_first_name}', '{property_address}', '{recipient_first_name}']);
+    expect(optin._AFTER).toContain('Reply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply.');
+  });
+
+  test('its audit actions fit audit_log.action (varchar 96)', () => {
+    expect(optin._AUDIT_ACTION.length).toBeLessThanOrEqual(96);
+    expect(optin._AUDIT_ROLLBACK_ACTION.length).toBeLessThanOrEqual(96);
+  });
+});

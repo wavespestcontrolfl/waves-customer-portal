@@ -740,7 +740,7 @@ router.post('/sms', async (req, res) => {
 
       return res.type('text/xml').send(
         optOut.applied
-          ? `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
+          ? `<Response><Message>You've been unsubscribed from Waves SMS. Reply START to re-subscribe.</Message></Response>`
           : '<Response></Response>'
       );
     }
@@ -914,8 +914,8 @@ router.post('/sms', async (req, res) => {
       await fireContactCorrection(null);
 
       return res.type('text/xml').send(optInLanded
-        ? `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
-        : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
+        ? `<Response><Message>You've been re-subscribed to Waves SMS.</Message></Response>`
+        : `<Response><Message>We received your request to receive texts from Waves. Our office will confirm your subscription shortly.</Message></Response>`);
     }
 
     // ── Recruiting: an applicant replying to our interview invite /

@@ -96,4 +96,33 @@ jest.setTimeout(30000);
     expect(await bodyOf('sms_templates', id)).toBe('Edited by the office after the swap.');
     expect(await auditRows(ROLLBACK_ACTION)).toHaveLength(0);
   });
+
+  // 20261105000100_optin_text_says_waves (owner "change": the consent texts too).
+  describe('the opt-in request follow-up', () => {
+    const optin = require('../models/migrations/20261105000100_optin_text_says_waves');
+
+    test('the base row and a matching variant swap and are audited; an edited variant stays; down() reverts the tracked rows', async () => {
+      const baseId = await seedTemplate(optin._KEY, optin._BEFORE);
+      const variantId = await seedVariant(optin._KEY, 'short', optin._BEFORE);
+      const customId = await seedVariant(optin._KEY, 'custom', 'Office wording for the opt-in.');
+      await optin.up(database);
+      expect(await bodyOf('sms_templates', baseId)).toBe(optin._AFTER);
+      expect(await bodyOf('sms_template_variants', variantId)).toBe(optin._AFTER);
+      expect(await bodyOf('sms_template_variants', customId)).toBe('Office wording for the opt-in.');
+      expect((await auditRows(optin._AUDIT_ACTION)).map((row) => `${row.resource_type}:${row.resource_id}`).sort())
+        .toEqual([`sms_template_variants:${variantId}`, `sms_templates:${baseId}`].sort());
+
+      await optin.down(database);
+      expect(await bodyOf('sms_templates', baseId)).toBe(optin._BEFORE);
+      expect(await bodyOf('sms_template_variants', variantId)).toBe(optin._BEFORE);
+      expect(await auditRows(optin._AUDIT_ROLLBACK_ACTION)).toHaveLength(2);
+    });
+
+    test('an opt-in body an admin edited is skipped and never tracked', async () => {
+      const id = await seedTemplate(optin._KEY, 'Edited opt-in text. Reply YES to confirm.');
+      await optin.up(database);
+      expect(await bodyOf('sms_templates', id)).toBe('Edited opt-in text. Reply YES to confirm.');
+      expect(await auditRows(optin._AUDIT_ACTION)).toHaveLength(0);
+    });
+  });
 });

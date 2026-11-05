@@ -116,11 +116,13 @@ const WRONG_NUMBER_PATTERNS = [
 ];
 
 const HELP_KEYWORDS = new Set(['HELP', 'INFO']);
+// Owner 2026-11-04: texts say "Waves", never "Waves Pest Control" ("change": the
+// consent and carrier replies too).
 const HELP_RESPONSE_TEMPLATE =
-  'Waves Pest Control: text or call (941) 297-5749 for support. ' +
+  'Waves: text or call (941) 297-5749 for support. ' +
   'Reply STOP to opt out. Msg & data rates may apply.';
 const STOP_CONFIRMATION_TEMPLATE =
-  "You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.";
+  "You've been unsubscribed from Waves SMS. Reply START to re-subscribe.";
 
 // Footer-stripping (a set of regexes that removed a vendor's own reply
 // instruction before matching) was removed 2026-09-11 (codex round 3 P0
