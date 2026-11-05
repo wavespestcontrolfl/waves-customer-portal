@@ -142,7 +142,20 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       requireGeneralChargeConsent: true,
       requireBookedVisitLinesOnly: true,
       requireNoUnappliedVisitPrepayment: true,
+      refuseWhenActivePaymentPlan: true,
     });
+  });
+
+  // Codex security P2 (#7587 r5): an active payment plan owns the invoice's collection, with or
+  // without a reminder sequence for the stopped-collection check to see.
+  test('gate on, an invoice on an active payment plan: both routes answer 404 before Stripe', async () => {
+    mockRows.payment_plans = { id: 'plan-1' };
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-1' })).status).toBe(404);
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 102.9 })).status).toBe(404);
+    });
+    expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   // Codex security P2 (#7587 r2): a card saved only for an estimate's card hold (or with only an old,
@@ -285,6 +298,11 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       InvoiceService.getById.mockImplementation(async () => ({
         ...invoiceRow({ line_items: [...BOOKED_LINES, { description: 'Extra treatment', amount: 400 }] }), total: 529,
       }));
+      expect((await read()).body.tech_card_on_file).toBe(false);
+    });
+
+    test('an invoice on an active payment plan: tech_card_on_file is false', async () => {
+      mockRows.payment_plans = { id: 'plan-1' };
       expect((await read()).body.tech_card_on_file).toBe(false);
     });
 

@@ -2161,6 +2161,7 @@ router.post('/:id/charge-card', async (req, res, next) => {
           requireGeneralChargeConsent: true,
           requireBookedVisitLinesOnly: true,
           requireNoUnappliedVisitPrepayment: true,
+          refuseWhenActivePaymentPlan: true,
         }
         // An admin ordered this charge explicitly: exempt from the default
         // collections dispute-hold guard (an operator may override a hold).

@@ -6,7 +6,7 @@
 describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards', () => {
   beforeEach(() => { jest.resetModules(); });
 
-  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {}, consents = [] }) {
+  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) }, methodType = 'card', invoiceFields = {}, consents = [], activePlan = null }) {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       subtotal: '200.00', total: '200.00', discount_amount: '0.00',
@@ -36,6 +36,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'annual_prepay_terms') return { status: 'payment_pending', prepay_invoice_id: 'inv-1' };
         if (table === 'customer_contracts') return contract;
         if (table === 'payment_method_consents') return consents[0] || null;
+        if (table === 'payment_plans') return activePlan;
         // Only the applied-prepayment marker lookup (it binds 'scheduled_service_prepaid') sees the marker.
         if (table === 'payments') return markerLookup ? appliedMarker : null;
         return null;
@@ -281,6 +282,18 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       const charge = StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: true });
       if (refuses) await expect(charge).rejects.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
       else await expect(charge).rejects.not.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
+    });
+
+    // Codex security P2 (#7587 r5): a plan may have no reminder sequence for refuseWhenDunningStopped.
+    test.each([
+      ['an active payment plan', { id: 'plan-1' }, true],
+      ['no active payment plan', null, false],
+    ])('refuseWhenActivePaymentPlan: %s on the locked invoice', async (_label, activePlan, refuses) => {
+      const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null, activePlan });
+      const charge = StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, refuseWhenActivePaymentPlan: true });
+      if (refuses) await expect(charge).rejects.toMatchObject({ code: 'ACTIVE_PAYMENT_PLAN' });
+      else await expect(charge).rejects.not.toMatchObject({ code: 'ACTIVE_PAYMENT_PLAN' });
       expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
     });
 
