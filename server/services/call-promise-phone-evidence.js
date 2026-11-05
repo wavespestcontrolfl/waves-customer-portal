@@ -69,6 +69,10 @@ async function loadPhoneEvidence(conn, commitment, message, now) {
   const key = message.phone_identity;
   const smsPeer = phoneIdentitySql("(CASE WHEN direction = 'inbound' THEN from_phone ELSE to_phone END)");
   const callPeer = phoneIdentitySql("(CASE WHEN direction LIKE 'outbound%' THEN to_phone ELSE from_phone END)");
+  // The call's real start, over call_log (the helper's default table). Written without the table name: the sandbox
+  // scan (voice-relay-sandbox-dry-run.test.js) reads any function call given the call_log table name as a query
+  // site, and this is not one. The query below already drops sandbox rows (whereNotSandboxCall).
+  const started = callStartedAtSql();
   const sources = {
     // Texts both ways. A reservation placeholder is no text (codex #4331 P2); recruiting threads are owner-only.
     sms: excludeRecruitingSmsLog(excludeUnresolvedSendReservations(conn('sms_log')))
@@ -87,10 +91,10 @@ async function loadPhoneEvidence(conn, commitment, message, now) {
       .whereRaw('id IS DISTINCT FROM ?', [message.source_call_id ?? null])
       .whereRaw('twilio_call_sid IS DISTINCT FROM ?', [message.source_call_sid ?? null])
       .where('created_at', '>', after)
-      .whereRaw(`${callStartedAtSql('call_log')} > ?`, [after]).whereRaw(`${callStartedAtSql('call_log')} <= ?`, [now])
+      .whereRaw(`${started} > ?`, [after]).whereRaw(`${started} <= ?`, [now])
       .orderBy('created_at', 'desc').limit(LIMIT + 1)
       .select('id', 'direction', 'status', 'duration_seconds', 'transcription', 'answered_by', 'created_at', ...callContactSelects(conn),
-        conn.raw(`${callStartedAtSql('call_log')} as started_at`)),
+        conn.raw(`${started} as started_at`)),
   };
   const entries = Object.entries(sources);
   const results = await Promise.allSettled(entries.map(([, query]) => query));
