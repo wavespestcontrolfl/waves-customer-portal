@@ -831,6 +831,7 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
   // `expected`; under the locks a recomputed year that differs refuses before anything is voided or minted.
   function expectedFrom(preview) {
     return {
+      customerId: 'cust-1',
       amount: preview.mintPayload.amount,
       setupFeeAmount: preview.mintPayload.setupFeeAmount || 0,
       visitCount: preview.mintPayload.visitCount,
@@ -868,6 +869,16 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     stubTables();
     const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected: { ...expectedFrom(preview), supersedeKeys: [] } });
     expect(out).toMatchObject({ httpStatus: 409, drift: true });
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('runPrepaySwitch refuses as drift when the visit now belongs to a different customer than the card approved', async () => {
+    const preview = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, { switchLane: true });
+    stubTables();
+    const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, expected: { ...expectedFrom(preview), customerId: 'cust-merged-away' } });
+    expect(out).toMatchObject({ httpStatus: 409, drift: true });
+    expect(out.httpBody.error).toMatch(/different customer than the card showed/);
+    expect(stubTables.casCalls.length).toBe(0);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 

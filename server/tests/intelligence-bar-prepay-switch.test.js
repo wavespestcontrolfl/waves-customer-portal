@@ -103,7 +103,7 @@ test('confirm runs the switch once with the figures the card showed', async () =
   expect(Schedule.runPrepaySwitch).toHaveBeenCalledTimes(1);
   expect(Schedule.runPrepaySwitch.mock.calls[0][0]).toMatchObject({
     visitId: VISIT, switchLane: true, acknowledgeNoticedAmount: false,
-    expected: { amount: 512, setupFeeAmount: 0, visitCount: 4, coverageCadence: 'quarterly', serviceType: 'Quarterly Pest Control', termStart: '2099-02-03', supersedeKeys: ['inv-1:227'] },
+    expected: { customerId: CUST, amount: 512, setupFeeAmount: 0, visitCount: 4, coverageCadence: 'quarterly', serviceType: 'Quarterly Pest Control', termStart: '2099-02-03', supersedeKeys: ['inv-1:227'] },
   });
 });
 

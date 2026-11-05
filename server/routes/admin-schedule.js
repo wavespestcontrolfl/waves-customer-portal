@@ -25489,6 +25489,14 @@ async function runPrepaySwitch({
         err.switchConflict = true;
         throw err;
       }
+      // The customer the card approved (bar only): a merge that repointed the
+      // visit before this transaction would otherwise mint on another record.
+      if (expected && String(liveVisit.customer_id) !== String(expected.customerId || '')) {
+        const err = new Error('This visit now belongs to a different customer than the card showed — nothing was switched');
+        err.switchConflict = true;
+        err.switchDrift = true;
+        throw err;
+      }
       // Provenance pin (Codex P0 r13): the supersede/mint context below
       // rides `target`, resolved before the transaction. Re-resolve under
       // the locks and refuse on ANY drift — a reparented series or a

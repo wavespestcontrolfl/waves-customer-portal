@@ -145,6 +145,7 @@ async function buildPlan(input) {
     sends_to_customer: false,
     _version: versionOf({ visit, customer, mint, supersedes }),
     _expected: {
+      customerId: String(visit.customer_id),
       amount: mint.amount,
       setupFeeAmount: setupFee,
       visitCount: mint.visitCount,
