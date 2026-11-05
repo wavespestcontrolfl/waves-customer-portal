@@ -25,6 +25,8 @@ const boundaryRow = (type, tripId, min) => logRow(tripId, [], {
     [type === 'trip-start' ? 'start' : 'end']: { timestamp: at(min), timezone: 'America/New_York' },
   }),
 });
+// The trip-start and trip-end events a settled trip has in the log (minutes from T0).
+const bounds = (tripId, startMin, endMin) => [boundaryRow('trip-start', tripId, startMin), boundaryRow('trip-end', tripId, endMin)];
 const trip = (n, tripId, extra = {}) => ({
   id: uuid(n), vehicle_id: IMEI, bouncie_trip_id: tripId, source: 'bouncie', trip_date: '2026-10-08',
   start_lat: null, start_lng: null, end_lat: null, end_lng: null,
@@ -40,6 +42,7 @@ describe('fillTripCoordinates', () => {
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [
+        ...bounds('t1', 0, 10),
         logRow('t1', [sample(8, 27.49, -82.57), sample(10, 27.5, -82.58)]),
         logRow('t1', [sample(0, 27.4, -82.5), sample(4, 27.45, -82.55)]),
       ],
@@ -57,6 +60,7 @@ describe('fillTripCoordinates', () => {
         trip(2, 't2', { start_lat: 3.5 }),
       ],
       log: [
+        ...bounds('t1', 0, 10), ...bounds('t2', 0, 10),
         logRow('t1', [sample(0, 27.4, -82.5), sample(10, 27.5, -82.58)]),
         logRow('t2', [sample(0, 27.4, -82.5), sample(10, 27.5, -82.58)]),
       ],
@@ -89,7 +93,7 @@ describe('fillTripCoordinates', () => {
   test('gate off: apply writes nothing; a dry run counts without writing', async () => {
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
-      log: [logRow('t1', [sample(0, 27.4, -82.5), sample(10, 27.5, -82.58)])],
+      log: [...bounds('t1', 0, 10), logRow('t1', [sample(0, 27.4, -82.5), sample(10, 27.5, -82.58)])],
     });
     expect(await fillTripCoordinates(conn, { apply: true, now: NOW })).toMatchObject({ skipped: 'gate_off', rowsFilled: 0 });
     expect(conn).not.toHaveBeenCalled();
@@ -102,7 +106,7 @@ describe('fillTripCoordinates', () => {
     process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1'), trip(2, 't2'), trip(3, 't3')],
-      log: ['t1', 't2', 't3'].map((id) => logRow(id, [sample(0, 27.4, -82.5), sample(5, 27.5, -82.6)])),
+      log: ['t1', 't2', 't3'].flatMap((id) => [...bounds(id, 0, 5), logRow(id, [sample(0, 27.4, -82.5), sample(5, 27.5, -82.6)])]),
     });
     const first = await fillTripCoordinates(conn, { apply: true, batchSize: 1, now: NOW });
     expect(first).toMatchObject({ candidates: 3, rowsFilled: 3 });
@@ -174,21 +178,62 @@ describe('settled trips and complete trails', () => {
     expect(await fillTripCoordinates(conn, { apply: true, now: endMs + 121 * 60000 })).toMatchObject({ rowsFilled: 1, unsettled: 0 });
   });
 
-  test('with no trip-end event, a trip dated today ET is unsettled and a trip dated earlier is settled', async () => {
+  test('a cross-midnight trip whose trip-end webhook is delayed is not filled at the 01:00 run, then is filled later', async () => {
+    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
+    // 23:50 ET Oct 8 to 00:55 ET Oct 9 (03:50Z to 04:55Z), dated Oct 8; the cron runs at 01:00 ET (05:00Z).
+    const iso = (hhmm) => `2026-10-09T${hhmm}:00Z`;
+    const ms = (hhmm) => Date.parse(iso(hhmm));
+    const point = (hhmm, lat, lng) => ({ timestamp: iso(hhmm), gps: { lat, lon: lng } });
+    const received = (when) => ({ received_at: new Date(when) });
+    const event = (type, hhmm) => logRow('cm', [], {
+      event_type: type, ...received(ms(hhmm)),
+      payload: JSON.stringify({ transactionId: 'cm', [type === 'trip-start' ? 'start' : 'end']: { timestamp: iso(hhmm) } }),
+    });
+    const conn = makeFakeDb({
+      mileage: [trip(1, 'cm')],
+      log: [event('trip-start', '03:50'), logRow('cm', [point('03:50', 27.4, -82.5), point('04:20', 27.45, -82.55)], received(ms('04:25')))],
+    });
+    // 01:00 ET: no trip-end event yet, and only the early batches. Nothing is stored.
+    expect(await fillTripCoordinates(conn, { apply: true, now: ms('05:00') })).toMatchObject({ rowsFilled: 0, noEndEvent: 1 });
+    expect(conn.tables.mileage_log[0].start_lat).toBeNull();
+    // The trip-end event arrives 5 minutes after the trip ended: still inside the 2 hour wait, so still nothing.
+    conn.tables.bouncie_webhook_log.push(event('trip-end', '04:55'));
+    expect(await fillTripCoordinates(conn, { apply: true, now: ms('05:00') })).toMatchObject({ rowsFilled: 0, unsettled: 1 });
+    // After the wait, but the last batch is still missing: the trail does not reach the end event.
+    expect(await fillTripCoordinates(conn, { apply: true, now: ms('07:30') })).toMatchObject({ rowsFilled: 0, incompleteTrail: 1 });
+    expect(conn.tables.mileage_log[0].end_lat).toBeNull();
+    // The late batch arrives; the next run fills the true endpoints.
+    conn.tables.bouncie_webhook_log.push(logRow('cm', [point('04:54', 27.5, -82.6)], received(ms('07:45'))));
+    expect(await fillTripCoordinates(conn, { apply: true, now: ms('08:00') })).toMatchObject({ rowsFilled: 1 });
+    expect(conn.tables.mileage_log[0]).toMatchObject({ start_lat: 27.4, start_lng: -82.5, end_lat: 27.5, end_lng: -82.6 });
+  });
+
+  test('a trip whose trip-end event never arrives is never filled, however old', async () => {
     process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
-      mileage: [trip(1, 'today', { trip_date: '2026-10-09' }), trip(2, 'earlier')],
-      log: [logRow('today', trail), logRow('earlier', trail)],
+      mileage: [trip(1, 't1')],
+      log: [boundaryRow('trip-start', 't1', 0), logRow('t1', trail)],
     });
-    expect(await fillTripCoordinates(conn, { apply: true, now: NOW })).toMatchObject({ rowsFilled: 1, unsettled: 1 });
-    expect(conn.tables.mileage_log[1].start_lat).toBe(27.4);
+    for (const now of [NOW, NOW + 3 * 86400000]) {
+      expect(await fillTripCoordinates(conn, { apply: true, now })).toMatchObject({ rowsFilled: 0, noEndEvent: 1 });
+    }
     expect(conn.tables.mileage_log[0].start_lat).toBeNull();
+  });
+
+  test('a trip with a trip-end event but no trip-start event is not filled', async () => {
+    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
+    const conn = makeFakeDb({
+      mileage: [trip(1, 't1')],
+      log: [boundaryRow('trip-end', 't1', 10), logRow('t1', trail)],
+    });
+    expect(await fillTripCoordinates(conn, { apply: true, now: NOW })).toMatchObject({ rowsFilled: 0, noStartEvent: 1 });
+    expect(conn.tables.mileage_log[0].end_lat).toBeNull();
   });
 
   test('a dry run reports an incomplete trail without writing', async () => {
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
-      log: [boundaryRow('trip-end', 't1', 10), logRow('t1', trail.slice(0, 2))],
+      log: [...bounds('t1', 0, 10), logRow('t1', trail.slice(0, 2))],
     });
     expect(await fillTripCoordinates(conn, { now: NOW })).toMatchObject({ rowsFilled: 0, incompleteTrail: 1 });
   });
@@ -210,7 +255,7 @@ describe('fillRecentTripCoordinates', () => {
 
   test('gate on fills recent settled trips', async () => {
     process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
-    const log = [logRow('t1', [sample(0, 27.4, -82.5), sample(5, 27.5, -82.6)])];
+    const log = [...bounds('t1', 0, 5), logRow('t1', [sample(0, 27.4, -82.5), sample(5, 27.5, -82.6)])];
     const conn = makeFakeDb({ mileage: [trip(1, 't1')], log });
     expect(await fillRecentTripCoordinates(conn, { now: NOW })).toMatchObject({ candidates: 1, rowsFilled: 1 });
     expect(conn.tables.mileage_log[0]).toMatchObject({ start_lat: 27.4, end_lat: 27.5 });

@@ -15,10 +15,12 @@
  *    existing coordinate is never overwritten, not even by a race with another writer.
  *  - A trip with no trip-data in the log is left alone.
  *  - Only SETTLED trips are filled, because trip-data batches can arrive late or out of order and the NULL-only guard
- *    would freeze a wrong early answer: the trip ended at least SETTLE_MS ago (its trip-end event's time; with no
- *    trip-end event, its trip_date is before today ET), and when the log holds the trip-start / trip-end events of the
- *    transaction, the trail's first point is within BOUNDARY_TOLERANCE_MS of the start time and its last point within
- *    it of the end time. A trail that does not reach them is counted as incompleteTrail and left for a later run.
+ *    would freeze a wrong early answer. A trip is settled ONLY when the log holds its trip-end event, that end time
+ *    is at least SETTLE_MS ago, the log also holds its trip-start event, and the trail's first point is within
+ *    BOUNDARY_TOLERANCE_MS of the start time and its last point within it of the end time. There is no date-based
+ *    fallback: a trip dated yesterday may have ended minutes ago. Anything else is counted (noEndEvent, unsettled,
+ *    noStartEvent, incompleteTrail) and left NULL for a later run. A trip whose trip-end event never arrives stays
+ *    NULL, which is today's state.
  *  - is_business, purpose, deduction and classification columns are never touched (the tax review stays
  *    suggestion-only, owner policy).
  *  - A write needs GATE_MILEAGE_TRIP_COORDS=true; a dry run reads and counts without it.
@@ -138,18 +140,10 @@ async function boundariesForGroup(conn, group, now) {
   return found;
 }
 
-/** Settled = the trip is over for good: ended 2+ hours ago by its own end event, else dated before today ET. */
-function isSettled(day, boundary, now) {
-  if (boundary?.endMs != null) return now - boundary.endMs >= SETTLE_MS;
-  return day < etDateString(new Date(now));
-}
-
-/** The logged trail reaches the start / end times of the trip's own events (when the log has them). */
+/** The logged trail reaches the start and end times of the trip's own events (both are required to be present). */
 function trailReachesBoundaries(trip, boundary) {
-  if (!boundary) return true;
-  if (boundary.startMs != null && Math.abs(trip.startMs - boundary.startMs) > BOUNDARY_TOLERANCE_MS) return false;
-  if (boundary.endMs != null && Math.abs(trip.endMs - boundary.endMs) > BOUNDARY_TOLERANCE_MS) return false;
-  return true;
+  return Math.abs(trip.startMs - boundary.startMs) <= BOUNDARY_TOLERANCE_MS
+    && Math.abs(trip.endMs - boundary.endMs) <= BOUNDARY_TOLERANCE_MS;
 }
 
 /** The pairs to write for one row, given its logged trip. Only a missing pair is returned. */
@@ -183,10 +177,15 @@ async function applyFills(conn, row, fills) {
   return { start, end };
 }
 
-/** What to do with one row: { outcome } where outcome is 'noPoints', 'unsettled', 'incompleteTrail' or 'fill' (+ fills). */
+/**
+ * What to do with one row: { outcome } where outcome is 'noPoints', 'noEndEvent', 'unsettled', 'noStartEvent',
+ * 'incompleteTrail' or 'fill' (+ fills). The checks run in that order.
+ */
 function decide(row, trip, boundary, now) {
   if (!trip) return { outcome: 'noPoints' };
-  if (!isSettled(row.day, boundary, now)) return { outcome: 'unsettled' };
+  if (boundary?.endMs == null) return { outcome: 'noEndEvent' };
+  if (now - boundary.endMs < SETTLE_MS) return { outcome: 'unsettled' };
+  if (boundary.startMs == null) return { outcome: 'noStartEvent' };
   if (!trailReachesBoundaries(trip, boundary)) return { outcome: 'incompleteTrail' };
   const fills = fillsFor(row, trip);
   return fills.start || fills.end ? { outcome: 'fill', fills } : { outcome: 'noPoints' };
@@ -217,10 +216,10 @@ async function processGroup(conn, group, totals, { apply, now }) {
  *   apply: write (needs the gate); default false = count only. sinceDate: YYYY-MM-DD lower bound on trip_date.
  *   tripId: only the row with this bouncie_trip_id.
  * @returns {Promise<{skipped?:string, candidates:number, rowsFilled:number, startFilled:number, endFilled:number,
- *   noPoints:number, unsettled:number, incompleteTrail:number}>}
+ *   noPoints:number, noEndEvent:number, unsettled:number, noStartEvent:number, incompleteTrail:number}>}
  */
 async function fillTripCoordinates(conn, { apply = false, sinceDate = null, tripId = null, batchSize = DEFAULT_BATCH_SIZE, now = Date.now() } = {}) {
-  const totals = { candidates: 0, rowsFilled: 0, startFilled: 0, endFilled: 0, noPoints: 0, unsettled: 0, incompleteTrail: 0 };
+  const totals = { candidates: 0, rowsFilled: 0, startFilled: 0, endFilled: 0, noPoints: 0, noEndEvent: 0, unsettled: 0, noStartEvent: 0, incompleteTrail: 0 };
   if (apply && !mileageTripCoordsLive()) return { skipped: 'gate_off', ...totals };
   for (let afterId = null; ;) {
     const rows = await loadCandidates(conn, { afterId, batchSize, sinceDate, tripId });
@@ -239,7 +238,7 @@ async function fillRecentTripCoordinates(conn, { days = 3, now = Date.now() } = 
   try {
     const sinceDate = etDateString(addETDays(new Date(now), -days));
     const result = await fillTripCoordinates(conn, { apply: true, sinceDate, now });
-    logger.info(`[mileage-trip-coords] filled ${result.rowsFilled} of ${result.candidates} trip(s) since ${sinceDate}; no points ${result.noPoints}, unsettled ${result.unsettled}, incomplete trail ${result.incompleteTrail}`);
+    logger.info(`[mileage-trip-coords] filled ${result.rowsFilled} of ${result.candidates} trip(s) since ${sinceDate}; no points ${result.noPoints}, no end event ${result.noEndEvent}, unsettled ${result.unsettled}, no start event ${result.noStartEvent}, incomplete trail ${result.incompleteTrail}`);
     return result;
   } catch (err) {
     logger.error(`[mileage-trip-coords] daily fill failed: ${err.message}`);

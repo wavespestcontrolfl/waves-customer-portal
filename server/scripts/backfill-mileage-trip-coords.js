@@ -37,7 +37,9 @@ function report(opts, result) {
     `  trips missing a start or end pair: ${result.candidates}`,
     `  trips ${opts.apply ? 'filled' : 'that would be filled'}: ${result.rowsFilled} (start pairs ${result.startFilled}, end pairs ${result.endFilled})`,
     `  trips with no trip-data in the log, left alone: ${result.noPoints}`,
-    `  trips not settled yet (ended under 2 hours ago), left for a later run: ${result.unsettled}`,
+    `  trips with no trip-end event in the log (stay NULL until it arrives): ${result.noEndEvent}`,
+    `  trips that ended under 2 hours ago, left for a later run: ${result.unsettled}`,
+    `  trips with no trip-start event in the log, left alone: ${result.noStartEvent}`,
     `  trips whose trail does not reach their start or end event, left for a later run: ${result.incompleteTrail}`,
   ];
   if (!opts.apply) lines.push('Re-run with --apply to write.');

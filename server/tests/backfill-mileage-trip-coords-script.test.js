@@ -12,10 +12,14 @@ const fixture = () => makeFakeDb({
     { id: '00000000-0000-4000-8000-000000000001', vehicle_id: 'imei-1', bouncie_trip_id: 't1', source: 'bouncie', trip_date: '2026-10-08', start_lat: null, start_lng: null, end_lat: null, end_lng: null },
     { id: '00000000-0000-4000-8000-000000000002', vehicle_id: 'imei-1', bouncie_trip_id: 'lost', source: 'bouncie', trip_date: '2026-10-08', start_lat: null, start_lng: null, end_lat: null, end_lng: null },
   ],
-  log: [{
-    id: 1, vehicle_imei: 'imei-1', event_type: 'trip-data', received_at: new Date(T0 + 60000),
-    payload: JSON.stringify({ transactionId: 't1', data: [sample(0, 27.4, -82.5), sample(9, 27.5, -82.6)] }),
-  }],
+  log: [
+    ['trip-start', { start: { timestamp: new Date(T0).toISOString() } }],
+    ['trip-end', { end: { timestamp: new Date(T0 + 9 * 60000).toISOString() } }],
+    ['trip-data', { data: [sample(0, 27.4, -82.5), sample(9, 27.5, -82.6)] }],
+  ].map(([type, body], i) => ({
+    id: i + 1, vehicle_imei: 'imei-1', event_type: type, received_at: new Date(T0 + 60000),
+    payload: JSON.stringify({ transactionId: 't1', ...body }),
+  })),
 });
 
 let logSpy;
