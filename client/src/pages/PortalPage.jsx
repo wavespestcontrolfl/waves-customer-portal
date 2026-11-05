@@ -31,6 +31,7 @@ import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard'
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
 import PetNameAskCard from '../components/portal/PetNameAskCard';
+import PortalMessages, { usePortalMessagesGate } from '../components/portal/PortalMessages';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
@@ -16585,6 +16586,8 @@ const PRIMARY_TABS = [
   { id: 'refer', label: 'Refer', icon: 'gift' },
 ];
 const MORE_TABS = [
+  // Listed only while the server offers it (usePortalMessagesGate answers 200).
+  { id: 'messages', label: 'Messages', icon: 'message', description: 'Questions and answers with our team' },
   { id: 'documents', label: 'Documents', icon: 'document', description: 'Reports, invoices, and agreements' },
   { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
   { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
@@ -16598,9 +16601,19 @@ const CANCELLED_TABS = ['plan', 'visits', 'billing', 'documents'];
 // reports — nothing billing, plan, referral or property related (those routes
 // answer 403 ACCOUNT_HOLDER_ONLY). Visits is home.
 const CONTACT_TABS = ['visits', 'documents'];
+const unreadLabel = (n) => `${n} unread message${n === 1 ? '' : 's'}`;
+// Count pill for the Messages rows (More sheet, desktop nav).
+function UnreadCount({ count }) {
+  return (
+    <span role="img" aria-label={unreadLabel(count)} style={{
+      minWidth: 22, height: 22, padding: '0 6px', borderRadius: 999, boxSizing: 'border-box',
+      background: B.red, color: '#fff', fontSize: 14, fontWeight: 700, lineHeight: '22px', textAlign: 'center',
+    }}>{count}</span>
+  );
+}
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
-function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
+function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef, tabs = PRIMARY_TABS, moreTabs = MORE_TABS, moreUnread = 0 }) {
   const navRef = useRef(null);
   useEffect(() => {
     const measure = () => {
@@ -16641,7 +16654,15 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef,
         borderRadius: 999,
         background: B.yellow,
       }} />}
-      <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
+      <span style={{ position: 'relative', display: 'inline-flex' }}>
+        <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
+        {t.id === 'more' && moreUnread > 0 && (
+          <span role="img" aria-label={unreadLabel(moreUnread)} style={{
+            position: 'absolute', top: -2, right: -4, width: 10, height: 10,
+            borderRadius: 999, background: B.red, border: '2px solid #fff', boxSizing: 'content-box',
+          }} />
+        )}
+      </span>
       {/* Large labels move to another row; the measured bar lifts the FAB. */}
       <span style={{
         fontSize: 14, fontWeight: isActive ? 700 : 600, letterSpacing: 0,
@@ -16676,7 +16697,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef,
 
 // `slide` is true only when a pointer or touch opened the sheet; a sheet opened
 // from the keyboard appears at once (motion audit 2026-11-02, owner pick 3A).
-function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhotoId, tabs = MORE_TABS, slide = true }) {
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhotoId, tabs = MORE_TABS, slide = true, unread = 0 }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -16783,6 +16804,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
                   <span style={{ display: 'block', fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>{t.label}</span>
                   <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.35 }}>{t.description}</span>
                 </span>
+                {t.id === 'messages' && unread > 0 && <UnreadCount count={unread} />}
                 <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: muted }} />
               </button>
             );
@@ -17388,8 +17410,14 @@ export default function PortalPage() {
   // The tabs this session may mount (null = every tab) and where a blocked
   // deep link lands.
   const allowedTabs = cancelledAccount ? CANCELLED_TABS : contactSession ? CONTACT_TABS : null;
-  const homeTab = cancelledAccount ? 'plan' : 'visits';
-  const tabBlocked = (tab) => !!allowedTabs && !allowedTabs.includes(tab);
+  const homeTab = cancelledAccount ? 'plan' : contactSession ? 'visits' : 'dashboard';
+  // Messages (dark behind a server gate): probed once the customer is loaded,
+  // never for a cancelled or contact session. A deep link to it waits for the
+  // probe and falls back home only once the server said it is off.
+  // One key per signed-in customer and session: the activity beacon and the Messages probe restart on it.
+  const sessionKey = `${customer?.id ?? ''}:${sessionEpoch}`;
+  const messagesGate = usePortalMessagesGate(!!customer?.id && !allowedTabs, sessionKey);
+  const tabBlocked = (tab) => (!!allowedTabs && !allowedTabs.includes(tab)) || (tab === 'messages' && messagesGate.off);
   // Rollback applies to this mounted session, including tab/property navigation.
   const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') !== '0');
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
@@ -17406,7 +17434,7 @@ export default function PortalPage() {
       if (t === 'schedule') return ['visits', 'upcoming', false, null];
       if (t === 'services') return ['visits', 'completed', false, null];
       if (t === 'request') return ['dashboard', 'upcoming', true, null];
-      const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+      const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn', 'messages'];
       const tab = t && allowed.includes(t) ? t : 'dashboard';
       const svc = params.get('service');
       const planService = tab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null;
@@ -17421,7 +17449,10 @@ export default function PortalPage() {
     tabBlocked(initialTab) ? homeTab : initialTab,
   );
   // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
-  usePortalActivity(activeTab, `${customer?.id ?? ''}:${sessionEpoch}`);
+  usePortalActivity(activeTab, sessionKey);
+  // Re-probe the Messages count when the customer changes tab (and for the first probe).
+  const { probe: probeMessages } = messagesGate;
+  useEffect(() => { probeMessages(activeTab); }, [probeMessages, activeTab, sessionEpoch]);
   const resetTabScroll = useRef(false);
   const moreButtonRef = useRef(null);
   useEffect(() => {
@@ -17456,7 +17487,7 @@ export default function PortalPage() {
     const t = params.get('tab');
     if (t === 'schedule') return 'visits:upcoming';
     if (t === 'services') return 'visits:completed';
-    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn', 'messages'];
     const tab = t && allowed.includes(t) ? t : 'dashboard';
     return tab === 'visits' ? 'visits:upcoming' : tab;
   };
@@ -17475,7 +17506,7 @@ export default function PortalPage() {
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const t = params.get('tab');
-    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn', 'messages'];
     let urlTab;
     if (t === 'schedule' || t === 'services') {
       urlTab = 'visits';
@@ -17525,7 +17556,8 @@ export default function PortalPage() {
   };
   // The narrowed nav for a cancelled or contact session; the full nav otherwise.
   const narrowedPrimaryTabs = allowedTabs ? PRIMARY_TABS.filter(t => allowedTabs.includes(t.id)) : PRIMARY_TABS;
-  const narrowedMoreTabs = allowedTabs ? MORE_TABS.filter(t => allowedTabs.includes(t.id)) : MORE_TABS;
+  const listedMoreTabs = MORE_TABS.filter(t => t.id !== 'messages' || messagesGate.enabled);
+  const narrowedMoreTabs = allowedTabs ? listedMoreTabs.filter(t => allowedTabs.includes(t.id)) : listedMoreTabs;
   const headerNavItems = [...narrowedPrimaryTabs, ...narrowedMoreTabs];
   // A narrowed session never lands on a tab it cannot read — Home (and any
   // deep link outside its tabs) redirects to its home tab.
@@ -17533,7 +17565,7 @@ export default function PortalPage() {
     if (!tabBlocked(activeTab)) return;
     setActiveTab(homeTab);
     syncTabUrl(homeTab);
-  }, [cancelledAccount, contactSession, activeTab]);
+  }, [cancelledAccount, contactSession, activeTab, messagesGate.off]);
   const headerNavButton = (tab) => {
     const isActive = activeTab === tab.id;
     return (
@@ -17564,6 +17596,7 @@ export default function PortalPage() {
       >
         <Icon name={tab.icon} size={15} strokeWidth={isActive ? 2.1 : 1.75} />
         <span style={{ whiteSpace: 'nowrap' }}>{tab.label}</span>
+        {tab.id === 'messages' && messagesGate.unread > 0 && <UnreadCount count={messagesGate.unread} />}
       </button>
     );
   };
@@ -18343,6 +18376,8 @@ export default function PortalPage() {
             wateringPlanCustomerId={wateringPlanCustomerId}
             onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
           />)}
+        {/* A deep link (a push tap) can land before the first probe answers: show the page unless the server said it is off. */}
+        {activeTab === 'messages' && !messagesGate.off && <PortalMessages onUnread={messagesGate.setUnread} />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} scope={{ currentEntry: activeProperty, savedScope: portalProperties.some((p) => p.key), selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable: refreshProperties }} />}
         </PortalRefreshArea>
       </main>
@@ -18357,6 +18392,7 @@ export default function PortalPage() {
           moreButtonRef={moreButtonRef}
           tabs={narrowedPrimaryTabs}
           moreTabs={narrowedMoreTabs}
+          moreUnread={messagesGate.unread}
         />
       )}
       {isMobileShell && showMoreSheet && (
@@ -18369,6 +18405,7 @@ export default function PortalPage() {
           onChat={cancelledAccount || contactSession ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowChat(true); }}
           onOpenPhotoId={photoIdAvailable ? () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowMoreSheet(false); } : null}
           tabs={narrowedMoreTabs}
+          unread={messagesGate.unread}
         />
       )}
 
