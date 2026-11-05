@@ -644,7 +644,7 @@ class WavesAssistant {
   async processMessage({ message, channel, channelIdentifier, customerId, customerPhone, secondaryProperty, turn = null }) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       logger.warn('[ai-assistant] ANTHROPIC_API_KEY not configured');
-      return { reply: "Thanks for reaching out! One of our team members will get back to you shortly. — Waves Pest Control", escalated: false };
+      return { reply: "Thanks for reaching out! One of our team members will get back to you shortly.", escalated: false };
     }
 
     // 1. Find or create conversation (respecting 30-min timeout)

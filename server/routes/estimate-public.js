@@ -30632,7 +30632,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // as the estimate-accept texts.
       const cmResult = await sendCustomerMessage({
         to: contact.customerPhone,
-        body: `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+        body: `Waves: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
         channel: 'sms',
         audience: estimate.customer_id ? 'customer' : 'lead',
         purpose: 'estimate_followup',
