@@ -242,23 +242,33 @@ async function readDrafts(database) {
   return r.rows[0] || { n: 0, total: 0 };
 }
 
-// The 8 AM dues run's own cohort and verdict (monthly-dues-eligibility.js), so the forecast counts the
-// dues that run would charge. The cheap guards first; the full verdict only for the few left.
-async function readDues(database, { today, to, now }) {
+// A member's dues billing days after today through `to`: the run bills on that day of the month only
+// (billing-helpers isBillingDayMatch), so a month without the day is skipped; no billing day is the 1st.
+function duesBillingDays(customer, { today, to }) {
+  const day = Math.max(1, Number(customer.billing_day) || 1);
+  const [y, mo] = today.split('-').map(Number);
+  const days = [];
+  for (let m = 0; m < 5; m += 1) {
+    const ym = new Date(Date.UTC(y, mo - 1 + m, 1)).toISOString().slice(0, 7);
+    const last = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0)).getUTCDate();
+    const due = `${ym}-${String(day).padStart(2, '0')}`;
+    if (day <= last && due > today && due <= to) days.push(due);
+  }
+  return days;
+}
+
+// The 8 AM dues run's own cohort and verdict (monthly-dues-eligibility.js), judged as of each billing
+// day (a pause that ends, a card that expires, a prepay year that starts or ends), so the forecast counts
+// the dues that run would charge on that day. The cheap guard first; the full verdict only for the rest.
+async function readDues(database, { today, to }) {
   const rows = await applyDuesCohort(database('customers')).select(DUES_COHORT_COLUMNS);
-  const members = rows.filter((c) => !autopayGuard(c, now) && !laneGuard(c));
   const out = [];
-  for (const c of members) {
-    const verdict = await monthlyDuesVerdict(database, c.id, { now });
-    if (!verdict.eligible) continue;
-    const day = Math.max(1, Number(c.billing_day) || 1);
-    const [y, mo] = today.split('-').map(Number);
-    for (let m = 0; m < 5; m += 1) {
-      const ym = new Date(Date.UTC(y, mo - 1 + m, 1)).toISOString().slice(0, 7);
-      const last = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0)).getUTCDate();
-      if (day > last) continue; // the run bills on that day of the month only (billing-helpers isBillingDayMatch)
-      const due = `${ym}-${String(day).padStart(2, '0')}`;
-      if (due > today && due <= to) out.push({ day: due, amountUsd: usd(c.monthly_rate) });
+  for (const c of rows.filter((r) => !laneGuard(r))) {
+    for (const due of duesBillingDays(c, { today, to })) {
+      const runDay = new Date(`${due}T12:00:00Z`); // the run's morning, Eastern time
+      if (autopayGuard(c, runDay)) continue;
+      const verdict = await monthlyDuesVerdict(database, c.id, { now: runDay });
+      if (verdict.eligible) out.push({ day: due, amountUsd: usd(c.monthly_rate) });
     }
   }
   return out;
@@ -502,7 +512,7 @@ async function loadForecastInput({
     readSentInvoices(database, { from: d.cohortFrom, to: d.yesterday }),
     readOpenInvoices(database),
     readDrafts(database),
-    readDues(database, { today: d.today, to: d.windowEnd, now }),
+    readDues(database, { today: d.today, to: d.windowEnd }),
     readPrepaySales(database, { from: engine.addDays(d.today, -91), to: d.yesterday }),
     // 10 days either side so a transfer or card payment pair at the window's edge still matches.
     readBankLines(database, { labels: [...pool.poolAccounts, ...pool.feedCards], from: engine.addDays(d.trailingFrom, -10), to: engine.addDays(d.trailingTo, 10) }),
