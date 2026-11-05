@@ -235,6 +235,30 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     expect(await get(s.kids[0].id)).toMatchObject({ technician_id: w.hireId });
   });
 
+  test('rollback leaves a date move alone once the old day is inside the freeze margin', async () => {
+    const w = await world();
+    const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });
+    const result = await execute(w, await plan(w));
+    // Thursday 07-09 is still ahead, but the Saturday it came from (07-11) is inside the 4-day margin from 07-08.
+    const late = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: new Date('2099-07-08T16:00:00Z'), refresh: jest.fn() });
+    expect(late.visitsRestored).toBe(0);
+    expect(late.skipped.visits).toEqual([s.kids[0].id]);
+    expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-09');
+  });
+
+  test('rollback keeps a date exception or a pending reschedule request recorded since the run', async () => {
+    const w = await world();
+    const s = await weekendSeries(w.ownerId, await customer());
+    const result = await execute(w, await plan(w));
+    await knex('scheduled_services').where({ id: s.kids[1].id }).update({ date_exception: true });
+    await knex('scheduled_services').where({ id: s.kids[2].id }).update({ status: 'rescheduled' });
+    const undo = await exec.rollbackHandover(knex, { file: result.rollbackFile, now: NOW, refresh: jest.fn() });
+    expect(undo.visitsRestored).toBe(1);
+    expect(new Set(undo.skipped.visits)).toEqual(new Set([s.kids[1].id, s.kids[2].id]));
+    expect(day((await get(s.kids[0].id)).scheduled_date)).toBe('2099-07-11');
+    expect(day((await get(s.kids[1].id)).scheduled_date)).toBe('2099-10-08');
+  });
+
   test('a confirmation or lock that lands after the plan was read stops the run: the plan is re-read under the locks', async () => {
     const w = await world();
     const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });
