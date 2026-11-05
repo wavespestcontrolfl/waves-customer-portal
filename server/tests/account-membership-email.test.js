@@ -472,6 +472,36 @@ describe('sendMovingLink (staff click from the Customer 360 Moving card)', () =>
   });
 });
 
+describe('sendPortalReply (an office answer from the Portal tab, when the app push did not land)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('sends the portal_reply template with the whole answer and the Messages link, keyed to the answer', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+    await AccountMembershipEmail.sendPortalReply({ customerId: 'cust-1', messageId: 'msg-1', body: '  Yes, we can bundle them.\nWe will call Tuesday.  ' });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'portal_reply',
+      to: 'taylor@example.com',
+      idempotencyKey: 'portal_reply:msg-1',
+      payload: expect.objectContaining({
+        reply_body: 'Yes, we can bundle them.\nWe will call Tuesday.',
+        // The profile hint, so an account with several profiles opens this customer's thread.
+        messages_url: 'https://portal.wavespestcontrol.com/?tab=messages&notificationProperty=cust-1',
+      }),
+    }));
+  });
+
+  test('no message id or an empty answer sends nothing', async () => {
+    expect(await AccountMembershipEmail.sendPortalReply({ customerId: 'cust-1', messageId: null, body: 'Hi' }))
+      .toEqual({ ok: false, skipped: true, reason: 'missing_message' });
+    expect(await AccountMembershipEmail.sendPortalReply({ customerId: 'cust-1', messageId: 'msg-1', body: '   ' }))
+      .toEqual({ ok: false, skipped: true, reason: 'missing_message' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
 describe('sendMembershipRenewalReminder (annual prepay year-end notice)', () => {
   beforeEach(() => jest.clearAllMocks());
 

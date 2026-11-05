@@ -1117,6 +1117,8 @@ app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
+// GATE_PORTAL_MESSAGES: the customer's Messages page (their portal thread with the office); 404 while dark.
+app.use('/api/portal-messages', require('./routes/portal-messages'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
 app.use('/api/review', reviewPublicRoutes);

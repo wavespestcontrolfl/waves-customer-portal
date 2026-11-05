@@ -14,9 +14,15 @@
 
 const express = require('express');
 const router = express.Router();
+const Joi = require('joi');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { portalInboxLive } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+const { portalInboxLive } = featureGates;
+// GATE_PORTAL_MESSAGES, read at call time; a test that mocks feature-gates without the reader reads off.
+const portalMessagesLive = () => Boolean(featureGates.portalMessagesLive?.());
 const portalInbox = require('../services/portal-inbox');
+const PortalMessages = require('../services/portal-messages');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -32,7 +38,7 @@ router.get('/summary', async (req, res, next) => {
   try {
     if (!portalInboxLive()) return res.json({ enabled: false });
     res.set('Cache-Control', 'private, no-store');
-    res.json({ enabled: true, ...(await portalInbox.summary()) });
+    res.json({ enabled: true, replies: portalMessagesLive(), ...(await portalInbox.summary()) });
   } catch (err) { next(err); }
 });
 
@@ -42,7 +48,7 @@ router.get('/summary', async (req, res, next) => {
 router.get('/', requireLive, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'private, no-store');
-    res.json({ enabled: true, ...(await portalInbox.list()) });
+    res.json({ enabled: true, replies: portalMessagesLive(), ...(await portalInbox.list()) });
   } catch (err) { next(err); }
 });
 
@@ -58,6 +64,36 @@ router.post('/close-older', requireLive, async (req, res, next) => {
     });
     res.json({ closed });
   } catch (err) { next(err); }
+});
+
+// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/reply  { kind, id, body, requestId? }
+//   -> { message, closed, notice } . Answers one item inside the customer's portal: the answer is saved in
+// their portal thread, the item and its bells close, and the customer gets one notice (app push, else email).
+// `requestId` makes a retried click return the first answer instead of sending a second one.
+const replySchema = Joi.object({
+  kind: Joi.string().valid('chat', 'request').required(),
+  id: Joi.string().uuid().required(),
+  body: Joi.string().allow('').max(PortalMessages.BODY_MAX * 2).required(),
+  requestId: Joi.string().uuid().optional(),
+});
+
+router.post('/reply', requireLive, async (req, res, next) => {
+  if (!portalMessagesLive()) return res.status(404).json({ enabled: false });
+  const { value, error } = replySchema.validate(req.body || {});
+  if (error) return res.status(400).json({ error: error.details[0].message });
+  try {
+    const result = await PortalMessages.staffReply({
+      kind: value.kind,
+      id: value.id,
+      body: value.body,
+      clientRequestId: value.requestId || null,
+      actor: { technicianId: req.technicianId, role: req.techRole },
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof PortalMessages.PortalMessageError) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
 });
 
 module.exports = router;
