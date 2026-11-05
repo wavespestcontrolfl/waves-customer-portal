@@ -60,6 +60,10 @@ const CALLERS = freezeEntries({
   // draft priced on the default size. Only a county-assessed single-family
   // home and lot at an address with no unit is used; no answer surface.
   lead_draft: { surface: 'automation', suiteSizing: false, calls: 2, file: 'services/lead-draft-measurements.js', why: 'a cache-only read when the draft is built, then one background lookup for a draft still on the default size; county home and lot only' },
+  // The app-made new-home estimate for a customer's move (GATE_MOVING_AUTO_ESTIMATE): one
+  // lookup of the new address per move, priced only on the county-assessed home and lot of
+  // a single-family house; no answer surface, the office prices anything else.
+  moving_auto_estimate: { surface: 'automation', suiteSizing: false, calls: 1, file: 'services/moving-auto-estimate.js', why: 'one lookup per move; county home and lot only; the office prices anything else' },
 });
 
 function freezeEntries(registry) {

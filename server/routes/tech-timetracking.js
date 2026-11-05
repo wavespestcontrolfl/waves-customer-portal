@@ -197,7 +197,176 @@ router.get('/weekly', async (req, res, next) => {
       startDate,
       endDate,
     });
-    res.json(summaries);
+    // Revenue and revenue per hour are the owner's figures (owner 2026-11-04):
+    // a technician gets its hours only. An admin's response is unchanged.
+    res.json(req.techRole === 'admin' ? summaries : summaries.map(withoutOwnerMoney));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /my-hours?weekStart=YYYY-MM-DD — the signed-in technician's own week
+// for the "My hours" card on Today (owner 2026-11-04, D5 A): daily hours, the
+// week's totals and the week's entries. Scoped to req.technicianId; the card
+// is a projection. It carries no revenue, no revenue per hour, no utilization,
+// no GPS, no customer and no pay rate. The week is the ET Monday that holds
+// weekStart (default this week); a future week is clamped to this one.
+// ---------------------------------------------------------------------------
+const OWNER_ONLY_WEEKLY_FIELDS = ['total_revenue', 'avg_rpmh', 'utilization_pct'];
+function withoutOwnerMoney(row) {
+  const copy = { ...row };
+  for (const key of OWNER_ONLY_WEEKLY_FIELDS) delete copy[key];
+  return copy;
+}
+const MY_HOURS_PAGE = 100;
+const MY_HOURS_MAX_PAGES = 5;
+const minutesOf = (value) => Math.round((Number.parseFloat(value) || 0) * 100) / 100;
+function myHoursDay(row) {
+  return {
+    date: dateColumnToYMD(row.work_date),
+    shiftMinutes: minutesOf(row.total_shift_minutes),
+    jobMinutes: minutesOf(row.total_job_minutes),
+    driveMinutes: minutesOf(row.total_drive_minutes),
+    breakMinutes: minutesOf(row.total_break_minutes),
+    unpaidMealMinutes: minutesOf(row.unpaid_meal_minutes),
+    jobCount: Number(row.job_count) || 0,
+    firstClockIn: row.first_clock_in || null,
+    lastClockOut: row.last_clock_out || null,
+    status: row.status || 'pending',
+  };
+}
+function myHoursLiveDay(date, rows) {
+  const sum = (type) => minutesOf(rows.filter((row) => row.entry_type === type).reduce((total, row) => total + (Number.parseFloat(row.duration_minutes) || 0), 0));
+  const shifts = rows.filter((row) => row.entry_type === 'shift');
+  const clockIns = shifts.map((row) => new Date(row.clock_in).getTime());
+  return {
+    date,
+    shiftMinutes: sum('shift'),
+    jobMinutes: sum('job'),
+    driveMinutes: sum('drive'),
+    breakMinutes: sum('break'),
+    unpaidMealMinutes: 0,
+    jobCount: rows.filter((row) => row.entry_type === 'job' && row.status !== 'active').length,
+    firstClockIn: clockIns.length ? new Date(Math.min(...clockIns)).toISOString() : null,
+    lastClockOut: shifts.length && shifts.every((row) => row.clock_out) ? new Date(Math.max(...shifts.map((row) => new Date(row.clock_out).getTime()))).toISOString() : null,
+    status: 'pending',
+  };
+}
+function myHoursEntry(row) {
+  return {
+    id: row.id,
+    type: row.entry_type,
+    status: row.status,
+    clockIn: row.clock_in,
+    clockOut: row.clock_out || null,
+    minutes: row.duration_minutes == null ? null : minutesOf(row.duration_minutes),
+    serviceType: row.service_type || row.job_service_type || null,
+    edited: row.status === 'edited',
+  };
+}
+function myHoursWeek(row) {
+  if (!row) return null;
+  return {
+    shiftMinutes: minutesOf(row.total_shift_minutes),
+    regularMinutes: minutesOf(row.regular_minutes),
+    overtimeMinutes: minutesOf(row.overtime_minutes),
+    daysWorked: Number(row.days_worked) || 0,
+    jobCount: Number(row.job_count) || 0,
+    status: row.status || 'pending',
+    signed: Boolean(row.tech_signed_at),
+  };
+}
+// A stored summary is current only once the office approves the day: a job or
+// break ended after "No lunch today" (or any early summary write) does not
+// refresh it. So every unapproved day is read from its current entries; the
+// stored row keeps only the unpaid meal and the status. An approved day keeps
+// its stored numbers, and a day with entries but no row still shows. Read-only.
+// dayRows is every non-voided entry of the week, not the capped detail list.
+function reconcileMyHoursDays(dailies, dayRows) {
+  const byDate = new Map();
+  for (const row of dayRows) {
+    const date = staffWorkDate(row.clock_in);
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(row);
+  }
+  const days = [];
+  const seen = new Set();
+  for (const row of dailies) {
+    const stored = myHoursDay(row);
+    seen.add(stored.date);
+    days.push(stored.status === 'approved'
+      ? stored
+      : { ...myHoursLiveDay(stored.date, byDate.get(stored.date) || []), unpaidMealMinutes: stored.unpaidMealMinutes, status: stored.status });
+  }
+  for (const [date, rows] of byDate) if (!seen.has(date)) days.push(myHoursLiveDay(date, rows));
+  return days;
+}
+// The stored weekly row is shown only while it still agrees with the days above.
+function weekMatchingDays(week, totals) {
+  if (!week) return null;
+  return week.status === 'approved' || Math.abs(week.shiftMinutes - totals.shiftMinutes) < 0.01 ? week : null;
+}
+router.get('/my-hours', async (req, res, next) => {
+  try {
+    const { weekStart } = req.query;
+    if (weekStart && !validDateOnly(weekStart)) {
+      return res.status(400).json({ error: 'weekStart must be a valid YYYY-MM-DD date' });
+    }
+    const thisMonday = mondayOfET();
+    const asked = mondayOfET(weekStart || undefined);
+    const monday = asked > thisMonday ? thisMonday : asked;
+    const mondayNoon = parseETDateTime(`${monday}T12:00`);
+    const sunday = etDateString(addETDays(mondayNoon, 6));
+    const technicianId = req.technicianId;
+
+    const entryRows = [];
+    let total = 0;
+    for (let page = 0; page < MY_HOURS_MAX_PAGES; page += 1) {
+      const result = await timeTracking.getEntries({
+        technicianId, startDate: monday, endDate: sunday, limit: MY_HOURS_PAGE, offset: page * MY_HOURS_PAGE,
+      });
+      entryRows.push(...(result.entries || []));
+      total = result.total || 0;
+      if (entryRows.length >= total || !(result.entries || []).length) break;
+    }
+    const [dailies, weeklies, dayRows] = await Promise.all([
+      timeTracking.getDailySummaries({ technicianId, startDate: monday, endDate: sunday }),
+      timeTracking.getWeeklySummaries({ technicianId, startDate: monday, endDate: monday }),
+      // Every entry of the week, only the columns the day totals need: the totals
+      // never come from the capped detail list above.
+      db('time_entries')
+        .where({ technician_id: technicianId })
+        .where('status', '!=', 'voided')
+        .whereRaw(`${STAFF_WORK_DATE_SQL} >= ?::date`, [monday])
+        .whereRaw(`${STAFF_WORK_DATE_SQL} <= ?::date`, [sunday])
+        .select('entry_type', 'status', 'clock_in', 'clock_out', 'duration_minutes'),
+    ]);
+
+    const liveEntries = entryRows.filter((row) => row.status !== 'voided');
+    const days = reconcileMyHoursDays(dailies, dayRows);
+    days.sort((a, b) => (a.date < b.date ? -1 : 1));
+    const totals = days.reduce((sum, day) => ({
+      shiftMinutes: sum.shiftMinutes + day.shiftMinutes,
+      jobMinutes: sum.jobMinutes + day.jobMinutes,
+      driveMinutes: sum.driveMinutes + day.driveMinutes,
+      breakMinutes: sum.breakMinutes + day.breakMinutes,
+      unpaidMealMinutes: sum.unpaidMealMinutes + day.unpaidMealMinutes,
+      jobCount: sum.jobCount + day.jobCount,
+    }), { shiftMinutes: 0, jobMinutes: 0, driveMinutes: 0, breakMinutes: 0, unpaidMealMinutes: 0, jobCount: 0 });
+    for (const key of Object.keys(totals)) totals[key] = Math.round(totals[key] * 100) / 100;
+
+    res.json({
+      weekStart: monday,
+      weekEnd: sunday,
+      prevWeekStart: etDateString(addETDays(mondayNoon, -7)),
+      nextWeekStart: monday < thisMonday ? etDateString(addETDays(mondayNoon, 7)) : null,
+      days,
+      totals,
+      week: weekMatchingDays(myHoursWeek(weeklies[0]), totals),
+      entries: liveEntries.map(myHoursEntry),
+      entriesTruncated: entryRows.length < total,
+    });
   } catch (err) {
     next(err);
   }

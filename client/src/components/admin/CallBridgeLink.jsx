@@ -67,14 +67,17 @@ export default function CallBridgeLink({
   ...rest
 }) {
   // The call bridge is an owner-only route (technician allow-list,
-  // 2026-10-02): a technician sees the number as plain text, not a control
-  // that can only 403.
+  // 2026-10-02): a technician gets the plain tel: link, as on the visit
+  // card, not a control that can only 403.
   const canCall = useCanAccessCalls();
   if (!phone) return null;
   // Plain, unstyled number: callers pass button classes and labels like
   // "Call", which would leave a dead control-looking pill (codex #5683 r1).
   // A caller's own formatted number is kept; any other label becomes the number.
-  if (!canCall) return <span>{typeof children === "string" && /\d{3}/.test(children) ? children : phone}</span>;
+  if (!canCall) {
+    const label = typeof children === "string" && /\d{3}/.test(children) ? children : phone;
+    return <a href={`tel:${phone}`} onClick={stopPropagation ? (e) => e.stopPropagation() : undefined}>{label}</a>;
+  }
   return (
     <button
       type="button"

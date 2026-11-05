@@ -45,7 +45,7 @@ async function listAllOpenWaves(now) {
   const all = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const rows = await commitments.listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, prepare: true, now });
-    all.push(...rows);
+    all.push(...commitments.pagerRows(rows));
     if (rows.length < SCAN_LIMIT) break;
   }
   return all;

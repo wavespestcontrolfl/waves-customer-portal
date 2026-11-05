@@ -887,6 +887,33 @@ describe('triggerNotification bell outcome', () => {
     }
   });
 
+  // Owner 2026-11-04 (technician visibility D1 A): what a voicemail caller asked about is call content. A technician's
+  // push leaves it out; the admin's push and the shared bell row keep it.
+  test('a voicemail callback push leaves out what the caller asked about for a technician only', async () => {
+    db.mockImplementation((table) => tableMock(table === 'technicians'
+      ? [{ id: 'admin-1', role: 'admin' }, { id: 'tech-1', role: 'technician' }] : []));
+    NotificationService.notifyAdmin.mockClear();
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_voicemail_callback', { name: 'Test Caller', service: 'WDO Inspection', phone: '+19415550100' });
+    const toUser = PushService.sendToAdminUsers.mock.calls[0][1];
+    expect(toUser('admin-1')).toMatchObject({ title: 'Voicemail — Test Caller', body: 'Test Caller - Asked about WDO Inspection - Callback: (941) 555-0100' });
+    expect(toUser('tech-1')).toMatchObject({ title: 'Voicemail — Test Caller', body: 'Test Caller - Callback: (941) 555-0100' });
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toBe('Test Caller - Asked about WDO Inspection - Callback: (941) 555-0100');
+  });
+
+  test('technicianRowCopy: a stored voicemail row without the service; no stored payload = no body; other rows as stored', () => {
+    const { technicianRowCopy } = require('../services/notification-triggers');
+    const payload = { name: 'Test Caller', service: 'WDO Inspection', phone: '+19415550100' };
+    const row = { id: 'n-1', title: 'Voicemail — Test Caller', body: 'Test Caller - Asked about WDO Inspection - Callback: (941) 555-0100', metadata: { triggerKey: 'customer_voicemail_callback', payload } };
+    expect(technicianRowCopy(row)).toMatchObject({ body: 'Test Caller - Callback: (941) 555-0100', metadata: { payload: { name: 'Test Caller', phone: '+19415550100' } } });
+    expect(technicianRowCopy(row).metadata.payload).not.toHaveProperty('service');
+    expect(technicianRowCopy({ ...row, metadata: { triggerKey: 'customer_voicemail_callback' } })).toMatchObject({ title: row.title, body: null });
+    const other = { id: 'n-2', title: 'Text from Pat Example', body: 'Running late', metadata: '{"triggerKey":"sms_reply"}' };
+    expect(technicianRowCopy(other)).toBe(other);
+    expect(technicianRowCopy({ id: 'n-3', metadata: '{not json' })).toMatchObject({ id: 'n-3' });
+  });
+
   test('a new-lead alert carries Call for its lead, else the customer, else the sender\'s text', () => {
     const LEAD = '00000000-0000-4000-8000-0000000000e2';
     const CUSTOMER = '00000000-0000-4000-8000-0000000000c2';

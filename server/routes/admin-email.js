@@ -10,7 +10,7 @@ const { unblockSender, manualBlockSender } = require('../services/email/spam-blo
 const { sendEmailMessage } = require('../services/email/send-message');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { emailSendLaterLive } = require('../config/feature-gates');
+const { emailSendLaterLive, emailReclassifyPickLive } = require('../config/feature-gates');
 const { parseETDateTime, etParts, etDateString, etWallClockOccurrences } = require('../utils/datetime-et');
 const { countProcessedInvoices } = require('../services/email/invoice-outcome');
 const {
@@ -673,9 +673,27 @@ router.post('/message/:id/ai-draft', async (req, res) => {
 // AI Classification & Auto-Actions (Session 2)
 // ============================================
 
-// POST /message/:id/reclassify — re-run Sonnet classification
+// GET /reclassify-options — the labels staff may pick on Reclassify
+// (GATE_EMAIL_RECLASSIFY_PICK). Off, the client sees no picker.
+router.get('/reclassify-options', (req, res) => {
+  if (!emailReclassifyPickLive()) return res.json({ enabled: false });
+  const { EMAIL_CATEGORIES } = require('../services/email/email-classifier');
+  res.json({ enabled: true, categories: EMAIL_CATEGORIES });
+});
+
+// POST /message/:id/reclassify — re-run Sonnet classification, or (gate on,
+// body.classification) set the label staff picked.
 router.post('/message/:id/reclassify', async (req, res) => {
   try {
+    // Gate off, the body is ignored: byte-identical to the AI-only route.
+    let staffPick = null;
+    if (emailReclassifyPickLive() && req.body && req.body.classification !== undefined && req.body.classification !== null) {
+      const { EMAIL_CATEGORIES } = require('../services/email/email-classifier');
+      if (typeof req.body.classification !== 'string' || !EMAIL_CATEGORIES.includes(req.body.classification)) {
+        return res.status(400).json({ error: 'Unknown email label' });
+      }
+      staffPick = req.body.classification;
+    }
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
 
@@ -812,15 +830,24 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // and run the auto-action exactly once.
     const { EMAIL_CATEGORIES, classifyEmailContent } = require('../services/email/email-classifier');
     let classification;
-    try {
-      classification = await classifyEmailContent(email);
-    } catch (classifyErr) {
-      await revertReclassClaim();
-      throw classifyErr;
-    }
-    if (!classification || !EMAIL_CATEGORIES.includes(classification.category)) {
-      await revertReclassClaim();
-      return res.status(502).json({ error: 'Classifier unavailable or off-vocabulary — quarantine state unchanged' });
+    let aiVerdict = null;
+    if (staffPick) {
+      // Staff picked the label (already checked against EMAIL_CATEGORIES):
+      // no model call. Everything below runs as it does for an AI relabel.
+      const pickModule = require('../services/email/email-reclassify-incident');
+      aiVerdict = pickModule.aiVerdictOf(email);
+      classification = pickModule.staffClassification(email, staffPick, aiVerdict);
+    } else {
+      try {
+        classification = await classifyEmailContent(email);
+      } catch (classifyErr) {
+        await revertReclassClaim();
+        throw classifyErr;
+      }
+      if (!classification || !EMAIL_CATEGORIES.includes(classification.category)) {
+        await revertReclassClaim();
+        return res.status(502).json({ error: 'Classifier unavailable or off-vocabulary — quarantine state unchanged' });
+      }
     }
     await db('emails').where('id', email.id).update({
       classification: classification.category,
@@ -828,6 +855,11 @@ router.post('/message/:id/reclassify', async (req, res) => {
       extracted_data: JSON.stringify(classification),
       updated_at: new Date(),
     });
+    if (staffPick) {
+      // Best effort: recordStaffReclassify logs a failed insert and returns.
+      await require('../services/email/email-reclassify-incident')
+        .recordStaffReclassify({ dbi: db, email, verdict: aiVerdict, pick: staffPick, staffUserId: req.technicianId });
+    }
     if (classification.category === 'spam') {
       if (restoredFromTrash) {
         // The message is live in Gmail again — reverting to a stale trashed

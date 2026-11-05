@@ -25,6 +25,16 @@
  * pauses every plan at the house left for the visits after move-out, and closes the
  * move when no address comes in within 60 days (see the Move pause section).
  *
+ * Apply on accept (GATE_MOVING_AUTO_APPLY, owner 2026-11-04 option A): once
+ * the customer accepts the new-home estimate, a job applies the move through
+ * Apply move's own preview and confirm, with no office click.
+ *
+ * The old-house stop (GATE_MOVING_STOP_AT_MOVE_OUT, owner 2026-11-04) runs the
+ * same pause step for a customer who gave the new address but whose move is not
+ * applied by the move-out day: the plans at the house left stop after the
+ * move-out date, and the move stays open for the new-home estimate and Apply
+ * move.
+ *
  * Spend: Google Address Validation is a paid call. Each link allows at most
  * DAILY_CHECK_CAP checks per Eastern day (claimed atomically BEFORE the call),
  * and the same typed address is answered from the row for 24 hours. Submit can
@@ -49,7 +59,7 @@ const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-e
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validateAddress, STATUSES } = require('./address-validation');
 const { moveVerdictLabel } = require('./move-address-verdict');
-const { movingEstimateLive, movingApplyLive, movingPauseLive } = require('../config/feature-gates');
+const { movingEstimateLive, movingApplyLive, movingAutoApplyLive, movingPauseLive, movingStopAtMoveOutLive } = require('../config/feature-gates');
 
 const TOKEN_RE = /^[a-f0-9]{48}$/;
 const DAILY_CHECK_CAP = 10;
@@ -479,6 +489,12 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = 
     // Moving PR 2b: the pause already stopped the old-house visits after the
     // old move-out date. A new date leaves those visits to the office to
     // check, and the job never ends this move on the old date's deadline.
+    // The app-made new-home estimate (GATE_MOVING_AUTO_ESTIMATE) tries the
+    // address on file once: an attempt for another address, finished or still
+    // running, is cleared, so the new address gets its own. A running attempt
+    // then finds its claim gone and ends without marking the move.
+    const autoEstimateReset = !!(locked.auto_estimate_state || locked.auto_estimate_at)
+      && (addressLine(parseJson(locked.normalized_address)) || '') !== (addressLine(address.normalized) || '');
     const oldMoveOut = dateOnlyString(locked.move_out_date) || null;
     const pauseNote = locked.pause_state === 'paused' && oldMoveOut !== moveOut
       ? `The customer changed the move-out date to ${prettyDate(moveOut) || 'not known yet'} after the pause stopped the old-house visits after ${prettyDate(oldMoveOut)}. Check those visits against the new date.`
@@ -502,6 +518,7 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = 
       submitted_at: now,
       updated_at: now,
       ...(pauseNote ? { pause_state: 'office', pause_note: pauseNote.slice(0, 300) } : {}),
+      ...(autoEstimateReset ? { auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null } : {}),
     }).returning('*');
     await trx('activity_log').insert({
       customer_id: locked.customer_id,
@@ -551,12 +568,13 @@ async function submitMove(move, { checkId = null, moveOutDate, moveInDate } = {}
 }
 
 // The fixed sentences the page shows after a submit. No model writes these.
-// `pauseLane` (pauseLane below): what the move pause will do for a move with
-// no new address, so the receipt never promises a pause the job will not run.
+// `pauseLane` (pauseLane below): what the daily move job will do after the
+// move-out date (the pause with no new address, the old-house stop with one),
+// so the receipt never promises a pause or a stop the job will not run.
 function receiptFor(view, pauseLane = null) {
   const first = view.firstName;
+  const day = prettyDate(view.moveOutDate);
   if (!view.addressOnFile) {
-    const day = prettyDate(view.moveOutDate);
     if (pauseLane === 'auto' && day) {
       return [`Thanks, ${first}. We have your move dates. We pause your visits after ${day} until we have your new address, for up to ${PAUSE_DAYS} days. When you know it, open this same link and add it.`];
     }
@@ -568,7 +586,11 @@ function receiptFor(view, pauseLane = null) {
   if (view.verdict === 'out_of_area') {
     return [`Thanks, ${first}. We do not serve that address yet. We will contact you about your last visit and ending your plan on your move-out date.`];
   }
-  const base = `Thanks, ${first}. We have your move. We will price your new home and send it to you to review. Nothing changes until you approve it.`;
+  // The old-house stop cancels the visits after move-out whether or not the
+  // customer approves the new price, so the receipt says so.
+  const base = pauseLane === 'auto' && day
+    ? `Thanks, ${first}. We have your move. We will price your new home and send it to you to review. Your plan at the new home starts when you approve it. We cancel the visits booked at your old home after ${day}.`
+    : `Thanks, ${first}. We have your move. We will price your new home and send it to you to review. Nothing changes until you approve it.`;
   return view.verdict === 'unverified'
     ? [base, 'We could not confirm that address, so we will check it with you.']
     : [base];
@@ -1598,15 +1620,18 @@ async function applyMove(customerId, moveId, opts = {}) {
     }
 
     const summary = [
+      opts.auto ? 'Applied by the app after the customer accepted the new-home estimate.' : '',
       `New home is primary: ${propertyLine(plan.to)}.`,
       `Old-house plans stopped after ${prettyDate(plan.moveOut)}: ${plan.stops.length} (${progress.visitsCancelled} visits cancelled, no customer text, no fee).`,
       progress.stationTask ? 'Termite station pickup task opened.' : '',
     ].join(' ').trim();
     await step('close', () => closeAppliedMove(plan, { actorId, summary, now: opts.now || new Date() }));
     await require('./portal-inbox')
-      .resolveRequestQuietly(plan.move.service_request_id, customerId, 'Move applied from the Moving card.', { notAfter: new Date(), now: new Date() })
+      .resolveRequestQuietly(plan.move.service_request_id, customerId,
+        opts.auto ? 'Move applied by the app after the customer accepted the new-home estimate.' : 'Move applied from the Moving card.',
+        { notAfter: new Date(), now: new Date() })
       .catch((err) => logger.warn(`[customer-moves] office item close failed for move ${moveId} (${errCode(err)})`));
-    logger.info(`[customer-moves] applied move ${moveId} for customer ${customerId} by ${actorId || 'unknown'}`);
+    logger.info(`[customer-moves] applied move ${moveId} for customer ${customerId} by ${opts.auto ? 'the app (accepted estimate)' : (actorId || 'unknown')}`);
     return { applied: true, ...progress, oneOffs: plan.oneOffs, pastOpen: plan.pastOpen, summary };
   } finally {
     await release();
@@ -1630,6 +1655,141 @@ async function applyAction(move, conn = db) {
     logger.warn(`[customer-moves] apply action read failed for move ${move.id} (${errCode(err)})`);
     return null;
   }
+}
+
+// ── Apply on accept (GATE_MOVING_AUTO_APPLY) ───────────────────────────────
+//
+// Owner 2026-11-04 (option A of the hands-off moves page: "App applies the
+// move, with the same preview checks as the office button"): once the
+// customer accepts the new-home estimate, the app applies the move itself. A
+// job every 15 minutes reads Apply move's own preview for each submitted move
+// whose estimate is accepted, and confirms it on that preview's version, as
+// an office click would. A refusal the office must handle rings one office
+// item per move and refusal, and the Moving card keeps its Apply button. A
+// run that stops partway resumes on the next run, like a second confirm.
+
+// Refusals that mean "not yet" or "try again": no office item, the next run
+// reads the preview again. A visit under way finishes on its own.
+const AUTO_APPLY_WAIT = new Set(['gate_off', 'not_found', 'already_applied', 'not_submitted', 'no_estimate',
+  'estimate_not_accepted', 'apply_in_progress', 'apply_lock_unavailable', 'apply_changed', 'visit_underway',
+  // A step's own "changed since the preview" (the primary change, a plan's series).
+  'preview_changed', 'series_changed']);
+// Saved by the accept itself: right after it, a missing new home or new plan
+// is a write still landing, not a refusal yet.
+const AUTO_APPLY_SETTLING = new Set(['no_new_property', 'no_new_plan']);
+const AUTO_APPLY_SETTLE_MS = 60 * 60 * 1000;
+
+// Submitted moves whose new-home estimate the customer accepted.
+function acceptedEstimateMoves() {
+  return db('customer_moves')
+    .where({ status: 'submitted' })
+    .whereNotNull('estimate_id')
+    .whereExists(function acceptedEstimate() {
+      this.select(db.raw('1')).from('estimates as e')
+        .whereRaw('e.id = customer_moves.estimate_id')
+        .where('e.status', 'accepted')
+        .whereNull('e.archived_at');
+    });
+}
+
+// One ringing office item per move and refusal code (the key dedupes for
+// good): a refusal that persists rings once, a new one rings again.
+async function raiseAutoApplyAlert(move, err) {
+  const customer = await db('customers').where({ id: move.customer_id }).first('first_name', 'last_name');
+  const name = [customer && customer.first_name, customer && customer.last_name].filter(Boolean).join(' ').trim() || 'a customer';
+  const notif = await raiseAdminAlert('service', {
+    area: 'Customers',
+    action: cutAtWord(`apply ${name}'s move by hand`, MAX_HEADLINE_CHARS - 'Customers — '.length),
+    why: cutAtWord('They accepted the new-home estimate, but the app could not apply the move; the item says why.', MAX_WHY_CHARS),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
+    subject: { type: 'customer', id: move.customer_id },
+    doneWhen: 'move_handled',
+    who: 'person',
+  }, {
+    detail: `${err.message} Then press Apply move on the Moving card.`,
+    icon: '🚚',
+    bell: true,
+    dedupeKey: `moving_auto_apply_${err.code}:${move.id}`,
+    metadata: { customerId: move.customer_id, moveId: move.id, kind: 'moving_auto_apply', code: err.code },
+  });
+  if (!notif || notif.suppressed) logger.warn(`[customer-moves] auto-apply office item did not persist for move ${move.id}; the next run tries again`);
+}
+
+// The old-house visits Apply never cancels (one-time visits after move-out,
+// open visits dated between move-out and today): an office click reads them
+// on the preview, so with no click the office gets them in one ringing item,
+// written BEFORE the move closes. A list that changes refreshes the item.
+async function raiseAutoApplyLeftBooked(move, preview, left) {
+  const customer = await db('customers').where({ id: move.customer_id }).first('first_name', 'last_name');
+  const name = [customer && customer.first_name, customer && customer.last_name].filter(Boolean).join(' ').trim() || 'a customer';
+  const notif = await raiseAdminAlert('service', {
+    area: 'Customers',
+    action: cutAtWord(`check ${name}'s old-house visits`, MAX_HEADLINE_CHARS - 'Customers — '.length),
+    why: cutAtWord(`They accepted the new-home estimate, and ${left.length === 1 ? '1 visit at the old house stays' : `${left.length} visits at the old house stay`} booked.`, MAX_WHY_CHARS),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(move.customer_id)}`,
+    subject: { type: 'customer', id: move.customer_id },
+    doneWhen: 'move_handled',
+    who: 'person',
+  }, {
+    detail: `Still booked at ${preview.fromAddress}: ${left.map((v) => `${v.name} ${prettyDate(v.date)}`).join(', ')}. Apply move never cancels these. Cancel any that should not run.`,
+    icon: '🚚',
+    bell: true,
+    dedupeKey: `moving_auto_apply_left_booked:${move.id}`,
+    refreshOnDedupe: true,
+    metadata: { customerId: move.customer_id, moveId: move.id, kind: 'moving_auto_apply_left_booked' },
+  });
+  if (!notif || notif.suppressed) throw new Error('moving auto-apply left-booked item did not persist');
+}
+
+// When the move's estimate was accepted, or null.
+async function acceptedAt(move) {
+  const row = await db('estimates').where({ id: move.estimate_id }).first('accepted_at');
+  return row && row.accepted_at ? new Date(row.accepted_at) : null;
+}
+
+/**
+ * Apply one move whose new-home estimate is accepted: Apply move's preview,
+ * then its confirm on that preview's version. Returns 'applied', 'waiting'
+ * (not ready, busy or changed: the next run reads it again) or 'office'.
+ */
+async function autoApplyMove(moveId, { now }) {
+  const move = await db('customer_moves').where({ id: moveId }).first('id', 'customer_id', 'status', 'estimate_id');
+  if (!move || move.status !== 'submitted' || !move.estimate_id) return 'waiting';
+  try {
+    const preview = await applyMovePreview(move.customer_id, move.id);
+    const left = [...(preview.oneOffs || []), ...(preview.pastOpen || [])];
+    // No item, no apply this run: the office hears before the move closes.
+    if (left.length) await raiseAutoApplyLeftBooked(move, preview, left);
+    const result = await applyMove(move.customer_id, move.id, { version: preview.version, actorId: null, now, auto: true });
+    return result && result.applied ? 'applied' : 'waiting';
+  } catch (err) {
+    if (!(err instanceof MoveError)) throw err;
+    if (AUTO_APPLY_WAIT.has(err.code)) return 'waiting';
+    if (AUTO_APPLY_SETTLING.has(err.code)) {
+      const accepted = await acceptedAt(move);
+      if (!accepted || now.getTime() - accepted.getTime() < AUTO_APPLY_SETTLE_MS) return 'waiting';
+    }
+    await raiseAutoApplyAlert(move, err);
+    return 'office';
+  }
+}
+
+/** The apply-on-accept job (scheduler, every 15 minutes). Off with GATE_MOVING_AUTO_APPLY. */
+async function autoApplyAcceptedMoves({ now = new Date() } = {}) {
+  if (!movingAutoApplyLive()) return { skipped: true };
+  const out = { applied: 0, waiting: 0, office: 0, failed: 0 };
+  await forEachMove(acceptedEstimateMoves(), async (id) => {
+    try {
+      const outcome = await autoApplyMove(id, { now });
+      if (outcome in out) out[outcome] += 1;
+    } catch (err) {
+      out.failed += 1;
+      logger.error(`[customer-moves] auto-apply failed for move ${id} (${errCode(err)}); the next run tries again`);
+    }
+  });
+  return out;
 }
 
 // ── Move pause (moving PR 2b, GATE_MOVING_PAUSE) ────────────────────────────
@@ -1659,6 +1819,13 @@ async function applyAction(move, conn = db) {
 // transaction as the move-row change it reports.
 // The job never cancels a one-time visit after move-out or an open visit
 // dated between move-out and today: the office gets those in one item.
+// The old-house stop (GATE_MOVING_STOP_AT_MOVE_OUT, owner 2026-11-04 "YES app
+// cancel those old-house visits") runs pass 2 for a submitted move WITH a new
+// address too, when the move is not applied by the move-out day: the same
+// cancel, with the office words for a stop. Such a move gets no reminder and
+// never ends in pass 3: it stays open for the new-home estimate and Apply move,
+// which then finds nothing left to stop. A plan the move's new-home estimate
+// booked is never stopped.
 
 const REMINDER_DAYS = 7;
 const PAUSE_PASS_LIMIT = 50;
@@ -1669,11 +1836,22 @@ const PAUSE_OFFICE_NOTES = {
   monthly: 'They pay a monthly membership, so the automatic pause skipped them. Pause their visits and dues by hand.',
   billing: 'Their billing plan is not one the automatic pause handles. Pause their visits by hand.',
 };
+// The same for a move with a new address (the old-house stop). A prepaid or
+// monthly plan moves to the new home by hand (BILLING_STEPS), so the item
+// points to the Moving card's steps.
+const STOP_OFFICE_NOTES = {
+  prepay: 'They prepay for the year, so the app did not stop their old-house visits. Move them to the new home: follow the steps on the Moving card.',
+  monthly: 'They pay a monthly membership, so the app did not stop their old-house visits. Move them to the new home: follow the steps on the Moving card.',
+  billing: 'Their billing plan is not one the app handles, so it did not stop their old-house visits. Stop or move them by hand.',
+};
+const officeNotesFor = (move) => (move.normalized_address ? STOP_OFFICE_NOTES : PAUSE_OFFICE_NOTES);
 
-// The note every visit the pause cancels carries (job_status_history). Like
-// Apply move's, it names only the move, so a later run finds what an earlier
-// one cancelled.
-const pauseVisitNote = (moveId) => `Customer moved out with no new address; plan paused after the move-out date (moving flow, move pause ${moveId})`;
+// The note every visit the pause or the old-house stop cancels carries
+// (job_status_history). Like Apply move's, it names only the move, so a later
+// run finds what an earlier one cancelled. The first pause note (2b) is still
+// replayed: a pause started before this note came in finishes on it.
+const pauseVisitNote = (moveId) => `Customer moved out; plan stopped after the move-out date (moving flow, move pause ${moveId})`;
+const firstPauseVisitNote = (moveId) => `Customer moved out with no new address; plan paused after the move-out date (moving flow, move pause ${moveId})`;
 
 // Submitted moves with a move-out date and no new address on file (the
 // "no address" the moving page's receipt and the new-home estimate read).
@@ -1698,20 +1876,23 @@ async function forEachMove(query, fn) {
   }
 }
 
-// The move pause runs on the move-out day itself, for the visits after it.
+// The move pause runs on the move-out day itself, for the visits after it. A
+// move with a new address joins only with the old-house stop on.
 function pauseDue(move, today) {
-  return !!(move && move.status === 'submitted' && !move.normalized_address && !move.pause_state
+  return !!(move && move.status === 'submitted' && (!move.normalized_address || movingStopAtMoveOutLive()) && !move.pause_state
     && move.move_out_date && dateOnlyString(move.move_out_date) <= today);
 }
 
 /**
- * What the move pause will do for this move: 'auto' (the job pauses the
- * plans: a customer billed per visit), 'office' (annual prepay, monthly or
- * another billing plan: the office pauses by hand), or null (gate off, an
- * address on file, no move-out date, no plan or no customer).
+ * What the move pause (or, for a move with a new address, the old-house stop)
+ * will do for this move: 'auto' (the job stops the plans: a customer billed
+ * per visit), 'office' (annual prepay, monthly or another billing plan: the
+ * office acts by hand), or null (gate off, no move-out date, no plan or no
+ * customer, or an address on file with the old-house stop off).
  */
 async function pauseLane(move, conn = db) {
-  if (!movingPauseLive() || !move || move.normalized_address || !move.move_out_date) return null;
+  if (!movingPauseLive() || !move || !move.move_out_date) return null;
+  if (move.normalized_address && !movingStopAtMoveOutLive()) return null;
   // A pause that ended (or went to the office) decides it; one still running promises nothing.
   if (move.pause_state) return move.pause_state === 'paused' ? 'auto' : 'office';
   if (move.paused_at) return null;
@@ -1815,6 +1996,17 @@ async function sendDueMoveReminders({ today, now }) {
 
 // ── Pass 2: the pause ──
 
+// Every series the move's new-home estimate booked (accepted, Apply not run
+// yet): the new home's plan, which the old-house stop never touches.
+async function estimateSeriesIds(customerId, estimateId) {
+  if (!estimateId) return new Set();
+  const rows = await db('scheduled_services')
+    .where({ customer_id: customerId, source_estimate_id: estimateId })
+    .whereNull('recurring_parent_id')
+    .select('id');
+  return new Set(rows.map((r) => String(r.id)));
+}
+
 // What the pause would stop for this move, read-only, or a MoveError saying
 // why it cannot run (Apply move's own old-house reading, with no new home).
 async function pausePlan(move, today) {
@@ -1825,7 +2017,7 @@ async function pausePlan(move, today) {
   if (!from) throw applyError('from_unknown');
   const primaryIsFrom = sameId(await primaryPropertyId(customerId), from.id);
   const ctx = { to: null, from, flipped: !primaryIsFrom, today, cutFrom, cancelFrom: cutFrom > today ? cutFrom : today };
-  const old = await oldHousePlans(db, customerId, ctx, new Set());
+  const old = await oldHousePlans(db, customerId, ctx, await estimateSeriesIds(customerId, move.estimate_id));
   await assertOldVisitsUnpaid(db, customerId, old.stops);
   const { rentedTermiteStationState } = require('./cancellation-processor');
   const stationState = await rentedTermiteStationState(customerId);
@@ -1836,11 +2028,16 @@ async function pausePlan(move, today) {
 // first cancel (claimPause), pause_state only at its end (settlePause).
 const pauseStarted = (move) => !!(move && move.paused_at && !move.pause_state);
 
-// The office item for a pause the office takes over.
-const officeItem = (note, why) => ({ action: (name) => `pause ${name}'s plan by hand`, why, detail: note });
+// The office item for a pause (or an old-house stop) the office takes over.
+const officeItem = (move, note, why) => ({
+  action: (name) => (move.normalized_address ? `handle ${name}'s old-house visits by hand` : `pause ${name}'s plan by hand`),
+  why,
+  detail: note,
+});
 
-// The office takes a pause that never started (annual prepay, monthly or
-// another billing plan), once: nothing more runs for it automatically.
+// The office takes a pause (or an old-house stop) that never started (annual
+// prepay, monthly or another billing plan), once: nothing more runs for it
+// automatically.
 async function handPauseToOffice(move, note, { now }) {
   return db.transaction(async (trx) => {
     const updated = await trx('customer_moves')
@@ -1855,8 +2052,10 @@ async function handPauseToOffice(move, note, { now }) {
       description: `Move pause left to the office: ${note}`,
       metadata: JSON.stringify({ move_id: move.id }),
     });
-    await raisePauseAlert(trx, move, 'office', officeItem(note,
-      `Their move-out is ${prettyDate(dateOnlyString(move.move_out_date))} with no new address on file; the automatic pause did not run.`));
+    const day = prettyDate(dateOnlyString(move.move_out_date));
+    await raisePauseAlert(trx, move, 'office', officeItem(move, note, move.normalized_address
+      ? `Their move-out is ${day} and the move is not applied yet; the app did not stop the old-house visits.`
+      : `Their move-out is ${day} with no new address on file; the automatic pause did not run.`));
     return 'office';
   });
 }
@@ -1891,11 +2090,11 @@ async function settlePause(move, facts, { state, note = null, summary = null, wh
       description: summary || `Move pause left to the office: ${note}`,
       metadata: JSON.stringify({ move_id: move.id, move_out_date: facts.moveOut }),
     });
-    if (state === 'office' && why) await raisePauseAlert(trx, locked, 'office', officeItem(note, why));
+    if (state === 'office' && why) await raisePauseAlert(trx, locked, 'office', officeItem(locked, note, why));
     if (left.length) {
       await raisePauseAlert(trx, locked, 'left_booked', {
         action: (name) => `check ${name}'s old-house visits`,
-        why: `The plans paused after the move-out, but ${left.length} visit${left.length === 1 ? ' is' : 's are'} still booked at the old house.`,
+        why: `The plans ${facts.hasAddress ? 'stopped' : 'paused'} after the move-out, but ${left.length} visit${left.length === 1 ? ' is' : 's are'} still booked at the old house.`,
         detail: `Still booked at ${propertyLine(house)}: ${left.map((v) => `${v.name} ${prettyDate(v.date)}`).join(', ')}. Cancel any that should not run.`,
       });
     }
@@ -1907,13 +2106,14 @@ async function settlePause(move, facts, { state, note = null, summary = null, wh
 // stopped): replayed, found by the visit note naming the move (the same
 // repair as Apply move's; each step finds nothing left to do when it ran).
 async function replayPauseFollowThrough(move) {
-  const note = pauseVisitNote(move.id);
   const { priorCancelledVisits } = require('./cancellation-processor');
-  const earlier = await priorCancelledVisits(move.customer_id, note);
-  if (!earlier.length) return;
-  await require('./visit-cancellation-followthrough').runVisitCancellationFollowThrough({
-    targetIds: earlier.map((v) => v.id), actorId: null, waiveFee: true, reason: note, source: 'moving-pause', linkedChildren: [],
-  });
+  for (const note of [pauseVisitNote(move.id), firstPauseVisitNote(move.id)]) {
+    const earlier = await priorCancelledVisits(move.customer_id, note);
+    if (!earlier.length) continue;
+    await require('./visit-cancellation-followthrough').runVisitCancellationFollowThrough({
+      targetIds: earlier.map((v) => v.id), actorId: null, waiveFee: true, reason: note, source: 'moving-pause', linkedChildren: [],
+    });
+  }
 }
 
 // Stops every plan at the house left and opens the termite task. A refusal
@@ -1955,11 +2155,14 @@ async function runPause(move, plan) {
 // handles. Otherwise every plan at the house left stops, as the run that
 // claimed it would have done: an address the customer added since does not
 // stop it (the move-out passed; Apply move later finds nothing left to stop).
-// A refused cancel goes to the office with what already stopped.
+// A refused cancel goes to the office with what already stopped. A move with
+// a new address reads as the old-house stop in every note and item.
 async function finishPause(move, { today, now }) {
   const claimedMoveOut = plusDays(dateOnlyString(move.pause_ends_on), -PAUSE_DAYS);
   const facts = { status: move.status, moveOut: dateOnlyString(move.move_out_date) || null, hasAddress: !!move.normalized_address };
-  const why = `The automatic pause for the move-out on ${prettyDate(claimedMoveOut)} did not finish; the item says what stopped.`;
+  const why = facts.hasAddress
+    ? `The automatic stop of the old-house visits for the move-out on ${prettyDate(claimedMoveOut)} did not finish; the item says what stopped.`
+    : `The automatic pause for the move-out on ${prettyDate(claimedMoveOut)} did not finish; the item says what stopped.`;
   await replayPauseFollowThrough(move);
   if (move.status !== 'submitted') {
     return settlePause(move, facts, { state: 'office', note: 'The move closed while the pause was running.', now });
@@ -1973,7 +2176,7 @@ async function finishPause(move, { today, now }) {
   // the office with what already stopped.
   const block = await billingBlock(db, move.customer_id);
   if (block) {
-    const note = PAUSE_OFFICE_NOTES[block] || 'Their account changed while the pause was running. Check the old-house visits by hand.';
+    const note = officeNotesFor(move)[block] || 'Their account changed while the pause was running. Check the old-house visits by hand.';
     return settlePause(move, facts, { state: 'office', note, why, now });
   }
   let plan;
@@ -1988,19 +2191,22 @@ async function finishPause(move, { today, now }) {
     const done = progress.stopped.length ? `Stopped: ${progress.stopped.join(', ')}. ` : '';
     return settlePause(move, facts, { state: 'office', note: `${done}Not stopped: ${progress.refusal}`, why, now });
   }
+  const counts = `(${progress.plansStopped} plans, ${progress.visitsCancelled} visits cancelled, no customer text, no fee)`;
   const summary = [
-    `Customer moved out with no new address: plans at ${propertyLine(plan.from)} paused after ${prettyDate(plan.moveOut)}`,
-    `(${progress.plansStopped} plans, ${progress.visitsCancelled} visits cancelled, no customer text, no fee), held until ${prettyDate(dateOnlyString(move.pause_ends_on))}.`,
+    facts.hasAddress
+      ? `Customer moved out: plans at ${propertyLine(plan.from)} stopped after ${prettyDate(plan.moveOut)} ${counts}. The move stays open for the new-home estimate and Apply move.`
+      : `Customer moved out with no new address: plans at ${propertyLine(plan.from)} paused after ${prettyDate(plan.moveOut)} ${counts}, held until ${prettyDate(dateOnlyString(move.pause_ends_on))}.`,
     progress.stationTask ? 'Termite station pickup task opened.' : '',
   ].join(' ').trim();
   return settlePause(move, facts, { state: 'paused', summary, left: [...plan.oneOffs, ...plan.pastOpen], house: plan.from, now });
 }
 
 /**
- * Pause one move whose customer moved out with no new address, or finish one
- * an earlier run started. Returns its outcome. Every step, the office
- * hand-off included, is awaited inside the try: the move fence is released
- * only after it commits or rolls back.
+ * Pause one move whose customer moved out with no new address (or, with the
+ * old-house stop on, stop the old-house plans of one with a new address that
+ * is not applied), or finish one an earlier run started. Returns its outcome.
+ * Every step, the office hand-off included, is awaited inside the try: the
+ * move fence is released only after it commits or rolls back.
  */
 async function pauseMove(moveId, { today, now }) {
   let release;
@@ -2018,7 +2224,8 @@ async function pauseMove(moveId, { today, now }) {
     // off once; anything else (no plan, no customer) is left alone, unmarked,
     // exactly as the receipt promised nothing.
     const block = await billingBlock(db, move.customer_id);
-    if (PAUSE_OFFICE_NOTES[block]) return await handPauseToOffice(move, PAUSE_OFFICE_NOTES[block], { now });
+    const notes = officeNotesFor(move);
+    if (notes[block]) return await handPauseToOffice(move, notes[block], { now });
     if (block) return 'skipped';
     const claimed = await claimPause(move, today, now);
     return claimed ? await finishPause(claimed, { today, now }) : 'not_due';
@@ -2029,11 +2236,15 @@ async function pauseMove(moveId, { today, now }) {
 
 async function pauseDueMoves({ today, now }) {
   const out = { paused: 0, office: 0, skipped: 0, busy: 0, failed: 0 };
-  // Due moves, and every pause an earlier run started, whatever changed since.
+  // Due moves (with a new address only when the old-house stop is on), and
+  // every pause an earlier run started, whatever changed since.
+  const withAddress = movingStopAtMoveOutLive();
   const due = db('customer_moves').whereNull('pause_state').where((q) => q
     .whereNotNull('paused_at')
-    .orWhere((fresh) => fresh.where({ status: 'submitted' }).whereNull('normalized_address').whereNotNull('move_out_date')
-      .where('move_out_date', '<=', today)));
+    .orWhere((fresh) => {
+      fresh.where({ status: 'submitted' }).whereNotNull('move_out_date').where('move_out_date', '<=', today);
+      if (!withAddress) fresh.whereNull('normalized_address');
+    }));
   await forEachMove(due, async (id) => {
     try {
       const outcome = await pauseMove(id, { today, now });
@@ -2100,7 +2311,11 @@ async function endExpiredPauses({ today, now }) {
   return out;
 }
 
-/** The daily move-pause job (scheduler, 10:20 ET): reminders, then pauses, then ends. Off with GATE_MOVING_PAUSE. */
+/**
+ * The daily move-pause job (scheduler, 10:20 ET): reminders, then pauses (and,
+ * with GATE_MOVING_STOP_AT_MOVE_OUT, old-house stops), then ends. Off with
+ * GATE_MOVING_PAUSE.
+ */
 async function runMovePauseJob({ now = new Date() } = {}) {
   if (!movingPauseLive()) return { skipped: true };
   const today = etDateString(now);
@@ -2146,7 +2361,8 @@ module.exports = {
   applyAction,
   applyMovePreview,
   applyMove,
+  autoApplyAcceptedMoves,
   runMovePauseJob,
   PAUSE_DAYS,
-  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse },
+  _private: { cleanDate, cleanTyped, typedUnit, normalizedFrom, reusableCheck, requestDescription, requestSubject, alertWhy, prettyDate, raiseMoveAlert, applyPlan, nextDay, visitAtHouse, pauseLane, addressLine },
 };

@@ -790,3 +790,40 @@ describe('AUDIT_PROMPT appointment definition', () => {
     expect(AUDIT_PROMPT).toContain(RESCHEDULE_RULE);
   });
 });
+
+describe('caller on file and the lead rule (owner ruling 2026-11-04, D1 A)', () => {
+  const { AUDIT_PROMPT, AUDIT_PROMPT_V1, callerOnFileBlock, auditUserContent, auditInputHash } = require('../services/call-self-audit');
+  const call = (stamp) => ({
+    direction: 'inbound',
+    transcription: 'Caller: how much would it be to treat my trees and shrubs too?',
+    ai_extraction: JSON.stringify(stamp === undefined ? { is_lead: false } : { is_lead: false, known_caller: stamp }),
+  });
+
+  test('both audit prompts carry production\'s lead meaning', () => {
+    for (const prompt of [AUDIT_PROMPT, AUDIT_PROMPT_V1]) {
+      expect(prompt).toContain('A current Waves customer is never a new lead, even when asking about another or additional service');
+      expect(prompt).toContain('A CALLER ON FILE line, when present');
+      expect(prompt).not.toContain('an existing customer coordinating a visit is not a new lead');
+    }
+  });
+
+  test('renders the caller stamp the call processor stored', () => {
+    expect(callerOnFileBlock(call('current_customer'))).toMatch(/^CALLER ON FILE: .*CURRENT Waves customer\.\n$/);
+    expect(callerOnFileBlock(call('other_account'))).toMatch(/not a current customer/);
+    expect(callerOnFileBlock(call('not_on_file'))).toMatch(/matched no Waves account/);
+  });
+
+  test('adds no line without a usable stamp', () => {
+    const noStamp = [call(undefined), call('lookup_failed'), call('toString'), call(7),
+      { direction: 'inbound', transcription: 'x', ai_extraction: 'null' }, { direction: 'inbound', transcription: 'x' }];
+    for (const c of noStamp) expect(callerOnFileBlock(c)).toBe('');
+  });
+
+  test('the line sits between the direction block and the transcript, and is part of the input hash', () => {
+    const content = auditUserContent(call('current_customer'));
+    expect(content.indexOf('CALL DIRECTION')).toBeLessThan(content.indexOf('CALLER ON FILE'));
+    expect(content.indexOf('CALLER ON FILE')).toBeLessThan(content.indexOf('Transcript:'));
+    expect(auditUserContent(call(undefined))).not.toContain('CALLER ON FILE');
+    expect(auditInputHash(call('current_customer'))).not.toBe(auditInputHash(call(undefined)));
+  });
+});

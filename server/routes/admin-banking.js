@@ -6,6 +6,8 @@ const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const logger = require('../services/logger');
 const StripeBanking = require('../services/stripe-banking');
 const BankingExport = require('../services/banking-export');
+const plaidSync = require('../services/plaid-sync');
+const featureGates = require('../config/feature-gates');
 const { parseETDateTime, etWeekStart, etMonthStart, etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -414,6 +416,72 @@ router.get('/stats', async (req, res) => {
   } catch (err) {
     logger.error('[banking] Stats failed:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GET /cash-today — owner-only Cash today card (GATE_CASH_FORECAST)
+// ═══════════════════════════════════════════════════════════════
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const isUsd = (currency) => String(currency || 'USD').toUpperCase() === 'USD';
+
+// Bank cash is the available balance, else the current one; a card's balance
+// is money owed. Entries in another currency stay listed but never total.
+function bankCash(entry) {
+  return entry.available != null ? entry.available : entry.current;
+}
+
+function sumUsd(entries, pick) {
+  return round2(entries.reduce((sum, e) => (
+    isUsd(e.currency) ? sum + (Number(pick(e)) || 0) : sum
+  ), 0));
+}
+
+// Stripe payouts still on the way. arrival_date is a midnight-UTC calendar-day
+// marker (see applyArrivalDayRange), so arrival_day is its UTC day, never an
+// Eastern-time conversion. A failed read answers { error } and the rest of the
+// card still returns.
+async function readInTransit() {
+  try {
+    const rows = await db('stripe_payouts')
+      .whereIn('status', ['pending', 'in_transit'])
+      .select('amount', 'currency', 'status', 'arrival_date', 'bank_last_four')
+      .orderBy('arrival_date', 'asc');
+    const payouts = rows.map((r) => ({
+      amount: round2(r.amount),
+      arrival_day: r.arrival_date ? new Date(r.arrival_date).toISOString().slice(0, 10) : null,
+      status: r.status,
+      bank_last_four: r.bank_last_four || null,
+      currency: String(r.currency || 'usd').toUpperCase(),
+    }));
+    return { total: sumUsd(payouts, (p) => p.amount), payouts };
+  } catch (err) {
+    logger.error('[banking] Cash today in-transit read failed:', err);
+    return { error: 'unavailable' };
+  }
+}
+
+router.get('/cash-today', requireFullAccess, async (req, res) => {
+  if (!featureGates.cashForecastLive()) return res.status(404).json({ error: 'Not found' });
+  try {
+    const { accounts, cards, unavailable } = await plaidSync.readCashBalances();
+    const inTransit = await readInTransit();
+    const bankEntries = accounts.map((a) => ({ ...a, cash: bankCash(a) }));
+    res.json({
+      fetched_at: new Date().toISOString(),
+      accounts,
+      cards,
+      unavailable,
+      in_transit: inTransit,
+      totals: {
+        bank_usd: sumUsd(bankEntries, (a) => a.cash),
+        owed_usd: sumUsd(cards, (c) => c.current),
+        in_transit_usd: inTransit.error ? 0 : inTransit.total,
+      },
+    });
+  } catch (err) {
+    logger.error('[banking] Cash today failed:', err);
+    res.status(500).json({ error: 'the cash read failed' });
   }
 });
 

@@ -13,7 +13,7 @@ const { checkConsentForPurpose } = require('../services/messaging/validators/con
 // Route internals for the payload/update mapping (mirrors the mocks in
 // notifications-preferences.test.js — the route file only needs these to load).
 jest.mock('express', () => ({
-  Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn() }),
+  Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn(), post: jest.fn() }),
 }));
 jest.mock('joi', () => ({}));
 jest.mock('../middleware/auth', () => ({ authenticate: jest.fn() }));
@@ -401,6 +401,8 @@ describe('notifications route mapping for the billing channels', () => {
     }, {})).toEqual({
       billing_channel: 'email',
       payment_receipt_channel: 'both',
+      // A changed receipt channel is the customer's choice (GATE_APP_FIRST_ANY_DEVICE).
+      payment_receipt_channel_explicit: true,
     });
 
     // Unknown values normalize to sms (channelValue guard).

@@ -58,6 +58,7 @@ async function main() {
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
       else if (api === '/admin/communications/unread-count') body = { conversations: 0 };
       else if (api === '/admin/email/oauth/status') body = { connected: gmailConnected };
+      else if (api === '/admin/email/reclassify-options') body = { enabled: false };
       else if (api === '/admin/email/inbox') body = { emails: [b], total: 1 };
       else if (api === '/admin/email/stats') body = { total: 1, unread: 0 };
       else if (api === '/admin/email/daily-digest') body = { total_received: 0 };

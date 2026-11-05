@@ -131,4 +131,69 @@ function technicianVisitRowInScope(actor, row) {
     && dateOnly(row.scheduled_date) >= techAccessCutoff();
 }
 
-module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit };
+// Card on file at the visit (GATE_TECH_CARD_ON_FILE, owner 2026-11-04 D4 A): the visit an invoice is
+// bound to must be the technician's own, scheduled today (ET), and completed. Tighter than the read
+// window on purpose: a saved-card charge needs no customer at the door, so a past visit, or one not yet
+// done, never qualifies. Completed, not On Site: the owner's 2026-09-26 rule is never to charge before
+// the visit, and an after-visit card consent authorizes the charge only once the visit is completed
+// (Codex security #7587 r3). Judged on a row in hand; the charge judges it again on the visit row it
+// holds locked. Administrators are unscoped.
+const TECH_CARD_ON_FILE_STATUSES = ['completed'];
+function technicianCardOnFileVisitOk(actor, row) {
+  if (!isTechnicianRequest(actor)) return true;
+  const { dateOnly } = require('./visit-groups');
+  return !!row && !!actor.technicianId
+    && String(row.technician_id || '') === String(actor.technicianId)
+    && TECH_CARD_ON_FILE_STATUSES.includes(String(row.status || ''))
+    && dateOnly(row.scheduled_date) === etDateString();
+}
+
+// Card on file charges the booked visit only (Codex security #7587): every positive line must be one
+// the server built from the visit (its primary line, its booked add-ons, its price top-up). A line
+// added at checkout (extraLineItems: free description and price) needs the customer at the door, so
+// it is Tap to Pay or manual card. Discount lines (negative) are fine.
+function invoiceChargesBookedVisitOnly(invoice) {
+  const visitId = String(invoice?.scheduled_service_id || '');
+  if (!visitId) return false;
+  const booked = (clientId) => clientId === `scheduled_${visitId}_primary`
+    || clientId.startsWith(`scheduled_${visitId}_addon_`)
+    || clientId === `scheduled_price_topup_${visitId}`;
+  const lines = invoiceLines(invoice.line_items);
+  return !!lines && lines.every((line) => !(Number(line?.amount) > 0) || booked(String(line?.client_id || '')));
+}
+
+// invoices.line_items is jsonb (an array) or, on old rows, JSON text. Missing or unreadable = null,
+// which refuses (fail closed).
+function invoiceLines(raw) {
+  if (Array.isArray(raw)) return raw;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// The unlocked check the card-on-file routes run first: the invoice is bound to a visit of its own
+// customer, that visit passes technicianCardOnFileVisitOk and its closeout was a performed visit, the
+// invoice bills the booked visit only, no active payment plan owns it, and the customer has not turned
+// Auto Pay off.
+async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
+  if (!isTechnicianRequest(req)) return true;
+  if (!invoice?.id || !invoice.scheduled_service_id || !invoiceChargesBookedVisitOnly(invoice)) return false;
+  const database = conn || require('../models/db');
+  const row = await database('scheduled_services').where({ id: invoice.scheduled_service_id })
+    .first('customer_id', 'technician_id', 'status', 'scheduled_date');
+  if (!row || String(row.customer_id) !== String(invoice.customer_id) || !technicianCardOnFileVisitOk(req, row)) return false;
+  // A completed visit is chargeable only after a performed closeout: inspection only, customer declined and
+  // incomplete also end completed (the charge's requirePerformedVisit reads the same latest record under its lock).
+  const record = await database('service_records').where({ scheduled_service_id: invoice.scheduled_service_id })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
+  if (!require('./visit-outcomes').closeoutPerformedForCharge(record)) return false;
+  // An active payment plan owns the invoice's collection: the office collects it.
+  if (await database('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id')) return false;
+  // A customer who turned Auto Pay off is not charged off-session from the visit.
+  return !(await require('./payment-method-consents').autopayOptedOut(invoice.customer_id, { dbh: database }));
+}
+
+module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly };

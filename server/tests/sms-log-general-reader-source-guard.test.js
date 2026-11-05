@@ -72,6 +72,16 @@ const ALLOWLIST = [
     reason: 'legacyRows: scoped to direction inbound (a send reservation is an outbound placeholder, so it can never match) and used only to stamp or clear a spam verdict on one sender\'s texts; it presents rows to nobody.',
   },
   {
+    file: 'services/dead-number-alert.js',
+    snippet: "const row = await db('sms_log').where({ twilio_sid: sid }).first('customer_id', 'direction', 'to_phone');",
+    reason: 'outboundCustomerText: keyed by the twilio_sid Twilio reports on, reading only the customer and number; a send reservation has no sid until it is promoted to a real send, so no placeholder can match.',
+  },
+  {
+    file: 'services/dead-number-alert.js',
+    snippet: "return conn('sms_log')",
+    reason: 'settledTextsTo: reads texts the provider settled as failed, undelivered or delivered (statuses a send reservation never has) plus the callback\'s own sid, to count failures in a row; it presents rows to nobody and reads only created_at, status and twilio_sid.',
+  },
+  {
     file: 'services/one-text-per-day.js',
     snippet: "const log = await db('sms_log').where({ twilio_sid: sid }).first('message_type');",
     reason: 'isTrackerText: keyed by twilio_sid (the text Twilio reports undelivered) and reads only its message type; a send reservation has no sid until it is promoted to a real send, so no placeholder can match.',

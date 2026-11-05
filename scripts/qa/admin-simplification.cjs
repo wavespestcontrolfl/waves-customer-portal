@@ -85,6 +85,7 @@ async function main() {
       else if (api === '/admin/ads/advisor') body = { report: null };
       else if (api === '/admin/ads/advisor/history') body = { reports: [] };
       else if (api === '/admin/ads/capacity-heatmap') body = { heatmap: {} };
+      else if (api === '/admin/ads/health') { status = 404; body = { error: 'ads_health_off' }; }
       else if (api === '/admin/seo/dashboard') body = { current: {}, change: {}, topQueries: [], topPages: [], daily: [] };
       else if (api === '/admin/seo/sync-health') body = {};
       else if (api === '/admin/seo/ai-overview') body = { results: [] };

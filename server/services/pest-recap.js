@@ -1744,8 +1744,7 @@ async function submitRecap({
   // to the right tech/visit (Codex P2 on PR #2588 round 2). Skips recaps of
   // previously non-performed visits (incomplete / inspection_only /
   // customer_declined), matching the referral-credit gating above (Codex P2
-  // round 3). Fire-and-forget; the card.issued email inside stays dark
-  // behind GATE_DIGITAL_BUSINESS_CARD.
+  // round 3). Fire-and-forget.
   if (!recapPriorNonPerformed) {
     try {
       const CustomerCardService = require('./customer-card');

@@ -31,6 +31,13 @@ const MAX_DAILY_BUDGET = 99999999.99;
 // on length. Cron-generated reasons are short by construction.
 const MAX_REASON_LEN = 255;
 
+// The capacity rule was built for Search campaigns only. The daily sync stores Google's channel enum as text
+// (SEARCH = '2', google-ads.js syncCampaigns), and 'google_search' is the older manual type. Every other type is left
+// alone: Google is moving Local Services Ads into pay-per-lead Performance Max campaigns, and a capacity budget pushed
+// to one of those would be spend the owner never approved (owner 2026-11-04, PPC gap page option A). A missing type
+// is not Search either. The owner's own actions (mode, hold, advisor Apply via setMode/setBudget) are not filtered.
+const SEARCH_CAMPAIGN_TYPES = new Set(['2', 'SEARCH', 'google_search']);
+
 // Physical stops per day for the gap window (see getGapWindow): a visit_id group
 // is one stop; with no visit_id, the same customer + same window_start (time,
 // NULL for a windowless placeholder) is one stop. visit_id is uuid and
@@ -178,6 +185,21 @@ function etDateWeekday(dateStr) {
 
 class BudgetManager {
   /**
+   * The active Google campaigns the capacity rule may change: Search only
+   * (SEARCH_CAMPAIGN_TYPES). Any other active Google campaign is named in the
+   * log on every run, so a campaign the rule leaves alone is visible.
+   */
+  async listCapacityCampaigns() {
+    const rows = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
+    const skipped = rows.filter((c) => !SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? '')));
+    if (skipped.length) {
+      const names = skipped.map((c) => `${c.campaign_name} (type ${c.campaign_type ?? 'none'})`).join(', ');
+      logger.info(`Budget adjust: left ${skipped.length} non-Search campaign(s) alone: ${names}`);
+    }
+    return rows.filter((c) => !skipped.includes(c));
+  }
+
+  /**
    * Core budget adjustment — runs every 2 hours via cron.
    *
    * Sunday algorithm: always check Monday's capacity, full power.
@@ -221,7 +243,8 @@ class BudgetManager {
     // ingested read-only (no Marketing API budget control here), so this
     // capacity-based budget automation must not throttle Meta budgets locally —
     // that would drift the dashboard from Ads Manager until the next Meta sync.
-    const campaigns = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
+    // Of the Google ones, only Search campaigns (listCapacityCampaigns).
+    const campaigns = await this.listCapacityCampaigns();
     const targets = await db('ad_targets').first();
     const thresholds = {
       green: parseFloat(targets?.capacity_green_max || 70),

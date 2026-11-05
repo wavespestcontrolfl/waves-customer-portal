@@ -235,6 +235,19 @@ describe("Email workspace feedback and request ownership", () => {
     expect(window.location.search).not.toContain("id=");
   });
 
+  it("shows the label picker only when the pick gate is on, and posts the picked label", async () => {
+    mount(); await open();
+    expect(screen.queryByRole("combobox", { name: "Set email label" })).not.toBeInTheDocument();
+    cleanup();
+    overrides.set("/api/admin/email/reclassify-options", () => response({ enabled: true, categories: ["lead_inquiry", "spam"] }));
+    const posts = [];
+    overrides.set(`/api/admin/email/message/${a.id}/reclassify`, (url, options) => { posts.push(options.body); return response({ classification: { category: "spam" } }); });
+    mount(); await open();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Set email label" }), { target: { value: "spam" } });
+    await screen.findByText("Email reclassified.");
+    expect(posts).toEqual([JSON.stringify({ classification: "spam" })]);
+  });
+
   it("keeps the star and classification unchanged after rejected actions", async () => {
     overrides.set(`/api/admin/email/message/${a.id}/star`, () => response({}, 503));
     overrides.set(`/api/admin/email/message/${a.id}/reclassify`, () => response({}, 503));

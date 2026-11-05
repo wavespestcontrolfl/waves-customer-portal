@@ -54,6 +54,99 @@ describe('Payroll tab table', () => {
   });
 });
 
+const SIMPLE_ROW = {
+  id: 'simple-1', participant: true, deferralBp: 350, deferralCents: null, signedOn: '2026-12-01', effectiveOn: '2027-01-04', note: null,
+};
+
+describe('SIMPLE IRA', () => {
+  beforeEach(() => {
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/technicians') {
+        return reply({ technicians: [{ ...TECHS[0], currentSimple: SIMPLE_ROW }, { ...TECHS[1], currentSimple: null }] });
+      }
+      if (path === '/admin/payroll/technicians/tech-a/simple-ira' && !options.method) {
+        return reply({ elections: [SIMPLE_ROW, { ...SIMPLE_ROW, id: 'simple-0', participant: false, deferralBp: null, effectiveOn: '2027-01-01', note: 'Declined at first' }] });
+      }
+      if (path.endsWith('/simple-ira') && options.method === 'POST') {
+        writes.push({ path, method: options.method, body: options.body });
+        return reply({ election: SIMPLE_ROW });
+      }
+      return base(path, options);
+    });
+  });
+
+  it('shows the election in force next to the W-4, or "Not set up"', async () => {
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    expect(within(rowFor('Sample Alpha')).getByText(/Takes part · saves 3\.5% of each check/)).toBeInTheDocument();
+    expect(within(rowFor('Sample Alpha')).getByText(/Applies from Jan 4, 2027/)).toBeInTheDocument();
+    expect(within(rowFor('Sample Beta')).getByText('Not set up')).toBeInTheDocument();
+  });
+
+  async function open(name = 'Sample Alpha') {
+    render(<PayrollSettings />);
+    await screen.findByText(name);
+    fireEvent.click(within(rowFor(name)).getByRole('button', { name: 'SIMPLE IRA' }));
+    return screen.findByRole('dialog');
+  }
+
+  it('lists earlier entries newest first, says to enter every covered employee, and asks for no SSN or account number', async () => {
+    const dialog = await open();
+    // The 2% is owed for every covered employee, so a missing entry is a missing contribution.
+    expect(dialog).toHaveTextContent('Enter every employee the plan covers, even one who saves nothing');
+    const list = await within(dialog).findByRole('list', { name: /SIMPLE IRA history/ });
+    const items = within(list).getAllByRole('listitem');
+    expect(items[0]).toHaveTextContent('saves 3.5% of each check');
+    expect(items[1]).toHaveTextContent('Not taking part');
+    expect(items[1]).toHaveTextContent('Declined at first');
+    expect(dialog.textContent).not.toMatch(/social security number|account number|routing/i);
+  });
+
+  it('keeps Save off until it is signed, then posts a percent, and a dollar amount sends dollars', async () => {
+    const dialog = await open();
+    const view = within(dialog);
+    const save = view.getByRole('button', { name: 'Save SIMPLE IRA' });
+    expect(save).toBeDisabled();
+    fireEvent.change(view.getByLabelText(/Date the employee signed/), { target: { value: '2026-10-20' } });
+    expect(save).toBeEnabled();
+    fireEvent.change(view.getByLabelText('Saves from each check'), { target: { value: 'percent' } });
+    expect(save).toBeDisabled();
+    fireEvent.change(view.getByLabelText(/Percent of each check/), { target: { value: '3.5' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0].path).toBe('/admin/payroll/technicians/tech-a/simple-ira');
+    expect(writes[0].body).toEqual({ participant: true, deferralPercent: '3.5', signedOn: '2026-10-20' });
+    await screen.findByText('SIMPLE IRA saved for Sample Alpha.');
+  });
+
+  it('sends dollars for a dollar amount, and nothing about savings for a non-participant', async () => {
+    const dialog = await open();
+    const view = within(dialog);
+    fireEvent.change(view.getByLabelText(/Date the employee signed/), { target: { value: '2026-10-20' } });
+    fireEvent.change(view.getByLabelText(/First pay date/), { target: { value: '2027-01-11' } });
+    fireEvent.change(view.getByLabelText('Saves from each check'), { target: { value: 'dollars' } });
+    fireEvent.change(view.getByLabelText(/Dollars from each check/), { target: { value: '25.50' } });
+    fireEvent.click(view.getByLabelText('Takes part in the SIMPLE IRA'));
+    expect(view.queryByLabelText(/Dollars from each check/)).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: 'Save SIMPLE IRA' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0].body).toEqual({ participant: false, signedOn: '2026-10-20', effectiveOn: '2027-01-11' });
+  });
+
+  it('shows the server message and stays open when the save is refused', async () => {
+    const dialog = await open();
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => (options.method === 'POST'
+      ? reply({ error: 'First pay date cannot be before the plan starts (January 1, 2027)' }, false, 400)
+      : base(path, options)));
+    fireEvent.change(within(dialog).getByLabelText(/Date the employee signed/), { target: { value: '2026-10-20' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save SIMPLE IRA' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('before the plan starts');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+});
+
 describe('Enter W-4 dialog', () => {
   async function open() {
     render(<PayrollSettings />);
