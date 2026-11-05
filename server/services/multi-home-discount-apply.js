@@ -62,6 +62,7 @@ const featureGates = require('../config/feature-gates');
 const { storedManualDiscountCandidates } = require('./estimate-manual-discount-replay');
 const { familyMembers, familyMultiHomeEligible, lockFamilyChangesShared } = require('./multi-home-family');
 const { PLAN_LINE_SQL } = require('./rate-review');
+const { seriesAgreedPropertyId } = require('./customer-properties');
 
 const TABLE = 'multi_home_discount_applications';
 const PRESET_KEY = 'multi_home';
@@ -195,25 +196,23 @@ function otherManualDiscount(estimateData, presetId = null) {
 // ── target selection (pure) ─────────────────────────────────────────────
 
 // series: [{ customerId, rootId, propertyId, serviceKey, ... }] (every active recurring series of the family's
-// profiles). Returns the series that are OTHER homes than the source's: not the source estimate's own series, and for
-// the source profile itself only series at a different, known property. A line the percent discount never touches
-// (isExcluded, e.g. a termite bond) is not a target.
+// profiles; propertyId is the house the app itself agrees the series is at, customer-properties.js
+// seriesAgreedPropertyId, or null when the visits name none or more than one). Returns the series that are OTHER homes
+// than the source's: not the source estimate's own series, and for the source profile itself only series at a
+// different, known property (an unknown property can never be shown to be another home). A line the percent discount
+// never touches (isExcluded, e.g. a termite bond) is not a target.
 function selectTargetSeries({
-  series, source, familyCustomerIds, primaryPropertyByCustomer = new Map(), isExcluded = () => false,
+  series, source, familyCustomerIds, isExcluded = () => false,
 }) {
   const allowed = new Set([String(source.customerId), ...familyCustomerIds.map(String)]);
-  const sourceProperty = source.propertyId || primaryPropertyByCustomer.get(String(source.customerId)) || null;
   const out = [];
   for (const s of series) {
     if (!allowed.has(String(s.customerId))) continue;
     if (source.roots.has(String(s.rootId))) continue;
-    const propertyId = s.propertyId || primaryPropertyByCustomer.get(String(s.customerId)) || null;
-    if (String(s.customerId) === String(source.customerId)) {
-      // The same profile: another home only when both properties are known and differ.
-      if (!propertyId || !sourceProperty || String(propertyId) === String(sourceProperty)) continue;
-    }
+    if (String(s.customerId) === String(source.customerId)
+      && (!s.propertyId || !source.propertyId || String(s.propertyId) === String(source.propertyId))) continue;
     if (isExcluded(s.serviceKey)) continue;
-    out.push({ ...s, propertyId });
+    out.push(s);
   }
   return out;
 }
@@ -224,12 +223,13 @@ const sourceCutoff = (now) => new Date(now.getTime() - SOURCE_WINDOW_DAYS * DAY_
 
 // One page of in-window source candidates after the keyset (accepted_at, id). The key rides as text so microseconds
 // survive the round trip (a JS Date would cut them and could re-read or skip a row).
-async function loadSourcePage(dbh, cutoff, after, pageSize) {
+async function loadSourcePage(dbh, cutoff, after, pageSize, presetId = null) {
   const query = dbh('estimates')
     .where({ status: 'accepted' })
     .whereNotNull('customer_id')
     .where('accepted_at', '>=', cutoff)
-    .whereRaw("estimate_data::text LIKE '%multi_home%'");
+    // The stored discount names the preset by key, by catalog id, or both: match either string.
+    .whereRaw(presetId ? "(estimate_data::text LIKE '%multi_home%' OR estimate_data::text LIKE ?)" : "estimate_data::text LIKE '%multi_home%'", presetId ? [`%${presetId}%`] : []);
   if (after) query.whereRaw('(accepted_at, id) > (?::timestamptz, ?::uuid)', [after.acceptedKey, after.id]);
   return query
     .orderBy([{ column: 'accepted_at', order: 'asc' }, { column: 'id', order: 'asc' }])
@@ -239,11 +239,11 @@ async function loadSourcePage(dbh, cutoff, after, pageSize) {
 
 // EVERY in-window source is visited each tick: pages of `pageSize` by keyset until a short page, so a long run of
 // older sources can never starve a newer accept. `visit(estimate)` runs per source.
-async function eachSourceEstimate(dbh, now, visit, pageSize = MAX_SOURCES) {
+async function eachSourceEstimate(dbh, now, visit, pageSize = MAX_SOURCES, presetId = null) {
   const cutoff = sourceCutoff(now);
   let after = null;
   for (;;) {
-    const page = await loadSourcePage(dbh, cutoff, after, pageSize);
+    const page = await loadSourcePage(dbh, cutoff, after, pageSize, presetId);
     for (const estimate of page) await visit(estimate);
     if (page.length < pageSize) return;
     const last = page[page.length - 1];
@@ -257,20 +257,18 @@ async function describeSource(dbh, estimate, presetId) {
   if (!multiHomeSourceDiscount(estimate.estimate_data, presetId)) return null;
   const customer = await dbh('customers').where({ id: estimate.customer_id }).first('id', 'active', 'deleted_at', 'has_multi_home');
   if (!customer || customer.deleted_at || customer.active !== true) return null;
-  const multi = customer.has_multi_home === true || await familyMultiHomeEligible(dbh, customer.id);
-  if (!multi) return null;
+  // The discount engine's own rule for a requires_multi_home discount: the profile's flag, or a live Same family.
+  if (!(await require('./discount-engine').customerMeetsMultiHome(customer, dbh))) return null;
   const { PLAN_ROW_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(
     `SELECT s.id, s.recurring_parent_id, s.property_id FROM scheduled_services s WHERE s.source_estimate_id = ? AND ${PLAN_ROW_SQL}`,
     [estimate.id],
   );
   if (!rows.length) return null;
-  return {
-    estimateId: estimate.id,
-    customerId: customer.id,
-    propertyId: estimate.property_id || (rows.find((r) => r.property_id) || {}).property_id || null,
-    roots: new Set(rows.map((r) => String(r.recurring_parent_id || r.id))),
-  };
+  const roots = new Set(rows.map((r) => String(r.recurring_parent_id || r.id)));
+  // The house the accept linked the estimate to, else the one the app agrees its first series is at.
+  const propertyId = estimate.property_id || await seriesAgreedPropertyId([...roots][0], customer.id, dbh);
+  return { estimateId: estimate.id, customerId: customer.id, propertyId: propertyId || null, roots };
 }
 
 // Every active recurring series of these profiles with an upcoming (or parked) plan visit, one entry per series root.
@@ -295,20 +293,14 @@ async function loadCandidateSeries(dbh, customerIds, today) {
     const entry = byRoot.get(key);
     if (!entry) {
       byRoot.set(key, {
-        customerId: r.customer_id, rootId, propertyId: r.property_id || null, serviceKey: r.service_key_snapshot || null,
+        customerId: r.customer_id, rootId, propertyId: null, serviceKey: r.service_key_snapshot || null,
         serviceType: r.service_type || null, line: r.line, cadence: r.cadence, nextDate: ymd(r.scheduled_date),
       });
     } else {
-      entry.propertyId = entry.propertyId || r.property_id || null;
       entry.serviceKey = entry.serviceKey || r.service_key_snapshot || null;
     }
   }
   return [...byRoot.values()];
-}
-
-async function loadPrimaryProperties(dbh, customerIds) {
-  const rows = await dbh('customer_properties').whereIn('customer_id', customerIds).where({ is_primary: true, active: true }).select('id', 'customer_id');
-  return new Map(rows.map((r) => [String(r.customer_id), r.id]));
 }
 
 async function loadLedger(dbh, estimateId) {
@@ -408,26 +400,25 @@ async function priceWithDiscount(trx, schedule, row, fields) {
   return legacy.price;
 }
 
-// Later extensions spawn from the parent overlaid with the template overrides: simulate that spawn and refuse unless it
-// prices at the discounted amount (a parent with a recurring add-on or its own discount would not).
-// What a visit auto-extended from the series parent would cost, in cents: the parent overlaid with the stored template
-// overrides and then `fields` (pass {} for the template as it stands today).
-async function templateSpawnCents(trx, schedule, { rootId, fields }) {
-  const parent = await trx('scheduled_services').where({ id: rootId }).first();
-  if (!parent) throw hold('no_future_visit', { rootId });
-  const parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: rootId });
-  if (parentAddons.some((a) => schedule.addonRecursAfterAnchor(a))) throw hold('series_template_complex', { recurringAddons: true });
-  const existing = schedule.parseTemplateOverrides(parent.recurring_template_overrides) || {};
-  const provenance = schedule.readProvenanceOverrides(parent.recurring_template_overrides);
-  const template = { ...parent, ...provenance, ...existing, ...fields };
-  return cents(await priceWithDiscount(trx, schedule, template, {}));
+// What the next auto-extended visit of the series costs, in cents, read from PRODUCTION: seriesNextOccurrencesPrice
+// (routes/admin-schedule.js) walks the same dates the top-up walks and prices each through the extension writers' own
+// chain: overlayRecurringTemplateOverrides, resolveSeriesExtensionPriceTemplate, the add-ons due on the date, then
+// storedOccurrenceFloorPrice (the stacking restack with GATE_DISCOUNT_STACKING on, calculateStoredVisitFinancials
+// off). It reads the STORED parent, so call it after the template is written. null = nothing will ever be extended
+// (no pattern), so there is no spawn to price; a walk that cannot finish is unproven and holds.
+async function nextSpawnCents(trx, schedule, rootId) {
+  const read = schedule.seriesNextOccurrencesPrice || require('../routes/admin-schedule').seriesNextOccurrencesPrice;
+  const next = await read(trx, rootId);
+  if (next === null || next === undefined) return null;
+  if (next.unverified) throw hold('series_template_complex', { unverified: true });
+  return cents(next.price);
 }
 
-// Later extensions spawn from the parent overlaid with the template overrides: simulate that spawn and refuse unless it
-// prices at the discounted amount (a parent with a recurring add-on or its own discount would not).
-async function assertTemplateSpawns(trx, schedule, { rootId, fields, expectedCents }) {
-  const spawn = await templateSpawnCents(trx, schedule, { rootId, fields });
-  if (spawn !== expectedCents) throw hold('series_template_complex', { spawn: dollars(spawn), expected: dollars(expectedCents) });
+// Refuse unless the next spawn prices at the discounted amount (a parent with a recurring add-on or its own line
+// discount would not).
+async function assertNextSpawn(trx, schedule, { rootId, expectedCents }) {
+  const spawn = await nextSpawnCents(trx, schedule, rootId);
+  if (spawn !== null && spawn !== expectedCents) throw hold('series_template_complex', { spawn: dollars(spawn), expected: dollars(expectedCents) });
 }
 
 // The sale's own estimates (any visit of the series points at one): the Multi-Home Discount netted into the price
@@ -443,10 +434,6 @@ async function soldDiscountVerdict(trx, rootId, presetId) {
   if (estimates.some((e) => multiHomeSourceDiscount(e.estimate_data, presetId))) return 'already';
   if (estimates.some((e) => otherManualDiscount(e.estimate_data, presetId))) return 'other';
   return null;
-}
-
-async function activePlanHold(trx, customerId) {
-  return trx('plan_holds').where({ customer_id: customerId, status: 'active' }).first('id');
 }
 
 // The billing lane of the series, resolved the way the annual rate review resolves it.
@@ -583,7 +570,7 @@ function alreadyVerdict(visits, reason) {
 }
 
 async function precheckSeries(trx, { customer, target, preset, today }) {
-  const activeHold = await activePlanHold(trx, customer.id);
+  const activeHold = await require('./rate-review-apply')._private.activePlanHold(trx, customer.id);
   if (activeHold) throw hold('plan_on_hold', { holdId: activeHold.id });
   await assertPerApplicationLane(trx, { customer, target, today });
   const sold = await soldDiscountVerdict(trx, target.rootId, preset.id);
@@ -623,13 +610,14 @@ async function verifyTemplateForAlready(trx, schedule, { target, preset, upcomin
     throw guardHold(err) || err;
   }
   try {
-    if (await templateSpawnCents(trx, schedule, { rootId: target.rootId, fields: {} }) === netCents) return { templateStamped: false };
+    const current = await nextSpawnCents(trx, schedule, target.rootId);
+    if (current === null || current === netCents) return { templateStamped: false };
     if (reason !== ALREADY_CARRIED) throw hold('template_not_discounted', { reason });
     const fields = { ...discountFields(preset, grossDollarsOf(upcoming[0])), estimated_price: dollars(netCents) };
     if (cents(await priceWithDiscount(trx, schedule, upcoming[0], fields)) !== netCents) throw hold('template_not_discounted', { reason: 'visit_price_differs_from_catalog' });
     await schedule.stampRecurringTemplateOverrides(trx, target.rootId, fields, await trx('scheduled_services').columnInfo());
-    const after = await templateSpawnCents(trx, schedule, { rootId: target.rootId, fields: {} });
-    if (after !== netCents) throw hold('template_not_discounted', { spawn: dollars(after), expected: dollars(netCents) });
+    const after = await nextSpawnCents(trx, schedule, target.rootId);
+    if (after !== null && after !== netCents) throw hold('template_not_discounted', { spawn: dollars(after), expected: dollars(netCents) });
     return { templateStamped: true };
   } catch (err) {
     if (isHold(err) && err.holdCode === 'series_template_complex') throw hold('template_not_discounted', err.detail);
@@ -643,12 +631,7 @@ async function sameProfileOtherHome(trx, { source, target }) {
   if (!target.propertyId) return false;
   const home = await trx('customer_properties').where({ id: target.propertyId, customer_id: target.customerId, active: true }).first('id');
   if (!home) return false;
-  let sourceHome = source.propertyId;
-  if (!sourceHome) {
-    const primary = await trx('customer_properties').where({ customer_id: source.customerId, is_primary: true, active: true }).first('id');
-    sourceHome = primary ? primary.id : null;
-  }
-  return !!sourceHome && String(sourceHome) !== String(target.propertyId);
+  return !!source.propertyId && String(source.propertyId) !== String(target.propertyId);
 }
 
 async function sameLiveFamily(trx, { source, target }) {
@@ -718,8 +701,10 @@ async function applyInTransaction(trx, ctx) {
   for (const visit of locked) {
     if (cents(await priceWithDiscount(trx, schedule, visit, base)) !== afterCents) throw hold('reprice_mismatch', { visitId: visit.id });
   }
-  await assertTemplateSpawns(trx, schedule, { rootId: target.rootId, fields, expectedCents: afterCents });
   await writeSeriesDiscount(trx, schedule, { ledgerId: ledger.id, rootId: target.rootId, today, fields, lockedIds: expectedIds, afterCents, preset });
+  // After the template is stamped: production prices the next extension from what is now stored. A mismatch rolls the
+  // whole series back.
+  await assertNextSpawn(trx, schedule, { rootId: target.rootId, expectedCents: afterCents });
 
   const firstVisit = locked.slice().sort((a, b) => String(ymd(a.scheduled_date)).localeCompare(String(ymd(b.scheduled_date))))[0];
   await finalizeApplied(trx, {
@@ -848,11 +833,13 @@ async function targetsForSource(dbh, source, today) {
   // The percent-discount exclusion catalog (termite bond and the like) must be loaded before any percent price is
   // computed; the router primes it per request, this job primes it itself.
   if (typeof schedule.primePercentDiscountExclusions === 'function') await schedule.primePercentDiscountExclusions().catch(() => {});
+  for (const s of series) {
+    if (!source.roots.has(String(s.rootId))) s.propertyId = await seriesAgreedPropertyId(s.rootId, s.customerId, dbh);
+  }
   return selectTargetSeries({
     series,
     source,
     familyCustomerIds: familyIds,
-    primaryPropertyByCustomer: await loadPrimaryProperties(dbh, customerIds),
     isExcluded: (serviceKey) => !!serviceKey && schedule.lineExcludedFromPercentDiscount(serviceKey),
   });
 }
@@ -930,13 +917,14 @@ async function runMultiHomeAllHomes({ now = new Date(), dbh = db } = {}) {
   const out = { ok: true, sources: 0, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, dropped: 0, holds: [] };
   const today = etDateString(now);
   const preset = await dbh('discounts').where({ discount_key: PRESET_KEY }).first('id');
+  const presetId = preset ? preset.id : null;
   await eachSourceEstimate(dbh, now, async (estimate) => {
     try {
-      await processSource(dbh, estimate, preset ? preset.id : null, { now, today }, out);
+      await processSource(dbh, estimate, presetId, { now, today }, out);
     } catch (err) {
       logger.error(`[multi-home-discount] source estimate ${estimate.id} failed: ${err.message}`);
     }
-  });
+  }, MAX_SOURCES, presetId);
   try {
     await pruneOutOfScopeHeld(dbh, now, out);
   } catch (err) {

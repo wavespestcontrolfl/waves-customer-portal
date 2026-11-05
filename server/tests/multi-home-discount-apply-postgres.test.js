@@ -168,6 +168,32 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
     });
   });
 
+  test.each([['stacking off', undefined], ['stacking on', 'true']])('the next auto-extended visit is priced by production at the discounted price (%s)', async (_label, stacking) => {
+    if (stacking) process.env.GATE_DISCOUNT_STACKING = stacking;
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      const production = require('../routes/admin-schedule');
+      expect((await production.seriesNextOccurrencesPrice(trx, f.parentSeries.rootId)).price).toBe(117);
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      const next = await production.seriesNextOccurrencesPrice(trx, f.parentSeries.rootId);
+      expect(next).toMatchObject({ unverified: false, price: 105.3 });
+    });
+  });
+
+  test('an estimate whose stored discount names the preset by catalog id only is found and applied', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      const preset = await trx('discounts').where({ discount_key: 'multi_home' }).first();
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: JSON.stringify({ summary: { manualDiscount: { presetId: preset.id, type: 'PERCENT', value: 10, recurringAmount: 40, amount: 40 } } }),
+      });
+      expect((await trx('estimates').where({ id: f.estimateId }).first('estimate_data')).estimate_data.summary.manualDiscount.presetKey).toBeUndefined();
+      const out = await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(out).toMatchObject({ sources: 1, applied: 1 });
+      expect((await visitRows(trx, f.parentSeries.ids)).every((r) => Number(r.estimated_price) === 105.3)).toBe(true);
+    });
+  });
+
   test('a second run changes nothing (an applied row is never applied twice)', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);
@@ -654,6 +680,7 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
         }
         const seen = [];
         await apply._private.eachSourceEstimate(trx, NOW, async (e) => { seen.push(e.id); }, 2);
+        expect(seen).toHaveLength(5);
         expect(seen.slice().sort()).toEqual(ids.slice().sort());
         expect(new Set(seen).size).toBe(5);
       });

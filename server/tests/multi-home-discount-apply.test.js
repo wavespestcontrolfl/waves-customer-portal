@@ -22,6 +22,11 @@ jest.mock('../services/multi-home-family', () => ({
 }));
 const mockClose = jest.fn(async () => 1);
 jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...args) => mockClose(...args) }));
+const mockAgreed = jest.fn(async () => null);
+jest.mock('../services/customer-properties', () => ({
+  ...jest.requireActual('../services/customer-properties'),
+  seriesAgreedPropertyId: (...args) => mockAgreed(...args),
+}));
 const mockRaise = jest.fn(async () => ({}));
 jest.mock('../services/admin-alert-compose', () => ({
   ...jest.requireActual('../services/admin-alert-compose'),
@@ -45,6 +50,8 @@ beforeEach(() => {
   mockGate.stacking = false;
   mockGate.episodes = false;
   mockEligible.mockReset();
+  mockAgreed.mockReset();
+  mockAgreed.mockResolvedValue(null);
 });
 
 describe('source detection', () => {
@@ -118,8 +125,8 @@ describe('target selection', () => {
     expect(pick([s({ rootId: 'a', propertyId: 'home-other' })])).toEqual(['a']);
     expect(pick([s({ rootId: 'b', propertyId: 'home-s' })])).toEqual([]);
     expect(pick([s({ rootId: 'c', propertyId: null })])).toEqual([]);
-    expect(pick([s({ rootId: 'd', propertyId: null })], { primaryPropertyByCustomer: new Map([['son', 'home-s']]) })).toEqual([]);
-    expect(pick([s({ rootId: 'e', propertyId: null })], { primaryPropertyByCustomer: new Map([['son', 'home-primary']]) })).toEqual(['e']);
+    // No source property known: no same-profile series can be shown to be another home.
+    expect(apply.selectTargetSeries({ series: [s({ rootId: 'd', propertyId: 'home-other' })], source: { ...source, propertyId: null }, familyCustomerIds: [] })).toEqual([]);
   });
 
   test('every series of a linked profile is a target, whatever its property; an unlinked profile is not', () => {
@@ -130,11 +137,6 @@ describe('target selection', () => {
   test('a service the percent discount never touches is not a target', () => {
     const isExcluded = (key) => key === 'termite_bond_1yr';
     expect(pick([s({ customerId: 'parents', rootId: 'bond', serviceKey: 'termite_bond_1yr' }), s({ customerId: 'parents', rootId: 'pest' })], { isExcluded })).toEqual(['pest']);
-  });
-
-  test('the resolved property rides on the target', () => {
-    const [t] = apply.selectTargetSeries({ series: [s({ customerId: 'parents', propertyId: null })], source, familyCustomerIds: ['parents'], primaryPropertyByCustomer: new Map([['parents', 'home-p']]) });
-    expect(t.propertyId).toBe('home-p');
   });
 });
 
@@ -190,6 +192,12 @@ describe('series shape and hold decisions', () => {
       primary_line_price: 117, discount_type: 'percentage', discount_amount: 10, discount_id: 'preset-1', discount_name: 'Multi-Home Discount',
       discount_service_key_filter: null, discount_service_category_filter: null, discount_max_dollars: null,
     });
+  });
+
+  test('the written fields are only keys the Edit appointment save propagates (PRICE_SERVICE_PRICE_KEYS)', () => {
+    const { PRICE_SERVICE_PRICE_KEYS } = require('../services/recurring-template-overrides');
+    const fields = { ...discountFields(PRESET, 117), estimated_price: 105.3 };
+    expect(Object.keys(fields).filter((k) => !PRICE_SERVICE_PRICE_KEYS.includes(k))).toEqual([]);
   });
 
   test('every hold has bell copy that passes the admin-notification rules, and no code leaks into it', () => {
@@ -322,7 +330,7 @@ describe('the relationship is read again under the family lock', () => {
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [] }), { source: src, target })).toBe(false);
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-s' }] }), { source: src, target: { ...target, propertyId: 'home-s' } })).toBe(false);
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target: { ...target, propertyId: null } })).toBe(false);
-    // Source property unknown: the source's primary property stands in for it.
+    // Source property unknown: a same-profile series can never be shown to be another home.
     expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: { ...src, propertyId: null }, target })).toBe(false);
   });
 
@@ -350,22 +358,28 @@ describe('already_discounted is only recorded when the next spawn is discounted 
   const upcoming = [{ id: 'v1', estimated_price: '105.30', primary_line_price: '117.00', discount_dollars: '11.70' }, { id: 'v2', estimated_price: '105.30', primary_line_price: '117.00', discount_dollars: '11.70' }];
   const target = { customerId: 'parents', rootId: 'root' };
 
-  function setup({ overrides = null, stampWorks = true, addons = [] } = {}) {
-    const parent = { id: 'root', primary_line_price: null, estimated_price: 117, recurring_template_overrides: overrides };
+  // The production price walk (seriesNextOccurrencesPrice) is faked from the stored parent: the next spawn prices the
+  // parent overlaid with its stamped overrides, plus any recurring add-on. The real function runs in the Postgres suite.
+  function setup({ overrides = null, stampWorks = true, addons = [], walk = null } = {}) {
+    const parent = { id: 'root', estimated_price: 117, recurring_template_overrides: overrides };
+    const price = () => {
+      const row = { ...parent, ...(parent.recurring_template_overrides || {}) };
+      const gross = Number(row.primary_line_price) || Number(row.estimated_price);
+      const off = row.discount_type === 'percentage' ? Math.round(gross * Number(row.discount_amount)) / 100 : 0;
+      return Math.round((gross - off) * 100) / 100 + addons.reduce((sum, a) => sum + a.estimated_price, 0);
+    };
     const schedule = {
       acquireRecurringSeriesMaintenanceLock: jest.fn(async () => {}),
-      addonRecursAfterAnchor: () => true,
-      parseTemplateOverrides: (raw) => raw || null,
-      readProvenanceOverrides: () => ({}),
       loadStoredDiscountScope: async () => null,
       calculateStoredVisitFinancials: (row) => {
         const gross = Number(row.primary_line_price) || Number(row.estimated_price);
         const off = row.discount_type === 'percentage' ? Math.round(gross * Number(row.discount_amount)) / 100 : 0;
         return { price: Math.round((gross - off) * 100) / 100 };
       },
+      seriesNextOccurrencesPrice: jest.fn(async () => (walk !== null ? walk : { unverified: false, price: price() })),
       stampRecurringTemplateOverrides: jest.fn(async (_t, _id, fields) => { if (stampWorks) parent.recurring_template_overrides = { ...(parent.recurring_template_overrides || {}), ...fields }; }),
     };
-    return { parent, schedule, trx: fakeTrx({ scheduled_services: [parent], scheduled_service_addons: addons }) };
+    return { parent, schedule, trx: fakeTrx({ scheduled_services: [parent] }) };
   }
   const run = (env, reason) => verifyTemplateForAlready(env.trx, env.schedule, { target, preset: PRESET, upcoming, reason });
 
@@ -385,7 +399,7 @@ describe('already_discounted is only recorded when the next spawn is discounted 
 
   test('a template the stamp cannot fix holds as template_not_discounted (the stamp rolls back with the transaction)', async () => {
     await expect(run(setup({ stampWorks: false }), 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
-    await expect(run(setup({ addons: [{ id: 'a' }] }), 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
+    await expect(run(setup({ addons: [{ id: 'a', estimated_price: 20 }] }), 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
   });
 
   test('sold with the discount netted in: a template that spawns at another price holds and is never stamped', async () => {
@@ -395,6 +409,16 @@ describe('already_discounted is only recorded when the next spawn is discounted 
     expect(env.schedule.stampRecurringTemplateOverrides).not.toHaveBeenCalled();
     const ok = setup({ overrides: { estimated_price: 105.3, primary_line_price: 105.3 } });
     expect(await verifyTemplateForAlready(ok.trx, ok.schedule, { target, preset: PRESET, upcoming: sold, reason: 'sold_with_multi_home_discount' })).toEqual({ templateStamped: false });
+  });
+
+  test('the price comes from production\'s own walk; a walk that cannot finish is unproven, and a series with no spawn needs no proof', async () => {
+    const env = setup({ walk: { unverified: true, price: 0 } });
+    await expect(run(env, 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
+    expect(env.schedule.seriesNextOccurrencesPrice).toHaveBeenCalledWith(env.trx, 'root');
+    const none = setup({ walk: null });
+    none.schedule.seriesNextOccurrencesPrice = jest.fn(async () => null);
+    expect(await run(none, 'all_upcoming_visits_carry_it')).toEqual({ templateStamped: false });
+    expect(none.schedule.stampRecurringTemplateOverrides).not.toHaveBeenCalled();
   });
 
   test('visits at different prices hold', async () => {
@@ -408,11 +432,11 @@ describe('every source in the window is visited, and a source that stops qualify
   function pagedDb(pages) {
     const calls = [];
     const dbh = jest.fn(() => {
-      const call = { limit: null, keyset: null };
+      const call = { limit: null, keyset: null, raw: [] };
       calls.push(call);
       const q = {
         where: () => q, whereNotNull: () => q, orderBy: () => q,
-        whereRaw: (sql, bindings) => { if (/accepted_at, id\) >/.test(sql)) call.keyset = bindings; return q; },
+        whereRaw: (sql, bindings) => { call.raw.push([sql, bindings]); if (/accepted_at, id\) >/.test(sql)) call.keyset = bindings; return q; },
         limit: (n) => { call.limit = n; return q; },
         select: async () => pages[calls.length - 1] || [],
       };
@@ -444,6 +468,17 @@ describe('every source in the window is visited, and a source that stops qualify
     const short = pagedDb([[est(1)]]);
     await eachSourceEstimate(short.dbh, new Date(), async () => {}, 2);
     expect(short.calls).toHaveLength(1);
+  });
+
+  test('the prefilter matches the preset by key OR by catalog id, so an id-only stored discount is found', async () => {
+    const withId = pagedDb([[]]);
+    await eachSourceEstimate(withId.dbh, new Date(), async () => {}, 2, 'preset-1');
+    const [sql, bindings] = withId.calls[0].raw[0];
+    expect(sql).toMatch(/LIKE '%multi_home%' OR estimate_data::text LIKE \?/);
+    expect(bindings).toEqual(['%preset-1%']);
+    const keyOnly = pagedDb([[]]);
+    await eachSourceEstimate(keyOnly.dbh, new Date(), async () => {}, 2, null);
+    expect(keyOnly.calls[0].raw[0][0]).toBe("estimate_data::text LIKE '%multi_home%'");
   });
 
   test('the production page is large enough to matter and the gate-off path never reads', async () => {
