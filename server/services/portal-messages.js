@@ -211,7 +211,7 @@ function claimable(query, now) {
 // click, the sweep): only a notice still pending, under NOTICE_ATTEMPTS tries, and not held by a fresh claim
 // (CLAIM_STALE_MS: an older claim's process stopped, or a passing failure waits for its next try) can be taken.
 // A final notice (reached, a skip, or out of tries) is never claimed again. The claim counts the try.
-// Returns { at, attempts, emailStarted }: emailStarted when an earlier try already moved on to the email.
+// Returns { at, attempts, email }: email is what an earlier try stored for the email (none before the move to it).
 async function claimNotice(messageId, now = new Date()) {
   const [row] = await claimable(db('messages as m').where('m.id', messageId), now)
     .update({
@@ -222,7 +222,7 @@ async function claimNotice(messageId, now = new Date()) {
     .returning('metadata');
   if (!row) return null;
   const { attempts, email } = metaOf(row).notice || {};
-  return { at: now.toISOString(), attempts: Number(attempts) || 1, emailStarted: email !== undefined };
+  return { at: now.toISOString(), attempts: Number(attempts) || 1, email };
 }
 
 // The in-app bell plus, unless push is false, a push to the Waves app. A push another attempt is still sending
@@ -259,13 +259,24 @@ async function replyEmail(customerId, message) {
   }
 }
 
+// A try's email part. Not needed after an accepted push; done already when an earlier try sent it (this try is
+// for a missing bell). Otherwise the move to the email is saved while this try holds the claim, then the email
+// goes. Null when the claim was lost (a try that was taken over sends nothing).
+async function emailStep(customerId, message, claim, sent) {
+  if (sent.pushAccepted > 0) return { email: 'not_needed', retry: false };
+  if (claim.email === 'sent') return { email: 'sent', retry: false };
+  const held = await recordNotice(message.id, { ...sent, email: 'sending', pending: true, claimedAt: claim.at, attempts: claim.attempts });
+  return held ? replyEmail(customerId, message) : null;
+}
+
 // The one notice for a saved answer, one try at a time (claimNotice): the customer's in-app bell plus a push
 // to the Waves app (app devices only: a browser subscription is not the app); an email with the whole answer
 // when no app device took the push. The move to the email is saved before the email goes, and a later try
 // never pushes after it (it makes sure of the bell and finishes the email): a try that stopped after the email
-// went out cannot add a push. The try's outcome is final when the customer was reached or can't be (an email
-// skip or block), or when it was the last try; a passing failure (no bell, or an email worth another try)
-// stays pending for a retried click or the sweep. A push another try is still sending leaves this try's claim
+// went out cannot add a push. The try's outcome is final when the bell exists and the customer was reached or
+// can't be (an email skip or block), or when it was the last try. A missing bell, or an email worth another
+// try, stays pending for a retried click or the sweep (a bell missed after a sent email is made with no push
+// and no second email). A push another try is still sending leaves this try's claim
 // in place (it counted) and adds no email. The stored notice keeps its try count. Never throws. Safe to run
 // again: the bell dedupes on its key, an accepted push is claimed by its bell (push-notifications.js), and the
 // email carries its own idempotency key.
@@ -273,22 +284,17 @@ async function noticeCustomer(customerId, message) {
   try {
     const claim = await claimNotice(message.id);
     if (!claim) return await storedNotice(message.id);
-    const { inFlight, ...sent } = await bellAndPush(customerId, message, { push: !claim.emailStarted });
+    const { inFlight, ...sent } = await bellAndPush(customerId, message, { push: claim.email === undefined });
     if (inFlight) {
       // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
       // notice ends here, since whatever that push does is the outcome.
       if (claim.attempts >= NOTICE_ATTEMPTS) await recordNotice(message.id, { ...sent, email: 'not_needed', pending: false, claimedAt: claim.at, attempts: claim.attempts });
       return { pending: claim.attempts < NOTICE_ATTEMPTS };
     }
-    let mail = { email: 'not_needed', retry: false };
-    if (!(sent.pushAccepted > 0)) {
-      // Saved before the send, while this try still holds the claim (a try that was taken over sends nothing).
-      const held = await recordNotice(message.id, { ...sent, email: 'sending', pending: true, claimedAt: claim.at, attempts: claim.attempts });
-      if (!held) return await storedNotice(message.id);
-      mail = await replyEmail(customerId, message);
-    }
+    const mail = await emailStep(customerId, message, claim, sent);
+    if (!mail) return await storedNotice(message.id);
     const outcome = { ...sent, email: mail.email };
-    const pending = !noticeReached(outcome) && (mail.retry || !outcome.bell) && claim.attempts < NOTICE_ATTEMPTS;
+    const pending = (!outcome.bell || (!noticeReached(outcome) && mail.retry)) && claim.attempts < NOTICE_ATTEMPTS;
     const notice = { ...outcome, pending, claimedAt: claim.at, attempts: claim.attempts };
     await recordNotice(message.id, notice);
     return publicNotice(notice);

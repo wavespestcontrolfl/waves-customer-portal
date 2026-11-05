@@ -330,6 +330,31 @@ maybeDescribe('portal messages (live Postgres)', () => {
       .toMatchObject({ bell: true, pushAccepted: 0, email: 'sent', pending: false, attempts: 2 });
   });
 
+  test('a bell that failed is made by the next try even after the email went: no push and no second email', async () => {
+    const pat = await customer();
+    const { escalationId } = await chat(pat.id, { alert: false });
+    const NotificationService = require('../services/notification-service');
+    const bellSpy = jest.spyOn(NotificationService, 'notifyCustomer').mockRejectedValueOnce(new Error('bell write failed'));
+    try {
+      const answer = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'See you Friday.', actor });
+      expect(answer.notice).toEqual({ bell: false, pushAccepted: 0, email: 'sent', pending: true });
+      await db('messages').where({ id: answer.message.id }).update({
+        metadata: db.raw("jsonb_set(metadata, '{notice,claimedAt}', to_jsonb((now() - interval '3 minutes')::text))"),
+        created_at: db.raw("now() - interval '10 minutes'"),
+      });
+      jest.clearAllMocks();
+      expect(await PortalMessages.resumePendingNotices()).toBeGreaterThanOrEqual(1);
+      expect(bellSpy).toHaveBeenCalledWith(pat.id, 'service', expect.any(String), expect.any(String), expect.objectContaining({ push: false }));
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+      expect((await db('messages').where({ id: answer.message.id }).first('metadata')).metadata.notice)
+        .toMatchObject({ bell: true, email: 'sent', pending: false, attempts: 2 });
+      expect(await db('notifications').where({ recipient_type: 'customer', recipient_id: pat.id }).whereRaw("metadata->>'portalMessageId' = ?", [answer.message.id])).toHaveLength(1);
+    } finally {
+      bellSpy.mockRestore();
+    }
+  });
+
   test('an answer waits for a chat turn that holds the session, instead of deadlocking with it', async () => {
     const pat = await customer();
     const { escalationId, sessionId } = await chat(pat.id, { alert: false });
