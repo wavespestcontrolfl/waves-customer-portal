@@ -9,7 +9,7 @@ const rows = ['Alpha', 'Beta'].map((name, i) => ({id: `qa-${i}`, customerName: `
 const response = services => ({ok:true, json:async () => ({services,total:services.length})});
 const header = () => screen.getByRole('checkbox', {name:'Select all visible appointments'});
 const checkbox = name => within(screen.getByText(`Synthetic ${name}`).closest('tr')).getByRole('checkbox');
-beforeEach(() => { vi.stubGlobal('fetch', vi.fn(async () => response(rows))); });
+beforeEach(() => { localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' })); vi.stubGlobal('fetch', vi.fn(async () => response(rows))); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it('uses visible IDs after an equal-size disjoint filter and replaces selection with visible rows', async () => {
@@ -68,4 +68,13 @@ it.each([true,false])('disables selection for empty or failed results: empty=%s'
   else await screen.findByRole('alert');
   expect(header()).toBeDisabled();
   expect(header()).not.toBeChecked();
+});
+
+// Audit C13: bulk-action is office-only, so a technician's list has no checkboxes and no bulk bar.
+it('a technician gets the plain list: no selection checkboxes, no bulk bar', async () => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+  render(<ScheduleListView />);
+  await screen.findByText('Synthetic Alpha');
+  expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+  expect(screen.queryByText(/selected/)).not.toBeInTheDocument();
 });

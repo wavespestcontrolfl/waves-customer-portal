@@ -6,6 +6,7 @@ const gbp = require('../services/google-business');
 const ReviewService = require('../services/review-request');
 const ReviewIncentives = require('../services/review-incentives');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { WAVES_LOCATIONS, resolveReviewLocationId } = require('../config/locations');
 const logger = require('../services/logger');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
@@ -109,7 +110,19 @@ function serviceRecordsHaveReportTemplateColumn() {
   return serviceRecordsReportColumnPromise;
 }
 
-router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+// A technician may name only a visit in its own current/recent window (the answer says whether
+// that visit's customer was ever asked for a review). Anything else is a 404. Admins are not checked.
+async function technicianOwnVisitOnly(req, res, next) {
+  try {
+    const { serviceId } = req.query;
+    if (!isTechnicianRequest(req) || typeof serviceId !== 'string' || !serviceId) return next();
+    const own = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', serviceId)).first('scheduled_services.id');
+    if (!own) return res.status(404).json({ error: 'Visit not found' });
+    return next();
+  } catch (err) { return next(err); }
+}
+
+router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, technicianOwnVisitOnly, async (req, res, next) => {
   try {
     const serviceType = typeof req.query.serviceType === 'string' ? req.query.serviceType.slice(0, 100) : '';
     // Effective availability, not the feature gate alone (codex #4140 r15

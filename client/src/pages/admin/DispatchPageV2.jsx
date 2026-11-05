@@ -241,7 +241,8 @@ function slotDurationMinutes(start, end) {
 const SCHEDULE_TABS = [
   { id: "board", label: "Schedule" },
   { id: "protocols", label: "Protocols" },
-  { id: "revenue", label: "Scores", desktopOnly: true },
+  // Scores ranks jobs by revenue: owner-only (owner 2026-11-04, D2 A).
+  { id: "revenue", label: "Scores", desktopOnly: true, adminOnly: true },
 ];
 
 function MobileScheduleSheet({ children, serviceCount, completedCount }) {
@@ -523,6 +524,8 @@ export default function DispatchPageV2({
   // The role AdminLayout verified; the stored copy only as a fallback (a failed
   // cache write can leave it missing or stale), as fastCompleteOperatorOf reads.
   const verifiedRole = (outlet?.user?.id ? outlet.user : getAdminUser())?.role || null;
+  const isAdminRole = verifiedRole === "admin";
+  const scheduleTabs = SCHEDULE_TABS.filter((t) => !t.adminOnly || isAdminRole);
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
@@ -615,6 +618,13 @@ export default function DispatchPageV2({
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
+  // Edit appointment reads /admin/payers and saves through PUT /:id/update-details,
+  // both office-only: a technician who opens a visit on the desktop grids,
+  // the list or the sidebar gets its Details sheet instead.
+  const openVisitEditor = (svc) => {
+    if (isAdminRole) setEditingService(svc);
+    else setDetailService(svc);
+  };
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
   // Staged handoffs are PER SERVICE (Map serviceId → handoff): a singleton
@@ -1492,7 +1502,7 @@ export default function DispatchPageV2({
           >
             {activeTab === "board"
               ? "More"
-              : SCHEDULE_TABS.find((t) => t.id === activeTab)?.label || "More"}
+              : scheduleTabs.find((t) => t.id === activeTab)?.label || "More"}
           </button>{" "}
         </div>
       )}
@@ -1545,12 +1555,14 @@ export default function DispatchPageV2({
                 </span>
               </span>
             )}
-            <span className="pl-3 border-l-hairline border-zinc-200">
-              <span className="u-nums font-medium text-zinc-900">
-                ${estRevenue.toLocaleString()}
-              </span>{" "}
-              revenue
-            </span>{" "}
+            {isAdminRole && (
+              <span className="pl-3 border-l-hairline border-zinc-200">
+                <span className="u-nums font-medium text-zinc-900">
+                  ${estRevenue.toLocaleString()}
+                </span>{" "}
+                revenue
+              </span>
+            )}{" "}
           </div>{" "}
         </div>
       )}
@@ -1726,21 +1738,23 @@ export default function DispatchPageV2({
             if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
               handleComplete(svc);
             } else {
-              setEditingService(svc);
+              openVisitEditor(svc);
             }
           }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
-          onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
+          // POST /admin/schedule is office-only: a technician's grid has no
+          // drag-to-create.
+          onCreateSlot={isAdminRole ? ({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({
               date: slotDate,
               windowStart,
               durationMinutes: slotDurationMinutes(windowStart, windowEnd),
             });
             setShowNewAppt(true);
-          }}
+          } : undefined}
         />
       )}
       {viewMode === "5day" && (
@@ -1758,21 +1772,23 @@ export default function DispatchPageV2({
             if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
               handleComplete(svc);
             } else {
-              setEditingService(svc);
+              openVisitEditor(svc);
             }
           }}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
-          onCreateSlot={({ date: slotDate, windowStart, windowEnd }) => {
+          // POST /admin/schedule is office-only: a technician's grid has no
+          // drag-to-create.
+          onCreateSlot={isAdminRole ? ({ date: slotDate, windowStart, windowEnd }) => {
             setNewApptDefaults({
               date: slotDate,
               windowStart,
               durationMinutes: slotDurationMinutes(windowStart, windowEnd),
             });
             setShowNewAppt(true);
-          }}
+          } : undefined}
         />
       )}
       {viewMode === "month" && (
@@ -1793,7 +1809,7 @@ export default function DispatchPageV2({
             if (isMobile) {
               setDetailService(svc);
             } else {
-              setEditingService(svc);
+              openVisitEditor(svc);
             }
           }}
           onRefresh={() => fetchSchedule(date)}
@@ -1818,7 +1834,7 @@ export default function DispatchPageV2({
               edgeBleed={4}
               style={{ paddingBottom: 0 }}
             >
-              {SCHEDULE_TABS.map((t) => (
+              {scheduleTabs.map((t) => (
                 <button
                   key={t.id}
                   onClick={() => setActiveTab(t.id)}
@@ -1867,7 +1883,7 @@ export default function DispatchPageV2({
               </button>{" "}
             </div>{" "}
             <div className="py-2">
-              {SCHEDULE_TABS.filter((t) => !t.desktopOnly).map((t) => (
+              {scheduleTabs.filter((t) => !t.desktopOnly).map((t) => (
                 <button
                   key={t.id}
                   onClick={() => {
@@ -1903,7 +1919,7 @@ export default function DispatchPageV2({
       {viewMode === "day" && activeTab === "protocols" && (
         <ProtocolReferenceTabV2 />
       )}
-      {viewMode === "day" && activeTab === "revenue" && (
+      {viewMode === "day" && activeTab === "revenue" && isAdminRole && (
         <Suspense
           fallback={
             <div className="py-10 text-center text-14 text-ink-secondary">
@@ -2003,7 +2019,7 @@ export default function DispatchPageV2({
                 if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
                   handleComplete(svc);
                 } else {
-                  setEditingService(svc);
+                  openVisitEditor(svc);
                 }
               }}
               onProtocol={(svc) => setProtocolService(svc)}
@@ -2021,10 +2037,10 @@ export default function DispatchPageV2({
               bookingHours={safeData.bookingHours || null}
               // GATE_BOARD_OPEN_TIMES: a drag lights the hours that fit the visit.
               openTimesOnDrag={safeData.boardOpenTimes === true}
-              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+              onCreateSlot={isAdminRole ? ({ date: slotDate, windowStart, techId }) => {
                 setNewApptDefaults({ date: slotDate, windowStart, techId });
                 setShowNewAppt(true);
-              }}
+              } : undefined}
             />{" "}
           </div>
           {/* Mobile: inline scrollable day list (replaces the multi-day calendar) */}
@@ -2958,7 +2974,7 @@ export default function DispatchPageV2({
           onClose={() => setSelectedScheduleService(null)}
           onEdit={(svc) => {
             setSelectedScheduleService(null);
-            setEditingService(svc);
+            openVisitEditor(svc);
           }}
           onReschedule={(svc) => {
             setSelectedScheduleService(null);
