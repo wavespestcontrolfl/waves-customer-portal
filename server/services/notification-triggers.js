@@ -1237,6 +1237,22 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // The owner's 7 PM open-visit nudge as a phone banner (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04 "banner"): the same words
+  // the text carries, a tap opens the tech close-out page. services/tech-open-visit-nudge.js sends it pushOnly to the owner's
+  // own admin user, so it writes no bell row (rule: fyi) and the owner can switch it off in Push Settings. p = { headline,
+  // lines: [visit line], day }; the nudge module builds the words (customer first name + last initial only).
+  open_visits_nudge: {
+    label: 'Evening nudge: visits still open',
+    category: 'alert',
+    priority: 'normal',
+    group: 'Alerts',
+    rule: { area: 'Schedule', severity: 'fyi', who: 'person', expiryDays: 7 },
+    build: (p) => ({
+      title: String(p.headline || 'Visits are still open'),
+      body: ['Tap to close out.', ...(Array.isArray(p.lines) ? p.lines : []).map(String)].join('\n'),
+      link: '/tech',
+    }),
+  },
 };
 
 const PRIORITY_VIBRATE = {
@@ -1350,6 +1366,10 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'waiting_summary') {
     return `waves-waiting_summary-${payload.day || 'unknown-day'}`;
   }
+  // One nudge banner per technician-day claim: a repeat replaces the same day's banner, tomorrow's never replaces today's.
+  if (triggerKey === 'open_visits_nudge') {
+    return `waves-open_visits_nudge-${payload.day || 'unknown-day'}`;
+  }
   return `waves-${triggerKey}`;
 }
 
@@ -1379,7 +1399,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1427,6 +1447,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       // adminOnly: a caller that sends the owner a banner (bell-banners.js) skips technicians even for a techVisible type.
       if (!trigger.techVisible || adminOnly) recipientQuery = recipientQuery.where({ role: 'admin' });
       activeAdmins = await recipientQuery.select('id', 'role');
+      // onlyUserIds: a banner meant for named users (the owner's open-visit nudge) reaches only them; null = everyone.
+      if (Array.isArray(onlyUserIds)) {
+        const wanted = new Set(onlyUserIds.map(String));
+        activeAdmins = activeAdmins.filter((u) => wanted.has(String(u.id)));
+      }
       // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
       // for a customer on its own route (technicianServicesCustomer, the rule the
       // Communications routes use). No customer on the event = today's routing.

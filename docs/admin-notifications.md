@@ -487,6 +487,13 @@ trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner pe
 day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
 "Morning summary: items waiting for you") or by unsetting the gate. It sends nothing to a customer.
 
+The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
+(`server/services/tech-open-visit-nudge.js`) reaches the owner as a Waves Admin banner instead of a text. It is the
+`open_visits_nudge` trigger, sent `pushOnly` to his own admin user only (`onlyUserIds`): no bell row, one banner per ET day
+(the nudge's own per-technician claim), same words as the text, a tap opens `/tech`. It counts as delivered only when a phone
+accepted it; otherwise the text goes out as before. The owner can turn the type off in Push Settings (Alerts group,
+"Evening nudge: visits still open"), which sends the text instead. It sends nothing to a customer.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns

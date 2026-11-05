@@ -21,6 +21,10 @@ describe('alert sounds map', () => {
     expect(soundForTrigger('waiting_summary')).toBe('waves-reminder.caf');
   });
 
+  test('the owner open-visit nudge banner plays the soft reminder sound (GATE_OWNER_NUDGE_BANNER)', () => {
+    expect(soundForTrigger('open_visits_nudge')).toBe('waves-reminder.caf');
+  });
+
   test('a new-lead email banner plays the New lead sound (GATE_RING_NEW_CONTACTS)', () => {
     expect(soundForTrigger('new_lead_email')).toBe(soundForTrigger('new_lead'));
     expect(soundForTrigger('new_lead_email')).toBe('waves-lead.caf');

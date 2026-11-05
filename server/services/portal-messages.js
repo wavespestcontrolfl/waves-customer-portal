@@ -37,6 +37,14 @@ const ENDPOINT = 'portal';
 const BODY_MAX = 2000;
 const PAGE_SIZE = 50;
 const PREVIEW_MAX = 140;
+// One attempt at a time runs an answer's notice (claimNotice). A claim older than this belongs to a process
+// that stopped, so a retry or the sweep may take it over. The sweep looks back one day.
+const CLAIM_STALE_MS = 2 * 60 * 1000;
+// A notice that failed for a passing reason is tried at most this many times, then left as it is.
+const NOTICE_ATTEMPTS = 5;
+const SWEEP_MIN_AGE_MS = 5 * 60 * 1000;
+const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SWEEP_LIMIT = 50;
 const MESSAGES_LINK = '/?tab=messages';
 const NOTICE_TITLE = 'New message from Waves';
 const ANSWERED_NOTE = 'Answered in the portal';
@@ -178,38 +186,132 @@ async function closeItemBells(kind, id, actor) {
   }
 }
 
-// The one notice for a saved answer: the customer's in-app bell plus a push to the Waves app; an email with
-// the whole answer when no app device took the push. The outcome is kept on the message. Never throws.
-async function noticeCustomer(customerId, message) {
-  const notice = { bell: false, pushAccepted: 0, email: 'not_needed' };
+// A try that reached the customer: an app push or the email went out.
+const noticeReached = (notice) => Number(notice.pushAccepted) > 0 || notice.email === 'sent';
+
+// What the staff screen is told about a notice: the outcome so far, and pending while tries remain.
+function publicNotice(notice) {
+  if (!notice) return null;
+  const shown = {};
+  for (const key of ['bell', 'pushAccepted', 'email']) if (notice[key] !== undefined) shown[key] = notice[key];
+  return notice.pending ? { ...shown, pending: true } : shown;
+}
+
+async function storedNotice(messageId) {
+  const row = await db('messages').where({ id: messageId }).first('metadata');
+  return publicNotice(metaOf(row).notice);
+}
+
+// Writes a try's outcome, only while that try still holds the claim (a try that was taken over writes nothing).
+function recordNotice(messageId, notice) {
+  return db('messages').where({ id: messageId })
+    .whereRaw("metadata->'notice'->>'claimedAt' = ?", [notice.claimedAt])
+    .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', ?::jsonb)", [JSON.stringify(notice)]), updated_at: new Date() });
+}
+
+// The claim conditions, shared by claimNotice and the sweep so the sweep only picks notices it can claim.
+function claimable(query, now) {
+  return query
+    .whereRaw("m.metadata->'notice'->>'pending' = 'true'")
+    .whereRaw("coalesce((m.metadata->'notice'->>'attempts')::int, 0) < ?", [NOTICE_ATTEMPTS])
+    .whereRaw("coalesce((m.metadata->'notice'->>'claimedAt')::timestamptz, '-infinity'::timestamptz) < ?::timestamptz",
+      [new Date(now.getTime() - CLAIM_STALE_MS).toISOString()]);
+}
+
+// Claims the answer's notice for this try, or null. The one gate for every attempt (the first send, a retried
+// click, the sweep): only a notice still pending, under NOTICE_ATTEMPTS tries, and not held by a fresh claim
+// (CLAIM_STALE_MS: an older claim's process stopped, or a passing failure waits for its next try) can be taken.
+// A final notice (reached, a skip, or out of tries) is never claimed again. The claim counts the try.
+// Returns { at, attempts }.
+async function claimNotice(messageId, now = new Date()) {
+  const [row] = await claimable(db('messages as m').where('m.id', messageId), now)
+    .update({
+      metadata: db.raw(`coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', coalesce(metadata->'notice', '{}'::jsonb)
+        || jsonb_build_object('pending', true, 'claimedAt', ?::text, 'attempts', coalesce((metadata->'notice'->>'attempts')::int, 0) + 1))`, [now.toISOString()]),
+      updated_at: now,
+    })
+    .returning('metadata');
+  return row ? { at: now.toISOString(), attempts: Number(metaOf(row).notice?.attempts) || 1 } : null;
+}
+
+// The in-app bell plus a push to the Waves app. A push another attempt is still sending is not a miss.
+async function bellAndPush(customerId, message) {
   try {
     const bell = await require('./notification-service').notifyCustomer(customerId, 'service', NOTICE_TITLE, preview(message.body), {
       link: MESSAGES_LINK,
       dedupeKey: `portal-reply:${message.id}`,
       awaitPush: true,
+      pushOptions: { nativeOnly: true },
       metadata: { portalMessageId: message.id },
     });
-    notice.bell = Boolean(bell?.id) && !bell.suppressed;
-    notice.pushAccepted = Number(bell?.push?.accepted || 0);
+    return { bell: Boolean(bell?.id) && !bell.suppressed, pushAccepted: Number(bell?.push?.accepted || 0), inFlight: bell?.push?.reason === 'push_in_flight' };
   } catch (err) {
     logger.warn(`[portal-messages] bell or push failed for message ${message.id}: ${err.message}`);
+    return { bell: false, pushAccepted: 0, inFlight: false };
   }
-  if (notice.pushAccepted === 0) {
-    try {
-      const result = await require('./account-membership-email').sendPortalReply({ customerId, messageId: message.id, body: message.body });
-      notice.email = result?.ok ? 'sent' : (result?.reason || 'not_sent');
-    } catch (err) {
-      notice.email = 'failed';
-      logger.warn(`[portal-messages] reply email failed for message ${message.id}: ${err.message}`);
-    }
-  }
+}
+
+// The reply email: 'sent', or why it did not go and whether a later try can help. A skip (no address, opted
+// out, the address changed) or a provider block is final; anything else (the preferences read failed, a
+// provider error, a send already in flight) is worth another try with the same idempotency key, which the
+// email library resends only when the earlier row failed or never went out.
+async function replyEmail(customerId, message) {
   try {
-    await db('messages').where({ id: message.id })
-      .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ notice })]), updated_at: new Date() });
+    const result = await require('./account-membership-email').sendPortalReply({ customerId, messageId: message.id, body: message.body });
+    if (result?.ok) return { email: 'sent', retry: false };
+    return { email: result?.reason || 'not_sent', retry: !(result?.skipped || result?.blocked) };
   } catch (err) {
-    logger.warn(`[portal-messages] could not record the notice for message ${message.id}: ${err.message}`);
+    logger.warn(`[portal-messages] reply email failed for message ${message.id}: ${err.message}`);
+    return { email: 'failed', retry: true };
   }
-  return notice;
+}
+
+// The one notice for a saved answer, one try at a time (claimNotice): the customer's in-app bell plus a push
+// to the Waves app (app devices only: a browser subscription is not the app); an email with the whole answer
+// when no app device took the push. The try's outcome is final when the customer was reached or can't be (an
+// email skip or block), or when it was the last try; a passing failure (no bell, or an email worth another try)
+// stays pending for a retried click or the sweep. A push another try is still sending leaves this try's claim
+// in place (it counted) and adds no email. The stored notice keeps its try count. Never throws. Safe to run
+// again: the bell dedupes on its key, an accepted push is claimed by its bell (push-notifications.js), and the
+// email carries its own idempotency key.
+async function noticeCustomer(customerId, message) {
+  try {
+    const claim = await claimNotice(message.id);
+    if (!claim) return await storedNotice(message.id);
+    const { inFlight, ...sent } = await bellAndPush(customerId, message);
+    if (inFlight) {
+      // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
+      // notice ends here, since whatever that push does is the outcome.
+      if (claim.attempts >= NOTICE_ATTEMPTS) await recordNotice(message.id, { ...sent, email: 'not_needed', pending: false, claimedAt: claim.at, attempts: claim.attempts });
+      return { pending: claim.attempts < NOTICE_ATTEMPTS };
+    }
+    const mail = sent.pushAccepted > 0 ? { email: 'not_needed', retry: false } : await replyEmail(customerId, message);
+    const outcome = { ...sent, email: mail.email };
+    const pending = !noticeReached(outcome) && (mail.retry || !outcome.bell) && claim.attempts < NOTICE_ATTEMPTS;
+    const notice = { ...outcome, pending, claimedAt: claim.at, attempts: claim.attempts };
+    await recordNotice(message.id, notice);
+    return publicNotice(notice);
+  } catch (err) {
+    logger.warn(`[portal-messages] notice failed for message ${message.id}: ${err.message}`);
+    return { pending: true };
+  }
+}
+
+// Every 10 minutes (scheduler.js): finish the notices still pending (a stopped process, or a passing failure
+// waiting for its next try), for answers 5 minutes to one day old. It only completes a send a staff member
+// pressed. Gate off: nothing. Returns how many it picked up (a fresh claim is left to its holder).
+async function resumePendingNotices(now = new Date()) {
+  if (!live()) return 0;
+  const rows = await claimable(db('messages as m'), now).join('conversations as cv', 'cv.id', 'm.conversation_id')
+    .where({ 'm.channel': CHANNEL, 'm.direction': 'outbound', 'cv.channel': CHANNEL })
+    .where('m.created_at', '<=', new Date(now.getTime() - SWEEP_MIN_AGE_MS))
+    .where('m.created_at', '>', new Date(now.getTime() - SWEEP_MAX_AGE_MS))
+    .orderBy('m.created_at', 'asc')
+    .limit(SWEEP_LIMIT)
+    .select('m.id', 'm.body', 'cv.customer_id');
+  for (const row of rows) await noticeCustomer(row.customer_id, row);
+  if (rows.length) logger.info(`[portal-messages] finished ${rows.length} pending answer notice(s)`);
+  return rows.length;
 }
 
 /**
@@ -226,7 +328,7 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
     const customerId = await itemCustomerWith(trx, kind, id);
     const thread = await threadWith(trx, customerId);
     const prior = await priorSend(trx, thread.id, clientRequestId);
-    if (prior) return { replay: true, message: prior };
+    if (prior) return { replay: true, message: prior, customerId };
     const message = await Conversations.appendMessage({
       conn: trx,
       conversationId: thread.id,
@@ -237,13 +339,21 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
       body: text,
       deliveryStatus: 'sent',
       messageType: 'portal_reply',
-      metadata: { portalItem: { kind, id }, ...(clientRequestId ? { clientRequestId } : {}) },
+      // pending until noticeCustomer records how the customer was told (a stopped process leaves it for the sweep)
+      metadata: { portalItem: { kind, id }, notice: { pending: true }, ...(clientRequestId ? { clientRequestId } : {}) },
     });
     const closed = await closeItemWith(trx, kind, id, customerId);
     return { message, closed, customerId };
   });
   if (saved.replay) {
-    return { message: staffView(saved.message), closed: false, notice: metaOf(saved.message).notice || null, replay: true };
+    const { notice } = metaOf(saved.message);
+    // A retried click tries a notice that is still pending (claimNotice decides); a final one is only shown.
+    return {
+      message: staffView(saved.message),
+      closed: false,
+      notice: notice?.pending ? await noticeCustomer(saved.customerId, saved.message) : publicNotice(notice),
+      replay: true,
+    };
   }
   await closeItemBells(kind, id, actor);
   const notice = await noticeCustomer(saved.customerId, saved.message);
@@ -384,5 +494,6 @@ module.exports = {
   customerThread,
   customerUnread,
   markRead,
-  __private: { preview, noticeCustomer, closeItemWith, itemCustomerWith },
+  resumePendingNotices,
+  __private: { preview, noticeCustomer, closeItemWith, itemCustomerWith, claimNotice },
 };

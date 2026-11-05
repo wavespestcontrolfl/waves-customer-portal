@@ -16,6 +16,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   customerAlertsRingLive: jest.fn(() => false),
   morningBannerLive: jest.fn(() => false),
+  ownerNudgeBannerLive: jest.fn(() => false),
 }));
 jest.mock('../services/internal-test-customers', () => ({
   isInternalTestCustomerId: jest.fn(() => false),
@@ -49,7 +50,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled, customerAlertsRingLive, morningBannerLive } = require('../config/feature-gates');
+const { isEnabled, customerAlertsRingLive, morningBannerLive, ownerNudgeBannerLive } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const NotificationService = require('../services/notification-service');
 const bellPolicy = require('../services/notification-bell-policy');
@@ -84,6 +85,7 @@ beforeEach(() => {
   gateOff();
   customerAlertsRingLive.mockReturnValue(false);
   morningBannerLive.mockReturnValue(false);
+  ownerNudgeBannerLive.mockReturnValue(false);
   bellPolicy.clearOverrideCache();
 });
 
@@ -607,6 +609,24 @@ describe('bellAllowed decision order', () => {
     await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: null })).resolves.toBe(false);
     expect([...bellPolicy._private.MORNING_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['waiting_summary']);
     // The customer-alerts gate list is untouched.
+    expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
+  });
+
+  test('GATE_OWNER_NUDGE_BANNER: the open_visits_nudge banner passes the policy only while its own gate is on, even with the alert category silenced', async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:alert', bell_enabled: false }]) });
+    const nudge = { category: 'alert', triggerKey: 'open_visits_nudge' };
+    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(false);
+    // The morning banner's gate does not open it.
+    morningBannerLive.mockReturnValue(true);
+    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(false);
+    morningBannerLive.mockReturnValue(false);
+    ownerNudgeBannerLive.mockReturnValue(true);
+    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(true);
+    // And its gate does not open the morning banner or any other alert-category event.
+    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'waiting_summary' })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'dashboard_alert' })).resolves.toBe(false);
+    expect([...bellPolicy._private.OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['open_visits_nudge']);
+    expect([...bellPolicy._private.MORNING_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['waiting_summary']);
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 
