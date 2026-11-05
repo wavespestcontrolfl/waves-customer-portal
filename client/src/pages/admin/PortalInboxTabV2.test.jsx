@@ -442,3 +442,159 @@ describe("Portal inbox tab", () => {
     expect(screen.getByText("Older than 14 days: 0 chat hand-offs and 0 requests and 2 bookings not finished")).toBeInTheDocument();
   });
 });
+
+// GATE_PORTAL_MESSAGES: the server says replies are on; a customer's own portal message is an item.
+const message = {
+  kind: "message", id: "thread-1", throughId: "msg-9", createdAt: "2026-11-04T15:00:00.000Z",
+  customer: { id: "cust-3", firstName: "Lee", lastName: "Sample", phone: "+19415550103", hasTexts: false },
+  customerMessage: "Is the lawn treatment safe for my dog?", lastAnswer: "Yes, once it dries.",
+};
+
+describe("Portal inbox tab: answers in the portal", () => {
+  const withReplies = (overrides = {}) => listing({ replies: true, ...overrides });
+
+  it("shows Reply in portal only when the server says replies are on, and never on a booking", async () => {
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? listing({ items: [chat, booking] }) : updated(url)));
+    mount();
+    await screen.findByText("Pat Synthetic");
+    expect(screen.queryByRole("button", { name: "Reply in portal" })).toBeNull();
+    cleanup();
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? withReplies({ items: [chat, booking] }) : updated(url)));
+    mount();
+    const chatRow = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    expect(within(chatRow).getByRole("button", { name: "Reply in portal" })).toBeInTheDocument();
+    const bookingRow = screen.getByText("Jo Visitor").closest("[data-testid]");
+    expect(within(bookingRow).queryByRole("button", { name: "Reply in portal" })).toBeNull();
+  });
+
+  it("sends the answer with a request id, drops the row, lowers the count and says how the customer was told", async () => {
+    const onCount = vi.fn();
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies();
+      if (url === "/admin/portal-inbox/reply") return { message: { id: "m1" }, closed: true, notice: { bell: true, pushAccepted: 1, email: "not_needed" } };
+      return updated(url);
+    });
+    mount(onCount);
+    const row = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    const box = within(row).getByRole("textbox", { name: "Answer in the portal" });
+    expect(within(row).getByRole("button", { name: "Send in portal" })).toBeDisabled();
+    fireEvent.change(box, { target: { value: "  Yes, we can add mosquito service.  " } });
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await screen.findByTestId("portal-sent-note")).toHaveTextContent("Sent to Pat Synthetic in the portal. They got a notice in the Waves app.");
+    expect(screen.queryByText("Pat Synthetic")).toBeNull();
+    const [, init] = adminFetch.mock.calls.find(([url]) => url === "/admin/portal-inbox/reply");
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody).toMatchObject({ kind: "chat", id: "esc-1", body: "Yes, we can add mosquito service." });
+    expect(sentBody.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(1));
+  });
+
+  it.each([
+    [{ bell: true, pushAccepted: 0, email: "sent" }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],
+    [{ bell: true, pushAccepted: 0, email: "failed", pending: true }, "Sent to Pat Synthetic in the portal. Their notice did not go out yet; we try again in a few minutes."],
+    [{ bell: true, pushAccepted: 0, email: "email_opted_out" }, "Sent to Pat Synthetic in the portal, but we could not reach them by app or email. Reply by text too."],
+  ])("says how the customer was told: %j", async (notice, line) => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies();
+      if (url === "/admin/portal-inbox/reply") return { message: { id: "m1" }, closed: true, notice };
+      return updated(url);
+    });
+    mount();
+    const row = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    fireEvent.change(within(row).getByRole("textbox", { name: "Answer in the portal" }), { target: { value: "Answer." } });
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await screen.findByTestId("portal-sent-note")).toHaveTextContent(line);
+  });
+
+  it("keeps the text after a failure: same text, same request id; changed text, a new one; shows the server's words", async () => {
+    const inactive = Object.assign(new Error("This customer cannot open the portal. Reply by text instead."), { status: 409, code: "customer_inactive" });
+    let calls = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies();
+      if (url === "/admin/portal-inbox/reply") {
+        calls += 1;
+        if (calls === 1) throw inactive;
+        if (calls === 2) throw new TypeError("Failed to fetch");
+        return { message: { id: "m1" }, closed: true, notice: { bell: true, pushAccepted: 0, email: "sent" } };
+      }
+      return updated(url);
+    });
+    mount();
+    const row = (await screen.findByText("Kim Sample")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    const box = within(row).getByRole("textbox", { name: "Answer in the portal" });
+    fireEvent.change(box, { target: { value: "Next week works." } });
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await within(row).findByRole("alert")).toHaveTextContent("This customer cannot open the portal. Reply by text instead.");
+    expect(box).toHaveValue("Next week works.");
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await within(row).findByText("Could not send. Try again.")).toBeInTheDocument();
+    fireEvent.change(box, { target: { value: "Next Tuesday works." } });
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    await screen.findByTestId("portal-sent-note");
+    const ids = adminFetch.mock.calls.filter(([url]) => url === "/admin/portal-inbox/reply").map(([, init]) => JSON.parse(init.body).requestId);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
+  it("shows a portal message with the customer's words and the last answer, and opens the whole thread", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies({ items: [message], total: 1 });
+      if (url === "/admin/portal-inbox/messages/thread-1") {
+        return { messages: [
+          { id: "msg-8", direction: "outbound", body: "Yes, once it dries.", createdAt: "2026-11-03T15:00:00.000Z", adminUserId: "admin-1" },
+          { id: "msg-9", direction: "inbound", body: "Is the lawn treatment safe for my dog?\nShe is a puppy.", createdAt: "2026-11-04T15:00:00.000Z", adminUserId: null },
+        ], hasMore: true };
+      }
+      if (url.startsWith("/admin/portal-inbox/messages/thread-1?before=")) {
+        return { messages: [{ id: "msg-1", direction: "inbound", body: "First question.", createdAt: "2026-10-01T15:00:00.000Z", adminUserId: null }], hasMore: false };
+      }
+      return updated(url);
+    });
+    mount();
+    const row = (await screen.findByText("Lee Sample")).closest("[data-testid]");
+    expect(within(row).getByText("Message")).toBeInTheDocument();
+    expect(within(row).getByText(/Is the lawn treatment safe for my dog\?/)).toBeInTheDocument();
+    expect(within(row).getByText(/Yes, once it dries\./)).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Show whole thread" }));
+    const thread = await within(row).findByTestId("portal-thread-thread-1");
+    expect(within(thread).getByText((_, el) => el.textContent === "Is the lawn treatment safe for my dog?\nShe is a puppy." && el.children.length === 0)).toBeInTheDocument();
+    fireEvent.click(within(thread).getByRole("button", { name: "Show earlier messages" }));
+    expect(await within(thread).findByText("First question.")).toBeInTheDocument();
+    expect(adminFetch).toHaveBeenCalledWith(`/admin/portal-inbox/messages/thread-1?before=${encodeURIComponent("2026-11-03T15:00:00.000Z")}`);
+    expect(within(thread).queryByRole("button", { name: "Show earlier messages" })).toBeNull();
+  });
+
+  it("marks a portal message handled through the message it showed; a newer message keeps it open", async () => {
+    let open = true;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies({ items: [message], total: 1 });
+      if (url === "/admin/portal-inbox/messages/thread-1/handled") return { handled: true, open };
+      return updated(url);
+    });
+    mount();
+    const row = (await screen.findByText("Lee Sample")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    expect(await within(row).findByText("This changed before you could mark it handled. It is still open.")).toBeInTheDocument();
+    expect(adminFetch).toHaveBeenCalledWith("/admin/portal-inbox/messages/thread-1/handled", { method: "POST", body: JSON.stringify({ throughId: "msg-9" }) });
+    open = false;
+    fireEvent.click(within(row).getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(screen.queryByText("Lee Sample")).toBeNull());
+  });
+
+  it("counts older portal messages in the Older line, and Close all older sums them", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies({ olderItems: [], older: { chats: 1, requests: 0, messages: 2 } });
+      if (url === "/admin/portal-inbox/close-older") return { closed: { chats: 1, requests: 0, messages: 2 } };
+      return updated(url);
+    });
+    mount();
+    expect(await screen.findByText(/Older than 14 days: 1 chat hand-off and 0 requests and 2 portal messages/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close all older" }));
+    expect(screen.getByText("Close 3 items? Customers get no message.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close them" }));
+    expect(await screen.findByText("Closed 3 items.")).toBeInTheDocument();
+  });
+});
