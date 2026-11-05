@@ -450,7 +450,7 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, appointmentId = null, invoiceId = null } = {}) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, appointmentId = null, invoiceId = null } = {}) {
   const { title, link, category } = await resolvePushDestination(pushPresentation(messageType), messageType, { customerId, appointmentId, invoiceId });
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
@@ -462,8 +462,22 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt, messageType });
+  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}) });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
+}
+
+// GATE_APP_FIRST_ANY_DEVICE applies to routed push_first sends only; a customer's
+// explicit App choice keeps its own path and the 72 hour rule.
+function anyDeviceSend(explicitPushOnly) {
+  return !explicitPushOnly && appFirstAnyDeviceLive();
+}
+
+// Which devices the push_first fan-out may count as delivery. Any-device sends
+// drop the heartbeat floor but stay on phone apps (customerStatus.reachable
+// counts phone apps only): a stale browser subscription that accepts must never
+// stand in for delivery and skip the text. Otherwise: the 72 hour floor.
+function fanOutReach(anyDevice) {
+  return anyDevice ? { nativeOnly: true } : { minUpdatedAt: heartbeatCutoff() };
 }
 
 function heartbeatCutoff() {
@@ -610,7 +624,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // GATE_APP_FIRST_ANY_DEVICE: a push_first send to the holder needs only an
     // active device, not a recent check-in. A customer's explicit App choice
     // keeps its own path and the 72 hour rule.
-    const anyDevice = !explicitPushOnly && appFirstAnyDeviceLive();
+    const anyDevice = anyDeviceSend(explicitPushOnly);
     const fresh = await hasFreshPushDevice(customerId, db, { anyDevice });
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
@@ -698,7 +712,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
       : await sendPush(customerId, messageType, body, {
         shouldContinue: windowGuardFrom(preSendCheck),
-        minUpdatedAt: anyDevice ? undefined : heartbeatCutoff(),
+        ...fanOutReach(anyDevice),
         appointmentId,
         invoiceId,
       });

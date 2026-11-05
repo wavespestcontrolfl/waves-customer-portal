@@ -112,6 +112,7 @@ describe('reachability without a recent check-in (legacy device query)', () => {
     expect(result.delivered).toBe(true);
     expect(mockSendToCustomer).toHaveBeenCalledTimes(1);
     expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
+    expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBe(true);
   });
 
   it('gate off: the same stale device falls back to the text (72 hour rule)', async () => {
@@ -126,6 +127,7 @@ describe('reachability without a recent check-in (legacy device query)', () => {
     const result = await send();
     expect(result.delivered).toBe(true);
     expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeInstanceOf(Date);
+    expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBeUndefined();
   });
 
   it('gate on: a contact device never counts as the holder having the app', async () => {
@@ -159,6 +161,7 @@ describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device stat
     mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
     expect((await send()).delivered).toBe(true);
     expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
+    expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBe(true);
   });
 
   it('gate on: app notifications switched off for the account still means text', async () => {
