@@ -77,6 +77,14 @@ describe('the technician category allow-list', () => {
     expect(technicianKnowledgeRows(ROWS).map((r) => r.id)).toEqual([1, 5]);
   });
 
+  test('a row\'s search vector never reaches a technician: its lexemes keep prices and vendor names', () => {
+    const row = { ...ROWS[0], search_vector: "'139.50':4 'herbicid':2 'sampl':1 'test':5 'vendor':6" };
+    const page = technicianKnowledgeRow(row);
+    expect(page).not.toHaveProperty('search_vector');
+    expect(JSON.stringify(page)).not.toMatch(/139|Test Vendor|vendor/i);
+    expect(technicianKnowledgeRows([row])[0]).not.toHaveProperty('search_vector');
+  });
+
   test('priced protocol lines lose their dollar tokens', () => {
     const { content } = technicianKnowledgeRow(ROWS[4]);
     expect(content).not.toMatch(/\$/);

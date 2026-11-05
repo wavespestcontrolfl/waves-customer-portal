@@ -51,13 +51,19 @@ function technicianText(value) {
 }
 
 const TEXT_FIELDS = ['title', 'summary', 'content', 'snippet'];
+// Columns derived from the stored text. search_vector is the tsvector
+// PostgreSQL builds from the original title and content: its lexemes keep
+// the price numbers and vendor names the text strip removes.
+const WITHHELD_FIELDS = ['search_vector'];
 
 // One row for a technician: null when its category is not a field category,
 // else the row with vendor price lines and dollar tokens removed from its text
-// fields. A row with no category field is withheld (fail closed).
+// fields and its search vector left out. A row with no category field is
+// withheld (fail closed).
 function technicianKnowledgeRow(row) {
   if (!row || !ALLOWED.has(row.category)) return null;
   const out = { ...row };
+  for (const field of WITHHELD_FIELDS) delete out[field];
   for (const field of TEXT_FIELDS) {
     if (field in out) out[field] = technicianText(out[field]);
   }
