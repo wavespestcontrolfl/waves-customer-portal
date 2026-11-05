@@ -9,10 +9,10 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const plaidSync = require('../plaid-sync');
 const StripeBanking = require('../stripe-banking');
-const { resolveBillingLane, membershipDuesCoverVisit, completionInvoiceAmount } = require('../billing-lane');
+const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected } = require('../billing-lane');
+const AnnualPrepay = require('../annual-prepay-renewals');
 const { applyOpenSelfPayPredicates, rowIsSelfPayDue } = require('../open-balance');
 const { autopayActivePredicate } = require('../autopay-eligibility');
-const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('../no-cost-visit-types');
 const { DUES_COHORT_COLUMNS, applyDuesCohort, autopayGuard, laneGuard, monthlyDuesVerdict } = require('../monthly-dues-eligibility');
 const InvoiceService = require('../invoice');
 const { invoiceAmountDue } = require('../invoice-helpers');
@@ -21,7 +21,6 @@ const inputs = require('./inputs');
 const { _private: engine } = require('./engine');
 
 const COHORT_DAYS = 150;
-const CASH_LANES = new Set(['per_visit', 'per_application', 'one_time']);
 const CLOSED_VISIT_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
 const DEAD_INVOICE_STATUSES = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES;
 const ET_DAY = (col) => `to_char((${col}) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')`;
@@ -32,56 +31,119 @@ const usd = (n) => Number(n) || 0;
 const PAID_CASH_SQL = `CASE WHEN COALESCE(i.amount_paid, 0) > 0 THEN i.amount_paid
   WHEN i.status = 'paid' THEN GREATEST(0, COALESCE(i.total, 0) - COALESCE(i.credit_applied, 0)) ELSE 0 END`;
 
-// Is this visit paid by the monthly dues? The completion path's own verdict (billing-lane
-// membershipDuesCoverVisit): a member's recurring or unpriced visit is; a priced one-time visit is billed.
-function duesCover(row, lane) {
-  return lane === 'monthly_membership' && membershipDuesCoverVisit({
-    visitIsPayerBilled: !!row.payer_billed,
-    perApplicationBilling: false,
-    annualPrepayBilling: false,
-    customerAutopayActive: !!row.autopay_active,
-    hasVisitPrice: Number(row.estimated_price) > 0,
-    isRecurring: !!row.is_recurring,
-    waveguardTier: row.waveguard_tier,
+// What completing the visit bills the homeowner: billing-lane predictCompletionBilling, the completion
+// path's own rules (the lane, Auto Pay, the dues, an annual prepay, the per-application fee, callbacks,
+// free and consultation types, a prepayment). An invoice or a card charge counts; a covered, payer-billed,
+// prepaid or free visit brings nothing. The prediction takes two answers from the database, read by
+// valueVisits: the annual-prepay verdict and whether the visit's month of dues is already paid for.
+const CASH_KINDS = new Set(['invoice', 'auto_charge']);
+function predictedCash(row, { annualCoverage = null, duesCollected = false } = {}) {
+  // Completion skips the invoice for a visit an annual prepay covers, in every lane
+  // (complete-scheduled-service.js annualPrepayCovered); the prediction covers a stamped visit only in
+  // the annual lane, so a covered verdict decides here first.
+  if (annualCoverage === true) return 0;
+  const prediction = predictCompletionBilling({
+    lane: resolveBillingLane(row).mode,
+    billingMode: row.billing_mode || null,
+    autopayActive: row.autopay_active === true,
+    estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
+    primaryLinePrice: row.primary_line_price,
     monthlyRate: row.monthly_rate,
-    billingMode: row.billing_mode,
+    perApplicationFee: row.per_application_fee,
+    isRecurring: row.is_recurring === true,
+    isCallback: row.is_callback === true,
+    serviceType: row.service_type,
+    payerBilled: row.payer_billed === true,
+    prepaidAmount: row.prepaid_amount,
+    prepaidMethod: row.prepaid_method || null,
+    annualCoverageValidated: annualCoverage,
+    duesCollectedThisMonth: duesCollected,
   });
+  return CASH_KINDS.has(prediction.kind) ? usd(prediction.amount) : 0;
 }
 
-// A visit's cash value: what completion will invoice for it (billing-lane completionInvoiceAmount: the
-// row price, else the per-application fee, else for the dues lane the monthly rate; a stamped $0, a
-// callback or an unpriced consultation bill nothing), less what was prepaid. Self-pay only (payer-billed
-// is listed apart); never a callback (a free re-treat, as on the billing recovery page, even when the row
-// carries a price), an always-free type, a visit on an annual prepay term, or one the dues cover.
-function visitValue(row) {
-  const lane = resolveBillingLane(row).mode;
-  const billed = CASH_LANES.has(lane) || (lane === 'monthly_membership' && !duesCover(row, lane));
-  if (!billed || row.payer_billed || row.is_callback || row.free_type || row.annual_prepay_term_id) return 0;
-  const amount = completionInvoiceAmount({
-    estimatedPrice: row.estimated_price,
-    isCallback: !!row.is_callback,
-    perApplicationBilling: row.billing_mode === 'per_application',
-    perApplicationFee: row.per_application_fee,
-    monthlyRate: row.monthly_rate,
-    billingMode: row.billing_mode,
-    primaryLinePrice: row.primary_line_price,
-    serviceType: row.service_type,
-  });
-  return Math.max(0, amount - usd(row.prepaid_amount));
+// The annual-prepay verdict, read as the schedule board reads it (annual-prepay-renewals
+// annualCoverageVerdictForPrediction): a stamped visit is checked against its prepay year, and so is a
+// visit of a customer with an after-visit prepay year (one query finds those customers). Every other visit
+// has no verdict (null) and is never read. The checks run eight at a time on the full visit rows (the
+// check reads the hold stamp from the row). A visit whose check fails (a stamp with no prepay year reads
+// as unverifiable) keeps no verdict, as on the board; one log line counts them.
+const ANNUAL_CHECKS_AT_ONCE = 8;
+async function annualVerdicts(database, rows) {
+  const verdicts = new Map();
+  let deferred;
+  let full;
+  try {
+    deferred = await AnnualPrepay.deferredPrepayHoldCustomerIds(database, rows.map((r) => r.customer_id));
+    const ids = rows
+      .filter((r) => r.prepaid_method === AnnualPrepay.ANNUAL_PREPAY_PREPAID_METHOD || deferred.has(String(r.customer_id)))
+      .map((r) => r.id);
+    full = ids.length ? await database('scheduled_services').whereIn('id', ids) : [];
+  } catch (err) {
+    logger.warn(`[cash-forecast] annual prepay coverage reads failed: ${err.message}`);
+    return verdicts;
+  }
+  const failed = [];
+  const check = async (visit) => {
+    try {
+      verdicts.set(String(visit.id), await AnnualPrepay.annualCoverageVerdictForPrediction(visit, database, { deferredCustomerIds: deferred }));
+    } catch (err) {
+      failed.push(err.message);
+    }
+  };
+  for (let n = 0; n < full.length; n += ANNUAL_CHECKS_AT_ONCE) {
+    await Promise.all(full.slice(n, n + ANNUAL_CHECKS_AT_ONCE).map(check));
+  }
+  if (failed.length) logger.warn(`[cash-forecast] annual prepay coverage unreadable for ${failed.length} visit(s); first: ${failed[0]}`);
+  return verdicts;
+}
+
+// Has the member's month of dues been paid for, leaving out the visit's own invoice? (billing-lane
+// monthlyDuesCollected, completion's own check.) A failed read counts the month as paid, so the forecast
+// never counts money it cannot place.
+async function duesPaid(database, row) {
+  try {
+    return await monthlyDuesCollected(database, row.customer_id, new Date(`${row.scheduled_day}T12:00:00Z`), {
+      excludeScheduledServiceId: row.id,
+    });
+  } catch (err) {
+    logger.warn(`[cash-forecast] dues read failed for visit ${row.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// Each visit's value, by id. Completion bills a member's dues once per ET month: one dues invoice covers
+// the month's other visits. So when the prediction turns on the month's dues, the database answers for
+// that month; in a month it has no answer for, the first such visit (by date) bills and the rest are
+// covered.
+async function valueVisits(database, rows) {
+  const annual = await annualVerdicts(database, rows);
+  const values = new Map();
+  const billedMonths = new Set();
+  const byDay = [...rows].sort((a, b) => a.scheduled_day.localeCompare(b.scheduled_day));
+  for (const row of byDay) {
+    const annualCoverage = annual.has(String(row.id)) ? annual.get(String(row.id)) : null;
+    const billed = predictedCash(row, { annualCoverage });
+    const duesDecide = billed > 0 && predictedCash(row, { annualCoverage, duesCollected: true }) !== billed;
+    const month = `${row.customer_id}|${row.scheduled_day.slice(0, 7)}`;
+    const paid = duesDecide && (billedMonths.has(month) || await duesPaid(database, row));
+    if (duesDecide && !paid) billedMonths.add(month);
+    values.set(String(row.id), paid ? 0 : billed);
+  }
+  return values;
 }
 
 async function readVisits(database, { from, to, now }) {
   const autopay = autopayActivePredicate(now);
   return database.raw(`
-    SELECT ss.id, ss.status, ${DAY('ss.scheduled_date')} AS scheduled_day,
+    SELECT ss.id, ss.customer_id, ss.status, ${DAY('ss.scheduled_date')} AS scheduled_day,
       CASE WHEN ss.completed_at IS NULL THEN NULL ELSE ${ET_DAY('ss.completed_at')} END AS completed_day,
-      ss.prepaid_amount, ss.annual_prepay_term_id, ss.estimated_price, ss.primary_line_price, ss.service_type,
+      ss.prepaid_amount, ss.prepaid_method, ss.estimated_price, ss.primary_line_price, ss.service_type,
       COALESCE(ss.is_recurring, false) AS is_recurring,
       ${autopay.sql} AS autopay_active,
       (COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END) IS NOT NULL) AS payer_billed,
       (COALESCE(ss.is_callback, false) OR EXISTS (
         SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND COALESCE(sr.is_callback, false))) AS is_callback,
-      (COALESCE(ss.service_type, '') ~* ?) AS free_type,
       -- its own live invoice, or a combined first-application invoice that covers it (the stamp
       -- estimate-converter's stampCombinedFirstApplicationInvoiceCoverage writes on every member)
       (EXISTS (SELECT 1 FROM invoices i LEFT JOIN service_records sr2 ON sr2.id = i.service_record_id
@@ -92,7 +154,7 @@ async function readVisits(database, { from, to, now }) {
     JOIN customers c ON c.id = ss.customer_id
     WHERE ss.scheduled_date BETWEEN ?::date AND ?::date
       AND (ss.status = 'completed' OR ss.status <> ALL(?::text[]))`,
-  [autopay.binding, ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, DEAD_INVOICE_STATUSES, DEAD_INVOICE_STATUSES, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
+  [autopay.binding, DEAD_INVOICE_STATUSES, DEAD_INVOICE_STATUSES, from, to, CLOSED_VISIT_STATUSES]).then((r) => r.rows);
 }
 
 // Invoices behind completed visits (linked by the visit or by its service record), live ones only:
@@ -351,8 +413,8 @@ function poolFrom(cash) {
 // Completed visits in the cohort window are the collection cohort; open visits in the forecast window
 // are booked work. A visit already invoiced brings its cash once, as its invoice (or a draft, listed
 // apart), but it is still booked work when the expected line compares work to last year's pace.
-function splitVisits(visits, d) {
-  const rows = visits.map((v) => ({ ...v, value: visitValue(v), doneDay: v.completed_day || v.scheduled_day }));
+function splitVisits(visits, d, values) {
+  const rows = visits.map((v) => ({ ...v, value: values.get(String(v.id)), doneDay: v.completed_day || v.scheduled_day }));
   const completed = rows.filter((v) => v.status === 'completed' && v.doneDay >= d.cohortFrom && v.doneDay <= d.yesterday);
   const trailing = completed.filter((v) => v.doneDay >= d.trailingFrom && v.doneDay <= d.trailingTo);
   const open = rows.filter((v) => v.status !== 'completed' && v.scheduled_day >= d.today && v.scheduled_day <= d.windowEnd);
@@ -427,7 +489,7 @@ async function loadForecastInput({
     // unpaid rows already past due stay owed (the tax page keeps them): they count today
     readTaxRows(database, { from: engine.addDays(d.today, -400), to: d.windowEnd }),
   ]);
-  const visits = splitVisits(visitRows, d);
+  const visits = splitVisits(visitRows, d, await valueVisits(database, visitRows));
   const visitInvoices = await readVisitInvoices(database, visits.cohort.map((v) => v.id));
   const parts = groupBy(await readPartPayments(database, [...visitInvoices, ...sent].map((i) => i.id)), 'invoice_id');
   const { visitCohort, unbilled } = cohortFrom(visits.cohort, visitInvoices, parts, d.today);
@@ -463,4 +525,4 @@ async function loadForecastInput({
   };
 }
 
-module.exports = { loadForecastInput, _private: { visitValue, projectPayroll, payEvents } };
+module.exports = { loadForecastInput, _private: { predictedCash, valueVisits, projectPayroll, payEvents } };

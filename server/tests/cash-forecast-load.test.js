@@ -21,8 +21,20 @@ jest.mock('../services/monthly-dues-eligibility', () => ({
   laneGuard: jest.fn((c) => (c.billing_mode === 'monthly_membership' ? null : { event: 'skipped_billing_mode' })),
   monthlyDuesVerdict: jest.fn(async () => ({ eligible: true })),
 }));
+// The two answers the completion prediction takes from the database.
+jest.mock('../services/billing-lane', () => ({
+  ...jest.requireActual('../services/billing-lane'),
+  monthlyDuesCollected: jest.fn(async () => false),
+}));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
+  deferredPrepayHoldCustomerIds: jest.fn(async () => new Set()),
+  annualCoverageVerdictForPrediction: jest.fn(async () => null),
+}));
 
 const { applyOpenSelfPayPredicates } = require('../services/open-balance');
+const { monthlyDuesCollected } = require('../services/billing-lane');
+const AnnualPrepay = require('../services/annual-prepay-renewals');
 const { loadForecastInput, _private } = require('../services/cash-forecast/load');
 
 // 21:30 ET on Thursday Nov 5 is already Nov 6 in UTC: every bound day must still be Nov 5.
@@ -35,6 +47,7 @@ function fakeDb({ raw = [], tables = {} } = {}) {
     const q = {};
     ['where', 'whereIn', 'whereNull', 'whereRaw', 'select', 'orderBy'].forEach((m) => { q[m] = () => q; });
     q.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+    q.first = () => Promise.resolve(rows[0]);
     return q;
   };
   database.raw = async (sql, bindings = []) => {
@@ -47,9 +60,10 @@ function fakeDb({ raw = [], tables = {} } = {}) {
 }
 
 const visit = (over) => ({
-  id: 'v', status: 'pending', scheduled_day: '2026-11-10', completed_day: null, prepaid_amount: 0, annual_prepay_term_id: null,
-  estimated_price: 100, primary_line_price: null, service_type: 'Quarterly Pest Control Service', payer_billed: false,
-  is_callback: false, free_type: false, billing_mode: 'per_visit', waveguard_tier: null, monthly_rate: 0, per_application_fee: null, ...over,
+  id: 'v', customer_id: 'k-v', status: 'pending', scheduled_day: '2026-11-10', completed_day: null, prepaid_amount: 0,
+  prepaid_method: null, estimated_price: 100, primary_line_price: null, service_type: 'Quarterly Pest Control Service',
+  payer_billed: false, is_callback: false, is_recurring: false, autopay_active: false, billing_mode: 'per_visit',
+  waveguard_tier: null, monthly_rate: 0, per_application_fee: null, ...over,
 });
 
 const cashOk = async () => ({
@@ -63,40 +77,102 @@ const cashOk = async () => ({
   unavailable: [],
 });
 
-describe('visit value: what completion will invoice, less prepaid', () => {
-  const { visitValue } = _private;
+describe('visit value: what completing it bills (billing-lane predictCompletionBilling)', () => {
+  const { predictedCash, valueVisits } = _private;
   const member = { billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 80, autopay_active: true, is_recurring: true };
 
-  test('cash lanes bill their price; payer-billed, callback, free types and annual prepay bill nothing here', () => {
-    expect(visitValue(visit({}))).toBe(100);
-    expect(visitValue(visit({ billing_mode: 'one_time', prepaid_amount: 30 }))).toBe(70);
-    expect(visitValue(visit({ prepaid_amount: 150 }))).toBe(0);
-    expect(visitValue(visit({ estimated_price: null }))).toBe(0); // an unpriced per-visit visit bills nothing
-    expect(visitValue(visit({ annual_prepay_term_id: 't1' }))).toBe(0);
-    expect(visitValue(visit({ payer_billed: true }))).toBe(0);
-    expect(visitValue(visit({ is_callback: true }))).toBe(0);
-    expect(visitValue(visit({ free_type: true }))).toBe(0);
+  beforeEach(() => {
+    monthlyDuesCollected.mockReset().mockResolvedValue(false);
+    AnnualPrepay.deferredPrepayHoldCustomerIds.mockReset().mockResolvedValue(new Set());
+    AnnualPrepay.annualCoverageVerdictForPrediction.mockReset().mockResolvedValue(null);
+  });
+
+  test('a cash lane bills its price less a prepayment; payer-billed, callback, free-type and annual-stamped visits bring nothing', () => {
+    expect(predictedCash(visit({}))).toBe(100);
+    expect(predictedCash(visit({ billing_mode: 'one_time', prepaid_amount: 30 }))).toBe(70);
+    expect(predictedCash(visit({ prepaid_amount: 150 }))).toBe(0);
+    expect(predictedCash(visit({ estimated_price: null }))).toBe(0); // an unpriced per-visit visit bills nothing
+    expect(predictedCash(visit({ billing_mode: 'annual_prepay', prepaid_method: 'annual_prepay_invoice' }))).toBe(0);
+    expect(predictedCash(visit({}), { annualCoverage: true })).toBe(0); // held by a deferred prepay year
+    expect(predictedCash(visit({ payer_billed: true }))).toBe(0);
+    expect(predictedCash(visit({ is_callback: true }))).toBe(0);
+    expect(predictedCash(visit({ service_type: 'Re-Service' }))).toBe(0);
   });
 
   test('per application: the fee when the row has no price; a stamped $0 follows GATE_STAMPED_ZERO_FREE', () => {
     const perApp = { billing_mode: 'per_application', per_application_fee: 50 };
-    expect(visitValue(visit({ ...perApp, estimated_price: null }))).toBe(50);
+    expect(predictedCash(visit({ ...perApp, estimated_price: null }))).toBe(50);
     const saved = process.env.GATE_STAMPED_ZERO_FREE;
     try {
       process.env.GATE_STAMPED_ZERO_FREE = 'true';
-      expect(visitValue(visit({ ...perApp, estimated_price: 0 }))).toBe(0);
+      expect(predictedCash(visit({ ...perApp, estimated_price: 0 }))).toBe(0);
       process.env.GATE_STAMPED_ZERO_FREE = 'false';
-      expect(visitValue(visit({ ...perApp, estimated_price: 0 }))).toBe(50);
+      expect(predictedCash(visit({ ...perApp, estimated_price: 0 }))).toBe(50);
     } finally {
       if (saved === undefined) delete process.env.GATE_STAMPED_ZERO_FREE; else process.env.GATE_STAMPED_ZERO_FREE = saved;
     }
   });
 
-  test('members: the dues cover a recurring visit on autopay; without autopay it bills the monthly rate; a priced one-time visit bills its price', () => {
-    expect(visitValue(visit({ ...member, estimated_price: null }))).toBe(0);
-    expect(visitValue(visit({ ...member, billing_mode: null, estimated_price: null }))).toBe(0); // inferred member
-    expect(visitValue(visit({ ...member, autopay_active: false, estimated_price: null }))).toBe(80);
-    expect(visitValue(visit({ ...member, is_recurring: false, estimated_price: 200 }))).toBe(200);
+  test('members: the dues cover a recurring visit on Auto Pay or in a month already paid for; else it bills the monthly rate', () => {
+    expect(predictedCash(visit({ ...member, estimated_price: null }))).toBe(0);
+    expect(predictedCash(visit({ ...member, billing_mode: null, estimated_price: null }))).toBe(0); // inferred member
+    expect(predictedCash(visit({ ...member, autopay_active: false, estimated_price: null }))).toBe(80);
+    expect(predictedCash(visit({ ...member, autopay_active: false, estimated_price: null }), { duesCollected: true })).toBe(0);
+    expect(predictedCash(visit({ ...member, is_recurring: false, estimated_price: 200 }))).toBe(200); // a priced one-off
+  });
+
+  test('a member without Auto Pay is billed once a month: the database answers for a month, else the first visit bills', async () => {
+    // November's dues are already paid; December has no record yet
+    monthlyDuesCollected.mockImplementation(async (db, customerId, when) => when.toISOString().startsWith('2026-11'));
+    const noAutopay = { ...member, customer_id: 'm1', autopay_active: false, estimated_price: null };
+    const rows = [
+      visit({ ...noAutopay, id: 'd2', scheduled_day: '2026-12-17' }),
+      visit({ ...noAutopay, id: 'n1', scheduled_day: '2026-11-12' }),
+      visit({ ...noAutopay, id: 'd1', scheduled_day: '2026-12-03' }),
+      visit({ id: 'p1', scheduled_day: '2026-12-10' }), // per visit: its price, and no dues read
+    ];
+    const values = await valueVisits(fakeDb(), rows);
+    expect(Object.fromEntries(values)).toEqual({ n1: 0, d1: 80, d2: 0, p1: 100 });
+    // each read leaves out the visit's own invoice; d2 rides the invoice d1 will bring
+    expect(monthlyDuesCollected.mock.calls.map((c) => [c[1], c[3]])).toEqual([
+      ['m1', { excludeScheduledServiceId: 'n1' }], ['m1', { excludeScheduledServiceId: 'd1' }],
+    ]);
+  });
+
+  test('annual prepay: a stamped visit and a deferred-year customer\'s visit take the year\'s verdict; others are never read', async () => {
+    AnnualPrepay.deferredPrepayHoldCustomerIds.mockResolvedValue(new Set(['k-held']));
+    // h1: held by a waiting year; s1: a live stamp; s2: a stale stamp (its year was refunded)
+    const verdict = { h1: true, s1: true, s2: false };
+    AnnualPrepay.annualCoverageVerdictForPrediction.mockImplementation(async (full) => verdict[full.id]);
+    const stamp = { billing_mode: 'per_application', per_application_fee: 90, estimated_price: null, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 90 };
+    const database = fakeDb({ tables: { scheduled_services: [{ id: 'h1', customer_id: 'k-held' }, { id: 's1' }, { id: 's2' }] } });
+    const values = await valueVisits(database, [
+      visit({ id: 'h1', customer_id: 'k-held' }),
+      visit({ id: 's1', customer_id: 'k-s', ...stamp }),
+      visit({ id: 's2', customer_id: 'k-s', ...stamp }),
+      visit({ id: 'x1', customer_id: 'k-other' }),
+    ]);
+    // the stale stamp is not a prepayment: completion bills the fee
+    expect(Object.fromEntries(values)).toEqual({ h1: 0, s1: 0, s2: 90, x1: 100 });
+    expect(AnnualPrepay.annualCoverageVerdictForPrediction.mock.calls.map((c) => c[0].id).sort()).toEqual(['h1', 's1', 's2']);
+  });
+
+  test('an unreadable annual check keeps no verdict (one log line); a failed batch read keeps none and the values still come', async () => {
+    const logger = require('../services/logger');
+    AnnualPrepay.annualCoverageVerdictForPrediction.mockRejectedValue(new Error('stamped visit carries no annual_prepay_term_id'));
+    const stamp = { billing_mode: 'annual_prepay', estimated_price: 120, prepaid_method: 'annual_prepay_invoice' };
+    const database = fakeDb({ tables: { scheduled_services: [{ id: 'u1' }, { id: 'u2' }] } });
+    // no verdict: in the annual lane the prediction falls back to the stamp
+    expect(Object.fromEntries(await valueVisits(database, [visit({ id: 'u1', ...stamp }), visit({ id: 'u2', ...stamp })]))).toEqual({ u1: 0, u2: 0 });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('unreadable for 2 visit(s)'));
+    AnnualPrepay.deferredPrepayHoldCustomerIds.mockRejectedValue(new Error('down'));
+    expect(Object.fromEntries(await valueVisits(database, [visit({ id: 'u1', ...stamp }), visit({ id: 'p1' })]))).toEqual({ u1: 0, p1: 100 });
+  });
+
+  test('a failed read never counts money it cannot place: unread dues count the month as paid', async () => {
+    monthlyDuesCollected.mockRejectedValue(new Error('read failed'));
+    const values = await valueVisits(fakeDb(), [visit({ ...member, id: 'f1', customer_id: 'm2', autopay_active: false, estimated_price: null })]);
+    expect(values.get('f1')).toBe(0);
   });
 });
 
@@ -125,7 +201,7 @@ describe('loadForecastInput', () => {
     expect(input.today).toBe('2026-11-05');
     const visits = database.calls.find((c) => /FROM scheduled_services ss/.test(c.sql));
     expect(visits.bindings[0]).toBe('2026-11-05'); // the autopay check's ET day
-    expect(visits.bindings.slice(4, 6)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
+    expect(visits.bindings.slice(3, 5)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
     const bank = database.calls.find((c) => /FROM bank_transactions bt/.test(c.sql));
     expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f', 'card-g'], '2026-08-28', '2026-11-11']); // trailing Sep 7 - Nov 1 +- 10 days; USD only
     for (const c of database.calls) expect(c.sql).not.toMatch(/current_date|now\(\)/i);
