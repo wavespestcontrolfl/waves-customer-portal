@@ -298,6 +298,19 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
     });
 
+    // Pre-push audit P0 (#7587): the technician charge sends requirePerformedVisit; a completed visit whose
+    // current closeout performed no treatment refuses under the visit lock.
+    test.each(['inspection_only', 'customer_declined', 'incomplete'])(
+      'requirePerformedVisit: a completed visit closed out as %s refuses before Stripe', async (visitOutcome) => {
+        const { StripeService, stripeClient } = load({
+          visit: visitToday(), contract: null, record: { status: 'completed', structured_notes: JSON.stringify({ visitOutcome }) },
+        });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requirePerformedVisit: true }))
+          .rejects.toMatchObject({ code: 'VISIT_NOT_COMPLETED' });
+        expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      },
+    );
+
     // Codex security P2 (#7587 r6): the latest Auto Pay toggle, read under the customer row lock.
     test.each([
       ['turned Auto Pay off', { event_type: 'autopay_disabled' }, true],

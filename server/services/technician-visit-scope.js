@@ -175,8 +175,9 @@ function invoiceLines(raw) {
 }
 
 // The unlocked check the card-on-file routes run first: the invoice is bound to a visit of its own
-// customer, that visit passes technicianCardOnFileVisitOk, the invoice bills the booked visit only, no
-// active payment plan owns it, and the customer has not turned Auto Pay off.
+// customer, that visit passes technicianCardOnFileVisitOk and its closeout was a performed visit, the
+// invoice bills the booked visit only, no active payment plan owns it, and the customer has not turned
+// Auto Pay off.
 async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   if (!isTechnicianRequest(req)) return true;
   if (!invoice?.id || !invoice.scheduled_service_id || !invoiceChargesBookedVisitOnly(invoice)) return false;
@@ -184,6 +185,11 @@ async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   const row = await database('scheduled_services').where({ id: invoice.scheduled_service_id })
     .first('customer_id', 'technician_id', 'status', 'scheduled_date');
   if (!row || String(row.customer_id) !== String(invoice.customer_id) || !technicianCardOnFileVisitOk(req, row)) return false;
+  // A completed visit is chargeable only after a performed closeout: inspection only, customer declined and
+  // incomplete also end completed (the charge's requirePerformedVisit reads the same latest record under its lock).
+  const record = await database('service_records').where({ scheduled_service_id: invoice.scheduled_service_id })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
+  if (!require('./visit-outcomes').closeoutPerformedForCharge(record)) return false;
   // An active payment plan owns the invoice's collection: the office collects it.
   if (await database('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id')) return false;
   // A customer who turned Auto Pay off is not charged off-session from the visit.

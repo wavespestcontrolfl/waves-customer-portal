@@ -103,6 +103,8 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
     mockRows.invoices = invoiceRow();
     mockRows.scheduled_services = visitRow();
     mockRows.payment_methods = { method_type: 'card', stripe_payment_method_id: 'pm_stripe_1' };
+    // The visit's latest closeout is a performed visit.
+    mockRows.service_records = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) };
     for (const key of Object.keys(mockLists)) delete mockLists[key];
     // The card's recorded consent authorizes charges for visits and invoices (v8+, not a card hold).
     mockLists.payment_method_consents = [{ consent_text_version: 'v12_2026-10-01', source: 'pay_page' }];
@@ -144,7 +146,28 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       requireNoUnappliedVisitPrepayment: true,
       refuseWhenActivePaymentPlan: true,
       refuseWhenAutopayOptedOut: true,
+      requirePerformedVisit: true,
     });
+  });
+
+  // Pre-push audit P0 (#7587): a visit also ends completed after an inspection only, a customer who
+  // declined, or an incomplete visit; none of those closeouts is a visit the card may be charged for.
+  test.each([
+    ['inspection only', { visitOutcome: 'inspection_only' }],
+    ['customer declined', { visitOutcome: 'customer_declined' }],
+    ['incomplete', { visitOutcome: 'incomplete' }],
+    ['a backfill closeout', { visitOutcome: 'completed', backfill: 'true' }],
+  ])('gate on, a completed visit whose closeout is %s: both routes answer 404 and the sheet hides the tender', async (_label, notes) => {
+    mockRows.service_records = { status: 'completed', structured_notes: JSON.stringify(notes) };
+    InvoiceService.getById.mockImplementation(async () => ({ ...invoiceRow(), total: 102.9, line_items: [] }));
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'charge-card-quote', { paymentMethodId: 'pm-1' })).status).toBe(404);
+      expect((await post(baseUrl, 'charge-card', { paymentMethodId: 'pm-1', expectedTotal: 102.9 })).status).toBe(404);
+      const read = await fetch(`${baseUrl}/api/admin/invoices/${INVOICE_ID}`);
+      expect((await read.json()).tech_card_on_file).toBe(false);
+    });
+    expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
   // Codex security P2 (#7587 r6): a customer who turned Auto Pay off is not charged off-session from the
