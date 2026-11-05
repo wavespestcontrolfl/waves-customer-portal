@@ -56,6 +56,49 @@ function LinkPicker({ query, onQuery, searchFailed, results, picked, onPick, bus
   );
 }
 
+function FamilyMemberRow({ member }) {
+  return (
+    <div className="py-2" data-testid="same-family-member">
+      <div className="text-ui-body text-zinc-900 break-words">{member.name}</div>
+      {member.address && <div className="text-ui-label text-ink-secondary break-words">{member.address}</div>}
+      {!member.active && <div className="text-ui-label text-ink-secondary">Inactive profile (does not count until active)</div>}
+    </div>
+  );
+}
+
+function UnlinkControl({ busy, confirmingUnlink, onAskUnlink, onKeep, onUnlink }) {
+  if (!confirmingUnlink) {
+    return <Button size="sm" variant="secondary" disabled={busy} onClick={onAskUnlink}>Unlink</Button>;
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-ui-label text-zinc-900">Remove this profile from the family?</span>
+      <Button size="sm" variant="secondary" disabled={busy} onClick={onKeep}>Keep link</Button>
+      <Button size="sm" disabled={busy} onClick={onUnlink}>{busy ? "Removing…" : "Unlink"}</Button>
+    </div>
+  );
+}
+
+// Who is in this profile's family, and the Unlink control. A profile can be in
+// a family with no other member on file (after a merge or a delete); it still
+// gets Unlink so staff can clear it.
+function FamilyMembers({ familyId, others, linking, ...unlinkProps }) {
+  if (!familyId) {
+    return linking ? null : <div className="text-ui-label text-ink-secondary">Not linked to another profile.</div>;
+  }
+  return (
+    <div className="divide-y divide-zinc-200/60">
+      {others.length === 0 && (
+        <div className="py-2 text-ui-label text-ink-secondary" data-testid="same-family-alone">
+          In a family, but no other profile in it is still on file (merged or deleted). Unlink to clear it, then link again.
+        </div>
+      )}
+      {others.map((m) => <FamilyMemberRow key={m.id} member={m} />)}
+      <div className="py-2"><UnlinkControl {...unlinkProps} /></div>
+    </div>
+  );
+}
+
 export default function CustomerSameFamilySection({ customerId }) {
   const [members, setMembers] = useState([]);
   const [familyId, setFamilyId] = useState(null);
@@ -181,39 +224,17 @@ export default function CustomerSameFamilySection({ customerId }) {
         <div className="px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{loadErr}</div>
       )}
 
-      {!loading && !loadErr && !familyId && !linking && (
-        <div className="text-ui-label text-ink-secondary">Not linked to another profile.</div>
-      )}
-
-      {!loading && !loadErr && familyId && others.length === 0 && (
-        <div className="text-ui-label text-ink-secondary" data-testid="same-family-alone">
-          In a family, but no other profile in it is still on file (merged or deleted). Unlink to clear it, then link again.
-        </div>
-      )}
-
-      {!loading && !loadErr && familyId && (
-        <div className="divide-y divide-zinc-200/60">
-          {others.map((m) => (
-            <div key={m.id} className="py-2" data-testid="same-family-member">
-              <div className="text-ui-body text-zinc-900 break-words">{m.name}</div>
-              {m.address && <div className="text-ui-label text-ink-secondary break-words">{m.address}</div>}
-              {!m.active && <div className="text-ui-label text-ink-secondary">Inactive profile (does not count until active)</div>}
-            </div>
-          ))}
-          <div className="py-2">
-            {confirmingUnlink ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-ui-label text-zinc-900">Remove this profile from the family?</span>
-                <Button size="sm" variant="secondary" disabled={busy} onClick={() => setConfirmingUnlink(false)}>Keep link</Button>
-                <Button size="sm" disabled={busy} onClick={unlink}>{busy ? "Removing…" : "Unlink"}</Button>
-              </div>
-            ) : (
-              <Button size="sm" variant="secondary" disabled={busy} onClick={() => { setConfirmingUnlink(true); setActionErr(""); }}>
-                Unlink
-              </Button>
-            )}
-          </div>
-        </div>
+      {!loading && !loadErr && (
+        <FamilyMembers
+          familyId={familyId}
+          others={others}
+          linking={linking}
+          busy={busy}
+          confirmingUnlink={confirmingUnlink}
+          onAskUnlink={() => { setConfirmingUnlink(true); setActionErr(""); }}
+          onKeep={() => setConfirmingUnlink(false)}
+          onUnlink={unlink}
+        />
       )}
 
       {linking && (
