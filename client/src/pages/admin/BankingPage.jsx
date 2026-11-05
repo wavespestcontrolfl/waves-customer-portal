@@ -2020,7 +2020,13 @@ function CashTodayCard({ balance, balanceError, refreshKey }) {
 }
 
 export default function BankingPage() {
-  const [tab, setTab] = useState("payouts");
+  // The Cash forecast low-week bell opens its tab (?tab=forecast); the tab reads
+  // its own data, so a login that may not see it gets the forecast's own refusal.
+  const [tab, setTab] = useState(() =>
+    new URLSearchParams(window.location.search).get("tab") === "forecast"
+      ? "forecast"
+      : "payouts",
+  );
   const nav = BANKING_NAV[useCashForecastAvailable() ? "forecast" : "plain"];
   const isMobile = useIsMobile(640);
   const [balance, setBalance] = useState(null);
