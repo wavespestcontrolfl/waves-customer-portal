@@ -13,7 +13,9 @@ const { effectiveServiceAddress, stampedDivergesSql } = require('../stamped-addr
 const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { fetchPropertyForecast, toCoordinate, SERVICE_AREA_DEFAULT_LOCATION } = require('../service-report/application-conditions');
-const { getProtocol: readProtocol } = require('../protocol-reader');
+const { getProtocol: readProtocol, deepStripPriceTokens, stripOwnerOnlyProtocolCostFields } = require('../protocol-reader');
+const { technicianCurrentVisitFilter } = require('../technician-visit-scope');
+const { TECHNICIAN_KNOWLEDGE_CATEGORIES, technicianText } = require('../knowledge/technician-categories');
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
 const { loadActiveAliasRows, activeProductsForAlias } = require('../purchase-receipts/product-matcher');
@@ -191,14 +193,18 @@ async function executeTechTool(toolName, input, techContext) {
     // an admin workflow that borrows these reads (Agent Estimate) passes an
     // empty one and keeps the catalog's exact label rates.
     const forTech = Boolean(techContext) && 'techId' in techContext;
+    // A technician login, as against the owner reading through the tech rail
+    // (the route stamps techRole 'admin' on that context). A tech context with
+    // no role counts as a technician: this fails closed.
+    const technician = forTech && techContext.techRole !== 'admin';
     switch (toolName) {
-      case 'get_my_route': return await getMyRoute(techContext.techId, techContext.techName, input.date);
-      case 'get_stop_details': return await getStopDetails(input, techId);
+      case 'get_my_route': return await getMyRoute(techContext.techId, techContext.techName, input.date, { technician });
+      case 'get_stop_details': return await getStopDetails(input, techId, technician);
       case 'get_service_history': return await getServiceHistory(input, techId);
       case 'get_product_info': return await getProductInfo(input.product_name, { forTech });
-      case 'get_protocol': return await getProtocol(input);
-      case 'check_customer_status': return await checkCustomerStatus(input, techId);
-      case 'search_knowledge_base': return await searchKnowledgeBase(input.query, { forTech });
+      case 'get_protocol': return await getProtocol(input, { technician });
+      case 'check_customer_status': return await checkCustomerStatus(input, techId, { technician });
+      case 'search_knowledge_base': return await searchKnowledgeBase(input.query, { forTech, technician });
       case 'get_weather_conditions': return await getWeatherConditions(techId);
       case 'get_my_truck_kit': return await getMyTruckKit(techContext);
       default: return { error: `Unknown tech tool: ${toolName}` };
@@ -212,7 +218,7 @@ async function executeTechTool(toolName, input, techContext) {
 
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
-async function getMyRoute(techId, techName, date) {
+async function getMyRoute(techId, techName, date, { technician = false } = {}) {
   const d = date || etDateString();
 
   let query = db('scheduled_services')
@@ -234,6 +240,10 @@ async function getMyRoute(techId, techName, date) {
   // Filter to this tech if we have their ID
   if (techId) {
     query = query.where('scheduled_services.technician_id', techId);
+    // A technician reads the same current/recent window the schedule route
+    // applies: no dead rows (rescheduled, skipped, no-show) and nothing older
+    // than the access window.
+    if (technician) technicianCurrentVisitFilter({ techRole: 'technician', technicianId: techId }, query);
   } else if (techName) {
     query = query.leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .whereILike('technicians.name', `%${techName}%`);
@@ -275,7 +285,11 @@ async function getMyRoute(techId, techName, date) {
 }
 
 
-async function getStopDetails(input, techId = null) {
+// CRM notes can hold call-derived lines (a second contact named on a call, the
+// caller-ID line quoting the caller); the customer page withholds them from a technician.
+const crmNotesField = (customer, technician) => (technician ? {} : { notes: customer.crm_notes });
+
+async function getStopDetails(input, techId = null, technician = false) {
   // Resolves only a customer this technician is authorized to read; an
   // unauthorized or missing match both return the generic not-found below so a
   // technician can't probe for customers assigned to someone else.
@@ -377,7 +391,7 @@ async function getStopDetails(input, techId = null) {
       lawn_type: customer.lawn_type,
       property_sqft: customer.property_sqft,
       lot_sqft: customer.lot_sqft,
-      notes: customer.crm_notes,
+      ...crmNotesField(customer, technician),
     },
     property,
     todays_service: todayService ? {
@@ -538,18 +552,37 @@ async function getProductInfo(productName, { forTech = false } = {}) {
 }
 
 
-async function getProtocol(input) {
+async function getProtocol(input, { technician = false } = {}) {
   try {
-    return readProtocol(input);
+    const protocol = readProtocol(input);
+    // Same projection as the Protocols page: owner-only job costs and priced lines go.
+    return technician ? deepStripPriceTokens(stripOwnerOnlyProtocolCostFields(protocol)) : protocol;
   } catch {
     return { error: 'Protocols config not available' };
   }
 }
 
 
-async function checkCustomerStatus(input, techId = null) {
+async function checkCustomerStatus(input, techId = null, { technician = false } = {}) {
   const customer = await resolveAuthorizedCustomer(input, techId);
   if (!customer) return { error: 'Customer not found' };
+
+  const lastService = await db('service_records')
+    .where({ customer_id: customer.id, status: 'completed' })
+    .orderBy('service_date', 'desc').first();
+  const lastServiceFact = lastService ? { date: lastService.service_date, type: lastService.service_type } : null;
+
+  // The customer page gives a technician no balance, health score, churn risk
+  // or CRM notes; this tool matches it.
+  if (technician) {
+    return {
+      name: `${customer.first_name} ${customer.last_name}`,
+      tier: customer.waveguard_tier || 'None',
+      active: customer.active,
+      last_service: lastServiceFact,
+      member_since: customer.member_since,
+    };
+  }
 
   // Shared feed-grade balance (visit-context/balance.js). The previous inline
   // query omitted the payer_id exclusion, so third-party-billed AR showed up
@@ -560,10 +593,6 @@ async function checkCustomerStatus(input, techId = null) {
     .where({ customer_id: customer.id })
     .orderByRaw('scored_at DESC NULLS LAST, created_at DESC').first();
 
-  const lastService = await db('service_records')
-    .where({ customer_id: customer.id, status: 'completed' })
-    .orderBy('service_date', 'desc').first();
-
   return {
     name: `${customer.first_name} ${customer.last_name}`,
     tier: customer.waveguard_tier || 'None',
@@ -571,7 +600,7 @@ async function checkCustomerStatus(input, techId = null) {
     balance_owed: openInvoices.balance,
     health_score: health?.overall_score || null,
     churn_risk: health?.churn_risk || null,
-    last_service: lastService ? { date: lastService.service_date, type: lastService.service_type } : null,
+    last_service: lastServiceFact,
     member_since: customer.member_since,
     notes: customer.crm_notes,
   };
@@ -592,12 +621,18 @@ function withoutMlLabelRate(content) {
 // termite, renders about 2,000 characters).
 const PROTOCOL_SNIPPET_CHARS = 2500;
 
-async function searchKnowledgeBase(query, { forTech = false } = {}) {
+async function searchKnowledgeBase(query, { forTech = false, technician = false } = {}) {
   // Trusted knowledge only — same gate the admin field-intelligence tool
   // uses, so red wiki pages awaiting review never reach a tech answer.
   try {
     const KnowledgeBridge = require('../knowledge-bridge');
-    const { claudeopedia, wiki } = await KnowledgeBridge.unifiedSearch(query, { limit: 5, trustedOnly: true });
+    // A technician's search reads field categories only (owner ruling 2026-11-04).
+    const { claudeopedia, wiki } = await KnowledgeBridge.unifiedSearch(query, {
+      limit: 5, trustedOnly: true,
+      ...(technician ? { kbCategories: TECHNICIAN_KNOWLEDGE_CATEGORIES } : {}),
+    });
+    // Vendor price lines and dollar tokens never reach a technician's snippet.
+    const clean = (text) => (technician ? technicianText(text) : text);
 
     // unifiedSearch returns metadata only — attach snippets: each page's first
     // 300 characters, once an mL label rate is out of it for a technician. A
@@ -611,7 +646,7 @@ async function searchKnowledgeBase(query, { forTech = false } = {}) {
       : [];
     const kbSnippetById = Object.fromEntries(kbRows.map((r) => [
       r.id,
-      r.content == null ? null : Array.from(forTech ? withoutMlLabelRate(r.content) : r.content)
+      r.content == null ? null : Array.from(clean(forTech ? withoutMlLabelRate(r.content) : r.content))
         .slice(0, kbCategoryById[r.id] === 'protocols' ? PROTOCOL_SNIPPET_CHARS : 300).join(''),
     ]));
 
@@ -624,7 +659,7 @@ async function searchKnowledgeBase(query, { forTech = false } = {}) {
     // Interleave the two corpora (wiki first — field outcomes lead, matching
     // the admin tool's presentation) so a populated KB can never push every
     // wiki hit past the cap, and vice versa.
-    const wikiResults = (wiki || []).map((r) => ({ title: r.title, category: r.category, snippet: wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null }));
+    const wikiResults = (wiki || []).map((r) => ({ title: r.title, category: r.category, snippet: clean(wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null) }));
     const kbResults = (claudeopedia || []).map((r) => ({ title: r.title, category: r.category, snippet: kbSnippetById[r.id] || null }));
     const results = [];
     for (let i = 0; results.length < 5 && (i < wikiResults.length || i < kbResults.length); i++) {
