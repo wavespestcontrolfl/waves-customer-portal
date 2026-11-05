@@ -156,9 +156,10 @@ function describeChange(ce) {
 }
 
 // GAQL has no OR, so this takes two queries. The first gets every change not made through the API: people, rules
-// and Google's own tools. The second gets the API's campaign changes, which are the portal's Pause and Enable
+// and Google's own tools. The second gets the API's campaign changes, which include the portal's Pause and Enable
 // buttons (they keep no portal log). The portal's budget pushes and negative keywords come from its own tables,
-// which also say why.
+// which also say why. Any tool the owner connects also writes through the API, so an API row names the account
+// Google recorded, never "the portal".
 async function googleChanges(customer, firstDay, lastDay) {
   const select = `SELECT ${CHANGE_FIELDS} FROM change_event
     WHERE change_event.change_date_time >= '${firstDay}' AND change_event.change_date_time <= '${lastDay}'`;
@@ -169,12 +170,11 @@ async function googleChanges(customer, firstDay, lastDay) {
   ]);
   return [...others, ...portal].map(({ change_event: ce }) => {
     const client = enumName(enums.ChangeClientType, ce.client_type);
-    const api = client === 'GOOGLE_ADS_API';
     return {
       at: googleTime(ce.change_date_time),
       source: 'google',
-      who: api ? 'Waves portal' : ce.user_email || 'Google',
-      via: api ? 'Google Ads API' : words(client),
+      who: ce.user_email || 'Google',
+      via: client === 'GOOGLE_ADS_API' ? 'Google Ads API' : words(client),
       campaignId: ce.campaign ? String(ce.campaign).split('/').pop() : null,
       ...describeChange(ce),
     };

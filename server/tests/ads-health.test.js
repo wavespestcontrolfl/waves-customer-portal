@@ -107,8 +107,9 @@ describe('buildAdsHealth', () => {
     mockGetCustomer.mockReturnValue(customer({
       // The owner's Nov 2 pause from the Google Ads phone app (client 8), in account time (ET, EST after Nov 1).
       others: [change({ at: '2026-11-02 11:49:56.098059', client: 8 })],
-      // The portal's Enable button: an API campaign change (client 6) with no portal log.
-      portal: [change({ at: '2026-11-03 09:00:00', client: 6, before: 3, after: 2 })],
+      // An API campaign change (client 6), such as the portal's Enable button, which keeps no portal log. Any tool the
+      // owner connects also uses the API, so the row names the account Google recorded.
+      portal: [change({ at: '2026-11-03 09:00:00', client: 6, before: 3, after: 2, email: 'api-user@example.test' })],
     }));
     mockTables.ad_budget_log = [
       budgetRow(),
@@ -122,7 +123,7 @@ describe('buildAdsHealth', () => {
 
     expect(out.timeline).toEqual([
       {
-        at: '2026-11-03T14:00:00.000Z', source: 'google', who: 'Waves portal', via: 'Google Ads API',
+        at: '2026-11-03T14:00:00.000Z', source: 'google', who: 'api-user@example.test', via: 'Google Ads API',
         campaign: 'Test Search', what: 'Status Paused → Enabled', detail: null,
       },
       {
