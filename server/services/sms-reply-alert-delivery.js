@@ -138,6 +138,46 @@ async function ringTrackingLineTextBell({ From, MessageSid, source, message }) {
   }, { dedupeKey: trackingThreadBellKey(From, MessageSid), refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) });
 }
 
+// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a text from a number with no customer record to a customer-facing
+// office line (a location line or a Google Business Profile tracking line) rings the SAME one-row-per-sender new_lead
+// bell as a website or van-wrap line, and pushes. Before this it wrote only a quiet Activity row (owner-alerts
+// inbound-text), so 32 such texts from 16 numbers in 30 days never reached the owner's phone.
+// Not rung: the AI assistant line (it answers strangers by design), a tech line, the internal alert line, a staff
+// sender, a reaction, a courtesy closer, a text a spam screen judged a sales pitch, a text with no words and no photo.
+const OFFICE_LINE_TYPES = new Set(['location', 'gbp_tracking']);
+
+// The line in plain words for the bell title ("New text from the Parrish (Pest) line").
+function officeLineWords(numberConfig) {
+  if (numberConfig.type === 'gbp_tracking') return `the ${numberConfig.area || numberConfig.label || 'Google profile'} Google profile line`;
+  return `the ${numberConfig.label || 'office'} line`;
+}
+
+// Who is not rung: a known customer, a staff sender, a reaction, a courtesy closer, a text with no words and no photo,
+// and any line but a location or Google profile line (not the AI line, a tech line or the internal alert line). A text
+// the spam screen silenced never gets here (the route returns first); one it judged but did not silence (a failed
+// verdict write, a spam tag undone in flight) was let through on purpose and rings like any other.
+function isRingableUnknownText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, message, mediaCount }) {
+  if (customer || staffSender || smsReaction || courtesyOnly || isAiNumber) return false;
+  if (!(message || mediaCount) || !OFFICE_LINE_TYPES.has(numberConfig?.type)) return false;
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  return !TWILIO_NUMBERS.isTechLine(To) && TWILIO_NUMBERS.internalAlertLine?.()?.number !== To;
+}
+
+// True when the ring landed (a bell row written or refreshed, or a push sent): the caller then skips the quiet row.
+// False when the gate is off, the text is not eligible, or the ring failed (the quiet row stays as the fallback).
+// Never throws.
+async function ringUnknownOfficeText({ From, MessageSid, message, mediaCount = 0, ...rest }) {
+  try {
+    if (!require('../config/feature-gates').ringNewContactsLive?.()) return false;
+    if (!isRingableUnknownText({ ...rest, message, mediaCount })) return false;
+    const stats = await ringTrackingLineTextBell({ From, MessageSid, source: officeLineWords(rest.numberConfig), message });
+    return Boolean(stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+  } catch (err) {
+    logger.warn('[twilio-webhook] unknown office text ring failed', { code: err?.code || err?.name || 'error' });
+    return false;
+  }
+}
+
 async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead, leadPreference }) {
   if (!customer && typeof afterRead !== 'function') throw new Error('Unknown SMS delivery requires read reconciliation');
   const { triggerNotification } = require('./notification-triggers');
@@ -273,4 +313,4 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery 
   return delivered || suppressed || alreadyRead;
 }
 
-module.exports = { ringSmsReplyBell, ringTrackingLineTextBell, dispatchUnknownSenderAlert, claimUnknownSenderAlertWindow, confirmUnknownSenderAlertWindow, releaseUnknownSenderAlertClaim };
+module.exports = { ringSmsReplyBell, ringTrackingLineTextBell, ringUnknownOfficeText,dispatchUnknownSenderAlert, claimUnknownSenderAlertWindow, confirmUnknownSenderAlertWindow, releaseUnknownSenderAlertClaim };

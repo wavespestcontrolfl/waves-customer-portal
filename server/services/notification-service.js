@@ -607,9 +607,12 @@ const NotificationService = {
   // Create admin notification (no recipient_id needed). The write itself is writeAdmin below; a write that rang a
   // bell-only reminder or a Facebook message also sends its phone banner (bell-banners.js, GATE_BELL_BANNERS), after
   // the row commits. Gate off: bannerAfterWrite returns at once and nothing else changes.
+  // bannerKind (optional): the phone-banner kind (bell-banners.js) for a row whose own metadata carries no triggerKey,
+  // so the row is written exactly as without it. Only the banner reads it.
   async notifyAdmin(category, title, body, opts = {}) {
-    const written = await this.writeAdmin(category, title, body, opts);
-    require('./bell-banners').bannerAfterWrite(written, { metadata: opts.metadata, trx: opts.trx });
+    const { bannerKind = null, ...writeOpts } = opts;
+    const written = await this.writeAdmin(category, title, body, bannerKind ? writeOpts : opts);
+    require('./bell-banners').bannerAfterWrite(written, { metadata: bannerKind ? { ...opts.metadata, triggerKey: bannerKind } : opts.metadata, trx: opts.trx });
     return written;
   },
 

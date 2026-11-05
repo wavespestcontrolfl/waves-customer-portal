@@ -940,6 +940,7 @@ async function handleLeadInquiry(email, classification) {
                 leadId: existingLead.id,
                 estimateId: followUpDraft.estimateId,
               },
+              ...ringNewLeadEmailOpts(email.id, 'draft'),
             },
           );
         } catch (e) { /* non-critical */ }
@@ -1084,6 +1085,7 @@ async function handleLeadInquiry(email, classification) {
           leadId: lead.id,
           ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
         },
+        ...ringNewLeadEmailOpts(email.id, 'lead'),
       },
     );
   } catch (e) { /* non-critical */ }
@@ -1094,6 +1096,16 @@ async function handleLeadInquiry(email, classification) {
     leadId: lead.id,
     ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
   };
+}
+
+// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a new-lead email also puts ONE banner on the owner's phone,
+// at any hour, and never twice for the same email. The bell row is keyed on the email id, so a retry or a re-sync of the
+// same email finds the standing row and writes nothing, and a row that already exists sends no second banner
+// (bell-banners.js, kind new_lead_email). `part` keeps the two alerts one email can raise on separate rows. Gate off:
+// no options, the plain unkeyed write exactly as before.
+function ringNewLeadEmailOpts(emailId, part) {
+  if (!emailId || !require('../../config/feature-gates').ringNewContactsLive?.()) return {};
+  return { dedupeKey: `email-lead:${part}:${emailId}`, bannerKind: 'new_lead_email' };
 }
 
 // ── Auto-draft replies (GATE_EMAIL_AUTO_DRAFTS, default OFF) ─────────────
@@ -1476,6 +1488,8 @@ module.exports = {
   emailQuoteDraftsEnabled,
   parseExtractedAddress,
   maybeDraftEstimateFromEmailLead,
+  // Exported for unit testing the new-lead email banner options (GATE_RING_NEW_CONTACTS)
+  ringNewLeadEmailOpts,
   // Exported for unit testing the hands-off upgrade
   handleSpam,
   emailAutoDraftsEnabled,
