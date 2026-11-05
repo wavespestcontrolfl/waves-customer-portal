@@ -40,7 +40,7 @@ const DAY_ROW = {
   total_shift_minutes: '480.00', total_job_minutes: '300.00', total_drive_minutes: '60.00',
   total_break_minutes: '30.00', unpaid_meal_minutes: '30.00', job_count: 5,
   first_clock_in: '2026-11-02T12:00:00Z', last_clock_out: '2026-11-02T20:30:00Z',
-  revenue_generated: '999.00', rpmh_actual: '77.00', utilization_pct: '62.50', status: 'pending',
+  revenue_generated: '999.00', rpmh_actual: '77.00', utilization_pct: '62.50', status: 'approved',
 };
 const ENTRY_ROW = {
   id: 'e-1', technician_id: 'tech-1', entry_type: 'job', status: 'completed',
@@ -119,6 +119,32 @@ describe('GET /my-hours', () => {
     const res = responseDouble();
     await handler('/my-hours')({ technicianId: 'tech-1', techRole: 'technician', query: { weekStart: '2026-11-02' } }, res, jest.fn());
     expect(res.json.mock.calls[0][0].entries.map((e) => e.id)).toEqual(['e-1']);
+  });
+});
+
+describe('GET /my-hours, a day the office has not approved', () => {
+  const SHIFT = { ...ENTRY_ROW, id: 'shift-1', entry_type: 'shift', clock_in: '2026-11-02T12:00:00Z', clock_out: '2026-11-02T20:00:00Z', duration_minutes: '480.00', service_type: null };
+  const JOB_AFTER_NO_LUNCH = { ...ENTRY_ROW, id: 'job-2', clock_in: '2026-11-02T16:00:00Z', clock_out: '2026-11-02T17:30:00Z', duration_minutes: '90.00' };
+
+  test('is read from its current entries, not from a stale summary written earlier in the day', async () => {
+    // "No lunch today" wrote this summary at 1 job / 60 minutes; a later job ended without refreshing it.
+    mockGetDailySummaries.mockResolvedValue([{ ...DAY_ROW, status: 'pending', total_shift_minutes: '60.00', total_job_minutes: '60.00', job_count: 1 }]);
+    mockGetWeeklySummaries.mockResolvedValue([{ ...WEEK_ROW, status: 'pending', total_shift_minutes: '60.00' }]);
+    mockGetEntries.mockResolvedValue({ entries: [SHIFT, ENTRY_ROW, JOB_AFTER_NO_LUNCH], total: 3 });
+    const res = responseDouble();
+    await handler('/my-hours')({ technicianId: 'tech-1', techRole: 'technician', query: { weekStart: '2026-11-02' } }, res, jest.fn());
+    const body = res.json.mock.calls[0][0];
+    expect(body.days).toEqual([expect.objectContaining({ date: '2026-11-02', shiftMinutes: 480, jobMinutes: 150, jobCount: 2, unpaidMealMinutes: 30, status: 'pending' })]);
+    expect(body.totals).toMatchObject({ shiftMinutes: 480, jobCount: 2 });
+    // The stored weekly row disagrees with the days, so no stale regular/overtime is shown.
+    expect(body.week).toBeNull();
+  });
+
+  test('an approved day keeps its stored numbers', async () => {
+    mockGetEntries.mockResolvedValue({ entries: [ENTRY_ROW], total: 1 });
+    const res = responseDouble();
+    await handler('/my-hours')({ technicianId: 'tech-1', techRole: 'technician', query: { weekStart: '2026-11-02' } }, res, jest.fn());
+    expect(res.json.mock.calls[0][0].days[0]).toMatchObject({ shiftMinutes: 480, jobCount: 5 });
   });
 });
 

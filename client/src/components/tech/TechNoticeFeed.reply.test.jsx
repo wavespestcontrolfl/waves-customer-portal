@@ -32,14 +32,22 @@ describe('TechNoticeFeed text card Reply', () => {
     vi.useRealTimers();
   });
 
-  it('links Reply to that customer\'s thread, next to Got it', async () => {
+  it('links Reply to the number that texted, so a customer with two numbers gets the right conversation', async () => {
     stubFeed([RELAYED]);
     render(<MemoryRouter><TechNoticeFeed /></MemoryRouter>);
     await act(async () => { await Promise.resolve(); });
     const card = await screen.findByTestId('tech-line-text');
     expect(card).toHaveTextContent('Can you come after 3?');
-    expect(screen.getByRole('link', { name: 'Reply' })).toHaveAttribute('href', '/admin/communications?thread=cust-123');
+    expect(screen.getByRole('link', { name: 'Reply' })).toHaveAttribute('href', '/admin/communications?phone=%2B19415550123');
     expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
+  });
+
+  it('falls back to the customer\'s thread when the notice has no number', async () => {
+    stubFeed([{ ...RELAYED, payload: { ...RELAYED.payload, from: null } }]);
+    render(<MemoryRouter><TechNoticeFeed /></MemoryRouter>);
+    await act(async () => { await Promise.resolve(); });
+    await screen.findByTestId('tech-line-text');
+    expect(screen.getByRole('link', { name: 'Reply' })).toHaveAttribute('href', '/admin/communications?thread=cust-123');
   });
 
   it('offers no Reply when the text has no customer on it', async () => {

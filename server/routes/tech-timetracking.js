@@ -277,6 +277,35 @@ function myHoursWeek(row) {
     signed: Boolean(row.tech_signed_at),
   };
 }
+// A stored summary is current only once the office approves the day: a job or
+// break ended after "No lunch today" (or any early summary write) does not
+// refresh it. So every unapproved day is read from its current entries; the
+// stored row keeps only the unpaid meal and the status. An approved day keeps
+// its stored numbers, and a day with entries but no row still shows. Read-only.
+function reconcileMyHoursDays(dailies, liveEntries) {
+  const byDate = new Map();
+  for (const row of liveEntries) {
+    const date = staffWorkDate(row.clock_in);
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(row);
+  }
+  const days = [];
+  const seen = new Set();
+  for (const row of dailies) {
+    const stored = myHoursDay(row);
+    seen.add(stored.date);
+    days.push(stored.status === 'approved'
+      ? stored
+      : { ...myHoursLiveDay(stored.date, byDate.get(stored.date) || []), unpaidMealMinutes: stored.unpaidMealMinutes, status: stored.status });
+  }
+  for (const [date, rows] of byDate) if (!seen.has(date)) days.push(myHoursLiveDay(date, rows));
+  return days;
+}
+// The stored weekly row is shown only while it still agrees with the days above.
+function weekMatchingDays(week, totals) {
+  if (!week) return null;
+  return week.status === 'approved' || Math.abs(week.shiftMinutes - totals.shiftMinutes) < 0.01 ? week : null;
+}
 router.get('/my-hours', async (req, res, next) => {
   try {
     const { weekStart } = req.query;
@@ -305,14 +334,8 @@ router.get('/my-hours', async (req, res, next) => {
       timeTracking.getWeeklySummaries({ technicianId, startDate: monday, endDate: monday }),
     ]);
 
-    const days = dailies.map(myHoursDay);
-    // A day with entries but no summary row yet (today's open shift) still shows,
-    // with the minutes its own entries carry.
-    const summarized = new Set(days.map((day) => day.date));
     const liveEntries = entryRows.filter((row) => row.status !== 'voided');
-    for (const date of new Set(liveEntries.map((row) => staffWorkDate(row.clock_in)))) {
-      if (!summarized.has(date)) days.push(myHoursLiveDay(date, liveEntries.filter((row) => staffWorkDate(row.clock_in) === date)));
-    }
+    const days = reconcileMyHoursDays(dailies, liveEntries);
     days.sort((a, b) => (a.date < b.date ? -1 : 1));
     const totals = days.reduce((sum, day) => ({
       shiftMinutes: sum.shiftMinutes + day.shiftMinutes,
@@ -331,7 +354,7 @@ router.get('/my-hours', async (req, res, next) => {
       nextWeekStart: monday < thisMonday ? etDateString(addETDays(mondayNoon, 7)) : null,
       days,
       totals,
-      week: myHoursWeek(weeklies[0]),
+      week: weekMatchingDays(myHoursWeek(weeklies[0]), totals),
       entries: liveEntries.map(myHoursEntry),
       entriesTruncated: entryRows.length < total,
     });
