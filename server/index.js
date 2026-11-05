@@ -483,6 +483,10 @@ app.use('/api/public/secure-card', (req, res, next) => {
 // (same reasoning as secure-card above), and POST /:token/view's malformed-
 // token 404 + body-ignore decided before the shared body parsers.
 app.use('/api/public/track', require('./middleware/track-public-preparser').trackPublicPreparser);
+// Email resubscribe confirm link (GATE_PORTAL_EMAIL_RESUBSCRIBE): privacy headers on every
+// outcome, the GLOBAL /api limiter's 429s and the body parsers' 400s included, and while dark
+// the generic 404 page before either of them (same reasoning as secure-card above).
+app.use('/api/public/email-resubscribe', require('./routes/public-email-resubscribe').preParserGuard);
 // The public agent surfaces (MCP + A2A) carry the same unobservable-when-
 // dark contract as the funnels above: while their gates are off they must
 // read 404 even for an IP that already exhausted the global /api/ limiter

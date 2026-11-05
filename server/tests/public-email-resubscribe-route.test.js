@@ -237,3 +237,62 @@ describe('limiter', () => {
     expect(statuses[20]).toBe(429);
   });
 });
+
+describe('the early guard ahead of the global /api limiter and the body parsers', () => {
+  test('server/index.js mounts the guard before the global /api/ limiter and the JSON parser', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+    const guardAt = src.indexOf("app.use('/api/public/email-resubscribe', require('./routes/public-email-resubscribe').preParserGuard)");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(src.indexOf("app.use('/api/', limiter)")).toBeGreaterThan(guardAt);
+    expect(src.indexOf('app.use(express.json(')).toBeGreaterThan(guardAt);
+  });
+
+  // The production order: early guard, then the global /api limiter and the body parser, then the router.
+  async function withStack({ exhaustedLimiter }, fn) {
+    const app = express();
+    app.use('/api/public/email-resubscribe', router.preParserGuard);
+    if (exhaustedLimiter) app.use('/api/', (_req, res) => res.status(429).json({ error: 'Too many requests' }));
+    app.use(express.json());
+    app.use('/api/public/email-resubscribe', router);
+    const stackServer = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+    try {
+      await fn(`http://127.0.0.1:${stackServer.address().port}/api/public/email-resubscribe/${TOKEN}`);
+    } finally {
+      await new Promise((resolve) => stackServer.close(resolve));
+    }
+  }
+
+  test('dark: an IP the global limiter refuses still gets the generic 404 page with privacy headers, never a 429', async () => {
+    delete process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE;
+    await withStack({ exhaustedLimiter: true }, async (url) => {
+      const res = await fetch(url);
+      expect(res.status).toBe(404);
+      expectPrivacy(res);
+      expect(await res.text()).toContain('Link expired.');
+    });
+    expect(calls).toEqual([]);
+  });
+
+  test('dark: malformed JSON is the same 404, never a parser 400', async () => {
+    delete process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE;
+    await withStack({ exhaustedLimiter: false }, async (url) => {
+      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{bad' });
+      expect(res.status).toBe(404);
+      expectPrivacy(res);
+      expect(await res.json()).toEqual({ success: false, state: 'expired' });
+    });
+  });
+
+  test('live: the global limiter\'s 429 and a parser 400 still carry the privacy headers', async () => {
+    await withStack({ exhaustedLimiter: true }, async (url) => {
+      const res = await fetch(url);
+      expect(res.status).toBe(429);
+      expectPrivacy(res);
+    });
+    await withStack({ exhaustedLimiter: false }, async (url) => {
+      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{bad' });
+      expect(res.status).toBe(400);
+      expectPrivacy(res);
+    });
+  });
+});

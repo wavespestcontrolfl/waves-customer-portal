@@ -52,9 +52,15 @@ function expired(req, res) {
   return page(res, 404, PAGE.expiredHeading, para(PAGE.expiredBody));
 }
 
-// Dark gate first (before the limiter), then the limiter; both after the privacy headers.
-router.use(privacyHeaders);
-router.use((req, res, next) => (portalEmailResubscribeLive() ? next() : expired(req, res)));
+// Privacy headers on every answer, then the dark gate. server/index.js mounts this SAME guard
+// ahead of the global /api limiter and the body parsers, so a dark route never answers a 429
+// or a parser 400 and every answer (those included) carries the privacy headers. The router
+// runs it again (harmless) so a mount without the early guard keeps the contract.
+function preParserGuard(req, res, next) {
+  privacyHeaders(req, res, () => (portalEmailResubscribeLive() ? next() : expired(req, res)));
+}
+
+router.use(preParserGuard);
 router.use(limiter);
 
 // GET /api/public/email-resubscribe/:token — read-only.
@@ -100,3 +106,4 @@ router.post('/:token', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.preParserGuard = preParserGuard;
