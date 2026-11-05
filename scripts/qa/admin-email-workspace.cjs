@@ -57,6 +57,7 @@ async function main() {
       else if (api === '/admin/communications/unread-count') body = { conversations: 0 };
       else if (api === '/admin/usage/track') body = {};
       else if (api === '/admin/email/oauth/status') { await state.statusHold; body = { connected: state.connected }; }
+      else if (api === '/admin/email/reclassify-options') body = { enabled: false };
       else if (api === '/admin/email/oauth/auth-url') body = { url: `${server.baseUrl}/synthetic-oauth` };
       else if (api === '/admin/email/inbox') {
         await state.inboxHold;

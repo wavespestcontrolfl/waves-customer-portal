@@ -14,6 +14,9 @@ jest.mock('../services/stripe-banking', () => ({
   getCashFlow: jest.fn(),
   reconcilePayout: jest.fn(),
 }));
+jest.mock('../services/plaid-sync', () => ({
+  readCashBalances: jest.fn(),
+}));
 jest.mock('../services/banking-export', () => ({
   generateCSV: jest.fn(() => ({ content: 'csv', filename: 'test.csv', content_type: 'text/csv' })),
   generateOFX: jest.fn(() => ({ content: 'ofx', filename: 'test.ofx', content_type: 'application/x-ofx' })),
@@ -46,6 +49,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const StripeBanking = require('../services/stripe-banking');
+const PlaidSync = require('../services/plaid-sync');
 const bankingRouter = require('../routes/admin-banking');
 
 function appServer() {
@@ -307,6 +311,181 @@ describe('admin banking routes', () => {
         expect(res.status).toBe(200);
         expect(body).toEqual({ total_available: 123 });
       });
+    });
+  });
+
+  describe('GET /cash-today (GATE_CASH_FORECAST)', () => {
+    const savedGate = process.env.GATE_CASH_FORECAST;
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_CASH_FORECAST;
+      else process.env.GATE_CASH_FORECAST = savedGate;
+    });
+
+    function bank(over = {}) {
+      return {
+        name: 'Synthetic Checking',
+        mask: '1111',
+        account_label: 'Synthetic Checking',
+        account_type: 'bank',
+        available: 1000.5,
+        current: 1200,
+        currency: 'USD',
+        balance_as_of: null,
+        ...over,
+      };
+    }
+
+    function payoutsDb(rows) {
+      const q = {
+        whereIn: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockResolvedValue(rows),
+      };
+      db.mockImplementation((table) => {
+        if (table === 'stripe_payouts') return q;
+        throw new Error(`Unexpected table ${table}`);
+      });
+      return q;
+    }
+
+    async function getCash(token = 'admin') {
+      return withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking/cash-today`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        return { status: res.status, body: await res.json() };
+      });
+    }
+
+    test('gate off: the owner gets 404 and nothing is read', async () => {
+      delete process.env.GATE_CASH_FORECAST;
+      const { status, body } = await getCash('admin');
+      expect(status).toBe(404);
+      expect(body).toEqual({ error: 'Not found' });
+      expect(PlaidSync.readCashBalances).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    test('only the exact value true turns the gate on', async () => {
+      process.env.GATE_CASH_FORECAST = '1';
+      const { status } = await getCash('admin');
+      expect(status).toBe(404);
+    });
+
+    test('a non-owner admin gets 403 even with the gate on', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      const { status } = await getCash('admin2');
+      expect(status).toBe(403);
+      expect(PlaidSync.readCashBalances).not.toHaveBeenCalled();
+    });
+
+    test('gate on + owner: 200 with the full shape', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockResolvedValue({
+        accounts: [bank(), bank({ name: 'Second Checking', mask: '2222', available: 250, balance_as_of: '2026-11-05T14:00:00Z' })],
+        cards: [],
+        unavailable: [],
+      });
+      payoutsDb([
+        { amount: '300.25', currency: 'usd', status: 'in_transit', arrival_date: new Date('2026-11-06T00:00:00Z'), bank_last_four: '9999' },
+      ]);
+      const { status, body } = await getCash('admin');
+      expect(status).toBe(200);
+      expect(Object.keys(body).sort()).toEqual(['accounts', 'cards', 'fetched_at', 'in_transit', 'totals', 'unavailable']);
+      expect(Number.isNaN(Date.parse(body.fetched_at))).toBe(false);
+      expect(body.accounts).toHaveLength(2);
+      expect(body.in_transit.total).toBe(300.25);
+      expect(body.in_transit.payouts[0]).toMatchObject({ amount: 300.25, arrival_day: '2026-11-06', status: 'in_transit', bank_last_four: '9999' });
+      expect(body.totals).toEqual({ bank_usd: 1250.5, owed_usd: 0, in_transit_usd: 300.25 });
+    });
+
+    test('a login_required connection is listed as unavailable while other data still returns', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockResolvedValue({
+        accounts: [bank()],
+        cards: [],
+        unavailable: [{ institution_name: 'Synthetic Bank', reason: 'login_required' }],
+      });
+      payoutsDb([]);
+      const { status, body } = await getCash('admin');
+      expect(status).toBe(200);
+      expect(body.unavailable).toEqual([{ institution_name: 'Synthetic Bank', reason: 'login_required' }]);
+      expect(body.totals.bank_usd).toBe(1000.5);
+    });
+
+    test('available null falls back to current', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockResolvedValue({
+        accounts: [bank({ available: null, current: 77.1 })],
+        cards: [],
+        unavailable: [],
+      });
+      payoutsDb([]);
+      const { body } = await getCash('admin');
+      expect(body.totals.bank_usd).toBe(77.1);
+    });
+
+    test('a card lands in cards as money owed and is not in bank_usd', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockResolvedValue({
+        accounts: [bank()],
+        cards: [bank({ name: 'Synthetic Card', mask: '3333', account_type: 'card', available: 5000, current: 420.1 })],
+        unavailable: [],
+      });
+      payoutsDb([]);
+      const { body } = await getCash('admin');
+      expect(body.totals.bank_usd).toBe(1000.5);
+      expect(body.totals.owed_usd).toBe(420.1);
+      expect(body.cards).toHaveLength(1);
+    });
+
+    test('non-USD entries stay listed but are left out of every total', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockResolvedValue({
+        accounts: [bank(), bank({ name: 'Foreign', mask: '4444', currency: 'CAD', available: 9999 })],
+        cards: [bank({ account_type: 'card', mask: '5555', currency: 'EUR', current: 888 })],
+        unavailable: [],
+      });
+      payoutsDb([
+        { amount: '10.00', currency: 'usd', status: 'pending', arrival_date: new Date('2026-11-07T00:00:00Z'), bank_last_four: null },
+        { amount: '500.00', currency: 'cad', status: 'pending', arrival_date: new Date('2026-11-07T00:00:00Z'), bank_last_four: null },
+      ]);
+      const { body } = await getCash('admin');
+      expect(body.accounts).toHaveLength(2);
+      expect(body.cards).toHaveLength(1);
+      expect(body.in_transit.payouts).toHaveLength(2);
+      expect(body.totals).toEqual({ bank_usd: 1000.5, owed_usd: 0, in_transit_usd: 10 });
+    });
+
+    test('in-transit arrival_day is the UTC calendar day of a midnight-UTC marker, never shifted to Eastern', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockResolvedValue({ accounts: [], cards: [], unavailable: [] });
+      const q = payoutsDb([
+        { amount: '1.00', currency: 'usd', status: 'pending', arrival_date: new Date('2026-01-15T00:00:00Z'), bank_last_four: '1234' },
+      ]);
+      const { body } = await getCash('admin');
+      expect(body.in_transit.payouts[0].arrival_day).toBe('2026-01-15');
+      expect(q.whereIn).toHaveBeenCalledWith('status', ['pending', 'in_transit']);
+    });
+
+    test('an in-transit database failure answers in_transit.error and still 200', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockResolvedValue({ accounts: [bank()], cards: [], unavailable: [] });
+      db.mockImplementation(() => { throw new Error('relation "stripe_payouts" does not exist'); });
+      const { status, body } = await getCash('admin');
+      expect(status).toBe(200);
+      expect(body.in_transit).toEqual({ error: 'unavailable' });
+      expect(body.totals).toEqual({ bank_usd: 1000.5, owed_usd: 0, in_transit_usd: 0 });
+      expect(body.accounts).toHaveLength(1);
+    });
+
+    test('an unexpected bank read failure is a 500 without the raw error', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      PlaidSync.readCashBalances.mockRejectedValue(new Error('select * from plaid_items failed'));
+      payoutsDb([]);
+      const { status, body } = await getCash('admin');
+      expect(status).toBe(500);
+      expect(body).toEqual({ error: 'the cash read failed' });
     });
   });
 });

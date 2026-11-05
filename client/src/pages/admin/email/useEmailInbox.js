@@ -319,12 +319,29 @@ export default function useEmailInbox(active, clearDraftResult) {
     } catch { /* keep the stale row; the error feedback still explains the outcome */ }
   };
 
-  const handleReclassify = async (emailId) => {
+  // GATE_EMAIL_RECLASSIFY_PICK: the labels staff may pick. Fails closed — off
+  // or unreadable, Reclassify only re-runs the AI, as before.
+  const [reclassifyLabels, setReclassifyLabels] = useState([]);
+  useEffect(() => {
+    if (!active) return undefined;
+    let current = true;
+    (async () => {
+      try {
+        const response = await adminFetch("/api/admin/email/reclassify-options");
+        const data = response.ok ? await response.json() : null;
+        if (current) setReclassifyLabels(data?.enabled === true && Array.isArray(data.categories) ? data.categories : []);
+      } catch { if (current) setReclassifyLabels([]); }
+    })();
+    return () => { current = false; };
+  }, [active]);
+
+  // `label` set = the label staff picked; omitted = run the AI again.
+  const handleReclassify = async (emailId, label) => {
     if (!beginAction(`reclassify:${emailId}`)) return;
     try {
       const response = await adminFetch(
         `/api/admin/email/message/${emailId}/reclassify`,
-        { method: "POST" },
+        { method: "POST", ...(label ? { body: JSON.stringify({ classification: label }) } : {}) },
       );
       const data = await response.json().catch(() => null);
       if (!response.ok) {
@@ -463,6 +480,7 @@ export default function useEmailInbox(active, clearDraftResult) {
     handleStar,
     removeEmail,
     handleReclassify,
+    reclassifyLabels,
     handleBlock,
     handleUnblock,
     handleDownloadAttachment,

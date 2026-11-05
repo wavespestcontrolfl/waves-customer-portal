@@ -1,5 +1,6 @@
 const db = require('../models/db');
-const { phoneMatchDigits } = require('../utils/phone');
+const { phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+const { extractEmailAddresses } = require('./email/email-customer-link');
 const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
@@ -343,10 +344,16 @@ async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system
 // staff booked/completed the in-person assessment discussed with them. Keep
 // this list positive: a voicemail, missed/failed call, transcription alone,
 // or generic enrichment must never move a lead out of the unanswered queue.
+// staff_text / staff_email / visit_booked come from the lead contact sync
+// (lead-contact-sync.js): a text or email a person sent, or a live visit a
+// person booked for the lead's own customer. Never an automated message.
 const CONTACT_EVIDENCE_TYPES = new Set([
   'live_conversation',
   'assessment_booked',
   'assessment_completed',
+  'staff_text',
+  'staff_email',
+  'visit_booked',
 ]);
 
 function isContactEvidenceType(value) {
@@ -362,6 +369,13 @@ function isContactEvidenceType(value) {
  * contacted/estimate/won/closed states without needing a fragile exclusion
  * list. The status, first-response SLA stamp, activity history, and funnel
  * bridge all share one transaction; transactional callers reuse their handle.
+ *
+ * `identity` is optional (the lead contact sync passes it; every other caller
+ * passes nothing and behaves as before). It pins WHICH contact detail the
+ * evidence named: `{ phoneKey }` (phoneIdentityKey of the phone) and/or
+ * `{ email }` (a lowercase address). Under the row lock the lead's CURRENT phone
+ * or email must still match, and no manual return to 'new' may exist, so a
+ * correction staff made between judging and writing is never overridden.
  */
 async function markLeadContactedFromEvidence(options = {}) {
   const {
@@ -372,6 +386,7 @@ async function markLeadContactedFromEvidence(options = {}) {
     evidenceId = null,
     performedBy = 'system',
     respondedAt = null,
+    identity = null,
   } = options;
   if (!leadId) return { contacted: false, reason: 'missing_lead' };
   if (!Object.prototype.hasOwnProperty.call(options, 'customerId')) {
@@ -389,6 +404,15 @@ async function markLeadContactedFromEvidence(options = {}) {
     else leadQuery.where('customer_id', customerId);
     const lead = await leadQuery.forUpdate().first();
     if (!lead) return { contacted: false, reason: 'not_new_or_identity_changed' };
+    if (identity) {
+      // The history row the Leads page writes on a manual return is 'Status: <from> → new'.
+      const reopened = await trx('lead_activities')
+        .where({ lead_id: leadId, activity_type: 'status_change' })
+        .whereRaw("description LIKE '%\u2192 new'").first('id');
+      const detailsHold = (!identity.phoneKey || phoneIdentityKey(lead.phone) === identity.phoneKey)
+        && (!identity.email || extractEmailAddresses(lead.email).includes(identity.email));
+      if (reopened || !detailsHold) return { contacted: false, reason: reopened ? 'reopened_by_person' : 'identity_changed' };
+    }
 
     const patch = { status: 'contacted', updated_at: new Date() };
     let responseMinutes = null;

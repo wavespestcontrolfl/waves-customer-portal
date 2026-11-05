@@ -51,6 +51,7 @@
  *   GATE_QUIET_OVERDUE_LIST=true (owner 2026-10-24: one standing Billing bell listing open self-pay invoices no reminder reaches (paused with no end, stopped, finished, Auto Pay hold 7+ days, never set up); weekday 11:47 ET cron; admin only, sends nothing to a customer)
  *   GATE_LEAD_NO_RESPONSE_REASON=true (owner 2026-11-01 "go": the daily lead staleness sweep (6:35 ET, services/lead-staleness.js) writes lost_reason 'no_response' on every lead it parks as 'unresponsive' (only when the reason is blank), and also parks a lead still in estimate_sent / estimate_viewed as 'unresponsive' when its linked estimate expired with a lost-group disposition (estimate-disposition.js) and the lead passes every exemption the new-lead sweep applies, has no converted_at, no newer live estimate, and no estimate send or view inside the window; a short note "estimate <disposition>" is appended to lost_notes. It never sets status 'lost' and sends no text, email or call. With it on, GET /analytics/lost in admin-leads.js also counts 'unresponsive' leads so no_response shows as a reason. Read at call time via leadNoResponseReasonLive(), strict 'true', dark by default; off = byte-identical.)
  *   GATE_UNBILLED_VISITS_LIST=true (owner 2026-10-25, Air Jobs Plan step 3: one standing Billing bell listing visits done in the last 30 days with no invoice, read from the Billing recovery page's own list; replaces the c02 check on the owner's MacBook Air; daily 07:23 ET cron; admin only, sends nothing to a customer)
+ *   GATE_CASH_FORECAST=true (owner 2026-11-05, cash forecast step 1: an owner-only Cash today card on Banking shows each checking account's balance from Plaid's free /accounts/get read, card balances owed, and Stripe payouts on the way. Read-only: it writes nothing, sends nothing, and never calls Plaid's paid balance read. Read at call time via cashForecastLive(), strict 'true', dark by default; off = the route answers 404 and the card is hidden.)
  *   GATE_INVOICE_NOT_ON_SPARK=true (owner 2026-11-05: one standing Tax bell listing, by vendor, emailed vendor invoices from 3 to 14 days ago that no Spark card or business debit charge paid (accounts named in INVOICE_OK_ACCOUNT_LABELS); daily 07:37 ET cron; read-only except its one admin bell; sends nothing to a customer; no money moves)
  *   GATE_SMS_LEDGER_STALL_FEED=true (owner 2026-11-01 "go": the texting AI's learning loop also learns from the two misses its own grader finds most: the draft stalled (deferred or handed off) when the facts already held the answer, or the person who replied knew a fact the facts did not hold. The nightly 4:20 AM ET pathology job also classifies each judge-v2 judgment that is human_better with could_send no into stalled_deferred, knew_more or other (evidence type judgment_stall, same batch cap and sanitizing as the draft_unsafe feed), and the weekly proposer counts new evidence by the base prompt identity so a learned-rule letter does not reset a cell. Auto-promote may then turn a stalled_deferred proposal into a rule that states a fact the facts already hold; knew_more is never eligible and every text guard in sms-prompt-patch.js is unchanged. Strict opt-in via gateEnvValue, read at call time by smsLedgerStallFeedLive() in server/services/sms-pathology-ledger.js (auto-promote reaches it through the ledger's countedPromptVersions()); needs GATE_SMS_PATHOLOGY_LEDGER (the nightly job) and GATE_SMS_JUDGE_V2 (the judgments); off = byte-identical feed, counts, prompts and rows. Sends, holds and changes nothing on its own)
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
@@ -88,6 +89,7 @@
  *   GATE_MOVING_PORTAL=true (owner 2026-11-02 "yes to all", moving PR 2a: the customer app's My Plan offers "Take WaveGuard with you" in Account Options and when the customer picks Moving in the cancel flow. The button opens the customer's own moving page (the same /moving/<token> page the office's moving link opens): it opens or reuses the customer's move and sends nothing. Needs GATE_MOVING_FLOW. Strict opt-in, read at call time via movingPortalLive(); off = no button, GET /api/property/moving answers enabled:false and POST answers 404. The owner flips it because it adds a customer-facing entry (each moving page allows the capped paid address checks). Kill switch: unset.)
  *   GATE_MOVING_PAUSE=true (owner 2026-11-02 "yes to all", Q4, moving PR 2b: a customer who moves out before giving the new address. A daily job at 10:20 ET texts a customer billed per visit once, 0 to 7 days before move-out, asking for the address with the moving link (template moving_address_reminder; claimed before the send, never repeated). On the move-out day it pauses every plan at the house left through Apply move's cancel (visits after move-out cancelled from today on, no customer text, no late-cancel fee; one-time visits and open visits dated before today stay and go to the office in one item), opens the termite pickup task when Waves-owned stations are rented, and holds the move open for 60 days; an address added later goes through the new-home estimate and Apply move. 60 days after move-out with still no address the move closes and the office gets one item. Annual prepay and monthly members, and a pause the job cannot run, go to the office once instead (no reminder text). Each office item is written with the move change it reports. The moving page's no-address receipt names the pause, or for prepay and monthly members says the office will contact them. Needs GATE_MOVING_FLOW. Strict opt-in, read at call time via movingPauseLive(); off = the job does nothing and the receipt is unchanged. The owner flips it because it texts customers and cancels visits. Kill switch: unset.)
  *   GATE_MOVING_STOP_AT_MOVE_OUT=true (owner 2026-11-04 "YES app cancel those old-house visits", moving: a customer who gave the new address but whose move is not applied by the move-out day. The daily 10:20 ET move job (GATE_MOVING_PAUSE) then stops every plan at the house left through the pause's own cancel: visits after move-out cancelled from today on, no customer text, no late-cancel fee; one-time visits and open visits dated before today stay and go to the office in one item; the termite pickup task opens when Waves-owned stations are rented; a plan the move's new-home estimate booked is never touched. Annual prepay and monthly members, and a stop the job cannot run, go to the office once instead. The move stays open for the new-home estimate and Apply move, which then finds nothing left to stop. The moving page's receipt for a customer billed per visit says the old-home visits after move-out are cancelled. Needs GATE_MOVING_PAUSE. Strict opt-in, read at call time via movingStopAtMoveOutLive(); off = only moves with no address pause, and the receipt is unchanged. Kill switch: unset.)
+ *   GATE_MOVING_AUTO_APPLY=true (owner 2026-11-04, option A of the hands-off moves page: "App applies the move, with the same preview checks as the office button". A job every 15 minutes applies each submitted move whose new-home estimate the customer accepted: it reads Apply move's own preview and confirms it on that preview's version, as an office click would (new home made primary, old-house plans stopped after move-out with no customer text and no fee, termite pickup task, move closed as applied). A refusal the office must handle (prepay or monthly billing, a paid visit, the primary property changed, a plan it cannot tie to the house, ...) rings one office item per move and refusal, and the Moving card keeps its Apply button; a visit under way, or an accept under an hour old whose new home or plan is not saved yet, waits for the next run. Needs GATE_MOVING_APPLY. Strict opt-in, read at call time via movingAutoApplyLive(); off = the office presses Apply move as before. Kill switch: unset.)
  *   GATE_SETUP_FEE_SETTLED_ANYWHERE=true (owner 2026-10-24 setup-fee alert audit: the "setup fee never invoiced, bill BOTH" admin alert, the completion hold it starts and the alert reconcile also treat the setup fee as settled when the customer's own invoices show it paid, waived or prepaid even though no invoice cites the accepted estimate: a paid line named setup fee or WaveGuard Membership for at least the frozen fee, a live $0 or waived setup-fee line, or a covered non-termite annual-prepay term or paid annual-prepay invoice. Settled = no alert, no hold, the normal visit invoice is made, and a standing alert is closed instead of reopened when the visit is billed. Read at call time via setupFeeSettledAnywhereLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_SETUP_FEE_APPLICATION_SETTLED=true (owner 2026-10-28, the three false setup-fee alerts of #6830: the setup-fee alert reconcile, which also runs right after a completion parks a new alert, counts a parked visit's application as billed when a prepay year whose bill is live (paid, or awaiting payment on a live prepay invoice) bought that visit, or when the visit's own invoices bill its base line plus its own add-on lines for the frozen visit charge. Billed = the alert closes, or shrinks to the charge still owed, instead of telling staff to bill the visit by hand. Read at call time via setupFeeApplicationSettledLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_SETUP_FEE_OPEN_INVOICE_NOTICE=true (owner 2026-10-31 "do these", the setup fee on an unpaid visit invoice: when the setup-fee alert's fee is not paid yet but the customer's open invoices (scheduled, sent, viewed, overdue or partly paid) carry fee lines that GATE_SETUP_FEE_SETTLED_ANYWHERE counts once they are paid, the alert stays open but says the fee is already on that invoice and must not be billed again, and the morning digest stops listing it as a fee to bill. The fee still counts as covered only once paid: paying the invoice resolves the alert, voiding it brings the fee instruction back. Read at call time via setupFeeOpenInvoiceNoticeLive(), strict 'true', dark by default; off = today's alert text, and a standing notice is rewritten back on the next reconcile. Sends nothing to a customer and creates no invoice.)
@@ -184,6 +186,7 @@
  *   GATE_LAWN_WIKI_PAUSE=true (owner 2026-10-30: pause the lawn wiki pages (agronomic wiki, knowledge_entries). The AI writes no page after a confirmed lawn visit or in the weekly refresh; the pages a visit feeds are flagged stale instead, so the refresh after a resume rewrites them. The weekly review digest stops and its open bell is retired. Treatment outcomes, weather, the wiki to Library sync and the admin Regenerate buttons keep working. Read at call time via lawnWikiPauseLive(), strict 'true'; unset = unchanged. Sends nothing to a customer.)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
  *   GATE_EMAIL_SEND_LATER=true (Gmail-style Schedule send in the admin email composer and reply box — strict opt-in, read at call time via emailSendLaterLive(), dark: the Send arrow menu and the Email > Scheduled tab appear, POST /api/admin/email/schedule queues a row in scheduled_emails, and a once-a-minute job sends due rows through the same Gmail path as Send, at most once. Off = no menu, no tab, the schedule route answers 404 {enabled:false}, and the job sends nothing; rows already queued stay queued, unsent, until it is on again. Sends customer email only at a time an office user picked.)
+ *   GATE_EMAIL_RECLASSIFY_PICK=true (email Reclassify lets staff PICK the right label from the classifier's list, and a pick that differs from the AI's label is saved as a confirmed mistake in ai_incidents for the correction loop; read at call time via emailReclassifyPickLive(), dark: unset = Reclassify only re-runs the AI)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
  *   GATE_AGENT_SESSION_GUARD=true (Managed Agents cost guards, strict opt-in, read at call time via agentSessionGuardLive(): each blog, backlink, briefing and lead agent session is created with a hard spend cap, and a session its runner gave up on gets a user.interrupt. Off = sessions are created and left as before. Sends nothing to a customer.)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
@@ -198,6 +201,7 @@
  *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
  *   GATE_SMS_STAFF_ACTION_ANSWERS=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F1: "A staff action answers a text" - a visit a person booked in the admin, or a payment a person recorded, for the text's customer within 24 hours after the text counts as the answer: the admin text alert closes, and in `true` the Messages Unanswered list and the evening Comms digest stop listing the text; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via staffActionAnswersMode(); shadow records the would-close only, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_LEAD_CONTACTED_CLOSE=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F5: a lead_contacted Leads bell closes once the lead was texted or called back, booked or quoted after the bell; its own gate, read at call time via leadContactedCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
+ *   GATE_LEAD_STATUS_FOLLOWS_CONTACT=shadow|true (owner 2026-11-04, "WHY ARENT THESE UPDATED ... FOR ALL COMUNNICATION LINES": a 'new' lead moves to 'contacted' once a person reached it on any Waves line after its first contact: a delivered staff text, a connected call, a staff email, or a visit booked for its customer. A gated sweep every 10 minutes (services/lead-contact-sync.js); shadow logs what would move and writes nothing, true writes; read at call time via leadStatusFollowsContactMode(), unset = off. Never sets won. See docs/gates-and-env.md.)
  *   GATE_LEAD_REPEAT_SWEEP=true (owner 2026-11-01, Action inbox agents A, "yes do this": a nightly 4:52 AM ET sweep files an unanswered lead that repeats the same person's open lead as its duplicate, so the inbox counts each person once and the person's real lead can settle. A waiting lead (the inbox's own leads_awaiting_contact queue) is filed only when an earlier live lead with the same phone, from the 30 days before it, leads to exactly one open root that has the same phone, a matching first or last name and no conflicting name, the same customer row when both are linked, the same street, unit and ZIP when both carry one, the same requested service by the quote wizard's own rule (catalog service_key, else the service label; no extra properties on either), and a live courtship (no closed estimate, shared with the wizard via lead-courtship.js). A won, lost or other closed earlier lead, another service, or a closed estimate never makes a repeat. The filing is the Leads page's own: status duplicate, the extracted_data.duplicate_of_lead_id marker the wizard's repeat dedupe writes, a status_change history row, then the funnel bridge. No first response is stamped. Sends nothing to anyone. Read at call time via leadRepeatSweepLive(), strict 'true', dark by default; off = no lead is touched. Undo a filing on the Leads page; the sweep never files that lead again. Kill switch: unset.)
  *   GATE_PORTAL_CHAT_ANSWERED_CLOSE=shadow|true (owner 2026-10-31, approved Portal inbox plan: a portal chat hand-off bell closes once a person texted, called or emailed that customer after the hand-off; its own gate, rides on GATE_ALERT_CONTACT_CLOSE, read at call time via portalChatAnsweredCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true|charge (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release; `charge` (owner 2026-10-28, "Charge the saved card"; narrowed 2026-10-29, option B) = charge the customer's saved Auto Pay card or bank for a held VISIT bill only, and only inside the visit-completion rail's own authorization (completion-charge-verdict.js: the visit's agreed price cap, the same lanes; an issued-invoice closeout counts as a performed visit for this charge only). Keep the hold when the charge went through or its outcome is unclear (an office alert says check Stripe). Over the agreed price, no agreed price, a visit that was not performed, a payer, or any guard refusal = the hold is kept, nothing is charged or texted, one office alert asks for a review (it is looked at again only after the bill or visit price changes). Release the hold only when the card was really declined or there is no Auto Pay method; an invoice bound to no visit, an annual-prepay term rail invoice, or a bill no completion lane admits is released as `true` releases it, never charged (one office alert, one audit_log row per attempt, invoice_followup.autopay_hold_timeout_charge). `charge` MOVES MONEY: the owner flips it. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
@@ -351,6 +355,7 @@
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button keeps following GATE_ALERT_CLOSE_BUTTONS.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ADS_NEGATIVES=true (owner plan A 2026-11-02: the owner's negative word list goes to Google Ads as phrase negatives on every linked campaign, each ads-advisor word arrives as one bell row with Add and Decline (3 a day at most), and every block can be undone on the Ads page; sends nothing to a customer and moves no money, but changes where the ads can show. Read at call time via adsNegativesLive(), strict 'true', dark by default; off = the /negatives routes answer 404, the bell rows serve no buttons, the advisor writes no rows, the 6 AM sync skips the step and no Google write runs.)
+ *   GATE_ADS_HEALTH_CARD=true (owner 2026-11-04, option A on the PPC gap page: a read-only Ad health card on Ads → Dashboard. GET /api/admin/ads/health returns each Google campaign's live serving status and Google's reasons, ad disapprovals, the portal's 30-day conversion upload counts with Google's own upload check, and a 30-day who-changed-what timeline (Google change history from people and Google tools, plus the portal's budget log and negative keyword decisions). Reads only: it sends nothing, moves no money and changes no ad. Read at call time via adsHealthCardLive(), strict 'true', dark by default; off = the route answers 404 and the card renders nothing.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -604,6 +609,8 @@ const gates = {
   // call time below so a flip needs no redeploy.
   portalActivity: process.env.GATE_PORTAL_ACTIVITY === 'true',
   emailSendLater: process.env.GATE_EMAIL_SEND_LATER === 'true',
+  // Staff-picked label on the email Reclassify button (read live via emailReclassifyPickLive()).
+  emailReclassifyPick: process.env.GATE_EMAIL_RECLASSIFY_PICK === 'true',
   // Managed Agents session spend cap + interrupt of abandoned sessions (dark).
   // Registered for logGateStatus only; services/agent-control/session-guard.js
   // reads agentSessionGuardLive() at call time below.
@@ -3018,6 +3025,8 @@ const gates = {
   bidAlertButtons: process.env.GATE_BID_ALERT_BUTTONS === 'true',
   // GATE_ADS_NEGATIVES (negative keywords: owner word list to Google, bell Add / Decline, Undo, dark). Boot-log entry only; the call-time reader is adsNegativesLive().
   adsNegatives: process.env.GATE_ADS_NEGATIVES === 'true',
+  // GATE_ADS_HEALTH_CARD (read-only Ad health card on Ads → Dashboard, dark). Boot-log entry only; the call-time reader is adsHealthCardLive().
+  adsHealthCard: process.env.GATE_ADS_HEALTH_CARD === 'true',
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -5176,6 +5185,10 @@ const gates = {
   // read leadContactedCloseMode() at CALL time. Kill switch: unset.
   leadContactedClose: ['shadow', 'true'].includes(String(process.env.GATE_LEAD_CONTACTED_CLOSE || '').trim().toLowerCase()),
 
+  // A 'new' lead moves to 'contacted' once a person reached it (owner 2026-11-04). Tri-state, its own gate.
+  // Registered for logGateStatus only; the sweep reads leadStatusFollowsContactMode() at CALL time. Kill switch: unset.
+  leadStatusFollowsContact: ['shadow', 'true'].includes(String(process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT || '').trim().toLowerCase()),
+
   // A portal chat hand-off bell closes once a person answered that customer after it (owner 2026-10-31,
   // approved Portal inbox plan). Tri-state, own gate, rides on GATE_ALERT_CONTACT_CLOSE. Registered for
   // logGateStatus only; consumers read portalChatAnsweredCloseMode() at CALL time. Kill switch: unset.
@@ -5759,6 +5772,13 @@ function portalActivityLive() {
 // (schedule / list / cancel) and services/email/scheduled-email-sender.js.
 function emailSendLaterLive() {
   return process.env.GATE_EMAIL_SEND_LATER === 'true';
+}
+
+// GATE_EMAIL_RECLASSIFY_PICK read at CALL time — strict `=== 'true'`, dark.
+// Owner 2026-11-04 (email learning loop, step 1). Read by routes/admin-email.js
+// (the reclassify route and GET /reclassify-options). Unset is the kill.
+function emailReclassifyPickLive() {
+  return process.env.GATE_EMAIL_RECLASSIFY_PICK === 'true';
 }
 
 // GATE_SMS_VOICE_PROFILE_PIN read at CALL time. Owner 2026-10-24: a voice_profiles.version (positive whole number).
@@ -7241,6 +7261,14 @@ function adsNegativesLive() {
   return process.env.GATE_ADS_NEGATIVES === 'true';
 }
 
+// GATE_ADS_HEALTH_CARD read at CALL time, strict `=== 'true'`, dark by default. The one reader for the read-only Ad
+// health card (owner 2026-11-04, PPC gap page option A): GET /api/admin/ads/health and the card on Ads → Dashboard.
+// Off: the route answers 404 and the card renders nothing. It reads only (Google Ads queries + portal tables); it
+// sends nothing and changes no ad. Kill: unset.
+function adsHealthCardLive() {
+  return process.env.GATE_ADS_HEALTH_CARD === 'true';
+}
+
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
 // (server/routes/reservice-public.js). Strict 'true', and only alongside
 // GATE_VISIT_PREP_PHOTOS (the storage and tech surfaces it rides).
@@ -8123,6 +8151,14 @@ function leadContactedCloseMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_LEAD_STATUS_FOLLOWS_CONTACT read at CALL time: 'shadow', 'true' or 'off'. The lead contact sync
+// (services/lead-contact-sync.js) moves a 'new' lead to 'contacted' when a person reached it after its first
+// contact. 'shadow' logs what would move and writes nothing; 'true' writes. Anything else, unset included, is off.
+function leadStatusFollowsContactMode() {
+  const value = String(process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_LEAD_REPEAT_SWEEP read at CALL time, strict `=== 'true'`, dark in every environment. Off = the 4:52 AM
 // lead repeat sweep touches no lead; a repeat stays in the waiting queue as before.
 function leadRepeatSweepLive() {
@@ -8207,6 +8243,11 @@ function leadNoResponseReasonLive() {
 // GATE_UNBILLED_VISITS_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
 function unbilledVisitsListLive() {
   return process.env.GATE_UNBILLED_VISITS_LIST === 'true';
+}
+
+// GATE_CASH_FORECAST read at CALL time (so a flip needs no redeploy); strict 'true'.
+function cashForecastLive() {
+  return process.env.GATE_CASH_FORECAST === 'true';
 }
 
 // GATE_INVOICE_NOT_ON_SPARK read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -9266,6 +9307,15 @@ function movingStopAtMoveOutLive() {
 }
 // GATE_MOVING_STOP_AT_MOVE_OUT reader, on its own line so gate PRs never conflict.
 module.exports.movingStopAtMoveOutLive = movingStopAtMoveOutLive;
+// GATE_MOVING_AUTO_APPLY read at CALL time, strict `=== 'true'`, dark (owner 2026-11-04, option A). On (with
+// GATE_MOVING_APPLY), a job every 15 minutes applies a submitted move once its new-home estimate is accepted, through
+// Apply move's own preview and confirm (services/customer-moves.js autoApplyAcceptedMoves). Off = the office presses
+// Apply move. Kill = unset.
+function movingAutoApplyLive() {
+  return movingApplyLive() && process.env.GATE_MOVING_AUTO_APPLY === 'true';
+}
+// GATE_MOVING_AUTO_APPLY reader, on its own line so gate PRs never conflict.
+module.exports.movingAutoApplyLive = movingAutoApplyLive;
 module.exports.reviewNameMatchMode = reviewNameMatchMode;
 module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
 // GATE_APP_RATING_PROMPT reader, on its own line so gate PRs never conflict.
@@ -9353,6 +9403,7 @@ module.exports.homeLineLive = homeLineLive;
 // gate PRs appending to that one-line list never conflict with this one.
 module.exports.portalActivityLive = portalActivityLive;
 module.exports.emailSendLaterLive = emailSendLaterLive;
+module.exports.emailReclassifyPickLive = emailReclassifyPickLive;
 module.exports.smsVoiceProfilePinVersion = smsVoiceProfilePinVersion;
 module.exports.smsEditLearningLive = smsEditLearningLive;
 module.exports.smsPromptB1Live = smsPromptB1Live;
@@ -9564,6 +9615,8 @@ module.exports.alertCallButtonLive = alertCallButtonLive;
 module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 // GATE_ADS_NEGATIVES reader, on its own line so gate PRs never conflict.
 module.exports.adsNegativesLive = adsNegativesLive;
+// GATE_ADS_HEALTH_CARD reader, on its own line so gate PRs never conflict.
+module.exports.adsHealthCardLive = adsHealthCardLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
@@ -9632,6 +9685,8 @@ module.exports.alertContactCloseMode = alertContactCloseMode;
 module.exports.voicemailVisitUnderwayMode = voicemailVisitUnderwayMode;
 // GATE_LEAD_CONTACTED_CLOSE reader, on its own line so gate PRs never conflict.
 module.exports.leadContactedCloseMode = leadContactedCloseMode;
+// GATE_LEAD_STATUS_FOLLOWS_CONTACT reader, on its own line so gate PRs never conflict.
+module.exports.leadStatusFollowsContactMode = leadStatusFollowsContactMode;
 // GATE_LEAD_REPEAT_SWEEP reader, on its own line so gate PRs never conflict.
 module.exports.leadRepeatSweepLive = leadRepeatSweepLive;
 // GATE_PORTAL_CHAT_ANSWERED_CLOSE reader, on its own line so gate PRs never conflict.
@@ -9973,6 +10028,18 @@ function ibSendToClaudeLive() {
 }
 // GATE_IB_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
 module.exports.ibSendToClaudeLive = ibSendToClaudeLive;
+
+// GATE_ALERT_SEND_TO_CLAUDE_COPY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-03,
+// decision 1 = A: "customer alerts = a COPY, read-only until approval"). On, for the owner login only, a bell row that
+// "Send to Claude" refuses (customer contact, or words our own code did not write) carries a "Send a copy to Claude
+// (read-only)" button: it writes ONE new owner-only row into Claude's queue that names the alert by id and holds no
+// customer words, and the alert stays in the bell (services/admin-alert-copy-to-claude.js). Off = no button and the
+// copy routes answer 404.
+function alertSendToClaudeCopyLive() {
+  return process.env.GATE_ALERT_SEND_TO_CLAUDE_COPY === 'true';
+}
+// GATE_ALERT_SEND_TO_CLAUDE_COPY reader, on its own line so gate PRs never conflict.
+module.exports.alertSendToClaudeCopyLive = alertSendToClaudeCopyLive;
 
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
@@ -10599,6 +10666,8 @@ function nightPassWaitLive() {
 }
 // GATE_NIGHT_PASS_WAIT reader, on its own line so gate PRs never conflict.
 module.exports.nightPassWaitLive = nightPassWaitLive;
+// GATE_CASH_FORECAST reader, on its own line so gate PRs never conflict.
+module.exports.cashForecastLive = cashForecastLive;
 
 // GATE_DEAD_NUMBER_ALERT read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-04 "fix check": a customer's number that fails two texts with Twilio 30003 / 30005 raises one bell
