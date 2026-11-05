@@ -401,6 +401,31 @@ postgres('moving: the app-made new-home estimate (live Postgres)', () => {
     expect((await moveRow(s.move.id)).auto_estimate_note).toContain('county record');
   });
 
+  test('an estimate the office made during the attempt ends it, unless the customer replaced the address meanwhile', async () => {
+    const Moves = require('../services/customer-moves');
+    const s = await seed();
+    // The office's estimate appears between the claim and the free checks.
+    const spy = jest.spyOn(Moves, 'moveEstimateSource').mockImplementationOnce(async () => {
+      throw Object.assign(new Moves.MoveError('estimate_exists', Moves.NEW_HOME_REFUSALS.estimate_exists, 409));
+    });
+    try {
+      expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ skipped: 1, office: 0 });
+      expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_state: 'office', auto_estimate_note: 'The office made the estimate.' });
+
+      // Again, but the customer's resubmit cleared the claim first: the move is left for its new attempt.
+      await trx('customer_moves').where({ id: s.move.id }).update({ auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null });
+      spy.mockImplementationOnce(async () => {
+        await trx('customer_moves').where({ id: s.move.id }).update({ auto_estimate_at: null });
+        throw Object.assign(new Moves.MoveError('estimate_exists', Moves.NEW_HOME_REFUSALS.estimate_exists, 409));
+      });
+      expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ skipped: 1 });
+      expect(await moveRow(s.move.id)).toMatchObject({ auto_estimate_state: null, auto_estimate_at: null });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(officeItems()).toHaveLength(0);
+  });
+
   test('a unit address goes to the office before any lookup', async () => {
     const s = await seed({ move: { typed_address: '40 Sample Road Apt 4, Venice, FL 34285', normalized_address: JSON.stringify({ ...NEW_HOUSE, line2: 'Apt 4' }) } });
     expect(await Auto.runMoveAutoEstimateJob()).toMatchObject({ office: 1 });

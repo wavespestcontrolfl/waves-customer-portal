@@ -374,7 +374,10 @@ async function autoEstimateMove(moveId, { now }) {
   if (!move) return 'skipped';
   const facts = await freeChecks(move, require('../utils/datetime-et').etDateString(now));
   if (facts.code === 'exists') {
-    await db('customer_moves').where({ id: move.id }).whereNull('auto_estimate_state').update({ auto_estimate_state: 'office', auto_estimate_note: 'The office made the estimate.', updated_at: now });
+    // Bound to this attempt's claim: a resubmit that cleared it (another
+    // address) leaves the move for the new address's own attempt.
+    await db('customer_moves').where({ id: move.id, auto_estimate_at: move.auto_estimate_at }).whereNull('auto_estimate_state')
+      .update({ auto_estimate_state: 'office', auto_estimate_note: 'The office made the estimate.', updated_at: now });
     return 'skipped';
   }
   if (facts.code) return leaveToOffice(move, facts.code, { now, note: facts.note || null });
