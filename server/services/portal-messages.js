@@ -394,8 +394,12 @@ async function ringOffice(customer, threadId, message) {
     // The customer's words, redacted and cut like every bell body; a quote the headline rules refuse (a second
     // sentence, a date) falls back to a plain why. The whole message is in the bell's full text either way.
     const quoted = whyWithQuote({ lead: 'They wrote in the portal: ', quote: redactedWords(message.body) });
-    const rang = await require('./portal-inbox').onLockedThread(threadId, async (_trx, open) => {
-      if (!open) return false;
+    const rang = await require('./portal-inbox').onLockedThread(threadId, async (trx, open) => {
+      // Only the newest customer message writes the bell: an older one whose ring ran late would put back stale
+      // words (the newer message's ring wrote, or will write, the bell).
+      const newest = await trx('messages').where({ conversation_id: threadId, channel: CHANNEL, direction: 'inbound' })
+        .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('id');
+      if (!open || newest?.id !== message.id) return false;
       const result = await raiseAdminAlert('alert', {
         area: 'Comms',
         action: fitAction('Comms', name, [(who) => `Answer ${who}'s portal message`, (who) => `Answer ${who}`]),
@@ -406,6 +410,8 @@ async function ringOffice(customer, threadId, message) {
         doneWhen: 'customer_answered',
         who: 'person',
       }, {
+        // On the locked thread's own transaction: no second connection while the lock is held.
+        trx,
         bell: true,
         dedupeKey: `portal-message:${threadId}`,
         dedupeOpenOnly: true,
@@ -469,19 +475,29 @@ async function unreadFor(thread) {
 }
 
 // The customer's thread, newest PAGE_SIZE first in time order; `before` (an ISO time) pages back.
+// One page of a thread: the newest PAGE_SIZE messages before `before` (or the newest), oldest first.
+async function threadPage(threadId, before, view) {
+  const query = db('messages').where({ conversation_id: threadId, channel: CHANNEL }).whereIn('direction', ['inbound', 'outbound']);
+  if (before) query.where('created_at', '<', before);
+  const rows = await query.orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .limit(PAGE_SIZE + 1).select('id', 'direction', 'body', 'created_at', 'admin_user_id');
+  return { messages: rows.slice(0, PAGE_SIZE).reverse().map(view), hasMore: rows.length > PAGE_SIZE };
+}
+
 async function customerThread(customerId, { before = null } = {}) {
   requireLive();
   const thread = await findThread(customerId);
   if (!thread) return { messages: [], hasMore: false, unread: 0 };
-  const query = db('messages').where({ conversation_id: thread.id, channel: CHANNEL }).whereIn('direction', ['inbound', 'outbound']);
-  if (before) query.where('created_at', '<', before);
-  const rows = await query.orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .limit(PAGE_SIZE + 1).select('id', 'direction', 'body', 'created_at');
-  return {
-    messages: rows.slice(0, PAGE_SIZE).reverse().map(customerView),
-    hasMore: rows.length > PAGE_SIZE,
-    unread: await unreadFor(thread),
-  };
+  return { ...(await threadPage(thread.id, before, customerView)), unread: await unreadFor(thread) };
+}
+
+// The office's view of a portal thread, every body whole (a Portal-tab message item shows a cut preview).
+// Admin routes only.
+async function staffThread(threadId, { before = null } = {}) {
+  requireLive();
+  const thread = await db('conversations').where({ id: threadId, channel: CHANNEL, our_endpoint_id: ENDPOINT }).first('id');
+  if (!thread) throw new PortalMessageError('not_found', 404, 'This thread is gone.');
+  return threadPage(thread.id, before, staffView);
 }
 
 async function customerUnread(customerId) {
@@ -519,6 +535,7 @@ module.exports = {
   staffReply,
   customerPost,
   customerThread,
+  staffThread,
   customerUnread,
   markRead,
   resumePendingNotices,

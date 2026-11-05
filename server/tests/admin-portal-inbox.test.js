@@ -22,9 +22,11 @@ jest.mock('../services/portal-inbox', () => ({
   markMessageHandled: (...a) => mockService.markMessageHandled(...a),
 }));
 const mockStaffReply = jest.fn();
+const mockStaffThread = jest.fn();
 jest.mock('../services/portal-messages', () => ({
   ...jest.requireActual('../services/portal-messages'),
   staffReply: (...a) => mockStaffReply(...a),
+  staffThread: (...a) => mockStaffThread(...a),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -207,6 +209,41 @@ describe('admin portal inbox routes', () => {
         expect((await post(base, 'admin', THREAD)).status).toBe(404);
       });
       expect(mockService.markMessageHandled).toHaveBeenCalledWith(THREAD, THROUGH, { technicianId: 'admin-1', role: 'admin' });
+    });
+  });
+
+  describe('GET /messages/:id', () => {
+    const THREAD = '66666666-6666-4666-8666-666666666666';
+    const get = (base, who, path) => fetch(`${base}/messages/${path}`, { headers: auth(who) });
+
+    test('404 while GATE_PORTAL_MESSAGES is off, 403 for a technician, 400 for a bad id or page time', async () => {
+      process.env.GATE_PORTAL_INBOX = 'true';
+      await withServer(async (base) => {
+        expect((await get(base, 'admin', THREAD)).status).toBe(404);
+        process.env.GATE_PORTAL_MESSAGES = 'true';
+        expect((await get(base, 'tech', THREAD)).status).toBe(403);
+        expect((await get(base, 'admin', 'not-a-uuid')).status).toBe(400);
+        expect((await get(base, 'admin', `${THREAD}?before=yesterday`)).status).toBe(400);
+      });
+      expect(mockStaffThread).not.toHaveBeenCalled();
+    });
+
+    test('returns the whole thread page, passes a page time as ISO, and keeps a service 404', async () => {
+      process.env.GATE_PORTAL_INBOX = 'true';
+      process.env.GATE_PORTAL_MESSAGES = 'true';
+      const page = { messages: [{ id: 'm1', direction: 'inbound', body: 'x'.repeat(1900), createdAt: '2026-11-04T20:00:00.000Z', adminUserId: null }], hasMore: false };
+      mockStaffThread.mockResolvedValueOnce(page)
+        .mockRejectedValueOnce(new (jest.requireActual('../services/portal-messages').PortalMessageError)('not_found', 404, 'This thread is gone.'));
+      await withServer(async (base) => {
+        const res = await get(base, 'admin', `${THREAD}?before=2026-11-04T21:00:00Z`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(page);
+        const gone = await get(base, 'admin', THREAD);
+        expect(gone.status).toBe(404);
+        expect(await gone.json()).toEqual({ error: 'This thread is gone.', code: 'not_found' });
+      });
+      expect(mockStaffThread).toHaveBeenNthCalledWith(1, THREAD, { before: '2026-11-04T21:00:00.000Z' });
+      expect(mockStaffThread).toHaveBeenNthCalledWith(2, THREAD, { before: null });
     });
   });
 });

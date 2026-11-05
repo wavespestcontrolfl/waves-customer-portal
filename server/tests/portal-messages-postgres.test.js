@@ -418,7 +418,11 @@ maybeDescribe('portal messages (live Postgres)', () => {
   });
   test('a customer message rings one bell per thread: a second message rewrites it, a new one comes after Done', async () => {
     const pat = await customer();
+    const notifyAdmin = jest.spyOn(require('../services/notification-service'), 'notifyAdmin');
     const first = await PortalMessages.customerPost({ customer: pat, body: 'Is the lawn treatment safe for my dog?' });
+    // The bell is written on the locked thread's own transaction: no second connection while the lock is held.
+    expect(notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ trx: expect.anything() }));
+    notifyAdmin.mockRestore();
     expect(first).toMatchObject({ from: 'you', body: 'Is the lawn treatment safe for my dog?' });
     const [row] = await thread(pat.id);
     let bells = await openAdminBells('portalConversationId', row.id);
@@ -525,6 +529,39 @@ maybeDescribe('portal messages (live Postgres)', () => {
     await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answered both.', actor });
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
     expect((await portalInbox.list()).items.filter((i) => i.kind === 'message' && i.id === row.id)).toEqual([]);
+  });
+
+  test('two sends whose rings run late in reverse order: the bell keeps the newest words', async () => {
+    const pat = await customer();
+    const { ringOffice } = PortalMessages.__private;
+    const m1 = await PortalMessages.customerPost({ customer: pat, body: 'Is Monday open?' });
+    const m2 = await PortalMessages.customerPost({ customer: pat, body: 'Never mind, Tuesday is better.' });
+    const [row] = await thread(pat.id);
+    jest.clearAllMocks();
+    // m1's ring arriving after m2's would put back stale words and ring the office again: it does nothing.
+    await ringOffice(pat, row.id, m1);
+    const bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].metadata.portalMessageId).toBe(m2.id);
+    expect(bells[0].detail).toBe('Never mind, Tuesday is better.');
+    expect(portalAskPush.pushPortalAsk).not.toHaveBeenCalled();
+  });
+
+  test('the office reads the whole thread behind a message item, every body whole', async () => {
+    process.env.GATE_PORTAL_INBOX = 'true';
+    const pat = await customer();
+    const long = `${'We have ants in the kitchen. '.repeat(60)}End.`.slice(0, 1990);
+    await PortalMessages.customerPost({ customer: pat, body: long });
+    await PortalMessages.customerPost({ customer: pat, body: 'Also the garage.' });
+    const [row] = await thread(pat.id);
+    const item = (await require('../services/portal-inbox').list()).items.find((i) => i.kind === 'message' && i.id === row.id);
+    expect(item.customerMessage.length).toBeLessThan(long.length);
+    const page = await PortalMessages.staffThread(row.id);
+    expect(page).toMatchObject({ hasMore: false });
+    expect(page.messages.map((m) => [m.direction, m.body])).toEqual([['inbound', long], ['inbound', 'Also the garage.']]);
+    await expect(PortalMessages.staffThread(randomUUID())).rejects.toMatchObject({ status: 404 });
+    process.env.GATE_PORTAL_MESSAGES = 'false';
+    await expect(PortalMessages.staffThread(row.id)).rejects.toMatchObject({ status: 404 });
   });
 
   test('an answer to a portal message closes its bell, and the customer sees both sides in order', async () => {
