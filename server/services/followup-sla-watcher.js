@@ -52,8 +52,8 @@ const {
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
 // bell reaches the staff who work the Owed tab. With GATE_TECH_LOGIN_PRIVACY
-// on, a technician never sees this list: it names other customers'
-// promises (missed_commitment_ids; notification-service's privacy rule).
+// on, a technician never sees this list: a promise alert with no customer is
+// office work (notification-service's privacy rule).
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
 const ESTIMATE_SENT_SMS_TYPE = 'estimate_sent';

@@ -33,11 +33,6 @@ const CUSTOMER_PREFERENCE_KEYS = new Set([
 // the internal-test mute). A row written straight through notifyAdmin keeps it
 // in metadata (customerId or customer_id). Empty text counts as no customer.
 const NOTIFICATION_CUSTOMER_ID_SQL = `NULLIF(COALESCE(metadata->>'customerId', metadata->>'customer_id', metadata->'payload'->>'customerId', metadata->'payload'->>'customer_id', metadata->'payload'->>'threadId', metadata->'payload'->>'scopeCustomerId'), '')`;
-// A row that lists several customers' items: the follow-up pager's rolling
-// list (followup-sla-watcher.js), which names each promise it shows in
-// metadata.missed_commitment_ids. It is no one customer's row, so the
-// technician privacy rule below never reads it as customer-less.
-const NOTIFICATION_CUSTOMER_LIST_SQL = "jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'missed_commitment_ids')";
 
 // Admin-feed role scoping, FAIL CLOSED: the persisted admin bell is shared
 // (one recipient-less row) and carries owner-only content — estimate and
@@ -51,11 +46,13 @@ const NOTIFICATION_CUSTOMER_LIST_SQL = "jsonb_exists(COALESCE(metadata, '{}'::js
 function scopeAdminFeedToRole(query, role, technicianId = null) {
   if (!role || role === 'admin') return query;
   let keys = [];
+  let promiseKeys = [];
   try {
     const { TRIGGER_REGISTRY } = require('./notification-triggers');
-    keys = Object.entries(TRIGGER_REGISTRY)
-      .filter(([, trigger]) => trigger.techVisible)
-      .map(([key]) => key);
+    const visible = Object.entries(TRIGGER_REGISTRY).filter(([, trigger]) => trigger.techVisible);
+    keys = visible.map(([key]) => key);
+    // Promise alerts: the registry's declaration of a follow-up Waves owes (rule.promise).
+    promiseKeys = visible.filter(([, trigger]) => trigger.rule?.promise === true).map(([key]) => key);
   } catch (err) {
     logger.warn(`[notifications] role-scope registry load failed: ${err.message}`);
   }
@@ -69,18 +66,21 @@ function scopeAdminFeedToRole(query, role, technicianId = null) {
   );
   // GATE_TECH_LOGIN_PRIVACY: a technician login also sees a customer's row only
   // for a customer on its own route (the Communications routes' rule). A row
-  // with no customer stays visible, as today. A row listing several
-  // customers' promises (the follow-up pager's list, owner 2026-11-04) is
-  // hidden from every technician, whether or not the caller names one: the
-  // technician's own promises are on its Promises tab. Callers that pass no
-  // technicianId keep the key-only scope otherwise.
+  // with no customer stays visible, as today, except a promise alert with no
+  // customer (owner 2026-11-04): the one-hour pager's list and the overdue
+  // watchdog's summary name several customers' promises, and a promise to a
+  // caller with no customer record is office work, which the Promises tab
+  // keeps from a technician too. That holds whether or not the caller names
+  // a technician; callers that pass no technicianId keep the key-only scope
+  // otherwise.
   if (role === 'technician' && require('../config/feature-gates').techLoginPrivacyLive?.()) {
-    const listless = scoped.whereRaw(`NOT ${NOTIFICATION_CUSTOMER_LIST_SQL}`);
-    if (!technicianId) return listless;
+    const officePromises = `NOT (COALESCE(metadata->>'triggerKey', '') IN (${promiseKeys.map(() => '?').join(', ')}) AND ${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL)`;
+    const ownPromises = promiseKeys.length ? scoped.whereRaw(officePromises, promiseKeys) : scoped;
+    if (!technicianId) return ownPromises;
     const { technicianCustomerIdsSubquery } = require('./technician-visit-scope');
     const ownCustomers = technicianCustomerIdsSubquery({ techRole: 'technician', technicianId }, db)
       .clearSelect().select(db.raw('scheduled_services.customer_id::text'));
-    return listless.where(function customerlessOrOwn() {
+    return ownPromises.where(function customerlessOrOwn() {
       this.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL`)
         .orWhereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
     });
