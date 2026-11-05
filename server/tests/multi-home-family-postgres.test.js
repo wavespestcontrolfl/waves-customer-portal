@@ -190,4 +190,30 @@ maybeDescribe('Same family link (TEMP tables)', () => {
       WHERE conrelid = 'public.multi_home_family_members'::regclass AND contype = 'f'`);
     expect(fk.rows.map((r) => r.confdeltype)).toEqual(['c']);
   });
+
+  test('link and unlink wait for the one family-changes lock, so they run one at a time', async () => {
+    const [a, b, c] = [await customer(), await customer(), await customer()];
+    await link(a, b);
+    // A second connection holds the advisory lock every link and unlink takes first.
+    const holder = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 1, max: 1 } });
+    try {
+      const release = await new Promise((resolveHeld, rejectHeld) => {
+        holder.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['multi_home_family_members:changes']);
+          await new Promise((finish) => resolveHeld(finish));
+        }).catch(rejectHeld);
+      });
+      let unlinked = false;
+      const pending = family.unlinkFamily(conn, { customerId: a, actorId: null }).then(() => { unlinked = true; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(unlinked).toBe(false);
+      release();
+      await pending;
+      expect(unlinked).toBe(true);
+    } finally {
+      await holder.destroy();
+    }
+    // With the lock serializing changes, a later link starts a fresh family for b and c.
+    expect(memberIds(await link(b, c))).toEqual([b, c].sort());
+  });
 });

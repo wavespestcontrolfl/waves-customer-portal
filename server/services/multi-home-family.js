@@ -112,6 +112,16 @@ async function loadLinkable(trx, customerId, label) {
   return row;
 }
 
+// Every link and unlink takes this one transaction-scoped lock first, so family
+// changes run one at a time. In READ COMMITTED a FOR UPDATE read that waited
+// does not see rows another transaction inserted meanwhile; after this lock,
+// every later statement sees each committed change (an unlink can never miss a
+// profile a concurrent link just added and strand it in a one-profile family).
+// Staff make these changes rarely, so one lock for all families is cheap.
+async function lockFamilyChanges(trx) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${TABLE}:changes`]);
+}
+
 async function lockCustomers(trx, ids) {
   await trx('customers').whereIn('id', [...ids].sort()).orderBy('id').forUpdate().select('id');
 }
@@ -143,12 +153,10 @@ function planLink(mineRow, otherRow, customerId, otherCustomerId) {
 }
 
 async function linkInTransaction(trx, { customerId, otherCustomerId, actorId }) {
+  await lockFamilyChanges(trx);
   await lockCustomers(trx, [customerId, otherCustomerId]);
   await loadLinkable(trx, customerId, 'first');
   await loadLinkable(trx, otherCustomerId, 'other');
-  // FOR UPDATE: an unlink running at the same time locks these rows too, so it
-  // either sees the profile this link adds or finishes first (and this read
-  // then skips the row it deleted) — never a one-profile family left behind.
   const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).forUpdate().select('customer_id', 'family_id');
   const mineRow = rows.find((row) => row.customer_id === customerId);
   const otherRow = rows.find((row) => row.customer_id === otherCustomerId);
@@ -175,6 +183,7 @@ async function linkFamily(conn, { customerId, otherCustomerId, actorId = null } 
 }
 
 async function unlinkInTransaction(trx, { customerId, actorId }) {
+  await lockFamilyChanges(trx);
   await lockCustomers(trx, [customerId]);
   const own = await trx(TABLE).where({ customer_id: customerId }).forUpdate().first('id', 'family_id');
   if (!own) return false;
