@@ -66,7 +66,14 @@ function fakeDb({ tables = {}, visits = {}, rawError = null }) {
     };
     return q;
   };
-  dbh.raw = jest.fn(async (_sql, params) => {
+  // Advisory locks are recorded in order; a series in `busy` refuses its maintenance try-lock.
+  dbh.locks = [];
+  dbh.busy = new Set();
+  dbh.raw = jest.fn(async (sql, params) => {
+    if (/pg_(try_)?advisory_xact_lock/.test(sql)) {
+      dbh.locks.push(params.join(':'));
+      return { rows: [{ locked: !dbh.busy.has(String(params[1])) }] };
+    }
     if (rawError) throw rawError;
     return { rows: visits[params[0]] || [] };
   });
@@ -92,22 +99,24 @@ const ledgerRow = (rootId, status, extra = {}) => ({
   source_estimate_id: EST, series_root_id: rootId, status, price_before: '120.00', price_after: '108.00', first_visit_date: '2026-11-14', ...extra,
 });
 
+const ACCEPTED_AT = '2026-11-05T15:00:00.000Z';
+
 function scenario({ targets = [], ledger = [], customers = [], payers = [], prefs = [], properties = [], visits = {}, estimateData, sourceExtra = {} }) {
   const source = { estimateId: EST, customerId: 'son', propertyId: 'prop-son', roots: new Set(['root-son']), presetId: 'preset-1', ...sourceExtra };
   mockApply.describeSource.mockResolvedValue(source);
   mockApply.targetsForSource.mockResolvedValue(targets);
-  const dbh = fakeDb({
-    tables: {
-      multi_home_discount_applications: ledger,
-      customers,
-      payers,
-      notification_prefs: prefs,
-      customer_properties: [{ id: 'prop-son', customer_id: 'son', address_line1: '10 New Home Lane', address_line2: null }, ...properties],
-    },
-    visits: { 'root-son': [visit('2026-11-14', '90.00')], ...visits },
-  });
-  const estimate = { id: EST, customer_id: 'son', estimate_data: estimateData || { summary: { manualDiscount: md() } } };
-  return { dbh, estimate };
+  const estimate = { id: EST, customer_id: 'son', property_id: 'prop-son', accepted_at: ACCEPTED_AT, estimate_data: estimateData || { summary: { manualDiscount: md() } } };
+  const tables = {
+    multi_home_discount_applications: ledger,
+    customers,
+    payers,
+    notification_prefs: prefs,
+    customer_properties: [{ id: 'prop-son', customer_id: 'son', address_line1: '10 New Home Lane', address_line2: null }, ...properties],
+    estimates: [{ ...estimate, status: 'accepted' }],
+  };
+  const allVisits = { 'root-son': [visit('2026-11-14', '90.00')], ...visits };
+  const dbh = fakeDb({ tables, visits: allVisits });
+  return { dbh, estimate, tables, visits: allVisits };
 }
 
 const target = (rootId, customerId, propertyId = null) => ({ customerId, rootId, propertyId });
@@ -302,7 +311,8 @@ describe('who gets it, and the greeting', () => {
   test('an unreadable email switch is not read as "on": the source is not sent this tick', async () => {
     const sc = scenario({ customers: [customer('son')] });
     const original = sc.dbh;
-    const dbh = (name) => (name === 'notification_prefs' ? { whereIn: () => ({ where: () => ({ select: () => Promise.reject(new Error('relation missing')) }) }) } : original(name));
+    const failing = { whereIn: () => failing, where: () => failing, select: () => Promise.reject(new Error('relation missing')) };
+    const dbh = (name) => (name === 'notification_prefs' ? failing : original(name));
     dbh.raw = original.raw;
     const send = sendOk();
     await expect(processSource(dbh, sc.estimate, { presetId: 'preset-1', today: TODAY, send, nextPrices: async () => null }, emptyOut())).rejects.toThrow('relation missing');
@@ -576,15 +586,16 @@ describe('a failed send is never replayed from stored copy and is retried by the
   });
 
   test('sendGroups: waits on a recent definite failure, skips a held one quietly, and sends neither', async () => {
+    const { sendsFor } = require('../services/multi-home-discount-email')._private;
     const send = jest.fn(async () => ({ sent: true, status: 'sent' }));
-    const home = (id) => ({ customerId: id, address: '1 Example Way', isSource: true });
-    const groups = () => [{ key: 'a@example.com', address: 'a@example.com', homes: [home('c1')] }];
+    const home = (id) => ({ customerId: id, rootId: `root-${id}`, address: '1 Example Way', isSource: true });
+    const composed = () => ({ sends: sendsFor('est-1', [{ key: 'a@example.com', address: 'a@example.com', payer: null, homes: [home('c1')] }], new Map()) });
     const out = () => ({ sent: 0, deduped: 0, blocked: 0, failed: 0, skipped: 0, waiting: 0 });
     const waiting = out();
-    await sendGroups(send, groups(), { estimate: { id: 'est-1' }, customers: new Map(), dbh: fakeDb(failedRow), holdsEarlier: () => null }, waiting);
+    await sendGroups(fakeDb(failedRow), { send, holdsEarlier: () => null }, { id: 'est-1' }, composed(), waiting);
     expect(waiting.waiting).toBe(1);
     const held = out();
-    await sendGroups(send, groups(), { estimate: { id: 'est-1' }, customers: new Map(), dbh: fakeDb(failedRow), holdsEarlier: () => ({}) }, held);
+    await sendGroups(fakeDb(failedRow), { send, holdsEarlier: () => ({}) }, { id: 'est-1' }, composed(), held);
     expect(held.skipped).toBe(1);
     expect(send).not.toHaveBeenCalled();
   });
@@ -670,104 +681,93 @@ describe('every listed home proves its discount now: sold-with-discount homes an
   });
 });
 
-describe('the provider handoff reads the routing again under the comms locks', () => {
-  const { groupByPayingAddress, routingHandoff } = email._private;
-
-  // The handoff's transaction: the fake tables (a test edits them after grouping), with every advisory lock recorded.
-  function handoffDb(tables) {
-    const trx = fakeDb({ tables });
-    const locks = [];
-    trx.raw = jest.fn(async (_sql, params) => { locks.push(params[0]); return { rows: [] }; });
-    return { dbh: { transaction: jest.fn(async (work) => work(trx)) }, trx, locks };
-  }
-
-  // Two homes, one per profile, grouped from the tables as they are now.
-  async function groupNow(tables) {
-    const customers = new Map(tables.customers.map((c) => [String(c.id), c]));
-    const payers = new Map((tables.payers || []).map((p) => [String(p.id), p]));
-    const homes = tables.customers.map((c, i) => ({ customerId: c.id, rootId: `root-${c.id}`, isSource: i === 0, address: `${i + 1} Example Way` }));
-    const { groups } = await groupByPayingAddress(fakeDb({ tables }), homes, { customers, payers, optedOut: new Set() });
-    return { groups, customers };
-  }
-
-  const shared = () => ({
-    customers: [customer('son', { email: 'family@example.invalid' }), customer('parents', { email: 'Family@Example.invalid' })],
-    payers: [],
-    notification_prefs: [],
+describe('the provider handoff composes the whole email again under the locks', () => {
+  // A sender that applies a staff edit after the job composed the email, then runs the library's provider handoff.
+  const sendThrough = (edit = () => {}) => jest.fn(async (args) => {
+    await edit(args);
+    let dispatched = false;
+    const verdict = await args.withProviderHandoff(async () => { dispatched = true; });
+    return verdict.ok && dispatched ? { sent: true, providerAttempted: true } : { sent: false, aborted: true };
   });
 
-  async function handoff(tables, edit) {
-    const { groups, customers } = await groupNow(tables);
-    expect(groups).toHaveLength(1);
-    const group = groups[0];
-    const greeting = email._private.payloadFor(group, customers).greeting_name;
-    edit(tables);
-    const { dbh, trx, locks } = handoffDb(tables);
-    const state = { routingChanged: false };
-    let locksAtDispatch = null;
-    const dispatch = jest.fn(async (database) => { expect(database).toBe(trx); locksAtDispatch = [...locks]; });
-    const verdict = await routingHandoff(dbh, group, greeting, state)(dispatch);
-    return { verdict, dispatch, locks, locksAtDispatch, state };
-  }
+  // The new home (son) and the parents' home, each emailed to its own profile address.
+  const twoHomes = (extra = {}) => scenario({
+    targets: [target('root-a', 'parents')],
+    ledger: [ledgerRow('root-a', 'applied')],
+    customers: [customer('son'), customer('parents')],
+    visits: { 'root-a': [visit('2026-11-14', '108.00')] },
+    ...extra,
+  });
+  const refusedLog = () => logger.info.mock.calls.map(([m]) => m).filter((m) => m.includes('just before the send'));
 
-  test('unchanged: each profile\'s comms key in id order, then the address key, and the request runs inside the locks', async () => {
-    const { verdict, dispatch, locksAtDispatch, state } = await handoff(shared(), () => {});
-    expect(verdict).toEqual({ ok: true });
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(locksAtDispatch).toEqual(['customer-comms:parents', 'customer-comms:son', 'customer-email:family@example.invalid']);
-    expect(state.routingChanged).toBe(false);
+  test('unchanged: both emails go, each after the family lock, the series locks, the comms locks, then its address key', async () => {
+    const sc = twoHomes();
+    const send = sendThrough();
+    expect(await run(sc, send)).toMatchObject({ sent: 2, waiting: 0 });
+    const perSend = (address) => [
+      'multi_home_family_members:changes',
+      'recurring-series-maintenance:root-a', 'recurring-series-maintenance:root-son',
+      'customer-comms:parents', 'customer-comms:son',
+      `customer-email:${address}`,
+    ];
+    expect(sc.dbh.locks).toEqual([...perSend('son@example.invalid'), ...perSend('parents@example.invalid')]);
   });
 
   test.each([
-    ['a profile\'s email changed', (t) => { t.customers[1].email = 'moved@example.invalid'; }],
-    ['a profile now bills to a payer with the same AP email (the payment line would be wrong)', (t) => {
-      t.payers.push({ id: 9, display_name: 'Morgan Example', company_name: null, ap_email: 'family@example.invalid', active: true });
-      t.customers[1].payer_id = 9;
+    ['staff reprice the other home', (sc) => { sc.visits['root-a'] = [visit('2026-11-14', '120.00')]; }],
+    ['staff take the discount off the new home', (sc) => { sc.visits['root-son'] = [visit('2026-11-14', '100.00')]; }],
+    ['another home of the family is now held', (sc) => { sc.tables.multi_home_discount_applications[0].status = 'held'; }],
+    ['the family gains a home not yet recorded', () => { mockApply.targetsForSource.mockResolvedValue([target('root-a', 'parents'), target('root-b', 'parents')]); }],
+    ['the source estimate is no longer accepted', (sc) => { sc.tables.estimates[0].status = 'revised'; }],
+    ['a listed plan is being changed right now', (sc) => { sc.dbh.busy.add('root-a'); }],
+  ])('%s after composing: both emails refused before the request, counted as waiting', async (_label, edit) => {
+    const sc = twoHomes();
+    let edited = false;
+    const send = sendThrough(() => { if (!edited) { edited = true; edit(sc); } });
+    expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 2, failed: 0 });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(refusedLog()).toHaveLength(2);
+    expect(refusedLog().some((m) => m.includes('@'))).toBe(false);
+  });
+
+  test('a recorded new home of the family (applied, so the email would be ready) still refuses: the homes changed', async () => {
+    const sc = twoHomes();
+    let edited = false;
+    const send = sendThrough(() => {
+      if (edited) return;
+      edited = true;
+      mockApply.targetsForSource.mockResolvedValue([target('root-a', 'parents'), target('root-b', 'parents')]);
+      sc.tables.multi_home_discount_applications.push(ledgerRow('root-b', 'applied'));
+      sc.visits['root-b'] = [visit('2026-11-15', '108.00')];
+    });
+    expect(await run(sc, send)).toMatchObject({ sent: 0, waiting: 2 });
+    expect(refusedLog()[0]).toContain("the family's homes changed");
+  });
+
+  test.each([
+    ['its email address changed', (sc) => { sc.tables.customers[1].email = 'moved@example.invalid'; }],
+    ['it now bills to a Bill-To payer with the same AP email (the payment line would be wrong)', (sc) => {
+      sc.tables.payers.push({ id: 9, display_name: 'Morgan Example', company_name: null, ap_email: 'parents@example.invalid', active: true });
+      sc.tables.customers[1].payer_id = 9;
     }],
-    ['a profile turned email off', (t) => { t.notification_prefs.push({ customer_id: 'parents', email_enabled: false }); }],
-    ['a profile was deleted', (t) => { t.customers[1].deleted_at = new Date(); }],
-    ['the greeting changed', (t) => { t.customers[0].first_name = 'Robin'; }],
-  ])('%s: refused before the request, no address lock, the job is told', async (_label, edit) => {
-    const { verdict, dispatch, locks, state } = await handoff(shared(), edit);
-    expect(verdict).toEqual({ ok: false, reason: 'recipient_changed' });
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(locks.some((k) => k.startsWith('customer-email:'))).toBe(false);
-    expect(state.routingChanged).toBe(true);
+    ['it turned email off', (sc) => { sc.tables.notification_prefs.push({ customer_id: 'parents', email_enabled: false }); }],
+    ['the profile was deleted', (sc) => { sc.tables.customers[1].deleted_at = new Date(); }],
+    ['its first name (the greeting) changed', (sc) => { sc.tables.customers[1].first_name = 'Robin'; }],
+  ])('the parents\' profile: %s -> only the parents\' email is refused', async (_label, edit) => {
+    const sc = twoHomes();
+    const send = sendThrough((args) => { if (args.to === 'parents@example.invalid') edit(sc); });
+    expect(await run(sc, send)).toMatchObject({ sent: 1, waiting: 1, failed: 0 });
+    expect(refusedLog()).toHaveLength(1);
   });
 
-  test('a payer-routed group: the payer turned inactive or its AP email changed, refused', async () => {
-    const paid = () => ({
-      customers: [customer('son', { payer_id: 7 }), customer('parents', { payer_id: 7 })],
-      payers: [{ id: 7, display_name: 'Morgan Example', company_name: null, ap_email: 'ap@example.invalid', active: true }],
-      notification_prefs: [],
-    });
-    expect((await handoff(paid(), () => {})).verdict).toEqual({ ok: true });
-    expect((await handoff(paid(), (t) => { t.payers[0].active = false; })).verdict).toEqual({ ok: false, reason: 'recipient_changed' });
-    expect((await handoff(paid(), (t) => { t.payers[0].ap_email = 'new-ap@example.invalid'; })).verdict).toEqual({ ok: false, reason: 'recipient_changed' });
-    expect((await handoff(paid(), (t) => { t.payers[0].display_name = 'Avery Example'; })).verdict).toEqual({ ok: false, reason: 'recipient_changed' });
-  });
-
-  test('a refusal at the handoff counts as waiting, and the log never names the address', async () => {
-    const sc = scenario({
-      targets: [target('root-a', 'parents')],
-      ledger: [ledgerRow('root-a', 'applied')],
-      customers: [customer('son'), customer('parents')],
-      visits: { 'root-a': [visit('2026-11-14', '108.00')] },
-    });
-    // Staff change the parents' email after the job grouped the homes, before the request.
-    const send = jest.fn(async (args) => {
-      if (args.to === 'parents@example.invalid') {
-        const rows = await sc.dbh('customers');
-        rows.find((r) => r.id === 'parents').email = 'moved@example.invalid';
-      }
-      const verdict = await args.withProviderHandoff(async () => {});
-      return verdict.ok ? { sent: true, providerAttempted: true } : { sent: false, aborted: true };
-    });
-    const out = await run(sc, send);
-    expect(out).toMatchObject({ sent: 1, waiting: 1, failed: 0 });
-    const logged = logger.info.mock.calls.map(([m]) => m).find((m) => m.includes('changed just before the send'));
-    expect(logged).toBeTruthy();
-    expect(logged).not.toContain('@');
+  test('a Bill-To payer group: an inactive payer, a new AP email or a new display name refuses', async () => {
+    for (const edit of [(t) => { t.payers[0].active = false; }, (t) => { t.payers[0].ap_email = 'new-ap@example.invalid'; }, (t) => { t.payers[0].display_name = 'Avery Example'; }]) {
+      const sc = twoHomes({
+        customers: [customer('son'), customer('parents', { payer_id: 7 })],
+        payers: [{ id: 7, display_name: 'Morgan Example', company_name: null, ap_email: 'ap@example.invalid', active: true }],
+      });
+      const send = sendThrough((args) => { if (args.to === 'ap@example.invalid') edit(sc.tables); });
+      expect(await run(sc, send)).toMatchObject({ sent: 1, waiting: 1 });
+    }
   });
 });
-

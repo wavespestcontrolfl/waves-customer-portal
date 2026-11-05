@@ -262,6 +262,49 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     });
   });
 
+  test('staff reprice the other home after the email was composed: refused at the provider handoff, the email waits', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      let edited = false;
+      const reprice = async () => {
+        if (edited) return;
+        edited = true;
+        await trx('scheduled_services').where({ recurring_parent_id: f.parentSeries.rootId }).update({ estimated_price: 120 });
+      };
+      expect(await emailRun(trx, { send: sendAfter(reprice) })).toMatchObject({ sent: 0, waiting: 2, failed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      const rows = await messages(f.estimateId);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.status === 'failed' && r.error_message === 'aborted_by_caller_before_dispatch')).toBe(true);
+      // The next run sees the price that is no longer discounted and waits; nothing claims it.
+      expect(await emailRun(trx)).toMatchObject({ sent: 0, waiting: 1 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a listed plan held by a series edit (the real maintenance lock) refuses at the handoff; free again, the email goes', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      // Another connection holds the new home's series the way a "this and following" save does. (Not the parents'
+      // series: PR 2's apply took that lock inside this test's one rolled-back transaction, so it stays held here.)
+      const holder = await appDb.transaction();
+      try {
+        await require('../routes/admin-schedule').acquireRecurringSeriesMaintenanceLock(holder, f.sonSeries.rootId);
+        expect(await emailRun(trx)).toMatchObject({ sent: 0, waiting: 2, failed: 0 });
+        expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      } finally {
+        await holder.rollback();
+      }
+      // The refused attempts are definitely unsent; the job tries them again after its daily backoff.
+      await appDb('email_messages').where('idempotency_key', 'like', `${TEMPLATE_KEY}:${f.estimateId}:%`)
+        .update({ updated_at: new Date(Date.now() - 25 * 60 * 60 * 1000) });
+      expect(await emailRun(trx)).toMatchObject({ sent: 2, failed: 0 });
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(2);
+    });
+  });
+
   test('a held target blocks the send; once it is no longer a target the email goes', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);

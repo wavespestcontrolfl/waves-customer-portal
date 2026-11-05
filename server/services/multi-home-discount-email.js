@@ -29,10 +29,13 @@
  * group bills to a payer with that AP email, else the first home's profile first name. No address -> no email for that
  * group (logged). A profile whose portal-wide email switch (notification_prefs.email_enabled) is off, or whose switch
  * cannot be read, is left out of the send; suppression and the transactional stream go through sendTemplate as usual.
- * At the provider handoff (sendTemplate's withProviderHandoff) the profiles, email switches and payers are read again
- * FOR SHARE, under each profile's customer-comms lock and then the address key, held through the request: a home whose
- * address, payer or switch changed, or a changed greeting, refuses that email before the request (counted as waiting;
- * a later run regroups from fresh rows).
+ *
+ * AT THE PROVIDER HANDOFF (sendTemplate's withProviderHandoff), in PR 2's lock order (the family lock, each listed
+ * series' maintenance lock as a try, each profile's customer-comms lock), the whole email is composed again from fresh
+ * reads (the routing rows FOR SHARE; no visit or invoice row is locked). It goes only when the same homes, the same
+ * series and exactly this send come out; then the address key is taken and every lock is held through the request.
+ * Anything else (a price or discount changed, a target added or held, a family change, a new address, payer, switch
+ * or greeting, a series being changed right now) refuses before the request: counted as waiting, a later run checks again.
  *
  * CELLS (per home; a cell that cannot be read from a stored record is left out, never guessed; the template drops the
  * row):
@@ -52,6 +55,7 @@
  */
 
 const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
 const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
@@ -61,6 +65,7 @@ const { propertyStreetLine } = require('../utils/property-display');
 const { PLAN_LINE_SQL } = require('./rate-review');
 const { PRICE_SERVICE_PRICE_KEYS, parseTemplateOverrides } = require('./recurring-template-overrides');
 const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { lockFamilyChangesShared } = require('./multi-home-family');
 const apply = require('./multi-home-discount-apply');
 
 const TEMPLATE_KEY = 'customer.multi_home_discount_on';
@@ -351,11 +356,14 @@ async function buildHomes(dbh, ctx) {
 
 // ── who pays, who may be emailed ────────────────────────────────────────
 
-async function loadCustomers(dbh, ids) {
-  const rows = await dbh('customers').whereIn('id', ids).whereNull('deleted_at').select(
+// `lock` (the provider handoff) reads the routing rows FOR SHARE: an edit of a profile's email or Bill-To payer, its
+// email switch, or a payer's AP email either committed first (and is read) or waits until the request is made.
+async function loadCustomers(dbh, ids, { lock = false } = {}) {
+  const query = dbh('customers').whereIn('id', ids).whereNull('deleted_at').select(
     'id', 'first_name', 'last_name', 'email', 'payer_id', 'billing_mode', 'autopay_enabled', 'autopay_paused_until',
     'autopay_payment_method_id', 'ach_status', 'address_line1', 'address_line2',
   );
+  const rows = lock ? await query.orderBy('id').forShare() : await query;
   return new Map(rows.map((r) => [String(r.id), r]));
 }
 
@@ -369,9 +377,10 @@ async function loadPayers(dbh, customers, { lock = false } = {}) {
 }
 
 // Profiles whose portal-wide email switch is off. A read that fails throws: the source waits for the next tick.
-async function loadEmailOptOuts(dbh, ids) {
-  const rows = await dbh('notification_prefs').whereIn('customer_id', ids).where({ email_enabled: false }).select('customer_id');
-  return new Set(rows.map((r) => String(r.customer_id)));
+async function loadEmailOptOuts(dbh, ids, { lock = false } = {}) {
+  const query = dbh('notification_prefs').whereIn('customer_id', ids).select('customer_id', 'email_enabled');
+  const rows = lock ? await query.orderBy('customer_id').forShare() : await query;
+  return new Set(rows.filter((r) => r.email_enabled === false).map((r) => String(r.customer_id)));
 }
 
 async function paymentCell(dbh, customer, payer) {
@@ -413,50 +422,6 @@ async function groupByPayingAddress(dbh, homes, { customers, payers, optedOut })
   return { groups: [...groups.values()], noAddress };
 }
 
-// The routing rows again, FOR SHARE inside the handoff transaction: an edit of a profile's email or Bill-To payer, its
-// email switch, or a payer's AP email either committed first (and is read here) or waits until the request is made.
-async function lockedRouting(trx, ids) {
-  const rows = await trx('customers').whereIn('id', ids).whereNull('deleted_at').orderBy('id').forShare()
-    .select('id', 'first_name', 'email', 'payer_id');
-  const customers = new Map(rows.map((r) => [String(r.id), r]));
-  const prefs = await trx('notification_prefs').whereIn('customer_id', ids).orderBy('customer_id').forShare()
-    .select('customer_id', 'email_enabled');
-  const optedOut = new Set(prefs.filter((p) => p.email_enabled === false).map((p) => String(p.customer_id)));
-  return { customers, optedOut, payers: await loadPayers(trx, customers, { lock: true }) };
-}
-
-// Every home of the group still pays to this address through the same payer (or none), no profile turned email off,
-// and the greeting is still the one rendered.
-function routingUnchanged(group, greeting, { customers, optedOut, payers }) {
-  const stillRouted = group.homes.every((home) => {
-    const customer = customers.get(home.customerId);
-    if (!customer || optedOut.has(home.customerId)) return false;
-    const route = routeFor(customer, payers);
-    return route.key === group.key && (route.payer ? String(route.payer.id) : null) === home.payerId;
-  });
-  if (!stillRouted) return false;
-  const payer = group.payer ? payers.get(String(group.payer.id)) || null : null;
-  return greetingFor({ ...group, payer }, customers) === greeting;
-}
-
-// The email library's provider-boundary hook. Under each profile's customer-comms lock (sorted ids, taken before any
-// row lock), the routing rows are read again; a change refuses before the request (nothing is sent, a later run
-// regroups from fresh rows). Otherwise the address key, which suppression writers share, is taken and every lock is
-// held through the provider request.
-function routingHandoff(dbh, group, greeting, state) {
-  return (dispatch) => dbh.transaction(async (trx) => {
-    const ids = [...new Set(group.homes.map((h) => h.customerId))].sort();
-    for (const id of ids) await lockCustomerComms(trx, id);
-    if (!routingUnchanged(group, greeting, await lockedRouting(trx, ids))) {
-      state.routingChanged = true;
-      return { ok: false, reason: 'recipient_changed' };
-    }
-    await lockCustomerEmail(trx, group.address);
-    await dispatch(trx);
-    return { ok: true };
-  });
-}
-
 function greetingFor(group, customers) {
   if (group.payer) return firstWord(group.payer.display_name) || 'there';
   const first = customers.get(group.homes[0].customerId);
@@ -495,24 +460,27 @@ function idempotencyKeyFor(estimateId, groupKey) {
   return `${TEMPLATE_KEY}:${estimateId}:${crypto.createHash('sha256').update(groupKey).digest('hex').slice(0, 32)}`;
 }
 
-// Returns the send's result and whether the provider-boundary recheck refused it.
-async function sendGroup(send, { dbh, estimateId, group, customers }) {
+// The fields of one group's send, compared again at the provider handoff.
+function sendArgs(estimateId, group, customers) {
   const payer = !!group.payer;
-  const payload = payloadFor(group, customers);
-  const state = { routingChanged: false };
-  const result = await send({
-    templateKey: TEMPLATE_KEY,
+  return {
     to: group.address,
-    payload,
+    payload: payloadFor(group, customers),
     recipientType: payer ? 'payer' : 'customer',
     recipientId: payer ? String(group.payer.id) : group.homes[0].customerId,
     triggerEventId: `multi_home_discount_on:${estimateId}`,
     idempotencyKey: idempotencyKeyFor(estimateId, group.key),
-    categories: [CATEGORY],
-    suppressProviderErrorLog: true,
-    withProviderHandoff: routingHandoff(dbh, group, payload.greeting_name, state),
+  };
+}
+
+// Each group's email (homes sorted), or why it is not sent.
+function sendsFor(estimateId, groups, customers) {
+  return groups.map((group) => {
+    const homes = sortHomes(group.homes);
+    if (homes.length > MAX_HOMES) return { key: group.key, skip: 'too_many_homes', count: homes.length };
+    if (homes.some((h) => !h.address)) return { key: group.key, skip: 'no_street' };
+    return { key: group.key, args: sendArgs(estimateId, { ...group, homes }, customers) };
   });
-  return { result, routingChanged: state.routingChanged };
 }
 
 function tally(out, result) {
@@ -553,63 +521,125 @@ async function earlierAttemptVerdict(dbh, key, holdsEarlier) {
   return (await failedRecently(dbh, key)) ? 'wait' : 'send';
 }
 
-async function sendGroups(send, groups, ctx, out) {
-  for (const group of groups) {
-    group.homes = sortHomes(group.homes);
-    if (group.homes.length > MAX_HOMES) {
-      logger.error(`[multi-home-discount-email] estimate ${ctx.estimate.id}: ${group.homes.length} homes pay to one address, more than the ${MAX_HOMES} the email holds; not sent`);
+const REFUSALS = Object.freeze({
+  series_busy: 'a listed plan is being changed right now',
+  not_ready: 'a home\'s discount or price, or another home of the family, changed',
+  homes_changed: 'the family\'s homes changed',
+  content_changed: 'what this email states, or who it goes to, changed',
+});
+
+async function sendGroups(dbh, run, estimate, composed, out) {
+  for (const one of composed.sends) {
+    if (one.skip === 'too_many_homes') {
+      logger.error(`[multi-home-discount-email] estimate ${estimate.id}: ${one.count} homes pay to one address, more than the ${MAX_HOMES} the email holds; not sent`);
       out.skipped += 1;
       continue;
     }
-    if (group.homes.some((h) => !h.address)) {
-      logger.warn(`[multi-home-discount-email] estimate ${ctx.estimate.id}: a home has no street address on file; email to its paying address not sent`);
+    if (one.skip) {
+      logger.warn(`[multi-home-discount-email] estimate ${estimate.id}: a home has no street address on file; email to its paying address not sent`);
       out.skipped += 1;
       continue;
     }
-    const earlier = await earlierAttemptVerdict(ctx.dbh, idempotencyKeyFor(ctx.estimate.id, group.key), ctx.holdsEarlier);
+    const earlier = await earlierAttemptVerdict(dbh, one.args.idempotencyKey, run.holdsEarlier);
     if (earlier === 'wait') { out.waiting += 1; continue; }
     if (earlier === 'never') { out.skipped += 1; continue; }
+    const state = { refused: null };
     try {
-      const { result, routingChanged } = await sendGroup(send, { dbh: ctx.dbh, estimateId: ctx.estimate.id, group, customers: ctx.customers });
-      if (routingChanged) {
-        logger.info(`[multi-home-discount-email] estimate ${ctx.estimate.id}: a payer, email address or email switch changed just before the send; nothing sent, the next run regroups`);
+      const result = await run.send({
+        templateKey: TEMPLATE_KEY,
+        ...one.args,
+        categories: [CATEGORY],
+        suppressProviderErrorLog: true,
+        withProviderHandoff: sendTimeHandoff(dbh, run, estimate, composed, one, state),
+      });
+      if (state.refused) {
+        logger.info(`[multi-home-discount-email] estimate ${estimate.id}: ${REFUSALS[state.refused]} just before the send; nothing sent, the next run checks again`);
         out.waiting += 1;
         continue;
       }
       tally(out, result);
     } catch (err) {
       out.failed += 1;
-      logger.warn(`[multi-home-discount-email] estimate ${ctx.estimate.id}: send not completed (${redact(err)}); the next run retries through the email library`);
+      logger.warn(`[multi-home-discount-email] estimate ${estimate.id}: send not completed (${redact(err)}); the next run retries through the email library`);
     }
   }
 }
 
 // ── the job ─────────────────────────────────────────────────────────────
 
+// Everything one source's email states, from fresh reads on `conn`: { none } when the estimate is not a source,
+// { wait } when it is not ready to send, else the sends. `lock` is the provider handoff's read (see loadCustomers).
+async function composeSource(conn, estimate, run, { lock = false } = {}) {
+  const source = await apply._private.describeSource(conn, estimate, run.presetId);
+  if (!source) return { none: true };
+  const targets = await apply._private.targetsForSource(conn, source, run.today);
+  const roots = [...new Set([...source.roots, ...targets.map((t) => t.rootId)].map(String))].sort();
+  const ids = [...new Set([source.customerId, ...targets.map((t) => t.customerId)].map(String))].sort();
+  const ledger = await loadLedgerRows(conn, estimate.id);
+  if (openTargetReason(targets, ledger)) return { wait: 'target_open', roots, ids };
+  const customers = await loadCustomers(conn, ids, { lock });
+  const ctx = { estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh: conn, nextPrices: run.nextPrices };
+  const homes = await buildHomes(conn, ctx);
+  if (homes.some((h) => h.stale)) return { wait: 'home_stale', roots, ids };
+  const payers = await loadPayers(conn, customers, { lock });
+  const optedOut = await loadEmailOptOuts(conn, ids, { lock });
+  const { groups, noAddress } = await groupByPayingAddress(conn, homes, { customers, payers, optedOut });
+  return { roots, ids, noAddress, sends: sendsFor(estimate.id, groups, customers) };
+}
+
+// The source estimate as the scan read it: still accepted, same profile, same accept time (so still in the window).
+async function sourceEstimateNow(trx, estimate) {
+  const row = await trx('estimates').where({ id: estimate.id, status: 'accepted' })
+    .first('id', 'customer_id', 'property_id', 'accepted_at', 'estimate_data');
+  const sameAccept = row && new Date(row.accepted_at).getTime() === new Date(estimate.accepted_at).getTime();
+  return row && sameAccept && String(row.customer_id) === String(estimate.customer_id) ? row : null;
+}
+
+// The provider-boundary recheck (pre-push audit P1s, rounds 7 and 8). In PR 2's lock order: the family lock first (a
+// link or unlink takes it exclusively), then each listed series' maintenance lock (every series price writer takes it;
+// a try, so a series being changed refuses instead of waiting), then each profile's customer-comms lock. Under them the
+// whole email is composed again from fresh reads, and it goes only when the same homes, the same series and exactly this
+// send come out; then the address key is taken and every lock is held through the request. Otherwise nothing is sent
+// and a later run checks again. No visit or invoice row is locked: the series lock fences the price writers.
+function sendTimeHandoff(dbh, run, estimate, composed, one, state) {
+  return (dispatch) => dbh.transaction(async (trx) => {
+    const refuse = (reason) => { state.refused = reason; return { ok: false, reason }; };
+    await lockFamilyChangesShared(trx);
+    for (const rootId of composed.roots) {
+      // Byte-identical key to admin-schedule.js acquireRecurringSeriesMaintenanceLock (a service cannot import a route).
+      const res = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+        ['recurring-series-maintenance', rootId]);
+      if (res?.rows?.[0]?.locked !== true) return refuse('series_busy');
+    }
+    for (const id of composed.ids) await lockCustomerComms(trx, id);
+    const current = await sourceEstimateNow(trx, estimate);
+    const fresh = current ? await composeSource(trx, current, run, { lock: true }) : { none: true };
+    if (fresh.none || fresh.wait) return refuse('not_ready');
+    if (!isDeepStrictEqual(fresh.roots, composed.roots) || !isDeepStrictEqual(fresh.ids, composed.ids)) return refuse('homes_changed');
+    const now = fresh.sends.find((s) => s.key === one.key);
+    if (!now || now.skip || !isDeepStrictEqual(now.args, one.args)) return refuse('content_changed');
+    await lockCustomerEmail(trx, one.args.to);
+    await dispatch(trx);
+    return { ok: true };
+  });
+}
+
 async function processSource(dbh, estimate, run, out) {
-  const source = await apply._private.describeSource(dbh, estimate, run.presetId);
-  if (!source) return;
+  const composed = await composeSource(dbh, estimate, run);
+  if (composed.none) return;
   out.sources += 1;
-  const targets = await apply._private.targetsForSource(dbh, source, run.today);
-  const ledger = await loadLedgerRows(dbh, estimate.id);
-  if (openTargetReason(targets, ledger)) { out.waiting += 1; return; }
-  const ids = [...new Set([source.customerId, ...targets.map((t) => t.customerId)].map(String))];
-  const customers = await loadCustomers(dbh, ids);
-  const ctx = { estimate, source, targets, ledger, presetId: run.presetId, today: run.today, customers, dbh, nextPrices: run.nextPrices };
-  const homes = await buildHomes(dbh, ctx);
-  if (homes.some((h) => h.stale)) {
-    logger.info(`[multi-home-discount-email] estimate ${estimate.id}: a home's discount or price is not proven now (changed, or not shown); the email waits`);
+  if (composed.wait) {
+    if (composed.wait === 'home_stale') {
+      logger.info(`[multi-home-discount-email] estimate ${estimate.id}: a home's discount or price is not proven now (changed, or not shown); the email waits`);
+    }
     out.waiting += 1;
     return;
   }
-  const payers = await loadPayers(dbh, customers);
-  const optedOut = await loadEmailOptOuts(dbh, ids);
-  const { groups, noAddress } = await groupByPayingAddress(dbh, homes, { customers, payers, optedOut });
-  if (noAddress.length) {
-    logger.info(`[multi-home-discount-email] estimate ${estimate.id}: ${noAddress.length} home(s) have no email address to send to`);
-    out.noAddress += noAddress.length;
+  if (composed.noAddress.length) {
+    logger.info(`[multi-home-discount-email] estimate ${estimate.id}: ${composed.noAddress.length} home(s) have no email address to send to`);
+    out.noAddress += composed.noAddress.length;
   }
-  await sendGroups(run.send, groups, ctx, out);
+  await sendGroups(dbh, run, estimate, composed, out);
 }
 
 /**
@@ -643,7 +673,7 @@ module.exports = {
   _private: {
     openTargetReason, sourcePrices, targetPrices, groupByPayingAddress, greetingFor, payloadFor, homeCells, idempotencyKeyFor,
     weekdayDate, money, sortHomes, paymentCell, processSource, loadLedgerRows, sendGroups, failedRecently, earlierAttemptVerdict, targetStillCurrent, soldTargetPrices, sourceHomeVerdict, targetHomeVerdict, unchangedSinceSale, MAX_HOMES, HOME_FIELDS,
-    routeFor, routingUnchanged, routingHandoff,
+    routeFor, sendsFor, composeSource, sendTimeHandoff,
     RETRY_BACKOFF_MS, CATEGORY,
   },
 };
