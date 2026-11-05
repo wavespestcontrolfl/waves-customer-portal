@@ -4,6 +4,7 @@ import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomp
 import { Input, inputStyles, useUiDensity, Select, Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
 import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
+import CustomerSameFamilySection from "./CustomerSameFamilySection";
 
 // customer_properties column widths (server PROPERTY_FIELD_LIMITS mirrors
 // migration 20260629000001); the server 400s past these too.
@@ -623,6 +624,8 @@ export default function CustomerPropertiesPanelV2({
             </div>
           </form>
         )}
+        {/* GET/POST/DELETE multi-home-family are requireAdmin; this panel is mounted for admins only (canEdit). */}
+        {canEdit && <CustomerSameFamilySection customerId={customerId} />}
       </CardBody>
       {primaryPreview && <Dialog open layer={1100} onClose={() => { if (!writeBusy) setPrimaryPreview(null); }}>
         <DialogHeader><DialogTitle>Change primary property</DialogTitle></DialogHeader>

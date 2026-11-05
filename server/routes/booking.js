@@ -1692,7 +1692,10 @@ function detachVoiceRouteCheck(plan, candidates) {
 // `bestSlotCount`: opt-in size of the curated `slots` list (curateSlots, one
 // per date; unset = 4). Only reschedule-public.js passes it (6, for a visit
 // waiting for the customer's pick); days[].slots is never affected.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel, serviceLines, bestSlotCount }) {
+// `technicianId`: opt-in. find-time searches that one technician's days only
+// (its own technicianId filter). Only reschedule-public.js passes it: a visit
+// that already has a technician keeps that technician.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel, serviceLines, bestSlotCount, technicianId }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1836,6 +1839,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     includeWeekends: true,
     // Display selection happens only after every feasible day is evaluated.
     topN: Number.MAX_SAFE_INTEGER,
+    // One technician's days only (reschedule-public.js keeps the visit's technician);
+    // unset for every other caller = every assignable technician, as before.
+    technicianId,
   });
 
   // Slot rules come from the shared bookingSlotWindow derivation so the

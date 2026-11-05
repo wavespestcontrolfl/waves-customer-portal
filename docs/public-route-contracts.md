@@ -1205,6 +1205,27 @@ rounds a year and a customer move stays inside the round the visit sits in:
     and the call reschedule apply use the same rule; the office "Reschedule
     series" action (`scope: 'series'`) always re-anchors.
 
+Public self-serve reschedule keeps the visit's technician (owner 2026-10-25,
+"each visit stays with its own technician"; no gate). Its one picker
+(`buildAvailabilityForService`, behind the GET slot list, `POST
+/:token/find-slots`, the commit's anti-forgery rebuild and the texting AI's
+offers) asks `buildBookingAvailability` for the visit's own technician's days
+only (`technicianId`, find-time's own filter) while that technician can take
+work (`technician-eligibility isAssignable`: employment active and field
+dispatchable). So `days[].slots` and `slots` name that technician only, and
+`POST /:token` (which sends a date and start, never a technician) saves the
+technician of the rebuilt slot, so it can only keep the visit's own; a start that
+technician no longer has answers the existing `409 SLOT_TAKEN`. Both movers' guard
+then re-reads the visit's technician on the locked row (missed visits too): a staff
+reassignment since the request's read answers `409 { error: "Cannot reschedule —
+appointment changed concurrently", code: 'SLOT_TAKEN' }` (the rebooker's own
+concurrent-change answer) and writes nothing. A visit with no technician, or whose
+technician can no longer take work, passes the visit's service line instead
+(`serviceLines`, `line-technician liveServiceLine`: catalog row first; a Waves
+Assessment has none), which ranks only while `GATE_SERVICE_LINE_MAP=live`
+(home technician first, then the gap technician, territory included). With one
+assignable technician every response is unchanged.
+
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
 SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
@@ -7174,6 +7195,18 @@ move-pause job (not a route) closes a paused move with still no address 60
 days after its move-out date (`closed_reason` `pause_expired`); from then on
 its token is the generic 404, like any closed move. Gate off: the plain
 no-address sentence, and no move closes this way.
+Old-house stop (owner 2026-11-04, "YES app cancel those old-house visits"):
+while `GATE_MOVING_STOP_AT_MOVE_OUT` is also on (strict `'true'`, read per
+request, needs `GATE_MOVING_PAUSE`), a submit with a checked address on file
+and a move-out date reads the same lane. A customer billed per visit in the
+service area (or with an address we could not confirm) reads "Your plan at
+the new home starts when you approve it. We cancel the visits booked at your
+old home after <move-out date>." in place of "Nothing changes until you
+approve it."; the could-not-confirm sentence still follows. Everyone else, an
+out-of-area address, and a submit with no move-out date read the sentences
+from before. The move job (not a route) never closes such a move: its link
+keeps opening until the move is applied or closed some other way. Gate off:
+the receipt is unchanged.
 New-home estimates on the estimate routes (moving PR B1, owner 2026-11-02):
 `/estimate/:token` and its data, accept and decline routes,
 `/api/public/estimates/:token/find-slots`, `/available-slots`, `/reserve`,
