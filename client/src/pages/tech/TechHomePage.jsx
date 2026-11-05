@@ -270,6 +270,11 @@ const ROUTE_REFRESH_INTERVAL_MS = 60_000;
 // nothing; only the timed re-read passes `{ background: true }`.
 const isBackgroundRead = (options) => options?.background === true;
 
+// A timed re-read keeps the route on screen through a passing failure (no
+// connection, a server error), never through a refusal (401/403): then the
+// route and its customers leave the screen as on any other read.
+const backgroundKeepsRoute = (background, result) => background && result.kind !== 'refused';
+
 function refreshingRouteNotice(savedAt) {
   const time = formatSnapshotTime(savedAt);
   return `Refreshing your route — showing the copy saved${time ? ` at ${time}` : ''}.`;
@@ -475,9 +480,10 @@ export default function TechHomePage({ section = 'today' }) {
         return next.rows;
       }
       console.error('Failed to fetch schedule:', result.kind, result.message || '');
-      // A timed re-read that fails keeps the route already on screen; the
-      // tech's own Refresh or the next timed read shows a real error.
-      if (background) return;
+      // A timed re-read that fails for a moment keeps the route already on
+      // screen; the tech's own Refresh or the next timed read shows a real
+      // error (backgroundKeepsRoute).
+      if (backgroundKeepsRoute(background, result)) return;
       // Offline fallback: the last good route this tech loaded today, read
       // fresh each time (another tab or a later login may have replaced it).
       // A server answer of any kind keeps the saved copy hidden behind the

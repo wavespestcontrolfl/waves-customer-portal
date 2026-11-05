@@ -287,3 +287,17 @@ it('keeps the route on screen when a background re-read fails', async () => {
   expect(screen.queryByText('Route connection unavailable')).not.toBeInTheDocument();
   expect(screen.getAllByText(/Fixture live-one/).length).toBeGreaterThan(0);
 });
+
+it.each([
+  ['401', 'rejected-401', 'Session expired'],
+  ['403', 'rejected-403', 'Not allowed'],
+])('a background re-read the server refuses (%s) takes the route off the screen', async (_label, mode, error) => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  mount();
+  await screen.findAllByText(/Fixture live-one/);
+  scheduleMode = mode;
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  await waitFor(() => expect(screen.queryByText(/Fixture live-one/)).not.toBeInTheDocument());
+  expect(screen.getByText(error).closest('[role="alert"]')).not.toBeNull();
+  expect(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).toBeNull();
+});
