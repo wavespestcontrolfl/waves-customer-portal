@@ -368,3 +368,95 @@ describe('computePaycheck: family employee (GATE_PAYROLL_FAMILY_EMPLOYEE)', () =
     expect(() => paycheck({ unemploymentExempt: false, ytdUnemploymentWages: '-1' })).toThrow(/Year-to-date unemployment wages/);
   });
 });
+
+describe('computePaycheck: SIMPLE IRA (employee deferral and Waves 2%)', () => {
+  const plain = paycheck();
+  // The same pay as a smaller check: $892.40 gross is the $920.00 check less a 3% deferral of $27.60.
+  const smaller = paycheck({ hourlyRate: '22.31' });
+  const THREE_PERCENT = { deferralBp: 300 };
+
+  test('a percent deferral lowers income tax wages and withholding, never the Social Security, Medicare, FUTA or RT-6 wages', () => {
+    const check = paycheck({ simple: THREE_PERCENT });
+    expect(check.simpleDeferralCents).toBe(2760);
+    expect(check.incomeTaxWagesCents).toBe(92000 - 2760);
+    expect(check.simpleCompensationCents).toBe(92000);
+    // Withholding is worked out on gross less the deferral: the same tax as a $892.40 check.
+    expect(smaller.grossPayCents).toBe(89240);
+    expect(check.withholdingWorksheet.line1a).toBe(89240);
+    expect(check.federalIncomeTaxCents).toBe(smaller.federalIncomeTaxCents);
+    expect(check.federalIncomeTaxCents).toBeLessThan(plain.federalIncomeTaxCents);
+    // FICA, FUTA and RT-6 are the same as the check with no deferral.
+    expect(check.taxableWages).toEqual(plain.taxableWages);
+    expect(check.socialSecurityEmployeeCents).toBe(plain.socialSecurityEmployeeCents);
+    expect(check.medicareEmployeeCents).toBe(plain.medicareEmployeeCents);
+    expect(check.futaCents).toBe(plain.futaCents);
+    expect(check.floridaReemploymentCents).toBe(plain.floridaReemploymentCents);
+    expect(check.grossPayCents).toBe(plain.grossPayCents);
+    // The deferral comes out of net pay after the taxes.
+    expect(check.netPayCents).toBe(92000 - check.federalIncomeTaxCents - check.socialSecurityEmployeeCents
+      - check.medicareEmployeeCents - check.additionalMedicareCents - 2760);
+  });
+
+  test('the percent rounds half up to the cent; a fixed amount is taken as typed', () => {
+    // 0.5% of $1.00 is half a cent: rounds up to 1 cent.
+    expect(paycheck({ hourlyRate: '15.00', regularMinutes: '4.00', simple: { deferralBp: 50 } }).simpleDeferralCents).toBe(1);
+    expect(paycheck({ simple: { deferralCents: 5000 } }).simpleDeferralCents).toBe(5000);
+  });
+
+  test('the year stops at the limit across checks, and a participant with no deferral still has the 2%', () => {
+    const wanted = { deferralCents: 50000 };
+    expect(paycheck({ simple: { ...wanted, ytdDeferralCents: 1680000 } }).simpleDeferralCents).toBe(20000);
+    expect(paycheck({ simple: { ...wanted, ytdDeferralCents: 1700000 } }).simpleDeferralCents).toBe(0);
+    expect(paycheck({ simple: { ...wanted, ytdDeferralCents: 1700000 } }).netPayCents).toBe(plain.netPayCents);
+    const none = paycheck({ simple: {} });
+    expect(none.simpleDeferralCents).toBe(0);
+    expect(none.simpleEmployerCents).toBe(1840);
+    expect(none.netPayCents).toBe(plain.netPayCents);
+    expect(none.federalIncomeTaxCents).toBe(plain.federalIncomeTaxCents);
+  });
+
+  test('a check never saves more than it pays after taxes, and taxes come first', () => {
+    // $15.00 gross, $1.15 of Social Security and Medicare, no income tax at this pay level.
+    const tiny = { hourlyRate: '15.00', regularMinutes: '60.00' };
+    const small = paycheck({ ...tiny, simple: { deferralCents: 100000 } });
+    expect(small.grossPayCents).toBe(1500);
+    expect(small.simpleDeferralCents).toBe(1500 - small.socialSecurityEmployeeCents - small.medicareEmployeeCents);
+    expect(small.netPayCents).toBe(0);
+    // Extra Step 4(c) withholding is taken before the savings.
+    const extra = paycheck({ ...tiny, w4: { ...W4_SINGLE, step4cExtraWithholding: '5' }, simple: { deferralCents: 100000 } });
+    expect(extra.federalIncomeTaxCents).toBe(500);
+    expect(extra.simpleDeferralCents).toBe(1500 - 500 - extra.socialSecurityEmployeeCents - extra.medicareEmployeeCents);
+    expect(extra.netPayCents).toBe(0);
+  });
+
+  test('the 2% is figured on compensation up to the yearly cap, counting the year to date', () => {
+    expect(paycheck({ simple: {} }).simpleEmployerCents).toBe(1840);
+    const nearCap = paycheck({ simple: { ytdCompensationCents: 35950000 } });
+    expect(nearCap.simpleEmployerCents).toBe(1000);
+    expect(paycheck({ simple: { ytdCompensationCents: 36000000 } }).simpleEmployerCents).toBe(0);
+    // Pay at the limit still pays 2% only on the room left.
+    expect(TAX_YEARS[2026].simpleCompensationCapCents).toBe(36000000);
+    expect(TAX_YEARS[2026].simpleDeferralLimitCents).toBe(1700000);
+  });
+
+  test('the SIMPLE figures appear without pay lines; with pay lines the income tax wages still exclude the deferral', () => {
+    const check = paycheck({ simple: THREE_PERCENT });
+    expect(check).toHaveProperty('incomeTaxWagesCents');
+    expect(check).not.toHaveProperty('qualifiedOvertimeCents');
+    const withLines = paycheck({ simple: THREE_PERCENT, payLines: { commissionCents: 10000 }, flsaCovered: true });
+    expect(withLines.grossPayCents).toBe(102000);
+    expect(withLines.simpleDeferralCents).toBe(3060);
+    expect(withLines.incomeTaxWagesCents).toBe(102000 - 3060);
+    expect(withLines).toHaveProperty('qualifiedOvertimeCents');
+  });
+
+  test('no SIMPLE input is byte for byte today; bad input is refused', () => {
+    expect(JSON.stringify(paycheck({ simple: undefined }))).toBe(JSON.stringify(plain));
+    expect(JSON.stringify(paycheck({ simple: null }))).toBe(JSON.stringify(plain));
+    expect(plain).not.toHaveProperty('simpleDeferralCents');
+    expect(() => paycheck({ simple: { deferralBp: 300, deferralCents: 100 } })).toThrow(/not both/);
+    expect(() => paycheck({ simple: { deferralBp: 10001 } })).toThrow(/more than 100/);
+    expect(() => paycheck({ simple: { deferralCents: -5 } })).toThrow(/SIMPLE IRA dollars/);
+    expect(() => paycheck({ simple: { ytdDeferralCents: 'abc' } })).toThrow(/Year-to-date SIMPLE IRA savings/);
+  });
+});

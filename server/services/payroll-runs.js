@@ -48,6 +48,12 @@
  * counts non-exempt pay only. Nothing else about the check changes. Gate off, every function here
  * reads and returns what it did before.
  *
+ * SIMPLE IRA (owner 2026-11-04, B2 A; no gate): a draft reads the election in force on the pay date
+ * (services/payroll-simple.js) and the year's deferral and participant pay already on finalized checks.
+ * A participant's check stores the election, the employee's deferral and Waves' 2% figure; the deferral
+ * comes out of net pay. With no election (or a non-participant one) every function here reads and
+ * returns what it did before.
+ *
  * Every write runs in one transaction with row locks. Audit events are
  * critical and carry ids only.
  */
@@ -57,6 +63,7 @@ const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 const { computePaycheck } = require('./payroll-calc');
 const { currentW4For, PayrollError } = require('./payroll-w4');
+const { simpleInputFor, simpleYtdBefore } = require('./payroll-simple');
 const { csvRow } = require('./csv-generators');
 const { syncPayrollFilingsSafe } = require('./payroll-tax-calendar');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
@@ -139,6 +146,10 @@ const storedLines = (row) => row.qualified_overtime_cents != null;
 // them in its token after the gate is turned off, so a draft that still shows them goes stale.
 const UNEMPLOYMENT_COLUMNS = ['unemployment_exempt', 'unemployment_wages_cents'];
 const storedUnemployment = (row) => row.unemployment_exempt != null;
+
+// SIMPLE IRA: payroll_checks columns, all null on a check with no participant election behind it.
+const SIMPLE_COLUMNS = ['simple_election_id', 'simple_deferral_cents', 'simple_employer_cents'];
+const storedSimple = (row) => row.simple_election_id != null;
 
 const requireUuid = (id, what) => {
   if (!UUID_RE.test(String(id || ''))) throw new PayrollError(404, `${what} not found.`);
@@ -229,7 +240,7 @@ const electionOrIrsDefault = (election, payDate) => election || {
  * file, or a lapsed exemption) is withheld as the IRS default, not blocked.
  */
 function buildCheck({
-  tech, payDate, weekStart, w4: election, ytdGrossCents, ytdUnemploymentCents, unemploymentExempt,
+  tech, payDate, weekStart, w4: election, ytdGrossCents, ytdUnemploymentCents, unemploymentExempt, simple,
 }) {
   const w4 = electionOrIrsDefault(election, payDate);
   const withTimeOff = timeOffOn();
@@ -256,6 +267,8 @@ function buildCheck({
       } : {}),
       // GATE_PAYROLL_FAMILY_EMPLOYEE: decided by evaluate() (undefined = not decided, today's math).
       ...(unemploymentExempt === undefined ? {} : { unemploymentExempt, ytdUnemploymentWages: centsText(ytdUnemploymentCents) }),
+      // SIMPLE IRA: a participant's election and year-to-date figures (undefined = today's math).
+      simple,
     });
   } catch (err) {
     return { blocked: (err && err.message) || 'The paycheck could not be worked out' };
@@ -273,6 +286,7 @@ function buildCheck({
     calc_snapshot: JSON.stringify(lines.length ? { ...pay, payLines: lines, lineOvertimeWeeks: linePremium.weeks } : pay),
     pay_method: tech.pay_method || 'check',
     status: 'draft',
+    ...simpleColumns(simple, pay),
   };
   for (const [column, key] of Object.entries(MONEY_COLUMNS)) check[column] = pay[key];
   if (withLines) for (const [column, key] of Object.entries(PAY_LINE_COLUMNS)) check[column] = pay[key];
@@ -288,6 +302,13 @@ function buildCheck({
   }
   return { check };
 }
+
+// payroll_checks SIMPLE IRA columns of a participant's check; none for any other (the columns stay null).
+const simpleColumns = (simple, pay) => (simple ? {
+  simple_election_id: simple.id,
+  simple_deferral_cents: pay.simpleDeferralCents,
+  simple_employer_cents: pay.simpleEmployerCents,
+} : {});
 
 // The pay lines a check holds: ids, kinds, amounts and spans, in id order. A stored row
 // carries them as `pay_lines` (calc_snapshot->'payLines'); a row about to be stored
@@ -329,6 +350,8 @@ function tokenOf(run, rows) {
     ...(withLines || storedLines(row) ? [...PAY_LINE_KEYS.map((key) => Number(row[key] || 0)), payLinesSignature(row)] : []),
     // The same rule for the family employee exemption: changing the setting after drafting makes the draft stale.
     ...(withFamily || storedUnemployment(row) ? [row.unemployment_exempt === true, Number(row.unemployment_wages_cents || 0)] : []),
+    // And for SIMPLE IRA savings: a new, changed or ended election after drafting makes the draft stale.
+    ...(storedSimple(row) ? [row.simple_election_id, Number(row.simple_deferral_cents), Number(row.simple_employer_cents)] : []),
   ]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return crypto.createHash('sha256').update(JSON.stringify([run.week_start, run.pay_date, parts])).digest('hex').slice(0, 32);
 }
@@ -357,7 +380,7 @@ const runColumns = (conn) => [
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
   ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_COLUMNS : []),
-  ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
+  ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, ...SIMPLE_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
   'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
@@ -394,6 +417,11 @@ function serializeCheck(row) {
     // No W-4 election stood behind this check: withheld as single, no adjustments (the IRS default).
     // Present only then, so a check with a W-4 keeps exactly its earlier keys.
     ...(row.w4_election_id == null ? { w4Default: true } : {}),
+    // SIMPLE IRA: present only on a participant's check, so any other check keeps exactly its earlier keys.
+    ...(storedSimple(row) ? {
+      simpleDeferralCents: Number(row.simple_deferral_cents),
+      simpleEmployerCents: Number(row.simple_employer_cents),
+    } : {}),
     ...(timeOffOn() ? {
       ptoMinutes: Number(row.pto_minutes || 0),
       holidayMinutes: Number(row.holiday_minutes || 0),
@@ -629,6 +657,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   const payable = [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id));
   const payableIds = payable.map((row) => row.technician_id);
   const ytd = await ytdBefore(conn, payableIds, run.pay_date, start);
+  const simpleYtd = await simpleYtdBefore(conn, payableIds, run.pay_date, start);
   // GATE_PAYROLL_FAMILY_EMPLOYEE: technicians whose pay on the pay date skips FUTA and RT-6 (empty when off).
   const familyLive = familyEmployeeOn();
   const familyExempt = await familyExemptIds(conn, payableIds, run.pay_date, { lock });
@@ -671,6 +700,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
       w4,
       ytdGrossCents: yearToDate.gross,
       ytdUnemploymentCents: yearToDate.unemployment,
+      simple: await simpleInputFor(tech.technician_id, run.pay_date, simpleYtd.get(tech.technician_id), conn),
       // GATE_PAYROLL_FAMILY_EMPLOYEE: decided and stored with the gate on, and also after it is turned
       // off for anyone whose year already holds exempt pay, so that pay never uses up the $7,000 base.
       unemploymentExempt: familyLive || yearToDate.unemployment !== yearToDate.gross
@@ -993,6 +1023,7 @@ async function getStub(checkId, conn = db) {
       conn.raw('COALESCE(SUM(medicare_cents), 0) AS medicare'),
       conn.raw('COALESCE(SUM(additional_medicare_cents), 0) AS additional_medicare'),
       conn.raw('COALESCE(SUM(net_cents), 0) AS net'),
+      conn.raw('COALESCE(SUM(simple_deferral_cents), 0) AS simple_ira'),
     );
   const [paid] = await withPaperPayments(conn, [check]);
   const c = serializeCheck(paid);
@@ -1033,6 +1064,8 @@ async function getStub(checkId, conn = db) {
       additionalMedicareCents: c.additionalMedicareCents,
       totalCents: withheld,
     },
+    // SIMPLE IRA savings (before income tax) come out of pay after the taxes; only on a participant's check.
+    ...(c.simpleDeferralCents === undefined ? {} : { preTaxDeductions: { simpleIraCents: c.simpleDeferralCents } }),
     netCents: c.netCents,
     payMethod: c.payMethod,
     checkNumber: c.checkNumber,
@@ -1044,6 +1077,7 @@ async function getStub(checkId, conn = db) {
       medicareCents: Number(ytd.medicare),
       additionalMedicareCents: Number(ytd.additional_medicare),
       netCents: Number(ytd.net),
+      ...(c.simpleDeferralCents === undefined ? {} : { simpleIraCents: Number(ytd.simple_ira) }),
     },
   };
 }
@@ -1109,12 +1143,15 @@ const CSV_HEADERS = [
 const CSV_TIME_OFF_HEADERS = ['PTO Hours', 'PTO Pay', 'Holiday Hours', 'Holiday Pay'];
 // After those, gate GATE_PAYROLL_PAY_LINES on only. HSA From Waves is not in Gross Pay.
 const CSV_PAY_LINE_HEADERS = ['Review Bonus', 'Commission', 'Health Allowance', 'Overtime On Bonus And Allowance', 'HSA From Waves'];
+// Last, only when a check in the run has SIMPLE IRA savings. It is in Gross Pay and comes out of Net Pay.
+const CSV_SIMPLE_HEADERS = ['SIMPLE IRA Savings'];
 
 function checksToCsv(rows) {
   const withTimeOff = timeOffOn();
   // Gate on, or a check in the run that stored pay line figures (drafted while it was on).
   const withLines = payLinesOn() || rows.some(storedLines);
-  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : [])])];
+  const withSimple = rows.some(storedSimple);
+  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
   for (const row of rows) {
     const c = serializeCheck(row);
     lines.push(csvRow([
@@ -1128,6 +1165,7 @@ function checksToCsv(rows) {
         centsText(c.reviewBonusCents), centsText(c.commissionCents), centsText(c.healthAllowanceCents),
         centsText(c.lineOvertimePremiumCents), centsText(c.hsaEmployerCents),
       ] : []),
+      ...(withSimple ? [centsText(c.simpleDeferralCents || 0)] : []),
     ]));
   }
   return lines.join('\n');
