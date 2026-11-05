@@ -48,11 +48,13 @@ function deliveredTotals(row = {}) {
 // manual overrides such as manualFinalAnnual / manualFinalOneTime) and the manual and self-service quote lines. The
 // scope keeps line names and cadence only. The customer's own selections are not the office's quote and stay out.
 const PRICED_CONTAINERS = ['result', 'engineResult', 'manualQuoteLines', 'services', 'setupFeeQuote'];
-// Bookkeeping a re-price rewrites without changing what the customer is charged: a re-price that lands on the same
-// prices is the same quote.
-const NON_PRICE_KEYS = new Set(['generatedAt', 'productionDiagnostics', 'routingMetadata', 'pricingMetadata', 'costs',
-  'margin', 'finalMargin', 'manualFinalMargin', 'marginWarnings', 'warnings', 'featureWarnings', 'pestAgeAdjWarnings']);
-const isNonPriceKey = (key) => NON_PRICE_KEYS.has(key) || /^diagnostic/i.test(key);
+// Internal signals a re-price rewrites without changing what the customer is charged (an internal cost change flips
+// belowMarginFloor or minAnnualForMargin; generatedAt moves on every run): costs, margins, floors, diagnostics,
+// warnings, confidence, review flags and metadata. The prices themselves (annual, monthly, perApp, price,
+// manualFinalAnnual, manualFinalOneTime, ...) never match, so a re-price that lands on the same prices is the same
+// quote.
+const NON_PRICE_KEY = /margin|cost|floor|diagnostic|warning|confidence|metadata|manualReview|generatedAt/i;
+const isNonPriceKey = (key) => NON_PRICE_KEY.test(key);
 
 function pricedOnly(value) {
   if (Array.isArray(value)) return value.map(pricedOnly);

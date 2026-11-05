@@ -2847,6 +2847,8 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     });
     expect(response.statusCode).toBe(200);
     expect(sendCustomerMessage.mock.calls[0][0].body).toBe('Updated estimate: portal.wavespestcontrol.com/s/synthetic-sms');
+    // The provider's per-template kill switch reads this as the messageType (services/twilio.js isTemplateActive).
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type).toBe('estimate_updated');
     expect(email.sendTemplate).toHaveBeenCalledTimes(1);
     expect(email.sendTemplate.mock.calls[0][0]).toMatchObject({ templateKey: 'estimate.updated_delivery', versionId: 'synthetic-email-version' });
     expect(dataOf().sendSnapshot.scope).toEqual(CORRECTED_SCOPE);
@@ -2927,6 +2929,14 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     expect(email.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('a normal-wording send keeps the estimate_sent message type', async () => {
+    liveScope = DELIVERED_SCOPE;
+    row.status = 'sending';
+    await router.sendEstimateNow(structuredClone(row), 'sms', { callerPreClaimed: true });
+    expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/^Synthetic estimate: /);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type).toBe('estimate_sent');
+  });
+
   test('an updated template that is off sends that channel the normal way', async () => {
     smsTemplates.getTemplate.mockImplementation(async (key, vars) => (key === 'estimate_updated' ? null : baseSms(key, vars)));
     email.loadTemplateByKey.mockImplementation(async (key) => ({
@@ -2959,6 +2969,7 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
       expect((await router.sendEstimateNow(structuredClone(row), 'both', { callerPreClaimed: true })).sent).toBe(true);
     }
     expect(sendCustomerMessage.mock.calls[0][0].body).toBe('Updated estimate: portal.wavespestcontrol.com/s/synthetic-sms');
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type).toBe('estimate_updated');
     expect(email.sendTemplate).toHaveBeenCalledTimes(1);
   });
 

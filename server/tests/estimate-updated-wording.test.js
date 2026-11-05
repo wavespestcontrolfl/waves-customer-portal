@@ -36,6 +36,16 @@ describe('offerChangedSinceDelivery', () => {
     expect(offset.totals).toEqual(PRICED.totals);
     expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: PRICED }, SCOPE, offset)).toBe(true);
   });
+  test('every price the customer pays stays in the digest (manual overrides included)', () => {
+    const left = ['annual', 'monthly', 'perApp', 'price', 'initialFee', 'finalAnnual', 'finalMonthly', 'annualAfterDiscount',
+      'monthlyAfterDiscount', 'priceAfterDiscount', 'manualFinalAnnual', 'manualFinalOneTime', 'visitsPerYear', 'frequency'];
+    for (const key of left) {
+      const [pest] = ROW.estimate_data.engineResult.lineItems;
+      const before = wording.pricedContent(withLines([{ ...pest, [key]: 100 }]));
+      const after = wording.pricedContent(withLines([{ ...pest, [key]: 101 }]));
+      expect([key, before.digest === after.digest]).toEqual([key, false]);
+    }
+  });
   test('offsetting manual price overrides (manualFinalAnnual / manualFinalOneTime) are an update', () => {
     const [pest, lawn] = ROW.estimate_data.engineResult.lineItems;
     const before = wording.pricedContent(withLines([{ ...pest, manualFinalAnnual: 450 }, { ...lawn, manualFinalOneTime: 120 }]));
@@ -51,9 +61,12 @@ describe('offerChangedSinceDelivery', () => {
     const selected = { ...ROW, estimate_data: { ...ROW.estimate_data, customerSelection: { frequencyKey: 'monthly' } } };
     expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: PRICED }, SCOPE, wording.pricedContent(selected))).toBe(false);
   });
-  test('a re-price that lands on the same prices (new generatedAt, costs, margins) is the same quote', () => {
+  test('a re-price that lands on the same prices (new generatedAt, costs, margins, floors) is the same quote', () => {
     const [pest, lawn] = ROW.estimate_data.engineResult.lineItems;
-    const repriced = withLines([{ ...pest, costs: { labor: 11 }, margin: 0.85, warnings: ['synthetic'] }, { ...lawn, diagnosticMargin: 0.7 }]);
+    const repriced = withLines([
+      { ...pest, costs: { labor: 11 }, margin: 0.85, warnings: ['synthetic'], belowMarginFloor: true, minAnnualForMargin: 510, marginGuardApplied: true },
+      { ...lawn, diagnosticMargin: 0.7, costFloorAnnual: 300, programFloorApplied: true, pricingConfidence: 'low', requiresManualReview: true },
+    ]);
     repriced.estimate_data.engineResult = { ...repriced.estimate_data.engineResult, generatedAt: '2026-11-04T09:00:00.000Z', productionDiagnostics: { ms: 12 }, pricingMetadata: { at: 'x' } };
     expect(wording.offerChangedSinceDelivery({ scope: SCOPE, priced: PRICED }, SCOPE, wording.pricedContent(repriced))).toBe(false);
   });

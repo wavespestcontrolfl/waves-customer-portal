@@ -3213,10 +3213,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // needs estimate_sent on; an updated one had estimate_updated checked before the claim. An unreviewed update
           // takes estimate_updated while it is on, else estimate_sent (GATE_ESTIMATE_UPDATED_WORDING).
           const reviewedUpdatedText = options.reviewedMessages?.smsTemplate === updatedWording.UPDATED_SMS_TEMPLATE_KEY;
+          const unreviewedSms = options.reviewedMessages ? null : await deliverySms(updatedSend, smsVars, smsContext);
           const currentSmsBody = reviewedUpdatedText ? null : (options.reviewedMessages
             ? await smsTemplatesRouter.getTemplate('estimate_sent', smsVars, smsContext, { noVariants: true })
-            : (await deliverySms(updatedSend, smsVars, smsContext)).body);
+            : unreviewedSms.body);
           if (!reviewedUpdatedText && !currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
+          // The template that rendered this body: the provider's per-template kill switch (services/twilio.js
+          // isTemplateActive) reads it as the messageType, so an updated text is held to estimate_updated's switch.
+          const smsTemplateKey = (reviewedUpdatedText || unreviewedSms?.marker.smsTemplate)
+            ? updatedWording.UPDATED_SMS_TEMPLATE_KEY : 'estimate_sent';
           const smsBody = options.reviewedMessages
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
@@ -3246,7 +3251,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             },
             entryPoint: 'admin_estimate_send',
             metadata: {
-              original_message_type: 'estimate_sent',
+              original_message_type: smsTemplateKey,
             },
           });
           if (!result.sent) {
