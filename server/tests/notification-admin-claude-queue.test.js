@@ -8,7 +8,7 @@ const mockState = { first: [], update: 1, calls: [] };
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
     const b = {};
-    for (const m of ['where', 'whereRaw', 'whereNull', 'whereIn', 'orderBy', 'limit', 'select', 'forUpdate']) {
+    for (const m of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'forUpdate']) {
       b[m] = jest.fn((...a) => { mockState.calls.push([table, m, ...a]); return b; });
     }
     b.modify = jest.fn((fn) => { fn(b); return b; });
@@ -57,6 +57,21 @@ describe('readers', () => {
     expect(await NotificationService.isAdminOwnerOnly(ID, { role: 'admin' })).toBe(true);
     expect(await NotificationService.isAdminOwnerOnly(ID, { role: 'admin' })).toBe(false);
     expect(await NotificationService.isAdminOwnerOnly(ID, { role: 'admin' })).toBe(false); // gone
+  });
+});
+
+describe('getAdminNotifications owner-only rows', () => {
+  const ownerOnlySql = "COALESCE(metadata->>'ownerOnly', '') <> 'true'";
+  test('hides ownerOnly rows unless fullAccess is true (the default hides them)', async () => {
+    await NotificationService.getAdminNotifications(51, 0, { role: 'admin' });
+    expect(rawTexts()).toEqual(expect.arrayContaining([ownerOnlySql]));
+    mockState.calls = [];
+    await NotificationService.getAdminNotifications(51, 0, { role: 'admin', fullAccess: false });
+    expect(rawTexts()).toEqual(expect.arrayContaining([ownerOnlySql]));
+  });
+  test('fullAccess lists them', async () => {
+    await NotificationService.getAdminNotifications(51, 0, { role: 'admin', fullAccess: true });
+    expect(rawTexts()).not.toEqual(expect.arrayContaining([ownerOnlySql]));
   });
 });
 
@@ -115,8 +130,16 @@ describe('markAdminIdeaCancelled', () => {
     mockState.first = [{ dedupe_key: 'owner-idea:0123456789abcdef' }, { id: ID }];
     expect(await NotificationService.markAdminIdeaCancelled(ID, AT, 'admin', 'Cancelled by the owner.')).toBe(1);
     expect(locks()).toEqual(['admin:owner-idea:0123456789abcdef']);
-    expect(rawTexts()).toEqual(expect.arrayContaining(["metadata->'sentToClaude'->>'kind' = 'owner-idea'"]));
+    expect(rawTexts()).toEqual(expect.arrayContaining(["metadata->'sentToClaude'->>'kind' = ?"]));
+    expect(mockState.calls.filter((c) => c[1] === 'whereRaw' && /->>'kind' = \?/.test(c[2])).map((c) => c[3])).toEqual([['owner-idea'], ['owner-idea']]);
     expect(updates()[0]).toMatchObject({ done_by: 'admin' });
+  });
+
+  test('a guarded copy is fenced on its own kind', async () => {
+    mockState.first = [{ dedupe_key: 'claude-copy:p1' }, { id: ID }];
+    expect(await NotificationService.markAdminIdeaCancelled(ID, AT, 'admin', 'Cancelled by the owner.', 'guarded-copy')).toBe(1);
+    expect(locks()).toEqual(['admin:claude-copy:p1']);
+    expect(mockState.calls.filter((c) => c[1] === 'whereRaw' && /->>'kind' = \?/.test(c[2])).map((c) => c[3])).toEqual([['guarded-copy'], ['guarded-copy']]);
   });
 
   test('a missing row or a started, changed or done idea writes nothing', async () => {

@@ -991,11 +991,13 @@ const NotificationService = {
   // and offset included) so the route can build a cursor that never rounds
   // away the sub-millisecond part: the ::timestamptz it round-trips through
   // is exact, so rows sharing a millisecond are never skipped or repeated.
-  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null } = {}) {
+  // An owner-only row (metadata.ownerOnly: a Claude plan or copy) is listed for the owner login only (`fullAccess`).
+  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ));
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     return query
       .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'))
@@ -1079,18 +1081,18 @@ const NotificationService = {
     });
   },
 
-  // The 10-second Undo of an idea sent from the Intelligence Bar box (admin-claude-ideas.js): closes the row as done by
-  // the admin. Same dedupe lock as the send; the row is locked and the fence re-checked inside the transaction: open,
-  // still in Claude's queue, an 'owner-idea' send stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the
-  // rows written, 0 or 1.
-  async markAdminIdeaCancelled(id, at, by, resolution) {
+  // The 10-second Undo of an idea sent from the Intelligence Bar box (admin-claude-ideas.js), or of a guarded copy
+  // (`kind` 'guarded-copy', admin-alert-copy-to-claude.js): closes the row as done by the admin. Same dedupe lock as the
+  // send; the row is locked and the fence re-checked inside the transaction: open, still in Claude's queue, a send of
+  // that `kind` stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the rows written, 0 or 1.
+  async markAdminIdeaCancelled(id, at, by, resolution, kind = 'owner-idea') {
     return db.transaction(async (trx) => {
       const row = await trx('notifications').where({ id, recipient_type: 'admin' }).first(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
       if (!row) return 0;
       if (row.dedupe_key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${row.dedupe_key}`]);
       const fenced = () => trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
         .whereRaw("metadata->>'claudeQueue' = ?", [SENT_TO_CLAUDE_CLASS])
-        .whereRaw("metadata->'sentToClaude'->>'kind' = 'owner-idea'")
+        .whereRaw("metadata->'sentToClaude'->>'kind' = ?", [kind])
         .whereRaw("metadata->'sentToClaude'->>'at' = ?", [at])
         .whereRaw("metadata->'sentToClaude'->>'startedAt' IS NULL");
       if (!(await fenced().forUpdate().first('id'))) return 0;

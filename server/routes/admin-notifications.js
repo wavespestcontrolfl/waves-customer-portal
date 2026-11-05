@@ -17,6 +17,9 @@ const { explainAdminAlert, explainerLive, withExplainerFields } = require('../se
 const {
   sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendToClaudeLive,
 } = require('../services/admin-alert-send-to-claude');
+const {
+  copyLive, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy,
+} = require('../services/admin-alert-copy-to-claude');
 
 router.use(adminAuthenticate);
 
@@ -86,7 +89,9 @@ router.get('/', async (req, res, next) => {
     const before = parseCursor(req.query.before);
     if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
     const offset = before ? 0 : (page - 1) * limit;
-    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before });
+    // fullAccess: an owner-only row (a Claude plan or copy) is listed for the owner login alone.
+    const fullAccess = ibFullAccess(req);
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
@@ -103,8 +108,10 @@ router.get('/', async (req, res, next) => {
     // An SMS review bell's source text rides as `source_text`, read now and never stored on the row. Added last:
     // the explainer reads the stored row by id, never this.
     const { withTextNoteSources } = require('../services/sms-operational-actions');
-    const marked = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }),
-      { role: req.techRole, fullAccess: ibFullAccess(req) });
+    const sendable = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }),
+      { role: req.techRole, fullAccess });
+    // `sendCopyToClaude` marks a row step 1 refuses (customer contact, words our code did not write), owner login only.
+    const marked = withSendCopyToClaudeFields(sendable, { role: req.techRole, fullAccess });
     const rows = await withTextNoteSources(marked, { role: req.techRole });
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
@@ -497,6 +504,8 @@ router.post('/:id/actions/:actionId', requireAdmin, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    // An owner-only row answers any other login as an unknown row does.
+    if (await hiddenFromLogin(req, id)) return res.status(404).json({ error: 'not_found' });
     const version = req.body?.version;
     if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
       return res.status(400).json({ error: 'version is required' });
@@ -567,6 +576,45 @@ router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
     const { status, body } = await unsendAdminAlertFromClaude(id, {
       at, by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
     });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/send-copy-to-claude — the bell's "Send a copy to Claude (read-only)" button for a row
+// "Send to Claude" refuses (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3). `version` (required): the content
+// version the bell served for the row. `note` (optional text, 500 characters). Writes ONE new owner-only row into Claude's
+// queue that names the alert by id and holds no customer words; the alert itself stays in the bell
+// (services/admin-alert-copy-to-claude.js). The answer carries the copy's `id` and `at`, for the undo. 409 when the row
+// changed since the bell read it or cannot be copied. Sends nothing to anyone. Gate off: 404, the same as an unknown route.
+router.post('/:id/send-copy-to-claude', requireAdmin, async (req, res, next) => {
+  try {
+    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });
+    const version = req.body?.version;
+    if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
+      return res.status(400).json({ error: 'version is required' });
+    }
+    const { status, body } = await sendAlertCopyToClaude(id, {
+      version: version.toLowerCase(), note: req.body?.note, by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
+    });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/cancel-copy — the 10-second Undo after a copy, on the COPY's id (GATE_ALERT_SEND_TO_CLAUDE_COPY,
+// owner login only). `at` (required): the time the send answered with. Closes the copy while it is open, still that send and
+// no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Gate off: 404.
+router.post('/:id/cancel-copy', requireAdmin, async (req, res, next) => {
+  try {
+    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });
+    const at = req.body?.at;
+    if (typeof at !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(at)) return res.status(400).json({ error: 'at is required' });
+    const { status, body } = await cancelAlertCopy(id, { at, by: req.technicianId, role: req.techRole, technicianId: req.technicianId });
     res.status(status).json(body);
   } catch (err) { next(err); }
 });

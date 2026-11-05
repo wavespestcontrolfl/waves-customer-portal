@@ -123,6 +123,8 @@ const RERING = [
     decision: 'expire: only a new Auto Pay hold charge attempt raises it again; an attempt keeps its invoice out of the charge sweep, and a review (over the agreed price, no price, not performed, a payer, a refusal) re-rings only after the bill or visit price changes' },
   { emitter: 'owner-idea', files: ['services/admin-claude-ideas.js'], prefixes: ['owner-idea:'], kind: 'event',
     decision: 'expire: only the owner sending the same idea again raises it again (an idea row is Activity-only, so the sweep never reaches it before Claude closes it)' },
+  { emitter: 'claude-copy', files: ['services/admin-alert-copy-to-claude.js'], prefixes: ['claude-copy:'], kind: 'event',
+    decision: 'expire: only the owner sending a copy of the same alert again raises it again (a copy row is Activity-only, so the sweep never reaches it before Claude closes it)' },
   // The send key first: 'payroll-mercury-key' is a prefix of its key too, and the first match wins.
   { emitter: 'payroll-mercury-key-send', files: ['services/payroll-mercury-alerts.js'], prefixes: ['payroll-mercury-key-send'], kind: 'event',
     decision: 'expire: only a new Send to Mercury that Mercury refuses for the key raises it again' },

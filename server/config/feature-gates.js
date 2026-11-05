@@ -9930,6 +9930,18 @@ function ibSendToClaudeLive() {
 // GATE_IB_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
 module.exports.ibSendToClaudeLive = ibSendToClaudeLive;
 
+// GATE_ALERT_SEND_TO_CLAUDE_COPY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-03,
+// decision 1 = A: "customer alerts = a COPY, read-only until approval"). On, for the owner login only, a bell row that
+// "Send to Claude" refuses (customer contact, or words our own code did not write) carries a "Send a copy to Claude
+// (read-only)" button: it writes ONE new owner-only row into Claude's queue that names the alert by id and holds no
+// customer words, and the alert stays in the bell (services/admin-alert-copy-to-claude.js). Off = no button and the
+// copy routes answer 404.
+function alertSendToClaudeCopyLive() {
+  return process.env.GATE_ALERT_SEND_TO_CLAUDE_COPY === 'true';
+}
+// GATE_ALERT_SEND_TO_CLAUDE_COPY reader, on its own line so gate PRs never conflict.
+module.exports.alertSendToClaudeCopyLive = alertSendToClaudeCopyLive;
+
 // GATE_ALERT_CATALOG reader, on its own line so gate PRs never conflict.
 module.exports.alertCatalogMode = alertCatalogMode;
 
