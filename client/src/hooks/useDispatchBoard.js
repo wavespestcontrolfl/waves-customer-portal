@@ -37,7 +37,9 @@
  * matching the existing adminFetch pattern across the admin app.
  * Server-side socketAuth (PR #279 + #284) verifies the token, runs
  * the staff freshness check, and joins the `dispatch:admins` room
- * automatically — we don't call socket.join() from the client.
+ * automatically — we don't call socket.join() from the client. The Board
+ * is admin-only: with GATE_TECH_LOGIN_PRIVACY on, a technician socket is not
+ * in that room, so this hook gets nothing on a technician login.
  *
  * refreshTechs(): a stable callback (exposed to consumers) that re-runs
  * GET /board and merges the fresh tech rows into techsMap by id — used

@@ -118,7 +118,7 @@ const TEMPLATES = [
   },
   {
     label: "Follow-up",
-    body: "Following up on your request. Adam will address this at your next visit.",
+    body: "Following up on your request. Your technician will address this at your next visit.",
   },
   {
     label: "Quick acknowledge",

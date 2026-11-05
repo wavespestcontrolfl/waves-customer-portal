@@ -51,6 +51,98 @@ describe('TechNoticeFeed — tech line text card', () => {
     expect(cards[1]).toHaveTextContent('Gate code is 4412, dog is friendly');
   });
 
+  // Reply (C17): the server names the visit (reply_visit_id) only for the tech's own visit when
+  // the phone on file texted; Reply sends from the tech's own line through POST /tech/line/sms.
+  const LINE = { line: { number: '+19413529161', formatted: '(941) 352-9161', label: 'Tech line' } };
+  const REPLYABLE = { ...TEXT, payload: { ...TEXT.payload, reply_visit_id: 'svc-1' } };
+
+  it('Reply texts back from the tech\'s line through the visit the card names; Got it and the page wait for the send', async () => {
+    stubFeed([REPLYABLE]);
+    let finishSend;
+    const request = vi.fn(() => new Promise((resolve) => { finishSend = resolve; }));
+    const onReplySending = vi.fn();
+    render(<TechNoticeFeed techLine={LINE} request={request} onReplySending={onReplySending} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(await screen.findByRole('button', { name: 'Reply' }));
+    expect(screen.getByTestId('line-text-compose')).toHaveTextContent('Text from your line (941) 352-9161');
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Be there in 10' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(request).toHaveBeenCalledWith('/tech/line/sms', {
+      method: 'POST', body: JSON.stringify({ scheduledServiceId: 'svc-1', body: 'Be there in 10', replyToNoticeId: 'n-text' }),
+    });
+    expect(screen.getByRole('button', { name: 'Got it' })).toBeDisabled();
+    expect(onReplySending).toHaveBeenLastCalledWith(true);
+    await act(async () => { finishSend({ ok: true }); });
+    expect(await screen.findByText('Sent.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Got it' })).not.toBeDisabled();
+    // An open compose with no send in flight does not hold the page.
+    expect(onReplySending).toHaveBeenLastCalledWith(false);
+  });
+
+  // Pre-push audit P1: the feed shows two kept cards; newer cards must not unmount an open Reply.
+  it('newer cards keep an open Reply on screen with its draft and its send in flight', async () => {
+    let feed = [REPLYABLE];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init = {}) => (init.method
+      ? { ok: true, json: async () => ({}) }
+      : { ok: true, json: async () => ({ notifications: feed }) })));
+    let finishSend;
+    const request = vi.fn(() => new Promise((resolve) => { finishSend = resolve; }));
+    render(<TechNoticeFeed techLine={LINE} request={request} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(await screen.findByRole('button', { name: 'Reply' }));
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Draft reply' } });
+
+    const newer = (id, minute) => ({ ...TEXT, id, created_at: `2026-09-08T18:${minute}:00Z`, payload: { ...TEXT.payload, body: `Newer ${id}` } });
+    feed = [newer('n-2', 50), newer('n-3', 51), REPLYABLE];
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getAllByTestId('tech-line-text')).toHaveLength(3);
+    expect(screen.getByLabelText('Message')).toHaveValue('Draft reply');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    feed = [newer('n-4', 52), newer('n-2', 50), newer('n-3', 51), REPLYABLE];
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole('button', { name: 'Sending…' })).toBeInTheDocument();
+    await act(async () => { finishSend({ ok: true }); });
+    expect(await screen.findByText('Sent.')).toBeInTheDocument();
+  });
+
+  // Pre-push audit P1: the server feed (20 rows, or a dismiss on another device) can stop listing the card.
+  it('a poll that no longer lists the card keeps it while the Reply is open; the next poll after Close removes it', async () => {
+    let feed = [REPLYABLE];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init = {}) => (init.method
+      ? { ok: true, json: async () => ({}) }
+      : { ok: true, json: async () => ({ notifications: feed }) })));
+    render(<TechNoticeFeed techLine={LINE} request={vi.fn()} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(await screen.findByRole('button', { name: 'Reply' }));
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Draft reply' } });
+
+    feed = [];
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId('tech-line-text')).toBeInTheDocument();
+    expect(screen.getByLabelText('Message')).toHaveValue('Draft reply');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('tech-line-text')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['the tech holds no line', REPLYABLE, null],
+    ['the line could not be checked', REPLYABLE, { unknown: true }],
+    ['the card names no visit', TEXT, LINE],
+  ])('no Reply when %s', async (_label, card, techLine) => {
+    stubFeed([card]);
+    render(<TechNoticeFeed techLine={techLine} request={vi.fn()} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(await screen.findByTestId('tech-line-text')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reply' })).not.toBeInTheDocument();
+  });
+
   it('stays until "Got it" (dismiss); the reminder timer never marks it read', async () => {
     const calls = stubFeed([TEXT]);
     render(<TechNoticeFeed />);

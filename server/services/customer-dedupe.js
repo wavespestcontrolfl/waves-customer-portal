@@ -2101,6 +2101,11 @@ const UNIQUE_COLLISION_HANDLERS = {
   irrigation_week_plans: repointWeekPlansKeepAvailable,
   collections_flags: repointFlagsReleaseCollisions,
   customer_health_alerts: repointHealthAlertsDismissCollisions,
+  // UNIQUE(customer_id): both duplicate profiles linked as "Same family" — the
+  // winner's membership is kept, the loser's copy drops (a family left with
+  // one profile no longer counts for the discount; familyMultiHomeEligible
+  // requires 2+ live members).
+  multi_home_family_members: repointRowwiseDropCollisions,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the

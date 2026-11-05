@@ -1585,6 +1585,14 @@ router.post('/status', async (req, res) => {
       } catch (bookkeepingErr) {
         logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
       }
+      // GATE_DEAD_NUMBER_ALERT (off = returns at once): a 2nd failed text (30003 / 30005) to a customer's number
+      // raises one bell naming the customer; a delivered text closes it. Isolated: neither a sync throw nor a
+      // rejection can reach the handlers below or the response.
+      await Promise.resolve()
+        .then(() => require('../services/dead-number-alert').handleDeadNumberCallback({
+          sid: MessageSid, status: MessageStatus, errorCode: ErrorCode, to: To,
+        }))
+        .catch((e) => logger.error(`[twilio-status] dead number alert failed: ${e.message}`));
       if (isFailureStatus(MessageStatus)) {
         notifyTwilioFailure({
           channel: 'sms',

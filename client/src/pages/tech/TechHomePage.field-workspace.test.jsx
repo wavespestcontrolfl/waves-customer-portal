@@ -9,7 +9,10 @@ const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), socketEvent: null }))
 vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mocks.socketEvent = callback; }, off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'pest-recap-v1', useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: ({ inlineScheduleChanges, placement }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement} /> }));
+vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: ({ inlineScheduleChanges, placement, onReplySending }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement}>
+  <button onClick={() => onReplySending(true)}>Card reply sending</button>
+  <button onClick={() => onReplySending(false)}>Card reply settled</button>
+</div> }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
     <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
@@ -313,6 +316,16 @@ describe('Tech field workspace uses the existing route workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start contact action' }));
     expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true);
     expect(screen.getByRole('button', { name: 'Today' })).toBeDisabled();
+  });
+
+  // Codex #7611 r1: a Reply sending from a Today text card holds navigation like the visit's own text.
+  it('holds navigation while a text card Reply is sending', async () => {
+    mount();
+    expect(await screen.findByText('Fixture one')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Card reply sending' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Card reply settled' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(false));
   });
 
   it('uses the navigation lock while the create report has unpersisted photos', async () => {

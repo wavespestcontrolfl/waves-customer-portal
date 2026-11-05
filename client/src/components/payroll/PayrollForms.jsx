@@ -113,6 +113,9 @@ const w2Rows = form => [
   ...(form.box12TT ? [{ line: 'Box 12 TT', label: 'Qualified overtime compensation', kind: 'cents', value: form.box12TT }] : []),
   // Only with GATE_PAYROLL_PAY_LINES on: the employer's cafeteria-plan HSA contributions.
   ...(form.box12W ? [{ line: 'Box 12 W', label: 'Employer contributions to a health savings account (cafeteria plan)', kind: 'cents', value: form.box12W }] : []),
+  // SIMPLE IRA: the employee's savings are in boxes 3 and 5 but not box 1; a participant has box 13 checked.
+  ...(form.box12S ? [{ line: 'Box 12 S', label: 'Employee SIMPLE IRA salary reduction (not in box 1)', kind: 'cents', value: form.box12S }] : []),
+  ...(form.box13RetirementPlan ? [{ line: 'Box 13', label: 'Retirement plan', kind: 'text', value: 'Check the box' }] : []),
 ];
 
 const w3Rows = totals => [

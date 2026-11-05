@@ -6890,9 +6890,10 @@ export default function TaxPage() {
   const [activeTab, setActiveTab] = useState(() =>
     new URLSearchParams(window.location.search).has("oauth_state_id")
       ? "bankimport"
-      : // a tax deadline bell opens the Filing calendar (?tab=filings)
-        new URLSearchParams(window.location.search).get("tab") === "filings"
-        ? "filings"
+      : // a tax deadline bell opens the Filing calendar (?tab=filings); the
+        // emailed-invoices-not-on-Spark bell opens Expenses (?tab=expenses)
+        ["filings", "expenses"].includes(new URLSearchParams(window.location.search).get("tab"))
+        ? new URLSearchParams(window.location.search).get("tab")
         : "overview",
   );
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is

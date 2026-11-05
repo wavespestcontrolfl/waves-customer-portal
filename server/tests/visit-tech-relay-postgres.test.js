@@ -76,12 +76,15 @@ postgres('visit tech relay (real Postgres)', () => {
     const later = await makeCustomer('Later');
     const done = await makeCustomer('Done');
     await visit(done, hire, 'completed', '07:00');
-    await visit(onTheWay, hire, 'en_route', '08:00');
-    await visit(nextUp, hire, 'confirmed', '10:00');
+    const onTheWayVisit = await visit(onTheWay, hire, 'en_route', '08:00');
+    const nextUpVisit = await visit(nextUp, hire, 'confirmed', '10:00');
     await visit(later, hire, 'confirmed', '13:00');
 
     expect(idsOf(await relay.visitTechniciansFor(onTheWay.id))).toEqual([String(hire.id)]);
     expect(idsOf(await relay.visitTechniciansFor(nextUp.id))).toEqual([String(hire.id)]);
+    // Each technician carries the visit that qualified (the text card's Reply texts through it).
+    expect(String((await relay.visitTechniciansFor(onTheWay.id))[0].visitId)).toBe(onTheWayVisit);
+    expect(String((await relay.visitTechniciansFor(nextUp.id))[0].visitId)).toBe(nextUpVisit);
     expect(await relay.visitTechniciansFor(later.id)).toEqual([]);
     expect(await relay.visitTechniciansFor(done.id)).toEqual([]);
   });
@@ -175,7 +178,11 @@ postgres('visit tech relay (real Postgres)', () => {
     expect((await relay.customerForPhone(db, contactPhone))?.id).toBe(customer.id);
     const sent = await relay.relayCustomerTextToVisitTech({ from: contactPhone, body: 'The gate is open' });
     expect(sent).toBe(1);
-    expect(await db('tech_notifications').where({ technician_id: hire.id })).toHaveLength(1);
+    const cards = await db('tech_notifications').where({ technician_id: hire.id });
+    expect(cards).toHaveLength(1);
+    // A Reply would text the phone on file, not this service contact: the card gets no Reply.
+    const payload = typeof cards[0].payload === 'string' ? JSON.parse(cards[0].payload) : cards[0].payload;
+    expect(payload.reply_visit_id).toBeNull();
 
     const neighbor = await makeCustomer('Neighbor');
     await db('customers').where({ id: neighbor.id }).update({ secondary_phone: contactPhone });
@@ -201,7 +208,7 @@ postgres('visit tech relay (real Postgres)', () => {
     const customer = await makeCustomer('Gate');
     const phone = `+1202555${String(Math.floor(1000 + Math.random() * 8999))}`;
     await db('customers').where({ id: customer.id }).update({ phone });
-    await visit(customer, hire, 'en_route', '09:00');
+    const visitId = await visit(customer, hire, 'en_route', '09:00');
     const { sendToAdminUser } = require('../services/push-notifications');
     sendToAdminUser.mockClear();
 
@@ -213,6 +220,8 @@ postgres('visit tech relay (real Postgres)', () => {
     expect(cards[0].type).toBe('tech_line_sms');
     const payload = typeof cards[0].payload === 'string' ? JSON.parse(cards[0].payload) : cards[0].payload;
     expect(payload).toMatchObject({ headline: 'Text from your customer', customer_id: customer.id, customer_name: 'Gate Fixture', body: 'The gate is open' });
+    // The text came from the phone on file: Reply texts back through the visit that qualified.
+    expect(payload.reply_visit_id).toBe(visitId);
     expect(sendToAdminUser).toHaveBeenCalledTimes(1);
     expect(sendToAdminUser).toHaveBeenCalledWith(hire.id, expect.objectContaining({ title: 'Text from Gate Fixture', url: '/tech' }));
   });

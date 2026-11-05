@@ -377,3 +377,44 @@ describe("saved-card presentation scope", () => {
     ).toBe(true);
   });
 });
+
+// Owner 2026-11-04 (technician visibility audit D4 A): card only at the visit.
+// A technician's list shows saved cards only; an admin still sees bank accounts.
+describe("MobileCardOnFileSheet saved methods by role", () => {
+  const methods = [
+    { id: "pm-1", method_type: "card", brand: "visa", last_four: "1111" },
+    { id: "pm-9", method_type: "ach", bank_name: "Test Bank", last_four: "9999" },
+  ];
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function renderFor(role) {
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key) => (key === "waves_admin_user" ? JSON.stringify({ id: "u1", role }) : "test-token")),
+    });
+    vi.stubGlobal("fetch", vi.fn(() => jsonResponse({ cards: methods })));
+    render(
+      <MobileCardOnFileSheet
+        desktopVisible
+        invoiceId="inv-1"
+        customerId="cust-1"
+        customerName="Test Customer"
+      />,
+    );
+  }
+
+  it("a technician sees the saved card and not the bank account", async () => {
+    renderFor("technician");
+    await screen.findByText("Visa 1111");
+    expect(screen.queryByText("Test Bank 9999")).not.toBeInTheDocument();
+  });
+
+  it("an admin still sees the bank account", async () => {
+    renderFor("admin");
+    await screen.findByText("Visa 1111");
+    expect(screen.getByText("Test Bank 9999")).toBeInTheDocument();
+  });
+});
