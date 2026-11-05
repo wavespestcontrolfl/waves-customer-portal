@@ -18,6 +18,7 @@ let alertSpy;
 
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'test-token');
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
   alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
   vi.spyOn(window, 'confirm').mockReturnValue(true);
   global.fetch = vi.fn((url) => {
