@@ -1033,10 +1033,15 @@ async function readItemCashBalances(item) {
   }
   const liveById = new Map((live || []).map(a => [a.account_id, a]));
   const stored = await db('plaid_accounts').where({ plaid_item_id: item.id, enabled: true });
-  const entries = stored
-    .filter(a => liveById.has(a.account_id))
-    .map(a => cashBalanceEntry(a, liveById.get(a.account_id)));
-  return { entries };
+  const entries = [];
+  const notShared = [];
+  for (const a of stored) {
+    if (liveById.has(a.account_id)) entries.push(cashBalanceEntry(a, liveById.get(a.account_id)));
+    // An enabled account the bank no longer lists would drop out of the total
+    // without a word; name it so the card says why the total is short.
+    else notShared.push({ institution_name: item.institution_name || null, reason: 'not_shared', mask: a.mask || null, account_type: a.account_type });
+  }
+  return { entries, notShared };
 }
 
 // Balances for the owner's Cash today card. READ-ONLY: writes nothing (no
@@ -1055,6 +1060,7 @@ async function readCashBalances() {
       r = { unavailable: { institution_name: item.institution_name || null, reason: 'error' } };
     }
     if (r.unavailable) unavailable.push(r.unavailable);
+    for (const u of r.notShared || []) unavailable.push(u);
     for (const e of r.entries || []) (e.account_type === 'card' ? cards : accounts).push(e);
   }
   return { accounts, cards, unavailable };

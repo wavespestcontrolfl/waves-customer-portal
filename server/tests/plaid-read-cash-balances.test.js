@@ -111,7 +111,8 @@ describe('readCashBalances', () => {
     const out = await plaidSync.readCashBalances();
     expect(plaid.getAccounts).toHaveBeenCalledTimes(1);
     expect(plaid.getAccounts).toHaveBeenCalledWith('access-token-1');
-    expect(out.unavailable).toEqual([]);
+    // acc-missing is enabled but the bank no longer lists it: named, not silently dropped.
+    expect(out.unavailable).toEqual([{ institution_name: 'Synthetic Bank', reason: 'not_shared', mask: '4444', account_type: 'bank' }]);
     expect(out.accounts).toEqual([{
       name: 'Synthetic Checking', mask: '1111', account_label: 'Synthetic Checking', account_type: 'bank',
       available: 100.5, current: 120, currency: 'USD', balance_as_of: '2026-11-05T13:00:00Z',

@@ -800,6 +800,25 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
     expect(screen.queryByText("Stripe: available and pending")).not.toBeInTheDocument();
   });
 
+  it("names an account the bank stopped sharing and shows a dash for a missing balance", async () => {
+    overrides.set("GET /api/admin/banking/cash-today", () =>
+      response({
+        ...cashToday,
+        accounts: [
+          { ...cashToday.accounts[0] },
+          { ...cashToday.accounts[1], available: null, current: null },
+        ],
+        unavailable: [{ institution_name: "Synthetic Bank", reason: "not_shared", mask: "4444", account_type: "bank" }],
+      }),
+    );
+    open(BankingPage);
+    expect(await screen.findByText("Cash today")).toBeInTheDocument();
+    expect(
+      screen.getByText("Synthetic Bank no longer shares ••4444: Tax page → Live bank feeds → Add accounts (not counted)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
   it.each([403, 404, 500])("renders nothing when the card read answers %i", async (status) => {
     overrides.set("GET /api/admin/banking/cash-today", () => response({ error: "no" }, status));
     open(BankingPage);

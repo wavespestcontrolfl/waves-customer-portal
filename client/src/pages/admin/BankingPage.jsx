@@ -1894,9 +1894,11 @@ function cashTodayFigures(data, balance, balanceError) {
 
 function cashUnavailableText(u) {
   const who = u.institution_name || "A bank";
-  return u.reason === "login_required"
-    ? `${who} needs a new sign-in: Tax page → Live bank feeds`
-    : `${who} balance is unavailable right now`;
+  if (u.reason === "login_required") return `${who} needs a new sign-in: Tax page → Live bank feeds`;
+  if (u.reason === "not_shared") {
+    return `${who} no longer shares ${u.mask ? `••${u.mask}` : "an account"}: Tax page → Live bank feeds → Add accounts (not counted)`;
+  }
+  return `${who} balance is unavailable right now`;
 }
 
 function CashTodayCard({ balance, balanceError }) {
@@ -1937,7 +1939,7 @@ function CashTodayCard({ balance, balanceError }) {
             <div style={{ ...cashMuted, marginTop: 0 }}>{fmtAsOf(a.balance_as_of)}</div>
           </div>
           <div className="u-nums" style={{ color: "#09090B" }}>
-            {money(a, cashOf(a) ?? 0)}
+            {cashOf(a) == null ? "—" : money(a, cashOf(a))}
           </div>
         </div>
       ))}
