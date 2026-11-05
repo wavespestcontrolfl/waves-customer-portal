@@ -3,9 +3,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
+  // An admin: these cases cover the admin charge path. A technician's card
+  // on file is in admin-invoices-tech-card-on-file.test.js.
   adminAuthenticate: (req, _res, next) => {
     req.technicianId = 'tech-1';
-    req.techRole = 'technician';
+    req.techRole = 'admin';
     return next();
   },
   requireAdmin: (_req, _res, next) => next(),

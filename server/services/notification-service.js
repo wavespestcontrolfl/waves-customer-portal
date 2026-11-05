@@ -999,10 +999,14 @@ const NotificationService = {
       role, technicianId,
     ));
     if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
-    return query
+    const rows = await query
       .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'))
       .orderByRaw('created_at DESC, id DESC')
       .limit(limit).offset(offset);
+    if (!role || role === 'admin') return rows;
+    // A non-admin reads a technician's copy of a row whose trigger names techOmit keys (call content, owner
+    // 2026-11-04 D1 A). Lazy require, as in scopeAdminFeedToRole.
+    return rows.map(require('./notification-triggers').technicianRowCopy);
   },
 
   // The current content version of one admin row (see NOTIFICATION_VERSION_SQL),

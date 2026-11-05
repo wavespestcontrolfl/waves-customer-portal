@@ -24,7 +24,9 @@
  *   - JWT customerId       → DB lookup; active customer → join
  *                            customer:<id>; otherwise IDENTITY_REVOKED
  *   - JWT technicianId     → DB lookup; active staff with matching role
- *                            → join dispatch:admins; otherwise
+ *                            → join dispatch:admins (a technician joins
+ *                            tech:<id> instead while GATE_TECH_LOGIN_PRIVACY
+ *                            is on; see index.js); otherwise
  *                            IDENTITY_REVOKED
  *   - trackToken           → DB lookup on track_view_token; if found,
  *                            not expired, and the linked customer is
