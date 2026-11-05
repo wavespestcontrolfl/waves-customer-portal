@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useOutletContext } from "react-router-dom";
 import { ThumbsUp } from "lucide-react";
 import { Badge, Button } from "../ui";
 import { formatETTime } from "../../lib/timezone";
@@ -8,11 +9,25 @@ import { sendOfficeLike } from "../../lib/smsLikes";
 // customer's newest text, the badge that shows who liked it, and the lines for
 // customer likes on our texts. Used by Messages and the Customer 360 thread.
 
+// The like route is not on the technician allow-list, so a technician login is
+// never offered the button. The role is the server-returned one from the admin
+// shell's Outlet context, else the stored login; unknown shows the button, as
+// useCanAccessCalls does.
+function storedStaffRole() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role || null;
+  } catch {
+    return null;
+  }
+}
+
 // A click texts a thumbs-up to the customer (the server's like route), so the
 // button says so. onLiked(messageId, officeLike) runs after the send.
 export function OfficeLikeButton({ messageId, customerName, onLiked }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const role = useOutletContext()?.user?.role || storedStaffRole();
+  if (role === "technician") return null;
   const like = async () => {
     if (sending) return;
     setSending(true);

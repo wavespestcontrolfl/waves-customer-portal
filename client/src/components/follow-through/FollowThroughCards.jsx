@@ -144,7 +144,8 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
       {r.evidence?.[0]?.quote && <Text>“{r.evidence[0].quote}”</Text>}
       {r.human_note && <Text>Note: {r.human_note}</Text>}
       {possiblyKept(r) && <Text tone="alert">Possibly kept: {humanize(possiblyKept(r).kind)}{possiblyKept(r).matched_at ? ` on ${when(possiblyKept(r).matched_at)}` : ''} · {humanize(possiblyKept(r).basis)} — confirm with Done</Text>}
-      <Text tone="muted">{phone(r)} · Call {when(r.call_started_at)}{r.owner_name ? ` · ${r.owner_name}` : ''}</Text>
+      {/* A technician's feed carries no phone number: the line starts at the call time. */}
+      <Text tone="muted">{phone(r) ? `${phone(r)} · ` : ''}Call {when(r.call_started_at)}{r.owner_name ? ` · ${r.owner_name}` : ''}</Text>
       {r.owner_name && r.owner_active === false && <Text tone="alert">Assigned to {r.owner_name}, who is no longer active — take this over</Text>}
       {snoozed.includes(r) && <Text tone="muted">Snoozed until {when(r.snoozed_until)}</Text>}
       <div className="flex flex-wrap gap-2">

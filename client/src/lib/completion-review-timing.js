@@ -6,7 +6,7 @@
 // Moved out of pages/admin/SchedulePage.jsx unchanged so the full Complete Service
 // form and the Fast Complete Wrap-up section (components/tech/FastCompleteWrapUp.jsx)
 // follow the same rules. SchedulePage re-exports the ones its tests import.
-import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateTime } from "./timezone";
+import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "./timezone";
 
 // Completion panel review timing (owner decisions 2026-09-07). "Automatic"
 // is the cadence's smart send window — the server's calculateReviewSendPlan,
@@ -291,6 +291,7 @@ export function completionReviewSuppressionReason({
   backfillQuietCloseout = false,
   visitOutcome = "completed",
   customerConcernInteraction = false,
+  alreadyReviewed = false,
 } = {}) {
   if (isIncompleteVisit) return "incomplete";
   if (backfillQuietCloseout) return "backfill";
@@ -298,6 +299,9 @@ export function completionReviewSuppressionReason({
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";
   }
+  // GATE_REVIEW_ALREADY_REVIEWED: the server says the customer is marked as already reviewed, the mark
+  // every review ask skips on, so the box shows that instead of an ask that would never go out.
+  if (alreadyReviewed) return ALREADY_REVIEWED_SUPPRESSION;
   // NOTE (coverage fix, 2026-07-30): an invoiced completion is deliberately
   // NOT a client-side suppression anymore. The server owns the invoice rule —
   // a completion-time ask is blocked only while the invoice is UNPAID
@@ -322,14 +326,28 @@ export function completionWillReview({
 export const reviewSendPreviewPath = (serviceType, serviceId) => `/admin/reviews/send-time-preview?${new URLSearchParams({ serviceType: serviceType || "", ...(serviceId ? { serviceId: String(serviceId) } : {}) })}`;
 
 // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a customer never asked for a
-// review sees the box as "First review ask", on and kept on. The tech may turn it off with ONE
-// reason, "Complaint on site", confirmed first; the server keeps the ask on without it.
+// review sees the box as "First review ask", on and kept on. The tech may turn it off only with a
+// confirmed reason: "Complaint on site", and (GATE_REVIEW_ALREADY_REVIEWED, owner 2026-11-04)
+// "Already left a review", which also marks the customer reviewed. The server keeps the ask on without one.
 export const FIRST_REVIEW_ASK_LABEL = "First review ask";
 export const COMPLAINT_ON_SITE_REASON = "complaint_on_site";
+export const ALREADY_LEFT_REVIEW_REASON = "already_left_review";
+export const FIRST_ASK_OPT_OUT_REASONS = [COMPLAINT_ON_SITE_REASON, ALREADY_LEFT_REVIEW_REASON];
 export const FIRST_ASK_OPT_OUT_PROMPT = "Turn off the first review ask? This customer was never asked for a review. The only reason to skip it is: Complaint on site.";
+export const ALREADY_LEFT_REVIEW_PROMPT = "Turn off the first review ask? This customer was never asked for a review. Did they already leave a Google review? OK marks them as reviewed, and they get no more review texts. Cancel shows the other reason.";
+export const COMPLAINT_ON_SITE_PROMPT = "Turn it off for a complaint on site? OK turns it off for this visit. Cancel keeps the first review ask on.";
+
+// The client suppression reason for a customer marked as already reviewed (GATE_REVIEW_ALREADY_REVIEWED).
+export const ALREADY_REVIEWED_SUPPRESSION = "already_reviewed";
+export const ALREADY_REVIEWED_LABEL = "Already left a Google review";
 
 // The label of the review box: the suppressed, included and plain wordings are today's.
-export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk }) {
+// `reviewedOn` ('YYYY-MM-DD' or null) dates the already-reviewed label.
+export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk, reviewedOn = null }) {
+  if (reviewSuppressionReason === ALREADY_REVIEWED_SUPPRESSION) {
+    const on = formatETDateOnly(reviewedOn, { month: "short", day: "numeric", year: "numeric" });
+    return on ? `${ALREADY_REVIEWED_LABEL} (${on})` : ALREADY_REVIEWED_LABEL;
+  }
   if (reviewSuppressionReason) return "Review request suppressed";
   if (oneTimeRecapOnly) return "Review request included";
   return firstAsk ? FIRST_REVIEW_ASK_LABEL : "Send review request";
@@ -338,13 +356,37 @@ export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firs
 // The preview's own verdict on the first ask, only when the server sent one (gate off: no key).
 export const firstReviewAskFrom = (preview) => (typeof preview?.firstReviewAsk === "boolean" ? preview.firstReviewAsk : null);
 
-// What the box does when toggled. A first ask turned off needs the confirmed reason; cancelling
-// keeps it on. Returns the next { requestReview, reviewOptOutReason }.
-export function nextReviewChoice({ checked, firstAsk, confirmOptOut }) {
+// GATE_REVIEW_ALREADY_REVIEWED: the server's read that the customer is marked as already reviewed,
+// as { reviewedOn }; null when it is not, or when the server sent no such key (gate off).
+export const alreadyReviewedFrom = (preview) => {
+  const value = preview?.alreadyReviewed;
+  return value && typeof value === "object" ? { reviewedOn: typeof value.reviewedOn === "string" ? value.reviewedOn : null } : null;
+};
+
+// The off reasons the server honors for a first ask now: the known ones it lists, else only
+// "Complaint on site" (gate off: no key).
+export const firstAskReasonsFrom = (preview) => {
+  const listed = Array.isArray(preview?.firstAskReasons) ? preview.firstAskReasons.filter((r) => FIRST_ASK_OPT_OUT_REASONS.includes(r)) : [];
+  return listed.length ? listed : [COMPLAINT_ON_SITE_REASON];
+};
+
+// The reason a tech confirms for turning a first ask off, or null to keep it on. With the second
+// reason on offer, "Already left a review" is asked first, then "Complaint on site".
+export function pickFirstAskOptOutReason(reasons, confirm) {
+  if (!reasons.includes(ALREADY_LEFT_REVIEW_REASON)) return confirm(FIRST_ASK_OPT_OUT_PROMPT) ? COMPLAINT_ON_SITE_REASON : null;
+  if (confirm(ALREADY_LEFT_REVIEW_PROMPT)) return ALREADY_LEFT_REVIEW_REASON;
+  return confirm(COMPLAINT_ON_SITE_PROMPT) ? COMPLAINT_ON_SITE_REASON : null;
+}
+
+// What the box does when toggled. A first ask turned off needs a confirmed reason; cancelling
+// keeps it on. `pickOptOutReason()` returns the reason or null. Returns the next
+// { requestReview, reviewOptOutReason }.
+export function nextReviewChoice({ checked, firstAsk, pickOptOutReason }) {
   if (checked) return { requestReview: true, reviewOptOutReason: null };
   if (!firstAsk) return { requestReview: false, reviewOptOutReason: null };
-  return confirmOptOut()
-    ? { requestReview: false, reviewOptOutReason: COMPLAINT_ON_SITE_REASON }
+  const reason = pickOptOutReason();
+  return reason
+    ? { requestReview: false, reviewOptOutReason: reason }
     : { requestReview: true, reviewOptOutReason: null };
 }
 

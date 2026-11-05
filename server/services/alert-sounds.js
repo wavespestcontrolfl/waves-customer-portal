@@ -20,11 +20,13 @@ const ALERT_SOUNDS = Object.freeze({
   relay_hot_lead: 'waves-missed-call.caf',
   customer_voicemail_callback: 'waves-voicemail.caf',
   new_lead: 'waves-lead.caf',
+  new_lead_email: 'waves-lead.caf',
   bundle_quote_requested: 'waves-lead.caf',
   customer_email_received: 'waves-email.caf',
   sms_operational_followup: 'waves-reminder.caf',
   call_commitment_overdue: 'waves-reminder.caf',
   waiting_summary: 'waves-reminder.caf',
+  open_visits_nudge: 'waves-reminder.caf',
   payment_failed: 'waves-payment-problem.caf',
   bill_payment_error: 'waves-payment-problem.caf',
 });

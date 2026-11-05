@@ -607,9 +607,12 @@ const NotificationService = {
   // Create admin notification (no recipient_id needed). The write itself is writeAdmin below; a write that rang a
   // bell-only reminder or a Facebook message also sends its phone banner (bell-banners.js, GATE_BELL_BANNERS), after
   // the row commits. Gate off: bannerAfterWrite returns at once and nothing else changes.
+  // bannerKind (optional): the phone-banner kind (bell-banners.js) for a row whose own metadata carries no triggerKey,
+  // so the row is written exactly as without it. Only the banner reads it.
   async notifyAdmin(category, title, body, opts = {}) {
-    const written = await this.writeAdmin(category, title, body, opts);
-    require('./bell-banners').bannerAfterWrite(written, { metadata: opts.metadata, trx: opts.trx });
+    const { bannerKind = null, ...writeOpts } = opts;
+    const written = await this.writeAdmin(category, title, body, bannerKind ? writeOpts : opts);
+    require('./bell-banners').bannerAfterWrite(written, { metadata: bannerKind ? { ...opts.metadata, triggerKey: bannerKind } : opts.metadata, trx: opts.trx });
     return written;
   },
 
@@ -1076,6 +1079,35 @@ const NotificationService = {
     });
   },
 
+  // The 10-second Undo of an idea sent from the Intelligence Bar box (admin-claude-ideas.js): closes the row as done by
+  // the admin. Same dedupe lock as the send; the row is locked and the fence re-checked inside the transaction: open,
+  // still in Claude's queue, an 'owner-idea' send stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the
+  // rows written, 0 or 1.
+  async markAdminIdeaCancelled(id, at, by, resolution) {
+    return db.transaction(async (trx) => {
+      const row = await trx('notifications').where({ id, recipient_type: 'admin' }).first(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+      if (!row) return 0;
+      if (row.dedupe_key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${row.dedupe_key}`]);
+      const fenced = () => trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
+        .whereRaw("metadata->>'claudeQueue' = ?", [SENT_TO_CLAUDE_CLASS])
+        .whereRaw("metadata->'sentToClaude'->>'kind' = 'owner-idea'")
+        .whereRaw("metadata->'sentToClaude'->>'at' = ?", [at])
+        .whereRaw("metadata->'sentToClaude'->>'startedAt' IS NULL");
+      if (!(await fenced().forUpdate().first('id'))) return 0;
+      return fenced().update(doneColumns({ by, resolution, keepExisting: true, conn: trx }));
+    });
+  },
+
+  // Is this admin row owner-only (metadata.ownerOnly: an idea sent to Claude)? Role-scoped like the others; false when the
+  // row is gone, out of scope or not owner-only.
+  async isAdminOwnerOnly(id, { role, technicianId = null } = {}) {
+    const row = await scopeAdminFeedToRole(
+      db('notifications').where({ id, recipient_type: 'admin' }),
+      role, technicianId,
+    ).first(db.raw("COALESCE(metadata->>'ownerOnly', '') = 'true' AS owner_only"));
+    return row?.owner_only === true;
+  },
+
   // Recently done admin rows (the "Recently done" list, so an accidental Done
   // can be reopened). Role-scoped like the bell list, but Activity-only rows
   // are INCLUDED: Activity has its own Done and this is the one recovery
@@ -1085,12 +1117,14 @@ const NotificationService = {
   // window stays reachable however many closed after it. done_at_token is
   // done_at::text at full precision: the cursor source, and the fence a
   // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
-  async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null } = {}) {
+  async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null, fullAccess = false } = {}) {
     const query = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
       role, technicianId,
     )
       .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
+    // An owner-only row (an idea sent to Claude) is listed for the owner login only.
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     if (before) query.whereRaw('(done_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     return query
       .select(

@@ -12,14 +12,14 @@
     },
     {
       "endpoint": "/admin/communications/blocked-numbers",
-      "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end.",
+      "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end. Re-read 2026-11-04 (technician visibility B15): a non-admin caller now gets the numbers without the reason an admin typed; an admin read, the bar's, is unchanged.",
       "scope": "broad",
       "freeText": {
         "reason": "note"
       },
       "signals": [],
       "unresolved": [],
-      "hash": "6bf3dfd7c9419b27a7b802fccd127503"
+      "hash": "60da5bab800ffc6a154f989a16b28beb"
     },
     {
       "endpoint": "/admin/csr/overview",
@@ -463,14 +463,14 @@
     },
     {
       "endpoint": "/admin/discounts",
-      "reviewed": "Handler + attachDiscountCatalogClassification (discount-catalog-classifier.js): discounts table select (includes promo_code values, the owner own marketing codes), in-memory classification; read end to end.",
+      "reviewed": "Handler + attachDiscountCatalogClassification (discount-catalog-classifier.js): discounts table select (includes promo_code values, the owner own marketing codes), in-memory classification; read end to end. Re-read 2026-11-04 (technician visibility A7): a non-admin caller now gets the rows without times_applied, total_discount_given and every promo_code field (stripDiscountOwnerFields, after classification); an admin read, which the bar makes, is unchanged.",
       "scope": "broad",
       "freeText": {
         "description": "content"
       },
       "signals": [],
       "unresolved": [],
-      "hash": "0475bbf9300cad99ce10d3d31666452a"
+      "hash": "f94d8cd481430c1af2d1bbdb5509ff2b"
     },
     {
       "endpoint": "/admin/discounts/stacking",
@@ -1324,7 +1324,7 @@
         "services/invoice.js#read",
         "services/recurring-appointment-seeder.js#isMistingSystemIdentity (depth limit)"
       ],
-      "hash": "e89bb1c9ec5cc6b5553bef6da58e6c4c"
+      "hash": "4e72eb341994d1e92fb45a46b27fcaa6"
     },
     {
       "endpoint": "/admin/invoices/:id/attachments",

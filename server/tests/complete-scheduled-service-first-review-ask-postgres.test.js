@@ -124,24 +124,31 @@ async function complete(f, extra) {
 
 postgres('the first review ask lock', () => {
   const lockWas = process.env.GATE_REVIEW_FIRST_ASK_LOCK;
+  const alreadyWas = process.env.GATE_REVIEW_ALREADY_REVIEWED;
   beforeAll(async () => {
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     mockPg = knex({ client: 'pg', connection: testUrl, pool: { min: 0, max: 4 } });
   });
-  afterEach(() => { if (lockWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = lockWas; });
+  afterEach(() => {
+    if (lockWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = lockWas;
+    if (alreadyWas === undefined) delete process.env.GATE_REVIEW_ALREADY_REVIEWED; else process.env.GATE_REVIEW_ALREADY_REVIEWED = alreadyWas;
+  });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
 
-  // One completion. Returns how many review asks were enrolled and the saved record's notes.
-  async function run({ gate = true, seed, extra }) {
+  // One completion. Returns how many review asks were enrolled, the saved record's notes and the customer's
+  // reviewed mark. `already` turns GATE_REVIEW_ALREADY_REVIEWED on.
+  async function run({ gate = true, already = false, seed, extra }) {
     ReviewService.enrollPostService.mockClear();
     if (gate) process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true'; else delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
+    if (already) process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true'; else delete process.env.GATE_REVIEW_ALREADY_REVIEWED;
     const f = await seedVisit(seed);
     try {
       const out = await complete(f, extra);
       expect(out.status).toBe(200);
       const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first('structured_notes');
       const notes = typeof record.structured_notes === 'string' ? JSON.parse(record.structured_notes) : record.structured_notes;
-      return { asks: ReviewService.enrollPostService.mock.calls.length, notes };
+      const customer = await mockPg('customers').where({ id: f.customerId }).first('has_left_google_review', 'review_marked_at');
+      return { asks: ReviewService.enrollPostService.mock.calls.length, notes, customer };
     } finally { await cleanup(f); }
   }
   const OFF = { requestReview: false };
@@ -172,6 +179,32 @@ postgres('the first review ask lock', () => {
     expect(out.asks).toBe(0);
     expect(out.notes.requestReview).toBe(false);
     expect(out.notes.reviewFirstAskLock).toEqual({ neverAsked: true, forcedOn: false, optOutReason: 'complaint_on_site' });
+  });
+
+  // GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): the second off reason marks the customer as reviewed.
+  const ALREADY = { requestReview: false, reviewOptOutReason: 'already_left_review' };
+
+  test('both gates on, never asked, box off with "Already left a review": no ask, the reason saved, the customer marked reviewed', async () => {
+    const out = await run({ already: true, extra: ALREADY });
+    expect(out.asks).toBe(0);
+    expect(out.notes.requestReview).toBe(false);
+    expect(out.notes.reviewFirstAskLock).toEqual({ neverAsked: true, forcedOn: false, optOutReason: 'already_left_review' });
+    expect(out.customer.has_left_google_review).toBe(true);
+    expect(out.customer.review_marked_at).not.toBeNull();
+  });
+
+  test('the new gate off: "Already left a review" is no reason, the ask stays on and the customer is not marked', async () => {
+    const out = await run({ already: false, extra: ALREADY });
+    expect(out.asks).toBe(1);
+    expect(out.notes.reviewFirstAskLock).toEqual({ neverAsked: true, forcedOn: true, optOutReason: null });
+    expect(out.customer.has_left_google_review).toBe(false);
+  });
+
+  test('both gates on, the complaint reason: no ask and the customer is not marked reviewed', async () => {
+    const out = await run({ already: true, extra: COMPLAINT });
+    expect(out.asks).toBe(0);
+    expect(out.notes.reviewFirstAskLock.optOutReason).toBe('complaint_on_site');
+    expect(out.customer.has_left_google_review).toBe(false);
   });
 
   test('gate on, never asked, box left on: asks as before and adds nothing to the record', async () => {

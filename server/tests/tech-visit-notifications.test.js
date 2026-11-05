@@ -1398,6 +1398,124 @@ describe('a visit handed to the customer to pick a day (Quick Move)', () => {
   });
 });
 
+describe('an open card read against its visit as it is now (owner 2026-11-04)', () => {
+  const { liveCard, moverText } = notices._test;
+  const TECH = 'tech-1';
+  const cardRow = (type, payload, createdAt = '2026-10-02T08:11:00Z') => ({
+    id: 'card-1', type, technician_id: TECH, created_at: createdAt,
+    payload: { visit_id: 'visit-1', customer_name: 'Sample', service_type: 'Quarterly Pest Control Service', ...payload },
+  });
+  const live = (extra = {}) => ({
+    id: 'visit-1', scheduled_date: '2026-11-05', window_start: '08:00:00', window_end: '09:00:00', status: 'confirmed',
+    technician_id: TECH, customer_pick_by: null, cancelled_at: null, created_at: '2026-10-01T12:00:00Z',
+    source_action: null, source_estimate_id: null, self_booking_id: null, holder_name: 'Pat Example', ...extra,
+  });
+
+  test('a card that still matches its visit is left as written', () => {
+    const row = cardRow('visit_rescheduled', { when: 'Thu Nov 5, 8–9 AM', previous_when: 'Fri Nov 6, 11 AM–12 PM', actor: 'by auto-dispatch' });
+    expect(liveCard(row, live(), null)).toBe(row);
+  });
+
+  test('a visit moved since its card: the card\'s time is struck, the time it has now shown, with the last mover', () => {
+    const row = cardRow('visit_rescheduled', { when: 'Thu Nov 5, 8–9 AM', date: '2026-11-05', previous_when: 'Fri Nov 6, 11 AM–12 PM', actor: 'by auto-dispatch' });
+    const out = liveCard(row, live({ scheduled_date: '2026-11-09', window_start: '16:00:00', window_end: '17:00:00' }),
+      { initiated_by: 'customer_self_serve', created_at: '2026-11-04T19:49:51Z' });
+    expect(out.type).toBe('visit_rescheduled');
+    expect(out.payload).toMatchObject({
+      previous_when: 'Thu Nov 5, 8–9 AM', previous_date: '2026-11-05', when: 'Mon Nov 9, 4–5 PM', date: '2026-11-09',
+      actor: 'by the customer', changed_at: '2026-11-04T19:49:51.000Z', changed_again: true,
+    });
+    expect(row.payload.when).toBe('Thu Nov 5, 8–9 AM');
+  });
+
+  test('a new-visit card whose visit moved reads as a move; a move logged before the card names no one', () => {
+    const row = cardRow('visit_assigned', { when: 'Sat Nov 14, 4–5 PM', date: '2026-11-14', actor: 'by the customer online', headline: 'New visit on your route' }, '2026-10-31T16:20:00Z');
+    const out = liveCard(row, live(), { initiated_by: 'admin', created_at: '2026-10-31T16:00:00Z' });
+    expect(out).toMatchObject({ type: 'visit_rescheduled', payload: { headline: 'New visit on your route', previous_when: 'Sat Nov 14, 4–5 PM', when: 'Thu Nov 5, 8–9 AM', actor: null, changed_at: null } });
+  });
+
+  test('a visit now on another tech\'s route, or cancelled, says so', () => {
+    const row = cardRow('visit_assigned', { when: 'Thu Nov 5, 8–9 AM' });
+    // The former holder reads nothing of the visit as it is now: its own time, no new holder.
+    const off = liveCard(row, live({ technician_id: 'tech-2', scheduled_date: '2026-11-20', window_start: '13:00:00', window_end: '14:00:00' }), { initiated_by: 'admin', created_at: '2026-11-03T21:50:00Z' });
+    expect(off).toMatchObject({ type: 'visit_unassigned', payload: { headline: 'Moved off your route', when: 'Thu Nov 5, 8–9 AM', now_with: null, now_elsewhere: true, ended: null, actor: null, changed_at: null } });
+    expect(JSON.stringify(off)).not.toMatch(/Nov 20|Pat Example/);
+    expect(liveCard(row, live({ technician_id: null }), null)).toMatchObject({ type: 'visit_unassigned', payload: { now_with: null, now_elsewhere: false } });
+    expect(liveCard(row, live({ status: 'cancelled', cancelled_at: '2026-11-03T15:00:00Z' }), null))
+      .toMatchObject({ type: 'visit_cancelled', payload: { headline: 'Visit cancelled', actor: null, changed_at: '2026-11-03T15:00:00.000Z' } });
+  });
+
+  test('an older card that took the visit off (or onto) today or tomorrow gives the "Was" line', () => {
+    const row = cardRow('visit_rescheduled', { when: 'Thu Nov 5, 8–9 AM', previous_when: 'Wed Oct 28, 8–9 AM', actor: 'by auto-dispatch' });
+    const out = liveCard(row, live(), null, 'Wed Nov 4, 9–10 AM');
+    expect(out).toMatchObject({ type: 'visit_rescheduled', payload: { previous_when: 'Wed Nov 4, 9–10 AM', when: 'Thu Nov 5, 8–9 AM', actor: 'by auto-dispatch' } });
+    expect(out.payload.changed_again).toBeUndefined();
+    // The card's own slot is no news: left as written.
+    expect(liveCard(row, live(), null, 'Thu Nov 5, 8–9 AM')).toBe(row);
+  });
+
+  test('a card that took the visit off today, then a silent move: "Was" stays today\'s slot', () => {
+    const row = cardRow('visit_rescheduled', { when: 'Wed Nov 11, 9–10 AM', date: '2026-11-11', previous_when: 'Wed Nov 4, 9–10 AM', previous_date: '2026-11-04' });
+    const out = liveCard(row, live({ scheduled_date: '2026-12-04', window_start: '09:00:00', window_end: '10:00:00' }), null, 'Wed Nov 4, 9–10 AM');
+    expect(out.payload).toMatchObject({ previous_when: 'Wed Nov 4, 9–10 AM', previous_date: null, when: 'Fri Dec 4, 9–10 AM', changed_again: true });
+  });
+
+  test('a moved-off card stays as written while it names the holder, names no one after a later handover, and comes back with the visit', () => {
+    const offCard = cardRow('visit_unassigned', { when: 'Thu Nov 5, 8–9 AM', headline: 'Moved off your route', now_with: 'Lee Sample', actor: 'by Virginia' });
+    expect(liveCard(offCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample' }), null)).toBe(offCard);
+    expect(liveCard(offCard, live({ technician_id: 'tech-4', holder_name: 'Kim Other' }), null))
+      .toMatchObject({ type: 'visit_unassigned', payload: { now_with: null, now_elsewhere: true, actor: null, when: 'Thu Nov 5, 8–9 AM' } });
+    // A recorded end ("Now cancelled") stays while the visit is still ended that way.
+    const endedCard = cardRow('visit_unassigned', { when: 'Thu Nov 5, 8–9 AM', headline: 'Moved off your route', now_with: null, ended: 'cancelled', actor: 'by Virginia' });
+    expect(liveCard(endedCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample', status: 'cancelled' }), null)).toBe(endedCard);
+    expect(liveCard(endedCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample', status: 'confirmed' }), null))
+      .toMatchObject({ payload: { ended: null, now_with: null, now_elsewhere: true } });
+    expect(liveCard(offCard, live(), { initiated_by: 'admin', created_at: '2026-11-03T21:50:00Z' }))
+      .toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route', when: 'Thu Nov 5, 8–9 AM', actor: 'by the office', changed_again: true, now_with: null } });
+  });
+
+  test('a cancelled card keeps its own line while cancelled, and says so when the visit is back', () => {
+    const gone = cardRow('visit_cancelled', { when: 'Thu Nov 5, 8–9 AM', headline: 'Visit cancelled', actor: 'by the customer online' });
+    expect(liveCard(gone, live({ status: 'cancelled', cancelled_at: '2026-11-03T15:00:00Z' }), null))
+      .toMatchObject({ type: 'visit_cancelled', payload: { actor: 'by the customer online', changed_at: null } });
+    expect(liveCard(gone, live(), null)).toMatchObject({ type: 'visit_assigned', payload: { headline: 'Back on your route' } });
+  });
+
+  test('a plan pause\'s skip stays a cancellation card, never "Back on your route"', () => {
+    const skipped = cardRow('visit_cancelled', { when: 'Thu Nov 5, 8–9 AM', headline: 'Visit cancelled', actor: 'by the customer online' });
+    expect(liveCard(skipped, live({ status: 'skipped' }), null))
+      .toMatchObject({ type: 'visit_cancelled', payload: { headline: 'Visit cancelled', actor: 'by the customer online' } });
+  });
+
+  test('a customer-pick hand-off keeps its "picks a day" text', () => {
+    const row = cardRow('visit_rescheduled', { when: 'the customer picks a day by Wed 8 PM' });
+    expect(liveCard(row, live({ window_start: null, window_end: null, customer_pick_by: new Date('2026-11-05T01:00:00Z') }), null)).toBe(row);
+  });
+
+  test.each([
+    ['by the customer online', { source_estimate_id: 'est-1' }, 'Customer accepted the estimate online'],
+    ['by the customer online', { self_booking_id: 'sb-1' }, 'Customer booked online'],
+    ['by the office', { source_action: 'ai_call_pipeline' }, 'Booked from a phone call (AI)'],
+    ['by the office', { source_action: 'package_followup_auto' }, 'Booked as a follow-up visit'],
+  ])('a new visit booked with its card (%s) names how it came in', (actor, source, line) => {
+    const row = cardRow('visit_assigned', { when: 'Thu Nov 5, 8–9 AM', actor }, '2026-10-01T12:03:00Z');
+    expect(liveCard(row, live(source), null).payload.actor_line).toBe(line);
+  });
+
+  test('a named staff actor, or a card written well after the booking, keeps its own line', () => {
+    expect(liveCard(cardRow('visit_assigned', { when: 'Thu Nov 5, 8–9 AM', actor: 'by Virginia' }, '2026-10-01T12:03:00Z'), live({ source_action: 'ai_call_pipeline' }), null).payload.actor_line).toBeUndefined();
+    expect(liveCard(cardRow('visit_assigned', { when: 'Thu Nov 5, 8–9 AM', actor: 'by the office' }, '2026-10-03T09:00:00Z'), live({ source_action: 'ai_call_pipeline' }), null).payload.actor_line).toBeUndefined();
+  });
+
+  test.each([
+    ['admin', 'by the office'], ['admin_ib', 'by the office'], ['auto_dispatch', 'by auto-dispatch'],
+    ['day_replan', 'by the route re-plan'], ['weather_auto', 'by the rain-out sweep'], ['customer_self_serve', 'by the customer'],
+    ['tech', 'by the technician'], ['machine', 'automatically'], [null, 'by the office'],
+  ])('mover %s reads "%s"', (initiatedBy, text) => {
+    expect(moverText(initiatedBy)).toBe(text);
+  });
+});
+
 describe('formatPromisedWindow', () => {
   const { formatPromisedWindow } = notices;
   test('reads the promised window instants, in ET, same style as formatWhen', () => {

@@ -319,6 +319,18 @@ describe("KnowledgePage embedded navigation", () => {
       .toBe(false);
   });
 
+  it("does not show a technician the admin-only Queries tab or call its route", () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
+    renderWiki("/admin/knowledge?wikiTab=queries");
+
+    expect(screen.queryByRole("button", { name: "Queries" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Articles" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(fetch.mock.calls.some(([url]) => String(url).includes("/admin/knowledge/queries")))
+      .toBe(false);
+  });
+
   it("lets a technician ask a question but not file the answer into the wiki", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
     fetch.mockImplementation(async (url, options) => (

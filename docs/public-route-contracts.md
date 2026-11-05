@@ -4038,6 +4038,13 @@ create customer/account rows or guess a customer name from message prose.
 Substantive messages ring the sender's one `new_lead` bell row (keyed on a
 hash of the number; each new text rewrites it, rings it again and pushes)
 linking to the inbox; reactions, empty messages and courtesy-only replies do not;
+`GATE_RING_NEW_CONTACTS` (owner 2026-11-04, dark): a text from a number with no
+customer record to a location line or a Google Business Profile tracking line
+rings that same row (title names the line, e.g. "New text from the Parrish (Pest)
+line"), and the quiet `inbound-text` Activity row is then skipped; if the ring fails
+the quiet row is written as before. Not rung: the AI assistant line, a tech line,
+the internal alert line, a staff sender, a reaction, a courtesy closer, a text a
+spam screen judged a sales pitch. Gate off = byte-identical;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. STOP/HELP/START handling (opt-out
 suppression + the `<Message>` confirmation TwiML) applies only to a sender

@@ -33,8 +33,18 @@ import {
 import { useBulkSlotConflicts } from './useSlotConflicts';
 import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock } from './openHours';
 import { useBoardOpenTimes, LitHours } from './BoardOpenTimes';
+import { getAdminUser } from '../../lib/adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+// A drop that changes nothing, or a technician's drop in another lane (or the
+// rail). That is a reassignment, and PUT /admin/schedule/:id/assign is
+// office-only: a technician can move a visit in time inside its own lane,
+// never across lanes.
+function dropRefused(fromTech, toTech, fromMin, toMin) {
+  if (fromTech === toTech) return fromMin === toMin;
+  return getAdminUser()?.role !== 'admin';
+}
 
 // Grid runs 6am–8pm; every displayed row is bookable (creation, drops,
 // drag-create) — there is no earliest-start floor (owner ruling 2026-08-27;
@@ -1298,7 +1308,7 @@ export default function TimeGridDay({
     // Past-day-end landings are disabled droppables; belt-and-braces for a
     // stale drop payload — the server would 422 it anyway.
     if (drop.slotMin != null && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
-    if (fromTech === toTech && fromMin === toMin) return;
+    if (dropRefused(fromTech, toTech, fromMin, toMin)) return;
 
     const dur = effectiveDuration(svc);
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
