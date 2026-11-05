@@ -157,8 +157,9 @@ describe('TechScheduleChanges', () => {
 
     const post = calls.find((c) => c.method === 'POST');
     expect(post.url).toMatch(/\/api\/tech\/notifications\/dismiss-batch$/);
-    // The server clears every folded change up to the read on screen.
-    expect(post.body).toEqual({ as_of: AS_OF });
+    // The server clears every folded change up to the read on screen, never
+    // a card shown on its own (keep_ids).
+    expect(post.body).toEqual({ as_of: AS_OF, keep_ids: [SOON.id] });
     expect(screen.queryByTestId('schedule-changes-summary')).not.toBeInTheDocument();
     expect(screen.getByTestId('schedule-change-soon')).toBeInTheDocument();
   });

@@ -113,6 +113,7 @@ const SCHEDULE_CHANGE_TYPES = VISIT_CARD_TYPES;
 // all" cover the whole open set, past this cap (Codex #5783 P2).
 const SCHEDULE_CHANGE_LIMIT = 300;
 const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+const UUID_RE = new RegExp(UUID_PATTERN, 'i');
 
 // The open schedule-change cards for one tech that still say something true
 // about their visit: one card per visit (rankedVisitCards), none for a past
@@ -189,11 +190,13 @@ router.get('/schedule-changes', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /dismiss-batch { as_of } — "Got it, clear all" on the summary card:
-// every open NON-soon schedule-change card of this tech written by `as_of`
-// (the read the tech was looking at), with the older cards of the same
-// visits that the read folded under them, so none of those comes back as
-// the visit's card. Soon cards keep their own Got it.
+// POST /dismiss-batch { as_of, keep_ids } — "Got it, clear all" on the
+// summary card: every open NON-soon schedule-change card of this tech written
+// by `as_of` (the read the tech was looking at), with the older cards of the
+// same visits that the read folded under them, so none of those comes back
+// as the visit's card. Soon cards keep their own Got it: `keep_ids` are the
+// soon cards that read showed, kept even when a move since has taken their
+// visit off today and tomorrow (soon also reads the visit's day now).
 router.post('/dismiss-batch', async (req, res, next) => {
   try {
     // A non-empty timestamp string only: new Date(null) is a valid 1970
@@ -201,10 +204,14 @@ router.post('/dismiss-batch', async (req, res, next) => {
     const raw = req.body?.as_of;
     const asOf = typeof raw === 'string' && raw.trim() ? new Date(raw) : null;
     if (!asOf || Number.isNaN(asOf.getTime())) return res.status(400).json({ error: 'as_of is required' });
+    const keepIds = Array.isArray(req.body?.keep_ids)
+      ? req.body.keep_ids.filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, SCHEDULE_CHANGE_LIMIT)
+      : [];
     const soon = soonSql(asOf);
     const shown = () => openScheduleChanges(req.technicianId, asOf)
       .where('n.created_at', '<=', asOf)
-      .whereRaw(`NOT ${soon.sql}`, soon.bindings);
+      .whereRaw(`NOT ${soon.sql}`, soon.bindings)
+      .whereNotIn('n.id', keepIds);
     const dismissed = await db('tech_notifications')
       .where('technician_id', req.technicianId)
       .whereIn('type', SCHEDULE_CHANGE_TYPES)

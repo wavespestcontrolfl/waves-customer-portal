@@ -297,8 +297,10 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
     setBusy(true);
     setError(null);
     try {
-      // The server clears every folded change up to the read on screen.
-      await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ as_of: feed.asOf }) });
+      // The server clears every folded change up to the read on screen, and
+      // never a card this screen shows on its own (a move since may have
+      // taken its visit off today and tomorrow).
+      await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ as_of: feed.asOf, keep_ids: soon.map((c) => c.id) }) });
       latest.current += 1;
       setChanges((prev) => prev.filter((c) => c.soon));
       setFeed((prev) => ({ ...prev, laterTotal: 0 }));

@@ -30,7 +30,7 @@ function stubDb(results) {
   db.mockImplementation((table) => {
     const calls = { table };
     const chain = {};
-    for (const m of ['leftJoin', 'where', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'select', 'count']) {
+    for (const m of ['leftJoin', 'where', 'whereNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'select', 'count']) {
       chain[m] = jest.fn((...args) => {
         (calls[m] ||= []).push(args);
         if (m === 'leftJoin' && typeof args[1] === 'function') {
@@ -120,7 +120,8 @@ describe('POST /dismiss-batch', () => {
     const chains = stubDb([37]);
     const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
     const asOf = new Date('2026-10-03T10:00:00.000Z');
-    await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: asOf.toISOString() } }, res, (e) => { throw e; });
+    // keep_ids: the cards the read showed on their own; junk is dropped.
+    await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: asOf.toISOString(), keep_ids: [ID(2), 'not-a-uuid', 7] } }, res, (e) => { throw e; });
 
     const [update, idCards, shownIds, visitCards, shownVisits] = chains;
     expect(update.table).toBe('tech_notifications');
@@ -136,6 +137,7 @@ describe('POST /dismiss-batch', () => {
       expect(shown.whereRaw[0][0]).toMatch(/^NOT \(n\.type IN \(/);
       expect(shown.whereRaw[1][0]).toMatch(/^NOT COALESCE\(/);
     }
+    for (const shown of [shownIds, shownVisits]) expect(shown.whereNotIn[0]).toEqual(['n.id', [ID(2)]]);
     expect(shownIds.select[0]).toEqual(['n.id']);
     expect(shownVisits.select[0][0].sql).toBe("n.payload->>'visit_id'");
     expect(update.update).toMatchObject({ read: true, dismissed_at: expect.any(Date) });

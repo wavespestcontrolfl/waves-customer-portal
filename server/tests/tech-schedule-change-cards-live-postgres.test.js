@@ -242,6 +242,23 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
     expect(byName.get('Stillaway')).toMatchObject({ type: 'visit_unassigned', payload: { now_with: 'Secondholder' } });
   });
 
+  test('Clear all never takes a card the read showed on its own, even after a move took its visit off today', async () => {
+    const tech = await makeTech('Fixture Tech');
+    const { formatWhen } = require('../services/tech-visit-notifications');
+    // A far-dated card whose visit moved onto today with no card: shown on top.
+    const visit = await makeVisit(tech, 'Ontoday', today, '15:00', '16:00');
+    const shownOnTop = await card(tech, visit, 'visit_assigned', { date: farOut, when: formatWhen(farOut, '15:00', '16:00'), actor: 'by the office', customer_name: 'Ontoday' }, daysAgo(4));
+    const read = await call('/schedule-changes', 'get', { technicianId: tech.id });
+    expect(read.changes.map((c) => [c.id, c.soon])).toEqual([[shownOnTop, true]]);
+
+    // Another quiet move takes it off today before the tap.
+    await db('scheduled_services').where({ id: visit }).update({ scheduled_date: farOut });
+    const result = await call('/dismiss-batch', 'post', { technicianId: tech.id, body: { as_of: read.as_of, keep_ids: [shownOnTop] } });
+    expect(result).toEqual({ success: true, dismissed: 0 });
+    const stillOpen = await db('tech_notifications').where({ technician_id: tech.id }).whereNull('dismissed_at').pluck('id');
+    expect(stillOpen).toEqual([shownOnTop]);
+  });
+
   test('Got it clears the visit\'s older open cards too, so none takes its place', async () => {
     const tech = await makeTech('Fixture Tech');
     const { formatWhen } = require('../services/tech-visit-notifications');
