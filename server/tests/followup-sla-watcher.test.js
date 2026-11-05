@@ -10,6 +10,7 @@ jest.mock('../services/notification-service', () => ({
   _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
   // The real guard, so an in-place rewrite is judged on the text a fresh post stores.
   normalizeAdminText: (...args) => jest.requireActual('../services/notification-service').normalizeAdminText(...args),
+  safeErrorSummary: (...args) => jest.requireActual('../services/notification-service').safeErrorSummary(...args),
 }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false), adminBodyGuardAllLive: jest.fn(() => true) }));
@@ -342,12 +343,14 @@ describe('the list names people and says what to do', () => {
     ['a placeholder name on the call counts as none', [unlinked('a')], { spoken: [{ id: 'call-a', name_full: 'Unknown' }] }, 'Comms — call caller ***0123 back'],
     ['a name the alert rule refuses counts as none', [unlinked('a')], { spoken: [{ id: 'call-a', name_full: 'Sam Sample!!' }] }, 'Comms — call caller ***0123 back'],
     ['no name anywhere: the masked number', [unlinked('a')], {}, 'Comms — call caller ***0123 back'],
-    ['the name read fails: the masked number, and the list still posts', [unlinked('a')], { spoken: () => { throw new Error('read failed'); } }, 'Comms — call caller ***0123 back'],
+    ['the name read fails: the masked number, and the list still posts', [unlinked('a')], { spoken: () => { throw Object.assign(new Error('select … +19415550123'), { code: '57014' }); } }, 'Comms — call caller ***0123 back'],
   ])('%s', async (_label, rows, scenario, title) => {
     mockDb(scenario);
     listOpenCommitments.mockResolvedValue(rows);
     expect((await runFollowUpSlaWatcher({ now: NOW })).alerted).toBe(1);
     expect(rollingCall()[1]).toBe(title);
+    // A failed read is logged by its code only: query text carries the bound phone number.
+    expect(JSON.stringify(require('../services/logger').warn.mock.calls)).not.toContain('5550123');
   });
 
   test('one person with several promises is one person to follow up with', async () => {

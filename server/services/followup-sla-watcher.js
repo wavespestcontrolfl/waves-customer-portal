@@ -597,7 +597,7 @@ async function namesFor(rows) {
   }
   if (!unnamed.length) return names;
   const spoken = await spokenNames(unnamed.map((r) => r.call_log_id)).catch((err) => {
-    logger.warn(`[followup-sla] caller names not read: ${err.message}`);
+    logger.warn(`[followup-sla] caller names not read: ${NotificationService.safeErrorSummary(err)}`);
     return new Map();
   });
   const onNumber = new Map();
@@ -607,7 +607,7 @@ async function namesFor(rows) {
     if (key) {
       if (!onNumber.has(key)) {
         onNumber.set(key, await nameOnFileForPhone(db, contactPhone(r)).catch((err) => {
-          logger.warn(`[followup-sla] name on file not read: ${err.message}`);
+          logger.warn(`[followup-sla] name on file not read: ${NotificationService.safeErrorSummary(err)}`);
           return null;
         }));
       }
