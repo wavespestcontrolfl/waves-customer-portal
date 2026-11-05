@@ -391,6 +391,19 @@ describeDb('second-tech-handover --weekend-move on PostgreSQL', () => {
     await expect(exec.executeHandover(knex, { ...args(w), start: '2099-07-03', planId: p.planId, outDir })).rejects.toMatchObject({ code: 'START_TOO_SOON' });
   });
 
+  test('a cleared absence does not block its day: the hire marked out on Thursday, then cleared, takes the Thursday', async () => {
+    const w = await world();
+    const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });
+    // Clearing keeps the row and stamps cleared_at (tech-out clearTechOut).
+    await knex('technician_absences').insert({ technician_id: w.hireId, absence_date: '2099-07-09', reason: 'synthetic', cleared_at: new Date('2099-06-29T15:00:00Z') });
+    const p = await plan(w);
+    expect(p.ids.kept).toEqual([]);
+    expect(p.ids.moves.find((m) => m.visit_id === s.kids[0].id).to_date).toBe('2099-07-09');
+    // The control: the same absence, not cleared, blocks Thursday and the visit takes the Monday.
+    await knex('technician_absences').where({ technician_id: w.hireId, absence_date: '2099-07-09' }).update({ cleared_at: null });
+    expect((await plan(w)).ids.moves.find((m) => m.visit_id === s.kids[0].id).to_date).toBe('2099-07-13');
+  });
+
   test('a stale plan writes nothing: a changed date after the dry run refuses the run', async () => {
     const w = await world();
     const s = await weekendSeries(w.ownerId, await customer(), { dates: ['2099-07-11'] });

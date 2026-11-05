@@ -713,6 +713,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
   const weekend = require('../../ops/agents/second-tech-handover-weekend.js');
   const seeder = require('../services/recurring-appointment-seeder');
   const { measureRecurringSeries } = require('../services/recurring-schedule-audit');
+  const { daysBetween } = require('../services/auto-dispatch/route-tiers');
   const hop = (date, pattern, n, opts) => seeder._internals.nextRecurringDate(date, pattern, n, opts);
   const ord = (date) => seeder._internals.recurrenceOrdinalOptions(date, {});
   const MON_THU = [1, 2, 3, 4];
@@ -773,7 +774,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
       for (const v of c.series[0].live) {
         const d = newDates.get(v.id);
         expect(dow(d)).toBe(toDay);
-        expect(Math.abs(weekend.dayDiff(v.scheduled_date, d))).toBeLessThanOrEqual(5);
+        expect(Math.abs(daysBetween(v.scheduled_date, d))).toBeLessThanOrEqual(5);
       }
       expect(anchors).toEqual([expect.objectContaining({ weekday: toDay, old_nth: null, old_weekday: null })]);
     }
@@ -850,7 +851,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
       const out = await run([c]);
       expect(out.kept.size).toBe(0);
       expect(live.map((v) => dow(out.newDates.get(v.id)))).toEqual([4, 4]);
-      for (const v of live) expect(Math.abs(weekend.dayDiff(v.scheduled_date, out.newDates.get(v.id)))).toBeLessThanOrEqual(5);
+      for (const v of live) expect(Math.abs(daysBetween(v.scheduled_date, out.newDates.get(v.id)))).toBeLessThanOrEqual(5);
     }
   });
 
@@ -867,7 +868,7 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     // Not the Thursday before (the 5th / last Thursday of the previous month): the Monday after, in the same month.
     expect(firstNew).toBe(`${first.slice(0, 8)}03`);
     expect(anchors[0]).toMatchObject({ nth: 1, weekday: 1 });
-    for (const v of c.series[0].live) expect(Math.abs(weekend.dayDiff(v.scheduled_date, newDates.get(v.id)))).toBeLessThanOrEqual(5);
+    for (const v of c.series[0].live) expect(Math.abs(daysBetween(v.scheduled_date, newDates.get(v.id)))).toBeLessThanOrEqual(5);
   });
 
   test('a visit never reaches or crosses its adjacent occurrence (the flex-tier neighbor bound)', async () => {

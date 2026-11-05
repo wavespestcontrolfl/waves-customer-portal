@@ -63,6 +63,7 @@ const root = path.join(__dirname, '..', '..', 'server');
 const { dayOfWeekOfDate } = require(path.join(root, 'services', 'technician-eligibility'));
 const { toDateStr, shiftDateStr } = require(path.join(root, 'services', 'auto-dispatch', 'dates'));
 const { FLEX_TIER_RADIUS_DAYS, loadSeriesNeighbors } = require(path.join(root, 'services', 'auto-dispatch', 'flex-tier'));
+const { daysBetween } = require(path.join(root, 'services', 'auto-dispatch', 'route-tiers'));
 const seeder = require(path.join(root, 'services', 'recurring-appointment-seeder'));
 const { clearOfBlackout, isBlackedOut } = require(path.join(root, 'services', 'scheduling', 'blackout-nudge'));
 
@@ -79,10 +80,12 @@ const DEFAULT_MINUTES = 60;
 /** rebooker.js isMonthBasedRecurrence: the patterns whose dates come from the parent's nth weekday. */
 const isMonthBased = (pattern) => pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || MONTH_PATTERNS.has(pattern);
 
-const dayDiff = (a, b) => Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86400000);
 /** Does top-up keep the series on one weekday? A month walk does (re-anchored on the parent); a day gap only in whole weeks. */
-const keepsWeekday = (parent, today) => isMonthBased(parent.recurring_pattern)
-  || dayDiff(today, nextRecurringDate(today, parent.recurring_pattern, 1, { intervalDays: parent.recurring_interval_days })) % 7 === 0;
+function keepsWeekday(parent, today) {
+  if (isMonthBased(parent.recurring_pattern)) return true;
+  const gap = daysBetween(today, nextRecurringDate(today, parent.recurring_pattern, 1, { intervalDays: parent.recurring_interval_days }));
+  return gap !== null && gap % 7 === 0;
+}
 const minutes = (t) => {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ''));
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
@@ -125,7 +128,7 @@ function candidateDates(current, workDays, today, start) {
 function hopsBetween(parent, earlier, later) {
   const opts = { ...recurrenceOrdinalOptions(earlier, {}), intervalDays: parent.recurring_interval_days };
   for (let hops = 1; hops <= 12; hops += 1) {
-    if (Math.abs(dayDiff(nextRecurringDate(earlier, parent.recurring_pattern, hops, opts), later)) <= FLEX_TIER_RADIUS_DAYS) return hops;
+    if (Math.abs(daysBetween(nextRecurringDate(earlier, parent.recurring_pattern, hops, opts), later)) <= FLEX_TIER_RADIUS_DAYS) return hops;
   }
   return 1;
 }
@@ -168,11 +171,11 @@ function preferenceProblem(prefs, date) {
 /** Why one projected date is not allowed for a visit, or null. Sync: reads only `facts`. */
 function dateProblem(v, date, ctx) {
   const { facts, parent, workDays, today, skipWeekends } = ctx;
-  if (Math.abs(dayDiff(v.scheduled_date, date)) > FLEX_TIER_RADIUS_DAYS) return 'projection';
+  if (Math.abs(daysBetween(v.scheduled_date, date)) > FLEX_TIER_RADIUS_DAYS) return 'projection';
   // The flex tier's cumulative allowance: ±5 days of the visit's durable original date too (route-tiers resolveAnchor), unknown fails closed.
   const anchor = facts.anchors.get(v.id);
   if (!anchor) return 'anchor_unknown';
-  if (Math.abs(dayDiff(anchor, date)) > FLEX_TIER_RADIUS_DAYS) return 'anchor_budget';
+  if (Math.abs(daysBetween(anchor, date)) > FLEX_TIER_RADIUS_DAYS) return 'anchor_budget';
   if (!workDays.includes(dayOfWeekOfDate(date))) return 'projection';
   if (date < shiftDateStr(today, MIN_DAYS_OUT)) return 'inside_freeze';
   if (isBlackedOut(date, facts.blackout)) return 'company_blackout';
@@ -344,7 +347,9 @@ async function loadWeekendFacts(db, { to, from, start, today, now = new Date(), 
   const dates = visits.map((v) => v.scheduled_date).sort();
   const lo = shiftDateStr(dates[0] || start, -FLEX_TIER_RADIUS_DAYS - 31);
   const hi = shiftDateStr(dates[dates.length - 1] || start, FLEX_TIER_RADIUS_DAYS + 31);
-  const absentRows = await db('technician_absences').where({ technician_id: to }).whereBetween('absence_date', [lo, hi]).select('absence_date');
+  // A cleared absence keeps its row with cleared_at stamped (tech-out clearTechOut): the hire works that day.
+  const absentRows = await db('technician_absences').where({ technician_id: to }).whereBetween('absence_date', [lo, hi]).whereNull('cleared_at')
+    .select('absence_date');
 
   const { getCustomerSchedulingPreferences } = require(path.join(root, 'services', 'auto-dispatch', 'preferences'));
   const prefs = new Map();
@@ -439,5 +444,5 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
 }
 
 module.exports = {
-  decideWeekend, MIN_DAYS_OUT, effectiveWindowEnd, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange, dayDiff,
+  decideWeekend, MIN_DAYS_OUT, effectiveWindowEnd, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange,
 };
