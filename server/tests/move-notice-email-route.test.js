@@ -91,3 +91,29 @@ test('a delivered text sends no email', async () => {
   expect(notice).toEqual({ sent: true, error: null });
   expect(AppointmentReminders.deliverMoveNoticeEmail).not.toHaveBeenCalled();
 });
+
+test('the text closes on the visit\'s reschedule link, read once for every recipient (owner 2026-11-04)', async () => {
+  const linkModule = require('../services/reschedule-link');
+  const renderer = require('../services/sms-template-renderer');
+  const line = jest.spyOn(linkModule, 'rescheduledTextLine')
+    .mockResolvedValue('Need a different time? Reschedule here: portal.test/l/abc');
+  const renderSpy = jest.spyOn(renderer, 'renderRequiredSmsTemplate').mockResolvedValue('body');
+  try {
+    AppointmentReminders.safeSendAppointment.mockImplementationOnce(async (_c, _p, renderBody) => {
+      await renderBody({ name: 'Pat Doe' });
+      await renderBody({ name: 'Sam Doe' });
+      return true;
+    });
+    await sendRescheduleNoticeForVisit('svc-1', '2099-11-04', '16:00');
+    expect(line).toHaveBeenCalledTimes(1);
+    expect(line).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
+    expect(renderSpy).toHaveBeenCalledTimes(2);
+    for (const [key, vars] of renderSpy.mock.calls) {
+      expect(key).toBe('appointment_rescheduled');
+      expect(vars.different_time_line).toBe('Need a different time? Reschedule here: portal.test/l/abc');
+    }
+  } finally {
+    line.mockRestore();
+    renderSpy.mockRestore();
+  }
+});
