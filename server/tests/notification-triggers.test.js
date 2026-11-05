@@ -90,8 +90,31 @@ describe('notification trigger push tags', () => {
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 1, areas: [{ area: 'Billing', count: 1 }] }).title).toBe('1 item waits for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 2, areas: [{ area: 'Billing', count: 2 }] }).title).toBe('2 items wait for you');
     expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 3, areas: [] }).body).toBeNull();
+    // Owner 2026-11-04 "fix count": read items still open show as "N open in all" after the unread areas.
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 39, total: 334, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2 \u00b7 334 open in all');
+    expect(TRIGGER_REGISTRY.waiting_summary.build({ count: 12, total: 12, areas }).body).toBe('Comms 6 \u00b7 Schedule 3 \u00b7 Billing 2');
     expect(TRIGGER_REGISTRY.waiting_summary).toMatchObject({ label: 'Morning summary: items waiting for you', category: 'alert', priority: 'normal', group: 'Alerts' });
     expect(TRIGGER_REGISTRY.waiting_summary.techVisible).toBeUndefined();
+  });
+
+  // GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner").
+  test('open_visits_nudge carries the text\'s words, opens the tech close-out page and has no bell-row rule beyond fyi', () => {
+    const built = TRIGGER_REGISTRY.open_visits_nudge.build({
+      headline: '3 visits from today are still open',
+      lines: ['9:00 AM - Ana R. - Pest Control (not started)', '+2 more'],
+      day: '2026-11-04',
+    });
+    expect(built.title).toBe('3 visits from today are still open');
+    expect(built.body).toBe('Tap to close out.\n9:00 AM - Ana R. - Pest Control (not started)\n+2 more');
+    expect(built.link).toBe('/tech');
+    expect(TRIGGER_REGISTRY.open_visits_nudge.build({}).body).toBe('Tap to close out.');
+    expect(TRIGGER_REGISTRY.open_visits_nudge).toMatchObject({ category: 'alert', priority: 'normal', group: 'Alerts', rule: { severity: 'fyi' } });
+    expect(TRIGGER_REGISTRY.open_visits_nudge.techVisible).toBeUndefined();
+  });
+
+  test('open_visits_nudge gets a per-ET-day push tag', () => {
+    expect(__private.pushTagFor('open_visits_nudge', { day: '2026-11-04' })).toBe('waves-open_visits_nudge-2026-11-04');
+    expect(__private.pushTagFor('open_visits_nudge', { day: '2026-11-05' })).not.toBe(__private.pushTagFor('open_visits_nudge', { day: '2026-11-04' }));
   });
 
   test('bill payment error trigger highlights ACH checkout failures', () => {
@@ -129,25 +152,39 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/leads?lead=lead-123');
   });
 
-  test('new lead trigger without a lead record points at the SMS inbox', () => {
-    // Tracking-line texts from unknown numbers no longer mint a customer
-    // row (twilio-webhook.js domain/van branch), so the bell must not send
-    // the owner to a lead that does not exist.
-    const built = TRIGGER_REGISTRY.new_lead.build({
-      title: 'New text from wavespestcontrol.com',
-      name: 'Unknown sender',
-      source: 'wavespestcontrol.com',
-      area: 'Bradenton',
-      phone: '+12025550101',
-      message: 'Please quote service for the garden shed.',
-      link: '/admin/communications',
-    });
+  test('an unknown sender\'s text to a tracking line says what they wrote, masked, and opens the SMS inbox (owner 2026-11-04)', () => {
+    // Tracking-line texts from unknown numbers mint no customer row
+    // (twilio-webhook.js domain/van branch), so the bell must not send the
+    // owner to a lead that does not exist. It used to say only "Message in
+    // the SMS inbox"; it quotes the text the way every bell body is masked.
+    const sid = `SM${'0123456789abcdef'.repeat(2)}`;
+    const text = { name: null, twilioSid: sid, source: 'wavespestcontrol.com', phone: '+12025550101', link: `/admin/communications?message=${sid}` };
+    const built = TRIGGER_REGISTRY.new_lead.build({ ...text, message: 'Please quote ants at 1000 Riverside Drive, call 941-555-0123', textCount: 1 });
 
     expect(built.title).toBe('New text from wavespestcontrol.com');
-    expect(built.body).toContain('Unknown sender via wavespestcontrol.com (Bradenton)');
-    expect(built.body).toContain('Message in the SMS inbox');
-    expect(built.body).not.toContain('swimming pool');
-    expect(built.link).toBe('/admin/communications');
+    expect(built.body).toBe('“Please quote ants at [address], call ***0123” — unknown sender ***0101');
+    expect(built.body).not.toContain('Message in the SMS inbox');
+    expect(built.detail).toBeUndefined();
+    expect(built.link).toBe(`/admin/communications?message=${sid}`);
+    // Call: the Communications thread's Call back for the sender, named by the text.
+    expect(built.alert.buttons.items[0].args).toEqual({ smsSid: sid });
+
+    // The sender's row counts its texts; a long text is cut inside the 110-character why and kept whole for
+    // "Show full text"; a text with no words (the webhook rings only for words or a photo) is a photo.
+    const long = 'Hi there, I have roaches all over my kitchen and garage and I need someone to come out this week, what do you charge?';
+    const second = TRIGGER_REGISTRY.new_lead.build({ ...text, message: long, textCount: 2 });
+    expect(second.title).toBe('2 texts from wavespestcontrol.com');
+    expect(second.body.length).toBeLessThanOrEqual(110);
+    expect(second.body).toMatch(/^“Hi there, I have roaches .*…” — unknown sender \*\*\*0101$/);
+    expect(second.detail).toBe(long);
+    const photo = TRIGGER_REGISTRY.new_lead.build({ ...text, message: '' });
+    expect(photo.body).toBe('Photo message — unknown sender ***0101');
+    expect(photo.detail).toBeUndefined();
+
+    // A name on file for the number leads instead of the bare number (owner 2026-11-04), with the line they texted.
+    const named = TRIGGER_REGISTRY.new_lead.build({ ...text, name: 'Jane Fixture', message: 'Do you treat roaches?', textCount: 2 });
+    expect(named.title).toBe('2 texts from Jane Fixture');
+    expect(named.body).toBe('“Do you treat roaches?” — via wavespestcontrol.com');
   });
 
   test('SMS reply trigger leads with a lead\'s CALL / TEXT choice and is unchanged without it', () => {
@@ -260,16 +297,17 @@ describe('notification trigger push tags', () => {
     expect(built.body).not.toContain('calling in now');
   });
 
-  test('promise-chaser headline leads with the caller name; with no name it leads with the formatted number (owner 2026-10-21)', () => {
+  test('promise-chaser headline and body lead with the caller name; with no name, the formatted number in both (owner 2026-10-21, 2026-11-04)', () => {
     const named = TRIGGER_REGISTRY.promise_chaser.build({
-      name: 'Martin Fixtureson', phone: '+19415550199', what: 'quote', when: 'Oct 19, 3:50 PM', calledAtLabel: '12:31 PM',
+      name: 'Martin Fixtureson', phone: '+19415550199', what: 'quote', when: 'Sun, Oct 19 at 3:50 PM', calledAtLabel: '12:31 PM',
     });
     expect(named.title).toBe('Martin Fixtureson called back — we still owe a quote');
     const unnamed = TRIGGER_REGISTRY.promise_chaser.build({
-      name: null, phone: '+19415550199', what: 'quote', when: 'Oct 19, 3:50 PM', calledAtLabel: '12:31 PM',
+      name: null, phone: '+19415550199', what: 'quote', when: 'Sun, Oct 19 at 3:50 PM', calledAtLabel: '12:31 PM',
     });
     expect(unnamed.title).toBe('(941) 555-0199 called back — we still owe a quote');
-    expect(unnamed.body).toBe('+19415550199 called at 12:31 PM. We still owe them a quote promised Oct 19, 3:50 PM.');
+    // The body names the caller the way the headline does, never the raw +1 number.
+    expect(unnamed.body).toBe('(941) 555-0199 called at 12:31 PM. We still owe them a quote promised Sun, Oct 19 at 3:50 PM.');
     expect(TRIGGER_REGISTRY.promise_chaser.build({ what: 'callback' }).title).toBe('A lead called back — we still owe a callback');
   });
 
@@ -679,6 +717,25 @@ describe('triggerNotification bell outcome', () => {
       { dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
     expect(stats).toMatchObject({ bellWritten: true, deduped: true, push: null });
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+
+    // The same for an unknown sender's thread row on a website line (new_lead, refreshed in place); a keyed
+    // new_lead that is not a thread row still pushes on a hit.
+    const sid = `SM${'0123456789abcdef'.repeat(2)}`;
+    const text = { name: 'Jane Fixture', twilioSid: sid, phone: '+12025550101', message: 'Second text', source: 'wavespestcontrol.com', textCount: 1 };
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'tracking-row', deduped: true });
+    expect(await triggerNotification('new_lead', text, { dedupeKey: 'sms-tracking-thread:abc', refreshOnDedupe: true, bumpOnRefresh: true }))
+      .toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    // At rest the row's payload masks the sender's number (new_lead carries no contact details); the name on file stays.
+    expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.payload).toMatchObject({ phone: '***0101', name: 'Jane Fixture' });
+    // The sender's next text rewrites the row (a refresh, even after a close): that one pushes.
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'tracking-row', deduped: true, refreshed: true, rung: true });
+    await triggerNotification('new_lead', { ...text, twilioSid: `SM${'fedcba9876543210'.repeat(2)}`, message: 'Third text' },
+      { dedupeKey: 'sms-tracking-thread:abc', refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'keyed-lead-row', deduped: true });
+    await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc' });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
   });
 
   // A second same-day callback on the SAME open promise dedupes to the
@@ -997,6 +1054,58 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     }
   });
 
+  // GATE_OWNER_NUDGE_BANNER: pushOnly + onlyUserIds reaches only the named admin, never a bell row, only while its gate is on.
+  test.each([['true', 1], [undefined, 0]])('GATE_OWNER_NUDGE_BANNER=%p: the pushOnly open_visits_nudge banner sends %p push(es) to the owner alone, never a bell row', async (gate, pushes) => {
+    const PushService = require('../services/push-notifications');
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'owner-1', role: 'admin' }, { id: 'admin-2', role: 'admin' }]) : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+    PushService.sendToAdminUsers.mockClear();
+    if (gate) process.env.GATE_OWNER_NUDGE_BANNER = gate;
+    try {
+      const stats = await triggerNotification(
+        'open_visits_nudge',
+        { headline: '2 visits from today are still open', lines: ['9:00 AM - Ana R. - Pest Control'], day: '2026-11-04' },
+        { pushOnly: true, adminOnly: true, onlyUserIds: ['owner-1'] },
+      );
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(pushes);
+      if (!pushes) {
+        expect(stats.policySilenced).toBe(true);
+        return;
+      }
+      const [adminIds, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
+      expect(adminIds).toEqual(['owner-1']);
+      expect(payloadFor('owner-1')).toMatchObject({
+        title: '2 visits from today are still open', body: 'Tap to close out.\n9:00 AM - Ana R. - Pest Control', url: '/tech',
+        tag: 'waves-open_visits_nudge-2026-11-04', sound: 'waves-reminder.caf', priority: 'normal',
+      });
+    } finally {
+      delete process.env.GATE_OWNER_NUDGE_BANNER;
+      gateSpy.mockRestore();
+    }
+  });
+
+  test('onlyUserIds naming nobody who is active sends no push (the nudge then falls back to the text)', async () => {
+    const PushService = require('../services/push-notifications');
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-2', role: 'admin' }]) : tableMock([])
+    ));
+    PushService.sendToAdminUsers.mockClear();
+    try {
+      const stats = await triggerNotification('open_visits_nudge', { headline: 'x', lines: [], day: '2026-11-04' }, { pushOnly: true, onlyUserIds: ['owner-1'] });
+      expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+      expect(stats.push?.sent ?? 0).toBe(0);
+    } finally {
+      gateSpy.mockRestore();
+    }
+  });
+
   // GATE_ALERT_CATALOG=watch (bell rebuild step D1): this silence returns before NotificationService.create, so it
   // leaves the muted record itself; otherwise every muted registry event (payments, dashboard alerts) went uncounted.
   test.each([['watch', 1], [undefined, 0]])('GATE_ALERT_CATALOG=%p: a registry event the bell policy silences leaves %p muted record(s)', async (mode, rows) => {
@@ -1308,6 +1417,18 @@ describe('bell banner triggers', () => {
     // It sits right after sms_reply.
     const keys = Object.keys(TRIGGER_REGISTRY);
     expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
+  });
+
+  test('new_lead_email (GATE_RING_NEW_CONTACTS) builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+    const lead = TRIGGER_REGISTRY.new_lead_email;
+    expect(lead).toEqual(expect.objectContaining({ category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
+    expect(lead.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });
+    expect(lead.build(bannerPayload)).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(lead.build({}).link).toBe('/admin/email');
+    await triggerNotification('new_lead_email', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    const sent = PushService.sendToAdminUsers.mock.calls.at(-1)[1]('admin-1');
+    expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_email-n-42', sound: 'waves-lead.caf' });
   });
 
   test('the banner is tagged by its row, so a refresh ring replaces it, and a second row never does', () => {

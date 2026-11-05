@@ -347,6 +347,46 @@ describe('llm-dispatch-metrics', () => {
         .toEqual([expect.objectContaining({ policy: 'visitBrief', kind: 'all_providers_failed' })]);
     });
 
+    it('never flags a backup-only route as gone silent — a quiet day means its primary answered', () => {
+      const { detectExceptions, BACKUP_ONLY_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect([...BACKUP_ONLY_POLICIES]).toContain('callExtractionV1Backup');
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      // 2026-11-04 shape: busy every day of a Gemini outage, then nothing once
+      // Gemini answered again. Neither cadence may alarm.
+      const priorWeek = [
+        { policy: 'callExtractionV1Backup', total: 60, activeDays: DAILY_CADENCE_MIN_DAYS },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['report']))).toEqual([]);
+      // A failed backup chain is a real incident and still reports.
+      const failing = [...live, { policy: 'callExtractionV1Backup', total: 3, fallbacks: 0, failed: 1 }];
+      expect(detectExceptions(failing, priorWeek, null, true, new Set(['report', 'callExtractionV1Backup'])))
+        .toEqual([expect.objectContaining({ policy: 'callExtractionV1Backup', kind: 'all_providers_failed' })]);
+    });
+
+    it('gives a low-volume policy the quiet-days grace even when it ran on most days', () => {
+      // Ask Waves pattern (2026-11-04 false alarm): 18 calls over 5 of 7 days,
+      // 11 of them one morning, then one empty day. Below
+      // DAILY_CADENCE_MIN_CALLS_PER_DAY an empty day is ordinary, so the whole
+      // recent window must be silent, as for a bursty policy.
+      const { detectExceptions, DAILY_CADENCE_MIN_DAYS, DAILY_CADENCE_MIN_CALLS_PER_DAY } = load();
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      const floor = DAILY_CADENCE_MIN_CALLS_PER_DAY * 7;
+      const priorWeek = [
+        { policy: 'askWaves', total: floor - 1, activeDays: DAILY_CADENCE_MIN_DAYS },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['askWaves', 'report']))).toEqual([]);
+      const silent = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(silent).toEqual([expect.objectContaining({ policy: 'askWaves', kind: 'gone_silent' })]);
+      expect(silent[0].detail).toMatch(/silent for \d\+ days/);
+      // At the floor, one zero day still alarms at once.
+      const atFloor = [{ policy: 'askWaves', total: floor, activeDays: DAILY_CADENCE_MIN_DAYS }];
+      const out = detectExceptions(live, atFloor, null, true, new Set(['askWaves']));
+      expect(out).toEqual([expect.objectContaining({ policy: 'askWaves', kind: 'gone_silent' })]);
+      expect(out[0].detail).toMatch(/ZERO calls yesterday/);
+    });
+
     it('never flags episodic lanes (:sealed/:backfill/:replay) as gone silent — they burst then quiet by design', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
       // Live traffic present, so the recorder is provably alive and the

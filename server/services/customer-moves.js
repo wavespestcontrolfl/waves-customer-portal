@@ -317,7 +317,7 @@ const VERDICT_WORDS = {
   unverified: 'could not be confirmed, so check it with the customer',
 };
 
-function requestDescription({ typed, normalized, verdict, moveOut, moveIn, services }) {
+function requestDescription({ typed, normalized, verdict, moveOut, moveIn, services, billing = null }) {
   const lines = [];
   if (typed) {
     const google = addressLine(normalized);
@@ -330,6 +330,7 @@ function requestDescription({ typed, normalized, verdict, moveOut, moveIn, servi
   lines.push(`Move-out date: ${prettyDate(moveOut) || 'not known yet'}.`);
   lines.push(`Move-in date: ${prettyDate(moveIn) || 'not known yet'}.`);
   lines.push(services.length ? `Current plan: ${services.join(', ')}.` : 'Current plan: no recurring service on file.');
+  if (billing) lines.push(billing);
   return lines.join('\n');
 }
 
@@ -456,7 +457,7 @@ function checkSubmitInput({ typed, moveOut }) {
   }
 }
 
-async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
+async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = null, now }) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [MOVE_FENCE_NS, String(move.id)]);
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
@@ -468,7 +469,7 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, now }) {
     checkSubmitInput({ typed: address.typed, moveOut });
     const customer = await trx('customers').where({ id: locked.customer_id }).first('id', 'first_name', 'last_name');
     const hasAddress = !!address.typed;
-    const description = requestDescription({ ...address, moveOut, moveIn, services });
+    const description = requestDescription({ ...address, moveOut, moveIn, services, billing });
     const subject = requestSubject(address.normalized, hasAddress);
     // Moving PR B1: a new-home estimate was priced for the address on file. A
     // resubmitted address that is not that house takes the estimate off the
@@ -521,7 +522,12 @@ async function submitMove(move, { checkId = null, moveOutDate, moveInDate } = {}
   const moveOut = cleanDate(moveOutDate, 'move-out date', now);
   const moveIn = cleanDate(moveInDate, 'move-in date', now);
   const services = await planServiceNames(move.customer_id);
-  const saved = await saveSubmit(move, { checkId: checkId || null, moveOut, moveIn, services, now });
+  // A failed read leaves the line out; it never blocks the customer's submit.
+  const billing = await billingLine(db, move.customer_id, now).catch((err) => {
+    logger.warn(`[customer-moves] billing line read failed for move ${move.id} (${errCode(err)})`);
+    return null;
+  });
+  const saved = await saveSubmit(move, { checkId: checkId || null, moveOut, moveIn, services, billing, now });
   try {
     await raiseMoveAlert({
       move: saved.updated,
@@ -647,12 +653,40 @@ const NEW_HOME_REFUSALS = {
   out_of_area: 'The new address is outside our service area.',
   no_address: 'The new address is not complete.',
   customer_gone: 'This customer record is not active.',
-  prepay: 'This customer prepays for the year. New-home estimates for prepay plans come in a later update.',
-  monthly: 'This customer pays a monthly membership. New-home estimates for monthly plans come in a later update.',
+  prepay: 'This customer prepays for the year. The new home\'s price starts with next year\'s prepay, so make no estimate now.',
+  monthly: 'This customer pays a monthly membership. Set the new home\'s price by hand, never with an estimate.',
   billing: 'This customer\'s billing plan is not one the new-home estimate handles yet.',
   no_plan: 'This customer has no recurring plan to move. Make a normal estimate instead.',
   estimate_exists: 'This move already has a new-home estimate. Open that one instead.',
 };
+// What the office does by hand for a move the flow refuses on billing (owner
+// 2026-11-04, B3 "A"). A paid annual prepay keeps its paid price, and the new
+// home's price starts with next year's prepay; a monthly member's new price is
+// set by hand. An accepted estimate would switch a prepay to per-visit billing,
+// book a second plan and close the year-end prepay bell, and would add a
+// monthly member's new price on top of the old one. The Edit appointment
+// address change moves every open visit of the plan, so it waits for the last
+// visit before move-out.
+const MOVE_VISITS_STEPS = [
+  'Add the new home with Add service address on this customer\'s page.',
+  'After the last visit at the old house before move-out is done, open the next visit\'s Edit appointment and pick the new home under Service address. That moves the plan\'s remaining visits.',
+  'Termite, misting and palm treatments stay with the old house.',
+];
+const BILLING_STEPS = {
+  prepay: [
+    'Send no estimate the customer can accept this year.',
+    ...MOVE_VISITS_STEPS,
+    'The moved visits keep their paid price: nothing is charged or refunded.',
+    'At year end the prepay bell asks for next year\'s prepay. Send it at the new home\'s price: the visits times the new visit price, less 5%.',
+  ],
+  monthly: [
+    'Send no estimate: an accept adds the new price on top of the old one.',
+    ...MOVE_VISITS_STEPS,
+    'On the first billing day after move-out, set the new monthly price by hand.',
+  ],
+};
+// A refusal's steps, for the card: { steps } or nothing.
+const billingSteps = (code) => (BILLING_STEPS[code] ? { steps: BILLING_STEPS[code] } : {});
 // Plan services the new-home estimate does not copy, and why.
 const LEFT_OUT = [
   { re: /termite/i, reason: 'Termite stations and treatments stay with the old house.' },
@@ -715,13 +749,37 @@ async function billingBlock(conn, customerId) {
   return prepaid ? 'prepay' : null;
 }
 
-/** The Moving card's new-home action for one move: null, or { action, estimateId, reason }. */
+// The last day of the customer's paid, live prepay year (not a termite plan's),
+// as YYYY-MM-DD, or null.
+async function prepayPaidThrough(conn, customerId, today) {
+  const row = await require('./annual-prepay-renewals').coveredTermsAsOf(conn, today)
+    .where('t.customer_id', customerId)
+    .whereNull('t.annual_plan_version')
+    .first(conn.raw("to_char(max(t.term_end), 'YYYY-MM-DD') as term_end"));
+  return (row && row.term_end) || null;
+}
+
+// The office item's billing line (owner 2026-11-04, B3 "A"), so whoever
+// answers the move sees a prepaid year or a monthly membership before pricing
+// the new home. Null when there is no plan to describe.
+async function billingLine(conn, customerId, now = new Date()) {
+  const block = await billingBlock(conn, customerId);
+  if (block === null) return 'Billing: per visit.';
+  if (block === 'prepay') {
+    const through = prettyDate(await prepayPaidThrough(conn, customerId, etDateString(now)));
+    return `Billing: annual prepay${through ? `, paid through ${through}` : ''}. Make no estimate the customer can accept this year: follow the steps on the Moving card.`;
+  }
+  if (block === 'monthly') return 'Billing: monthly membership. Set the new price by hand, never with an estimate: follow the steps on the Moving card.';
+  return null;
+}
+
+/** The Moving card's new-home action for one move: null, or { action, estimateId, reason, steps? }. */
 async function newHomeAction(move, conn = db) {
   if (!movingEstimateLive() || !move || move.status !== 'submitted') return null;
   const existing = await liveMoveEstimate(move, conn);
   if (existing) return { action: 'open', estimateId: existing.id, reason: null };
   const block = await newHomeBlock(move, conn);
-  if (block) return { action: 'blocked', estimateId: null, reason: NEW_HOME_REFUSALS[block] };
+  if (block) return { action: 'blocked', estimateId: null, reason: NEW_HOME_REFUSALS[block], ...billingSteps(block) };
   return { action: 'start', estimateId: null, reason: null };
 }
 
@@ -1007,8 +1065,8 @@ const APPLY_REFUSALS = {
   out_of_area: NEW_HOME_REFUSALS.out_of_area,
   no_address: NEW_HOME_REFUSALS.no_address,
   customer_gone: NEW_HOME_REFUSALS.customer_gone,
-  prepay: 'This customer prepays for the year. Apply move for prepay plans comes in a later update.',
-  monthly: 'This customer pays a monthly membership. Apply move for monthly plans comes in a later update.',
+  prepay: 'This customer prepays for the year. Apply move does not move a prepaid plan: follow the steps.',
+  monthly: 'This customer pays a monthly membership. Apply move does not move a monthly plan: follow the steps.',
   billing: 'This customer\'s billing plan is not one Apply move handles yet.',
   no_plan: 'This customer has no recurring plan to move.',
   no_move_out: 'The customer has not given a move-out date. Ask them to add it with the same moving link.',
@@ -1555,7 +1613,7 @@ async function applyMove(customerId, moveId, opts = {}) {
   }
 }
 
-/** The Moving card's Apply action for one move: null, or { action: 'review' | 'blocked' | 'applied', reason }. */
+/** The Moving card's Apply action for one move: null, or { action: 'review' | 'blocked' | 'applied', reason, steps? }. */
 async function applyAction(move, conn = db) {
   if (!movingApplyLive() || !move) return null;
   if (move.status === 'closed') return move.closed_reason === 'applied' ? { action: 'applied', reason: null } : null;
@@ -1567,7 +1625,7 @@ async function applyAction(move, conn = db) {
     if (err instanceof MoveError) {
       // Nothing to apply yet: the estimate step owns those moves.
       if (['no_estimate', 'estimate_not_accepted'].includes(err.code)) return null;
-      return { action: 'blocked', reason: err.message };
+      return { action: 'blocked', reason: err.message, ...billingSteps(err.code) };
     }
     logger.warn(`[customer-moves] apply action read failed for move ${move.id} (${errCode(err)})`);
     return null;
@@ -2071,6 +2129,7 @@ module.exports = {
   textTarget,
   planServiceNames,
   NEW_HOME_REFUSALS,
+  BILLING_STEPS,
   newHomeAction,
   addressMatchesMove,
   sameAddressLine,

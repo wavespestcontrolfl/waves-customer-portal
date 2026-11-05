@@ -9,7 +9,8 @@
  *                           move carries new_home ({ action, estimateId,
  *                           reason }) for the "Estimate for new home" button;
  *                           with GATE_MOVING_APPLY on, apply ({ action,
- *                           reason }) for the "Apply move" button.
+ *                           reason }) for the "Apply move" button. A prepay
+ *                           or monthly refusal adds steps (BILLING_STEPS).
  *   GET  /:id/moves/:moveId/estimate-source
  *                           what the estimator needs to start the new
  *                           house's estimate (moving PR B1). 404 when

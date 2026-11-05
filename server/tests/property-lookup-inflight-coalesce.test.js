@@ -43,6 +43,13 @@ describe('lookupCoalesceKey', () => {
     expect(lookupCoalesceKey(ADDR, { cacheOnly: true })).toBeNull();
     expect(lookupCoalesceKey(ADDR, { persist: false })).toBeNull();
   });
+
+  test('a background full-vision-budget run never joins an interactive run, nor the reverse', () => {
+    // The background run may outlast an interactive caller's response budget.
+    const background = lookupCoalesceKey(ADDR, { fullVisionBudget: true });
+    expect(background).not.toBe(lookupCoalesceKey(ADDR, {}));
+    expect(lookupCoalesceKey('4720 60TH ST W, bradenton, fl 34210', { fullVisionBudget: true })).toBe(background);
+  });
 });
 
 describe('join path', () => {

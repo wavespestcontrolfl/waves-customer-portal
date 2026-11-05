@@ -132,6 +132,12 @@ const callButtonAlert = (ids) => {
   const buttons = require('./alert-call-button').callButtons(ids);
   return buttons ? { alert: { buttons } } : {};
 };
+// A US number the way the office writes it, "(941) 544-1363" (owner 2026-10-21 for the promise chaser,
+// 2026-11-04 for a voicemail's callback number); anything else as it came. Still the whole real number.
+function shownPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : phone;
+}
 
 // bundle_quote_requested's `alert` (GATE_PORTAL_ITEM_CLOSE): the request row and its customer at the top of the
 // bell's metadata. Gate off, or a bell with no request row (a self-applied bundle): nothing, as before.
@@ -201,6 +207,28 @@ const TRIGGER_REGISTRY = {
     // surface — neither the bell row nor the push reaches non-admin staff.
     adminRoleOnly: true,
     build: (p) => {
+      // A text from a number with no customer record to a website or van-wrap line, the one caller that names a
+      // text (sms-reply-alert-delivery.js ringTrackingLineTextBell): one row per sender, rewritten by each new text
+      // like a known customer's thread row ("2 texts from wavespestcontrol.com"). It says who and what (owner
+      // audit 2026-10-01): the latest text in quotes, masked like every bell body. Who: the name on file for the
+      // number (owner 2026-11-04) and the line they texted, else the line and the masked number. A text with no
+      // words is a photo (the webhook rings only for words or a photo).
+      if (p.twilioSid) {
+        const { redactedWords, whyWithQuote } = require('./admin-alert-names');
+        const count = Math.floor(Number(p.textCount)) || 1;
+        const words = redactedWords(p.message);
+        const [who, tail] = p.name ? [p.name, ` — via ${p.source}`] : [p.source, ` — unknown sender ${maskPhone(p.phone)}`];
+        const body = whyWithQuote({ lead: words ? '' : 'Photo message', quote: words, tail });
+        return {
+          title: `${count > 1 ? `${count} texts` : 'New text'} from ${who}`,
+          body,
+          // The whole text for "Show full text" when the quote had to be cut.
+          ...(body.includes(words) ? {} : { detail: words.slice(0, 1600) }),
+          link: p.link,
+          // Call: the Communications thread's Call back for the sender (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+          ...callButtonAlert({ smsSid: p.twilioSid }),
+        };
+      }
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
       ];
@@ -212,9 +240,8 @@ const TRIGGER_REGISTRY = {
         body: bodyParts.join(' - '),
         link: p.leadId ? `/admin/leads?lead=${p.leadId}` : (p.link || '/admin/leads'),
         // Call: the Leads page's Call Now for the lead, else the customer page's Call (a web form whose lead row
-        // failed sends the customer id as leadId), else the Communications thread's Call back for an unknown
-        // sender's text (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
-        ...callButtonAlert({ leadId: p.leadId === p.customerId ? null : p.leadId, customerId: p.customerId, smsSid: p.twilioSid }),
+        // failed sends the customer id as leadId) (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
+        ...callButtonAlert({ leadId: p.leadId === p.customerId ? null : p.leadId, customerId: p.customerId }),
       };
     },
   },
@@ -449,6 +476,24 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=messenger',
     }),
   },
+  // The phone banner for a new-lead email (GATE_RING_NEW_CONTACTS, bell-banners.js kind new_lead_email, owner 2026-11-04
+  // "ring new"). The bell row is the plain 'new_lead' category row email-actions.js already writes, which carries no
+  // triggerKey of its own (the writer names this kind with notifyAdmin's bannerKind), so no sweep closes it and its
+  // rule is the retention expiry. `build` takes the written row's own words as alertTitle/alertBody/alertLink.
+  // Admin-only like the lead bell.
+  new_lead_email: {
+    label: 'New lead email banner',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'New lead from email',
+      body: p.alertBody || 'Open the email to read it and reply.',
+      link: p.alertLink || '/admin/email',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a
@@ -522,10 +567,12 @@ const TRIGGER_REGISTRY = {
     // Payload fields are built by call-recording-processor, not free text.
     allowContactDetails: true,
     build: (p) => {
-      const who = p.name || p.phone || 'Unknown caller';
+      // The callback number the way the office writes it (owner 2026-11-04), still the whole number.
+      const phone = shownPhone(p.phone);
+      const who = p.name || phone || 'Unknown caller';
       const bodyParts = [who];
       if (p.service) bodyParts.push(`Asked about ${p.service}`);
-      if (p.phone) bodyParts.push(`Callback: ${p.phone}`);
+      if (phone) bodyParts.push(`Callback: ${phone}`);
       return {
         // Banner-first: the WHO leads so a truncated phone banner still
         // identifies the caller (owner ruling 2026-07-30).
@@ -604,18 +651,17 @@ const TRIGGER_REGISTRY = {
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', closedBy: 'server/services/promise-chaser-bell.js', promise: true },
     allowContactDetails: true,
     build: (p) => {
-      const who = p.name || p.phone || 'A lead';
-      // The headline leads with WHO (owner 2026-10-21): the name, else the
-      // number in its usual form, else a plain "A lead".
-      const digits = String(p.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
-      const shownPhone = digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : p.phone;
-      const headlineWho = p.name || shownPhone || 'A lead';
+      // The headline and the body lead with WHO (owner 2026-10-21): the name,
+      // else the number in its usual form, else a plain "A lead". The body
+      // used to show the raw +1 number under a formatted headline (owner
+      // screenshot 2026-11-04).
+      const who = p.name || shownPhone(p.phone) || 'A lead';
       // Dispatched only by the durable sweep now (no more live /voice call
       // site) — the call has always already ended by the time this fires,
       // so the copy always states when they called, never "is calling in
       // now".
       return {
-        title: `${headlineWho} called back — we still owe a ${p.what || 'follow-up'}`,
+        title: `${who} called back — we still owe a ${p.what || 'follow-up'}`,
         body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
         link: callLink(p),
         ...callButtonAlert({ callLogId: p.callLogId }),
@@ -1179,14 +1225,33 @@ const TRIGGER_REGISTRY = {
     group: 'Alerts',
     rule: { area: 'System', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => {
+      // count = unread waiting items (owner 2026-11-04 "fix count"); total = every waiting item, read or not.
       const count = Number(p.count) || 0;
+      const total = Number(p.total) || 0;
       const areas = (Array.isArray(p.areas) ? p.areas : []).slice(0, 3);
+      const parts = [...areas.map((a) => `${a.area} ${a.count}`), ...(total > count ? [`${total} open in all`] : [])];
       return {
         title: count === 1 ? '1 item waits for you' : `${count} items wait for you`,
-        body: areas.map((a) => `${a.area} ${a.count}`).join(' \u00b7 ') || null,
+        body: parts.join(' \u00b7 ') || null,
         link: '/admin/dashboard?bell=open',
       };
     },
+  },
+  // The owner's 7 PM open-visit nudge as a phone banner (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04 "banner"): the same words
+  // the text carries, a tap opens the tech close-out page. services/tech-open-visit-nudge.js sends it pushOnly to the owner's
+  // own admin user, so it writes no bell row (rule: fyi) and the owner can switch it off in Push Settings. p = { headline,
+  // lines: [visit line], day }; the nudge module builds the words (customer first name + last initial only).
+  open_visits_nudge: {
+    label: 'Evening nudge: visits still open',
+    category: 'alert',
+    priority: 'normal',
+    group: 'Alerts',
+    rule: { area: 'Schedule', severity: 'fyi', who: 'person', expiryDays: 7 },
+    build: (p) => ({
+      title: String(p.headline || 'Visits are still open'),
+      body: ['Tap to close out.', ...(Array.isArray(p.lines) ? p.lines : []).map(String)].join('\n'),
+      link: '/tech',
+    }),
   },
 };
 
@@ -1301,6 +1366,10 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'waiting_summary') {
     return `waves-waiting_summary-${payload.day || 'unknown-day'}`;
   }
+  // One nudge banner per technician-day claim: a repeat replaces the same day's banner, tomorrow's never replaces today's.
+  if (triggerKey === 'open_visits_nudge') {
+    return `waves-open_visits_nudge-${payload.day || 'unknown-day'}`;
+  }
   return `waves-${triggerKey}`;
 }
 
@@ -1330,7 +1399,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1378,6 +1447,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       // adminOnly: a caller that sends the owner a banner (bell-banners.js) skips technicians even for a techVisible type.
       if (!trigger.techVisible || adminOnly) recipientQuery = recipientQuery.where({ role: 'admin' });
       activeAdmins = await recipientQuery.select('id', 'role');
+      // onlyUserIds: a banner meant for named users (the owner's open-visit nudge) reaches only them; null = everyone.
+      if (Array.isArray(onlyUserIds)) {
+        const wanted = new Set(onlyUserIds.map(String));
+        activeAdmins = activeAdmins.filter((u) => wanted.has(String(u.id)));
+      }
       // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
       // for a customer on its own route (technicianServicesCustomer, the rule the
       // Communications routes use). No customer on the event = today's routing.
@@ -1419,6 +1493,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // idempotent replay of a booking whose bell already landed.
     // relay_hot_lead: keyed per call, so a hit is a reconnect's or the
     // hourly sweep's retry of a page that already landed.
+    // new_lead, on a thread row only (refreshOnDedupe: an unknown sender's
+    // texts to a website line, one row rewritten by each new text): a plain
+    // hit there is the same text delivered again, which already pushed.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1522,7 +1599,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead')) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

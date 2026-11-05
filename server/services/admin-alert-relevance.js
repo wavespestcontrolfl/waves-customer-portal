@@ -329,11 +329,14 @@ function contactRefs(kind, row, data) {
   if (kind === 'sms') {
     const key = String(refs.meta.dedupeKey || '');
     const customerId = key.startsWith(SMS_THREAD_PREFIX) ? uuidOrNull(key.slice(SMS_THREAD_PREFIX.length)) : uuidOrNull(first(payload.threadId, params.get('thread')));
-    // An unknown sender's bell (no customer on file) is not judged: its emitter keeps a row per 4-hour window
-    // and suppresses a second text inside it, so no anchor here can stand for its latest text. It stays a
-    // person's to close; the 30-day retention sweep closes it if nobody does.
-    if (!customerId) return null;
-    return { sid: first(params.get('message'), payload.twilioSid), customerId };
+    const sid = first(params.get('message'), payload.twilioSid);
+    // An unknown sender's sms_reply bell (no customer on file) is not judged: its emitter keeps a row per 4-hour
+    // window and suppresses a second text inside it, so no anchor here can stand for its latest text. It stays a
+    // person's to close; the 30-day retention sweep closes it if nobody does. A tracking-line text row (new_lead,
+    // the tracking_text class) names the text it shows, so that text anchors it and its sender's number is the
+    // subject (the witnesses resolve the number from the text).
+    if (!customerId) return refs.meta.triggerKey === 'new_lead' && sid ? { sid, customerId: null } : null;
+    return { sid, customerId };
   }
   if (kind === 'voice') return { callLogId: uuidOrNull(payload.callLogId), customerId: uuidOrNull(payload.customerId), phone: payload.phone };
   if (kind === 'email') return { emailId: uuidOrNull(payload.emailId), customerId: uuidOrNull(payload.customerId) };
@@ -1205,6 +1208,13 @@ const CLASSES = [
     // no new row, so no anchor can stand for its latest text.
     key: 'inbound_sms', categories: ['inbound_sms'], triggerKey: 'sms_reply', contactOnly: true, contact: 'sms', contactRule: textAnswered,
   },
+  { // twilio-webhook.js: a number with no customer record texting a website or van-wrap line rings a new_lead
+    // row with no lead record (sms-reply-alert-delivery.js ringTrackingLineTextBell: one row per sender that each
+    // new text rewrites; one row per text before 2026-11-04). The row names the text it shows (?message=<sid>), so
+    // it is judged like a known sender's thread, by that text's sender number (owner 2026-11-04, "D").
+    key: 'tracking_text', categories: ['new_lead'], triggerKey: 'new_lead', contactOnly: true, contact: 'sms', contactRule: textAnswered,
+    match: (meta, row) => !refsFromRow(row).leadId && Boolean(first(linkParams(row.link).get('message'), parseMeta(meta.payload).twilioSid)),
+  },
   { // call-recording-processor.js — one bell per voicemail, no dedupe key
     key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contactOnly: true, contact: 'voice', contactRule: voicemailAnswered,
   },
@@ -1223,7 +1233,7 @@ const CLASSES = [
     match: (meta) => meta.doneWhen === 'text_note_checked', contactOnly: true, contact: 'customer', contactRule: textNoteSettled,
   },
   // Leads bells that promise `doneWhen: 'lead_contacted'` and name a lead (lead-call-text-followup,
-  // lead-call-reply-ring, sms-lead-extraction, lead-unverified-hold; the lead id is in metadata.leadId
+  // lead-call-reply-ring, sms-lead-extraction, lead-unverified-hold, caller-callback-bell; the lead id is in metadata.leadId
   // and the link's ?lead=). The repeat-form alert (same doneWhen) is the lead_repeat_form class above,
   // matched first. A bid-invite Leads bell (doneWhen bid_decided) never matches. The whole class runs
   // under GATE_LEAD_CONTACTED_CLOSE (`gate`), whatever GATE_ALERT_CONTACT_CLOSE says.

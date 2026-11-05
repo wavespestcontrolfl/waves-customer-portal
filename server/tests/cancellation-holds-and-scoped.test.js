@@ -469,6 +469,12 @@ describe('runPlanHoldLifecycle', () => {
     expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit',
       expect.objectContaining({ visit_date: displayOf(daysOut(27)) }), expect.anything());
     expect(mockSms.mock.calls[0][0]).toMatchObject({ metadata: expect.objectContaining({ plan_hold_id: 'h1', visit_id: 'back' }) });
+    // The real policy takes the call. A trust level it does not know is a
+    // contract refusal (the text never sends), and the mocked sender hides it.
+    const policy = require('../services/messaging/policy');
+    const sent = mockSms.mock.calls[0][0];
+    expect(policy.IDENTITY_TRUST_LEVELS).toContain(sent.identityTrustLevel);
+    expect(policy.trustAtLeast(sent.identityTrustLevel, policy.PURPOSE_POLICY[sent.purpose].minIdentityTrust)).toBe(true);
 
     expect((await runPlanHoldLifecycle({ today: daysOut(21) })).reminded).toBe(0); // stamped, never re-sent
     const lawn = mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care');

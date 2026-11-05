@@ -38,6 +38,15 @@
  * (technician_absences) is skipped, and members of one visit group count as
  * one stop.
  *
+ * Owner banner (owner 2026-11-04, "banner"): GATE_OWNER_NUDGE_BANNER, strict
+ * 'true', read at call time and only for the owner's nudge. On, the owner gets
+ * the same words as a Waves Admin phone banner (the open_visits_nudge trigger,
+ * pushOnly to his own admin user, a tap opens /tech) instead of the text. The
+ * banner counts only when a device accepted it (push sent > 0); otherwise the
+ * same text goes out as today, so the nudge is never lost. Never both. The day's
+ * claim is the same single claim: the SMS fallback releases it only when nothing
+ * went out. Off, the owner still gets the text, unchanged.
+ *
  * Carry-over (owner 2026-11-02): GATE_RESERVICE_OPEN_CARRYOVER, strict
  * 'true', read at call time and only when the nudge itself runs. On, the same
  * text also names every re-service (callback or pest/lawn re-service) still
@@ -54,6 +63,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
 const CARRYOVER_GATE = 'GATE_RESERVICE_OPEN_CARRYOVER';
+const OWNER_BANNER_GATE = 'GATE_OWNER_NUDGE_BANNER';
 const CARRYOVER_DAYS = 30;
 const RESERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
 // Same allowlist the stale-visit sweep rings the admin about — every status
@@ -76,6 +86,11 @@ function enabled() {
 
 function carryoverEnabled() {
   return process.env[CARRYOVER_GATE] === 'true';
+}
+
+// GATE_OWNER_NUDGE_BANNER (feature-gates.js ownerNudgeBannerLive reads the same literal for the bell policy).
+function ownerBannerEnabled() {
+  return process.env[OWNER_BANNER_GATE] === 'true';
 }
 
 const VISIT_COLUMNS = [
@@ -279,16 +294,17 @@ function bodyLines(visits, carryovers) {
   return [...visitLines(visits), 'Re-services still open from earlier days:', ...carryoverLines(carryovers)];
 }
 
+// "3 visits from today are still open" / "2 re-services from earlier days are still open": the sentence the text and
+// the owner's banner both lead with.
+function headlineText(visits, carryovers = []) {
+  if (visits.length) return `${visits.length} visit${visits.length === 1 ? '' : 's'} from today are still open`;
+  const n = carryovers.length;
+  return `${n} re-service${n === 1 ? '' : 's'} from earlier days ${n === 1 ? 'is' : 'are'} still open`;
+}
+
 function buildMessage(visits, carryovers = []) {
   const link = `${publicPortalUrl()}/tech`;
-  let header;
-  if (visits.length) {
-    header = `Waves: ${visits.length} visit${visits.length === 1 ? '' : 's'} from today are still open. Tap to close out: ${link}`;
-  } else {
-    const n = carryovers.length;
-    const verb = n === 1 ? 'is' : 'are';
-    header = `Waves: ${n} re-service${n === 1 ? '' : 's'} from earlier days ${verb} still open. Tap to close out: ${link}`;
-  }
+  const header = `Waves: ${headlineText(visits, carryovers)}. Tap to close out: ${link}`;
   return [header, ...bodyLines(visits, carryovers)].join('\n');
 }
 
@@ -359,6 +375,27 @@ async function releaseClaim(technicianId, etDate) {
       .del();
   } catch (err) {
     logger.warn(`[tech-open-visit-nudge] claim release failed for ${technicianId}: ${errTag(err)}`);
+  }
+}
+
+// The owner's banner (GATE_OWNER_NUDGE_BANNER): the same words as the text, minus the link (a tap opens /tech). pushOnly
+// to the owner's own admin user (technicians.id is the admin user id, as cardNudge's push relies on), so no bell row and
+// no other admin's phone. True only when a device accepted it (push sent > 0): a Push Settings switch off, no device, a
+// policy silence or any error is false, and the caller falls back to the text. Never throws.
+async function bannerNudge(tech, visits, carryovers, etDate) {
+  try {
+    const { triggerNotification } = require('./notification-triggers');
+    const result = await triggerNotification('open_visits_nudge', {
+      headline: headlineText(visits, carryovers),
+      lines: bodyLines(visits, carryovers),
+      day: etDate,
+    }, { pushOnly: true, adminOnly: true, onlyUserIds: [tech.id] });
+    if (result?.push?.sent > 0) return true;
+    logger.info(`[tech-open-visit-nudge] banner not accepted for ${tech.id}, sending the text`);
+    return false;
+  } catch (err) {
+    logger.warn(`[tech-open-visit-nudge] banner failed for ${tech.id}, sending the text: ${errTag(err)}`);
+    return false;
   }
 }
 
@@ -475,9 +512,10 @@ async function deliverNudge(techId, etDate, now, withCarryover = carryoverEnable
     return false;
   }
   const cell = ownerCell(live.tech);
-  return cell
-    ? smsNudge(live.tech, cell, buildMessage(live.visits, live.carryovers), etDate)
-    : cardNudge(live.tech, live.visits, etDate, live.carryovers);
+  if (!cell) return cardNudge(live.tech, live.visits, etDate, live.carryovers);
+  // Gate on: the banner first; the text only when no device took it. Never both.
+  if (ownerBannerEnabled() && await bannerNudge(live.tech, live.visits, live.carryovers || [], etDate)) return true;
+  return smsNudge(live.tech, cell, buildMessage(live.visits, live.carryovers), etDate);
 }
 
 // One entry per technician: today's stops first, then technicians who only
@@ -495,7 +533,7 @@ function mergeGroups(todayGroups, carryGroups) {
 /**
  * Runs the whole sweep once: gate check, today's open visits grouped by
  * technician, eligibility + phone filtering, per-technician dedupe claim,
- * then one SMS (owner) or tech-home card + push (everyone else) per technician that claimed a
+ * then one SMS or banner (owner) or tech-home card + push (everyone else) per technician that claimed a
  * slot. Never throws — a
  * per-technician send failure is logged and counted as skipped; the sweep
  * keeps going for the rest.
@@ -563,6 +601,9 @@ module.exports = {
     cardNudge,
     visitLines,
     smsNudge,
+    bannerNudge,
+    headlineText,
+    ownerBannerEnabled,
     deliverNudge,
   },
 };

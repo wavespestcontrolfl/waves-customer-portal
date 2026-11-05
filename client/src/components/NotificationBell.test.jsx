@@ -1845,3 +1845,89 @@ describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', 
     expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled();
   });
 });
+
+// Owner 2026-11-04: "for voicemails, can we have a button where we can click on the voicemail and listen to it
+// within the admin section". The voicemail row plays its call's recording in the bell (AuthenticatedCallAudio).
+describe('NotificationBell voicemail Listen', () => {
+  const CALL_ID = '0b9f3c2e-1d4a-4c5b-9e6f-7a8b9c0d1e2f';
+  const staffToken = (role) => `h.${btoa(JSON.stringify({ role })).replace(/=+$/, '')}.s`;
+  const voicemail = (payload = {}) => ({
+    id: 'vm1', category: 'voicemail_callback', title: 'Voicemail — Fixture Caller', body: 'Fixture Caller - Callback: +19415550123',
+    link: `/admin/communications#tab=calls&call=${CALL_ID}`, created_at: new Date().toISOString(), read_at: null,
+    metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: CALL_ID, ...payload } },
+  });
+  const createObjectURL = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+  const revokeObjectURL = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+  beforeEach(() => {
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, writable: true, value: vi.fn(() => 'blob:voicemail') });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, writable: true, value: vi.fn() });
+  });
+  afterEach(() => {
+    // Unmount first: the player revokes its Blob URL on unmount, before the stubs go.
+    cleanup();
+    if (createObjectURL) Object.defineProperty(URL, 'createObjectURL', createObjectURL); else delete URL.createObjectURL;
+    if (revokeObjectURL) Object.defineProperty(URL, 'revokeObjectURL', revokeObjectURL); else delete URL.revokeObjectURL;
+  });
+
+  it('names the call of a voicemail row for the admin role only, never an AI-call callback, a live row or a customer bell', () => {
+    const { voicemailRecordingFor } = _test;
+    localStorage.setItem('waves_admin_token', staffToken('admin'));
+    expect(voicemailRecordingFor(voicemail(), 'admin')).toBe(CALL_ID);
+    expect(voicemailRecordingFor({ ...voicemail(), metadata: JSON.stringify(voicemail().metadata) }, 'admin')).toBe(CALL_ID);
+    // The AI-call callback is raised during the call, before there is a recording.
+    expect(voicemailRecordingFor(voicemail({ reason: 'sandy_provider_failure' }), 'admin')).toBeNull();
+    expect(voicemailRecordingFor(voicemail({ callLogId: 'not-a-call' }), 'admin')).toBeNull();
+    expect(voicemailRecordingFor({ ...voicemail(), id: 'live:voicemail' }, 'admin')).toBeNull();
+    expect(voicemailRecordingFor({ ...voicemail(), category: 'missed_call' }, 'admin')).toBeNull();
+    expect(voicemailRecordingFor(voicemail(), 'customer')).toBeNull();
+    localStorage.setItem('waves_admin_token', staffToken('technician'));
+    expect(voicemailRecordingFor(voicemail(), 'admin')).toBeNull();
+  });
+
+  it.each([['desktop', 1280], ['phone', 390]])('Listen plays the voicemail inside the bell without opening the row (%s)', async (_label, width) => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    const token = staffToken('admin');
+    localStorage.setItem('waves_admin_token', token);
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    global.fetch = vi.fn(async (url, options = {}) => {
+      if (String(url).includes('/call-recordings/audio/')) return { ok: true, status: 200, blob: async () => new Blob(['audio'], { type: 'audio/mpeg' }) };
+      if (options.method === 'PUT') return jsonResponse({ success: true });
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      return jsonResponse({ notifications: [voicemail()] });
+    });
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const listen = await screen.findByRole('button', { name: 'Listen' });
+      expect(listen).toHaveStyle({ background: '#FFFFFF', color: '#18181B' });
+      expect(listen.style.minHeight).toBe(width === 390 ? '44px' : '');
+      fireEvent.click(listen);
+      await waitFor(() => expect(screen.getByLabelText('Voicemail')).toHaveAttribute('src', 'blob:voicemail'));
+      // The audio is sized at 100% of its box: a box with no height draws no controls (seen in the browser check).
+      expect(screen.getByLabelText('Voicemail').parentElement.style.height).toBe(width === 390 ? '44px' : '32px');
+      const [audioUrl, audioOptions] = global.fetch.mock.calls.find(([url]) => String(url).includes('/call-recordings/audio/'));
+      expect(audioUrl).toBe(`/api/admin/call-recordings/audio/${CALL_ID}`);
+      expect(audioOptions.headers.Authorization).toBe(`Bearer ${token}`);
+      expect(play).toHaveBeenCalled();
+      // The tap stayed on the player: the row was not opened or marked read, and the bell is still open.
+      expect(global.fetch.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(false);
+      expect(screen.getByText('Voicemail — Fixture Caller')).toBeInTheDocument();
+    } finally {
+      play.mockRestore();
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+
+  it('shows no Listen to a technician login', async () => {
+    localStorage.setItem('waves_admin_token', staffToken('technician'));
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      return jsonResponse({ notifications: [voicemail()] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Voicemail — Fixture Caller');
+    expect(screen.queryByRole('button', { name: 'Listen' })).toBeNull();
+  });
+});

@@ -86,7 +86,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { etDateString, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { etDateString, formatETDayDate, formatETTime } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
 const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
@@ -137,7 +137,8 @@ function describePromise(row) {
   const source = Number.isFinite(row.__obligationAtMs) ? row.__obligationAtMs
     : (row.source === 'human' ? row.created_at : row.call_started_at);
   const at = source != null ? new Date(source) : null;
-  const when = at && !Number.isNaN(at.getTime()) ? `${formatETDate(at)} ${formatETTime(at)}` : 'an earlier call';
+  // The short day an office alert names ("Wed, Nov 4 at 1:27 PM"), as the follow-up pager's own rows read.
+  const when = at && !Number.isNaN(at.getTime()) ? `${formatETDayDate(at)} at ${formatETTime(at)}` : 'an earlier call';
   return { what, when };
 }
 
@@ -342,32 +343,14 @@ async function findPromiseToRing(call, now) {
   return { promise, renewedAt: promise.__renewedAt, ...describePromise(promise) };
 }
 
-// Placeholder names (call-commitments' one list) read as no name at all.
-const fullName = (row, first = 'first_name', last = 'last_name') => {
-  const name = [row?.[first], row?.[last]].filter(Boolean).join(' ').trim();
-  return name && !commitments.isMissingName(name) ? name : null;
-};
-
-// The real names one source holds for a number, reduced to one person:
-// undefined = no real name here (try the next source); null = two or more
-// different people (stop: name nobody); else the newest spelling of the one name.
-const identityKey = (name) => String(name).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-function oneIdentity(names) {
-  const real = names.filter(Boolean);
-  if (!real.length) return undefined;
-  return new Set(real.map(identityKey)).size === 1 ? real[0] : null;
-}
-
 // Who is calling back, for the headline (owner 2026-10-21: "the headline
 // should have the customer name"). The call's own customer when it has one;
-// for a call with no customer link, the NUMBER: the customer records carrying
-// it, then estimates, then leads. At each step the real (non-placeholder)
-// names must agree on ONE person (duplicates of one person are common); two
-// different people on the number name nobody, and the lookup stops there —
-// an estimate or lead must not pick between them (Codex #6417 r4). Null when
-// nothing on the number names one person; the copy then falls back to the number.
-// A failed lookup never blocks the bell.
+// for a call with no customer link, the name on file for the NUMBER
+// (admin-alert-names.js nameOnFileForPhone: customers, then estimates, then
+// leads, one person only). Null when nothing names one person; the copy then
+// falls back to the number. A failed lookup never blocks the bell.
 async function resolveCallerName(call) {
+  const { realName, nameOnFileForPhone } = require('./admin-alert-names');
   try {
     // A call WITH a customer is that customer's: their record is the only
     // authority on the name. A missing or placeholder-named record gives no
@@ -375,23 +358,9 @@ async function resolveCallerName(call) {
     // that merely shares the phone.
     if (call.customer_id) {
       const linked = await db('customers').where('id', call.customer_id).first('first_name', 'last_name');
-      return fullName(linked);
+      return realName(linked);
     }
-    const key = commitments.phoneDigits(call.from_phone);
-    if (!key || key.length < 10) return null;
-    const phones = [call.from_phone];
-    const customers = await commitments.phoneWhereAny(db('customers'), 'phone', phones)
-      .whereNull('deleted_at').orderBy('created_at', 'desc').select('first_name', 'last_name');
-    const fromCustomers = oneIdentity(customers.map((c) => fullName(c)));
-    if (fromCustomers !== undefined) return fromCustomers;
-    const estimates = await commitments.phoneWhereAny(db('estimates'), 'customer_phone', phones)
-      .whereRaw("COALESCE(customer_name, '') <> ''").orderBy('created_at', 'desc').limit(50).select('customer_name');
-    const fromEstimates = oneIdentity(estimates.map((e) => fullName(e, 'customer_name', null)));
-    if (fromEstimates !== undefined) return fromEstimates;
-    const leads = await commitments.phoneWhereAny(db('leads'), 'phone', phones)
-      .whereNull('deleted_at').orderBy('created_at', 'desc').limit(50).select('first_name', 'last_name');
-    const fromLeads = oneIdentity(leads.map((l) => fullName(l)));
-    if (fromLeads !== undefined) return fromLeads;
+    return await nameOnFileForPhone(db, call.from_phone);
   } catch (err) {
     logger.warn(`[promise-chaser-bell] caller name lookup failed for call ${call.id}: ${err.message}`);
   }

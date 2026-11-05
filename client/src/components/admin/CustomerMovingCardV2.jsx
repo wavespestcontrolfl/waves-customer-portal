@@ -106,9 +106,24 @@ const EMAIL_REASONS = {
   prefs_unavailable: "Email settings could not be read. Try again.",
 };
 
+// A refusal, and for a prepaid or monthly plan the steps the office takes by
+// hand instead (the server's BILLING_STEPS).
+function BlockedNote({ reason, steps, testId }) {
+  return (
+    <div className="text-14 text-ink-secondary mt-2" data-testid={testId}>
+      <div>{reason}</div>
+      {Array.isArray(steps) && steps.length > 0 && (
+        <ol className="list-decimal pl-5 mt-1 space-y-0.5" data-testid={`${testId}-steps`}>
+          {steps.map((step) => <li key={step}>{step}</li>)}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 // The new-home estimate action the server picked for one move.
 function NewHomeAction({ move, customerId }) {
-  const { action, estimateId, reason } = move.new_home;
+  const { action, estimateId, reason, steps } = move.new_home;
   if (action === "start") {
     const href = `/admin/estimates?tab=new&moveId=${encodeURIComponent(move.id)}&customerId=${encodeURIComponent(customerId)}`;
     return (
@@ -125,7 +140,7 @@ function NewHomeAction({ move, customerId }) {
     );
   }
   if (action === "blocked" && reason) {
-    return <div className="text-14 text-ink-secondary mt-2" data-testid="new-home-action">{reason}</div>;
+    return <BlockedNote reason={reason} steps={steps} testId="new-home-action" />;
   }
   return null;
 }
@@ -172,7 +187,7 @@ function ApplyMoveAction({ move, customerId, onDone }) {
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
-  const { action, reason } = move.apply;
+  const { action, reason, steps } = move.apply;
 
   const review = async () => {
     setBusy("preview"); setNote("");
@@ -212,7 +227,7 @@ function ApplyMoveAction({ move, customerId, onDone }) {
   };
 
   if (action === "blocked" && reason) {
-    return <div className="text-14 text-ink-secondary mt-2" data-testid="apply-move-action">{reason}</div>;
+    return <BlockedNote reason={reason} steps={steps} testId="apply-move-action" />;
   }
   if (action !== "review") return note ? <div className="text-14 text-ink-secondary mt-2" role="status">{note}</div> : null;
   return (

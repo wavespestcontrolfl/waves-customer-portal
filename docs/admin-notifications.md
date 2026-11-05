@@ -57,7 +57,10 @@ note") never stores the text, because a text can hold a code or a word that open
 screen catches every form; the bell list reads it from the text itself while it serves the list
 (`withTextNoteSources` in `server/services/sms-operational-actions.js`, admin role only, masked
 the same way) and the bell shows it in quotes as `source_text`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
-long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
+long name inside the 60-character headline; `whyWithQuote` budgets the quote; `nameOnFileForPhone` names the
+person behind a number with no customer link: the customer records on it, then estimates, then leads, only when
+they agree on one person. The promise chaser, a text to a website line and a voicemail use it; owner 2026-10-21 and
+2026-11-04, "it should be the name of the person rather than just the number, if possible, if we have it on file"). Where an
 alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
 
 **The bell names the customer and says what to do** (owner 2026-11-02, `GATE_ALERT_EXPLAINER`, admin logins
@@ -207,6 +210,14 @@ Kinds today:
   The owner's own word list sends no bell. It sends nothing to a customer and moves no money; it changes where the ad
   can show, and **Undo** is on the Ads page.
 
+**Listen on a voicemail** (owner 2026-11-04: "for voicemails, can we have a button where we can click on the
+voicemail and listen to it within the admin section"). A voicemail row (`customer_voicemail_callback`; not the AI-call
+callback, `reason` `sandy_provider_failure`, raised before any recording exists) shows **Listen** above its buttons, for
+the admin role. One tap loads the recording of the call the row names (`payload.callLogId`) through the admin-only audio
+proxy the Calls tab uses (`GET /api/admin/call-recordings/audio/:id`) and plays it in the bell
+(`AuthenticatedCallAudio` with `playOnLoad`). It is not a button kind: it runs no server step, changes nothing on the
+row and never opens it; the row closes by its own done-when as before.
+
 ## 3. Never in a headline or a why
 
 Timestamps and ISO dates, UUIDs and hashes, table and column names, `GATE_*` and other
@@ -233,6 +244,20 @@ customer's message by this rule.
    text rewrites it (latest text as the body, "3 texts from Name" in the title, unread,
    moved to the top) and still pushes; the count restarts once the row was read or done.
    The link keeps its `?thread=<customerId>` prefix, which the thread-read matchers use.
+   A number with no customer record texting a website or van-wrap line is one subject too
+   (owner screenshot 2026-11-04: two texts from one number rang two rows): its texts share
+   one `new_lead` row (`dedupeKey` `sms-tracking-thread:<hash of the number>`, the same
+   refresh, `ringTrackingLineTextBell` in `server/services/sms-reply-alert-delivery.js`),
+   "2 texts from wavespestcontrol.com" in the title and the latest text quoted in the why,
+   masked like every bell body, then the masked number; with a name on file for the number
+   (`nameOnFileForPhone`), the name leads the title and the why ends "via <the line>".
+   Its link and Call follow the latest text.
+   `GATE_RING_NEW_CONTACTS` (owner 2026-11-04, "ring new", dark) gives a number with no
+   customer record texting a location line or a Google Business Profile line the same row
+   (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
+   Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
+   staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
+   closes these rows once a person answers, like a tracking-line row.
    A standing backlog (overdue promises past five) is a count on its page, never a bell:
    its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
    Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
@@ -243,7 +268,8 @@ customer's message by this rule.
    for the customer-contact bells (owner 2026-10-24: "most of these should close
    automatically ... text sent, agent confirms resolved, appt booked, rescheduled").
    A customer's text, voicemail callback request, email or new lead closes once
-   a person answered it (a missed-call bell is closed by `server/services/missed-call-bell.js`,
+   a person answered it (a text to a website or van-wrap line from a number with no customer
+   record too, judged by that text's sender number: owner 2026-11-04, "D") (a missed-call bell is closed by `server/services/missed-call-bell.js`,
    its one owner, on the same facts: a person's text, a booked visit, a handed-off quote, beside
    its own called-back proof), judged only by what happened AFTER the text, call or email the bell
    is about, and only by the repo's shared witnesses: the Messages "needs a reply" reader
@@ -437,20 +463,36 @@ nothing; a write inside a nested transaction waits for the outermost commit). It
 `pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
 line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
 
+New-lead email banner (owner 2026-11-04, "ring new"; gate `GATE_RING_NEW_CONTACTS`, dark; own gate, not
+`GATE_BELL_BANNERS`): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
+banner on the owner's phone at any hour (kind `new_lead_email`, the New lead sound). The writer (`email-actions.js`) keys the
+existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id>`) and names the kind with
+`notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
+second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
+
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
 
 The 8 AM banner (owner 2026-11-03, "ok add", choice C; `GATE_MORNING_BANNER`, dark): once a day at 8:00 AM
 ET, `server/services/morning-banner.js` sends ONE phone banner, "N items wait for you" ("1 item waits for you"),
-with the three busiest areas in the text ("Comms 6 · Schedule 3 · Billing 2"). A tap opens the dashboard with the
+where N counts the waiting items nobody has read yet (owner 2026-11-04, "fix count"), with the three busiest areas of
+those in the text and the whole open count after them when some were already read ("Comms 6 · Schedule 3 · Billing 2 ·
+334 open in all"). A tap opens the dashboard with the
 alert list open (`/admin/dashboard?bell=open`, read by `NotificationBell`). It counts the open bell alerts that need
 a person: an alert row not done, severity `needs-you` or `broken`, `who` = person, judged by `needs-me.js`
 `mapAlertRow`. It leaves out Activity-only rows, rows sent to Claude, unsorted rows and the dashboard's standing
-counts (an alert row already echoes most of them). With zero items it sends nothing. It is the `waiting_summary`
+counts (an alert row already echoes most of them). With nothing unread it sends nothing. It is the `waiting_summary`
 trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner per ET day (the send first takes a
 `sms_send_claims` row `morning_banner:<ET date>`, so a deploy overlap or a restart cannot send a second one; a
 day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
 "Morning summary: items waiting for you") or by unsetting the gate. It sends nothing to a customer.
+
+The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
+(`server/services/tech-open-visit-nudge.js`) reaches the owner as a Waves Admin banner instead of a text. It is the
+`open_visits_nudge` trigger, sent `pushOnly` to his own admin user only (`onlyUserIds`): no bell row, one banner per ET day
+(the nudge's own per-technician claim), same words as the text, a tap opens `/tech`. It counts as delivered only when a phone
+accepted it; otherwise the text goes out as before. The owner can turn the type off in Push Settings (Alerts group,
+"Evening nudge: visits still open"), which sends the text instead. It sends nothing to a customer.
 
 ## 7. How to raise one
 

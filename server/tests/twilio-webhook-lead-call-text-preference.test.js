@@ -71,7 +71,7 @@ jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: asyn
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => false }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: async () => ({}) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: { sent: 1 } })) }));
-jest.mock('../services/sms-reply-alert-delivery', () => ({ ringSmsReplyBell: jest.fn(async () => ({ bellWritten: true })) }));
+jest.mock('../services/sms-reply-alert-delivery', () => ({ ringSmsReplyBell: jest.fn(async () => ({ bellWritten: true })), ringUnknownOfficeText: jest.fn(async () => false) }));
 jest.mock('../services/reschedule-sms', () => ({ handleRescheduleReply: async () => ({ handled: false }) }));
 jest.mock('../services/customer-intelligence/event-rescore', () => ({ rescoreOnInboundMessage: async () => ({}) }));
 jest.mock('../services/recruiting-inbound', () => ({ matchApplicantReply: async () => null }));
