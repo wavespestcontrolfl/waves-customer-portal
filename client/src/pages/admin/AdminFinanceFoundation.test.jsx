@@ -808,13 +808,19 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
           { ...cashToday.accounts[0] },
           { ...cashToday.accounts[1], available: null, current: null },
         ],
-        unavailable: [{ institution_name: "Synthetic Bank", reason: "not_shared", mask: "4444", account_type: "bank" }],
+        unavailable: [
+          { institution_name: "Synthetic Bank", reason: "not_shared", mask: "4444", account_type: "bank" },
+          { institution_name: "Other Bank", reason: "needs_confirmation" },
+        ],
       }),
     );
     open(BankingPage);
     expect(await screen.findByText("Cash today")).toBeInTheDocument();
     expect(
       screen.getByText("Synthetic Bank no longer shares ••4444: Tax page → Live bank feeds → Add accounts (not counted)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Other Bank reported a new or changed account: confirm it on Tax page → Live bank feeds"),
     ).toBeInTheDocument();
     expect(screen.getByText("—")).toBeInTheDocument();
   });

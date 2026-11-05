@@ -1029,6 +1029,9 @@ function cashKind(stored, live) {
 async function readItemCashBalances(item) {
   const unavailable = (reason) => ({ unavailable: { institution_name: item.institution_name || null, reason } });
   if (item.status === 'login_required') return unavailable('login_required');
+  const stored = await db('plaid_accounts').where({ plaid_item_id: item.id, enabled: true });
+  // A first connection still in setup has nothing enabled yet: nothing to read or report.
+  if (item.status === 'setup' && !stored.length) return {};
   let accessToken = null;
   try {
     accessToken = await decryptToken(db, item.access_token_enc);
@@ -1044,7 +1047,6 @@ async function readItemCashBalances(item) {
     return unavailable(isLoginRequired(err) ? 'login_required' : 'error');
   }
   const liveById = new Map((live || []).map(a => [a.account_id, a]));
-  const stored = await db('plaid_accounts').where({ plaid_item_id: item.id, enabled: true });
   const cash = [];
   const owed = [];
   const notShared = [];
@@ -1060,13 +1062,17 @@ async function readItemCashBalances(item) {
     if (kind === 'cash') cash.push(cashBalanceEntry(a, l));
     else if (kind === 'owed') owed.push(cashBalanceEntry(a, l));
   }
+  // An established connection the sync put back in setup (registerNewAccounts: the bank
+  // reported a new or re-issued account) keeps its token and its enabled accounts: their
+  // balances still count, and one line asks the owner to confirm the accounts.
+  if (item.status === 'setup') notShared.push({ institution_name: item.institution_name || null, reason: 'needs_confirmation' });
   return { cash, owed, notShared };
 }
 
 // Balances for the owner's Cash today card. READ-ONLY: writes nothing (no
 // status update, no failure record, no audit row) and sends nothing.
 async function readCashBalances() {
-  const items = await db('plaid_items').whereNotIn('status', ['removed', 'setup']).orderBy('created_at', 'asc');
+  const items = await db('plaid_items').whereNotIn('status', ['removed']).orderBy('created_at', 'asc');
   const accounts = [];
   const cards = [];
   const unavailable = [];

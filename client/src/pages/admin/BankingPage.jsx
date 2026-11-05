@@ -1895,6 +1895,9 @@ function cashTodayFigures(data, balance, balanceError) {
 function cashUnavailableText(u) {
   const who = u.institution_name || "A bank";
   if (u.reason === "login_required") return `${who} needs a new sign-in: Tax page → Live bank feeds`;
+  if (u.reason === "needs_confirmation") {
+    return `${who} reported a new or changed account: confirm it on Tax page → Live bank feeds`;
+  }
   if (u.reason === "not_shared") {
     return `${who} no longer shares ${u.mask ? `••${u.mask}` : "an account"}: Tax page → Live bank feeds → Add accounts (not counted)`;
   }

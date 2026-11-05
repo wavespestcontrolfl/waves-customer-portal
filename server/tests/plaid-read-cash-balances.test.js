@@ -72,9 +72,26 @@ describe('readCashBalances', () => {
     expect(typeof plaidSync.readCashBalances).toBe('function');
   });
 
-  test('skips removed and setup connections in the query', async () => {
+  test('skips only removed connections in the query', async () => {
     await plaidSync.readCashBalances();
-    expect(mockState.calls[0].whereNotIn).toEqual(['status', ['removed', 'setup']]);
+    expect(mockState.calls[0].whereNotIn).toEqual(['status', ['removed']]);
+  });
+
+  test('a first connection still in setup with nothing enabled is not read and not reported', async () => {
+    mockState.items = [item({ status: 'setup' })];
+    mockState.accounts = [stored({ enabled: false })];
+    const out = await plaidSync.readCashBalances();
+    expect(plaid.getAccounts).not.toHaveBeenCalled();
+    expect(out).toEqual({ accounts: [], cards: [], unavailable: [] });
+  });
+
+  test('an established connection back in setup (new account reported) still counts its balances and asks to confirm', async () => {
+    mockState.items = [item({ status: 'setup' })];
+    mockState.accounts = [stored()];
+    plaid.getAccounts.mockResolvedValue({ accounts: [{ account_id: 'acc-1', type: 'depository', balances: { available: 75, current: 80 } }] });
+    const out = await plaidSync.readCashBalances();
+    expect(out.accounts.map(a => [a.mask, a.available])).toEqual([['1111', 75]]);
+    expect(out.unavailable).toEqual([{ institution_name: 'Synthetic Bank', reason: 'needs_confirmation' }]);
   });
 
   test('login_required skips the Plaid call', async () => {
