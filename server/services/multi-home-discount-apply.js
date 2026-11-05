@@ -220,16 +220,35 @@ function selectTargetSeries({
 
 // ── reads ───────────────────────────────────────────────────────────────
 
-async function loadSourceEstimates(dbh, now) {
-  const cutoff = new Date(now.getTime() - SOURCE_WINDOW_DAYS * DAY_MS);
-  return dbh('estimates')
+const sourceCutoff = (now) => new Date(now.getTime() - SOURCE_WINDOW_DAYS * DAY_MS);
+
+// One page of in-window source candidates after the keyset (accepted_at, id). The key rides as text so microseconds
+// survive the round trip (a JS Date would cut them and could re-read or skip a row).
+async function loadSourcePage(dbh, cutoff, after, pageSize) {
+  const query = dbh('estimates')
     .where({ status: 'accepted' })
     .whereNotNull('customer_id')
     .where('accepted_at', '>=', cutoff)
-    .whereRaw("estimate_data::text LIKE '%multi_home%'")
-    .orderBy('accepted_at', 'asc')
-    .limit(MAX_SOURCES)
-    .select('id', 'customer_id', 'property_id', 'accepted_at', 'estimate_data');
+    .whereRaw("estimate_data::text LIKE '%multi_home%'");
+  if (after) query.whereRaw('(accepted_at, id) > (?::timestamptz, ?::uuid)', [after.acceptedKey, after.id]);
+  return query
+    .orderBy([{ column: 'accepted_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .limit(pageSize)
+    .select('id', 'customer_id', 'property_id', 'accepted_at', 'estimate_data', dbh.raw('accepted_at::text AS accepted_key'));
+}
+
+// EVERY in-window source is visited each tick: pages of `pageSize` by keyset until a short page, so a long run of
+// older sources can never starve a newer accept. `visit(estimate)` runs per source.
+async function eachSourceEstimate(dbh, now, visit, pageSize = MAX_SOURCES) {
+  const cutoff = sourceCutoff(now);
+  let after = null;
+  for (;;) {
+    const page = await loadSourcePage(dbh, cutoff, after, pageSize);
+    for (const estimate of page) await visit(estimate);
+    if (page.length < pageSize) return;
+    const last = page[page.length - 1];
+    after = { acceptedKey: last.accepted_key, id: last.id };
+  }
 }
 
 // The source, or null when it is not (yet) a valid source: no Multi-Home Discount recurring slice, the profile is not
@@ -860,9 +879,41 @@ async function pruneStaleHeld(dbh, source, targets, ledger, out) {
   }
 }
 
+const REASON_TARGET_DROPPED = 'multi_home_discount_target_dropped';
+
+// HELD rows (and their bells) go; applied and already_discounted rows are history and stay.
+async function dropHeldRows(dbh, rows, out) {
+  if (!rows.length) return;
+  await dbh(TABLE).whereIn('id', rows.map((r) => r.id)).where({ status: STATUS_HELD }).del();
+  for (const r of rows) {
+    await closeHoldAlerts(dbh, { source: { estimateId: r.source_estimate_id }, target: { rootId: r.series_root_id } }, REASON_TARGET_DROPPED);
+  }
+  out.dropped += rows.length;
+}
+
+// A source that no longer qualifies (no longer multi-home by flag or family, no plan visits, no recurring slice) keeps
+// no held row: nothing will ever retry it, and a stale one would block "every target applied" forever.
+async function dropHeldForSource(dbh, estimateId, out) {
+  const rows = await dbh(TABLE).where({ source_estimate_id: estimateId, status: STATUS_HELD }).select('id', 'source_estimate_id', 'series_root_id');
+  await dropHeldRows(dbh, rows, out);
+}
+
+// One pass over held rows whose source estimate left the 14-day window or stopped being 'accepted'.
+async function pruneOutOfScopeHeld(dbh, now, out) {
+  const rows = await dbh(`${TABLE} as m`)
+    .join('estimates as e', 'e.id', 'm.source_estimate_id')
+    .where('m.status', STATUS_HELD)
+    .whereRaw("NOT COALESCE(e.status = 'accepted' AND e.accepted_at >= ?, false)", [sourceCutoff(now)])
+    .select('m.id', 'm.source_estimate_id', 'm.series_root_id');
+  await dropHeldRows(dbh, rows, out);
+}
+
 async function processSource(dbh, estimate, presetId, { now, today }, out) {
   const source = await describeSource(dbh, estimate, presetId);
-  if (!source) return;
+  if (!source) {
+    await dropHeldForSource(dbh, estimate.id, out);
+    return;
+  }
   out.sources += 1;
   const targets = await targetsForSource(dbh, source, today);
   const ledger = await loadLedger(dbh, source.estimateId);
@@ -879,13 +930,17 @@ async function runMultiHomeAllHomes({ now = new Date(), dbh = db } = {}) {
   const out = { ok: true, sources: 0, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, dropped: 0, holds: [] };
   const today = etDateString(now);
   const preset = await dbh('discounts').where({ discount_key: PRESET_KEY }).first('id');
-  const estimates = await loadSourceEstimates(dbh, now);
-  for (const estimate of estimates) {
+  await eachSourceEstimate(dbh, now, async (estimate) => {
     try {
       await processSource(dbh, estimate, preset ? preset.id : null, { now, today }, out);
     } catch (err) {
       logger.error(`[multi-home-discount] source estimate ${estimate.id} failed: ${err.message}`);
     }
+  });
+  try {
+    await pruneOutOfScopeHeld(dbh, now, out);
+  } catch (err) {
+    logger.error(`[multi-home-discount] out-of-window cleanup failed: ${err.message}`);
   }
   if (out.applied || out.held || out.already || out.dropped) {
     logger.info(`[multi-home-discount] ${out.sources} source(s), ${out.targets} series: ${out.applied} applied, ${out.already} already discounted, ${out.held} held, ${out.dropped} no longer a target`);
@@ -904,6 +959,6 @@ module.exports = {
   TABLE,
   _private: {
     guardHold, seriesShapeVerdict, flatRefusal, discountFields, describeSource, loadCandidateSeries, hold, HoldError,
-    soldDiscountVerdict, relationshipHolds, verifyTemplateForAlready, pruneStaleHeld, recordHold, raiseHoldAlert, processSource, applyTargets, settleTarget, loadSourceEstimates,
+    soldDiscountVerdict, relationshipHolds, verifyTemplateForAlready, pruneStaleHeld, recordHold, raiseHoldAlert, processSource, applyTargets, settleTarget, eachSourceEstimate, dropHeldForSource, pruneOutOfScopeHeld,
   },
 };

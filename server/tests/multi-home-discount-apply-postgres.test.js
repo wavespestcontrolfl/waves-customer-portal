@@ -588,6 +588,78 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
     });
   });
 
+  describe('stale held rows and paging', () => {
+    const episodes = () => require('../services/admin-alert-episodes');
+
+    async function heldFamily(trx) {
+      const f = await family(trx);
+      await trx('customers').where({ id: f.parents }).update({ billing_mode: 'monthly_membership', monthly_rate: 49, waveguard_tier: 'Gold' });
+      const out = await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(out).toMatchObject({ held: 1 });
+      expect((await ledger(trx, f.estimateId))[0]).toMatchObject({ status: 'held' });
+      return f;
+    }
+    const bellClosedFor = (spy, f) => spy.mock.calls.some(([, keys]) => keys.includes(`multi-home-discount-hold:${f.estimateId}:${f.parentSeries.rootId}:lane_monthly_membership`));
+
+    test('the whole family unlinked after a hold: the held row and its bell are gone on the next run', async () => {
+      await inRollback(async (trx) => {
+        const spy = jest.spyOn(episodes(), 'closeAdminAlertKeys').mockResolvedValue(1);
+        const f = await heldFamily(trx);
+        await trx('multi_home_family_members').whereIn('customer_id', [f.son, f.parents]).del();
+        const out = await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+        expect(out).toMatchObject({ sources: 0, dropped: 1, held: 0 });
+        expect(await ledger(trx, f.estimateId)).toHaveLength(0);
+        expect(bellClosedFor(spy, f)).toBe(true);
+      });
+    });
+
+    test('an accepted estimate that leaves the 14-day window: its held rows are cleared, applied rows stay', async () => {
+      await inRollback(async (trx) => {
+        const spy = jest.spyOn(episodes(), 'closeAdminAlertKeys').mockResolvedValue(1);
+        const f = await heldFamily(trx);
+        await trx('multi_home_discount_applications').insert({
+          source_estimate_id: f.estimateId, source_customer_id: f.son, target_customer_id: f.parents, series_root_id: randomUUID(),
+          status: 'applied', applied_at: NOW, price_before: 117, price_after: 105.3,
+        });
+        const later = new Date(NOW.getTime() + 20 * 86400000);
+        const out = await apply.runMultiHomeAllHomes({ now: later, dbh: trx });
+        expect(out).toMatchObject({ sources: 0, dropped: 1 });
+        const left = await ledger(trx, f.estimateId);
+        expect(left.map((r) => r.status)).toEqual(['applied']);
+        expect(bellClosedFor(spy, f)).toBe(true);
+      });
+    });
+
+    test('an estimate that stops being accepted: its held rows are cleared', async () => {
+      await inRollback(async (trx) => {
+        jest.spyOn(episodes(), 'closeAdminAlertKeys').mockResolvedValue(1);
+        const f = await heldFamily(trx);
+        await trx('estimates').where({ id: f.estimateId }).update({ status: 'declined' });
+        expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ dropped: 1 });
+        expect(await ledger(trx, f.estimateId)).toHaveLength(0);
+      });
+    });
+
+    test('every source in the window is read by keyset, including rows with the same accepted_at', async () => {
+      await inRollback(async (trx) => {
+        const ids = [];
+        for (const at of ['2026-11-01T10:00:00.123456Z', '2026-11-01T10:00:00.123456Z', '2026-11-02T10:00:00Z', '2026-11-03T10:00:00Z', '2026-11-04T10:00:00Z']) {
+          const c = await customer(trx);
+          const id = randomUUID();
+          await trx('estimates').insert({
+            id, customer_id: c, status: 'accepted', accepted_at: at, token: randomUUID().replace(/-/g, ''),
+            estimate_data: JSON.stringify({ summary: { manualDiscount: { presetKey: 'multi_home', type: 'PERCENT', value: 10, recurringAmount: 40 } } }),
+          });
+          ids.push(id);
+        }
+        const seen = [];
+        await apply._private.eachSourceEstimate(trx, NOW, async (e) => { seen.push(e.id); }, 2);
+        expect(seen.slice().sort()).toEqual(ids.slice().sort());
+        expect(new Set(seen).size).toBe(5);
+      });
+    });
+  });
+
   test('the ledger holds one row per source estimate and series (unique)', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);

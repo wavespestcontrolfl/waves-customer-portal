@@ -20,6 +20,8 @@ jest.mock('../services/multi-home-family', () => ({
   familyMultiHomeEligible: (...args) => mockEligible(...args),
   lockFamilyChangesShared: jest.fn(async () => {}),
 }));
+const mockClose = jest.fn(async () => 1);
+jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...args) => mockClose(...args) }));
 const mockRaise = jest.fn(async () => ({}));
 jest.mock('../services/admin-alert-compose', () => ({
   ...jest.requireActual('../services/admin-alert-compose'),
@@ -32,7 +34,7 @@ const apply = require('../services/multi-home-discount-apply');
 
 const {
   guardHold, seriesShapeVerdict, flatRefusal, discountFields, describeSource, applyTargets, settleTarget, recordHold, HoldError,
-  relationshipHolds, verifyTemplateForAlready, pruneStaleHeld,
+  relationshipHolds, verifyTemplateForAlready, pruneStaleHeld, eachSourceEstimate, dropHeldForSource, pruneOutOfScopeHeld, processSource,
 } = apply._private;
 
 const PRESET = { id: 'preset-1', name: 'Multi-Home Discount', discount_type: 'percentage', amount: '10.00', max_discount_dollars: null, service_key_filter: null, service_category_filter: null };
@@ -273,7 +275,7 @@ function fakeTrx(tables, extra = {}) {
   const trx = jest.fn((name) => {
     const rows = tables[name] || [];
     const q = {
-      where: () => q, whereIn: () => q, select: async () => rows, first: async () => rows[0], del: jest.fn(async () => 1),
+      where: () => q, whereIn: () => q, join: () => q, whereRaw: () => q, select: async () => rows, first: async () => rows[0], del: jest.fn(async () => 1),
       columnInfo: async () => ({}), then: (res, rej) => Promise.resolve(rows).then(res, rej),
     };
     return q;
@@ -398,5 +400,92 @@ describe('already_discounted is only recorded when the next spawn is discounted 
   test('visits at different prices hold', async () => {
     const env = setup();
     await expect(verifyTemplateForAlready(env.trx, env.schedule, { target, preset: PRESET, upcoming: [upcoming[0], { ...upcoming[1], estimated_price: '99.00' }], reason: 'all_upcoming_visits_carry_it' })).rejects.toMatchObject({ holdCode: 'visit_prices_differ' });
+  });
+});
+
+describe('every source in the window is visited, and a source that stops qualifying leaves nothing behind', () => {
+  // A fake estimates query that answers pages in order and records the keyset it was asked for.
+  function pagedDb(pages) {
+    const calls = [];
+    const dbh = jest.fn(() => {
+      const call = { limit: null, keyset: null };
+      calls.push(call);
+      const q = {
+        where: () => q, whereNotNull: () => q, orderBy: () => q,
+        whereRaw: (sql, bindings) => { if (/accepted_at, id\) >/.test(sql)) call.keyset = bindings; return q; },
+        limit: (n) => { call.limit = n; return q; },
+        select: async () => pages[calls.length - 1] || [],
+      };
+      return q;
+    });
+    dbh.raw = jest.fn((sql) => sql);
+    return { dbh, calls };
+  }
+  const est = (n) => ({ id: `e${n}`, accepted_key: `2026-11-0${n} 10:00:00.123456+00` });
+
+  test('more sources than one page are all visited, by keyset', async () => {
+    const { dbh, calls } = pagedDb([[est(1), est(2)], [est(3), est(4)], [est(5)]]);
+    const seen = [];
+    await eachSourceEstimate(dbh, new Date('2026-11-06T15:00:00Z'), async (e) => { seen.push(e.id); }, 2);
+    expect(seen).toEqual(['e1', 'e2', 'e3', 'e4', 'e5']);
+    expect(calls).toHaveLength(3);
+    expect(calls.every((c) => c.limit === 2)).toBe(true);
+    expect(calls[0].keyset).toBeNull();
+    expect(calls[1].keyset).toEqual(['2026-11-02 10:00:00.123456+00', 'e2']);
+    expect(calls[2].keyset).toEqual(['2026-11-04 10:00:00.123456+00', 'e4']);
+  });
+
+  test('an exact multiple of the page size ends on the empty page; a short first page needs no second read', async () => {
+    const exact = pagedDb([[est(1), est(2)], []]);
+    const seen = [];
+    await eachSourceEstimate(exact.dbh, new Date(), async (e) => { seen.push(e.id); }, 2);
+    expect(seen).toEqual(['e1', 'e2']);
+    expect(exact.calls).toHaveLength(2);
+    const short = pagedDb([[est(1)]]);
+    await eachSourceEstimate(short.dbh, new Date(), async () => {}, 2);
+    expect(short.calls).toHaveLength(1);
+  });
+
+  test('the production page is large enough to matter and the gate-off path never reads', async () => {
+    const { dbh, calls } = pagedDb([[]]);
+    await eachSourceEstimate(dbh, new Date(), async () => {});
+    expect(calls[0].limit).toBeGreaterThanOrEqual(200);
+  });
+
+  test('a source that no longer qualifies loses its HELD rows and their bells (applied rows stay)', async () => {
+    mockGate.episodes = true;
+    const held = [{ id: 'l1', source_estimate_id: 'est-9', series_root_id: 'rootA' }, { id: 'l2', source_estimate_id: 'est-9', series_root_id: 'rootB' }];
+    const trx = fakeTrx({ multi_home_discount_applications: held });
+    const out = { dropped: 0 };
+    await dropHeldForSource(trx, 'est-9', out);
+    expect(out.dropped).toBe(2);
+    expect(mockClose).toHaveBeenCalledTimes(2);
+    const keys = mockClose.mock.calls[0][1];
+    expect(keys).toContain('multi-home-discount-hold:est-9:rootA:plan_on_hold');
+    expect(keys.every((k) => k.startsWith('multi-home-discount-hold:est-9:rootA:'))).toBe(true);
+    expect(mockClose.mock.calls[1][1][0]).toMatch(/:rootB:/);
+    const none = { dropped: 0 };
+    await dropHeldForSource(fakeTrx({ multi_home_discount_applications: [] }), 'est-9', none);
+    expect(none.dropped).toBe(0);
+  });
+
+  test('processSource on an estimate that no longer qualifies clears its held rows and applies nothing', async () => {
+    const held = [{ id: 'l1', source_estimate_id: 'est-9', series_root_id: 'rootA' }];
+    const trx = fakeTrx({ multi_home_discount_applications: held });
+    const out = { sources: 0, dropped: 0 };
+    await processSource(trx, { id: 'est-9', customer_id: 'son', estimate_data: {} }, null, { now: new Date(), today: '2026-11-06' }, out);
+    expect(out).toEqual({ sources: 0, dropped: 1 });
+  });
+
+  test('held rows whose source left the window or stopped being accepted are cleared in one pass', async () => {
+    const trx = fakeTrx({ multi_home_discount_applications: [] });
+    const rows = [{ id: 'l1', source_estimate_id: 'old-1', series_root_id: 'rootA' }];
+    const joined = fakeTrx({ 'multi_home_discount_applications as m': rows, multi_home_discount_applications: rows });
+    const out = { dropped: 0 };
+    await pruneOutOfScopeHeld(joined, new Date('2026-11-06T15:00:00Z'), out);
+    expect(out.dropped).toBe(1);
+    const nothing = { dropped: 0 };
+    await pruneOutOfScopeHeld(trx, new Date(), nothing);
+    expect(nothing.dropped).toBe(0);
   });
 });
