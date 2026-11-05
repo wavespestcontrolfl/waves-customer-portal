@@ -581,26 +581,12 @@ function PhotoCard({ n, onDismiss }) {
   );
 }
 
-function replyHref(p) {
-  if (!p.customer_id) return null;
-  return p.from
-    ? `/admin/communications?phone=${encodeURIComponent(p.from)}`
-    : `/admin/communications?thread=${encodeURIComponent(p.customer_id)}`;
-}
-
 // A text on the tech's own Twilio line (tech-line.js). The office sees the
 // same thread in /admin/communications; this card is the tech's copy, kept
-// until "Got it" like a visit card. "Reply" opens the Communications composer
-// addressed to the number that texted (the notice's `from`): a customer who
-// texts from more than one number has several threads, and a customer-only
-// link opens their newest one, not the one being answered. The page also takes
-// a message SID, but the notice does not carry it, so the number is the key.
-// Without a number the customer's thread opens. The route scopes both to
-// customers on the technician's own route. An unknown sender has neither.
+// until "Got it" like a visit card. Replying from the line is a later PR.
 function TextCard({ n, onDismiss }) {
   const p = n.payload || {};
   const media = Number(p.media_count || 0);
-  const replyTo = replyHref(p);
   return (
     <div style={cardStyle(COLORS.ink)} data-testid="tech-line-text">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
@@ -612,10 +598,7 @@ function TextCard({ n, onDismiss }) {
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {p.body || (media > 0 ? `${media} photo${media === 1 ? '' : 's'}` : '(empty message)')}
       </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        {replyTo && <Link to={replyTo} style={{ ...btnSecondary, flex: 1, boxSizing: 'border-box', textAlign: 'center', textDecoration: 'none' }}>Reply</Link>}
-        <button onClick={onDismiss} style={{ ...btnSecondary, flex: 1 }}>Got it</button>
-      </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>
   );
 }
