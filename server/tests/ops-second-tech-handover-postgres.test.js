@@ -24,6 +24,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
   const customerIds = [];
   const extraTechIds = [];
   const visitGroupIds = [];
+  const zipRows = [];
   const START = '2099-07-06';
   const TODAY = '2099-06-30';
 
@@ -67,6 +68,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
       await knex('scheduled_services').whereIn('customer_id', customerIds).del();
       await knex('customers').whereIn('id', customerIds).del();
     }
+    if (zipRows.length) await knex('territory_zips').whereIn('zip', zipRows).del();
     await knex('technicians').whereIn('id', [ownerId, hireId, ...extraTechIds]).del();
     await knex.destroy();
   });
@@ -214,6 +216,56 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     expect(plan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
     expect(new Set(plan.ids.series)).toEqual(new Set([rodentPest.id, cancelledFirst.id]));
     expect(plan.ids.visits).toContain(liveChild.id);
+  });
+
+  test('a --zips run plans termite and WDO series too (and not without --zips); bait and lawn still stay; --to Off refuses', async () => {
+    const ownerE = randomUUID();
+    const hireE = randomUUID();
+    await knex('technicians').insert([tech(ownerE), tech(hireE, { work_days: [1, 2, 3, 4] })]);
+    extraTechIds.push(ownerE, hireE);
+    await knex('territory_zips').insert({ zip: '99901', area: 'synthetic' });
+    zipRows.push('99901');
+    const on = (o) => ({ technician_id: ownerE, service_address_zip: '99901', ...o });
+    const wdo = await series(await customer(), on({ service_type: 'WDO Inspection' }));
+    await child(wdo, '2099-07-07', on({ service_type: wdo.service_type }));
+    const spot = await series(await customer(), on({ service_type: 'Termite Spot Treatment Service' }));
+    const spotVisit = await child(spot, '2099-07-08', on({ service_type: spot.service_type }));
+    const baitCustomer = await customer();
+    const bait = await series(baitCustomer, on({ service_type: 'Quarterly Termite Active Bait Station Service' }));
+    await child(bait, '2099-07-07', on({ service_type: bait.service_type }));
+    const lawn = await series(await customer(), on({ service_type: 'Lawn Care Program' }));
+    await child(lawn, '2099-07-07', on({ service_type: 'Lawn Care Program' }));
+    const args = { from: ownerE, to: hireE, start: START, today: TODAY };
+
+    // Territory run, default lines: both termite series move; the bait series and lawn do not.
+    const zipLines = handover.TERRITORY_MOVABLE_LINES;
+    const territoryPlan = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines });
+    expect(new Set(territoryPlan.ids.series)).toEqual(new Set([wdo.id, spot.id]));
+    expect(territoryPlan.would_change.by_line).toEqual({ termite: { series: 2, visits: 2 } });
+    expect(territoryPlan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(territoryPlan.skipped.other_line).toEqual({ series: 1, visits: 1 }); // lawn
+
+    // The same rows without --zips: termite stays (other_line), as before; naming termite is refused.
+    const plain = await handover.planHandover(knex, args);
+    expect(plain.ids.series).toEqual([]);
+    expect(plain.skipped.other_line.series).toBe(4); // wdo, spot, bait, lawn
+    await expect(handover.planHandover(knex, { ...args, lines: zipLines })).rejects.toMatchObject({ code: 'LINES_NEED_ZIPS' });
+
+    // --to set to Off for termite: refused with a clear code. Other states, and an Off line with nothing to move, are not.
+    const cap = (category, o) => knex('technician_capabilities').insert({ technician_id: hireE, service_category: category, ...o });
+    await cap('mosquito', { capability_level: 'review_required', active: false });
+    await cap('rodent', { capability_level: 'qualified', active: true });
+    const withMosquitoOff = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines });
+    expect(withMosquitoOff.planId).toBe(territoryPlan.planId); // the Off mosquito line has no series to move: no refusal, same plan
+    await cap('termite', { capability_level: 'review_required', active: false });
+    await expect(handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines })).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
+    // Leaving the line out of --lines is the way past it.
+    const generalOnly = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: ['general'] });
+    expect(generalOnly.ids.series).toEqual([]);
+    // A termite line set to review_required (the new-hire default) is allowed.
+    await knex('technician_capabilities').where({ technician_id: hireE, service_category: 'termite' }).update({ active: true });
+    const allowed = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines });
+    expect(allowed.ids.visits).toContain(spotVisit.id);
   });
 
   test('without --to the plan says the target is not set and assumes Mon-Thu', async () => {

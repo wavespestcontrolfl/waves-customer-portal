@@ -1706,7 +1706,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, prepayNoticesByTerm, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, smsDeliveryFailure, holdFromGuard, HoldError,
+    activePlanHold, laneForRow, effectiveDateFor, prepayNoticesByTerm, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, smsDeliveryFailure, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

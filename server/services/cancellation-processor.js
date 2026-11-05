@@ -213,8 +213,8 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
       // marked done is taken over as well (openToCloser's rule), so Recently
       // done can't reopen an obsolete instruction beside its replacement; one
       // a system already closed is history and stays as it is.
-      const { isPersonDoneBy } = require('./notification-service')._private;
-      const retire = others.filter(({ row }) => row.done_at == null || isPersonDoneBy(row.done_by));
+      const { isReopenableDoneBy } = require('./notification-service')._private;
+      const retire = others.filter(({ row }) => row.done_at == null || isReopenableDoneBy(row.done_by));
       if (retire.length) {
         await trx('notifications').whereIn('id', retire.map(({ row }) => row.id)).update(
           require('./notification-service')._private.doneColumns({ by: 'cancellation-processor', resolution: 'Replaced by a newer termite station retrieval task', keepExisting: true, conn: trx }),

@@ -91,6 +91,13 @@ function fitAction(area, name, templates) {
   return last(`${first}…`);
 }
 
+// Names as a person lists them: "A", "A and B", "A, B and C", "A, B and 2 more".
+function listWords(names, more) {
+  const parts = more > 0 ? [...names, `${more} more`] : names;
+  if (parts.length <= 1) return parts.join('');
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
 // A short ET date a person would say ("Sep 29").
 function shortDateET(value) {
   const at = value instanceof Date ? value : new Date(value);
@@ -114,4 +121,4 @@ function whyWithQuote({ lead = '', quote, tail = '', max = MAX_WHY_CHARS }) {
   return `${lead}“${cutAtWord(quote, room)}”${tail}`;
 }
 
-module.exports = { fullName, lookupCustomerName, realName, nameOnFileForPhone, tidyName, fitAction, shortDateET, redactedWords, whyWithQuote };
+module.exports = { fullName, lookupCustomerName, realName, nameOnFileForPhone, tidyName, fitAction, listWords, shortDateET, redactedWords, whyWithQuote };

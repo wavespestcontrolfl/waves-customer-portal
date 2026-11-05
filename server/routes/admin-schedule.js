@@ -6564,6 +6564,20 @@ async function seriesNextOccurrencesPrice(conn, parentId) {
   return { unverified: false, price, linePrice, parentLinePrice, addonLines, zero, explicitZero };
 }
 
+// Every price (not only the highest) the top-up would copy onto the visits it mints on series `parentId`: the same
+// walk and verdicts as seriesNextOccurrencesPrice above. A caller that must prove each future visit's price (the
+// Multi-Home Discount job, services/multi-home-discount-apply.js) reads this. `{ unverified: true, prices: [] }` when
+// the walk could not finish; null when the series has nothing to extend.
+async function seriesNextOccurrencePrices(conn, parentId) {
+  const walk = await seriesVerdictWalk(conn, parentId);
+  if (!walk) return null;
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, prices: [] };
+  const verdicts = await seriesExtensionDateVerdicts(conn, {
+    ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, walk.parent, walk.parentAddons),
+  });
+  return { unverified: false, prices: verdicts.map((v) => v.price) };
+}
+
 
 // GET /api/admin/schedule/held-visits?date=YYYY-MM-DD — visits promised to a
 // caller on a recorded call with nothing booked (GATE_CALL_HELD_VISIT). Display
@@ -29948,6 +29962,7 @@ module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 module.exports.nextRecurringDate = nextRecurringDate;
 module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;
 module.exports.seriesNextOccurrencesPrice = seriesNextOccurrencesPrice;
+module.exports.seriesNextOccurrencePrices = seriesNextOccurrencePrices;
 module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).

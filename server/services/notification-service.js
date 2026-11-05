@@ -62,18 +62,20 @@ function scopeAdminFeedToRole(query, role, technicianId = null) {
     `COALESCE(metadata->>'triggerKey', '') IN (${keys.map(() => '?').join(', ')})`,
     keys,
   );
-  // GATE_TECH_LOGIN_PRIVACY: a technician login also sees a customer's row only
-  // for a customer on its own route (the Communications routes' rule). A row
-  // with no customer stays visible, as today. Callers that pass no technicianId
-  // keep the key-only scope.
-  if (role === 'technician' && technicianId && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+  // GATE_TECH_LOGIN_PRIVACY: a technician login sees an alert only for a
+  // customer on its own route (owner 2026-10-25, the Communications routes'
+  // rule). An alert with no customer is the office's (owner 2026-11-04): an
+  // unknown caller's voicemail, a phone failure to a number no one customer
+  // owns, the one-hour pager's list and the overdue watchdog's summary. That
+  // holds whether or not the caller names a technician; a caller that passes
+  // no technicianId keeps the key-only scope for customer rows.
+  if (role === 'technician' && require('../config/feature-gates').techLoginPrivacyLive?.()) {
+    const customerRows = scoped.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NOT NULL`);
+    if (!technicianId) return customerRows;
     const { technicianCustomerIdsSubquery } = require('./technician-visit-scope');
     const ownCustomers = technicianCustomerIdsSubquery({ techRole: 'technician', technicianId }, db)
       .clearSelect().select(db.raw('scheduled_services.customer_id::text'));
-    return scoped.where(function customerlessOrOwn() {
-      this.whereRaw(`${NOTIFICATION_CUSTOMER_ID_SQL} IS NULL`)
-        .orWhereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
-    });
+    return customerRows.whereIn(db.raw(NOTIFICATION_CUSTOMER_ID_SQL), ownCustomers);
   }
   return scoped;
 }
@@ -143,6 +145,27 @@ const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
 // ops digest keeps metadata.resolved, its dedupeKey is dropped, ...).
 const PERSON_DONE_BY_SQL = "(done_by ~ '^[0-9]+$' OR done_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR done_by = 'claude')";
 
+// The quiet fall-off rule's closer (admin-alert-retention.js, owner 2026-11-04: "IF THE ALERT IS
+// OVER 3 DAYS OLD,, IT SHOULD FALL OFF"). A system close, but a plain one: the row keeps its dedupeKey and
+// every other state, so a person can put it back. The owner page promises Reopen for these rows.
+const QUIET_FALL_OFF_DONE_BY = 'quiet-72h';
+// metadata.quietHoldFrom: stamped by a Reopen. The fall-off rule counts it as activity, so a reopened
+// alert gets 72 more hours before it can fall off again. A ringing refresh drops it (rungAt says it all).
+const QUIET_HOLD_KEY = 'quietHoldFrom';
+
+// Whose close a Reopen button may undo, and which done rows another SYSTEM closer may take over
+// (openToCloser): a person's close, or the quiet fall-off's. PERSON_DONE_BY_SQL keeps its meaning ("a
+// person closed it") for every other caller (the proofreader's personHeld, cancellation-processor, the
+// relevance sweep's own reading of a hold); only these two decisions widen.
+const REOPENABLE_DONE_BY_SQL = `(${PERSON_DONE_BY_SQL} OR done_by = '${QUIET_FALL_OFF_DONE_BY}')`;
+
+// A QUIET refresh of a standing row writes its metadata from the row it read earlier. A Reopen that committed between
+// that read and this write stamped quietHoldFrom (the earlier read cannot have it), so the write keeps the DATABASE
+// row's hold in SQL, atomically: the merged JSON loses any hold it carries, then the row's own current hold goes back
+// in. A ringing refresh (second binding true) drops the hold, as it always did. jsonb_exists is the function behind
+// the `?` operator, which knex would read as a binding.
+const KEEP_DB_HOLD_SQL = `(?::jsonb - '${QUIET_HOLD_KEY}') || CASE WHEN ?::boolean THEN '{}'::jsonb WHEN jsonb_exists(metadata, '${QUIET_HOLD_KEY}') THEN jsonb_build_object('${QUIET_HOLD_KEY}', metadata -> '${QUIET_HOLD_KEY}') ELSE '{}'::jsonb END`;
+
 function cleanResolution(text) {
   const plain = String(stripEmoji(text) || '').replace(/\s+/g, ' ').trim();
   return plain ? truncateAtWord(plain, MAX_RESOLUTION_CHARS) : null;
@@ -159,7 +182,8 @@ function doneColumns({ by, resolution = null, at = new Date(), keepExisting = fa
     // reopen could restore), so PERSON_DONE_BY_SQL refuses its reopen. The
     // first done_at, the person's resolution and their read still stand.
     done_by: columns.done_by,
-    resolution: conn.raw('COALESCE(resolution, ?)', [columns.resolution]),
+    // A quiet fall-off row taken over by a real close carries the new closer's words, not "No new activity".
+    resolution: conn.raw(`CASE WHEN done_by = '${QUIET_FALL_OFF_DONE_BY}' THEN ?::text ELSE COALESCE(resolution, ?::text) END`, [columns.resolution, columns.resolution]),
     read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [columns.done_at]),
   };
 }
@@ -169,6 +193,10 @@ const UUID_DONE_BY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 function isPersonDoneBy(by) {
   const text = String(by ?? '');
   return /^[0-9]+$/.test(text) || UUID_DONE_BY_RE.test(text) || text === 'claude';
+}
+// The JS twin of REOPENABLE_DONE_BY_SQL.
+function isReopenableDoneBy(by) {
+  return isPersonDoneBy(by) || String(by ?? '') === QUIET_FALL_OFF_DONE_BY;
 }
 
 // The ONE row selection every SYSTEM closer uses for its closing UPDATE (a
@@ -186,7 +214,8 @@ function isPersonDoneBy(by) {
 // whereNull('done_at'). Columns are unqualified, like doneColumns' own.
 function openToCloser(query, by) {
   if (isPersonDoneBy(by)) return query.whereNull('done_at');
-  return query.where((q) => q.whereNull('done_at').orWhereRaw(`COALESCE(${PERSON_DONE_BY_SQL}, false)`));
+  // A quiet fall-off close is reopenable like a person's, so a real close of the subject takes it over too.
+  return query.where((q) => q.whereNull('done_at').orWhereRaw(`COALESCE(${REOPENABLE_DONE_BY_SQL}, false)`));
 }
 
 // `scheduledServiceId` (app property scope, PR 3): the five appointment keys
@@ -422,7 +451,8 @@ function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
     // A ringing refresh clears the done fields (below), so a relevance
     // retirement stamp on the row is stale: dropped, or the sweep would never
     // judge this row again (admin-alert-relevance.js candidateQuery).
-    const { retired: _retired, ...standing } = existingMeta;
+    // The same for the quiet fall-off's Reopen hold (rungAt, stamped below, now says when the row last had news).
+    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, ...standing } = existingMeta;
     const merged = { ...standing, ...metadata, rungAt: new Date().toISOString() };
     // A DEFINED non-owner audience only — a caller outside ops-digest.js
     // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
@@ -762,7 +792,7 @@ const NotificationService = {
             const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
+              metadata: trx.raw(KEEP_DB_HOLD_SQL, [JSON.stringify(mergedMetadata), shouldRing]), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
             await trx('notifications').where({ id: existing.id }).update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
             return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
@@ -991,11 +1021,13 @@ const NotificationService = {
   // and offset included) so the route can build a cursor that never rounds
   // away the sub-millisecond part: the ::timestamptz it round-trips through
   // is exact, so rows sharing a millisecond are never skipped or repeated.
-  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null } = {}) {
+  // An owner-only row (metadata.ownerOnly: a Claude plan or copy) is listed for the owner login only (`fullAccess`).
+  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ));
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     const rows = await query
       .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'))
@@ -1083,18 +1115,18 @@ const NotificationService = {
     });
   },
 
-  // The 10-second Undo of an idea sent from the Intelligence Bar box (admin-claude-ideas.js): closes the row as done by
-  // the admin. Same dedupe lock as the send; the row is locked and the fence re-checked inside the transaction: open,
-  // still in Claude's queue, an 'owner-idea' send stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the
-  // rows written, 0 or 1.
-  async markAdminIdeaCancelled(id, at, by, resolution) {
+  // The 10-second Undo of an idea sent from the Intelligence Bar box (admin-claude-ideas.js), or of a guarded copy
+  // (`kind` 'guarded-copy', admin-alert-copy-to-claude.js): closes the row as done by the admin. Same dedupe lock as the
+  // send; the row is locked and the fence re-checked inside the transaction: open, still in Claude's queue, a send of
+  // that `kind` stamped at `at`, and no Mac tab has stamped `startedAt`. Returns the rows written, 0 or 1.
+  async markAdminIdeaCancelled(id, at, by, resolution, kind = 'owner-idea') {
     return db.transaction(async (trx) => {
       const row = await trx('notifications').where({ id, recipient_type: 'admin' }).first(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
       if (!row) return 0;
       if (row.dedupe_key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${row.dedupe_key}`]);
       const fenced = () => trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
         .whereRaw("metadata->>'claudeQueue' = ?", [SENT_TO_CLAUDE_CLASS])
-        .whereRaw("metadata->'sentToClaude'->>'kind' = 'owner-idea'")
+        .whereRaw("metadata->'sentToClaude'->>'kind' = ?", [kind])
         .whereRaw("metadata->'sentToClaude'->>'at' = ?", [at])
         .whereRaw("metadata->'sentToClaude'->>'startedAt' IS NULL");
       if (!(await fenced().forUpdate().first('id'))) return 0;
@@ -1120,7 +1152,7 @@ const NotificationService = {
   // keyset-paged on (done_at, id) like the bell list, so every row in the
   // window stays reachable however many closed after it. done_at_token is
   // done_at::text at full precision: the cursor source, and the fence a
-  // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
+  // reopen must echo back (see reopenAdminDone). reopenable: a person closed it, or the quiet fall-off did.
   async getAdminDoneNotifications({ role, technicianId = null, limit = 20, days = 7, before = null, fullAccess = false } = {}) {
     const query = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
@@ -1134,7 +1166,7 @@ const NotificationService = {
       .select(
         'id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at',
         db.raw('done_at::text AS done_at_token'),
-        db.raw(`COALESCE(${PERSON_DONE_BY_SQL}, false) AS reopenable`),
+        db.raw(`COALESCE(${REOPENABLE_DONE_BY_SQL}, false) AS reopenable`),
       )
       .orderByRaw('done_at DESC, id DESC')
       .limit(limit);
@@ -1145,13 +1177,15 @@ const NotificationService = {
   // badge ordering section (admin-unread.js) computes counts inside its
   // advisory-lock transaction and must not borrow a second pool
   // connection while holding one.
-  async getAdminUnreadCount({ role, technicianId = null } = {}, trx = null) {
-    const [{ count }] = await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // An owner-only row (metadata.ownerOnly) counts for the owner login only (`fullAccess`), as getAdminNotifications lists it.
+  async getAdminUnreadCount({ role, technicianId = null, fullAccess = false } = {}, trx = null) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       (trx || db)('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ))
-      .whereNull('read_at')
-      .count('* as count');
+      .whereNull('read_at');
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    const [{ count }] = await query.count('* as count');
     return parseInt(count);
   },
 
@@ -1183,13 +1217,16 @@ const NotificationService = {
   // Mark a single admin notification read — scoped to recipient_type 'admin' so
   // the admin endpoint can't clear a customer's notification by supplying its id
   // (admin notifications are the shared admin queue; customer rows are off-limits).
-  async markReadAdmin(notificationId, { role, technicianId = null } = {}) {
+  async markReadAdmin(notificationId, { role, technicianId = null, fullAccess = false } = {}) {
     // Same role predicate as the reads: a technician must not be able to
-    // mark a hidden adminRoleOnly row read before the owner sees it.
-    const updated = await scopeAdminFeedToRole(
+    // mark a hidden adminRoleOnly row read before the owner sees it. Likewise
+    // an owner-only row (metadata.ownerOnly) is the owner login's alone.
+    const query = scopeAdminFeedToRole(
       db('notifications').where({ id: notificationId, recipient_type: 'admin' }),
       role, technicianId,
-    ).update({ read_at: new Date() });
+    );
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    const updated = await query.update({ read_at: new Date() });
     return updated > 0;
   },
 
@@ -1220,18 +1257,23 @@ const NotificationService = {
   // expectedDoneAt (required): the done_at token the Recently-done list served
   // (done_at::text, full precision). A stale list must not clear a NEWER
   // completion of the same row, so the row is reopened only while its done_at
-  // still equals the token. Only a row a PERSON closed can be reopened
-  // (PERSON_DONE_BY_SQL). Returns 'reopened', 'changed' (still done, but not
+  // still equals the token. Only a row a PERSON closed, or the quiet fall-off
+  // closed, can be reopened (REOPENABLE_DONE_BY_SQL). The reopen stamps
+  // metadata.quietHoldFrom (any reopened row: the fall-off rule waits 72 hours
+  // from it). Returns 'reopened', 'changed' (still done, but not
   // by the close the caller saw), 'not_reopenable' (a system close) or
   // 'not_found' (missing, or not done any more).
-  async reopenAdminDone(notificationId, { expectedDoneAt } = {}, connection = db) {
+  async reopenAdminDone(notificationId, { expectedDoneAt, now = new Date() } = {}, connection = db) {
     if (expectedDoneAt == null || expectedDoneAt === '') return 'changed';
     const updated = await connection('notifications')
       .where({ id: notificationId, recipient_type: 'admin' })
       .whereNotNull('done_at')
       .whereRaw('done_at = ?::timestamptz', [String(expectedDoneAt)])
-      .whereRaw(PERSON_DONE_BY_SQL)
-      .update(DONE_CLEARED);
+      .whereRaw(REOPENABLE_DONE_BY_SQL)
+      .update({
+        ...DONE_CLEARED,
+        metadata: connection.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [QUIET_HOLD_KEY]: now.toISOString() })]),
+      });
     if (updated > 0) return 'reopened';
     const row = await connection('notifications')
       .where({ id: notificationId, recipient_type: 'admin' })
@@ -1242,11 +1284,15 @@ const NotificationService = {
   },
 
   // Mark all read for admin
-  async markAllReadAdmin({ role, technicianId = null } = {}) {
-    await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // An owner-only row (metadata.ownerOnly) is read only by the owner login (`fullAccess`): another login's "Mark all
+  // read" never clears the owner's unread Claude plans.
+  async markAllReadAdmin({ role, technicianId = null, fullAccess = false } = {}) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }),
       role, technicianId,
-    )).whereNull('read_at').update({ read_at: new Date() });
+    )).whereNull('read_at');
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+    await query.update({ read_at: new Date() });
   },
 
   // Mark a customer's inbound_sms admin bells read — the ONE writer for
@@ -1365,7 +1411,12 @@ module.exports._private = {
   doneColumns,
   openToCloser,
   isPersonDoneBy,
+  isReopenableDoneBy,
   PERSON_DONE_BY_SQL,
+  REOPENABLE_DONE_BY_SQL,
+  KEEP_DB_HOLD_SQL,
+  QUIET_FALL_OFF_DONE_BY,
+  QUIET_HOLD_KEY,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,
   MAX_ADMIN_BODY_CHARS,

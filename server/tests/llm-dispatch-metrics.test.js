@@ -861,4 +861,35 @@ describe('llm-dispatch-metrics', () => {
       expect(prune.del).toHaveBeenCalled();
     });
   });
+  describe('served model for fast-speed Anthropic calls', () => {
+    const message = (usage) => ({ model: 'claude-opus-5-5', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 10, output_tokens: 5, ...usage } });
+
+    it('anthropicServedModel adds -fast only when usage.speed is "fast"', () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { anthropicServedModel } = load();
+      expect(anthropicServedModel(message({ speed: 'fast' }))).toBe('claude-opus-5-5-fast');
+      expect(anthropicServedModel(message({ speed: 'standard' }))).toBe('claude-opus-5-5');
+      expect(anthropicServedModel(message({}))).toBe('claude-opus-5-5');
+      expect(anthropicServedModel({ usage: { speed: 'fast' } })).toBeUndefined();
+      expect(anthropicServedModel(null)).toBeUndefined();
+    });
+
+    it.each([
+      [{ speed: 'fast' }, 'claude-opus-5-5-fast'],
+      [{ speed: 'standard' }, 'claude-opus-5-5'],
+      [{}, 'claude-opus-5-5'],
+    ])('ledgerCall files usage %j as served_model %s', async (usage, served) => {
+      process.env.GATE_LLM_CALL_LEDGER = 'true';
+      const { ledgerCall } = load();
+      await ledgerCall('anthropic', 'claude-opus-5-5', async () => message(usage));
+      expect(mockInsert.mock.calls[0][0]).toMatchObject({ served_model: served, requested_model: 'claude-opus-5-5' });
+    });
+
+    it('a non-Anthropic provider keeps its own model field', async () => {
+      process.env.GATE_LLM_CALL_LEDGER = 'true';
+      const { ledgerCall } = load();
+      await ledgerCall('openai', 'gpt-x', async () => ({ model: 'gpt-x', usage: { speed: 'fast' } }));
+      expect(mockInsert.mock.calls[0][0].served_model).toBe('gpt-x');
+    });
+  });
 });

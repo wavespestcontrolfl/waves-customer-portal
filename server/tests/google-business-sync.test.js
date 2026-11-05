@@ -230,6 +230,10 @@ function createDbMock(initialRows = {}) {
               const cur = row[key] ? new Date(row[key]) : new Date(0);
               rec[key] = bound > cur ? val.__bindings[0] : row[key];
             }
+            // The resolution form: a quiet fall-off close takes the new closer's words, any other keeps its own.
+            if (val && typeof val === 'object' && typeof val.__raw === 'string' && val.__raw.startsWith('CASE WHEN done_by = ')) {
+              rec[key] = row.done_by === 'quiet-72h' ? val.__bindings[0] : (row[key] ?? val.__bindings[1]);
+            }
             // doneColumns' keepExisting form: COALESCE(col, ?) keeps a value already there.
             if (val && typeof val === 'object' && typeof val.__raw === 'string' && val.__raw.startsWith(`COALESCE(${key},`)) {
               rec[key] = row[key] ?? val.__bindings[0];

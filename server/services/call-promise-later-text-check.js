@@ -134,7 +134,7 @@ async function checkLaterTexts(conn, { commitment, message, proof, readThrough, 
   const read = await readLaterTexts(conn, { commitment, message, proof, readThrough });
   if (read.hold) return { version: VERSION, verdict: 'unclear', reason: read.hold, evidence_hash: read.hash, retry_after: null };
   if (cache?.version === VERSION && cacheFresh(cache, read.hash, now)) return cache;
-  if (!mayCall()) return null;
+  if (!(await mayCall())) return null;
   const verdict = await askModel(commitment, proof, read.records);
   return { version: VERSION, ...verdict, evidence_hash: read.hash,
     retry_after: ['provider_failed', 'invalid_model_output'].includes(verdict.reason) ? new Date(now.getTime() + PROVIDER_RETRY_MS).toISOString() : null };

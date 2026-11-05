@@ -86,6 +86,8 @@ const baseCampaign = () => ({
   id: 'c-1',
   campaign_name: 'Sarasota Pest',
   platform: 'google_ads',
+  // The sync stores Google's SEARCH channel enum as text; only Search campaigns are on the capacity rule.
+  campaign_type: '2',
   platform_campaign_id: '1234567890',
   target_area: 'Sarasota',
   budget_mode: 'base',
@@ -112,6 +114,59 @@ describe('BudgetManager live Google Ads push', () => {
   });
 
   describe('adjustBudgets (autonomous cron)', () => {
+    // Owner 2026-11-04 (PPC gap page, option A): Google is moving Local Services Ads into pay-per-lead Performance
+    // Max campaigns. One of those syncing in as an active google_ads row must not get a capacity budget.
+    describe('Search campaigns only', () => {
+      beforeEach(() => {
+        mockIsEnabled.mockReturnValue(true);
+        mockIsConfigured.mockReturnValue(true);
+        mockUpdateBudget.mockResolvedValue({ success: true });
+      });
+
+      test('a Performance Max campaign is left alone and named in the log', async () => {
+        campaignRows = [{ ...baseCampaign(), id: 'c-pmax', campaign_name: 'Pay-per-lead', campaign_type: '10' }];
+
+        const result = await BudgetManager.adjustBudgets();
+
+        expect(mockUpdateBudget).not.toHaveBeenCalled();
+        expect(mockCampaignUpdate).not.toHaveBeenCalled();
+        expect(mockLogInsert).not.toHaveBeenCalled();
+        expect(result).toEqual(expect.objectContaining({ evaluated: 0, changed: 0, failed: 0 }));
+        expect(require('../services/logger').info).toHaveBeenCalledWith(
+          expect.stringContaining('left 1 non-Search campaign(s) alone: Pay-per-lead (type 10)'),
+        );
+      });
+
+      test('with a Search and a pay-per-lead campaign active, only the Search one is pushed', async () => {
+        campaignRows = [
+          baseCampaign(),
+          { ...baseCampaign(), id: 'c-lsa', platform_campaign_id: '999', campaign_type: 'LOCAL_SERVICES' },
+        ];
+
+        await BudgetManager.adjustBudgets();
+
+        expect(mockUpdateBudget).toHaveBeenCalledTimes(1);
+        expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
+      });
+
+      test('a campaign with no type is not treated as Search', async () => {
+        campaignRows = [{ ...baseCampaign(), campaign_type: null }];
+
+        await BudgetManager.adjustBudgets();
+
+        expect(mockUpdateBudget).not.toHaveBeenCalled();
+        expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      });
+
+      test.each(['SEARCH', 'google_search'])('type %s is Search', async (campaignType) => {
+        campaignRows = [{ ...baseCampaign(), campaign_type: campaignType }];
+
+        await BudgetManager.adjustBudgets();
+
+        expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
+      });
+    });
+
     test('gate on + linked + configured: pushes to Google first, then commits locally', async () => {
       campaignRows = [baseCampaign()];
       mockIsEnabled.mockReturnValue(true);

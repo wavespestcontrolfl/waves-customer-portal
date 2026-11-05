@@ -31,7 +31,7 @@ jest.mock('../models/db', () => {
   };
   const makeTrx = () => {
     const trx = jest.fn((table) => builder(table));
-    trx.raw = jest.fn(async () => {});
+    trx.raw = jest.fn((sql, bindings) => (String(sql).includes('jsonb_exists') ? bindings[0] : undefined));
     trx.fn = { now: () => new Date('2026-11-03T15:00:00Z') };
     return trx;
   };
