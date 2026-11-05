@@ -437,6 +437,86 @@ describeDb('service-line map shadow on PostgreSQL', () => {
     });
   });
 
+  describe('territory cover at the card save (PUT /service-lines)', () => {
+    // A technician who owns ZIPs needs a cover on all four territory lines (general, mosquito, rodent, termite).
+    const ZIP = '34293';
+    const TERRITORY = ['general', 'mosquito', 'rodent', 'termite'];
+    let priorZips = [];
+    const put = (lines) => call('put', '/service-lines', { technicianId: ownerId, body: { lines } });
+    const entries = (lines, home, gap) => lines.map((line) => ({ service_category: line, home_technician_id: home, gap_technician_id: gap }));
+    const stored = async () => (await db('service_line_techs').select('service_category', 'home_technician_id', 'gap_technician_id').orderBy('service_category'));
+
+    beforeEach(async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+      priorZips = await db('territory_zips').select('zip', 'technician_id');
+      await db('territory_zips').update({ technician_id: null });
+    });
+    afterEach(async () => {
+      await db('technician_capabilities').whereIn('technician_id', techIds).del();
+      await db('territory_zips').update({ technician_id: null });
+      for (const row of priorZips.filter((r) => r.technician_id)) await db('territory_zips').where({ zip: row.zip }).update({ technician_id: row.technician_id });
+    });
+
+    test('no technician owns a ZIP (today): any card saves, a hire alone on a line included', async () => {
+      const res = await put(entries(TERRITORY, hireId, null));
+      expect(res.statusCode).toBe(200);
+      expect(await stored()).toHaveLength(4);
+    });
+
+    test('the hire owns a ZIP: a card that leaves a territory line without a cover is refused, in words, and nothing is saved', async () => {
+      await db('territory_zips').where({ zip: ZIP }).update({ technician_id: hireId });
+      const res = await put([
+        ...entries(['mosquito', 'rodent', 'termite'], hireId, ownerId),
+        { service_category: 'general', home_technician_id: hireId, gap_technician_id: null },
+      ]);
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toBe(`General pest needs a cover technician besides Hire ${run}: set a home or gap technician`);
+      expect(await stored()).toEqual([]);
+      // Several lines: all are named.
+      const many = await put(entries(['general', 'termite'], hireId, null));
+      expect(many.statusCode).toBe(400);
+      expect(many.body.error).toContain('General pest, Mosquito, Rodent and Termite / WDO need a cover technician besides');
+    });
+
+    test('the owner named as home or gap on all four lines: the save goes through', async () => {
+      await db('territory_zips').where({ zip: ZIP }).update({ technician_id: hireId });
+      const res = await put([...entries(['general', 'mosquito'], hireId, ownerId), ...entries(['rodent', 'termite'], ownerId, null), ...entries(['lawn'], ownerId, null)]);
+      expect(res.statusCode).toBe(200);
+      expect(await stored()).toHaveLength(5);
+    });
+
+    test('the card is judged as it will be after the save: a partial request cannot strip a stored cover, or rely on one', async () => {
+      await db('territory_zips').where({ zip: ZIP }).update({ technician_id: hireId });
+      await db('service_line_techs').insert(entries(TERRITORY, hireId, ownerId).map((r) => ({ ...r })));
+      // Only lawn is sent: the stored cover stands.
+      expect((await put(entries(['lawn'], ownerId, null))).statusCode).toBe(200);
+      // Clearing the owner from termite alone: refused, the other lines stay.
+      const strip = await put(entries(['termite'], hireId, null));
+      expect(strip.statusCode).toBe(400);
+      expect(strip.body.error).toContain('Termite / WDO needs a cover technician');
+      expect((await stored()).find((r) => r.service_category === 'termite')).toMatchObject({ home_technician_id: hireId, gap_technician_id: ownerId });
+      // Both cleared: refused too.
+      expect((await put(entries(['general'], null, null))).statusCode).toBe(400);
+    });
+
+    test('a cover who is not assignable, or switched Off for the line, does not count', async () => {
+      await db('territory_zips').where({ zip: ZIP }).update({ technician_id: hireId });
+      const notYet = await put(entries(TERRITORY, hireId, futureId));
+      expect(notYet.statusCode).toBe(400);
+      expect(notYet.body.error).toContain('need a cover technician');
+      await db('technician_capabilities').insert({ technician_id: ownerId, service_category: 'termite', active: false, capability_level: 'qualified' });
+      const off = await put(entries(TERRITORY, hireId, ownerId));
+      expect(off.statusCode).toBe(400);
+      expect(off.body.error).toBe(`Termite / WDO needs a cover technician besides Hire ${run}: set a home or gap technician`);
+    });
+
+    test('the owner owning ZIPs needs a cover too (the hire), and the hire alone on a line is refused', async () => {
+      await db('territory_zips').where({ zip: ZIP }).update({ technician_id: ownerId });
+      expect((await put(entries(TERRITORY, ownerId, null))).statusCode).toBe(400);
+      expect((await put(entries(TERRITORY, ownerId, hireId))).statusCode).toBe(200);
+    });
+  });
+
   describe('Team-tab editor routes', () => {
     test('gate off: all three routes answer 404', async () => {
       for (const [method, path] of [['get', '/service-lines'], ['put', '/service-lines'], ['get', '/service-lines/shadow-summary']]) {

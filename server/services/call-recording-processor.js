@@ -2262,6 +2262,19 @@ function summarizeKnownCaller(customer) {
   };
 }
 
+// What this pass knew about the caller before extraction, stamped on the stored
+// extraction as `known_caller` so the nightly call audit judges is_lead from the
+// same caller facts (owner ruling 2026-11-04, D1 A: a lead is a new prospect; a
+// current customer asking about another service is not a lead).
+// 'current_customer' = an actively served stage (summarizeKnownCaller's
+// isExistingCustomer); 'other_account' = on file but not a current customer (a
+// prospect, or a closed or former account); 'not_on_file' = no match;
+// 'lookup_failed' = the pre-lookup threw, so the extractor had no hint either.
+function knownCallerAuditStamp(knownCaller, { lookupFailed = false } = {}) {
+  if (knownCaller) return knownCaller.isExistingCustomer ? 'current_customer' : 'other_account';
+  return lookupFailed ? 'lookup_failed' : 'not_on_file';
+}
+
 // Owner ruling 2026-09-24: a NEW LEAD who already has an address on file (a
 // web quote form, an earlier call) is trusted for the on-file address rule
 // the same way an active customer is — six of the nine address blocks filed
@@ -12168,6 +12181,7 @@ const CallRecordingProcessor = {
     // model the context to tell a new-prospect lead apart from an existing customer
     // coordinating a visit, complaining, or asking about billing.
     let knownCaller = null;
+    let knownCallerLookupFailed = false;
     try {
       // The operator's link outranks the phone lookup here too (Codex #3764
       // r2 P1): a relink exists because the phone identity was wrong or
@@ -12181,6 +12195,7 @@ const CallRecordingProcessor = {
         : await findCustomerForCallContact(contactPhone, {});
       knownCaller = summarizeKnownCaller(knownCustomer);
     } catch (e) {
+      knownCallerLookupFailed = true;
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
     // The linked customer's address AT FILING, snapshotted on every review
@@ -12272,6 +12287,9 @@ const CallRecordingProcessor = {
       const v1ProviderMeta = {};
       extracted = await extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call) || call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound', providerMeta: v1ProviderMeta });
       stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
+      if (extracted && typeof extracted === 'object') {
+        extracted = { ...extracted, known_caller: knownCallerAuditStamp(knownCaller, { lookupFailed: knownCallerLookupFailed }) };
+      }
       // Only set when GATE_CALL_EXTRACTION_V1_FALLBACK served the call from a backup provider.
       if (v1ProviderMeta.extraction_v1_provider) Object.assign(stageTimings, v1ProviderMeta);
     } catch (err) {
@@ -26073,6 +26091,7 @@ CallRecordingProcessor._test = {
   attachCandidateSlotAgrees,
   classifyCallerAccount,
   summarizeKnownCaller,
+  knownCallerAuditStamp,
   failOpenKnownCustomer,
   trustValidatedNewLeadAddress,
   applyOnFileAddressVerdict,

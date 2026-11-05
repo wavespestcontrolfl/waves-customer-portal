@@ -113,6 +113,7 @@ const auditLog = require(path.join(root, 'services', 'audit-log'));
 const { etParts, etDateString } = require(path.join(root, 'utils', 'datetime-et'));
 const { recurringDispatchDuePatch } = require(path.join(root, 'services', 'scheduling', 'recurring-dispatch-due'));
 const { scheduledServiceTrackTokenExpiry } = require(path.join(root, 'services', 'track-token-expiry'));
+const { lacksCoverLines } = require(path.join(root, 'services', 'territory'));
 
 const { OPEN_STATUSES, STOPPED_TRACK_STATES } = planner;
 const AUTO_DISPATCH_LOCK = 'cron:auto-dispatch-recurring';
@@ -170,6 +171,17 @@ function checkTarget(row) {
   }
   if (!normalizeWorkDays(row.work_days)) {
     throw new Refusal('TARGET_NO_WORK_DAYS', '--to has no work days set (an empty list or all seven days is not a schedule): set the hire\'s work days first');
+  }
+}
+
+/**
+ * --zips makes --to a territory technician: every territory line needs a cover technician for his days off
+ * (territory.lacksCoverLines: named on the line's card row, assignable, not switched Off). Without --zips: no check.
+ */
+async function checkCover(trx, to, zips) {
+  const uncovered = zips ? await lacksCoverLines(trx, to) : [];
+  if (uncovered.length) {
+    throw new Refusal('NO_COVER_TECH', `--zips: --to has no assignable cover technician on ${uncovered.join(', ')}: set a home or gap technician besides --to on the Service lines card first. Nothing was written.`);
   }
 }
 
@@ -350,6 +362,7 @@ async function executeHandover(db, opts) {
     committed = await db.transaction(async (trx) => {
       const toRow = await trx('technicians').where({ id: to }).forShare().first('id', 'employment_status', 'field_dispatchable', 'work_days');
       checkTarget(toRow);
+      await checkCover(trx, to, zips);
       const mismatch = (got) => new Refusal('PLAN_MISMATCH', `the plan changed since the dry run: this run's PLAN ID is ${got}, --plan is ${planId}. Nothing was written. Run the dry run again and read it.`);
 
       const first = await planOrRefuse(trx, { from, to, start, today, lines, zips, weekendMove, now });
