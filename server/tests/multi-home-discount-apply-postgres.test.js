@@ -409,17 +409,182 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
     });
   });
 
-  test('every visit already carrying the preset is already_discounted (staff did it by hand)', async () => {
+  const carryPreset = async (trx, ids) => {
+    const preset = await trx('discounts').where({ discount_key: 'multi_home' }).first();
+    await trx('scheduled_services').whereIn('id', ids).update({
+      discount_id: preset.id, discount_name: preset.name, discount_type: 'percentage', discount_amount: 10, discount_dollars: 11.7, primary_line_price: 117, estimated_price: 105.3,
+    });
+    return preset;
+  };
+
+  test('visits that already carry the preset (hand edits) and a template that does not: the template is stamped, then already_discounted', async () => {
     await inRollback(async (trx) => {
       const f = await family(trx);
-      const preset = await trx('discounts').where({ discount_key: 'multi_home' }).first();
-      await trx('scheduled_services').whereIn('id', f.parentSeries.ids).update({
-        discount_id: preset.id, discount_name: preset.name, discount_type: 'percentage', discount_amount: 10, discount_dollars: 11.7, primary_line_price: 117, estimated_price: 105.3,
-      });
+      const preset = await carryPreset(trx, f.parentSeries.ids);
       await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
       const [row] = await ledger(trx, f.estimateId);
-      expect(row).toMatchObject({ status: 'already_discounted', hold_reason: null });
+      expect(row).toMatchObject({ status: 'already_discounted', hold_reason: null, detail: { reason: 'all_upcoming_visits_carry_it', templateStamped: true } });
       expect((await visitRows(trx, f.parentSeries.ids)).every((r) => Number(r.estimated_price) === 105.3)).toBe(true);
+      const root = await trx('scheduled_services').where({ id: f.parentSeries.rootId }).first('recurring_template_overrides');
+      expect(root.recurring_template_overrides).toMatchObject({ discount_id: preset.id, primary_line_price: 117, estimated_price: 105.3 });
+      // A second run leaves it alone.
+      expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ targets: 0 });
+    });
+  });
+
+  test('visits and template both already discounted: already_discounted with nothing stamped', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      const preset = await carryPreset(trx, f.parentSeries.ids);
+      const overrides = { primary_line_price: 117, estimated_price: 105.3, discount_id: preset.id, discount_name: preset.name, discount_type: 'percentage', discount_amount: 10 };
+      await trx('scheduled_services').where({ id: f.parentSeries.rootId }).update({ recurring_template_overrides: JSON.stringify(overrides) });
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      const [row] = await ledger(trx, f.estimateId);
+      expect(row).toMatchObject({ status: 'already_discounted', detail: { templateStamped: false } });
+    });
+  });
+
+  test('visits carry the preset but the template cannot be fixed: held as template_not_discounted, nothing stamped', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      await carryPreset(trx, f.parentSeries.ids);
+      await trx('scheduled_services').where({ id: f.parentSeries.rootId }).update({ line_discount_dollars: 5 });
+      const out = await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      expect(out).toMatchObject({ held: 1, already: 0 });
+      const [row] = await ledger(trx, f.estimateId);
+      expect(row).toMatchObject({ status: 'held', hold_reason: 'template_not_discounted' });
+      const root = await trx('scheduled_services').where({ id: f.parentSeries.rootId }).first('recurring_template_overrides');
+      expect(root.recurring_template_overrides).toBeNull();
+      expect(notification.notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String),
+        expect.objectContaining({ dedupeKey: `multi-home-discount-hold:${f.estimateId}:${f.parentSeries.rootId}:template_not_discounted` }));
+    });
+  });
+
+  test('sold with the discount netted in, but the template would spawn at another price: held, not terminal', async () => {
+    await inRollback(async (trx) => {
+      const f = await family(trx);
+      const soldWith = await estimate(trx, f.parents, f.parentsHome);
+      await trx('scheduled_services').where({ id: f.parentSeries.rootId }).update({ source_estimate_id: soldWith });
+      // The visits were sold at the net price; the parent row (the template) still reads the gross.
+      await trx('scheduled_services').whereIn('id', f.parentSeries.ids).update({ estimated_price: 105.3 });
+      await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+      const rows = await ledger(trx, f.estimateId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'held', hold_reason: 'template_not_discounted' });
+    });
+  });
+
+  describe('the family is checked again under the family-changes lock', () => {
+    // A -> B and C: the son (source) is linked with two other profiles.
+    async function threeProfileFamily(trx) {
+      const f = await family(trx);
+      const third = await customer(trx);
+      const thirdHome = await property(trx, third);
+      const familyId = (await trx('multi_home_family_members').where({ customer_id: f.son }).first()).family_id;
+      await trx('multi_home_family_members').insert({ customer_id: third, family_id: familyId });
+      const thirdSeries = await series(trx, { customerId: third, propertyId: thirdHome });
+      const source = { estimateId: f.estimateId, customerId: f.son, propertyId: f.sonHome, roots: new Set([f.sonSeries.rootId]) };
+      const targetOf = (customerId, propertyId, s) => ({ customerId, rootId: s.rootId, propertyId, line: 'pest_control', cadence: 'quarterly', serviceType: 'Quarterly Pest Control Service' });
+      return { ...f, third, thirdHome, thirdSeries, source, parentsTarget: targetOf(f.parents, f.parentsHome, f.parentSeries), thirdTarget: targetOf(third, thirdHome, thirdSeries) };
+    }
+
+    test('a profile unlinked after the targets were picked is dropped: no price change, no hold, no bell, its old held row gone', async () => {
+      await inRollback(async (trx) => {
+        const f = await threeProfileFamily(trx);
+        await trx('multi_home_discount_applications').insert({
+          source_estimate_id: f.estimateId, source_customer_id: f.son, target_customer_id: f.parents, series_root_id: f.parentSeries.rootId, status: 'held', hold_reason: 'plan_on_hold',
+        });
+        // Staff unlink the parents after selection (their membership row is gone).
+        await trx('multi_home_family_members').where({ customer_id: f.parents }).del();
+        const dropped = await apply.applyTargetSeries(f.source, f.parentsTarget, { now: NOW, dbh: trx });
+        expect(dropped).toEqual({ skipped: true, dropped: true });
+        expect((await visitRows(trx, f.parentSeries.ids)).every((r) => Number(r.estimated_price) === 117 && r.discount_id === null)).toBe(true);
+        expect((await ledger(trx, f.estimateId)).filter((r) => r.series_root_id === f.parentSeries.rootId)).toHaveLength(0);
+        expect(notification.notifyAdmin).not.toHaveBeenCalled();
+        // The other linked profile is still a target and still gets it.
+        const thirdResult = await apply.applyTargetSeries(f.source, f.thirdTarget, { now: NOW, dbh: trx });
+        expect(thirdResult).toMatchObject({ status: 'applied' });
+        expect((await visitRows(trx, f.thirdSeries.ids)).every((r) => Number(r.estimated_price) === 105.3)).toBe(true);
+      });
+    });
+
+    test('the source unlinked after selection: no other profile gets the discount from an unrelated source', async () => {
+      await inRollback(async (trx) => {
+        const f = await threeProfileFamily(trx);
+        await trx('multi_home_family_members').where({ customer_id: f.son }).del();
+        for (const target of [f.parentsTarget, f.thirdTarget]) {
+          expect(await apply.applyTargetSeries(f.source, target, { now: NOW, dbh: trx })).toEqual({ skipped: true, dropped: true });
+        }
+        expect((await visitRows(trx, [...f.parentSeries.ids, ...f.thirdSeries.ids])).every((r) => r.discount_id === null)).toBe(true);
+      });
+    });
+
+    test('a family left with one live member no longer counts', async () => {
+      await inRollback(async (trx) => {
+        const f = await family(trx);
+        const source = { estimateId: f.estimateId, customerId: f.son, propertyId: f.sonHome, roots: new Set([f.sonSeries.rootId]) };
+        await trx('customers').where({ id: f.son }).update({ active: false });
+        expect(await apply.applyTargetSeries(source, { customerId: f.parents, rootId: f.parentSeries.rootId, propertyId: f.parentsHome, line: 'pest_control', cadence: 'quarterly' }, { now: NOW, dbh: trx })).toEqual({ skipped: true, dropped: true });
+      });
+    });
+
+    test('a held row for a profile that was unlinked is deleted by the next run, and counted', async () => {
+      await inRollback(async (trx) => {
+        const f = await threeProfileFamily(trx);
+        await trx('customers').where({ id: f.third }).update({ has_multi_home: false });
+        await trx('multi_home_discount_applications').insert({
+          source_estimate_id: f.estimateId, source_customer_id: f.son, target_customer_id: f.third, series_root_id: f.thirdSeries.rootId, status: 'held', hold_reason: 'plan_on_hold',
+        });
+        await trx('multi_home_family_members').where({ customer_id: f.third }).del();
+        const out = await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx });
+        expect(out).toMatchObject({ applied: 1, dropped: 1 });
+        const left = await ledger(trx, f.estimateId);
+        expect(left.map((r) => r.series_root_id)).toEqual([f.parentSeries.rootId]);
+      });
+    });
+
+    // A second connection holds the lock the way a link or unlink does (exclusive). The apply waits for it, then goes on.
+    async function holdFamilyLock(mode) {
+      const holder = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 1, max: 1 } });
+      const fn = mode === 'shared' ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock';
+      const release = await new Promise((resolveHeld, rejectHeld) => {
+        holder.transaction(async (trx) => {
+          await trx.raw(`SELECT ${fn}(hashtext(?))`, ['multi_home_family_members:changes']);
+          await new Promise((finish) => resolveHeld(finish));
+        }).catch(rejectHeld);
+      });
+      return { release, destroy: () => holder.destroy() };
+    }
+
+    test('an apply waits while a link or unlink holds the family lock exclusively', async () => {
+      const held = await holdFamilyLock('exclusive');
+      try {
+        await inRollback(async (trx) => {
+          const f = await family(trx);
+          let finished = false;
+          const pending = apply.runMultiHomeAllHomes({ now: NOW, dbh: trx }).then((out) => { finished = true; return out; });
+          await new Promise((r) => setTimeout(r, 400));
+          expect(finished).toBe(false);
+          held.release();
+          expect(await pending).toMatchObject({ applied: 1 });
+          expect((await visitRows(trx, f.parentSeries.ids)).every((r) => Number(r.estimated_price) === 105.3)).toBe(true);
+        });
+      } finally {
+        await held.destroy();
+      }
+    });
+
+    test('applies share the lock: another shared holder does not block an apply', async () => {
+      const held = await holdFamilyLock('shared');
+      try {
+        await inRollback(async (trx) => {
+          await family(trx);
+          expect(await apply.runMultiHomeAllHomes({ now: NOW, dbh: trx })).toMatchObject({ applied: 1 });
+        });
+      } finally {
+        held.release();
+        await held.destroy();
+      }
     });
   });
 

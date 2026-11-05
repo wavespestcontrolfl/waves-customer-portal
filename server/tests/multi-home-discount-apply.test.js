@@ -18,6 +18,7 @@ const mockEligible = jest.fn();
 jest.mock('../services/multi-home-family', () => ({
   familyMembers: jest.fn(),
   familyMultiHomeEligible: (...args) => mockEligible(...args),
+  lockFamilyChangesShared: jest.fn(async () => {}),
 }));
 const mockRaise = jest.fn(async () => ({}));
 jest.mock('../services/admin-alert-compose', () => ({
@@ -29,7 +30,10 @@ const db = require('../models/db');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const apply = require('../services/multi-home-discount-apply');
 
-const { guardHold, seriesShapeVerdict, flatRefusal, discountFields, describeSource, applyTargets, settleTarget, recordHold, HoldError } = apply._private;
+const {
+  guardHold, seriesShapeVerdict, flatRefusal, discountFields, describeSource, applyTargets, settleTarget, recordHold, HoldError,
+  relationshipHolds, verifyTemplateForAlready, pruneStaleHeld,
+} = apply._private;
 
 const PRESET = { id: 'preset-1', name: 'Multi-Home Discount', discount_type: 'percentage', amount: '10.00', max_discount_dollars: null, service_key_filter: null, service_category_filter: null };
 
@@ -211,7 +215,7 @@ describe('the job', () => {
 
   const source = { estimateId: 'est-1', customerId: 'son' };
   const targets = [{ customerId: 'parents', rootId: 'r1', propertyId: 'home-p' }, { customerId: 'parents', rootId: 'r2', propertyId: 'home-p' }, { customerId: 'parents', rootId: 'r3', propertyId: 'home-p' }];
-  const fresh = () => ({ ok: true, sources: 1, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, holds: [] });
+  const fresh = () => ({ ok: true, sources: 1, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, dropped: 0, holds: [] });
   const dbhStub = () => { const d = jest.fn(); d.raw = jest.fn(async () => ({})); return d; };
 
   test('idempotent: an applied or already_discounted series is never applied again; a held one is retried', async () => {
@@ -260,5 +264,139 @@ describe('the job', () => {
     const dbh = dbhStub();
     await recordHold(dbh, { source, target: targets[0], code: 'plan_on_hold', detail: null, now: new Date() });
     expect(dbh.raw.mock.calls[0][0]).toMatch(/WHERE multi_home_discount_applications\.status = 'held'/);
+  });
+});
+
+// A table-keyed fake knex: every query on a table answers that table's rows (filters are not applied, so each test
+// names exactly the rows the real query would return).
+function fakeTrx(tables, extra = {}) {
+  const trx = jest.fn((name) => {
+    const rows = tables[name] || [];
+    const q = {
+      where: () => q, whereIn: () => q, select: async () => rows, first: async () => rows[0], del: jest.fn(async () => 1),
+      columnInfo: async () => ({}), then: (res, rej) => Promise.resolve(rows).then(res, rej),
+    };
+    return q;
+  });
+  return Object.assign(trx, extra);
+}
+
+describe('the relationship is read again under the family lock', () => {
+  const src = { estimateId: 'est-1', customerId: 'son', propertyId: 'home-s' };
+  const source = src;
+  const targets = [{ customerId: 'parents', rootId: 'r1', propertyId: 'home-p' }];
+  const fresh = () => ({ ok: true, sources: 1, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, dropped: 0, holds: [] });
+  const dbhStub = () => { const d = jest.fn(); d.raw = jest.fn(async () => ({})); return d; };
+  const live = (...ids) => ids.map((id) => ({ id, active: true, deleted_at: null }));
+
+  test('the source estimate must still be accepted, and both profiles live', async () => {
+    const target = { customerId: 'parents', rootId: 'r1', propertyId: 'home-p' };
+    const base = { estimates: [{ id: 'est-1' }], customers: live('son', 'parents'), multi_home_family_members: [{ customer_id: 'son', family_id: 'f' }, { customer_id: 'parents', family_id: 'f' }] };
+    mockEligible.mockResolvedValue(true);
+    expect(await relationshipHolds(fakeTrx(base), { source: src, target })).toBe(true);
+    expect(await relationshipHolds(fakeTrx({ ...base, estimates: [] }), { source: src, target })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, customers: live('son') }), { source: src, target })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, customers: [...live('son'), { id: 'parents', active: true, deleted_at: new Date() }] }), { source: src, target })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, customers: [...live('son'), { id: 'parents', active: false, deleted_at: null }] }), { source: src, target })).toBe(false);
+  });
+
+  test('another profile: both must be in the SAME family that still has 2 or more live members', async () => {
+    const target = { customerId: 'parents', rootId: 'r1', propertyId: null };
+    const base = { estimates: [{ id: 'est-1' }], customers: live('son', 'parents') };
+    mockEligible.mockResolvedValue(true);
+    const rows = (a, b) => [{ customer_id: 'son', family_id: a }, { customer_id: 'parents', family_id: b }];
+    expect(await relationshipHolds(fakeTrx({ ...base, multi_home_family_members: rows('f', 'f') }), { source: src, target })).toBe(true);
+    expect(await relationshipHolds(fakeTrx({ ...base, multi_home_family_members: rows('f', 'g') }), { source: src, target })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, multi_home_family_members: [{ customer_id: 'son', family_id: 'f' }] }), { source: src, target })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, multi_home_family_members: [] }), { source: src, target })).toBe(false);
+    mockEligible.mockResolvedValue(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, multi_home_family_members: rows('f', 'f') }), { source: src, target })).toBe(false);
+  });
+
+  test('the same profile: the target must be an active property that differs from the source\'s', async () => {
+    const target = { customerId: 'son', rootId: 'r1', propertyId: 'home-2' };
+    const base = { estimates: [{ id: 'est-1' }], customers: live('son') };
+    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target })).toBe(true);
+    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [] }), { source: src, target })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-s' }] }), { source: src, target: { ...target, propertyId: 'home-s' } })).toBe(false);
+    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: src, target: { ...target, propertyId: null } })).toBe(false);
+    // Source property unknown: the source's primary property stands in for it.
+    expect(await relationshipHolds(fakeTrx({ ...base, customer_properties: [{ id: 'home-2' }] }), { source: { ...src, propertyId: null }, target })).toBe(false);
+  });
+
+  test('a series that is no longer a target counts as dropped: no hold, no bell, no price', async () => {
+    const dbh = dbhStub();
+    const out = fresh();
+    await settleTarget(dbh, source, targets[0], { skipped: true, dropped: true }, new Date(), out);
+    expect(out).toMatchObject({ dropped: 1, skipped: 0, held: 0, applied: 0 });
+    expect(dbh.raw).not.toHaveBeenCalled();
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a held ledger row for a series that is no longer a target is deleted; applied and current rows stay', async () => {
+    const del = jest.fn(async () => 1);
+    const dbh = jest.fn(() => ({ where: () => ({ del }) }));
+    const ledger = new Map([['gone', { status: 'held' }], ['kept', { status: 'held' }], ['done', { status: 'applied' }]]);
+    const out = fresh();
+    await pruneStaleHeld(dbh, source, [{ rootId: 'kept' }], ledger, out);
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(out.dropped).toBe(1);
+  });
+});
+
+describe('already_discounted is only recorded when the next spawn is discounted too', () => {
+  const upcoming = [{ id: 'v1', estimated_price: '105.30', primary_line_price: '117.00', discount_dollars: '11.70' }, { id: 'v2', estimated_price: '105.30', primary_line_price: '117.00', discount_dollars: '11.70' }];
+  const target = { customerId: 'parents', rootId: 'root' };
+
+  function setup({ overrides = null, stampWorks = true, addons = [] } = {}) {
+    const parent = { id: 'root', primary_line_price: null, estimated_price: 117, recurring_template_overrides: overrides };
+    const schedule = {
+      acquireRecurringSeriesMaintenanceLock: jest.fn(async () => {}),
+      addonRecursAfterAnchor: () => true,
+      parseTemplateOverrides: (raw) => raw || null,
+      readProvenanceOverrides: () => ({}),
+      loadStoredDiscountScope: async () => null,
+      calculateStoredVisitFinancials: (row) => {
+        const gross = Number(row.primary_line_price) || Number(row.estimated_price);
+        const off = row.discount_type === 'percentage' ? Math.round(gross * Number(row.discount_amount)) / 100 : 0;
+        return { price: Math.round((gross - off) * 100) / 100 };
+      },
+      stampRecurringTemplateOverrides: jest.fn(async (_t, _id, fields) => { if (stampWorks) parent.recurring_template_overrides = { ...(parent.recurring_template_overrides || {}), ...fields }; }),
+    };
+    return { parent, schedule, trx: fakeTrx({ scheduled_services: [parent], scheduled_service_addons: addons }) };
+  }
+  const run = (env, reason) => verifyTemplateForAlready(env.trx, env.schedule, { target, preset: PRESET, upcoming, reason });
+
+  test('a template that already spawns at the discounted price needs no write', async () => {
+    const env = setup({ overrides: { primary_line_price: 117, discount_type: 'percentage', discount_amount: 10 } });
+    expect(await run(env, 'all_upcoming_visits_carry_it')).toEqual({ templateStamped: false });
+    expect(env.schedule.stampRecurringTemplateOverrides).not.toHaveBeenCalled();
+    expect(env.schedule.acquireRecurringSeriesMaintenanceLock).toHaveBeenCalledWith(env.trx, 'root', false);
+  });
+
+  test('visits carry it but the template does not: the template is stamped and the spawn proven', async () => {
+    const env = setup();
+    expect(await run(env, 'all_upcoming_visits_carry_it')).toEqual({ templateStamped: true });
+    const fields = env.schedule.stampRecurringTemplateOverrides.mock.calls[0][2];
+    expect(fields).toMatchObject({ primary_line_price: 117, estimated_price: 105.3, discount_id: 'preset-1', discount_type: 'percentage', discount_amount: 10 });
+  });
+
+  test('a template the stamp cannot fix holds as template_not_discounted (the stamp rolls back with the transaction)', async () => {
+    await expect(run(setup({ stampWorks: false }), 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
+    await expect(run(setup({ addons: [{ id: 'a' }] }), 'all_upcoming_visits_carry_it')).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
+  });
+
+  test('sold with the discount netted in: a template that spawns at another price holds and is never stamped', async () => {
+    const sold = [{ id: 'v1', estimated_price: '105.30' }, { id: 'v2', estimated_price: '105.30' }];
+    const env = setup();
+    await expect(verifyTemplateForAlready(env.trx, env.schedule, { target, preset: PRESET, upcoming: sold, reason: 'sold_with_multi_home_discount' })).rejects.toMatchObject({ holdCode: 'template_not_discounted' });
+    expect(env.schedule.stampRecurringTemplateOverrides).not.toHaveBeenCalled();
+    const ok = setup({ overrides: { estimated_price: 105.3, primary_line_price: 105.3 } });
+    expect(await verifyTemplateForAlready(ok.trx, ok.schedule, { target, preset: PRESET, upcoming: sold, reason: 'sold_with_multi_home_discount' })).toEqual({ templateStamped: false });
+  });
+
+  test('visits at different prices hold', async () => {
+    const env = setup();
+    await expect(verifyTemplateForAlready(env.trx, env.schedule, { target, preset: PRESET, upcoming: [upcoming[0], { ...upcoming[1], estimated_price: '99.00' }], reason: 'all_upcoming_visits_carry_it' })).rejects.toMatchObject({ holdCode: 'visit_prices_differ' });
   });
 });

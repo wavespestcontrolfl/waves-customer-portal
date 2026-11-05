@@ -60,7 +60,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const featureGates = require('../config/feature-gates');
 const { storedManualDiscountCandidates } = require('./estimate-manual-discount-replay');
-const { familyMembers, familyMultiHomeEligible } = require('./multi-home-family');
+const { familyMembers, familyMultiHomeEligible, lockFamilyChangesShared } = require('./multi-home-family');
 const { PLAN_LINE_SQL } = require('./rate-review');
 
 const TABLE = 'multi_home_discount_applications';
@@ -76,6 +76,9 @@ const DAY_MS = 86400000;
 const STATUS_APPLIED = 'applied';
 const STATUS_HELD = 'held';
 const STATUS_ALREADY = 'already_discounted';
+const FAMILY_TABLE = 'multi_home_family_members';
+const ALREADY_SOLD = 'sold_with_multi_home_discount';
+const ALREADY_CARRIED = 'all_upcoming_visits_carry_it';
 
 // Hold reasons (hold_reason in the ledger). Each maps to the one-sentence prose the Billing bell shows (at most 110
 // characters, no codes: docs/admin-notifications.md).
@@ -104,6 +107,7 @@ const HOLD_COPY = Object.freeze({
   series_busy: 'The series is being updated right now, so the change is retried on the next check.',
   series_guard_refused: 'A visit in the series already holds money or is being changed, so it was not repriced.',
   series_template_complex: 'The series template carries add-ons or a discount, so later visits would not match.',
+  template_not_discounted: 'The visits are discounted but the series template is not, so later visits would come in at full price.',
   target_set_changed: 'The visits of the series changed while the discount was added, so it was rolled back.',
   discount_no_effect: 'The 10 percent does not lower the price of this plan, so nothing was changed.',
   stacking_price_mismatch: 'The two price engines disagree on the discounted price, so the series was left alone.',
@@ -387,7 +391,9 @@ async function priceWithDiscount(trx, schedule, row, fields) {
 
 // Later extensions spawn from the parent overlaid with the template overrides: simulate that spawn and refuse unless it
 // prices at the discounted amount (a parent with a recurring add-on or its own discount would not).
-async function assertTemplateSpawns(trx, schedule, { rootId, fields, expectedCents }) {
+// What a visit auto-extended from the series parent would cost, in cents: the parent overlaid with the stored template
+// overrides and then `fields` (pass {} for the template as it stands today).
+async function templateSpawnCents(trx, schedule, { rootId, fields }) {
   const parent = await trx('scheduled_services').where({ id: rootId }).first();
   if (!parent) throw hold('no_future_visit', { rootId });
   const parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: rootId });
@@ -395,8 +401,14 @@ async function assertTemplateSpawns(trx, schedule, { rootId, fields, expectedCen
   const existing = schedule.parseTemplateOverrides(parent.recurring_template_overrides) || {};
   const provenance = schedule.readProvenanceOverrides(parent.recurring_template_overrides);
   const template = { ...parent, ...provenance, ...existing, ...fields };
-  const spawnPrice = await priceWithDiscount(trx, schedule, template, {});
-  if (cents(spawnPrice) !== expectedCents) throw hold('series_template_complex', { spawn: spawnPrice, expected: dollars(expectedCents) });
+  return cents(await priceWithDiscount(trx, schedule, template, {}));
+}
+
+// Later extensions spawn from the parent overlaid with the template overrides: simulate that spawn and refuse unless it
+// prices at the discounted amount (a parent with a recurring add-on or its own discount would not).
+async function assertTemplateSpawns(trx, schedule, { rootId, fields, expectedCents }) {
+  const spawn = await templateSpawnCents(trx, schedule, { rootId, fields });
+  if (spawn !== expectedCents) throw hold('series_template_complex', { spawn: dollars(spawn), expected: dollars(expectedCents) });
 }
 
 // The sale's own estimates (any visit of the series points at one): the Multi-Home Discount netted into the price
@@ -537,24 +549,30 @@ async function finalizeApplied(trx, { source, target, customer, preset, firstVis
   });
 }
 
-async function markAlready(trx, { source, target, now, attempts, reason }) {
+async function markAlready(trx, { source, target, now, attempts, reason, templateStamped = false }) {
   await trx(TABLE).where({ source_estimate_id: source.estimateId, series_root_id: target.rootId }).update({
-    status: STATUS_ALREADY, hold_reason: null, attempts: Number(attempts || 0) + 1, detail: JSON.stringify({ reason }), updated_at: now,
+    status: STATUS_ALREADY, hold_reason: null, attempts: Number(attempts || 0) + 1, detail: JSON.stringify({ reason, templateStamped }), updated_at: now,
   });
 }
 
 // The checks that need no row lock on the series: lane, plan hold, the sale's own discount, visit shape. Returns the
 // upcoming visits, or { already } when the series needs nothing.
+function alreadyVerdict(visits, reason) {
+  const upcoming = visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status)));
+  if (!upcoming.length) throw hold('no_future_visit');
+  return { already: reason, upcoming };
+}
+
 async function precheckSeries(trx, { customer, target, preset, today }) {
   const activeHold = await activePlanHold(trx, customer.id);
   if (activeHold) throw hold('plan_on_hold', { holdId: activeHold.id });
   await assertPerApplicationLane(trx, { customer, target, today });
   const sold = await soldDiscountVerdict(trx, target.rootId, preset.id);
-  if (sold === 'already') return { already: 'sold_with_multi_home_discount' };
   if (sold === 'other') throw hold('plan_has_other_discount');
   const visits = await loadSeriesVisits(trx, target.rootId, today);
+  if (sold === 'already') return alreadyVerdict(visits, ALREADY_SOLD);
   const verdict = seriesShapeVerdict(visits, preset.id);
-  if (verdict && verdict.already) return { already: 'all_upcoming_visits_carry_it' };
+  if (verdict && verdict.already) return alreadyVerdict(visits, ALREADY_CARRIED);
   if (verdict) throw hold(verdict.reason);
   const upcoming = visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status)));
   const currentCents = cents(upcoming[0].estimated_price);
@@ -564,9 +582,90 @@ async function precheckSeries(trx, { customer, target, preset, today }) {
   return { upcoming, currentCents };
 }
 
+// The gross a visit carrying the discount was discounted from.
+function grossDollarsOf(visit) {
+  const primary = Number(visit.primary_line_price);
+  if (primary > 0) return primary;
+  return Math.round((Number(visit.estimated_price) + (Number(visit.discount_dollars) || 0)) * 100) / 100;
+}
+
+// The visits already carry the discount (or the plan was sold with it netted in). Terminal success is only true when
+// the NEXT auto-extended visit would also come in discounted, so the series template is checked under the series lock.
+// Visits carrying it while the template does not: the template is stamped through the same helper the apply uses and the
+// spawn is proven again. A template the stamp cannot fix, or a sold-with plan whose template spawns at another price,
+// holds as template_not_discounted. Returns { templateStamped }.
+async function verifyTemplateForAlready(trx, schedule, { target, preset, upcoming, reason }) {
+  const netCents = cents(upcoming[0].estimated_price);
+  if (netCents == null || netCents <= 0) throw hold('visit_unpriced');
+  if (upcoming.some((v) => cents(v.estimated_price) !== netCents)) throw hold('visit_prices_differ');
+  try {
+    await schedule.acquireRecurringSeriesMaintenanceLock(trx, target.rootId, false);
+  } catch (err) {
+    throw guardHold(err) || err;
+  }
+  try {
+    if (await templateSpawnCents(trx, schedule, { rootId: target.rootId, fields: {} }) === netCents) return { templateStamped: false };
+    if (reason !== ALREADY_CARRIED) throw hold('template_not_discounted', { reason });
+    const fields = { ...discountFields(preset, grossDollarsOf(upcoming[0])), estimated_price: dollars(netCents) };
+    if (cents(await priceWithDiscount(trx, schedule, upcoming[0], fields)) !== netCents) throw hold('template_not_discounted', { reason: 'visit_price_differs_from_catalog' });
+    await schedule.stampRecurringTemplateOverrides(trx, target.rootId, fields, await trx('scheduled_services').columnInfo());
+    const after = await templateSpawnCents(trx, schedule, { rootId: target.rootId, fields: {} });
+    if (after !== netCents) throw hold('template_not_discounted', { spawn: dollars(after), expected: dollars(netCents) });
+    return { templateStamped: true };
+  } catch (err) {
+    if (isHold(err) && err.holdCode === 'series_template_complex') throw hold('template_not_discounted', err.detail);
+    throw err;
+  }
+}
+
+// ── is this still a target? (checked under the family-changes lock) ─────
+
+async function sameProfileOtherHome(trx, { source, target }) {
+  if (!target.propertyId) return false;
+  const home = await trx('customer_properties').where({ id: target.propertyId, customer_id: target.customerId, active: true }).first('id');
+  if (!home) return false;
+  let sourceHome = source.propertyId;
+  if (!sourceHome) {
+    const primary = await trx('customer_properties').where({ customer_id: source.customerId, is_primary: true, active: true }).first('id');
+    sourceHome = primary ? primary.id : null;
+  }
+  return !!sourceHome && String(sourceHome) !== String(target.propertyId);
+}
+
+async function sameLiveFamily(trx, { source, target }) {
+  const rows = await trx(FAMILY_TABLE).whereIn('customer_id', [source.customerId, target.customerId]).select('customer_id', 'family_id');
+  if (rows.length !== 2 || String(rows[0].family_id) !== String(rows[1].family_id)) return false;
+  return familyMultiHomeEligible(trx, source.customerId);
+}
+
+// The relationship that made this series a target, read again under the SHARED family-changes lock (a link or unlink
+// waits for it): the source estimate is still accepted, both profiles are live, and either the target is another active
+// property of the same profile, or both profiles are in the SAME family that still has 2 or more live members.
+async function relationshipHolds(trx, { source, target }) {
+  const estimate = await trx('estimates').where({ id: source.estimateId, status: 'accepted' }).first('id');
+  if (!estimate) return false;
+  const people = await trx('customers').whereIn('id', [source.customerId, target.customerId]).select('id', 'active', 'deleted_at');
+  const live = new Set(people.filter((c) => c.active === true && !c.deleted_at).map((c) => String(c.id)));
+  if (!live.has(String(source.customerId)) || !live.has(String(target.customerId))) return false;
+  return String(source.customerId) === String(target.customerId)
+    ? sameProfileOtherHome(trx, { source, target })
+    : sameLiveFamily(trx, { source, target });
+}
+
+// No longer a target: nothing changes, nothing rings. An old HELD row goes (it must not block "every target applied"
+// forever); an applied or already_discounted row is history and stays.
+async function dropTarget(trx, { source, target }) {
+  await trx(TABLE).where({ source_estimate_id: source.estimateId, series_root_id: target.rootId, status: STATUS_HELD }).del();
+  return { skipped: true, dropped: true };
+}
+
 async function applyInTransaction(trx, ctx) {
   const { source, target, now, today } = ctx;
   const schedule = ctx.schedule || require('../routes/admin-schedule')._test;
+  // FIRST, before any row lock (a link or unlink takes the same lock exclusively, then customer rows): the family cannot
+  // change under this transaction, and the relationship that made the series a target is read again.
+  await lockFamilyChangesShared(trx);
+  if (!(await relationshipHolds(trx, { source, target }))) return dropTarget(trx, { source, target });
   if (!featureGates.isEnabled('editApptPriceServiceScope')) throw hold('scope_gate_off');
   const { lockCustomerComms } = require('../utils/customer-comms-lock');
   await lockCustomerComms(trx, target.customerId);
@@ -579,8 +678,9 @@ async function applyInTransaction(trx, ctx) {
 
   const pre = await precheckSeries(trx, { customer, target, preset, today });
   if (pre.already) {
-    await markAlready(trx, { source, target, now, attempts: ledger.attempts, reason: pre.already });
-    return { status: STATUS_ALREADY, reason: pre.already };
+    const { templateStamped } = await verifyTemplateForAlready(trx, schedule, { target, preset, upcoming: pre.upcoming, reason: pre.already });
+    await markAlready(trx, { source, target, now, attempts: ledger.attempts, reason: pre.already, templateStamped });
+    return { status: STATUS_ALREADY, reason: pre.already, templateStamped };
   }
   const { upcoming, currentCents } = pre;
   await assertEligible(trx, { preset, customer, visit: upcoming[0], priceDollars: dollars(currentCents) });
@@ -693,6 +793,11 @@ async function raiseHoldAlert({ source, target }, code) {
 // ── the job ─────────────────────────────────────────────────────────────
 
 async function settleTarget(dbh, source, target, result, now, out) {
+  if (result.dropped) {
+    out.dropped += 1;
+    await closeHoldAlerts(dbh, { source, target }, 'multi_home_discount_target_dropped');
+    return;
+  }
   if (result.skipped) { out.skipped += 1; return; }
   if (result.status === STATUS_APPLIED) {
     out.applied += 1;
@@ -744,21 +849,34 @@ async function applyTargets(dbh, source, targets, ledger, { now, apply = applyTa
   }
 }
 
+// A HELD row whose series is no longer a target of this source (unlinked, deleted, moved) goes, with its bell.
+async function pruneStaleHeld(dbh, source, targets, ledger, out) {
+  const current = new Set(targets.map((t) => String(t.rootId)));
+  for (const [rootId, row] of ledger.entries()) {
+    if (row.status !== STATUS_HELD || current.has(rootId)) continue;
+    await dbh(TABLE).where({ source_estimate_id: source.estimateId, series_root_id: rootId, status: STATUS_HELD }).del();
+    await closeHoldAlerts(dbh, { source, target: { rootId } }, 'multi_home_discount_target_dropped');
+    out.dropped += 1;
+  }
+}
+
 async function processSource(dbh, estimate, presetId, { now, today }, out) {
   const source = await describeSource(dbh, estimate, presetId);
   if (!source) return;
   out.sources += 1;
   const targets = await targetsForSource(dbh, source, today);
-  await applyTargets(dbh, source, targets, await loadLedger(dbh, source.estimateId), { now }, out);
+  const ledger = await loadLedger(dbh, source.estimateId);
+  await pruneStaleHeld(dbh, source, targets, ledger, out);
+  await applyTargets(dbh, source, targets, ledger, { now }, out);
 }
 
 /**
  * Gate off -> returns before any query. Returns
- * { ok, sources, targets, applied, already, held, skipped, holds: [{ sourceEstimateId, targetCustomerId, seriesRootId, reason }] }.
+ * { ok, sources, targets, applied, already, held, skipped, dropped, holds: [{ sourceEstimateId, targetCustomerId, seriesRootId, reason }] }.
  */
 async function runMultiHomeAllHomes({ now = new Date(), dbh = db } = {}) {
   if (!featureGates.multiHomeAllHomesLive()) return { ok: false, reason: 'gate_off' };
-  const out = { ok: true, sources: 0, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, holds: [] };
+  const out = { ok: true, sources: 0, targets: 0, applied: 0, already: 0, held: 0, skipped: 0, dropped: 0, holds: [] };
   const today = etDateString(now);
   const preset = await dbh('discounts').where({ discount_key: PRESET_KEY }).first('id');
   const estimates = await loadSourceEstimates(dbh, now);
@@ -769,8 +887,8 @@ async function runMultiHomeAllHomes({ now = new Date(), dbh = db } = {}) {
       logger.error(`[multi-home-discount] source estimate ${estimate.id} failed: ${err.message}`);
     }
   }
-  if (out.applied || out.held || out.already) {
-    logger.info(`[multi-home-discount] ${out.sources} source(s), ${out.targets} series: ${out.applied} applied, ${out.already} already discounted, ${out.held} held`);
+  if (out.applied || out.held || out.already || out.dropped) {
+    logger.info(`[multi-home-discount] ${out.sources} source(s), ${out.targets} series: ${out.applied} applied, ${out.already} already discounted, ${out.held} held, ${out.dropped} no longer a target`);
   }
   return out;
 }
@@ -786,6 +904,6 @@ module.exports = {
   TABLE,
   _private: {
     guardHold, seriesShapeVerdict, flatRefusal, discountFields, describeSource, loadCandidateSeries, hold, HoldError,
-    soldDiscountVerdict, recordHold, raiseHoldAlert, processSource, applyTargets, settleTarget, loadSourceEstimates,
+    soldDiscountVerdict, relationshipHolds, verifyTemplateForAlready, pruneStaleHeld, recordHold, raiseHoldAlert, processSource, applyTargets, settleTarget, loadSourceEstimates,
   },
 };

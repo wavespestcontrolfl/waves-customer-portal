@@ -118,8 +118,17 @@ async function loadLinkable(trx, customerId, label) {
 // every later statement sees each committed change (an unlink can never miss a
 // profile a concurrent link just added and strand it in a one-profile family).
 // Staff make these changes rarely, so one lock for all families is cheap.
+const FAMILY_CHANGES_LOCK_KEY = `${TABLE}:changes`;
 async function lockFamilyChanges(trx) {
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${TABLE}:changes`]);
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [FAMILY_CHANGES_LOCK_KEY]);
+}
+
+// The same lock in SHARED mode, for a writer that must see the family unchanged until its own transaction ends (the
+// Multi-Home Discount job re-checks "source and target are still one family" under it). Applies run together; a link
+// or unlink (exclusive) waits for them, and they wait for it. Take it FIRST in the transaction, before any row lock,
+// so the lock order stays the one link/unlink use (advisory lock, then customer rows).
+async function lockFamilyChangesShared(trx) {
+  await trx.raw('SELECT pg_advisory_xact_lock_shared(hashtext(?))', [FAMILY_CHANGES_LOCK_KEY]);
 }
 
 async function lockCustomers(trx, ids) {
@@ -224,5 +233,6 @@ module.exports = {
   linkFamily,
   unlinkFamily,
   isUuid,
-  _test: { AUDIT_LINK, AUDIT_UNLINK },
+  lockFamilyChangesShared,
+  _test: { AUDIT_LINK, AUDIT_UNLINK, FAMILY_CHANGES_LOCK_KEY },
 };

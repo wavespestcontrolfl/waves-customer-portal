@@ -1047,8 +1047,8 @@ function initScheduledJobs() {
     try {
       await runExclusive('multi-home-all-homes', async () => {
         const result = await require('./multi-home-discount-apply').runMultiHomeAllHomes();
-        if (result.applied || result.held || result.already) {
-          logger.info(`[multi-home-all-homes] tick: ${result.applied} applied, ${result.already} already discounted, ${result.held} held`);
+        if (result.applied || result.held || result.already || result.dropped) {
+          logger.info(`[multi-home-all-homes] tick: ${result.applied} applied, ${result.already} already discounted, ${result.held} held, ${result.dropped} no longer a target`);
         }
       });
     } catch (err) {
