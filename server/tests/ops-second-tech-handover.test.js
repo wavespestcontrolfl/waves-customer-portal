@@ -800,6 +800,21 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     }
   });
 
+  test('a projection that leaves a recurring visit on a day off keeps the customer whole (no visit may stay behind on a Saturday)', async () => {
+    // A custom 21-day series: Thursday 07-09, then 07-30 (Thursday) is fine; add a stray visit whose projected date equals its own Saturday.
+    const parentRow = { id: 'P-stay', customer_id: 'C-stay', service_type: 'Pest', recurring_pattern: 'custom', recurring_nth: null, recurring_weekday: null, recurring_interval_days: 9 };
+    const live = ['2099-07-09', '2099-07-18'].map((d, i) => ({
+      id: `V-stay-${i}`, series_id: 'P-stay', recurring_parent_id: 'P-stay', is_recurring: true, scheduled_date: d, status: 'confirmed',
+      technician_id: OWNER, window_start: '09:00:00', window_end: '10:00:00',
+    }));
+    const c = { customer_id: 'C-stay', series: [{ parent: parentRow, live, chain: live, needsDates: true }] };
+    const out = await run([c]);
+    // Thu 07-09 stays, the second visit (Sat 07-18, 9 days later) projects to itself on a day off: not accepted as is.
+    expect(out.kept.size).toBe(0);
+    expect(out.newDates.get('V-stay-1')).toBe('2099-07-16'); // the series re-dated from the first candidate day that leaves no visit on a day off (Tue 07-07)
+    for (const v of out.newDates.values()) expect(MON_THU).toContain(dow(v));
+  });
+
   test('a cancelled or skipped middle occurrence does not shift the later dates (seasonal Feb-Oct and monthly walks count the real cadence steps)', async () => {
     for (const [pattern, first, steps] of [['seasonal_feb_oct', '2099-07-11', 2], ['monthly', '2099-07-11', 2], ['quarterly', '2099-07-11', 2]]) {
       const parentRow = { id: `P-gap-${pattern}`, customer_id: `C-gap-${pattern}`, service_type: 'Mosquito', recurring_pattern: pattern, recurring_nth: null, recurring_weekday: null, recurring_interval_days: null };

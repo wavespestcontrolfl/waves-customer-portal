@@ -200,7 +200,8 @@ async function tryCandidate(series, a0, ctx) {
   for (let i = 0; i < chain.length; i += 1) {
     const v = chain[i];
     const date = projected.dates[i];
-    if (date === v.scheduled_date) continue;
+    // A visit the projection leaves where it is must already sit on a --to work day: no recurring visit may stay on a day off.
+    if (date === v.scheduled_date && ctx.workDays.includes(dayOfWeekOfDate(date))) continue;
     const skipWeekends = series.parent.skip_weekends === true || ctx.facts.noWeekends.get(series.parent.customer_id) === true;
     const problem = dateProblem(v, date, { ...ctx, parent: series.parent, skipWeekends });
     if (problem) return { ok: false, reason: problem };
