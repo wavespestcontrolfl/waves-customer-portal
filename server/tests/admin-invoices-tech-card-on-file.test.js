@@ -141,6 +141,7 @@ describe('admin-invoices: a technician\'s card on file at the visit', () => {
       requireCardMethod: true,
       requireGeneralChargeConsent: true,
       requireBookedVisitLinesOnly: true,
+      requireNoUnappliedVisitPrepayment: true,
     });
   });
 

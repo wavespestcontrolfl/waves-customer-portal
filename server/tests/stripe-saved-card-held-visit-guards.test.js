@@ -268,6 +268,22 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
     });
 
+    // Codex security P2 (#7587 r4): completion commits the visit as completed before it applies a cash
+    // prepayment to the invoice. In that window the technician charge (which sends
+    // requireNoUnappliedVisitPrepayment) refuses; once the prepayment marker is booked, it proceeds.
+    test.each([
+      ['not yet applied to this invoice', null, true],
+      ['applied to this invoice', { id: 'pay-1' }, false],
+    ])('a cash prepayment on the completed visit, %s', async (_label, appliedMarker, refuses) => {
+      const { StripeService, stripeClient } = load({
+        visit: visitToday({ prepaid_method: 'cash', prepaid_amount: '40.00' }), contract: null, appliedMarker,
+      });
+      const charge = StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: true });
+      if (refuses) await expect(charge).rejects.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      else await expect(charge).rejects.not.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(refuses ? 0 : 1);
+    });
+
     test('the option without the visit lock is a caller error', async () => {
       const { StripeService, stripeClient } = load({ visit: visitToday(), contract: null });
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireTechnicianCardOnFileFor: tech }))

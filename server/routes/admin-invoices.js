@@ -2148,7 +2148,9 @@ router.post('/:id/charge-card', async (req, res, next) => {
       techCharge.invoice
         // A technician never overrides a collections hold or a stopped
         // collection; the visit is judged again under the charge's own lock,
-        // and a payer-billed visit refuses there too.
+        // and a payer-billed visit refuses there too. A cash/Zelle amount
+        // recorded on the visit that the completion has not yet applied to
+        // this invoice refuses (the gross total would charge over it).
         ? {
           expectedTotal,
           refuseWhenDunningStopped: true,
@@ -2158,6 +2160,7 @@ router.post('/:id/charge-card', async (req, res, next) => {
           requireCardMethod: true,
           requireGeneralChargeConsent: true,
           requireBookedVisitLinesOnly: true,
+          requireNoUnappliedVisitPrepayment: true,
         }
         // An admin ordered this charge explicitly: exempt from the default
         // collections dispute-hold guard (an operator may override a hold).
