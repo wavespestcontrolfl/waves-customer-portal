@@ -268,7 +268,7 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
-const REVIEW_STALE_MESSAGE = 'The saved offer, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.';
+const REVIEW_STALE_MESSAGE = 'The saved offer, its wording, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.';
 
 function moneySummary(estimate = {}, { allowTotals = false, average = null } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
@@ -1064,9 +1064,26 @@ async function deliveryEmailLibrary(proposalMode, updated) {
 }
 
 // The estimate text for a send: estimate_updated for an update while that template is on, else estimate_sent.
-async function deliverySmsBody(updated, vars, context = {}, opts = {}) {
-  const body = updated ? await smsTemplatesRouter.getTemplate(updatedWording.UPDATED_SMS_TEMPLATE_KEY, vars, context, opts) : null;
-  return body || smsTemplatesRouter.getTemplate('estimate_sent', vars, context, opts);
+// `marker` rides in a review's messages ({ smsTemplate } only for the updated text, so a normal review is unchanged):
+// the send then checks that template is still on (its off switch), as it does for estimate_sent.
+async function deliverySms(updated, vars, context = {}, opts = {}) {
+  const updatedBody = updated ? await smsTemplatesRouter.getTemplate(updatedWording.UPDATED_SMS_TEMPLATE_KEY, vars, context, opts) : null;
+  if (updatedBody) return { body: updatedBody, marker: { smsTemplate: updatedWording.UPDATED_SMS_TEMPLATE_KEY } };
+  return { body: await smsTemplatesRouter.getTemplate('estimate_sent', vars, context, opts), marker: {} };
+}
+
+// GATE_ESTIMATE_UPDATED_WORDING: a review that chose the updated wording needs it still allowed at dispatch: the gate
+// on, and each updated template it used still on (estimate_updated active; estimate.updated_delivery sendable). Else
+// the whole send is refused before any channel and the office reviews again (a gate flip after a review is stale,
+// like the PDF and monthly-average decisions). The SMTP copy is code, so it cannot be turned off.
+async function reviewedUpdatedWordingStale(reviewedMessages, sendMethod) {
+  const smsUpdated = sendMethod !== 'email' && reviewedMessages?.smsTemplate === updatedWording.UPDATED_SMS_TEMPLATE_KEY;
+  const emailUpdated = sendMethod !== 'sms' && reviewedMessages?.email?.updated === true;
+  if (!smsUpdated && !emailUpdated) return false;
+  if (!updatedWording.updatedWordingLive()) return true;
+  if (smsUpdated && !(await smsTemplatesRouter.getTemplate(updatedWording.UPDATED_SMS_TEMPLATE_KEY, { first_name: 'there', estimate_url: 'portal.wavespestcontrol.com' }, {}, { noVariants: true, audit: false }))) return true;
+  return emailUpdated && reviewedMessages.email.provider === 'sendgrid'
+    && !updatedWording.updatedEmailTemplateUsable(await EmailTemplateLibrary.loadTemplateByKey(updatedWording.UPDATED_EMAIL_TEMPLATE_KEY));
 }
 
 async function buildEstimateSendPreview(estimate) {
@@ -1083,7 +1100,7 @@ async function buildEstimateSendPreview(estimate) {
   // normal template when the updated one is off or missing, and the email carries `updated` only when it used the
   // updated template, so the send loads that same template. Gate off = the same template reads as before.
   const updated = await updatedWordingFor(estimate, proposalMode);
-  const sms = await deliverySmsBody(updated, { first_name: firstName, estimate_url: viewUrl }, {}, { noVariants: true, audit: false });
+  const smsChoice = await deliverySms(updated, { first_name: firstName, estimate_url: viewUrl }, {}, { noVariants: true, audit: false });
   let email = null;
   const delivery = await deliveryEmailLibrary(proposalMode, updated);
   const library = delivery.library;
@@ -1112,7 +1129,7 @@ async function buildEstimateSendPreview(estimate) {
     // The content hash is of the SMTP content alone (no note), so it is unchanged.
     email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex'), ...(pdfCopy ? { pdfCopy: true } : {}), ...(updated ? { updated: true } : {}) };
   }
-  const messages = { sms: sms || null, email };
+  const messages = { sms: smsChoice.body || null, email, ...smsChoice.marker };
   const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
   const uncertain = (Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result);
   return {
@@ -2953,6 +2970,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // GATE_ESTIMATE_MONTHLY_AVERAGE: the reviewed average copy must still be what this send would carry
     // (a gate flip or a price edit since the review or schedule). Resolved BEFORE the claim transaction because
     // it reads billing state on other connections; a mismatch refuses the whole send below, before any channel.
+    const reviewedWordingStale = await reviewedUpdatedWordingStale(options.reviewedMessages, sendMethod);
     const reviewedAverageStale = sendMethod !== 'sms'
       && await require('../services/estimate-monthly-average').reviewedAverageStale(
         options.reviewedMessages,
@@ -2979,7 +2997,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // joining a group, since the review or schedule): never silently add or
       // drop the file. Reviews that carry no decision mean "no PDF" and are not
       // stale (codex #6343 r6).
-      if (reviewedAverageStale) return 'saved_offer_changed';
+      if (reviewedAverageStale || reviewedWordingStale) return 'saved_offer_changed';
       if (sendMethod !== 'sms' && emailPdfCopy().reviewedPdfDecisionStale(options.reviewedMessages, await emailPdfCopy().deliveryPdfCopyDecision(verdictRow, trx))) {
         return 'saved_offer_changed';
       }
@@ -3195,7 +3213,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // An unreviewed update takes estimate_updated while it is on; a reviewed send delivers the reviewed body.
           const smsBody = options.reviewedMessages
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
-            : (updatedSend ? await deliverySmsBody(true, { first_name: firstName, estimate_url: smsViewUrl }, smsContext) : currentSmsBody);
+            : (updatedSend ? (await deliverySms(true, { first_name: firstName, estimate_url: smsViewUrl }, smsContext)).body : currentSmsBody);
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
           // EVERY claimed member of a grouped send, not only the anchor: a
           // county warning landing on a sibling before the provider call

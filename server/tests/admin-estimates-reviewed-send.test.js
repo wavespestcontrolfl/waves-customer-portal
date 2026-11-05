@@ -2839,6 +2839,7 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
   test('the review shows the updated text and email, the reviewed send delivers them, and the send stamps its prices', async () => {
     const preview = await invoke('/:id/send-preview', 'get');
     expect(preview.body.messages.sms).toMatch(/^Updated estimate: /);
+    expect(preview.body.messages.smsTemplate).toBe('estimate_updated');
     expect(preview.body.messages.email).toMatchObject({ provider: 'sendgrid', versionId: 'synthetic-email-version', updated: true });
     expect(loadedKeys()).toEqual(['estimate.updated_delivery']);
     const response = await invoke('/:id/send', 'post', {
@@ -2880,9 +2881,50 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     arrange(row);
     const preview = await invoke('/:id/send-preview', 'get');
     expect(preview.body.messages.sms).toMatch(/^Synthetic estimate: /);
+    expect(preview.body.messages).not.toHaveProperty('smsTemplate');
     expect(preview.body.messages.email).not.toHaveProperty('updated');
     expect(loadedKeys()).toEqual(['estimate.delivery']);
     expect(smsKeys()).not.toContain('estimate_updated');
+  });
+
+  test.each([
+    ['the updated text is turned off', () => smsTemplates.getTemplate.mockImplementation(async (key, vars) => (key === 'estimate_updated' ? null : baseSms(key, vars)))],
+    ['the gate is switched off', () => gates.estimateUpdatedWordingLive.mockReturnValue(false)],
+  ])('a reviewed update whose wording is no longer allowed (%s) is refused before any channel', async (_name, afterReview) => {
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.smsTemplate).toBe('estimate_updated');
+    afterReview();
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'both', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.code).toBe('ESTIMATE_REVIEW_STALE');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a reviewed update whose updated email template was disabled after the review is refused before any channel', async () => {
+    const preview = await invoke('/:id/send-preview', 'get');
+    email.loadTemplateByKey.mockImplementation(async (key) => ({
+      template: { template_key: key, ...(key === 'estimate.updated_delivery' ? { status: 'disabled' } : {}) },
+      activeVersion: { id: 'synthetic-email-version' },
+    }));
+    const response = await invoke('/:id/send', 'post', {
+      sendMethod: 'both', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an email-only reviewed update is refused when the gate is switched off', async () => {
+    const preview = await invoke('/:id/send-preview', 'get');
+    gates.estimateUpdatedWordingLive.mockReturnValue(false);
+    const emailOnly = await invoke('/:id/send', 'post', {
+      sendMethod: 'email', expectedEditVersion: preview.body.editVersion, messageVersion: preview.body.messageVersion,
+    });
+    expect(emailOnly.statusCode).toBe(409);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('an updated template that is off sends that channel the normal way', async () => {
