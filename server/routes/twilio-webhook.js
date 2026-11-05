@@ -1366,7 +1366,12 @@ router.post('/sms', async (req, res) => {
     // knownInboundNotified records whether this modern bell/push actually
     // landed — when it did, the legacy owner-SMS forward below is suppressed
     // so a single inbound message can't raise two admin notifications.
-    let knownInboundNotified = false;
+    // GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a text from a number with no customer record to a location
+    // or Google profile line rings the same one-row-per-sender bell as a tracking line, and it too counts as
+    // delivered here, so the quiet Activity row below is skipped. Ring failed, gate off or not eligible: false, as before.
+    let knownInboundNotified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({
+      customer, staffSender, smsReaction, courtesyOnly, isAiNumber, spamVerdict: solicitation, numberConfig, To, From, MessageSid, message: Body, mediaCount: inboundMedia.length,
+    });
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly) {
       try {
         const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`, leadPreference: intakeLeadPreference });

@@ -339,3 +339,76 @@ describe('tracking-line unknown-sender thread bell', () => {
     expect(new Set(keys.slice(2)).size).toBe(5);
   });
 });
+
+// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): an unknown sender's text to a location or Google profile line
+// rings the same one-row-per-sender thread bell as a tracking line. True only when the ring landed.
+describe('unknown-sender text to an office line (GATE_RING_NEW_CONTACTS)', () => {
+  const numbers = require('../config/twilio-numbers');
+  const parrish = { ...numbers.locations.parrish, type: 'location' };
+  const gbp = { ...numbers.gbpTracking.sarasota, type: 'gbp_tracking' };
+  const base = { numberConfig: parrish, To: parrish.number, ...input, message: 'Do you do termite inspections?', mediaCount: 0 };
+  const ring = (args = {}) => delivery.ringUnknownOfficeText({ ...base, ...args });
+  beforeEach(() => { process.env.GATE_RING_NEW_CONTACTS = 'true'; });
+  afterEach(() => { delete process.env.GATE_RING_NEW_CONTACTS; });
+
+  test('rings the tracking-line row with the line in plain words, for a location line and a Google profile line', async () => {
+    expect(await ring()).toBe(true);
+    const [key, payload, options] = triggerNotification.mock.calls.at(-1);
+    expect(key).toBe('new_lead');
+    expect(payload).toMatchObject({ source: 'the Parrish (Pest) line', twilioSid: input.MessageSid, phone: input.From, message: 'Do you do termite inspections?' });
+    expect(options).toMatchObject({ refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(options.dedupeKey).toMatch(/^sms-tracking-thread:[0-9a-f]{32}$/);
+    expect(await ring({ numberConfig: gbp, To: gbp.number, MessageSid: 'SM-gbp' })).toBe(true);
+    expect(triggerNotification.mock.calls.at(-1)[1].source).toBe('the Sarasota Google profile line');
+    // The same sender keys the same row on both lines, and a second text refreshes it.
+    expect(triggerNotification.mock.calls.at(-1)[2].dedupeKey).toBe(options.dedupeKey);
+  });
+
+  test('a photo with no words rings; no words and no photo does not', async () => {
+    expect(await ring({ message: '', mediaCount: 1 })).toBe(true);
+    triggerNotification.mockClear();
+    expect(await ring({ message: '', mediaCount: 0 })).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a customer on file', { customer: { id: 'c-1' } }],
+    ['a staff sender', { staffSender: true }],
+    ['a reaction', { smsReaction: true }],
+    ['a courtesy closer', { courtesyOnly: true }],
+    ['a text a spam screen judged a sales pitch', { spamVerdict: { solicitation: true, enforced: false } }],
+    ['the AI assistant line', { isAiNumber: true, numberConfig: { ...numbers.tollFree, type: 'location' }, To: numbers.tollFree.number }],
+    ['a tech line', { numberConfig: { ...numbers.fieldTech[0], type: 'location' }, To: numbers.fieldTech[0].number }],
+    ['a website tracking line', { numberConfig: { ...numbers.domainTracking[0], type: 'domain_tracking' } }],
+    ['a van tracking line', { numberConfig: { ...numbers.tracking.vanWrap, type: 'van_tracking' } }],
+  ])('does not ring for %s', async (_name, args) => {
+    expect(await ring(args)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('does not ring for the internal alert line', async () => {
+    const spy = jest.spyOn(numbers, 'internalAlertLine').mockReturnValue({ number: parrish.number });
+    try {
+      expect(await ring()).toBe(false);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
+  test('does not ring with the gate off', async () => {
+    delete process.env.GATE_RING_NEW_CONTACTS;
+    expect(await ring()).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('false when the ring did not land, or threw, so the caller keeps the quiet row', async () => {
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0 } });
+    expect(await ring()).toBe(false);
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, error: 'x' });
+    expect(await ring()).toBe(false);
+    triggerNotification.mockRejectedValueOnce(new Error('boom'));
+    expect(await ring()).toBe(false);
+    // A push alone counts as landed, as for a known customer's bell.
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 2 } });
+    expect(await ring()).toBe(true);
+  });
+});

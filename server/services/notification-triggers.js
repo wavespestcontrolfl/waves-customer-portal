@@ -476,6 +476,24 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=messenger',
     }),
   },
+  // The phone banner for a new-lead email (GATE_RING_NEW_CONTACTS, bell-banners.js kind new_lead_email, owner 2026-11-04
+  // "ring new"). The bell row is the plain 'new_lead' category row email-actions.js already writes, which carries no
+  // triggerKey of its own (the writer names this kind with notifyAdmin's bannerKind), so no sweep closes it and its
+  // rule is the retention expiry. `build` takes the written row's own words as alertTitle/alertBody/alertLink.
+  // Admin-only like the lead bell.
+  new_lead_email: {
+    label: 'New lead email banner',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'New lead from email',
+      body: p.alertBody || 'Open the email to read it and reply.',
+      link: p.alertLink || '/admin/email',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a

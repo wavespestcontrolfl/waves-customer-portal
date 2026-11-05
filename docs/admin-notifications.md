@@ -252,6 +252,12 @@ customer's message by this rule.
    masked like every bell body, then the masked number; with a name on file for the number
    (`nameOnFileForPhone`), the name leads the title and the why ends "via <the line>".
    Its link and Call follow the latest text.
+   `GATE_RING_NEW_CONTACTS` (owner 2026-11-04, "ring new", dark) gives a number with no
+   customer record texting a location line or a Google Business Profile line the same row
+   (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
+   Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
+   staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
+   closes these rows once a person answers, like a tracking-line row.
    A standing backlog (overdue promises past five) is a count on its page, never a bell:
    its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
    Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
@@ -456,6 +462,13 @@ call-commitment backlog summary) or a row routed to Claude's queue, and only aft
 nothing; a write inside a nested transaction waits for the outermost commit). It goes out through `triggerNotification` with
 `pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
 line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
+
+New-lead email banner (owner 2026-11-04, "ring new"; gate `GATE_RING_NEW_CONTACTS`, dark; own gate, not
+`GATE_BELL_BANNERS`): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
+banner on the owner's phone at any hour (kind `new_lead_email`, the New lead sound). The writer (`email-actions.js`) keys the
+existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id>`) and names the kind with
+`notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
+second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
