@@ -1261,7 +1261,8 @@ function rankedVisitCards(conn, technicianId, days) {
       // prior_day_unknown: an old assignment card that never recorded the
       // slot it left (backfill 20261003150000) — kept on top, as before.
       conn.raw(`bool_or(${touches} OR tn.payload->>'prior_day_unknown' = 'true') OVER (${visit}) AS visit_touches_soon`, [today, tomorrow, today, tomorrow]),
-      conn.raw(`(array_agg(CASE WHEN tn.payload->>'previous_date' IN (?, ?) THEN tn.payload->>'previous_when' ELSE tn.payload->>'when' END)`
+      // A card's own day first (its newer slot), else the day it left.
+      conn.raw(`(array_agg(CASE WHEN tn.payload->>'date' IN (?, ?) THEN tn.payload->>'when' ELSE tn.payload->>'previous_when' END)`
         + ` FILTER (WHERE ${touches}) OVER (${visit} ORDER BY tn.created_at DESC, tn.id DESC`
         + ' ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING))[1] AS visit_soon_when',
       [today, tomorrow, today, tomorrow, today, tomorrow]),
@@ -1360,21 +1361,25 @@ function backOnRouteCard(row, view) {
 // named (rankedVisitCards).
 function onRouteCard(row, live, view, soonWhen) {
   const payload = row.payload || {};
-  // An older card put the visit on (or took it off) today or tomorrow: that
-  // slot is the "Was" the tech needs, not this card's own.
-  const olderSoon = soonWhen && soonWhen !== payload.when && soonWhen !== payload.previous_when ? soonWhen : null;
   if (view.when !== payload.when) {
-    // "Was" is what the cards last told the tech; "Now" is the visit today.
+    // "Was" is the today/tomorrow slot the visit's cards named, when there is
+    // one (why the card is on top), else what this card last told the tech;
+    // "Now" is the visit today.
+    const was = soonWhen || payload.when || null;
     return {
       ...row,
       type: 'visit_rescheduled',
       payload: {
-        ...payload, previous_when: olderSoon || payload.when || null, previous_date: olderSoon ? null : (payload.date || null),
+        ...payload, previous_when: was, previous_date: was === payload.when ? (payload.date || null) : null,
         when: view.when, date: view.date, actor: view.actor, changed_at: view.changedAt, changed_again: true,
       },
     };
   }
-  if (olderSoon) return { ...row, type: 'visit_rescheduled', payload: { ...payload, previous_when: olderSoon, previous_date: null } };
+  // Unchanged since this card, but an older card put the visit on (or took
+  // it off) today or tomorrow: that slot is the "Was" the tech needs.
+  if (soonWhen && soonWhen !== payload.when && soonWhen !== payload.previous_when) {
+    return { ...row, type: 'visit_rescheduled', payload: { ...payload, previous_when: soonWhen, previous_date: null } };
+  }
   const line = bookedLine(row, live);
   return line ? { ...row, payload: { ...payload, actor_line: line } } : row;
 }

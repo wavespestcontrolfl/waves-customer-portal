@@ -1451,6 +1451,12 @@ describe('an open card read against its visit as it is now (owner 2026-11-04)', 
     expect(liveCard(row, live(), null, 'Thu Nov 5, 8–9 AM')).toBe(row);
   });
 
+  test('a card that took the visit off today, then a silent move: "Was" stays today\'s slot', () => {
+    const row = cardRow('visit_rescheduled', { when: 'Wed Nov 11, 9–10 AM', date: '2026-11-11', previous_when: 'Wed Nov 4, 9–10 AM', previous_date: '2026-11-04' });
+    const out = liveCard(row, live({ scheduled_date: '2026-12-04', window_start: '09:00:00', window_end: '10:00:00' }), null, 'Wed Nov 4, 9–10 AM');
+    expect(out.payload).toMatchObject({ previous_when: 'Wed Nov 4, 9–10 AM', previous_date: null, when: 'Fri Dec 4, 9–10 AM', changed_again: true });
+  });
+
   test('a moved-off card follows the visit: a new holder, or back on this route with no card of its own', () => {
     const offCard = cardRow('visit_unassigned', { when: 'Thu Nov 5, 8–9 AM', headline: 'Moved off your route', now_with: 'Pat', actor: 'by Virginia' });
     expect(liveCard(offCard, live({ technician_id: 'tech-3', holder_name: 'Lee Sample' }), null))

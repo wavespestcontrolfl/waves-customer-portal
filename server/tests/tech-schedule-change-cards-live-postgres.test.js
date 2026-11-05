@@ -207,6 +207,21 @@ postgres('schedule-change cards read against the live visit (real Postgres)', ()
     expect(stillOpen.sort()).toEqual([offToday, later].sort());
   });
 
+  test('a card that took the visit off today, then a move with no card: still on top, "Was" today\'s slot', async () => {
+    const tech = await makeTech('Fixture Tech');
+    const { formatWhen } = require('../services/tech-visit-notifications');
+    const nextWeek = et.etDateString(et.addETDays(new Date(), 7));
+    const visit = await makeVisit(tech, 'Silentagain', farOut, '09:00', '10:00');
+    await card(tech, visit, 'visit_rescheduled', { date: nextWeek, previous_date: today, when: formatWhen(nextWeek, '09:00', '10:00'), previous_when: formatWhen(today, '09:00', '10:00'), actor: 'by auto-dispatch', customer_name: 'Silentagain' }, daysAgo(3));
+
+    const read = await call('/schedule-changes', 'get', { technicianId: tech.id });
+    expect(read.changes).toHaveLength(1);
+    expect(read.changes[0]).toMatchObject({
+      soon: true, type: 'visit_rescheduled',
+      payload: { previous_when: formatWhen(today, '09:00', '10:00'), when: formatWhen(farOut, '09:00', '10:00'), changed_again: true },
+    });
+  });
+
   test('a moved-off card follows its visit: back on this route with no card of its own, or with a new holder', async () => {
     const tech = await makeTech('Fixture Tech');
     const first = await makeTech('Firstholder Hire');
