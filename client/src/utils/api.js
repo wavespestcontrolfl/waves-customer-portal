@@ -638,6 +638,12 @@ export class ApiClient {
     });
   }
 
+  // GATE_PORTAL_EMAIL_RESUBSCRIBE: asks for ONE "Turn Waves emails back on?" email to the
+  // account holder's own address. Answers { state: 'sent' | 'not_paused' | 'failed', maskedEmail?, sentAt? }.
+  requestEmailResubscribe() {
+    return this.request('/notifications/email-resubscribe', { method: 'POST' });
+  }
+
   getPropertyNotificationPrefs() {
     return this.request('/notifications/property-preferences');
   }

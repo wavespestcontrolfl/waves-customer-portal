@@ -5,6 +5,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled, accountSavedProperties } = require('../services/account-properties');
 const PropertyTexts = require('../services/property-notification-prefs');
+const rateLimit = require('express-rate-limit');
 const { gateEnvValue, portalEmailResubscribeLive } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
@@ -482,45 +483,23 @@ async function ensurePrefs(customerId) {
 }
 
 
-// GATE_PORTAL_EMAIL_RESUBSCRIBE: the Email messages switch reads OFF while the
-// address carries an unsubscribe the customer made by email link (the send path
-// blocks on it whatever the stored switch says). Stored values are untouched,
-// and an OFF save is always stored as before (the client only sends patch saves,
-// so a switch shown OFF never sends false: a false is an explicit opt-out).
-async function emailSwitchReflectsUnsubscribe(email) {
-  if (!portalEmailResubscribeLive() || !email) return false;
-  return require('../services/email-resubscribe').hasReleasableUnsubscribe(email, { dbh: db });
+// GATE_PORTAL_EMAIL_RESUBSCRIBE: the holder's own address on file, for the "Turn emails
+// back on" flow. The app never releases an unsubscribe itself: it can only ask for one
+// confirmation email to this address (POST /email-resubscribe below). Contacts are out.
+async function holderEmailForResubscribe(customerId) {
+  const row = await db('customers').where({ id: customerId }).first('email', 'first_name');
+  return deliverableEmail(row?.email) ? { email: String(row.email).trim(), firstName: row.first_name || '' } : null;
 }
 
-async function holderEmailOnFile(customerId, dbh = db) {
-  const row = await dbh('customers').where({ id: customerId }).first('email');
-  return row?.email || '';
-}
-
-// Turning Email messages ON releases the customer's own unsubscribe, in two
-// steps. First, BEFORE the save's transaction, SendGrid's own list is cleared
-// (a failed clear leaves the local rows active, so the switch keeps reading OFF
-// and the customer can try again). Then, inside the transaction under the
-// address lock, only the rows whose list SendGrid confirmed are released, and
-// only if the address on file is still the one that was cleared. If the save is
-// then refused (removed contact, consent_required, email_unavailable) SendGrid
-// may already be cleared; that is harmless because the still-active local rows
-// keep blocking the send path.
-async function preClearOwnUnsubscribes(switchOn, emailOnFile) {
-  if (!switchOn || !portalEmailResubscribeLive()) return null;
-  const email = await emailOnFile();
-  if (!email) return null;
-  return { email, ...(await require('../services/email-resubscribe').clearSendgridBeforeRelease(email)) };
-}
-
-async function releaseOwnUnsubscribesOnSwitchOn({ trx, email, pre, customerId, actor, contactSlot }) {
-  if (!pre || !pre.clearedIds.length) return;
-  const Resub = require('../services/email-resubscribe');
-  if (Resub.normalizeEmail(email) !== Resub.normalizeEmail(pre.email)) return;
-  await Resub.releaseOwnUnsubscribes({
-    email, customerId, actor, onlyIds: pre.clearedIds, versionById: pre.versionById, sendgridClear: pre.clearById,
-    ...(actor === 'contact' ? { contactSlot } : {}),
-  }, { dbh: trx });
+// Gate off, a contact session, or no deliverable address: the field is absent.
+async function emailResubscribeField(req) {
+  if (!portalEmailResubscribeLive() || req.contactSession) return null;
+  try {
+    const holder = await holderEmailForResubscribe(req.customerId);
+    return holder ? await require('../services/email-resubscribe').resubscribeStatus(holder.email, { dbh: db }) : null;
+  } catch {
+    return null; // a read problem must not fail the whole preferences screen
+  }
 }
 
 // Build the account-level preferences payload: per-property toggles/contacts
@@ -532,12 +511,10 @@ async function loadPreferencePayload(req) {
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
   const accountHasEmail = await accountEmailAvailable(req.customerId, primaryId);
   const billingHasEmail = await customerEmailAvailable(req.customerId) || deliverableEmail(prefs.billing_email);
-  const reflectUnsubscribe = prefs.email_enabled !== false && portalEmailResubscribeLive()
-    && await emailSwitchReflectsUnsubscribe(await holderEmailOnFile(req.customerId));
+  const emailResubscribe = await emailResubscribeField(req);
   return {
     ...preferencePayload({
       ...prefs,
-      ...(reflectUnsubscribe ? { email_enabled: false } : {}),
       appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
       service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
       service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
@@ -551,6 +528,8 @@ async function loadPreferencePayload(req) {
     // Email/Both offer keys on the ACCOUNT having an address — not on the
     // currently-selected property row alone.
     channelEmailAvailable: accountHasEmail,
+    // Never changes emailEnabled; absent unless the holder's address carries a customer unsubscribe.
+    ...(emailResubscribe ? { emailResubscribe } : {}),
   };
 }
 
@@ -677,6 +656,38 @@ router.get('/preferences', async (req, res, next) => {
     res.json(await loadPreferencePayload(req));
   } catch (err) {
     next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/notifications/email-resubscribe — GATE_PORTAL_EMAIL_RESUBSCRIBE
+// The account holder asks for ONE "Turn Waves emails back on?" email to their own
+// address on file. Only a click on its button (public-email-resubscribe.js) undoes
+// the unsubscribe. Answers { state: 'not_paused' | 'sent' | 'failed' }; 'sent' carries
+// maskedEmail and sentAt. At most one email per address per 24 h.
+// =========================================================================
+const emailResubscribeLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many requests. Try again in a few minutes.' },
+});
+
+router.post('/email-resubscribe', (req, res, next) => {
+  if (!portalEmailResubscribeLive()) return res.status(404).json({ state: 'off' });
+  if (req.contactSession) return res.status(403).json({ error: 'Account holders only', code: 'HOLDER_SESSION_ONLY' });
+  return next();
+}, emailResubscribeLimiter, async (req, res, next) => {
+  try {
+    const holder = await holderEmailForResubscribe(req.customerId);
+    if (!holder) return res.json({ state: 'not_paused' });
+    return res.json(await require('../services/email-resubscribe').requestResubscribeEmail({
+      customerId: req.customerId, email: holder.email, firstName: holder.firstName,
+    }, { dbh: db }));
+  } catch (err) {
+    return next(err);
   }
 });
 
@@ -808,7 +819,6 @@ async function contactPreferencePayload(req) {
   ]);
   const emailOnFile = contactEmailOnFile(req.customer, contact.phoneKey);
   const { preferences, accountOff } = ContactPrefs.effectiveContactPreferences(accountRow, own, { emailAvailable: !!emailOnFile });
-  if (preferences.emailEnabled !== false && await emailSwitchReflectsUnsubscribe(emailOnFile)) preferences.emailEnabled = false;
   // The report rule (customer-contact.js slotWithheldFromReports) decides
   // whether this contact ever gets the visit's findings; the card says so
   // instead of offering a report toggle that would never fire.
@@ -872,8 +882,6 @@ router.put('/contact-preferences', async (req, res, next) => {
     // holder turned off never do.
     if (updates.consentAttested === true) patch.consent_attested_at = new Date();
 
-    const preClear = await preClearOwnUnsubscribes(
-      patch.email_enabled === true, () => contactEmailOnFile(req.customer, contact.phoneKey));
     const outcome = await withCustomerCommsLock(db, req.customerId, async (trx) => {
       // An attestation confirms this phone's ask and runs the consent
       // follow-up (onRecipientConfirmed), which locks the row of EVERY
@@ -906,13 +914,7 @@ router.put('/contact-preferences', async (req, res, next) => {
       ]);
       const enablesTexts = ContactPrefs.textPathsOpened(accountRow, existing, patch);
       if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) return 'consent_required';
-      // GATE_PORTAL_EMAIL_RESUBSCRIBE: an OFF save is always stored, as before.
-      const contactEmail = contactEmailOnFile(live, contact.phoneKey);
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.customerId, contact.phone, patch);
-      if (patch.email_enabled === true) {
-        await releaseOwnUnsubscribesOnSwitchOn({
-          trx, email: contactEmail, pre: preClear, customerId: req.customerId, actor: 'contact', contactSlot: contact.slot });
-      }
       if (updates.consentAttested !== true) return 'saved';
       // The in-app attestation confirms THIS customer's pending or
       // undelivered ask for this phone. ask_failed included (the ask never
@@ -1108,8 +1110,6 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     let billingDeliveryError;
-    const preClear = await preClearOwnUnsubscribes(
-      updates.emailEnabled === true, () => holderEmailOnFile(req.customerId));
     await db.transaction(async (trx) => {
       for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
       // Row before key, like every other notification_prefs writer in this
@@ -1147,14 +1147,7 @@ router.put('/preferences', async (req, res, next) => {
       // locks, like every customer address writer: a bearer-link handoff
       // that read the address as unowned commits before this claim or
       // re-judges ownership after it.
-      // GATE_PORTAL_EMAIL_RESUBSCRIBE: the resubscribe release below needs the
-      // holder's own address key too. It joins this ONE sorted key set, never a
-      // second, later acquisition, so two writers cannot take the same keys in
-      // opposite orders; the release's own lockCustomerEmail then re-enters.
-      const resubscribeEmail = preClear ? await holderEmailOnFile(req.customerId, trx) : '';
-      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, {
-        ...propertyDbUpdates, ...channelDbUpdates, ...(resubscribeEmail ? { email: resubscribeEmail } : {}),
-      });
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { ...propertyDbUpdates, ...channelDbUpdates });
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });
@@ -1165,12 +1158,6 @@ router.put('/preferences', async (req, res, next) => {
       if (Object.keys(channelDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: primaryId })
           .update({ ...channelDbUpdates, updated_at: new Date() });
-      }
-      // GATE_PORTAL_EMAIL_RESUBSCRIBE: turning Email messages ON releases the
-      // customer's own email unsubscribe in the same transaction.
-      if (preClear) {
-        await releaseOwnUnsubscribesOnSwitchOn({
-          trx, email: resubscribeEmail, pre: preClear, customerId: req.customerId, actor: 'holder' });
       }
     });
     if (billingDeliveryError) return res.status(409).json({ error: billingDeliveryError });

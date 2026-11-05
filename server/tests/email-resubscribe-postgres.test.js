@@ -1,23 +1,30 @@
 /**
  * GATE_PORTAL_EMAIL_RESUBSCRIBE on real PostgreSQL: which email_suppressions
- * rows a customer's own Email-messages switch may release (the SQL, including
- * the Gmail-spelling match), and the stamps the release writes.
+ * rows the "Turn Waves emails back on?" link may release (the SQL, including
+ * the Gmail-spelling match), the stamps the release writes, and the
+ * email_resubscribe_requests table (24 h limit, hashed token, expiry, the click).
  *
- * Every case runs in a transaction that is always rolled back, on the real table.
+ * Most cases run in a transaction that is always rolled back, on the real table.
+ * The click cases (completeResubscribe) commit real rows, because SendGrid's
+ * pre-clear reads on its own connection, and delete them at the end.
  */
 const SKIP = !process.env.DATABASE_URL;
 jest.setTimeout(60000);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/email-resubscribe-confirm', () => ({ sendResubscribeConfirmation: jest.fn() }));
 
 (SKIP ? describe.skip : describe)('email resubscribe on PostgreSQL', () => {
   let db;
   let service;
+  let sender;
   let n = 0;
 
   beforeAll(() => {
     db = require('../models/db');
     service = require('../services/email-resubscribe');
+    sender = require('../services/email-resubscribe-confirm');
   });
+  beforeEach(() => { sender.sendResubscribeConfirmation.mockReset(); sender.sendResubscribeConfirmation.mockResolvedValue({ messageId: 'm1' }); });
   afterAll(async () => { await db.destroy(); });
 
   const uniq = () => `resub-${Date.now()}-${++n}`;
@@ -111,7 +118,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
         updated_at: new Date(),
       });
       const released = await db.transaction((trx) => service.releaseOwnUnsubscribes({
-        email, customerId: 'c-1', actor: 'holder', onlyIds: [untouched.id, bumped.id], versionById,
+        email, customerId: 'c-1', onlyIds: [untouched.id, bumped.id], versionById,
       }, { dbh: trx }));
       expect(released.map((r) => r.id)).toEqual([untouched.id]);
       expect((await db('email_suppressions').where({ id: bumped.id }).first()).status).toBe('active');
@@ -126,12 +133,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       const email = `${uniq()}@example.com`;
       const cleared = await sup(trx, { email });
       const late = await sup(trx, { email, group_key: 'service_operational' });
-      expect((await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder' }, { dbh: trx }))).toEqual([]);
+      expect((await service.releaseOwnUnsubscribes({ email, customerId: 'c-1' }, { dbh: trx }))).toEqual([]);
       const released = await service.releaseOwnUnsubscribes({
-        email, customerId: 'c-1', actor: 'holder', onlyIds: [cleared.id], versionById: await versionsOf(trx, [cleared.id]),
+        email, customerId: 'c-1', onlyIds: [cleared.id], versionById: await versionsOf(trx, [cleared.id]),
       }, { dbh: trx });
       // An id with no captured version is not released either.
-      expect(await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', actor: 'holder', onlyIds: [cleared.id] }, { dbh: trx })).toEqual([]);
+      expect(await service.releaseOwnUnsubscribes({ email, customerId: 'c-1', onlyIds: [cleared.id] }, { dbh: trx })).toEqual([]);
       expect(released.map((r) => r.id)).toEqual([cleared.id]);
       expect((await trx('email_suppressions').where({ id: late.id }).first()).status).toBe('active');
     });
@@ -144,20 +151,196 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       const bounce = await sup(trx, { email, suppression_type: 'bounce' });
       const note = { ok: true, status: 204, at: new Date().toISOString() };
       const released = await service.releaseOwnUnsubscribes({
-        email, customerId: 'c-1', actor: 'holder', onlyIds: [unsub.id], versionById: await versionsOf(trx, [unsub.id]),
+        email, customerId: 'c-1', onlyIds: [unsub.id], versionById: await versionsOf(trx, [unsub.id]),
         sendgridClear: { [unsub.id]: note },
       }, { dbh: trx });
       expect(released.map((r) => r.id)).toEqual([unsub.id]);
       const after = await trx('email_suppressions').where({ id: unsub.id }).first();
-      expect(after).toMatchObject({ status: 'released', consent_source: 'portal_email_switch' });
+      expect(after).toMatchObject({ status: 'released', consent_source: 'email_confirm_link' });
       expect(after.released_at).toBeInstanceOf(Date);
       expect(after.consent_timestamp).toBeInstanceOf(Date);
       expect(after.metadata).toMatchObject({
-        provider: 'sendgrid', released_via: 'portal_email_switch', released_by: null,
-        released_for_customer_id: 'c-1', actor: 'holder', contact_slot: null, sendgrid_clear: note,
+        provider: 'sendgrid', released_via: 'email_confirm_link', release_reason: 'Customer confirmed by email link',
+        released_by: null, released_for_customer_id: 'c-1', request_id: null, sendgrid_clear: note,
       });
+      expect(after.metadata).not.toHaveProperty('actor');
       expect((await trx('email_suppressions').where({ id: bounce.id }).first()).status).toBe('active');
       expect(await service.releasableUnsubscribes(email, { dbh: trx })).toEqual([]);
+    });
+  });
+
+  describe('request side: one confirmation email per address per 24 h', () => {
+    const ask = (trx, email, extra = {}) => service.requestResubscribeEmail({ customerId: null, email, firstName: 'Pat', ...extra }, { dbh: trx });
+    const requestsFor = (trx, email) => trx('email_resubscribe_requests').whereRaw('lower(email) = ?', [email.toLowerCase()]).orderBy('requested_at');
+
+    test('sends once: stores only the sha256 of the token, a 7-day expiry and sent_at; the second tap sends nothing', async () => {
+      await inRolledBackTx(async (trx) => {
+        const email = `${uniq()}@example.com`;
+        await sup(trx, { email });
+        const first = await ask(trx, email.toUpperCase());
+        expect(first).toMatchObject({ state: 'sent', maskedEmail: `${email[0]}***@example.com` });
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(1);
+        const call = sender.sendResubscribeConfirmation.mock.calls[0][0];
+        expect(call).toMatchObject({ to: email, firstName: 'Pat' });
+        expect(call.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+        const rows = await requestsFor(trx, email);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].token_hash).toBe(service.hashToken(call.token));
+        expect(JSON.stringify(rows[0])).not.toContain(call.token);
+        expect(rows[0].sent_at).toBeInstanceOf(Date);
+        expect(Math.round((rows[0].expires_at - rows[0].requested_at) / 86400000)).toBe(7);
+        const second = await ask(trx, email);
+        expect(second).toMatchObject({ state: 'sent', sentAt: first.sentAt });
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(1);
+        expect(await requestsFor(trx, email)).toHaveLength(1);
+        // After 24 h a new email may go out.
+        await trx('email_resubscribe_requests').where({ id: rows[0].id }).update({ sent_at: new Date(Date.now() - 25 * 3600 * 1000) });
+        expect((await ask(trx, email)).state).toBe('sent');
+        expect(sender.sendResubscribeConfirmation).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    test('nothing releasable, or a bounce / spam complaint / do-not-email on the address: nothing is sent or stored', async () => {
+      await inRolledBackTx(async (trx) => {
+        const clean = `${uniq()}@example.com`;
+        expect(await ask(trx, clean)).toEqual({ state: 'not_paused' });
+        for (const suppression_type of ['bounce', 'spam_complaint', 'do_not_email']) {
+          const email = `${uniq()}@example.com`;
+          await sup(trx, { email });
+          await sup(trx, { email, suppression_type, source: 'admin_manual', group_key: 'service_operational' });
+          expect(await ask(trx, email)).toEqual({ state: 'not_paused' });
+          expect(await service.resubscribeStatus(email, { dbh: trx })).toBeNull();
+          expect(await requestsFor(trx, email)).toEqual([]);
+        }
+        expect(sender.sendResubscribeConfirmation).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a send failure answers failed, keeps no sent_at, records only the error word, and a retry can send', async () => {
+      await inRolledBackTx(async (trx) => {
+        const email = `${uniq()}@example.com`;
+        await sup(trx, { email });
+        sender.sendResubscribeConfirmation.mockRejectedValueOnce(Object.assign(new Error(`SendGrid 500 for ${email}`), { code: 'ECONNRESET' }));
+        expect(await ask(trx, email)).toEqual({ state: 'failed' });
+        const [row] = await requestsFor(trx, email);
+        expect(row.sent_at).toBeNull();
+        expect(row.outcome).toEqual({ send_failed: 'ECONNRESET' });
+        expect(JSON.stringify(row.outcome)).not.toContain(email);
+        expect((await ask(trx, email)).state).toBe('sent');
+      });
+    });
+
+    test('resubscribeStatus: paused, then sent', async () => {
+      await inRolledBackTx(async (trx) => {
+        const email = `${uniq()}@example.com`;
+        await sup(trx, { email });
+        expect(await service.resubscribeStatus(email, { dbh: trx })).toEqual({ state: 'paused', maskedEmail: `${email[0]}***@example.com` });
+        await ask(trx, email);
+        expect(await service.resubscribeStatus(email, { dbh: trx })).toMatchObject({ state: 'sent', sentAt: expect.any(String) });
+      });
+    });
+
+    test('findRequest: unknown / never sent / expired / used / open, by token', async () => {
+      await inRolledBackTx(async (trx) => {
+        const email = `${uniq()}@example.com`;
+        const mk = async (patch) => {
+          const token = require('crypto').randomBytes(32).toString('base64url');
+          await trx('email_resubscribe_requests').insert({
+            email, token_hash: service.hashToken(token), sent_at: new Date(), expires_at: new Date(Date.now() + 3600000), ...patch,
+          });
+          return token;
+        };
+        expect((await service.findRequest(await mk({}), { dbh: trx })).status).toBe('open');
+        expect((await service.findRequest(await mk({ expires_at: new Date(Date.now() - 1000) }), { dbh: trx })).status).toBe('expired');
+        expect((await service.findRequest(await mk({ used_at: new Date() }), { dbh: trx })).status).toBe('used');
+        expect((await service.findRequest(await mk({ sent_at: null }), { dbh: trx })).status).toBe('unknown');
+        expect((await service.findRequest('x'.repeat(43), { dbh: trx })).status).toBe('unknown');
+        expect((await service.findRequest('short', { dbh: trx })).status).toBe('unknown');
+        expect((await service.findRequest(undefined, { dbh: trx })).status).toBe('unknown');
+      });
+    });
+  });
+
+  describe('the click: completeResubscribe (committed rows, cleaned up at the end)', () => {
+    const realFetch = global.fetch;
+    afterEach(() => { global.fetch = realFetch; delete process.env.SENDGRID_API_KEY; delete process.env.SENDGRID_ASM_GROUP_SERVICE; });
+
+    async function withCommitted(fn) {
+      const email = `${uniq()}@example.com`;
+      try { await fn(email); } finally {
+        await db('email_resubscribe_requests').whereRaw('lower(email) = ?', [email]).del();
+        await db('email_suppressions').whereRaw('lower(email) = ?', [email]).del();
+      }
+    }
+    const openRequest = async (email) => {
+      const [request] = await db('email_resubscribe_requests').insert({
+        email, token_hash: service.hashToken(uniq()), sent_at: new Date(), expires_at: new Date(Date.now() + 3600000),
+      }).returning('*');
+      return request;
+    };
+
+    test('clears SendGrid first, then releases the rows and marks the request used; a second click finds nothing left', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      process.env.SENDGRID_ASM_GROUP_SERVICE = '777';
+      await withCommitted(async (email) => {
+        const order = [];
+        global.fetch = jest.fn(async (url) => { order.push(`fetch:${url.includes('/groups/') ? 'service' : 'global'}`); return { ok: true, status: 204 }; });
+        const globalRow = await sup(db, { email });
+        const serviceRow = await sup(db, { email, group_key: 'service_operational' });
+        const bounce = await sup(db, { email, suppression_type: 'bounce' });
+        const request = await openRequest(email);
+        expect(await service.completeResubscribe(request)).toBe('done');
+        expect(order.sort()).toEqual(['fetch:global', 'fetch:service']);
+        for (const id of [globalRow.id, serviceRow.id]) {
+          const after = await db('email_suppressions').where({ id }).first();
+          expect(after).toMatchObject({ status: 'released', consent_source: 'email_confirm_link' });
+          expect(after.metadata).toMatchObject({ released_via: 'email_confirm_link', request_id: request.id, sendgrid_clear: { ok: true, status: 204 } });
+        }
+        expect((await db('email_suppressions').where({ id: bounce.id }).first()).status).toBe('active');
+        const used = await db('email_resubscribe_requests').where({ id: request.id }).first();
+        expect(used.used_at).toBeInstanceOf(Date);
+        expect(used.outcome.released_ids.sort()).toEqual([globalRow.id, serviceRow.id].sort());
+        expect((await service.findRequest('y'.repeat(43))).status).toBe('unknown');
+        // The same request again (a double click): nothing left to release.
+        global.fetch.mockClear();
+        expect(await service.completeResubscribe(request)).toBe('already');
+        expect(global.fetch).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a SendGrid failure releases nothing it did not confirm, leaves the request open, and the next click works', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      process.env.SENDGRID_ASM_GROUP_SERVICE = '777';
+      await withCommitted(async (email) => {
+        const globalRow = await sup(db, { email });
+        const serviceRow = await sup(db, { email, group_key: 'service_operational' });
+        const request = await openRequest(email);
+        global.fetch = jest.fn(async (url) => (url.includes('/groups/') ? { ok: false, status: 500 } : { ok: true, status: 204 }));
+        expect(await service.completeResubscribe(request)).toBe('retry');
+        expect((await db('email_suppressions').where({ id: globalRow.id }).first()).status).toBe('released');
+        expect((await db('email_suppressions').where({ id: serviceRow.id }).first()).status).toBe('active');
+        expect((await db('email_resubscribe_requests').where({ id: request.id }).first()).used_at).toBeNull();
+        global.fetch = jest.fn(async () => ({ ok: true, status: 204 }));
+        expect(await service.completeResubscribe(request)).toBe('done');
+        expect((await db('email_suppressions').where({ id: serviceRow.id }).first()).status).toBe('released');
+        expect((await db('email_resubscribe_requests').where({ id: request.id }).first()).used_at).toBeInstanceOf(Date);
+      });
+    });
+
+    test('a row the webhook updated after the pre-clear stays active, and the request stays open', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test';
+      await withCommitted(async (email) => {
+        const row = await sup(db, { email });
+        const request = await openRequest(email);
+        // The newer opt-out lands between SendGrid's answer and the release.
+        global.fetch = jest.fn(async () => {
+          await db('email_suppressions').where({ id: row.id }).update({ updated_at: new Date(), source: 'sendgrid_event_webhook' });
+          return { ok: true, status: 204 };
+        });
+        expect(await service.completeResubscribe(request)).toBe('retry');
+        expect((await db('email_suppressions').where({ id: row.id }).first()).status).toBe('active');
+        expect((await db('email_resubscribe_requests').where({ id: request.id }).first()).used_at).toBeNull();
+      });
     });
   });
 });

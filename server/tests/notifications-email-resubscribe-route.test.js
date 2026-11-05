@@ -1,14 +1,11 @@
 'use strict';
 
-// GATE_PORTAL_EMAIL_RESUBSCRIBE on the two "Email messages" switches:
-//   holder   GET/PUT /api/notifications/preferences
-//   contact  GET/PUT /api/notifications/contact-preferences
-// Gate off: nothing changes (no read, no release, no SendGrid call). Gate on:
-// a customer-made unsubscribe reads as OFF, an OFF save is always stored as
-// before (it is an explicit opt-out), and an ON save releases the block inside the save's
-// own transaction, but only after SendGrid's own list was cleared BEFORE that
-// transaction, and only the rows SendGrid confirmed.
-// The service's row rules are proven on real SQL in email-resubscribe-postgres.test.js.
+// GATE_PORTAL_EMAIL_RESUBSCRIBE on the account holder's notification routes:
+//   GET  /api/notifications/preferences          adds emailResubscribe (never changes emailEnabled)
+//   POST /api/notifications/email-resubscribe    asks for ONE "Turn Waves emails back on?" email
+// Gate off: nothing changes (no read, no route). Contact sessions are out (403 / no field).
+// The service rules (24 h limit, bounce block, hashed token) are proven on real SQL in
+// email-resubscribe-postgres.test.js; here the service is mocked and the route wiring is checked.
 //
 // Real router + real express; the auth middleware is a stand-in.
 
@@ -22,10 +19,8 @@ jest.mock('../services/recipient-optin', () => ({
 }));
 jest.mock('../services/service-contact-events', () => ({ recordServiceContactChanges: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/email-resubscribe', () => ({
-  hasReleasableUnsubscribe: jest.fn(),
-  releaseOwnUnsubscribes: jest.fn(),
-  clearSendgridBeforeRelease: jest.fn(),
-  normalizeEmail: (email) => String(email || '').trim().toLowerCase(),
+  resubscribeStatus: jest.fn(),
+  requestResubscribeEmail: jest.fn(),
 }));
 const mockSession = { current: null };
 jest.mock('../middleware/auth', () => ({
@@ -107,11 +102,6 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-// `blocked` = the set of addresses the service reports a customer-made unsubscribe for.
-let blocked;
-const CLEARED = { clearedIds: ['sup-1'], outcomes: [{ list: 'global', ok: true, status: 204 }], clearById: { 'sup-1': { ok: true, status: 204, at: '2026-11-04T12:00:00.000Z' } }, versionById: { 'sup-1': '555' } };
-const NOT_CLEARED = { clearedIds: [], outcomes: [{ list: 'global', ok: false, status: 500 }], clearById: {} };
-let preClear;
 beforeEach(() => {
   tables = {
     customers: [{ ...HOLDER }],
@@ -120,11 +110,8 @@ beforeEach(() => {
     recipient_optin: [],
   };
   installDb();
-  blocked = new Set(['pat@example.com', 'sam@example.com']);
-  preClear = CLEARED;
-  Resub.hasReleasableUnsubscribe.mockReset().mockImplementation(async (email) => blocked.has(email));
-  Resub.releaseOwnUnsubscribes.mockReset().mockImplementation(async ({ email }) => { events.push('release'); return blocked.has(email) ? [{ id: 'sup-1', email, group_key: null }] : []; });
-  Resub.clearSendgridBeforeRelease.mockReset().mockImplementation(async () => { events.push('sendgrid-clear'); return preClear; });
+  Resub.resubscribeStatus.mockReset().mockResolvedValue({ state: 'paused', maskedEmail: 'p***@example.com' });
+  Resub.requestResubscribeEmail.mockReset().mockResolvedValue({ state: 'sent', maskedEmail: 'p***@example.com', sentAt: '2026-11-04T12:00:00.000Z' });
   mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
   delete process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE;
   process.env.GATE_CONTACT_LOGIN = 'true';
@@ -139,170 +126,130 @@ async function call(method, path, body) {
 }
 const gateOn = () => { process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE = 'true'; };
 const holderGet = () => call('GET', '/api/notifications/preferences');
-const holderPut = (body) => call('PUT', '/api/notifications/preferences', body);
+const ask = () => call('POST', '/api/notifications/email-resubscribe');
 const asContact = () => { mockSession.current = { ...mockSession.current, contactSession: SAM }; };
-const contactGet = () => call('GET', '/api/notifications/contact-preferences');
-const contactPut = (body) => call('PUT', '/api/notifications/contact-preferences', body);
-const storedHolder = () => tables.notification_prefs[0].email_enabled;
-const storedContact = () => (tables.service_contact_notification_prefs[0] || {}).email_enabled;
 
-describe('account holder switch', () => {
-  test('gate off: the payload is stored-only, and nothing is read, released or cleared', async () => {
+describe('GET /preferences: emailResubscribe', () => {
+  test('gate off: the field is absent and the service is never read', async () => {
     const res = await holderGet();
     expect(res.status).toBe(200);
-    expect(res.body.emailEnabled).toBe(true);
-    const put = await holderPut({ emailEnabled: true });
-    expect(put.status).toBe(200);
-    expect(Resub.hasReleasableUnsubscribe).not.toHaveBeenCalled();
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
-    expect(storedHolder()).toBe(true);
+    expect(res.body).not.toHaveProperty('emailResubscribe');
+    expect(Resub.resubscribeStatus).not.toHaveBeenCalled();
   });
 
-  test('gate on: GET shows OFF while the customer-made block stands; the stored value is untouched; other fields identical', async () => {
+  test('gate on, paused: the field carries the masked address; emailEnabled and every other field are unchanged', async () => {
     const before = (await holderGet()).body;
     gateOn();
     const res = await holderGet();
-    expect(Resub.hasReleasableUnsubscribe).toHaveBeenCalledWith('pat@example.com', expect.anything());
-    expect(res.body.emailEnabled).toBe(false);
-    expect({ ...res.body, emailEnabled: true }).toEqual(before);
-    expect(storedHolder()).toBeUndefined();
+    expect(Resub.resubscribeStatus).toHaveBeenCalledWith('pat@example.com', expect.anything());
+    expect(res.body.emailResubscribe).toEqual({ state: 'paused', maskedEmail: 'p***@example.com' });
+    const rest = { ...res.body };
+    delete rest.emailResubscribe;
+    expect(rest).toEqual(before);
+    expect(rest.emailEnabled).toBe(true);
+    expect(tables.notification_prefs[0].email_enabled).toBeUndefined();
   });
 
-  test('gate on, no block: GET is unchanged', async () => {
+  test('gate on, sent: the field carries the sent state and time', async () => {
     gateOn();
-    blocked.clear();
-    expect((await holderGet()).body.emailEnabled).toBe(true);
+    Resub.resubscribeStatus.mockResolvedValue({ state: 'sent', maskedEmail: 'p***@example.com', sentAt: '2026-11-04T12:00:00.000Z' });
+    expect((await holderGet()).body.emailResubscribe).toEqual({ state: 'sent', maskedEmail: 'p***@example.com', sentAt: '2026-11-04T12:00:00.000Z' });
   });
 
-  test('gate on: an ON save clears SendGrid BEFORE the transaction, then releases the confirmed rows inside it', async () => {
+  test('gate on, nothing paused (or the service reads nothing): the field is absent', async () => {
     gateOn();
-    const res = await holderPut({ emailEnabled: true });
+    Resub.resubscribeStatus.mockResolvedValue(null);
+    expect((await holderGet()).body).not.toHaveProperty('emailResubscribe');
+  });
+
+  test('gate on, a contact session: no field and no read', async () => {
+    gateOn();
+    asContact();
+    const res = await holderGet();
+    expect(res.body).not.toHaveProperty('emailResubscribe');
+    expect(Resub.resubscribeStatus).not.toHaveBeenCalled();
+  });
+
+  test('gate on, a failing read never fails the screen', async () => {
+    gateOn();
+    Resub.resubscribeStatus.mockRejectedValue(new Error('boom'));
+    const res = await holderGet();
     expect(res.status).toBe(200);
-    expect(Resub.clearSendgridBeforeRelease).toHaveBeenCalledWith('pat@example.com');
-    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith({
-      email: 'pat@example.com', customerId: 'cust-1', actor: 'holder',
-      onlyIds: ['sup-1'], versionById: { 'sup-1': '555' }, sendgridClear: CLEARED.clearById,
-    }, { dbh: trx });
-    expect(events).toEqual(['sendgrid-clear', 'tx-start', 'release', 'tx-end']);
-    expect(storedHolder()).toBe(true);
-  });
-
-  test('gate on: the release address joins the save\'s one sorted address-key lock set (no second, later key lock)', async () => {
-    gateOn();
-    const Lock = require('../utils/customer-comms-lock');
-    const spy = jest.spyOn(Lock, 'lockAssignedCustomerEmails');
-    try {
-      expect((await holderPut({ emailEnabled: true })).status).toBe(200);
-      expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy).toHaveBeenCalledWith(trx, expect.objectContaining({ email: 'pat@example.com' }));
-      expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith(
-        expect.objectContaining({ email: 'pat@example.com' }), { dbh: trx });
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  test('gate on: a failed SendGrid clear releases nothing, still saves ON, and the next GET still shows OFF (retryable)', async () => {
-    gateOn();
-    preClear = NOT_CLEARED;
-    const res = await holderPut({ emailEnabled: true });
-    expect(res.status).toBe(200);
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect(storedHolder()).toBe(true);
-    expect((await holderGet()).body.emailEnabled).toBe(false);
-    preClear = CLEARED;
-    await holderPut({ emailEnabled: true });
-    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledTimes(1);
-  });
-
-  test('gate on: an address that changed between the clear and the lock releases nothing', async () => {
-    gateOn();
-    Resub.clearSendgridBeforeRelease.mockImplementationOnce(async () => { tables.customers[0].email = 'new@example.com'; return CLEARED; });
-    expect((await holderPut({ emailEnabled: true })).status).toBe(200);
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-  });
-
-  test('gate on, nothing to release: the ON save is as today', async () => {
-    gateOn();
-    blocked.clear();
-    preClear = { clearedIds: [], outcomes: [], clearById: {} };
-    expect((await holderPut({ emailEnabled: true })).status).toBe(200);
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect(storedHolder()).toBe(true);
-  });
-
-  test('gate on, block present: an OFF save is stored as OFF (an explicit opt-out), releases nothing; a later ON save stores ON and still releases', async () => {
-    gateOn();
-    expect((await holderPut({ emailEnabled: false })).status).toBe(200);
-    expect(storedHolder()).toBe(false);
-    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect((await holderPut({ emailEnabled: true })).status).toBe(200);
-    expect(storedHolder()).toBe(true);
-    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledTimes(1);
+    expect(res.body).not.toHaveProperty('emailResubscribe');
   });
 });
 
-describe('additional contact switch', () => {
-  beforeEach(() => { asContact(); });
-
-  test('gate off: nothing is read, released or cleared', async () => {
-    expect((await contactGet()).body.preferences.emailEnabled).toBe(true);
-    expect((await contactPut({ emailEnabled: true })).status).toBe(200);
-    expect(Resub.hasReleasableUnsubscribe).not.toHaveBeenCalled();
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
+describe('POST /email-resubscribe', () => {
+  test('gate off: 404 { state: off } and nothing is read or sent', async () => {
+    const res = await ask();
+    expect(res).toEqual({ status: 404, body: { state: 'off' } });
+    expect(Resub.requestResubscribeEmail).not.toHaveBeenCalled();
   });
 
-  test('gate on: GET shows OFF for a blocked address and leaves the other fields alone', async () => {
-    const before = (await contactGet()).body;
+  test('gate on, a contact session: 403 and nothing is sent', async () => {
     gateOn();
-    const res = await contactGet();
-    expect(Resub.hasReleasableUnsubscribe).toHaveBeenCalledWith('sam@example.com', expect.anything());
-    expect(res.body.preferences.emailEnabled).toBe(false);
-    expect({ ...res.body, preferences: { ...res.body.preferences, emailEnabled: true } }).toEqual(before);
-    expect(storedContact()).toBeUndefined();
+    asContact();
+    const res = await ask();
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('HOLDER_SESSION_ONLY');
+    expect(Resub.requestResubscribeEmail).not.toHaveBeenCalled();
   });
 
-  test('gate on: an ON save clears SendGrid for the CONTACT address BEFORE the lock transaction, then releases inside it', async () => {
+  test("gate on: asks for the holder's OWN address on file (never an address from the request) and returns the answer", async () => {
     gateOn();
-    const res = await contactPut({ emailEnabled: true });
+    const res = await call('POST', '/api/notifications/email-resubscribe', { email: 'someone-else@example.com' });
+    expect(res).toEqual({ status: 200, body: { state: 'sent', maskedEmail: 'p***@example.com', sentAt: '2026-11-04T12:00:00.000Z' } });
+    expect(Resub.requestResubscribeEmail).toHaveBeenCalledWith(
+      { customerId: 'cust-1', email: 'pat@example.com', firstName: 'Pat' }, { dbh: expect.anything() });
+  });
+
+  test.each([
+    ['not_paused', { state: 'not_paused' }],
+    ['failed', { state: 'failed' }],
+  ])('gate on: %s is passed through', async (_name, answer) => {
+    gateOn();
+    Resub.requestResubscribeEmail.mockResolvedValue(answer);
+    expect(await ask()).toEqual({ status: 200, body: answer });
+  });
+
+  test('gate on, no usable address on file: not_paused and nothing is sent', async () => {
+    gateOn();
+    tables.customers[0].email = '';
+    expect(await ask()).toEqual({ status: 200, body: { state: 'not_paused' } });
+    expect(Resub.requestResubscribeEmail).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the 7th tap in ten minutes is a 429 and sends nothing more', async () => {
+    gateOn();
+    mockSession.current = { ...mockSession.current, customerId: 'cust-rate', customer: { ...HOLDER, id: 'cust-rate' } };
+    tables.customers.push({ ...HOLDER, id: 'cust-rate' });
+    const statuses = [];
+    for (let i = 0; i < 7; i += 1) statuses.push((await ask()).status);
+    expect(statuses).toEqual([200, 200, 200, 200, 200, 200, 429]);
+    expect(Resub.requestResubscribeEmail).toHaveBeenCalledTimes(6);
+  });
+
+  test('gate on: a service error is a 500, not a send', async () => {
+    gateOn();
+    Resub.requestResubscribeEmail.mockRejectedValue(new Error('db down'));
+    expect((await ask()).status).toBe(500);
+  });
+});
+
+describe('the contact switch and the holder save are exactly as on main', () => {
+  test('gate on: PUT /preferences stores emailEnabled as before and reads/sends nothing for resubscribe', async () => {
+    gateOn();
+    const res = await call('PUT', '/api/notifications/preferences', { emailEnabled: true });
     expect(res.status).toBe(200);
-    expect(Resub.clearSendgridBeforeRelease).toHaveBeenCalledWith('sam@example.com');
-    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledWith({
-      email: 'sam@example.com', customerId: 'cust-1', actor: 'contact', contactSlot: 1,
-      onlyIds: ['sup-1'], versionById: { 'sup-1': '555' }, sendgridClear: CLEARED.clearById,
-    }, { dbh: trx });
-    expect(events).toEqual(['sendgrid-clear', 'tx-start', 'release', 'tx-end']);
-    expect(storedContact()).toBe(true);
+    expect(Resub.requestResubscribeEmail).not.toHaveBeenCalled();
+    expect(tables.notification_prefs[0].email_enabled).toBe(true);
   });
 
-  test('gate on: a failed SendGrid clear releases nothing, still saves ON, and the next GET still shows OFF', async () => {
+  test('gate on: GET /contact-preferences has no emailResubscribe field', async () => {
     gateOn();
-    preClear = NOT_CLEARED;
-    expect((await contactPut({ emailEnabled: true })).status).toBe(200);
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect(storedContact()).toBe(true);
-    expect((await contactGet()).body.preferences.emailEnabled).toBe(false);
-  });
-
-  test('gate on: a contact address changed by the holder between the clear and the lock releases nothing', async () => {
-    gateOn();
-    mockSession.current = { ...mockSession.current, customer: { ...HOLDER } };
-    Resub.clearSendgridBeforeRelease.mockImplementationOnce(async () => { tables.customers[0].service_contact_email = 'other@example.com'; return CLEARED; });
-    expect((await contactPut({ emailEnabled: true })).status).toBe(200);
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-  });
-
-  test('gate on, block present: an OFF save is stored as OFF (an explicit opt-out), releases nothing; a later ON save stores ON and still releases', async () => {
-    gateOn();
-    expect((await contactPut({ emailEnabled: false })).status).toBe(200);
-    expect(storedContact()).toBe(false);
-    expect(Resub.clearSendgridBeforeRelease).not.toHaveBeenCalled();
-    expect(Resub.releaseOwnUnsubscribes).not.toHaveBeenCalled();
-    expect((await contactPut({ emailEnabled: true })).status).toBe(200);
-    expect(storedContact()).toBe(true);
-    expect(Resub.releaseOwnUnsubscribes).toHaveBeenCalledTimes(1);
+    asContact();
+    const res = await call('GET', '/api/notifications/contact-preferences');
+    expect(res.body).not.toHaveProperty('emailResubscribe');
+    expect(Resub.resubscribeStatus).not.toHaveBeenCalled();
   });
 });

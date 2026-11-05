@@ -10434,8 +10434,9 @@ function dayReplanMode() {
 module.exports.dayReplanMode = dayReplanMode;
 
 // GATE_PORTAL_EMAIL_RESUBSCRIBE read at CALL time (so a flip needs no redeploy); strict `=== 'true'`,
-// dark by default. Owner 2026-11-04 ("build", gap #18): turning the app's Email messages switch ON releases
-// the customer's OWN email unsubscribe (services/email-resubscribe.js). Off = the switch behaves as before.
+// dark by default. Owner 2026-11-04 (gap #18, "confirm email"): an account holder whose own address carries
+// an email unsubscribe can ask in the app for ONE "Turn Waves emails back on?" email; only a click on its
+// button (public-email-resubscribe.js) releases the block (services/email-resubscribe.js). Off = nothing changes.
 function portalEmailResubscribeLive() {
   return process.env.GATE_PORTAL_EMAIL_RESUBSCRIBE === 'true';
 }

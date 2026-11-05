@@ -1,15 +1,20 @@
 'use strict';
 
-// A customer turning the app's "Email messages" switch ON releases THEIR OWN
-// email unsubscribe (GATE_PORTAL_EMAIL_RESUBSCRIBE, owner 2026-11-04, gap #18).
-// Before this, only staff could release an email_suppressions row
-// (admin-email-templates.js POST /suppressions/:id/release).
+// A customer who unsubscribed from our emails can get them back without staff
+// (GATE_PORTAL_EMAIL_RESUBSCRIBE, owner 2026-11-04, gap #18). Customers sign in
+// with a phone code only, so nothing in the app proves they own the mailbox.
+// So the app never releases a block itself. It asks for one email, "Turn Waves
+// emails back on?", sent to the holder's own address on file. Only a click from
+// that mailbox (POST /api/public/email-resubscribe/:token) undoes the block.
+// Staff can still release a row with the Release button
+// (admin-email-templates.js POST /suppressions/:id/release); that path is untouched.
 //
 // What counts as releasable (all must hold):
 //   - active row covering the address (suppressionCoversEmail: exact + Gmail
 //     mailbox equivalence), the same match the send path blocks on;
 //   - suppression_type 'unsubscribe' only. Bounce, spam complaint and
-//     do_not_email are facts about the address or a staff decision;
+//     do_not_email are facts about the address or a staff decision; an active
+//     one on the address also stops the confirmation email from being sent;
 //   - group_key NULL (blocks every stream) or 'service_operational'.
 //     'marketing_newsletter' is NOT released here: newsletter consent has its
 //     own double opt-in flow;
@@ -32,28 +37,38 @@
 //          writes it, so it survives the source overwrite and marks staff rows.
 //
 // SendGrid keeps its own unsubscribe lists. Left alone, the next send is
-// dropped by SendGrid and the webhook re-creates the local block. So the order
-// is: clear SendGrid FIRST (clearSendgridBeforeRelease, before the route's
-// transaction), then release locally only the rows whose SendGrid list was
-// confirmed cleared. A failed clear leaves the rows active: the switch keeps
-// reading OFF and the customer can simply try again.
+// dropped by SendGrid and the webhook re-creates the local block. So on the
+// click the order is: clear SendGrid FIRST (clearSendgridBeforeRelease), then
+// release locally, in a transaction under the address lock, only the rows whose
+// SendGrid list was confirmed cleared. A failed clear leaves the rows active and
+// the link unused, so the customer can click the button again.
 //
 // Between the SendGrid DELETE and the local release a newer opt-out can arrive:
 // the webhook (recordEmailSuppressionForEvent) updates an existing ACTIVE row
 // in place (same id) and SendGrid restores its own block. So the pre-read also
 // captures each row's Postgres row version (xmin, which any update changes),
 // and the release only touches a row whose version is unchanged under the lock.
-// A changed row stays active; the switch keeps reading OFF and the customer can
-// try again.
+// A changed row stays active; the customer can ask again.
+//
+// The request side (requestResubscribeEmail) stores only a sha256 of the token;
+// the token itself exists only in the emailed link.
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { suppressionCoversEmail } = require('../utils/email-equivalence');
 
 const RELEASABLE_SOURCES = ['sendgrid_event_webhook', 'sendgrid_asm_backfill', 'sendgrid_dropped_backfill_2026_06_01'];
 const SERVICE_GROUP_KEY = 'service_operational';
-const RELEASE_CONSENT_SOURCE = 'portal_email_switch';
+const RELEASE_CONSENT_SOURCE = 'email_confirm_link';
+const RELEASE_REASON = 'Customer confirmed by email link';
 const SENDGRID_TIMEOUT_MS = 8000;
+// Same three types the send path treats as stop-everything (email-template-library GLOBAL_SUPPRESSION_TYPES).
+const HARD_BLOCK_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
+const REQUEST_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const RESEND_WINDOW_MS = 24 * 60 * 60 * 1000;
+// 32 random bytes as base64url = 43 characters.
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 
 // Never log or store an error message: a database error can carry the SQL with
 // the address binding, and a fetch error can carry the URL. Code or name only.
@@ -82,15 +97,94 @@ async function releasableUnsubscribes(email, { dbh = db } = {}) {
     .orderBy('suppressed_at', 'asc');
 }
 
-// Read for the preference payload: never throws, so a read problem shows the
-// stored value instead of failing the whole preferences screen.
-async function hasReleasableUnsubscribe(email, { dbh = db } = {}) {
+// True when an active bounce / spam complaint / do-not-email row covers the address.
+async function hasHardBlock(email, { dbh = db } = {}) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return false;
+  const row = await dbh('email_suppressions')
+    .where(suppressionCoversEmail(normalized))
+    .where({ status: 'active' })
+    .whereRaw(`LOWER(suppression_type) IN (${HARD_BLOCK_TYPES.map(() => '?').join(', ')})`, HARD_BLOCK_TYPES)
+    .first('id');
+  return !!row;
+}
+
+// `t***@gmail.com`. Never the whole local part.
+function maskEmail(email) {
+  const [local, domain] = normalizeEmail(email).split('@');
+  if (!local || !domain) return '';
+  return `${local[0]}***@${domain}`;
+}
+
+const hashToken = (token) => crypto.createHash('sha256').update(String(token)).digest('hex');
+const newToken = () => crypto.randomBytes(32).toString('base64url');
+const isTokenShape = (token) => typeof token === 'string' && TOKEN_RE.test(token);
+
+// The latest request for this address that was actually emailed in the last 24 h.
+async function recentSentRequest(email, { dbh = db, now = new Date() } = {}) {
+  return dbh('email_resubscribe_requests')
+    .whereRaw('lower(email) = ?', [normalizeEmail(email)])
+    .where('sent_at', '>', new Date(now.getTime() - RESEND_WINDOW_MS))
+    .orderBy('sent_at', 'desc')
+    .first();
+}
+
+// What the app shows for the holder's own address: null (nothing to do),
+// { state: 'paused', maskedEmail } or { state: 'sent', maskedEmail, sentAt }.
+// A bounce / spam complaint / do-not-email row hides the block, so the app
+// never reveals why. Never throws: a read problem shows nothing.
+async function resubscribeStatus(email, { dbh = db } = {}) {
   try {
-    return (await releasableUnsubscribes(email, { dbh })).length > 0;
+    const normalized = normalizeEmail(email);
+    if (!normalized || !(await releasableUnsubscribes(normalized, { dbh })).length) return null;
+    if (await hasHardBlock(normalized, { dbh })) return null;
+    const maskedEmail = maskEmail(normalized);
+    const sent = await recentSentRequest(normalized, { dbh });
+    return sent ? { state: 'sent', maskedEmail, sentAt: new Date(sent.sent_at).toISOString() } : { state: 'paused', maskedEmail };
   } catch (err) {
-    logger.warn(`[email-resubscribe] releasable lookup failed (${errorWord(err)})`);
-    return false;
+    logger.warn(`[email-resubscribe] status lookup failed (${errorWord(err)})`);
+    return null;
   }
+}
+
+// POST /api/notifications/email-resubscribe, after the route checked the gate and the session.
+// Under the per-address lock: nothing releasable or a hard block = send nothing; an email sent in
+// the last 24 h = send nothing, answer with that one; else create the request and send. The lock
+// stays held through the send (short timeout), so two taps cannot send twice.
+// Returns { state: 'not_paused' | 'sent' | 'failed', maskedEmail?, sentAt? }.
+async function requestResubscribeEmail({ customerId, email, firstName = '' }, { dbh = db, now = new Date() } = {}) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return { state: 'not_paused' };
+  return dbh.transaction(async (trx) => {
+    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalized);
+    if (!(await releasableUnsubscribes(normalized, { dbh: trx })).length || await hasHardBlock(normalized, { dbh: trx })) {
+      return { state: 'not_paused' };
+    }
+    const maskedEmail = maskEmail(normalized);
+    const recent = await recentSentRequest(normalized, { dbh: trx, now });
+    if (recent) return { state: 'sent', maskedEmail, sentAt: new Date(recent.sent_at).toISOString() };
+
+    const token = newToken();
+    const [request] = await trx('email_resubscribe_requests').insert({
+      email: normalized,
+      customer_id: customerId || null,
+      token_hash: hashToken(token),
+      requested_at: now,
+      expires_at: new Date(now.getTime() + REQUEST_TTL_MS),
+    }).returning(['id']);
+    try {
+      await require('./email-resubscribe-confirm').sendResubscribeConfirmation({ to: normalized, token, firstName, database: trx });
+    } catch (err) {
+      const code = errorWord(err);
+      logger.warn(`[email-resubscribe] confirmation email failed (${code})`);
+      await trx('email_resubscribe_requests').where({ id: request.id })
+        .update({ outcome: JSON.stringify({ send_failed: code }), updated_at: new Date() });
+      return { state: 'failed' };
+    }
+    const sentAt = new Date();
+    await trx('email_resubscribe_requests').where({ id: request.id }).update({ sent_at: sentAt, updated_at: sentAt });
+    return { state: 'sent', maskedEmail, sentAt: sentAt.toISOString() };
+  });
 }
 
 // Runs on the caller's transaction, after clearSendgridBeforeRelease. Takes the
@@ -102,7 +196,7 @@ async function hasReleasableUnsubscribe(email, { dbh = db } = {}) {
 // webhook) is left active. `sendgridClear` maps row id -> { ok: true, status,
 // at }, written in the same update. No onlyIds = nothing released; an id with
 // no captured version is not released.
-async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = null, onlyIds = [], versionById = {}, sendgridClear = {} }, { dbh = db } = {}) {
+async function releaseOwnUnsubscribes({ email, customerId = null, requestId = null, onlyIds = [], versionById = {}, sendgridClear = {} }, { dbh = db } = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized || !onlyIds.length) return [];
   await require('../utils/customer-comms-lock').lockCustomerEmail(dbh, normalized);
@@ -114,11 +208,10 @@ async function releaseOwnUnsubscribes({ email, customerId, actor, contactSlot = 
   for (const row of rows) {
     const metadata = {
       released_via: RELEASE_CONSENT_SOURCE,
-      release_reason: 'Customer turned Email messages on in the app',
+      release_reason: RELEASE_REASON,
       released_by: null,
       released_for_customer_id: customerId == null ? null : String(customerId),
-      actor,
-      contact_slot: contactSlot,
+      request_id: requestId == null ? null : String(requestId),
       sendgrid_clear: sendgridClear[row.id] || null,
     };
     const [updated] = await dbh('email_suppressions')
@@ -221,11 +314,52 @@ async function clearSendgridBeforeRelease(email) {
   return result;
 }
 
+// The link's request, by token. Status: 'unknown' (bad shape, no row, never sent), 'used',
+// 'expired', or 'open'. The token shape is checked before any query.
+async function findRequest(token, { dbh = db, now = new Date() } = {}) {
+  if (!isTokenShape(token)) return { status: 'unknown' };
+  const request = await dbh('email_resubscribe_requests').where({ token_hash: hashToken(token) }).first();
+  if (!request || !request.sent_at) return { status: 'unknown' };
+  if (request.used_at) return { status: 'used', request };
+  if (new Date(request.expires_at) <= now) return { status: 'expired', request };
+  return { status: 'open', request };
+}
+
+// The click. SendGrid first, then (one transaction, under the address lock) release only
+// the rows SendGrid confirmed. The request is marked used ONLY when no releasable row is
+// left afterwards; a failed clear or a row that changed in between leaves it open so the
+// button works again. Returns 'done' (rows released), 'already' (nothing was left to
+// release) or 'retry'.
+async function completeResubscribe(request, { dbh = db, now = new Date() } = {}) {
+  const pre = await clearSendgridBeforeRelease(request.email);
+  return dbh.transaction(async (trx) => {
+    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, normalizeEmail(request.email));
+    const released = await releaseOwnUnsubscribes({
+      email: request.email, customerId: request.customer_id, requestId: request.id,
+      onlyIds: pre.clearedIds, versionById: pre.versionById, sendgridClear: pre.clearById,
+    }, { dbh: trx });
+    if ((await releasableUnsubscribes(request.email, { dbh: trx })).length) return 'retry';
+    await trx('email_resubscribe_requests').where({ id: request.id }).whereNull('used_at')
+      .update({ used_at: now, updated_at: now, outcome: JSON.stringify({ released_ids: released.map((r) => r.id) }) });
+    return released.length ? 'done' : 'already';
+  });
+}
+
 module.exports = {
+  findRequest,
+  completeResubscribe,
   releasableUnsubscribes,
-  hasReleasableUnsubscribe,
+  hasHardBlock,
+  resubscribeStatus,
+  requestResubscribeEmail,
   releaseOwnUnsubscribes,
   clearSendgridBeforeRelease,
   normalizeEmail,
+  maskEmail,
+  hashToken,
+  isTokenShape,
+  errorWord,
   RELEASABLE_SOURCES,
+  REQUEST_TTL_MS,
+  RESEND_WINDOW_MS,
 };

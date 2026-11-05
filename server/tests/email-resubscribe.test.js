@@ -1,9 +1,9 @@
 'use strict';
 
 // services/email-resubscribe.js (GATE_PORTAL_EMAIL_RESUBSCRIBE): the SendGrid
-// pre-clear (runs BEFORE the route's transaction) and the local release that
-// follows it. Which rows are releasable is proven on real SQL in
-// email-resubscribe-postgres.test.js.
+// pre-clear (runs BEFORE the release transaction), the local release that
+// follows it, and the token and mask helpers. Which rows are releasable, the
+// 24 h limit and the click are proven on real SQL in email-resubscribe-postgres.test.js.
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -13,7 +13,9 @@ jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerEmail: jest.fn(()
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { lockCustomerEmail } = require('../utils/customer-comms-lock');
-const { releaseOwnUnsubscribes, clearSendgridBeforeRelease } = require('../services/email-resubscribe');
+const {
+  releaseOwnUnsubscribes, clearSendgridBeforeRelease, maskEmail, hashToken, isTokenShape,
+} = require('../services/email-resubscribe');
 
 // A thenable query builder: a select resolves to `selectRows`; an update
 // records its patch and resolves (via returning) to the row it targeted.
@@ -50,7 +52,7 @@ describe('releaseOwnUnsubscribes', () => {
   test('releases only the ids SendGrid confirmed, with the stamps, the clear note in the SAME update, and the address lock', async () => {
     const dbh = fakeDbh({ selectRows: ROWS });
     const released = await releaseOwnUnsubscribes({
-      email: ' Pat@Example.com ', customerId: 42, actor: 'contact', contactSlot: 2,
+      email: ' Pat@Example.com ', customerId: 42, requestId: 'req-1',
       onlyIds: ['a'], versionById: { a: '100' }, sendgridClear: { a: { ok: true, status: 204, at: AT } },
     }, { dbh });
     expect(lockCustomerEmail).toHaveBeenCalledWith(dbh, 'pat@example.com');
@@ -59,15 +61,14 @@ describe('releaseOwnUnsubscribes', () => {
     const { id, patch } = dbh.updates[0];
     expect(id).toBe('a');
     expect(dbh.guards).toEqual([{ id: 'a', sql: 'xmin::text = ?', bindings: ['100'] }]);
-    expect(patch).toMatchObject({ status: 'released', consent_source: 'portal_email_switch' });
+    expect(patch).toMatchObject({ status: 'released', consent_source: 'email_confirm_link' });
     for (const key of ['released_at', 'updated_at', 'consent_timestamp']) expect(patch[key]).toBeInstanceOf(Date);
     expect(metaOf(dbh)).toEqual({
-      released_via: 'portal_email_switch',
-      release_reason: 'Customer turned Email messages on in the app',
+      released_via: 'email_confirm_link',
+      release_reason: 'Customer confirmed by email link',
       released_by: null,
       released_for_customer_id: '42',
-      actor: 'contact',
-      contact_slot: 2,
+      request_id: 'req-1',
       sendgrid_clear: { ok: true, status: 204, at: AT },
     });
   });
@@ -75,16 +76,16 @@ describe('releaseOwnUnsubscribes', () => {
   test('a row updated since the pre-read (version changed, or none captured) is not released', async () => {
     const dbh = fakeDbh({ selectRows: ROWS });
     await expect(releaseOwnUnsubscribes({
-      email: 'pat@example.com', customerId: 1, actor: 'holder', onlyIds: ['a', 'b'], versionById: { a: '99' },
+      email: 'pat@example.com', customerId: 1, onlyIds: ['a', 'b'], versionById: { a: '99' },
     }, { dbh })).resolves.toEqual([]);
     expect(dbh.updates).toEqual([]);
   });
 
   test('no onlyIds, no address, or nothing releasable: no lock and no write', async () => {
     const dbh = fakeDbh({ selectRows: ROWS });
-    await expect(releaseOwnUnsubscribes({ email: 'pat@example.com', customerId: 1, actor: 'holder' }, { dbh })).resolves.toEqual([]);
-    await expect(releaseOwnUnsubscribes({ email: '', customerId: 1, actor: 'holder', onlyIds: ['a'] }, { dbh })).resolves.toEqual([]);
-    await expect(releaseOwnUnsubscribes({ email: 'pat@example.com', customerId: 1, actor: 'holder', onlyIds: ['zzz'] }, { dbh: fakeDbh() })).resolves.toEqual([]);
+    await expect(releaseOwnUnsubscribes({ email: 'pat@example.com', customerId: 1 }, { dbh })).resolves.toEqual([]);
+    await expect(releaseOwnUnsubscribes({ email: '', customerId: 1, onlyIds: ['a'] }, { dbh })).resolves.toEqual([]);
+    await expect(releaseOwnUnsubscribes({ email: 'pat@example.com', customerId: 1, onlyIds: ['zzz'] }, { dbh: fakeDbh() })).resolves.toEqual([]);
     expect(dbh.updates).toEqual([]);
   });
 });
@@ -96,10 +97,10 @@ describe('error text never reaches logs or stored notes', () => {
   beforeEach(() => { [logger.warn, logger.error, logger.info].forEach((fn) => fn.mockClear()); });
 
   test('a DB error carrying the address in its message is logged by code or name only (lookup and pre-clear)', async () => {
-    const { hasReleasableUnsubscribe } = require('../services/email-resubscribe');
+    const { resubscribeStatus } = require('../services/email-resubscribe');
     const boom = () => { const err = new Error(`select * from email_suppressions where LOWER(email) = '${SECRET}' - relation missing`); err.code = '42P01'; throw err; };
     db.mockImplementation(boom);
-    await expect(hasReleasableUnsubscribe(SECRET)).resolves.toBe(false);
+    await expect(resubscribeStatus(SECRET)).resolves.toBeNull();
     await clearSendgridBeforeRelease(SECRET);
     expect(logged()).not.toContain(SECRET);
     expect(logged()).toContain('42P01');
@@ -121,6 +122,25 @@ describe('error text never reaches logs or stored notes', () => {
     expect(JSON.stringify(out)).not.toContain(SECRET);
     expect(out.outcomes).toEqual([{ list: 'global', ok: false, reason: 'TypeError' }]);
     expect(logged()).not.toContain(SECRET);
+  });
+});
+
+describe('token and mask helpers', () => {
+  test('maskEmail keeps the first letter and the domain only', () => {
+    expect(maskEmail(' Tom.Smith@Gmail.com ')).toBe('t***@gmail.com');
+    expect(maskEmail('a@b.co')).toBe('a***@b.co');
+    expect(maskEmail('')).toBe('');
+    expect(maskEmail('not-an-address')).toBe('');
+  });
+
+  test('hashToken is sha256 hex and never the token; only 43-character base64url tokens pass the shape gate', () => {
+    const token = require('crypto').randomBytes(32).toString('base64url');
+    expect(token).toHaveLength(43);
+    expect(hashToken(token)).toMatch(/^[0-9a-f]{64}$/);
+    expect(hashToken(token)).not.toContain(token);
+    expect(hashToken(token)).toBe(require('crypto').createHash('sha256').update(token).digest('hex'));
+    expect(isTokenShape(token)).toBe(true);
+    for (const bad of ['', 'abc', `${token}x`, `${token.slice(0, 42)}!`, undefined, null, 42, {}]) expect(isTokenShape(bad)).toBe(false);
   });
 });
 

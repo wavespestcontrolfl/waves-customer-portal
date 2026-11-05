@@ -4232,6 +4232,49 @@ function NotificationLabelDisclosure({ label, description }) {
   );
 }
 
+// GATE_PORTAL_EMAIL_RESUBSCRIBE: the account holder's own address carries an unsubscribe the
+// customer made by email link. The app cannot undo it (a phone code does not prove the mailbox);
+// the button asks for ONE email to that address, and only its link turns emails back on.
+const EMAIL_RESUBSCRIBE_COPY = {
+  paused: (maskedEmail) => `Emails to ${maskedEmail} are off because of an unsubscribe link.`,
+  button: 'Turn emails back on',
+  sent: (maskedEmail) => `Check your email. We sent a link to ${maskedEmail}. Open it to turn emails back on.`,
+  failed: "We couldn't send the email. Please try again later.",
+};
+
+function EmailResubscribeNotice({ resubscribe }) {
+  const [answer, setAnswer] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const current = answer || resubscribe;
+  if (!current || current.state === 'not_paused') return null;
+  const maskedEmail = current.maskedEmail || resubscribe?.maskedEmail || 'your email';
+  const sent = current.state === 'sent';
+  const ask = async () => {
+    if (busy) return;
+    setBusy(true);
+    setFailed(false);
+    try {
+      const res = await api.requestEmailResubscribe();
+      if (res?.state === 'failed') setFailed(true);
+      else setAnswer(res);
+    } catch {
+      setFailed(true);
+    } finally { setBusy(false); }
+  };
+  return (
+    <div data-testid="email-resubscribe" style={{ marginTop: 16, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+      <div role="status">{sent ? EMAIL_RESUBSCRIBE_COPY.sent(maskedEmail) : EMAIL_RESUBSCRIBE_COPY.paused(maskedEmail)}</div>
+      {failed && <div role="alert" style={{ marginTop: 6 }}>{EMAIL_RESUBSCRIBE_COPY.failed}</div>}
+      {!sent && (
+        <button data-glass-accent="" type="button" disabled={busy} onClick={ask} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>
+          {EMAIL_RESUBSCRIBE_COPY.button}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function AppNotificationSettings({ prefs, app, saving, onSave }) {
   const [expanded, setExpanded] = useState(false);
   const settingsId = useId();
@@ -5777,6 +5820,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 ? 'Delivery methods apply across your account. Turn appointment alerts on or off under Property notifications below.'
                 : 'Choose how you receive each update.'}
             </p>
+            <EmailResubscribeNotice resubscribe={prefs.emailResubscribe} />
             <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
           </div>
           <div style={{ padding: '4px 18px 12px' }}>

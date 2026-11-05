@@ -481,6 +481,7 @@ Object.assign(api, {
     Object.assign(NOTIFICATION_PREFS, updates);
     return { success: true, preferences: { ...NOTIFICATION_PREFS } };
   },
+  requestEmailResubscribe: async () => ({ state: 'sent', maskedEmail: 'j***@example.com', sentAt: new Date().toISOString() }),
   getCustomerPushStatus: async () => ({ available: !!APP_NOTIFICATIONS, enabled: NOTIFICATION_PREFS.pushEnabled !== false,
     registered: APP_NOTIFICATIONS !== 'missing', fresh: APP_NOTIFICATIONS === 'ready' }),
   updateAccountCreditPreference: async (on) => { CUSTOMER.autoApplyAccountCredit = !!on; return { autoApplyAccountCredit: !!on }; },
