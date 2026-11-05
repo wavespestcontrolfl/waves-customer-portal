@@ -35,6 +35,8 @@ module.exports = {
     '<rootDir>/tests/notification-inbound-sms-read-admin.test.js',
     // Claude's-queue readers and fenced writers (Send to Claude #7498/#7546, ideas #7548).
     '<rootDir>/tests/notification-admin-claude-queue.test.js',
+    // The technician copy of the bell list (techOmit, owner 2026-11-04 D1 A).
+    '<rootDir>/tests/notification-admin-technician-copy.test.js',
   ],
   collectCoverage: true,
   collectCoverageFrom: [
