@@ -144,7 +144,10 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode, promisePhoneMatchCloseMode } = require('../config/feature-gates');
+const { adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode } = require('../config/feature-gates');
+// GATE_PROMISE_PHONE_MATCH_CLOSE, read at call time and guarded like the other late-added readers: a test that mocks
+// feature-gates without it reads off.
+const promisePhoneMatchCloseMode = () => require('../config/feature-gates').promisePhoneMatchCloseMode?.() ?? 'off';
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 // The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
@@ -326,10 +329,18 @@ const UNKNOWN_SMS_CLASS = 'unknown_sms';
 const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'customer_quote_form']);
 // (portal_add_service_request has no contact witness; its estimate boundary is askedAtOf, in loadQuoteHandoffs.)
 
+// The classes that judge a text from a sender with no customer on file, and what each names (needs the text's sid).
+// The tracking-line row (new_lead) names the text it shows; the unknown sender's text bell (sms-reply:<sid>) also
+// carries the flag the rule reads. Any other class gets nothing, so such a text is not judged.
+const UNKNOWN_SENDER_REFS = {
+  tracking_text: (sid) => sid && { sid, customerId: null },
+  [UNKNOWN_SMS_CLASS]: (sid) => sid && { sid, customerId: null, unknownSender: true },
+};
+
 // What a customer-contact bell is about, for the witnesses: the text, call or
 // email it names, or the lead's own phone. Nothing here reads the customer's
 // account at large.
-function contactRefs(kind, row, data, cls = null) {
+function contactRefs(kind, row, data, cls) {
   const refs = refsFromRow(row);
   const payload = parseMeta(refs.meta.payload);
   const params = linkParams(row.link);
@@ -344,8 +355,8 @@ function contactRefs(kind, row, data, cls = null) {
     // retention sweep closes it if nobody does. A tracking-line text row (new_lead,
     // the tracking_text class) names the text it shows, so that text anchors it and its sender's number is the
     // subject (the witnesses resolve the number from the text).
-    if (!customerId && cls?.key === UNKNOWN_SMS_CLASS && sid) return { sid, customerId: null, unknownSender: true };
-    if (!customerId) return refs.meta.triggerKey === 'new_lead' && sid ? { sid, customerId: null } : null;
+    // A text from a sender with no customer on file: only the classes that name one judge it (UNKNOWN_SENDER_REFS).
+    if (!customerId) return UNKNOWN_SENDER_REFS[cls.key]?.(sid);
     return { sid, customerId };
   }
   if (kind === 'voice') return { callLogId: uuidOrNull(payload.callLogId), customerId: uuidOrNull(payload.customerId), phone: payload.phone };

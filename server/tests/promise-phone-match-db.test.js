@@ -153,15 +153,17 @@ maybeDescribe('phone-matched alert and promise rules (live Postgres)', () => {
       const applicant = await promiseOn({ disposition: 'lead_response_flow_triggered', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'job_applicant' }) });
       const prospect = await promiseOn({ disposition: 'lead_response_flow_triggered', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'new_lead' }) });
       const mine = new Set([vendor, spam, applicant, prospect]);
-      const ids = async (options) => (await cc.listOpenCommitments(db, { party: 'waves', limit: 200, ...options })).map((r) => r.id).filter((id) => mine.has(id));
+      const page = () => cc.listOpenCommitments(db, { party: 'waves', limit: 200 });
+      const ids = (rows) => rows.map((r) => r.id).filter((id) => mine.has(id));
 
       delete process.env.GATE_PROMISE_PHONE_MATCH_CLOSE;
-      expect((await ids({ quietAlerts: true })).length).toBe(4);
+      expect(ids(cc.pagerRows(await page())).length).toBe(4);
       process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'shadow';
-      expect((await ids({ quietAlerts: true })).length).toBe(4);
+      expect(ids(cc.pagerRows(await page())).length).toBe(4);
       process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
-      expect(await ids({ quietAlerts: true })).toEqual([prospect]);
-      expect((await ids({})).length).toBe(4);
+      expect(ids(cc.pagerRows(await page()))).toEqual([prospect]);
+      // The Owed tab reads the page itself, and keeps every one.
+      expect(ids(await page()).length).toBe(4);
     });
   });
 });

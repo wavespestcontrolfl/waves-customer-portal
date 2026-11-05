@@ -327,9 +327,7 @@ const invoiceRecords = (conn, customerId, after, now, scopedProperty) => Promise
   property_id: row.property_id || soleProperty,
   text: invoiceText({ ...row, line_items: lineItems, annual_prepay: annualPrepay }) })));
 
-async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
-  // A call promise with no customer record is judged by the caller's phone identity (call-promise-phone-evidence.js).
-  if (message.phone_identity) return require('./call-promise-phone-evidence').loadPhoneEvidence(conn, commitment, message, now);
+async function loadCustomerEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
   const customerId = message.customer_id;
   const peer = message.direction === 'inbound' ? message.from_phone : message.to_phone;
@@ -763,6 +761,22 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
 // property-scoped promise it counts only when its linked visit is at that
 // property; an unlinked notice cannot vouch for it (Codex #4816 r39).
 // Human texts stay with the model, which reads their words.
+// A call promise with no customer record (call-promise-phone-evidence.js) is judged by the caller's phone: only a
+// person's delivered text or a live call counts, and texts and calls are the only evidence there is. Everything else
+// is the customer path below, unchanged. Tables keyed by identity, so neither path gains a branch.
+const IDENTITY_RULES = {
+  true: {
+    load: (...args) => require('./call-promise-phone-evidence').loadPhoneEvidence(...args),
+    witness: (record, commitment) => require('./call-promise-phone-evidence').phoneWitness(record, commitment),
+    types: () => ['sms', 'call'],
+  },
+  false: { load: (...args) => loadCustomerEvidence(...args), witness: (...args) => customerWitness(...args), types: (...args) => customerWitnessTypes(...args) },
+};
+const rulesFor = (commitment) => IDENTITY_RULES[Boolean(commitment.sms_context?.phone_keyed)];
+const loadSmsFulfillmentEvidence = (conn, commitment, message, now) => rulesFor(commitment).load(conn, commitment, message, now);
+const admissibleWitness = (record, commitment, records = []) => rulesFor(commitment).witness(record, commitment, records);
+const witnessTypes = (commitment) => rulesFor(commitment).types(commitment);
+
 function automatedNoticeInScope(record, commitment) {
   const propertyId = commitment.sms_context?.property_id;
   if (!propertyId) return true;
@@ -867,9 +881,7 @@ function scopedToProperty(record, commitment) {
   return !!propertyId && witnessProperty === propertyId;
 }
 
-function admissibleWitness(record, commitment, records = []) {
-  // Judged by phone (sms_context.phone_keyed): only a person's delivered text or a live call counts.
-  if (commitment.sms_context?.phone_keyed) return require('./call-promise-phone-evidence').phoneWitness(record, commitment);
+function customerWitness(record, commitment, records = []) {
   // Deliverables and completed work need their actual records. A staff
   // text/call saying "sent" or "done" is only an association hint.
   const emails = requestedEmails(commitment);
@@ -960,9 +972,7 @@ const ORDERING_TIME = {
 // The only kind that admits payment evidence; the watcher's event page wakes
 // only these rows for money landing (Codex #4996 r4).
 const PAYMENT_WITNESS_KINDS = Object.freeze(['other']);
-function witnessTypes(commitment) {
-  // A promise judged by phone has no visits, estimates or payments to cite: texts and calls only.
-  if (commitment.sms_context?.phone_keyed) return ['sms', 'call'];
+function customerWitnessTypes(commitment) {
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
   // Owner ruling 2026-09-28 (reversing R3, 2026-09-24): a general `other` ask
   // is answered by any text a person from Waves sends after it (operatorReply

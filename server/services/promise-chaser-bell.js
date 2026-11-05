@@ -187,13 +187,13 @@ async function findPromiseToRing(call, now) {
   // An existing customer's callback isn't lost: the recording pipeline
   // links the call within minutes, and a later tick inside the 30-minute
   // window re-reads the link and rings then.
-  const rows = (await commitments.listOpenCommitments(db, {
+  const rows = commitments.pagerRows(await commitments.listOpenCommitments(db, {
     // kinds pushes the SLA_KINDS filter into the QUERY itself (Codex #5019
     // r10 P2): filtering client-side AFTER a LIMIT 200 page let a shared
     // or long-lived number's unrelated commitments (customer-party rows,
     // other kinds) crowd the one relevant promise out of every tick's page
     // entirely — it was never wrong, just never reached.
-    party: 'waves', kinds: SLA_KINDS, phone: call.from_phone, limit: 200, includeHints: true, now, quietAlerts: true,
+    party: 'waves', kinds: SLA_KINDS, phone: call.from_phone, limit: 200, includeHints: true, now,
   })).filter((r) => String(r.call_log_id) !== String(call.id)
     // Strictly PRECEDES this callback — never the current call's own row
     // (excluded above), and never a call that arrived AFTER it either. A

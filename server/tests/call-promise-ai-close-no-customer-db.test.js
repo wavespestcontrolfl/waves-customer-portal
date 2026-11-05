@@ -110,7 +110,7 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
       process.env.GATE_CALL_PROMISE_AI_NO_CUSTOMER = 'false';
       const w = await world();
       await addCall(w);
-      expect(await close.listCandidates(db, { callIds: [w.call.id], noCustomer: true })).toEqual([]);
+      expect(await close.listNoCustomerCandidates(db, { callIds: [w.call.id] })).toEqual([]);
       const result = await run(w);
       expect(result).toMatchObject({ candidates: 0, closed: 0 });
       expect(result.no_customer_candidates).toBeUndefined();
@@ -119,14 +119,14 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
 
     test('gate on: it is listed in its own pass; the customer pass still never lists it', async () => {
       const w = await world();
-      expect((await close.listCandidates(db, { callIds: [w.call.id], noCustomer: true })).map((r) => r.id)).toEqual([w.commitment.id]);
+      expect((await close.listNoCustomerCandidates(db, { callIds: [w.call.id] })).map((r) => r.id)).toEqual([w.commitment.id]);
       expect(await close.listCandidates(db, { callIds: [w.call.id] })).toEqual([]);
     });
 
     test('the AI close itself off: the no-customer gate alone does nothing', async () => {
       process.env.GATE_CALL_PROMISE_AI_CLOSE = 'false';
       const w = await world();
-      expect(await close.listCandidates(db, { callIds: [w.call.id], noCustomer: true })).toEqual([]);
+      expect(await close.listNoCustomerCandidates(db, { callIds: [w.call.id] })).toEqual([]);
       expect(await run(w)).toEqual({ skipped: true, reason: 'gated_off' });
     });
   });
@@ -166,7 +166,9 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
       const prompt = asked(w)[0][1].text;
       expect(prompt).toContain('walkthrough at two PM');
       expect(prompt).toContain('Tuesday works');
-      expect(prompt).not.toContain(w.phone.slice(-7));
+      // (The promise text carries the fixture's serial; the number itself, in any form, must not.)
+      expect(prompt).not.toContain(w.phone.slice(2));
+      expect(prompt).not.toContain(w.phone);
     });
   });
 

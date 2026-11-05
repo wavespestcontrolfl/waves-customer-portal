@@ -40,7 +40,7 @@ describe('no-customer candidates (call-promise-ai-close.js)', () => {
   test('with the gate off no-customer calls are never listed, and the database is not even asked', async () => {
     const conn = jest.fn(() => { throw new Error('the database must not be read'); });
     process.env.GATE_CALL_PROMISE_AI_CLOSE = 'true';
-    await expect(close().listCandidates(conn, { noCustomer: true })).resolves.toEqual([]);
+    await expect(close().listNoCustomerCandidates(conn)).resolves.toEqual([]);
     expect(conn).not.toHaveBeenCalled();
   });
   test('the daily cap is one exported constant, 10', () => {
@@ -169,18 +169,7 @@ describe('the unknown-sender text bell (admin-alert-relevance.js unknown_sms)', 
 });
 
 describe('promises on vendor, spam and applicant calls raise no pager alert (call-commitments.js)', () => {
-  const recorder = () => {
-    const calls = [];
-    const chain = new Proxy(() => {}, {
-      get: (_t, prop) => {
-        if (prop === 'then') return (resolve) => resolve([]);
-        if (prop === 'modify') return (fn) => { fn(chain); return chain; };
-        return (...args) => { calls.push([prop, ...args]); return chain; };
-      },
-    });
-    return { conn: () => chain, calls };
-  };
-  const quiet = (calls) => calls.filter(([m, sql]) => m === 'whereRaw' && String(sql).startsWith('NOT (COALESCE'));
+  const rows = [{ id: 'vendor', quiet_call: true }, { id: 'prospect', quiet_call: false }];
 
   test('the predicate names the dispositions and the applicant nature', () => {
     const sql = require('../services/call-commitments').quietCallSql('cl');
@@ -188,23 +177,24 @@ describe('promises on vendor, spam and applicant calls raise no pager alert (cal
     expect(sql).toContain("call_nature' = 'job_applicant'");
     expect(sql).not.toMatch(/\?/);
   });
-  test('the pagers (quietAlerts) drop them only under the gate; the Owed tab\'s read never does', async () => {
-    const { listOpenCommitments } = require('../services/call-commitments');
-    const run = async (options, mode) => {
-      if (mode) process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = mode; else delete process.env.GATE_PROMISE_PHONE_MATCH_CLOSE;
-      const { conn, calls } = recorder();
-      await listOpenCommitments(conn, { party: 'waves', ...options });
-      return quiet(calls).length;
-    };
-    expect(await run({ quietAlerts: true }, 'true')).toBe(1);
-    expect(await run({ quietAlerts: true }, 'shadow')).toBe(0);
-    expect(await run({ quietAlerts: true }, null)).toBe(0);
-    expect(await run({}, 'true')).toBe(0);
+  test('the pagers\' page drops them only under the gate; shadow keeps every row and logs once; off is the page as read', () => {
+    const { pagerRows } = require('../services/call-commitments');
+    const logger = require('../services/logger');
+    const info = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    delete process.env.GATE_PROMISE_PHONE_MATCH_CLOSE;
+    expect(pagerRows(rows)).toBe(rows);
+    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'shadow';
+    expect(pagerRows(rows)).toBe(rows);
+    pagerRows(rows);
+    expect(info.mock.calls.filter(([m]) => String(m).includes('would raise no pager alert'))).toHaveLength(1);
+    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
+    expect(pagerRows(rows).map((r) => r.id)).toEqual(['prospect']);
+    info.mockRestore();
   });
-  test('the three pagers ask for it', () => {
+  test('the three pagers read their page through it', () => {
     for (const file of ['promise-chaser-bell.js', 'followup-sla-watcher.js', 'call-commitments-watchdog.js']) {
       const source = fs.readFileSync(path.join(__dirname, '../services', file), 'utf8');
-      expect([file, source.includes('quietAlerts: true')]).toEqual([file, true]);
+      expect([file, source.includes('commitments.pagerRows(')]).toEqual([file, true]);
     }
   });
 });

@@ -3605,25 +3605,27 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 const quietCallSql = (cl = 'cl') => `(COALESCE(${cl}.disposition, '') IN ('vendor_logged', 'spam_discarded')
   OR (${cl}.v2_extraction_status = 'valid' AND ${cl}.ai_extraction_enriched->>'call_nature' = 'job_applicant'))`;
 
-// Shadow (GATE_PROMISE_PHONE_MATCH_CLOSE=shadow): the pagers still see these promises; one log line per Eastern day
-// says how many they would stop seeing. Reads only; a failed count is ignored.
+// What the promise pagers (promise-chaser bell, follow-up SLA pager, overdue watchdog) page for, from a page of
+// listOpenCommitments rows: under GATE_PROMISE_PHONE_MATCH_CLOSE=true a promise on a vendor, spam or applicant call
+// (the row's quiet_call) is left out; `shadow` leaves every row in and logs, once an Eastern day, how many it would
+// leave out. The Owed tab reads listOpenCommitments directly and keeps every promise.
+const QUIET_FILTERS = {
+  off: (rows) => rows,
+  shadow: (rows) => {
+    const day = etDateString(new Date());
+    if (quietShadowDay !== day) {
+      quietShadowDay = day;
+      logger.info(`[call-commitments] shadow: ${rows.filter((r) => r.quiet_call).length} of ${rows.length} open Waves promise(s) on this page are on vendor, spam or applicant calls and would raise no pager alert`);
+    }
+    return rows;
+  },
+  true: (rows) => rows.filter((r) => !r.quiet_call),
+};
 let quietShadowDay = null;
-async function noteQuietCallsShadow(conn) {
-  const day = etDateString(new Date());
-  if (quietShadowDay === day) return;
-  quietShadowDay = day;
-  try {
-    const row = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
-      .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereRaw(quietCallSql('cl')).count({ n: '*' }).first();
-    logger.info(`[call-commitments] shadow: ${Number(row?.n) || 0} open Waves promise(s) on vendor, spam or applicant calls would raise no pager alert`);
-  } catch { /* advisory */ }
-}
+// (A test that mocks feature-gates without the reader reads off.)
+const pagerRows = (rows) => QUIET_FILTERS[require('../config/feature-gates').promisePhoneMatchCloseMode?.() ?? 'off'](rows);
 
-async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null, customerScope = null, quietAlerts = false } = {}) {
-  // The pagers (promise chaser, follow-up SLA, overdue watchdog) ask for quietAlerts: under the gate, a promise on a
-  // vendor, spam or applicant call is left out of what they page for. Every other reader (the Owed tab) keeps it.
-  const quiet = quietAlerts ? require('../config/feature-gates').promisePhoneMatchCloseMode() : 'off';
-  if (quiet === 'shadow') await noteQuietCallsShadow(conn);
+async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null, customerScope = null } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -3656,7 +3658,6 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
       scopeCommitmentRows(b, { customerId, leadId, leadSid, phone });
       // customerScope: a subquery of customer ids (a technician login's own customers, GATE_TECH_LOGIN_PRIVACY).
       if (customerScope) b.whereIn('cl.customer_id', customerScope);
-      if (quiet === 'true') b.whereRaw(`NOT ${quietCallSql('cl')}`);
       if (!includeHints) b.whereNull('cc.fulfillment');
       // activeSince (the follow-up pager): only promises made, dated or
       // snoozed since then — a large historical backlog must not page
@@ -3683,6 +3684,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
       'cc.*',
       'cl.twilio_call_sid', 'cl.created_at as call_started_at', 'cl.direction', 'cl.from_phone', 'cl.to_phone',
       'cl.customer_id', 'cu.first_name as customer_first_name', 'cu.last_name as customer_last_name',
+      conn.raw(`${quietCallSql('cl')} as quiet_call`),
     );
   return rows.map((r) => ({ ...normalizeRow(r), overdue: isOverdue(r, now) }));
 }
@@ -4429,6 +4431,7 @@ module.exports = {
   scopeCommitmentRows,
   listOpenCommitments,
   quietCallSql,
+  pagerRows,
   listAutoClosedCommitments,
   deriveRelayCommitments,
   recordRelayCommitments,

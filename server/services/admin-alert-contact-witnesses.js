@@ -213,12 +213,13 @@ async function sharedPhoneItems(conn, smsIdents, since) {
 // that came before a later text does not answer it (admin-alert-relevance.js unknownTextAnswered).
 async function latestInboundTexts(conn, unknownIdents) {
   const peers = unique(unknownIdents.flatMap((i) => [...i.peers]));
-  if (!peers.length) return [];
+  if (!peers.length) return new Map();
   const peerSql = phoneIdentitySql('sl.from_phone');
   const since = new Date(Math.min(...unknownIdents.map((i) => i.anchor.getTime())));
-  return excludeUnresolvedSendReservations(conn('sms_log as sl').where('sl.direction', 'inbound'), 'sl')
+  const rows = await excludeUnresolvedSendReservations(conn('sms_log as sl').where('sl.direction', 'inbound'), 'sl')
     .whereRaw(`${peerSql} = ANY(?)`, [peers]).where('sl.created_at', '>', since)
     .select(conn.raw(`${peerSql} as peer`)).max('sl.created_at as at').groupByRaw('1');
+  return new Map(unknownIdents.map((ident) => [ident, rows.filter((r) => ident.peers.has(r.peer)).reduce((best, r) => later(asDate(r.at), best), null)]));
 }
 
 // A person's reply to a customer on a SHARED phone, by customer id: the replies the
@@ -483,7 +484,7 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
   const ranVisits = visitRan ? await visitsThatRan(conn, idents.filter((i) => i.item.kind === 'voice')) : new Map();
   const staffActed = await staffActionsAfterTexts(conn, smsIdents, staffActions);
   const unknownSenders = idents.filter((i) => i.item.kind === 'sms' && i.item.refs.unknownSender === true && !i.customerId);
-  const inboundRows = unknownSenders.length ? await latestInboundTexts(conn, unknownSenders) : [];
+  const lastInbound = await latestInboundTexts(conn, unknownSenders);
   for (const ident of idents) {
     const { item, customerId } = ident;
     // A shared phone: this customer's own evidence by customer id only (ownMatch).
@@ -500,7 +501,8 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
       replyAt: null,
       visitRanAt: ranVisits.get(String(item.id)) || null,
       ...staffActionFields(staffActed, item),
-      ...(unknownSenders.includes(ident) ? { unknownSender: true, lastInboundAt: inboundRows.filter((r) => ident.peers.has(r.peer)).reduce((best, r) => later(asDate(r.at), best), null) } : {}),
+      unknownSender: lastInbound.has(ident),
+      lastInboundAt: lastInbound.get(ident),
     };
     bundle.quote = await quoteHandedOff(conn, ident, bundle);
     bundles.set(String(item.id), bundle);
