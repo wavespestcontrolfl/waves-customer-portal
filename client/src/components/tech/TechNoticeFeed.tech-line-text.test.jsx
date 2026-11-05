@@ -67,7 +67,7 @@ describe('TechNoticeFeed — tech line text card', () => {
     fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Be there in 10' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(request).toHaveBeenCalledWith('/tech/line/sms', {
-      method: 'POST', body: JSON.stringify({ scheduledServiceId: 'svc-1', body: 'Be there in 10' }),
+      method: 'POST', body: JSON.stringify({ scheduledServiceId: 'svc-1', body: 'Be there in 10', replyToNoticeId: 'n-text' }),
     });
     expect(screen.getByRole('button', { name: 'Got it' })).toBeDisabled();
     await act(async () => { finishSend({ ok: true }); });

@@ -624,8 +624,10 @@ function TextCard({ n, onDismiss, techLine = null, request = null, onReplying = 
 // customer of `reply_visit_id` from the tech's own line. The server names that
 // visit only for the tech's own visit when the phone on file is the one that
 // texted, so a tech without a line, or a card without the visit, gets no
-// Reply. While the compose is open or sending, the feed keeps the card on
-// screen, and "Got it" waits for a send in flight.
+// Reply; the send names this card (replyToNoticeId), and the server refuses it
+// if the phone on file has changed since. While the compose is open or
+// sending, the feed keeps the card on screen, and "Got it" waits for a send in
+// flight.
 function TextCardActions({ n, onDismiss, techLine, request, onReplying }) {
   const visitId = n.payload?.reply_visit_id;
   const canReply = Boolean(visitId && techLine?.line && request);
@@ -642,7 +644,7 @@ function TextCardActions({ n, onDismiss, techLine, request, onReplying }) {
         <div style={{ marginBottom: 12 }}>
           <LineTextCompose
             line={techLine.line}
-            onSend={(body) => request('/tech/line/sms', { method: 'POST', body: JSON.stringify({ scheduledServiceId: visitId, body }) })}
+            onSend={(body) => request('/tech/line/sms', { method: 'POST', body: JSON.stringify({ scheduledServiceId: visitId, body, replyToNoticeId: n.id }) })}
             onClose={() => setReplyOpen(false)}
             onBusyChange={setSending}
           />
