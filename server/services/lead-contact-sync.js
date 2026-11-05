@@ -58,10 +58,16 @@ const PERFORMED_BY = 'Lead contact sync';
 // staleness sweep's (lead-staleness.js parks a silent 'new' lead after 21 days).
 const LOOKBACK_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
-// One run judges at most SCAN_CAP leads (newest first) and moves at most
-// WRITE_CAP, so a bad day cannot turn into a bulk rewrite.
-const SCAN_CAP = 200;
+// One run walks at most MAX_PAGES pages of PAGE_SIZE leads (newest first) and
+// moves at most WRITE_CAP, so a bad day cannot turn into a bulk rewrite. A
+// backlog bigger than one run is walked ACROSS runs: a run that stops at the
+// page cap leaves its place in `resumeAfter`, and the next run starts there, so
+// newer leads that stay 'new' (no evidence, shared, reopened) never hide older
+// ones. At the end of the walk the next run starts from the newest again.
+const PAGE_SIZE = 100;
+const MAX_PAGES = 2;
 const WRITE_CAP = 50;
+let resumeAfter = null;
 // Witness rows read per kind in one run. Hitting it is logged, never silent.
 const ROW_CAP = 5000;
 
@@ -87,25 +93,28 @@ function leadEmail(raw) {
 
 // The 'new' leads this sweep judges: live, first touched inside the lookback,
 // not internal/test. Newest first so a fresh lead is never starved by a pile.
-function candidateLeadsQuery(dbi, now) {
+function candidateLeadsQuery(dbi, now, after = null) {
   const query = dbi('leads')
     .where('status', 'new')
     .whereNull('deleted_at')
     .whereNull('converted_at')
     .whereNotNull('first_contact_at')
     .where('first_contact_at', '>=', new Date(now.getTime() - LOOKBACK_DAYS * DAY_MS));
+  // Keyset resume, newest first. The cursor time is the exact text of the column,
+  // never a JS Date, which would drop microseconds and re-read the row it stopped on.
+  if (after) query.whereRaw('(first_contact_at, id) < (?::timestamptz, ?::uuid)', [after.at, after.id]);
   return excludeInternalTestLeads(query, dbi);
 }
 
 // ---- Witness reads: one bulk query per kind for the whole batch ----------
 // Every loader returns WITNESSES in one shape, so the judging below is one loop
 // over a table of kinds with no per-kind branches:
-//   { type, id, at, startedAt, scope, key, customerId, originOf }
+//   { type, id, at, startedAt, scope, value, key, customerId, originOf }
 // `key` is `<scope>:<value>` (phone, email or customer), the identity the
 // contact names; `customerId` is the customer the contact row itself carries.
 const ms = (value) => asDate(value).getTime();
 const witness = (type, scope, value, row, extra = {}) => ({
-  type, id: String(row.id), at: ms(row.at), startedAt: ms(row.at), scope, key: `${scope}:${value}`,
+  type, id: String(row.id), at: ms(row.at), startedAt: ms(row.at), scope, value, key: `${scope}:${value}`,
   customerId: row.customer_id == null ? null : String(row.customer_id), originOf: [], ...extra,
 });
 
@@ -229,6 +238,11 @@ async function reopenedLeadIds(dbi, leadIds) {
 
 // ---- Judging --------------------------------------------------------------
 
+// Which writer pin a witness's identity scope feeds (lead-estimate-link.js
+// markLeadContactedFromEvidence `identity`). A visit is pinned by the customer
+// id the writer already takes; it still gets the reopen check.
+const IDENTITY_FIELD = { phone: 'phoneKey', email: 'email', customer: 'customerId' };
+
 // What a skipped lead is reported as, by the scope its ambiguous contact named.
 const SHARED_REASON = { phone: 'shared_phone', email: 'shared_email', customer: 'multiple_open_leads_for_customer' };
 
@@ -274,7 +288,9 @@ async function judgeLeads(dbi, leads) {
       else usable.push(w);
     }
     const first = usable[0];
-    const evidence = first && { evidenceType: first.type, evidenceId: first.id, at: new Date(first.at) };
+    const evidence = first && {
+      evidenceType: first.type, evidenceId: first.id, at: new Date(first.at), identity: { [IDENTITY_FIELD[first.scope]]: first.value },
+    };
     verdicts.set(id, reopened.has(id) ? { skip: 'reopened_by_person' } : evidence || { skip: skips[0] || 'no_contact_evidence' });
   }
   return verdicts;
@@ -295,6 +311,7 @@ const APPLY = {
     evidenceId: verdict.evidenceId,
     performedBy: PERFORMED_BY,
     respondedAt: verdict.at,
+    identity: verdict.identity,
   }),
 };
 
@@ -305,33 +322,41 @@ const tally = (counts, key) => { counts[key] = (counts[key] || 0) + 1; };
  * and logs what would move (counts by evidence type), 'true' writes.
  */
 async function runLeadContactSync(options = {}) {
-  const { dbi, now, mode, scanCap, writeCap } = {
-    dbi: db, now: new Date(), mode: leadStatusFollowsContactMode(), scanCap: SCAN_CAP, writeCap: WRITE_CAP, ...options,
+  const { dbi, now, mode, pageSize, maxPages, writeCap } = {
+    dbi: db, now: new Date(), mode: leadStatusFollowsContactMode(), pageSize: PAGE_SIZE, maxPages: MAX_PAGES, writeCap: WRITE_CAP, ...options,
   };
   if (!APPLY[mode]) return { skipped: 'gate_off' };
 
   const results = { mode, scanned: 0, candidates: 0, moved: 0, byEvidence: {}, skipped: {}, errors: 0, moves: [] };
-  const leads = await candidateLeadsQuery(dbi, now)
-    .orderBy('first_contact_at', 'desc').orderBy('id', 'desc').limit(scanCap)
-    .select('id', 'customer_id', 'phone', 'email', 'first_contact_at');
-  results.scanned = leads.length;
-  const verdicts = await judgeLeads(dbi, leads);
+  let cursor = resumeAfter;
+  resumeAfter = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    const leads = await candidateLeadsQuery(dbi, now, cursor)
+      .orderBy('first_contact_at', 'desc').orderBy('id', 'desc').limit(pageSize)
+      .select('id', 'customer_id', 'phone', 'email', 'first_contact_at', dbi.raw('first_contact_at::text as cursor_at'));
+    if (!leads.length) break;
+    cursor = { at: leads[leads.length - 1].cursor_at, id: leads[leads.length - 1].id };
+    if (leads.length === pageSize && page === maxPages - 1) resumeAfter = cursor;
+    results.scanned += leads.length;
+    const verdicts = await judgeLeads(dbi, leads);
 
-  for (const lead of leads) {
-    const verdict = verdicts.get(String(lead.id));
-    if (verdict.skip) { tally(results.skipped, verdict.skip); continue; }
-    results.candidates += 1;
-    if (results.moved >= writeCap) { tally(results.skipped, 'write_cap'); continue; }
-    try {
-      const outcome = await APPLY[mode](dbi, lead, verdict);
-      if (!outcome.contacted) { tally(results.skipped, outcome.reason); continue; }
-      results.moved += 1;
-      tally(results.byEvidence, verdict.evidenceType);
-      results.moves.push({ leadId: lead.id, evidenceType: verdict.evidenceType });
-    } catch (err) {
-      results.errors += 1;
-      logger.warn(`[lead-contact-sync] lead ${lead.id} left new: ${err.code || err.name || 'error'}`);
+    for (const lead of leads) {
+      const verdict = verdicts.get(String(lead.id));
+      if (verdict.skip) { tally(results.skipped, verdict.skip); continue; }
+      results.candidates += 1;
+      if (results.moved >= writeCap) { tally(results.skipped, 'write_cap'); continue; }
+      try {
+        const outcome = await APPLY[mode](dbi, lead, verdict);
+        if (!outcome.contacted) { tally(results.skipped, outcome.reason); continue; }
+        results.moved += 1;
+        tally(results.byEvidence, verdict.evidenceType);
+        results.moves.push({ leadId: lead.id, evidenceType: verdict.evidenceType });
+      } catch (err) {
+        results.errors += 1;
+        logger.warn(`[lead-contact-sync] lead ${lead.id} left new: ${err.code || err.name || 'error'}`);
+      }
     }
+    if (leads.length < pageSize) break;
   }
 
   logger.info(`[lead-contact-sync] mode=${mode} scanned=${results.scanned} moved=${results.moved} errors=${results.errors} byEvidence=${JSON.stringify(results.byEvidence)} skipped=${JSON.stringify(results.skipped)}`);
@@ -344,5 +369,5 @@ module.exports = {
   candidateLeadsQuery,
   PERFORMED_BY,
   LOOKBACK_DAYS,
-  _test: { usablePhoneKey, leadEmail },
+  _test: { usablePhoneKey, leadEmail, resumeAfter: () => resumeAfter, resetResume: () => { resumeAfter = null; } },
 };

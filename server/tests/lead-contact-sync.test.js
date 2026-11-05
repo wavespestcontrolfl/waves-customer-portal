@@ -50,7 +50,10 @@ const sharing = (fields = {}) => ({ id: 'lead-2', customer_id: null, email: null
 
 const run = (script, mode = 'true') => runLeadContactSync({ dbi: fakeDb(script), mode, now: T(60) });
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  _test.resetResume();
+});
 
 describe('lead contact sync: gate', () => {
   test('off touches nothing', async () => {
@@ -90,6 +93,7 @@ describe('lead contact sync: moving a lead', () => {
     expect(result.moved).toBe(1);
     expect(markLeadContactedFromEvidence).toHaveBeenCalledWith(expect.objectContaining({
       leadId: 'lead-1', customerId: null, evidenceType: 'staff_text', evidenceId: 'sms-1', respondedAt: T(7),
+      identity: { phoneKey: '9415550100' },
     }));
   });
 
@@ -105,7 +109,9 @@ describe('lead contact sync: moving a lead', () => {
       leads: [[lead({ phone: null, email: 'Pat@Example.invalid' })], []],
       emails: [{ id: 'mail-1', gmail_thread_id: 't', to_address: 'Pat Sample <pat@example.invalid>', cc_address: '', bcc_address: '', at: T(30) }],
     });
-    expect(markLeadContactedFromEvidence).toHaveBeenCalledWith(expect.objectContaining({ evidenceType: 'staff_email', evidenceId: 'mail-1' }));
+    expect(markLeadContactedFromEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      evidenceType: 'staff_email', evidenceId: 'mail-1', identity: { email: 'pat@example.invalid' },
+    }));
   });
 
   test('an email that also names another recipient only counts when the address is in the list', async () => {
@@ -193,6 +199,33 @@ describe('lead contact sync: what does not count', () => {
     const result = await runLeadContactSync({ dbi: fakeDb({ leads: [leads, []], sms_log: sms }), mode: 'true', now: T(60), writeCap: 2 });
     expect(result.moved).toBe(2);
     expect(result.skipped.write_cap).toBe(1);
+  });
+});
+
+describe('lead contact sync: walking a backlog across runs', () => {
+  const two = { pageSize: 2, maxPages: 1 };
+  const runPaged = (script) => runLeadContactSync({ dbi: fakeDb(script), mode: 'true', now: T(60), ...two });
+
+  test('a run that stops at its page cap resumes after that page; the walk restarts at the newest once it ends', async () => {
+    const newest = [lead({ id: 'n1', phone: '(941) 555-0111' }), lead({ id: 'n2', phone: '(941) 555-0112', first_contact_at: T(-1), cursor_at: 'cur-n2' })];
+    const older = lead({ id: 'old', phone: '(941) 555-0100', first_contact_at: T(-5) });
+    // Run 1: a full page of leads with no evidence (leads read, then the shared-identity read).
+    const first = await runPaged({ leads: [newest, []] });
+    expect(first.moved).toBe(0);
+    expect(_test.resumeAfter()).toMatchObject({ id: 'n2', at: 'cur-n2' });
+    // Run 2 resumes after n2: the older lead has a delivered staff text and moves.
+    const second = await runPaged({ leads: [[older], []], sms_log: [text()] });
+    expect(second.moved).toBe(1);
+    expect(markLeadContactedFromEvidence).toHaveBeenCalledWith(expect.objectContaining({ leadId: 'old' }));
+    // The end of the walk (a short page) clears the place: the next run starts from the newest.
+    expect(_test.resumeAfter()).toBe(null);
+  });
+
+  test('an empty page ends the walk and clears the place', async () => {
+    await runPaged({ leads: [[lead({ id: 'a' }), lead({ id: 'b' })], []] });
+    expect(_test.resumeAfter()).not.toBe(null);
+    await runPaged({ leads: [[], []] });
+    expect(_test.resumeAfter()).toBe(null);
   });
 });
 

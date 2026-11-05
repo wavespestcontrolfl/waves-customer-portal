@@ -20,7 +20,8 @@ jest.mock('../services/lead-funnel-bridge', () => ({
   bridgeLeadFunnelStage: jest.fn(async () => ({ updated: 0 })),
 }));
 
-const { runLeadContactSync } = require('../services/lead-contact-sync');
+const { runLeadContactSync, _test } = require('../services/lead-contact-sync');
+const leadLink = require('../services/lead-estimate-link');
 
 const NOW = new Date('2026-11-04T18:00:00Z');
 const AT = (minutes) => new Date(Date.UTC(2026, 10, 4, 14, minutes, 0));
@@ -40,6 +41,7 @@ jest.setTimeout(30000);
     await database.raw(`ALTER TABLE "${schema}".lead_activities ALTER COLUMN created_at SET DEFAULT now()`);
     mockConn = database;
   });
+  beforeEach(() => _test.resetResume());
   afterEach(async () => {
     for (const table of tables) await database.raw('TRUNCATE TABLE ??.??', [schema, table]);
   });
@@ -205,5 +207,80 @@ jest.setTimeout(30000);
     await staffText();
     expect((await sync()).moved).toBe(1);
     expect((await sync()).scanned).toBe(0);
+  });
+
+  // Staff correct the lead (or a person reopens it) AFTER the sweep judged it and BEFORE the
+  // writer takes the row lock: the writer re-checks under the lock and moves nothing.
+  async function raceBetweenJudgeAndWrite(change) {
+    const writer = leadLink.markLeadContactedFromEvidence;
+    const spy = jest.spyOn(leadLink, 'markLeadContactedFromEvidence').mockImplementation(async (options) => {
+      await change();
+      return writer(options);
+    });
+    try {
+      return await sync();
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  test('a phone corrected between judging and writing moves nothing', async () => {
+    const l = await lead();
+    await staffText();
+    const result = await raceBetweenJudgeAndWrite(() => database('leads').where({ id: l.id }).update({ phone: '+19415550188' }));
+    expect(result.moved).toBe(0);
+    expect(result.skipped).toEqual({ identity_changed: 1 });
+    expect((await read(l.id)).status).toBe('new');
+    expect(await database('lead_activities')).toHaveLength(0);
+  });
+
+  test('an email corrected between judging and writing moves nothing', async () => {
+    const l = await lead({ phone: null, email: 'pat@example.invalid' });
+    await database('emails').insert({
+      id: randomUUID(), gmail_id: 'g-2', gmail_thread_id: 'th-2', from_address: 'office@example.invalid',
+      to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', label_ids: JSON.stringify(['SENT']), received_at: AT(20),
+    });
+    const result = await raceBetweenJudgeAndWrite(() => database('leads').where({ id: l.id }).update({ email: 'other@example.invalid' }));
+    expect(result.skipped).toEqual({ identity_changed: 1 });
+    expect((await read(l.id)).status).toBe('new');
+  });
+
+  test('a manual return to new landing between judging and writing moves nothing', async () => {
+    const l = await lead();
+    await staffText();
+    const result = await raceBetweenJudgeAndWrite(() => database('lead_activities').insert({
+      lead_id: l.id, activity_type: 'status_change', description: 'Status: contacted \u2192 new', performed_by: 'Admin',
+    }));
+    expect(result.skipped).toEqual({ reopened_by_person: 1 });
+    expect((await read(l.id)).status).toBe('new');
+  });
+
+  test('a corrected phone that still matches the evidence moves the lead as usual', async () => {
+    const l = await lead();
+    await staffText();
+    const result = await raceBetweenJudgeAndWrite(() => database('leads').where({ id: l.id }).update({ phone: '(941) 555-0100', last_name: 'Fixed' }));
+    expect(result.moved).toBe(1);
+    expect((await read(l.id)).status).toBe('contacted');
+  });
+
+  test('250 new leads: the newest 200 have no evidence and an older one does; the second run reaches it', async () => {
+    const rows = Array.from({ length: 250 }, (_, i) => {
+      const at = AT(-i);
+      return {
+        id: randomUUID(), status: 'new', lead_type: 'form', first_name: 'Pat', last_name: 'Sample',
+        phone: `+1941555${String(1000 + i)}`, customer_id: null, first_contact_at: at, created_at: at, updated_at: at,
+      };
+    });
+    await database.batchInsert('leads', rows, 100);
+    const oldest = rows[249];
+    await staffText({ to_phone: oldest.phone, created_at: AT(-249 + 5) });
+    const first = await sync();
+    expect(first.scanned).toBe(200);
+    expect(first.moved).toBe(0);
+    const second = await sync();
+    expect(second.moved).toBe(1);
+    expect((await read(oldest.id)).status).toBe('contacted');
+    // The walk reached the end: the next run starts from the newest again.
+    expect((await sync()).scanned).toBe(200);
   });
 });
