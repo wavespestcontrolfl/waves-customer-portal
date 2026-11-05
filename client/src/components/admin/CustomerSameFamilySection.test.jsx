@@ -90,3 +90,19 @@ it('the properties panel mounts the section for an editor and nothing for a view
   render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
   expect(await screen.findByTestId('same-family-section')).toBeInTheDocument();
 });
+
+it('a profile left alone in its family (merge or delete) still shows Unlink, not "Not linked"', async () => {
+  familyState = { familyId: 'f1', members: [self] };
+  render(<CustomerSameFamilySection customerId="c1" />);
+  expect(await screen.findByTestId('same-family-alone')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Unlink' })).toBeInTheDocument();
+  expect(screen.queryByText('Not linked to another profile.')).not.toBeInTheDocument();
+});
+
+it('a profile in no family says so and offers no Unlink', async () => {
+  familyState = { familyId: null, members: [] };
+  render(<CustomerSameFamilySection customerId="c1" />);
+  expect(await screen.findByText('Not linked to another profile.')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Unlink' })).not.toBeInTheDocument();
+  expect(screen.queryByTestId('same-family-alone')).not.toBeInTheDocument();
+});

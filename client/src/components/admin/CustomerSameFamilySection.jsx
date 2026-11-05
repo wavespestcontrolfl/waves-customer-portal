@@ -58,6 +58,7 @@ function LinkPicker({ query, onQuery, searchFailed, results, picked, onPick, bus
 
 export default function CustomerSameFamilySection({ customerId }) {
   const [members, setMembers] = useState([]);
+  const [familyId, setFamilyId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -79,7 +80,10 @@ export default function CustomerSameFamilySection({ customerId }) {
     setLinking(false);
     adminFetch(`/admin/customers/${customerId}/multi-home-family`)
       .then((d) => {
-        if (!cancelled) setMembers(Array.isArray(d?.members) ? d.members : []);
+        if (!cancelled) {
+          setMembers(Array.isArray(d?.members) ? d.members : []);
+          setFamilyId(d?.familyId || null);
+        }
       })
       .catch((e) => {
         if (!cancelled) setLoadErr(e.message || "Could not load the family link");
@@ -133,6 +137,7 @@ export default function CustomerSameFamilySection({ customerId }) {
         body: JSON.stringify({ otherCustomerId: picked.id }),
       });
       setMembers(Array.isArray(d?.members) ? d.members : []);
+      setFamilyId(d?.familyId || null);
       closeLink();
     } catch (err) {
       setActionErr(err.message || "Could not link the profile");
@@ -148,6 +153,7 @@ export default function CustomerSameFamilySection({ customerId }) {
     try {
       const d = await adminFetch(`/admin/customers/${customerId}/multi-home-family`, { method: "DELETE" });
       setMembers(Array.isArray(d?.members) ? d.members : []);
+      setFamilyId(d?.familyId || null);
       setConfirmingUnlink(false);
     } catch (err) {
       setActionErr(err.message || "Could not remove the family link");
@@ -175,11 +181,17 @@ export default function CustomerSameFamilySection({ customerId }) {
         <div className="px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{loadErr}</div>
       )}
 
-      {!loading && !loadErr && others.length === 0 && !linking && (
+      {!loading && !loadErr && !familyId && !linking && (
         <div className="text-ui-label text-ink-secondary">Not linked to another profile.</div>
       )}
 
-      {!loading && !loadErr && others.length > 0 && (
+      {!loading && !loadErr && familyId && others.length === 0 && (
+        <div className="text-ui-label text-ink-secondary" data-testid="same-family-alone">
+          In a family, but no other profile in it is still on file (merged or deleted). Unlink to clear it, then link again.
+        </div>
+      )}
+
+      {!loading && !loadErr && familyId && (
         <div className="divide-y divide-zinc-200/60">
           {others.map((m) => (
             <div key={m.id} className="py-2" data-testid="same-family-member">
