@@ -99,7 +99,7 @@ describe('candidateFromSlot — territory rule', () => {
 });
 
 describe('a grouped move keeps every member in its own territory (Codex r1 P2 on #7182)', () => {
-  const { unitTerritoryTechnician, NO_SINGLE_TERRITORY } = _internals;
+  const { unitTerritory, NO_SINGLE_TERRITORY } = _internals;
   beforeEach(() => { territory.territoryCoverFor.mockReset().mockResolvedValue(null); });
   const geo = { lat: 27.05, lng: -82.4 };
   const lawnRow = { id: 'visit-lawn', technician_id: null, customer_id: 'cust-1', service_id: 'svc-lawn', service_type: 'Lawn Fertilization' };
@@ -114,7 +114,7 @@ describe('a grouped move keeps every member in its own territory (Codex r1 P2 on
     const pestRow = { id: 'visit-pest', technician_id: null, customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_address_zip: '34293' };
     lineTech.liveServiceLine.mockImplementation(async (_db, { serviceType }) => (/pest/i.test(serviceType) ? 'general' : 'lawn'));
     territory.territoryTechnicianFor.mockResolvedValue('tech-south');
-    await expect(unitTerritoryTechnician(lawnRow, geo, ctxWith([pestRow]))).resolves.toBe('tech-south');
+    await expect(unitTerritory(lawnRow, geo, ctxWith([pestRow]))).resolves.toEqual({ techId: 'tech-south', coverId: null });
   });
 
   test('two members in two territories: no single technician, so every slot drops', async () => {
@@ -122,14 +122,14 @@ describe('a grouped move keeps every member in its own territory (Codex r1 P2 on
     const northPest = { ...southPest, id: 'visit-b', customer_id: 'cust-1', service_address_zip: '34219' };
     lineTech.liveServiceLine.mockResolvedValue('general');
     territory.territoryTechnicianFor.mockImplementation(async (_db, place) => (place.zip === '34219' ? 'tech-north' : 'tech-south'));
-    await expect(unitTerritoryTechnician(southPest, geo, ctxWith([northPest]))).resolves.toBe(NO_SINGLE_TERRITORY);
+    await expect(unitTerritory(southPest, geo, ctxWith([northPest]))).resolves.toEqual({ techId: NO_SINGLE_TERRITORY, coverId: null });
   });
 
   test('no group: the visit\'s own territory, with no sibling read', async () => {
     lineTech.liveServiceLine.mockResolvedValue('general');
     territory.territoryTechnicianFor.mockResolvedValue('tech-south');
     const ctx = { db: jest.fn() };
-    await expect(unitTerritoryTechnician({ ...lawnRow, service_type: 'Pest' }, geo, ctx)).resolves.toBe('tech-south');
+    await expect(unitTerritory({ ...lawnRow, service_type: 'Pest' }, geo, ctx)).resolves.toEqual({ techId: 'tech-south', coverId: null });
     expect(ctx.db).not.toHaveBeenCalled();
   });
 });

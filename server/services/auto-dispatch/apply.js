@@ -558,7 +558,7 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   };
 }
 
-// The candidate side restricts the whole unit (candidate-slots unitTerritoryTechnician); this re-checks the
+// The candidate side restricts the whole unit (candidate-slots unitTerritory); this re-checks the
 // rows at apply (the moving visit in makeMoveGuard, its committed siblings in makeMemberGuard), so a move
 // never gives a visit another territory's technician (its line's cover technician may take it). No receiving technician: nobody gets the visit.
 async function assertInOwnTerritory(rows, targetTechId, refuse) {

@@ -256,7 +256,7 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
 // unreadable read, FAILS CLOSED (Codex r7): scoring the current day on the
 // unassigned rows alone would understate it the same way, so the evaluation
 // is skipped (CURRENT_DAY_TECH_UNRESOLVED), never guessed. A visit with a
-// territory technician (GATE_TERRITORY_NIGHT_RUN, unitTerritoryTechnician)
+// territory technician (GATE_TERRITORY_NIGHT_RUN, unitTerritory)
 // is read on that technician's day alone, the only technician candidate
 // admission lets it move to (or, on a day he is off or absent, the line's
 // cover technician's day): a closer route it may not take must not set the
@@ -1213,10 +1213,6 @@ async function unitTerritory(service, geo, ctx) {
   return { techId: siblingIds.length ? [...named][0] : members[0].techId, coverId: sameCover ? covers[0] : null };
 }
 
-async function unitTerritoryTechnician(service, geo, ctx) {
-  return (await unitTerritory(service, geo, ctx)).techId;
-}
-
 async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
@@ -1384,7 +1380,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    candidateFromSlot, unitTerritoryTechnician, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
+    candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
