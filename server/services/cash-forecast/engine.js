@@ -340,12 +340,14 @@ function expectedFlows(i, c) {
 }
 
 // Spending from the last 8 complete weeks, a seventh of the weekly rate each day. A card payoff plan
-// stands in for the off-feed card payments from its first date (its own payments are planned items).
+// stands in for the off-feed card payments only between its first and last dates (its own payments
+// are planned items); before or after it, the trailing line applies (the safe side).
 function spendFlows(i, c) {
+  const covered = (d) => c.payoffs.some((it) => d >= it.first_date && !(it.last_date < d));
   return c.windowDays.flatMap((d) => [
     flow(d, 'ai_software', c.weekly.ai_software / 7),
     flow(d, 'other_spending', c.weekly.other_spending / 7),
-    flow(d, 'card_payments_off_feed', d < c.payoffFrom ? c.weekly.card_payments_off_feed / 7 : 0),
+    flow(d, 'card_payments_off_feed', covered(d) ? 0 : c.weekly.card_payments_off_feed / 7),
   ]);
 }
 
@@ -414,7 +416,6 @@ function context(i) {
     perVisit: i.trailing.visits > 0 ? spend.products_fuel / i.trailing.visits : 0,
     items,
     payoffs,
-    payoffFrom: payoffs.map((it) => it.first_date).sort()[0] || '9999-12-31',
     missing: [...i.missing],
     lateBeyond: [],
   };

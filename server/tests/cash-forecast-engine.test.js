@@ -322,6 +322,15 @@ describe('computeForecast', () => {
     expect(r.lowest.booked_with_hire.week_start).toBe('2027-01-25');
   });
 
+  test('after a payoff plan ends, the trailing card payment line comes back', () => {
+    const lines = [{ id: 'p', day: '2026-10-05', account: 'checking-b', direction: 'debit', amount: 1600, description: 'CAPITAL ONE', category: null }];
+    const r = computeForecast(base({ bankLines: lines, items: [
+      { kind: 'card_payoff', label: 'Short plan', amount_cents: 50000, cadence: 'once', first_date: '2026-11-09', last_date: '2026-11-15', active: true },
+    ] }));
+    expect(r.weeks[1].money_out.card_payments_off_feed).toBe(0); // Nov 9-15: the plan
+    expect(r.weeks[2].money_out.card_payments_off_feed).toBe(200); // after it
+  });
+
   test('a payoff plan that has ended leaves the card payment line in', () => {
     const lines = [{ id: 'p', day: '2026-10-05', account: 'checking-b', direction: 'debit', amount: 1600, description: 'CAPITAL ONE', category: null }];
     const r = computeForecast(base({ bankLines: lines, items: [
