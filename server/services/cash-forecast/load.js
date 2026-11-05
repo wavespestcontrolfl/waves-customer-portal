@@ -320,7 +320,10 @@ async function readPayroll(database, { from, to }) {
       (COALESCE(pc.net_cents, 0) + COALESCE(pc.hsa_employer_cents, 0)) AS net_cents,
       (pc.gross_cents + COALESCE(pc.employer_social_security_cents, 0) + COALESCE(pc.employer_medicare_cents, 0)
         + COALESCE(pc.futa_cents, 0) + COALESCE(pc.fl_reemployment_cents, 0) + COALESCE(pc.simple_employer_cents, 0)
-        + COALESCE(pc.hsa_employer_cents, 0)) AS full_cents
+        + COALESCE(pc.hsa_employer_cents, 0)) AS full_cents,
+      -- already out of the bank: sent or paid by paper check on the portal's record, or a matched bank line
+      (EXISTS (SELECT 1 FROM payroll_payments pp WHERE pp.check_id = pc.id AND pp.state IN ('sent', 'paper'))
+        OR EXISTS (SELECT 1 FROM bank_transactions bt WHERE bt.matched_payroll_check_id = pc.id)) AS paid_out
     FROM payroll_checks pc JOIN payroll_runs pr ON pr.id = pc.run_id
     WHERE pc.pay_date BETWEEN ?::date AND ?::date AND pr.status = 'finalized' AND pr.voided_at IS NULL
       AND COALESCE(pc.status, '') <> 'void'
@@ -550,7 +553,8 @@ async function loadForecastInput({
     feedCards: pool.feedCards,
     payroll: [
       ...overduePay.map((p) => ({ payDay: d.today, cashCostUsd: usd(p.net_cents) / 100 })),
-      ...payroll.filter((p) => p.pay_day >= d.today).map((p) => ({ payDay: p.pay_day, cashCostUsd: usd(p.net_cents) / 100 })),
+      // a check due today or later that already went out is in the opening balance
+      ...payroll.filter((p) => p.pay_day >= d.today && !p.paid_out).map((p) => ({ payDay: p.pay_day, cashCostUsd: usd(p.net_cents) / 100 })),
       ...projectPayroll(payroll, { today: d.today, to: d.windowEnd }),
     ],
     taxRows: taxRows.filter((t) => t.amount_due !== null && t.amount_due !== undefined)

@@ -219,6 +219,7 @@ describe('loadForecastInput', () => {
     expect(applyOpenSelfPayPredicates).toHaveBeenCalled();
     const pay = database.calls.find((c) => /FROM payroll_checks pc/.test(c.sql));
     expect(pay.sql).toMatch(/pc\.net_cents/);
+    expect(pay.sql).toMatch(/pp\.state IN \('sent', 'paper'\)\)\s+OR EXISTS \(SELECT 1 FROM bank_transactions bt WHERE bt\.matched_payroll_check_id = pc\.id\)\) AS paid_out/);
     expect(pay.bindings).toEqual(['2026-10-01', '2027-01-31']); // 35 days back, for the weekly projection
     // a check past its pay date is still owed only on the portal's own record: a payment row, none sent or
     // paid by paper, and no bank line matched
@@ -298,6 +299,8 @@ describe('loadForecastInput', () => {
         [/FROM payroll_checks pc/, [
           { technician_id: 't2', pay_day: '2026-10-30', net_cents: 60000, full_cents: 90000 },
           { technician_id: 't1', pay_day: '2026-11-13', net_cents: 81234, full_cents: 100000 },
+          // sent early, before its pay date: already in the opening balance, but still a check for the projection
+          { technician_id: 't3', pay_day: '2026-11-06', net_cents: 50000, full_cents: 70000, paid_out: true },
         ]],
         [/WITH last AS/, [{ account_label: 'old-card', last_day: '2026-10-27', debits_30d: 900 }]],
       ],

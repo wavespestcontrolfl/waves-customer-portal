@@ -331,6 +331,16 @@ describe('computeForecast', () => {
     expect(r.weeks[2].money_out.card_payments_off_feed).toBe(200); // after it
   });
 
+  test('a one-time payoff with no last date covers its own day only, then the card payment line comes back', () => {
+    const lines = [{ id: 'p', day: '2026-10-05', account: 'checking-b', direction: 'debit', amount: 1400, description: 'CAPITAL ONE', category: null }];
+    const r = computeForecast(base({ bankLines: lines, items: [
+      { kind: 'card_payoff', label: 'Lump payoff', amount_cents: 300000, cadence: 'once', first_date: '2026-11-10', last_date: null, active: true },
+    ] }));
+    expect(r.weeks[1].money_out.card_payments_off_feed).toBe(150); // Nov 9-15 less Nov 10 (175 a week, 25 a day)
+    expect(r.weeks[2].money_out.card_payments_off_feed).toBe(175);
+    expect(r.weeks[1].money_out.planned).toBe(3000);
+  });
+
   test('a payoff plan that has ended leaves the card payment line in', () => {
     const lines = [{ id: 'p', day: '2026-10-05', account: 'checking-b', direction: 'debit', amount: 1600, description: 'CAPITAL ONE', category: null }];
     const r = computeForecast(base({ bankLines: lines, items: [

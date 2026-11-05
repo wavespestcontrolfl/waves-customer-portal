@@ -337,11 +337,15 @@ function expectedFlows(i, c) {
   });
 }
 
+// The last day a card payoff plan stands in for the off-feed card payments: its last date; a one-time
+// payoff with none covers its own day only; a repeating plan with none has no end.
+const payoffEnd = (it) => it.last_date || (it.cadence === 'once' ? it.first_date : null);
+
 // Spending from the last 8 complete weeks, a seventh of the weekly rate each day. A card payoff plan
-// stands in for the off-feed card payments only between its first and last dates (its own payments
+// stands in for the off-feed card payments only between its first and last days (its own payments
 // are planned items); before or after it, the trailing line applies (the safe side).
 function spendFlows(i, c) {
-  const covered = (d) => c.payoffs.some((it) => d >= it.first_date && !(it.last_date < d));
+  const covered = (d) => c.payoffs.some((it) => d >= it.first_date && !(payoffEnd(it) && payoffEnd(it) < d));
   return c.windowDays.flatMap((d) => [
     flow(d, 'ai_software', c.weekly.ai_software / 7),
     flow(d, 'other_spending', c.weekly.other_spending / 7),
@@ -390,7 +394,7 @@ function context(i) {
   const spend = classifySpend(i.bankLines, { pool: i.poolAccounts, feedCards: i.feedCards, from: trailingFrom, to: trailingTo }).totals;
   const items = i.items.filter((it) => it.active !== false);
   // A payoff plan that has ended stands in for nothing.
-  const payoffs = items.filter((it) => it.kind === 'card_payoff' && !(it.last_date < i.today));
+  const payoffs = items.filter((it) => it.kind === 'card_payoff' && !(payoffEnd(it) && payoffEnd(it) < i.today));
   const visit = collectionCurve(i.visitCohort);
   const invoice = collectionCurve(i.invoiceCohort);
   return {
