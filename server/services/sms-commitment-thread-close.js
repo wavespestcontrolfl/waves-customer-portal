@@ -26,6 +26,7 @@ const { VERSION, stringifySmsEvidence } = require('./sms-operational-extractor')
 const { hashExtractionSource } = require('./data-hygiene/source-extraction-store');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { operatorReplySql } = require('./staff-contact');
+const { phoneIdentitySql } = require('./sms-response-policy');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 
 // Bump to re-check every cached thread verdict once (the policy is part of the
@@ -76,8 +77,18 @@ function humanTextQueries(conn, message, now) {
   const peer = tenDigits(message.direction === 'inbound' ? message.from_phone : message.to_phone);
   const anyPhone = message.any_customer_phone === true;
   if (peer.length < 10 && !anyPhone) return null;
-  const phoneOf = (column) => `RIGHT(regexp_replace(${column}, '[^0-9]', '', 'g'), 10) = ?`;
-  const onPeer = (q, column) => (anyPhone ? q : q.whereRaw(phoneOf(column), [peer]));
+  // A customer's thread is matched on the last ten digits, as on main. A call promise with no customer record is matched
+  // on the canonical phone identity (message.phone_identity, as loadPhoneEvidence does): with no customer id to scope
+  // by, a shared last ten digits (a +44 number and a NANP one) must never read as the same caller.
+  const PEER_MATCH = {
+    true: (column) => [`${phoneIdentitySql(column)} = ?`, message.phone_identity],
+    false: (column) => [`RIGHT(regexp_replace(${column}, '[^0-9]', '', 'g'), 10) = ?`, peer],
+  };
+  const onPeer = (q, column) => {
+    if (anyPhone) return q;
+    const [sql, value] = PEER_MATCH[Boolean(message.phone_identity)](column);
+    return q.whereRaw(sql, [value]);
+  };
   // Recruiting threads (applicant texts) are owner-only and never evidence.
   // A call promise with no customer record (message.phone_identity, call-promise-phone-evidence.js) is read by the
   // phone alone: no customer id to scope by, and the peer number is required (anyPhone is never set for it).

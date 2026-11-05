@@ -63,10 +63,10 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
   });
 
   // One promise from a 55 second call, three days ago, from a number with no customer record: the Nov 4 shape.
-  async function world({ kind = 'schedule_visit', callAgeDays = 3, description = null } = {}) {
+  async function world({ kind = 'schedule_visit', callAgeDays = 3, description = null, phone: forcedPhone = null } = {}) {
     seq += 1;
     const n = `${Date.now().toString().slice(-5)}${String(seq).padStart(3, '0')}`.replace(/4111/g, '4101');
-    const phone = `+1555${n.padStart(7, '0').slice(-7)}`;
+    const phone = forcedPhone || `+1555${n.padStart(7, '0').slice(-7)}`;
     const startedAt = new Date(Date.now() - callAgeDays * DAY);
     const [call] = await db('call_log').insert({
       twilio_call_sid: `CA${'7'.repeat(20)}${n}`.slice(0, 34), direction: 'inbound', from_phone: phone, to_phone: OUR_NUMBER, status: 'completed',
@@ -360,6 +360,64 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
       await close.runCallPromiseAiClose({ conn: db, now: new Date() });
       expect(modelCalls()).toBe(0);
       close.resetNoCustomerResume();
+    });
+  });
+
+  describe('a number that shares its last ten digits is another caller', () => {
+    // A NANP number and a +44 number can end in the same ten digits. Without a customer id to scope by, only the canonical
+    // phone identity tells them apart: texts and calls of one are never evidence for, or a hold on, the other's promise.
+    const twins = async () => {
+      const w = await world();
+      return { w, nanp: w.phone, intl: `+44${w.phone.slice(-10)}` };
+    };
+    const humanText = (over) => ({ direction: 'inbound', message_type: null, status: 'received', metadata: null, message_body: 'Got it, thanks', ...over });
+
+    test('the record check: a person\'s text and a live call with the +44 twin are no evidence for the NANP promise', async () => {
+      const { w, intl } = await twins();
+      await addSms(w, { to_phone: intl });
+      await addCall(w, { from_phone: intl });
+      const result = await run(w);
+      expect(result).toMatchObject({ model_calls: 0, closed: 0 });
+      expect(modelCalls()).toBe(0);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('and the other way round: a promise made on the +44 number takes nothing from the NANP twin', async () => {
+      const { w, nanp, intl } = await twins();
+      await db('call_log').where({ id: w.call.id }).update({ from_phone: intl });
+      await addSms(w, { to_phone: nanp });
+      await addCall(w, { from_phone: nanp });
+      expect(await run(w)).toMatchObject({ model_calls: 0, closed: 0 });
+      expect(modelCalls()).toBe(0);
+    });
+
+    test('the thread check: the twin\'s "got it, thanks" text is not the caller\'s confirmation', async () => {
+      const { w, intl } = await twins();
+      const reply = await addSms(w, humanText({ from_phone: intl, to_phone: OUR_NUMBER }));
+      say(w, (payload) => (payload.text.includes(THREAD_PROMPT)
+        ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${reply}`, quote: 'Got it' } }
+        : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
+      expect(await run(w)).toMatchObject({ model_calls: 0, closed: 0 });
+      expect(modelCalls()).toBe(0);
+      // The same text from the caller's own number is read (the control).
+      const own = await world();
+      const ownReply = await addSms(own, humanText({ from_phone: own.phone, to_phone: OUR_NUMBER }));
+      say(own, (payload) => (payload.text.includes(THREAD_PROMPT)
+        ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${ownReply}`, quote: 'Got it' } }
+        : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
+      expect(await run(own)).toMatchObject({ closed: 1 });
+    });
+
+    test('the hold: a later text from the twin does not hold a close the caller\'s own call earned, and revalidation reads the same way', async () => {
+      const { w, intl } = await twins();
+      const later = await addCall(w);
+      await addSms(w, humanText({ from_phone: intl, to_phone: OUR_NUMBER, created_at: after(w, 200) }));
+      say(w, fulfilledBy(`call:${later}`, 'walkthrough at two PM tomorrow'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      // Re-judged (refreshFulfillment reads the hold again): the twin's text still holds nothing.
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
     });
   });
 

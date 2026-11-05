@@ -64,6 +64,34 @@ describe('no-customer candidates (call-promise-ai-close.js)', () => {
   });
 });
 
+describe('the thread and hold queries by phone (sms-commitment-thread-close.js humanTextQueries)', () => {
+  const sqlOf = (message) => {
+    const raw = [];
+    const chain = new Proxy(() => {}, {
+      get: (_t, prop) => {
+        if (prop === 'then') return undefined;
+        if (prop === 'modify') return (fn) => { fn(chain); return chain; };
+        return (...args) => { if (prop === 'whereRaw') raw.push(args); return chain; };
+      },
+    });
+    const queries = require('../services/sms-commitment-thread-close').humanTextQueries(() => chain, message, null);
+    queries.inbound();
+    queries.outbound();
+    return raw.map(([sql]) => String(sql));
+  };
+  const base = { id: 'x', created_at: new Date(), direction: 'inbound', from_phone: '+445555550142', to_phone: '+15555550100' };
+
+  test('a promise judged by phone matches the canonical identity, never the last ten digits', () => {
+    const phoneKeyed = sqlOf({ ...base, customer_id: null, phone_identity: '+445555550142' });
+    expect(phoneKeyed.some((sql) => sql.includes('REGEXP_REPLACE(COALESCE(from_phone'))).toBe(true);
+    expect(phoneKeyed.some((sql) => sql.includes('RIGHT(regexp_replace('))).toBe(false);
+  });
+  test('a customer\'s thread is matched as it is on main (last ten digits)', () => {
+    const customer = sqlOf({ ...base, customer_id: 'c1', any_customer_phone: false });
+    expect(customer.some((sql) => sql.includes('RIGHT(regexp_replace(from_phone'))).toBe(true);
+  });
+});
+
 describe('the daily model-call reservation (call-promise-phone-evidence.js)', () => {
   const evidence = () => require('../services/call-promise-phone-evidence');
   const logger = () => require('../services/logger');
