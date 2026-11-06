@@ -221,6 +221,8 @@ describe('scheduler wiring', () => {
     expect(fixedCronsAt(src, 23, 21)).toEqual(['21 23 * * *']);
     // text-name-spelling-check
     expect(fixedCronsAt(src, 23, 32)).toEqual(['32 23 * * *']);
+    // late-sent-bill-check
+    expect(fixedCronsAt(src, 23, 30)).toEqual(['30 23 * * *']);
     // The rule check itself: three hourly jobs run at minute 20.
     expect(fixedCronsAt(src, 23, 20).length).toBeGreaterThan(1);
   });
