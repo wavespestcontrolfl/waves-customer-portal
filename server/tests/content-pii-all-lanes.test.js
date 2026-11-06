@@ -138,3 +138,46 @@ describe('agent text no longer calls regex-redacted customer text "paraphrased"'
     expect(toolDescriptions).toHaveLength(2);
   });
 });
+
+// Codex #7646 r1: the customer-text name heuristic read owner-approved
+// competitors and cited public bodies as people, so the new editorial-lane
+// check held drafts that were eligible before. Those spans are exempt; a
+// customer's name next to them still holds the draft.
+describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
+  const PUBLIC = {
+    'an owner-approved competitor': 'Truly Nolen offers pest control in Bradenton.',
+    'an approved competitor alias': 'Massey Services and Orkin Pest Control both treat lawns in Sarasota.',
+    'a cited trade association': 'Data from the National Pest Management Association shows termites cost homeowners billions each year.',
+    'a university extension citation': 'The University of Florida IFAS Extension recommends inspecting mulch beds near the slab.',
+    'a state agency citation': 'The Florida Department of Agriculture and Consumer Services licenses every pest control operator.',
+  };
+
+  test.each(Object.entries(PUBLIC))('live: %s passes the check', (_label, body) => {
+    process.env[GATE] = 'true';
+    expect(evalLane(brief, body).checks.redaction_passed).toMatchObject({ ok: true });
+  });
+
+  test('live: a customer name beside a public body still holds the draft', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'John Smith at 4867 Maple Street called the Homeowners Association about the ants.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  test('live: a customer name in prose next to an approved competitor still holds the draft', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'My name is john smith and Truly Nolen never called me back.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  test('live: a customer surname that matches a one-word competitor alias still holds the draft', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'John Massey reported ants in Parrish last spring.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  test('live: the exemption does not reach the city-service lane check', () => {
+    process.env[GATE] = 'true';
+    const r = gate.evaluate({ body: 'Truly Nolen offers pest control in Bradenton.', frontmatter: {} }, { page_type: 'city-service', action_type: 'create_or_refresh_city_service_page' }, {});
+    expect(r.checks.redaction_passed).toBeDefined();
+  });
+});

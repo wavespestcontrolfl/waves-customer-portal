@@ -1139,7 +1139,61 @@ function checkRedactionPassedAllLanes(draft) {
   if (!require('../../config/feature-gates').contentPiiAllLanesLive()) {
     return { ok: true, reason: 'content_pii_all_lanes_gate_dark' };
   }
-  return checkRedactionPassed(draft);
+  return checkRedactionPassed(blankApprovedPublicEntitiesInDraft(draft));
+}
+
+// Editorial lanes name public entities the customer-text name heuristic reads
+// as people: owner-approved competitors ("Truly Nolen") and cited public
+// bodies ("National Pest Management Association") — Codex #7646 r1. Replace
+// exactly those spans with an allowlisted stand-in before the scan. Narrow on purpose: competitors only
+// when every alias resolves to an OWNER_APPROVED_AUTOPUBLISH_IDS record (the
+// competitor gate still owns every other business name), and organizations
+// only as a Title Case run that ENDS in an organization word, so "John Smith"
+// next to "Homeowners Association" still fails on John Smith.
+const PUBLIC_ORG_WORDS = 'Association|Society|Institute|University|Extension|Agency|Administration|Commission|Department|Foundation|Council|Bureau|Centers|Center|Centre|College';
+const PUBLIC_ORG_RE = new RegExp(
+  `\\b(?:[A-Z][\\w&/.'-]*\\s+){0,5}(?:${PUBLIC_ORG_WORDS})\\b(?:\\s+(?:of|for|and)\\s+(?:the\\s+)?[A-Z][\\w&/.'-]*(?:\\s+(?:and\\s+)?[A-Z][\\w&/.'-]*){0,3})?`,
+  'g',
+);
+const PUBLIC_ORG_EXACT = ['UF/IFAS', 'IFAS', 'NPMA', 'FDACS', 'EPA', 'USDA', 'CDC'];
+
+// A one-word alias is exempt only when it is a brand, never a common surname:
+// the approved list's bare 'massey' would otherwise clear "John Massey".
+const SINGLE_WORD_BRANDS = new Set(['orkin', 'terminix', 'trugreen', 'aptive', 'taexx']);
+
+function approvedCompetitorNames() {
+  const { COMPETITORS, OWNER_APPROVED_AUTOPUBLISH_IDS } = require('./competitor-facts');
+  return COMPETITORS
+    .filter((c) => OWNER_APPROVED_AUTOPUBLISH_IDS.includes(c.id))
+    .flatMap((c) => [c.name, ...(c.aliases || [])])
+    .filter((n) => n && (/\s/.test(n.trim()) || SINGLE_WORD_BRANDS.has(n.trim().toLowerCase())))
+    .sort((a, b) => b.length - a.length);
+}
+
+function blankApprovedPublicEntities(text) {
+  if (!text) return text;
+  // Each capitalized word becomes 'Waves' (on the redactor's NAME_ALLOWLIST)
+  // and connector words stay, so the text keeps its capitalization: the
+  // redactor's pii_confidence_low test reads the case ratio, and blanking
+  // the only capitalized words of a sentence tripped it.
+  const standIn = (span) => span.split(/(\s+)/).map((w) => (/^[A-Z]/.test(w) ? 'Waves' : w)).join('');
+  let out = String(text).replace(PUBLIC_ORG_RE, standIn);
+  for (const name of [...approvedCompetitorNames(), ...PUBLIC_ORG_EXACT]) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(^|[^\\w])(${escaped})(?![\\w])`, 'gi'), (m, pre, hit) => pre + standIn(hit));
+  }
+  return out;
+}
+
+function blankApprovedPublicEntitiesInDraft(draft) {
+  const fm = draft?.frontmatter || {};
+  const seo = (o) => ({
+    ...o,
+    ...['title', 'meta_description', 'metaTitle', 'metaDescription']
+      .filter((k) => typeof o[k] === 'string')
+      .reduce((acc, k) => ({ ...acc, [k]: blankApprovedPublicEntities(o[k]) }), {}),
+  });
+  return { ...seo(draft || {}), body: blankApprovedPublicEntities(draft?.body), frontmatter: seo(fm) };
 }
 
 function checkRedactionPassed(draft) {
