@@ -57,9 +57,35 @@ const CUSTOMER = {
 };
 let estimateRow;
 let customerRow;
+// scheduled_services rows the completed-assessment read can see: { status, when (completion instant) }.
+let visitRows;
+// A scheduled_services query stub that applies the query's own status filter and date floor (the whereRaw binding)
+// to visitRows, so the test proves the rule the SQL states: completed only, on or after the floor.
+function visitChain() {
+  const f = { status: null, since: null };
+  const chain = {};
+  chain.leftJoin = jest.fn(() => chain);
+  chain.where = jest.fn((col, val) => { if (col === 'scheduled_services.status') f.status = val; return chain; });
+  chain.whereRaw = jest.fn((_sql, bindings) => { f.since = bindings[0]; return chain; });
+  chain.first = jest.fn(async () => {
+    if (visitRows instanceof Error) throw visitRows;
+    return visitRows.find((r) => r.status === f.status && new Date(r.when) >= f.since);
+  });
+  return chain;
+}
+function tableChain(table) {
+  if (table === 'scheduled_services') return visitChain();
+  const chain = {};
+  for (const m of ['where', 'whereNull']) chain[m] = jest.fn(() => chain);
+  chain.first = jest.fn(async () => (table === 'estimates' ? estimateRow : table === 'customers' ? customerRow : undefined));
+  return chain;
+}
+const DAY = 24 * 60 * 60 * 1000;
+const CREATED = '2026-10-20T14:00:00Z';
+const daysBeforeCreated = (n) => new Date(new Date(CREATED).getTime() - n * DAY).toISOString();
 function estimate(overrides = {}) {
   return {
-    id: 'est-1', token: TOKEN, estimate_slug: 'EST-2026-0042', status: 'sent', archived_at: null,
+    id: 'est-1', token: TOKEN, estimate_slug: 'EST-2026-0042', status: 'sent', archived_at: null, created_at: CREATED,
     customer_id: 'cust-1', address: '100 Sample Way, Bradenton, FL 34205', estimate_group_id: null,
     estimate_data: {},
     ...overrides,
@@ -70,12 +96,8 @@ beforeEach(() => {
   process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
   estimateRow = estimate();
   customerRow = { ...CUSTOMER };
-  db.mockReset().mockImplementation((table) => {
-    const chain = {};
-    for (const m of ['where', 'whereNull']) chain[m] = jest.fn(() => chain);
-    chain.first = jest.fn(async () => (table === 'estimates' ? estimateRow : table === 'customers' ? customerRow : undefined));
-    return chain;
-  });
+  visitRows = [];
+  db.mockReset().mockImplementation(tableChain);
   for (const fn of Object.values(mockInspection)) if (jest.isMockFunction(fn)) fn.mockClear();
   mockInspection.loadAssessmentCatalog.mockResolvedValue({ serviceId: 'svc-assessment', serviceType: 'Waves Assessment', durationMinutes: 45 });
   mockInspection.buildAvailabilityForLead.mockResolvedValue({ days: [{ date: '2026-11-03', slots: [{ start_time: '09:00', end_time: '09:45' }] }], slots: [], nearby: false });
@@ -171,6 +193,56 @@ describe('GET /:token', () => {
     mockInspection.serviceAreaFailure.mockResolvedValue({ failure: 'service_area_unavailable' });
     expect((await call(TOKEN)).body).toMatchObject({ state: 'ok', availability: null, service_area_unavailable: true });
     expect(mockInspection.buildAvailabilityForLead).not.toHaveBeenCalled();
+  });
+
+  // The gap: a customer self-booked a free assessment, the tech completed it, staff sent the estimate afterwards.
+  describe('a completed Waves Assessment that was the look for this estimate', () => {
+    test.each([
+      ['completed 3 days after the estimate was drafted', 'completed', new Date(new Date(CREATED).getTime() + 3 * DAY).toISOString()],
+      ['completed 29 days before the estimate was created', 'completed', daysBeforeCreated(29)],
+    ])('%s: gone, with no times', async (_label, status, when) => {
+      visitRows = [{ status, when }];
+      expect(await call(TOKEN)).toMatchObject({ status: 200, body: { state: 'gone' } });
+      expect(mockInspection.buildAvailabilityForLead).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['completed 45 days before the estimate was created', 'completed', daysBeforeCreated(45)],
+      ['cancelled', 'cancelled', daysBeforeCreated(0)],
+      ['no_show', 'no_show', daysBeforeCreated(0)],
+    ])('%s: still offered', async (_label, status, when) => {
+      visitRows = [{ status, when }];
+      expect(await call(TOKEN)).toMatchObject({ status: 200, body: { state: 'ok' } });
+    });
+
+    test('the read is the router\'s assessment identity on the estimate\'s customer, floored 30 days before creation', async () => {
+      visitRows = [{ status: 'completed', when: daysBeforeCreated(1) }];
+      await call(TOKEN);
+      const chain = db.mock.results.find((r) => r.value.leftJoin).value;
+      expect(chain.where).toHaveBeenCalledWith('scheduled_services.customer_id', 'cust-1');
+      expect(chain.where).toHaveBeenCalledWith('scheduled_services.status', 'completed');
+      expect(chain.whereRaw.mock.calls[0][1][0].toISOString()).toBe(daysBeforeCreated(30));
+    });
+
+    test('an open assessment still answers already_booked, ahead of the completed-look check', async () => {
+      visitRows = [{ status: 'completed', when: daysBeforeCreated(1) }];
+      mockInspection.findOpenVisit.mockResolvedValue({ id: 'visit-1', scheduled_date: '2026-11-03' });
+      expect((await call(TOKEN)).body).toMatchObject({ state: 'already_booked' });
+    });
+
+    test('POST (book): gone, nothing booked', async () => {
+      visitRows = [{ status: 'completed', when: daysBeforeCreated(-3) }];
+      expect(await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } })).toMatchObject({ status: 200, body: { state: 'gone' } });
+      expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
+    });
+
+    test('a failed read keeps today\'s answer (the offer stays), logs a warning, and does not 500', async () => {
+      const logger = require('../services/logger');
+      logger.warn.mockClear();
+      visitRows = Object.assign(new Error('boom'), { code: 'XX000' });
+      expect(await call(TOKEN)).toMatchObject({ status: 200, body: { state: 'ok' } });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('completed-assessment check skipped for estimate est-1'));
+    });
   });
 
   test('an excluded locality (Punta Gorda) is gone before any location work, and /data never offers it', async () => {
@@ -292,10 +364,8 @@ describe('the in-transaction estimate guard', () => {
     const trx = jest.fn((table) => {
       const q = { table, shared: false };
       reads.push(q);
-      const chain = {};
-      for (const m of ['where', 'whereNull']) chain[m] = jest.fn(() => chain);
+      const chain = tableChain(table);
       chain.forShare = jest.fn(() => { q.shared = true; return chain; });
-      chain.first = jest.fn(async () => (table === 'estimates' ? estimateRow : table === 'customers' ? customerRow : undefined));
       return chain;
     });
     return { trx, reads };
@@ -324,6 +394,11 @@ describe('the in-transaction estimate guard', () => {
     expect(await revalidate(fakeTrx().trx)).toBe('ineligible');
   });
 
+  test('a completed assessment that was the look for the estimate: ineligible (the commit refuses it too)', async () => {
+    visitRows = [{ status: 'completed', when: daysBeforeCreated(-3) }];
+    expect(await revalidate(fakeTrx().trx)).toBe('ineligible');
+  });
+
   test('an assessment booked since the page read: booked (createSelfBooking answers ALREADY_BOOKED)', async () => {
     mockInspection.findOpenVisit.mockResolvedValueOnce({ id: 'visit-9', scheduled_date: '2026-11-04' });
     expect(await revalidate(fakeTrx().trx)).toBe('booked');
@@ -345,6 +420,21 @@ describe('assessmentFirstFor (/data)', () => {
     expect(await assessmentFirstFor(estimate(), { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
     customerRow = { ...CUSTOMER, latitude: null, longitude: null };
     expect(await assessmentFirstFor(estimate(), { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
+  });
+
+  test('a completed assessment that was the look: no offer (/data); 45 days before creation or cancelled: the offer', async () => {
+    visitRows = [{ status: 'completed', when: daysBeforeCreated(-3) }];
+    expect(await assessmentFirstFor(estimate(), { open: true })).toBeNull();
+    visitRows = [{ status: 'completed', when: daysBeforeCreated(45) }, { status: 'cancelled', when: daysBeforeCreated(0) }];
+    expect(await assessmentFirstFor(estimate(), { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
+  });
+
+  test('a failed completed-assessment read: the offer is unchanged and a warning is logged', async () => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    visitRows = new Error('boom');
+    expect(await assessmentFirstFor(estimate(), { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('completed-assessment check skipped'));
   });
 
   test('gate off, a staff or document view, an open assessment, another property: nothing', async () => {
