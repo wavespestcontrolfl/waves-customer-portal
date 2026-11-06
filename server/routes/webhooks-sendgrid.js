@@ -190,7 +190,10 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
   let processed = 0;
   let retryNeeded = false;
   for (const ev of events) {
+    let retryCritical = false;
     try {
+      // Decided BEFORE any lookup or transaction (see isRetryCriticalEvent): any failure of this event is then redelivered.
+      retryCritical = await isRetryCriticalEvent(ev);
       await handleEvent(ev);
       processed++;
     } catch (err) {
@@ -199,7 +202,7 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
       // must ANY failure to process a bounce / dropped / blocked event (a lookup that failed
       // before the message was even classified would otherwise lose a failure the rate
       // review letter's notice depends on). The event ledger dedupes what already committed.
-      if ((err && err.retryWebhook) || ['bounce', 'dropped', 'blocked'].includes(String(ev && ev.event || '').toLowerCase())) retryNeeded = true;
+      if (retryCritical || (err && err.retryWebhook) || ['bounce', 'dropped', 'blocked'].includes(String(ev && ev.event || '').toLowerCase())) retryNeeded = true;
     }
   }
   res.status(retryNeeded ? 500 : 200).json({ received: events.length, processed });
@@ -218,6 +221,31 @@ function settleSpellingOutcome(spelling, ev) {
     ...ev, reason: `its other spelling from the call bounced too: ${String(ev.reason || ev.response || 'mailbox rejected').trim()}`,
   }).catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
   return true;
+}
+
+/**
+ * GATE_CALL_BOUNCE_OTHER_SPELLING: is this event retry-critical, i.e. may it be the DELIVERY that commits an other-spelling retry?
+ * Decided before the event's lookups and transaction, narrowly: the gate is on, the event is `delivered`, and the send it names is
+ * bound by `retry_send_id` to a claim still `resending` -- or this pre-check itself fails (we cannot rule it out). Then ANY failure of
+ * the event (the message lookups, the event-ledger insert, the delivery update, the retry hook, the COMMIT) answers non-2xx so
+ * SendGrid redelivers it; the redelivery is idempotent through the event ledger and the claim. Gate off, a non-delivered event, or a
+ * send provably not bound: today's contract, unchanged. Never throws.
+ */
+async function isRetryCriticalEvent(ev) {
+  try {
+    if (!require('../config/feature-gates').callBounceOtherSpellingLive()) return false;
+    if (String(ev?.event || '').toLowerCase() !== 'delivered') return false;
+    const messageId = ev.sg_message_id ? String(ev.sg_message_id).split('.')[0] : null;
+    if (!messageId) return false;
+    const bound = await db('call_email_spelling_retries as c')
+      .join('automation_step_sends as s', 's.id', 'c.retry_send_id')
+      .where({ 's.sendgrid_message_id': messageId, 'c.status': 'resending' })
+      .first('c.id');
+    return !!bound;
+  } catch (err) {
+    logger.warn(`[sendgrid-webhook] retry pre-check failed (treated as retry-critical): ${err.code || err.name}`);
+    return true;
+  }
 }
 
 /**

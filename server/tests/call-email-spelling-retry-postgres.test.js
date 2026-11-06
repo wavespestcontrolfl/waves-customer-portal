@@ -1251,4 +1251,72 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
     expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
   });
+
+  // ── Retry-critical is decided BEFORE the event's lookups and transaction (round 11 P1) ───────────────────────────────────
+  async function failStatementWhen(table, event, whenSql) {
+    await db.raw("CREATE OR REPLACE FUNCTION test_fail_statement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected statement failure'; END $$");
+    await db.raw(`CREATE TRIGGER test_fail_statement BEFORE ${event} ON ${table} FOR EACH ROW WHEN (${whenSql}) EXECUTE FUNCTION test_fail_statement()`);
+    return () => db.raw(`DROP TRIGGER IF EXISTS test_fail_statement ON ${table}`);
+  }
+  async function renameTableAway(table) {
+    await db.raw(`ALTER TABLE ${table} RENAME TO ${table}_away`);
+    return () => db.raw(`ALTER TABLE ${table}_away RENAME TO ${table}`);
+  }
+  const injections = {
+    'event-ledger insert': (messageId, eventId) => failStatementWhen('sendgrid_webhook_events', 'INSERT', `NEW.event_id = '${eventId}'`),
+    'delivery update': (messageId) => failStatementWhen('automation_step_sends', 'UPDATE', `NEW.sendgrid_message_id = '${messageId}' AND NEW.status = 'delivered'`),
+    'initial message lookup': () => renameTableAway('newsletter_send_deliveries'),
+  };
+
+  describe.each(Object.keys(injections))('failure before the retry hook: %s', (name) => {
+    test('a delivery of the BOUND retry send answers 500, writes nothing, and the redelivery commits once', async () => {
+      await boundRetryDelivery(`pre-${name.length}`);
+      const eventId = `ev-pre-${name.length}`;
+      const undo = await injections[name](`pre-${name.length}`, eventId);
+      try {
+        expect(await post([deliveredEvent(`pre-${name.length}`, eventId)])).toBe(500);
+      } finally {
+        await undo();
+      }
+      await expectNothingHalfWritten(eventId);
+      expect(await post([deliveredEvent(`pre-${name.length}`, eventId)])).toBe(200);
+      await expectCommittedOnce(eventId);
+    });
+
+    test('a delivery of an UNRELATED send (not bound to a pending claim) keeps the 200 contract', async () => {
+      await boundRetryDelivery(`unrel-${name.length}`);
+      const stray = await strayAutomationSend(ctx.enrollment.id, ctx.last.id, `stray-${name.length}`, OTHER);
+      const eventId = `ev-stray-${name.length}`;
+      const undo = await injections[name](stray.sendgrid_message_id, eventId);
+      try {
+        expect(await post([deliveredEvent(stray.sendgrid_message_id, eventId)])).toBe(200);
+      } finally {
+        await undo();
+      }
+      expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    });
+  });
+
+  test('the pre-check itself cannot be answered: the delivered event is treated as retry-critical (500) even for an unrelated send', async () => {
+    await boundRetryDelivery('precheck-1');
+    const stray = await strayAutomationSend(ctx.enrollment.id, ctx.last.id, 'precheck-stray', OTHER);
+    const undo = await renameTableAway('call_email_spelling_retries');
+    try {
+      expect(await post([deliveredEvent(stray.sendgrid_message_id, 'ev-precheck-1')])).toBe(500);
+    } finally {
+      await undo();
+    }
+    expect(await post([deliveredEvent(stray.sendgrid_message_id, 'ev-precheck-1')])).toBe(200);
+  });
+
+  test('gate off: the same ledger-insert failure on a delivery of the bound retry send keeps today\'s 200', async () => {
+    await boundRetryDelivery('gateoff-1');
+    delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
+    const undo = await failStatementWhen('sendgrid_webhook_events', 'INSERT', "NEW.event_id = 'ev-gateoff-1'");
+    try {
+      expect(await post([deliveredEvent('gateoff-1', 'ev-gateoff-1')])).toBe(200);
+    } finally {
+      await undo();
+    }
+  });
 });
