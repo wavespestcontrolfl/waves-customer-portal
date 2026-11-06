@@ -9,12 +9,13 @@
  * An hour counts only when every rule holds:
  *   1. The estimate page could offer it (the caller's `admit`: the customer grid and close, the request's dates,
  *      weekends, zone days, time of day, notice and season) and it starts where a stop starts, on a day the free-slot
- *      finder would use: an assignable technician, no absent or off tech-day, no blackout date (find-time's rules).
+ *      finder would use: an assignable technician, no absent or off tech-day, no blackout date (find-time's rules),
+ *      and a technician whose capability for this estimate's services is not off (the page's filterCollidingSlots).
  *   2. Every stop in the chain may move under the 4:40 re-plan's own rules: day-replan fixedReason, read again with
  *      the day's full facts (status, hold, staff lock, office review, group, same customer twice, the 24-hour lock,
  *      the 24-hour text and, with GATE_NIGHT_TOLD_LOCK, confirmed, first or one-time, person-placed and told
- *      visits). Its customer also gets the 72-hour and 24-hour reminders BY TEXT (the sender's own channel rules), so
- *      the new time reaches them. Its time
+ *      visits). Its customer also gets the 72-hour and 24-hour reminders BY TEXT (the plan: "the customer gets
+ *      reminder texts"), read with the sender's own channel and app routing rules, so the new time reaches them. Its time
  *      preference (the re-plan's loadPref) allows the new hour, and it still ends by the night tools' day close.
  *   3. Nothing else holds the new minutes: no unassigned visit, no other technician's visit while the occupancy
  *      check is technician-blind (the re-plan's blockedHoursFor rule), no schedule block.
@@ -264,16 +265,31 @@ function remindersOn(prefs) {
 }
 
 const TEXT_CHANNELS = new Set(['sms', 'both']);
+// The message types of the 72-hour and the 24-hour reminder (appointment-reminders.js).
+const REMINDER_TYPES = ['reminder_72h', 'appointment_reminder'];
+
+// With the sender's app routing on (push-channel-routing decidePushRoute; app-first for reminders, owner 2026-11-04),
+// a text-led reminder goes in the app INSTEAD of a text when the customer has an app device the sender could reach
+// (its hasFreshPushDevice: a reachable or fresh native device). Such a customer never moves. A customer who chose
+// Text in the app is counted here too: the check fails closed.
+async function remindersMayGoInApp(customerId, env, conn) {
+  if (!REMINDER_TYPES.some((messageType) => env.pushRouteFor(customerId, messageType) === 'push_first')) return false;
+  const status = await env.appDeviceStatus(customerId, conn);
+  return !status || (status.enabled === true && (status.reachable === true || status.fresh === true));
+}
 
 // ...and both go out by text: the channels the reminder sender itself uses (resolve72hChannel for the 72-hour leg,
-// which can promote a one-time visit to email; the stored 24-hour channel). Email or app only never moves.
-async function remindersByText(prefs, row, env) {
+// which can promote a one-time visit to email; the stored 24-hour channel), and, for a text-only leg, not the app.
+async function remindersByText(prefs, row, env, conn) {
   const channel72 = await env.resolve72hChannel(prefs.reminder72hChannel, row.id, {
     prefsUnavailable: prefs.unavailable,
     explicitChoice: prefs.reminder72hChannelExplicit,
     emailEnabled: prefs.emailEnabled,
   });
-  return TEXT_CHANNELS.has(channel72) && TEXT_CHANNELS.has(prefs.reminder24hChannel);
+  if (!TEXT_CHANNELS.has(channel72) || !TEXT_CHANNELS.has(prefs.reminder24hChannel)) return false;
+  // 'both' adds an email leg the app never replaces; only a text-only leg can turn into an app message.
+  if (channel72 !== 'sms' && prefs.reminder24hChannel !== 'sms') return true;
+  return !(await remindersMayGoInApp(row.customer_id, env, conn));
 }
 
 // Why one moved stop may not move after all, from the day's full facts, or null.
@@ -287,7 +303,7 @@ async function moveBlockedReason(move, { conn, env, day, techId }) {
   try {
     prefs = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id });
     if (!remindersOn(prefs)) return 'reminders_off';
-    if (!(await remindersByText(prefs, row, env))) return 'reminders_not_text';
+    if (!(await remindersByText(prefs, row, env, conn))) return 'reminders_not_text';
     pref = await env.loadPref(conn, row);
   } catch {
     return 'prefs_unreadable';
@@ -347,16 +363,19 @@ async function loadDays(conn, env, { dates, holdIds, deadline, report }) {
 }
 
 // The free-slot finder's own day and technician rules (find-time loadFindTimeContext): assignable technicians only,
-// no absent or off tech-day, no blackout date (strict: an unreadable list stops the check). A stop left on such a
-// day is never a place to book, so it is never a candidate.
-async function loadOpenTechDays(conn, env, dates) {
+// no absent or off tech-day, no blackout date (strict: an unreadable list stops the check). With this estimate's
+// services (capabilityRows), also the page's capability rule (filterCollidingSlots): no technician whose capability
+// for a requested service is off. A stop left on such a day is never a place to book, so it is never a candidate.
+async function loadOpenTechDays(conn, env, { dates, capabilityRows }) {
   const dateFrom = dates[0];
   const dateTo = dates[dates.length - 1];
   const techIds = (await env.assignableTechIds(conn)).map(String);
   const blackout = await env.getBlackoutDates(dateFrom, dateTo, conn, { strict: true });
   const absent = techIds.length ? await env.absentTechDays(conn, { dateFrom, dateTo, technicianIds: techIds }) : new Set();
-  const assignable = new Set(techIds);
-  return (dateStr, techId) => assignable.has(String(techId)) && !blackout.has(dateStr) && !absent.has(`${techId}:${dateStr}`);
+  const inactive = capabilityRows?.length && techIds.length ? await env.inactiveCapabilities(conn, techIds, capabilityRows) : [];
+  const off = new Set(inactive.map((row) => String(row.technician_id)));
+  const open = new Set(techIds.filter((id) => !off.has(id)));
+  return (dateStr, techId) => open.has(String(techId)) && !blackout.has(dateStr) && !absent.has(`${techId}:${dateStr}`);
 }
 
 async function ownHoldIds(conn, estimateId) {
@@ -373,6 +392,7 @@ function defaultDeps() {
   const occupancy = require('./occupancy');
   const eligibility = require('../technician-eligibility');
   const reminders = require('../appointment-reminders');
+  const pushRouting = require('../messaging/push-channel-routing');
   return {
     loadDayStops: (conn, dateStr) => replan.loadDayStops(conn, dateStr, false),
     loadDayContext: replan.loadDayContext,
@@ -391,6 +411,9 @@ function defaultDeps() {
     assignableTechIds: async (conn) => (await eligibility.applyAssignable(conn('technicians')).select('technicians.id')).map((row) => row.id),
     absentTechDays: eligibility.absentTechDays,
     getBlackoutDates: require('./blackout-dates').getBlackoutDates,
+    inactiveCapabilities: require('../technician-capabilities').inactiveCapabilitiesForServices,
+    pushRouteFor: (customerId, messageType) => pushRouting.decidePushRoute({ gateOn: pushRouting.gatePushRoutingOn(), customerId, messageType }),
+    appDeviceStatus: (customerId, conn) => require('../push-notifications').customerStatus(customerId, conn, { withReachable: true }),
     techBlind: () => !occupancy.techScopedConfirmActive(),
     closeMin: require('../auto-dispatch/candidate-slots').DAY_CLOSE,
     ownHoldIds,
@@ -425,11 +448,16 @@ async function checkCandidates(candidates, { conn, env, request, deadline, repor
   }
 }
 
-async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, dateFrom, dateTo, admit, now, deadline, deps }) {
+async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, dateFrom, dateTo, admit, now, deadline, deps }) {
   const base = deps || defaultDeps();
-  const homes = await base.loadTechStartPoints(conn);
+  // The setup reads run under the same budget as every later read.
+  const homes = await raceBudget(base.loadTechStartPoints(conn), deadline);
+  const holdIds = homes === TIMED_OUT ? TIMED_OUT : await raceBudget(base.ownHoldIds(conn, estimateId), deadline);
+  if (holdIds === TIMED_OUT) {
+    report.timedOut = true;
+    return;
+  }
   const env = { ...base, homeOf: (techId) => base.homeFromMap(homes, techId), techBlind: base.techBlind() };
-  const holdIds = await env.ownHoldIds(conn, estimateId);
   const dates = datesFor({ dateFrom, dateTo, pool });
   report.dates = dates.length;
   const dayRows = await loadDays(conn, env, { dates, holdIds, deadline, report });
@@ -437,7 +465,7 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
   report.free = { count: pool.length, best: bestFree };
   const request = { point, durationMin, admit, now, bestFree, estimateId };
-  const open = await raceBudget(loadOpenTechDays(conn, env, dates), deadline);
+  const open = await raceBudget(loadOpenTechDays(conn, env, { dates, capabilityRows }), deadline);
   if (open === TIMED_OUT) {
     report.timedOut = true;
     return;
@@ -489,10 +517,11 @@ function checkRow(report) {
  * @param {string} args.dateFrom        the request's first and last ET dates
  * @param {string} args.dateTo
  * @param {Function} args.admit         slot -> true when the page could offer it
+ * @param {Array}  [args.capabilityRows] this estimate's services as technician-capabilities rows ({ service_type })
  * @returns {Promise<object>} the report
  */
-async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, dateFrom, dateTo, admit,
-  now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS } = {}) {
+async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, capabilityRows,
+  dateFrom, dateTo, admit, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS } = {}) {
   const startedAt = Date.now();
   const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0 };
   const knex = conn || require('../../models/db');
@@ -504,6 +533,7 @@ async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = nu
     else {
       await findMakeRoom(report, {
         conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, estimateId,
+        capabilityRows,
         dateFrom, dateTo, admit, now, deadline: startedAt + budgetMs, deps,
       });
     }

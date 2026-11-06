@@ -1681,6 +1681,11 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false, rainTierO
 // page could report no times at all and leave a still-live reservation
 // unconfirmable, and the React page forced a needless re-pick. Another
 // estimate's hold still blocks, exactly as before.
+// This estimate's service mix as the rows technician-capabilities reads (one service type per requested service).
+function capabilityRowsFor(serviceMix) {
+  return serviceMix.services.map((key) => ({ service_type: key.replace(/_/g, ' ') }));
+}
+
 async function filterCollidingSlots(slots, {
   dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null, ownEstimateId = null,
   // This estimate's own catalog expected-service minutes (owner ruling
@@ -1696,9 +1701,7 @@ async function filterCollidingSlots(slots, {
   let inactiveTechs = new Set();
   if (serviceMix) {
     const ids = [...new Set(slots.map((slot) => slot.techId).filter(Boolean))];
-    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(
-      db, ids, serviceMix.services.map((key) => ({ service_type: key.replace(/_/g, ' ') })),
-    );
+    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(db, ids, capabilityRowsFor(serviceMix));
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
   if (capacityEnabled()) {
@@ -2554,6 +2557,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   startMakeRoomCheck(makeRoomModeFor(userOpts), {
     estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, dateFrom, dateTo,
+    // The page's capability rule (filterCollidingSlots) for the technician whose stop would move.
+    capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
     admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
   });
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.

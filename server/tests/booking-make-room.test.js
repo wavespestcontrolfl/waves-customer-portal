@@ -46,7 +46,7 @@ const TEXTS = { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: 
 
 function makeDeps({
   rows = exampleDay(), told = ['visit-e'], prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
-  channel72 = {}, assignable = [TECH], absent = [], blackout = [],
+  channel72 = {}, assignable = [TECH], absent = [], blackout = [], inactive = [], pushRoute = 'push_and_sms', device = null,
 } = {}) {
   const evaluated = [];
   return {
@@ -76,6 +76,10 @@ function makeDeps({
     assignableTechIds: jest.fn(async () => assignable),
     absentTechDays: jest.fn(async () => new Set(absent)),
     getBlackoutDates: jest.fn(async () => new Set(blackout)),
+    inactiveCapabilities: jest.fn(async () => inactive),
+    // The sender's app routing for a reminder type, and the customer's app device as its sender reads it.
+    pushRouteFor: jest.fn(() => pushRoute),
+    appDeviceStatus: jest.fn(async () => device || { enabled: true, registered: false, fresh: false, reachable: false }),
     techBlind: () => techBlind,
     closeMin: 17 * 60,
     ownHoldIds: jest.fn(async () => new Set(holdIds)),
@@ -88,10 +92,10 @@ function fakeConn() {
   return { conn, inserted };
 }
 
-async function check({ deps = makeDeps(), pool = FREE, admit = (slot) => slot.date === DAY, coords = NEW_PIN, durationMinutes = 60 } = {}) {
+async function check({ deps = makeDeps(), pool = FREE, admit = (slot) => slot.date === DAY, coords = NEW_PIN, durationMinutes = 60, ...extra } = {}) {
   const { conn, inserted } = fakeConn();
   const report = await recordMakeRoomCheck({
-    mode: 'shadow', estimateId: 'est-1', pool, coords, durationMinutes, dateFrom: DAY, dateTo: DAY, admit, now: NOW, conn, deps,
+    mode: 'shadow', estimateId: 'est-1', pool, coords, durationMinutes, dateFrom: DAY, dateTo: DAY, admit, now: NOW, conn, deps, ...extra,
   });
   return { report, inserted, deps };
 }
@@ -168,11 +172,26 @@ describe('the rules a moved customer adds', () => {
     expect(report.byReason.reminders_not_text).toBeGreaterThanOrEqual(1);
   });
 
+  test('with app-first routing, a customer the sender can reach in the app never moves (reminders go in the app instead)', async () => {
+    const device = { enabled: true, registered: true, fresh: false, reachable: true };
+    const { report, deps } = await check({ deps: makeDeps({ pushRoute: 'push_first', device }) });
+    expect(starts(report)).not.toContain('09:00');
+    expect(report.byReason.reminders_not_text).toBeGreaterThanOrEqual(1);
+    expect(deps.pushRouteFor).toHaveBeenCalledWith('cust-b', 'reminder_72h');
+  });
+
+  test('with app-first routing, a customer with no app device still gets texts and may move', async () => {
+    const { report } = await check({ deps: makeDeps({ pushRoute: 'push_first' }) });
+    expect(starts(report)).toContain('09:00');
+  });
+
   test('reminders by text and email count as text, and the 72-hour channel is resolved the way the sender does', async () => {
     const prefs = { 'cust-c': { ...TEXTS, reminder72hChannel: 'both', reminder24hChannel: 'both', reminder72hChannelExplicit: true, emailEnabled: true } };
     const { report, deps } = await check({ deps: makeDeps({ prefs }) });
     expect(starts(report)).toContain('09:00');
     expect(deps.resolve72hChannel).toHaveBeenCalledWith('both', 'visit-c', { prefsUnavailable: undefined, explicitChoice: true, emailEnabled: true });
+    // 'both' always keeps a text leg, so the app device is never read for it.
+    expect(deps.appDeviceStatus).not.toHaveBeenCalledWith('cust-c', expect.anything());
   });
 
   test('a time preference that does not allow the new hour stops the chain', async () => {
@@ -192,6 +211,33 @@ describe('the day and the route', () => {
     expect(report.passed).toEqual([]);
     expect(report.candidates).toBe(0);
     expect(report.byReason.tech_day_closed).toBe(1);
+  });
+
+  test('a technician whose capability for the requested service is off is never a candidate (the page\'s rule)', async () => {
+    const deps = makeDeps({ inactive: [{ technician_id: TECH, service_category: 'lawn', active: false }] });
+    const capabilityRows = [{ service_type: 'lawn care' }];
+    const { report } = await check({ deps, capabilityRows });
+    expect(deps.inactiveCapabilities).toHaveBeenCalledWith(expect.anything(), [TECH], capabilityRows);
+    expect(report.candidates).toBe(0);
+    expect(report.byReason.tech_day_closed).toBe(1);
+  });
+
+  test('without the estimate\'s services, capability is not read', async () => {
+    const deps = makeDeps();
+    const { report } = await check({ deps });
+    expect(deps.inactiveCapabilities).not.toHaveBeenCalled();
+    expect(starts(report)).toContain('09:00');
+  });
+
+  test.each(['loadTechStartPoints', 'ownHoldIds'])('a setup read (%s) that never answers ends the check at its budget', async (name) => {
+    const deps = makeDeps();
+    deps[name] = jest.fn(() => new Promise(() => {}));
+    const started = Date.now();
+    const { report, inserted } = await check({ deps, budgetMs: 40 });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(report.timedOut).toBe(true);
+    expect(report.passed).toEqual([]);
+    expect(inserted).toHaveLength(1);
   });
 
   test('the blackout list is read strictly: an unreadable one stops the check', async () => {
@@ -337,6 +383,9 @@ describe('the default reads', () => {
     const reminders = require('../services/appointment-reminders');
     expect(deps.getReminderPrefs).toBe(reminders._test.getReminderPrefs);
     expect(deps.resolve72hChannel).toBe(reminders._test.resolve72hChannel);
+    expect(deps.inactiveCapabilities).toBe(require('../services/technician-capabilities').inactiveCapabilitiesForServices);
+    expect(typeof require('../services/push-notifications').customerStatus).toBe('function');
+    expect(typeof deps.pushRouteFor('cust-1', 'reminder_72h')).toBe('string');
     expect(typeof deps.techBlind()).toBe('boolean');
   });
 });
