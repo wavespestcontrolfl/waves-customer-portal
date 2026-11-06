@@ -1,7 +1,7 @@
-// db is callable for the held-visit alert sweep (a chain that finds nothing) and carries raw for the scan.
+// db is callable for the held-visit and ended-visit alert sweeps (a chain that finds nothing) and carries raw for the scan.
 jest.mock('../models/db', () => {
   const chain = {};
-  for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereExists']) chain[m] = jest.fn(() => chain);
+  for (const m of ['join', 'whereIn', 'whereNull', 'whereNotNull', 'whereExists']) chain[m] = jest.fn(() => chain);
   chain.select = jest.fn(async () => []);
   const db = jest.fn(() => chain);
   db.raw = jest.fn();
@@ -14,6 +14,9 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/dispatch-alerts', () => ({
   createAlert: jest.fn(),
+  resolveAlert: jest.fn(async () => ({})),
+  OVERDUE_ALERT_TYPES: ['tech_late', 'unassigned_overdue'],
+  OVERDUE_ALERT_AUTO_RESOLVE_STATUSES: new Set(['on_site', 'completed', 'cancelled', 'skipped', 'no_show']),
 }));
 // The street-level hold recheck (its row-lock transaction needs a database): a controllable stand-in.
 const mockHeld = new Set();
@@ -27,7 +30,8 @@ jest.mock('../services/no-show-detector', () => ({ enabled: jest.fn(() => false)
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(), recordJobStart: jest.fn(async () => {}), recordJobEnd: jest.fn(async () => {}) }));
 
 const db = require('../models/db');
-const { createAlert } = require('../services/dispatch-alerts');
+const logger = require('../services/logger');
+const { createAlert, resolveAlert } = require('../services/dispatch-alerts');
 const detector = require('../services/tech-late-detector');
 
 describe('tech-late detector tuning', () => {
@@ -55,6 +59,8 @@ describe('tech-late detector tuning', () => {
     expect(sql).toContain("COALESCE(a.payload->>'window_end', '') = COALESCE(c.window_end::text, '')");
     expect(sql).not.toContain('a.created_at >= c.due_at');
     expect(sql).not.toContain("s.window_start) AT TIME ZONE 'America/New_York')\n              < NOW() - INTERVAL '15 minutes'");
+    // Both best-effort sweeps ran clean on the mocks: nothing fell into a catch path.
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('creates alerts with due-time delay severity and window_end context', async () => {
@@ -167,5 +173,65 @@ describe('tech-late detector tuning', () => {
     expect(createAlert).toHaveBeenCalledTimes(1);
     // The alert is written on the guard's own transaction (no second pool checkout while it is held).
     expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-ok', trx: mockTrx }));
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  // The held-visit sweep runs first and takes the chain's first select; the ended-visit sweep takes the second.
+  describe('ended-visit sweep', () => {
+    const chain = db();
+
+    test('resolves each open late card whose visit has ended, auto: true, with the right filters', async () => {
+      chain.select.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'alert-1' }, { id: 'alert-2' }]);
+      db.raw.mockResolvedValue({ rows: [] });
+
+      await detector.runTechLateCheck();
+
+      expect(db).toHaveBeenCalledWith('dispatch_alerts as a');
+      expect(chain.join).toHaveBeenCalledWith('scheduled_services as s', 's.id', 'a.job_id');
+      expect(chain.whereIn).toHaveBeenCalledWith('a.type', ['tech_late', 'unassigned_overdue']);
+      expect(chain.whereIn).toHaveBeenCalledWith('s.status', ['on_site', 'completed', 'cancelled', 'skipped', 'no_show']);
+      expect(chain.whereNull).toHaveBeenCalledWith('a.resolved_at');
+      expect(chain.select).toHaveBeenLastCalledWith('a.id');
+      expect(resolveAlert).toHaveBeenCalledTimes(2);
+      expect(resolveAlert).toHaveBeenNthCalledWith(1, { id: 'alert-1', auto: true });
+      expect(resolveAlert).toHaveBeenNthCalledWith(2, { id: 'alert-2', auto: true });
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('resolved 2 late alert(s) for visits that have already ended'));
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    test('runs when no-show tracking is enabled, before tracking.sweep', async () => {
+      const tracking = require('../services/no-show-detector');
+      const locks = require('../utils/cron-lock');
+      tracking.enabled.mockReturnValue(true);
+      tracking.sweep.mockResolvedValue({ alerted: 0 });
+      locks.runExclusive.mockImplementationOnce((_key, work) => work());
+      chain.select.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'alert-9' }]);
+
+      await detector.runTechLateCheck();
+
+      expect(resolveAlert).toHaveBeenCalledWith({ id: 'alert-9', auto: true });
+      expect(tracking.sweep).toHaveBeenCalledTimes(1);
+      expect(resolveAlert.mock.invocationCallOrder[0]).toBeLessThan(tracking.sweep.mock.invocationCallOrder[0]);
+    });
+
+    test('a failing sweep query logs a warning and the scan still runs', async () => {
+      chain.select.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('boom'));
+      db.raw.mockResolvedValue({ rows: [] });
+
+      await expect(detector.runTechLateCheck()).resolves.toEqual({ created: 0, suppressed: 0, scanned: 0 });
+
+      expect(logger.warn).toHaveBeenCalledWith('[tech-late-detector] ended-visit alert resolve failed: boom');
+      expect(resolveAlert).not.toHaveBeenCalled();
+      expect(db.raw).toHaveBeenCalled();
+    });
+
+    test('no ended-visit cards means no resolve call and no info log', async () => {
+      db.raw.mockResolvedValue({ rows: [] });
+
+      await detector.runTechLateCheck();
+
+      expect(resolveAlert).not.toHaveBeenCalled();
+      expect(logger.info).not.toHaveBeenCalled();
+    });
   });
 });
