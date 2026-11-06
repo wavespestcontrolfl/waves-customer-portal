@@ -34,6 +34,17 @@ function noteFailedPasses(failedSteps, step, result) {
   if (result?.failedPasses?.length) failedSteps.push(step);
 }
 
+// The restamp sweep logs a failed candidate query and returns its summary.
+// Both runners (the hourly tick in scheduler.js and the leg below) call this
+// inside the shared 'annual-prepay-restamp-sweep' lock, so that job's
+// job_health row records the failed pass.
+function throwIfRestampFailed(summary) {
+  if (summary?.failedPasses?.length) {
+    throw new Error(`annual-prepay restamp: ${summary.failedPasses.length} pass(es) failed (${summary.failedPasses.join(', ')})`);
+  }
+  return summary;
+}
+
 function throwIfStepsFailed(failedSteps, totalSent) {
   if (failedSteps.length > 0) {
     throw new Error(`renewal-reminders: ${failedSteps.length} step(s) failed (${failedSteps.join(', ')}); ${totalSent} sent`);
@@ -65,8 +76,8 @@ async function runPrepayRestampLeg(prepay, failedSteps = []) {
       // Same lease as the hourly tick (scheduler.js): the two runners never
       // overlap, and a held lease just skips this leg until the next tick.
       const { runExclusive } = require('../../utils/cron-lock');
-      const summary = await runExclusive('annual-prepay-restamp-sweep', () => service.restampUnstampedActiveTerms());
-      noteFailedPasses(failedSteps, 'prepay restamp', summary);
+      // Thrown inside the lock, so the restamp lease's own job_health row records it.
+      await runExclusive('annual-prepay-restamp-sweep', async () => throwIfRestampFailed(await service.restampUnstampedActiveTerms()));
     }
   } catch (err) {
     logger.error(`Annual prepay restamp sweep failed: ${err.message}`);
@@ -252,4 +263,6 @@ class RenewalReminder {
 }
 
 module.exports = new RenewalReminder();
+// The hourly restamp tick (scheduler.js) shares this check, inside the same lock.
+module.exports.throwIfRestampFailed = throwIfRestampFailed;
 module.exports._private = { TERMITE_RENEWAL_ACTIVITY_KEYS, runTermiteRenewalChargeLeg };

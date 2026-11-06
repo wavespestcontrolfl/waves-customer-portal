@@ -6,6 +6,8 @@
  *   - appointment-reminders: throws on a failed main scan AFTER the stale
  *     cancellation-claim sweep ran; a per-customer error count never throws.
  *   - call-self-audit and typed-decisions-daily-review: rethrow.
+ *   - annual-prepay-restamp-sweep (hourly): throws inside the lock when the
+ *     sweep's summary names a failed pass (its candidate query is caught).
  *
  * Mock baseline copied from scheduler-alert-retention-cron.test.js.
  */
@@ -40,6 +42,7 @@ jest.mock('../services/appointment-reminders', () => ({
   sweepStaleCancellationClaims: jest.fn(),
 }));
 jest.mock('../services/call-self-audit', () => ({ runSelfAudit: jest.fn() }));
+jest.mock('../services/annual-prepay-renewals', () => ({ restampUnstampedActiveTerms: jest.fn() }));
 jest.mock('../services/typed-decisions/daily-review-item', () => ({ runDailyReviewItem: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
@@ -48,6 +51,7 @@ const { isEnabled } = require('../config/feature-gates');
 const reminders = require('../services/appointment-reminders');
 const { runSelfAudit } = require('../services/call-self-audit');
 const { runDailyReviewItem } = require('../services/typed-decisions/daily-review-item');
+const prepay = require('../services/annual-prepay-renewals');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -107,6 +111,25 @@ describe.each([
     const tick = tickFor(expression, job);
     await tick();
     await expect(healthOutcome(job)).resolves.toBeUndefined();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('annual-prepay-restamp-sweep hourly cron', () => {
+  test('a failed candidate query in the summary fails the job inside the lock', async () => {
+    prepay.restampUnstampedActiveTerms.mockResolvedValue({ terms: 0, failedPasses: ['restamp query'] });
+    const tick = tickFor('42 * * * *', 'annual-prepay-restamp-sweep');
+    await expect(tick()).resolves.toBeUndefined();
+    await expect(healthOutcome('annual-prepay-restamp-sweep')).rejects.toThrow('annual-prepay restamp: 1 pass(es) failed (restamp query)');
+    expect(logger.error).toHaveBeenCalledWith('[annual-prepay-restamp] hourly sweep failed: annual-prepay restamp: 1 pass(es) failed (restamp query)');
+  });
+
+  test('a clean sweep records success', async () => {
+    prepay.restampUnstampedActiveTerms.mockResolvedValue({ terms: 2 });
+    const tick = tickFor('42 * * * *', 'annual-prepay-restamp-sweep');
+    await tick();
+    await expect(healthOutcome('annual-prepay-restamp-sweep')).resolves.toBeUndefined();
+    expect(prepay.restampUnstampedActiveTerms).toHaveBeenCalledTimes(1);
     expect(logger.error).not.toHaveBeenCalled();
   });
 });

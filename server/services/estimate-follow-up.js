@@ -1226,7 +1226,8 @@ function throwIfStagesFailed(stageFailures, sent) {
 
 function noteStageFailure(stageFailures, stage, err) {
   if (MISSING_SCHEMA_CODES.has(err?.code)) return;
-  logger.error(`[est-followup] ${stage} stage failed: ${err.message}`);
+  // Code only: a driver message can carry SQL bindings or a customer's contact data.
+  logger.error(`[est-followup] ${stage} stage failed (${err?.code || err?.name || "error"})`);
   stageFailures.push(stage);
 }
 

@@ -119,9 +119,14 @@ describe('checkAll: a failed stage reaches job_health', () => {
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
   });
 
-  test('the thrown message carries stage names and counts only, never row data', async () => {
+  test('the thrown message and the log carry stage names and codes only, never row data', async () => {
+    const logger = require('../services/logger');
+    logger.error.mockClear();
     enqueue('estimates', { error: new Error('boom for taylor@example.com') });
     await expect(EstimateFollowUp.checkAll()).rejects.toThrow(/^estimate-follow-up: 1 stage\(s\) failed \(unviewed\); 0 follow-up\(s\) sent$/);
+    const logged = logger.error.mock.calls.map((args) => args.join(' ')).join('\n');
+    expect(logged).toContain('[est-followup] unviewed stage failed (Error)');
+    expect(logged).not.toContain('taylor@example.com');
   });
 
   test('a schema without the stage columns stays quiet (42703 and 42P01)', async () => {

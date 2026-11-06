@@ -1398,7 +1398,10 @@ function initScheduledJobs() {
   cron.schedule('42 * * * *', async () => {
     try {
       await runExclusive('annual-prepay-restamp-sweep', async () => {
-        await require('./annual-prepay-renewals').restampUnstampedActiveTerms();
+        const summary = await require('./annual-prepay-renewals').restampUnstampedActiveTerms();
+        // A failed candidate query is logged and returned in the summary;
+        // throwing inside the lock makes this job's job_health row record it.
+        require('./workflows/renewal-reminder').throwIfRestampFailed(summary);
       });
     } catch (err) {
       logger.error(`[annual-prepay-restamp] hourly sweep failed: ${err.message}`);
