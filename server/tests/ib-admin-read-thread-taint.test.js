@@ -159,9 +159,9 @@ describe('loadRequestTaint (once per request)', () => {
     test('a login without full access still reads the thread record', async () => {
       expect((await load({ fullAccess: false, threadId: THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(true);
     });
-    test('one thread query per request', async () => {
+    test('two thread queries per request at most: the general marker, then the v2 marker (gate off too, audit run 3)', async () => {
       await load({ threadId: OTHER_THREAD, conversationHistory: plainHistory });
-      expect(mockDb).toHaveBeenCalledTimes(1);
+      expect(mockDb).toHaveBeenCalledTimes(2);
     });
     test('a login without full access is not tainted by the no-record rule', async () => {
       expect((await load({ fullAccess: false, conversationHistory: plainHistory })).untrustedRead).toBe(false);
