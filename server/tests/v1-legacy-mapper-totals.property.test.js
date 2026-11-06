@@ -5,10 +5,9 @@
 // converter rules that bill the customer at accept, for any service mix.
 //
 // #6438 shipped because the mapper cached the WaveGuard setup fee on bundles
-// that the converter never bills. The setup-fee property below leaves out two
-// mixes that still disagree on today's code and wait for an owner decision:
-// pest + palm injection (palm rides outside the converter's service list) and
-// a solo mosquito plan (the mapper takes the fee from the pest line only).
+// that the converter never bills. The setup-fee property below leaves out one
+// mix that still disagrees on today's code and waits for an owner decision:
+// pest + palm injection (palm rides outside the converter's service list).
 
 jest.mock('../models/db', () => {
   const db = jest.fn(() => { throw new Error('db access in a property test'); });
@@ -110,14 +109,12 @@ function priceEstimate(input) {
 
 // ---------------------------------------------------------------- properties
 describe('mapV1ToLegacyShape totals properties', () => {
-  test('the stored setup fee matches what accept bills, except the two open mixes', () => {
+  test('the stored setup fee matches what accept bills, except the open pest + palm mix', () => {
     fc.assert(fc.property(arbEstimateInput, (input) => {
       const priced = priceEstimate(input);
       fc.pre(!!priced && priced.recurringServices.length > 0);
       const { mapped, estimateData, recurringServices } = priced;
-      const keys = recurringServices.map(converter.recurringServiceKey);
-      const soloMosquitoPlan = !keys.includes('pest_control') && converter.recurringMixHasMembershipFeeService(recurringServices);
-      fc.pre(!input.services.palm && !soloMosquitoPlan);
+      fc.pre(!input.services.palm);
       const billed = converter.shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices, estimateData })
         ? converter.frozenSetupFeeAmount(estimateData)
         : 0;

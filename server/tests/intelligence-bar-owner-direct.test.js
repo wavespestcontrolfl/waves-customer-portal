@@ -516,7 +516,7 @@ describe('after an untrusted general read, nothing runs without a card', () => {
     expect(set({ error: 'off', code: 'gate_off' })).toBe(false);
     expect(set({ status: 200, endpoint: '/x', note: 'redirect' })).toBe(false);
     const other = OwnerDirect.newRequestTaint([]);
-    OwnerDirect.noteUntrustedRead(other, 'get_customer_detail', dataAnswer);
+    OwnerDirect.noteUntrustedRead(other, 'get_kpi_snapshot', dataAnswer);
     expect(other.untrustedRead).toBe(false);
     expect(() => OwnerDirect.noteUntrustedRead(null, READ, dataAnswer)).not.toThrow();
   });
@@ -536,7 +536,7 @@ describe('after an untrusted general read, nothing runs without a card', () => {
       expect(OwnerDirect.untrustedReadInHistory([asked('t1'), { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'not json' }] }])).toBe(true);
     });
     test('no general read in the history, or no history, is clean', () => {
-      expect(OwnerDirect.untrustedReadInHistory([{ role: 'assistant', content: [{ type: 'tool_use', id: 'x', name: 'get_customer_detail', input: {} }] }])).toBe(false);
+      expect(OwnerDirect.untrustedReadInHistory([{ role: 'assistant', content: [{ type: 'tool_use', id: 'x', name: 'get_kpi_snapshot', input: {} }] }])).toBe(false);
       expect(OwnerDirect.untrustedReadInHistory(undefined)).toBe(false);
       expect(OwnerDirect.untrustedReadInHistory([{ role: 'user', content: 'plain string' }])).toBe(false);
     });
