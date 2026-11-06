@@ -631,8 +631,27 @@ async function auditVendorOrder({ vendor_order_id, restock_request_id, vendor_id
   });
 }
 
+/**
+ * A saved card's expiry, brand, last four or funding was refreshed from
+ * Stripe (services/card-details-sync.js; Stripe's card account updater
+ * renews cards without telling us). Fire-and-forget: the payment_methods row
+ * is the record, this is forensics, so a lost audit row must not block the
+ * refresh. Metadata names the fields that changed and the old and new expiry
+ * as MM/YYYY; never a last four or a Stripe object.
+ */
+async function auditCardDetailsSynced({ payment_method_row_id, source, changed_fields, old_expiry, new_expiry }) {
+  return recordAuditEvent({
+    actor_type: 'system',
+    action: 'billing.payment_method.card_details_synced',
+    resource_type: 'payment_method',
+    resource_id: payment_method_row_id,
+    metadata: { source, changed_fields, old_expiry, new_expiry },
+  });
+}
+
 module.exports = {
   recordAuditEvent,
+  auditCardDetailsSynced,
   auditLawnSqftFromEstimate,
   auditVendorOrder,
   auditTerminalHandoffMint,
