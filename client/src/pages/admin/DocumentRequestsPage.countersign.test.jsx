@@ -165,7 +165,7 @@ it("requires a typed name, posts it, and refreshes the row as countersigned", as
   expect(within(rowFor("Annual agreement")).getByText("Countersigned")).toBeInTheDocument();
 });
 
-it("a countersigned row offers the executed PDF, fetched with admin auth (codex #4842 r1 P2)", async () => {
+it("a signed row offers the executed PDF (countersigned or not), fetched with admin auth (codex #4842 r1 P2)", async () => {
   const tab = { location: { href: "" }, close: vi.fn() };
   const openSpy = vi.spyOn(window, "open").mockReturnValue(tab);
   URL.createObjectURL = vi.fn(() => "blob:signed-pdf");
@@ -173,7 +173,8 @@ it("a countersigned row offers the executed PDF, fetched with admin auth (codex 
   try {
     render(<MemoryRouter><DocumentRequestsPage /></MemoryRouter>);
     await screen.findByText("Annual agreement");
-    expect(within(rowFor("Annual agreement")).queryByRole("button", { name: /signed pdf/i })).toBeNull();
+    // Signed but not yet countersigned: the executed copy is offered too.
+    expect(within(rowFor("Annual agreement")).getByRole("button", { name: /signed pdf/i })).toBeInTheDocument();
     fireEvent.click(within(rowFor("Countersigned annual")).getByRole("button", { name: /signed pdf/i }));
     await waitFor(() => expect(tab.location.href).toBe("blob:signed-pdf"));
     expect(adminFetch).toHaveBeenCalledWith("/admin/contracts/done/pdf");

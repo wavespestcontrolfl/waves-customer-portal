@@ -90,10 +90,12 @@ function CountersignBadge({ request }) {
   return null;
 }
 
-// The executed copy, countersignature stamp included — the only place a
-// countersigned PDF can be obtained (the customer's signing link is burned).
+// Staff download of any signed agreement's executed copy (the countersignature
+// stamp is included when there is one). The customer's signing link is burned
+// at signing, so this is the only place to get it. Countersigning is a
+// separate action (CountersignButton).
 function SignedPdfButton({ request, disabled, onError }) {
-  if (!request?.countersignedAt || !isExecutedAgreement(request)) return null;
+  if (request?.contractType !== "document_template" || !isExecutedAgreement(request)) return null;
   const openPdf = async () => {
     const tab = window.open("", "_blank");
     try {
