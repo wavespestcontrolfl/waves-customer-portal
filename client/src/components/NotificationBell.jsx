@@ -113,6 +113,21 @@ function digestKindChip(n) {
   return null;
 }
 
+// GATE_ALERT_BELL_ORDER: the server names a row's Area (`areaChip`, one of the nine Areas) only while the list is
+// ranked. One small neutral chip, so it never competes with the Needs you / Broken chip beside it.
+function areaChipLabel(n) {
+  return n && typeof n.areaChip === 'string' && n.areaChip ? n.areaChip : null;
+}
+function AreaChip({ label, color }) {
+  if (!label) return null;
+  return (
+    <span data-testid="area-chip" style={{
+      fontSize: 14, fontWeight: 600, padding: '1px 6px', borderRadius: 4, flexShrink: 0,
+      color, background: 'rgba(100,116,139,0.16)',
+    }}>{label}</span>
+  );
+}
+
 // An ops_digest row whose link is the shared Activity feed gets `&focus=<id>`
 // appended on click, so AgentActivityTab can expand and scroll straight to
 // this row's item instead of landing on the top of a long feed.
@@ -554,6 +569,9 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   // The server's keyset cursor for the next page: rows can leave the feed
   // between requests (Done, an auto-close), so paging never uses offsets.
   const [nextCursor, setNextCursor] = useState(null);
+  // True while the server says the list is ranked (order: 'needs-you-first' on the first page): keep its order, no day groups.
+  // Load more appends in the server's order and never changes it.
+  const [serverRanked, setServerRanked] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailed, setMoreFailed] = useState(false);
@@ -796,6 +814,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
       const d = await requestJson(`${basePath}?limit=30`);
       if (seq !== loadSeqRef.current) return;
       setNotifications(d.notifications || []);
+      setServerRanked(d.order === 'needs-you-first');
       setPage(1);
       setNextCursor(d.next || null);
       setHasMore(type === 'admin' && d.hasMore === true);
@@ -1168,6 +1187,8 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
 
   // Group by time: Today, Yesterday, This Week, Older
   const groupByTime = (notifs) => {
+    // A ranked list keeps the server's order as served: one group with no day heading.
+    if (serverRanked) return notifs.length ? [[null, notifs]] : [];
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const yesterday = new Date(today.getTime() - 86400000);
@@ -1483,6 +1504,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                           background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
                         }}>{chip.label}</span>
                       )}
+                      <AreaChip label={areaChipLabel(n)} color={colors.text} />
                     </div>
                     <SourceText n={n} type={type} style={{ fontSize: 14, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, marginTop: 4, lineHeight: 1.4 }} />
                     {n.body && (
@@ -1602,15 +1624,15 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                 </div>
               )}
               {!loading && !loadFailed && groupByTime(notifications).map(([group, items]) => (
-                <div key={group}>
+                <div key={group || 'ranked'}>
                   {/* The office panel is white: a light gray band with 14px text
                       (admin minimum), not the old dark one. */}
-                  <div style={{
+                  {group && <div style={{
                     padding: '8px 20px', fontSize: isDark ? 14 : 11, fontWeight: 700, color: isDark ? colors.text : colors.muted,
                     textTransform: 'uppercase', letterSpacing: 0.5,
                     background: isDark ? '#F1F5F9' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
                     backdropFilter: isDark ? 'none' : 'blur(8px)', WebkitBackdropFilter: isDark ? 'none' : 'blur(8px)',
-                  }}>{group}</div>
+                  }}>{group}</div>}
                   {items.map(n => {
                     const href = linkFor(n);
                     const chip = digestKindChip(n);
@@ -1658,6 +1680,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                               background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
                             }}>{chip.label}</span>
                           )}
+                          <AreaChip label={areaChipLabel(n)} color={colors.text} />
                         </div>
                         <SourceText n={n} type={type} style={{
                           fontSize: 14, color: colors.text, marginTop: 2, lineHeight: 1.4,
@@ -1761,4 +1784,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor, actionsFor, customerNameFor, voicemailRecordingFor };
+export const _test = { displayTitle, digestKindChip, areaChipLabel, linkFor, reportLinkFor, fullTextFor, actionsFor, customerNameFor, voicemailRecordingFor };

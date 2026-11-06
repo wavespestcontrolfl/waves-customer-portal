@@ -482,6 +482,14 @@ bell (the bell list, `getAdminNotifications` with `fullAccess`, hides `ownerOnly
 button route refuses them). The owner acts with his own words: step 1 for a system alert, step 2 (Intelligence Bar) for the rest.
 Nothing here sends anything to a customer or makes a model call.
 
+### Bell order and Area chip (owner 2026-11-05, `GATE_ALERT_BELL_ORDER`, dark)
+
+The bell lists the alerts that need the owner first. Rank 0 is `metadata.severity` `needs-you`; rank 1 is a row with no
+severity label (an older alert stays above known FYI rows); rank 2 is any other severity. Inside a rank the order is newest
+first. Each row whose `metadata.area` is one of the nine Areas also shows one Area chip (`areaChip`). The list response says
+`order: 'needs-you-first'` and the bell keeps that order (no day groups). The paging cursor is `<rank>~<timestamp>~<id>`; an old
+two-part cursor reads as rank 0. The unread count and the Recently done list do not change. See `docs/gates-and-env.md`.
+
 ## 6. What is enforced today
 
 | Rule | Where | State |

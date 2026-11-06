@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import NotificationBell, { _test } from './NotificationBell';
 import api from '../utils/api';
@@ -2062,5 +2062,135 @@ describe('NotificationBell voicemail Listen', () => {
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
     await screen.findByText('Voicemail — Fixture Caller');
     expect(screen.queryByRole('button', { name: 'Listen' })).toBeNull();
+  });
+});
+
+// GATE_ALERT_BELL_ORDER (owner 2026-11-05, admin-bell plan D1): the server ranks the list (order: 'needs-you-first')
+// and names each row's Area (areaChip). The bell draws one Area chip per row that has one, and keeps the server's
+// order everywhere: first page, load more, Done, a refresh.
+describe('NotificationBell admin — ranked list with an Area chip', () => {
+  const DAY = 86400000;
+  const row = (id, title, ageDays, over = {}) => ({
+    id, category: 'alert', title, body: null, metadata: {}, read_at: null, link: null,
+    created_at: new Date(Date.now() - ageDays * DAY).toISOString(), ...over,
+  });
+  // Server order: an old needs-you row FIRST, then newer rows. By time it would sit last, under "Older".
+  const RANKED_PAGE_1 = [
+    row('r1', 'Old needs-you alert', 20, { areaChip: 'Billing', version: 'v1' }),
+    row('r2', 'Newer needs-you alert', 1, { areaChip: 'Comms', version: 'v2' }),
+    row('r3', 'Plain alert today', 0, { version: 'v3' }),
+  ];
+  const RANKED_PAGE_2 = [
+    row('r4', 'FYI today', 0, { areaChip: 'System', version: 'v4' }),
+    row('r5', 'FYI last week', 9, { version: 'v5' }),
+  ];
+  const titlesOnScreen = () => screen.getAllByText(/ alert|FYI /).map((el) => el.textContent);
+
+  function serve({ ranked = true, pages = [RANKED_PAGE_1, RANKED_PAGE_2] } = {}) {
+    const calls = [];
+    global.fetch = vi.fn(async (url, options) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 3 });
+      if (options?.method === 'PUT') return jsonResponse({ success: true });
+      calls.push(u);
+      const second = u.includes('before=');
+      return jsonResponse({
+        notifications: second ? pages[1] : pages[0],
+        hasMore: !second && pages.length > 1,
+        next: !second && pages.length > 1 ? '0~2031-01-01%2012:00:00+00~x' : null,
+        ...(ranked ? { order: 'needs-you-first' } : {}),
+      });
+    });
+    return calls;
+  }
+  const open = async () => {
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Old needs-you alert');
+  };
+
+  it('areaChipLabel reads only a non-empty string', () => {
+    expect(_test.areaChipLabel({ areaChip: 'Billing' })).toBe('Billing');
+    expect(_test.areaChipLabel({ areaChip: '' })).toBeNull();
+    expect(_test.areaChipLabel({ areaChip: 7 })).toBeNull();
+    expect(_test.areaChipLabel({})).toBeNull();
+    expect(_test.areaChipLabel(null)).toBeNull();
+  });
+
+  it('desktop: shows the Area chip on a row that has one, none on a row without, and keeps the server order with no day bands', async () => {
+    serve({ pages: [RANKED_PAGE_1] });
+    await open();
+    const chips = screen.getAllByTestId('area-chip');
+    expect(chips.map((c) => c.textContent)).toEqual(['Billing', 'Comms']);
+    // the plain row has no chip: its row holds none
+    const plainRow = screen.getByText('Plain alert today').closest('div[style*="min-height"]');
+    expect(plainRow.querySelector('[data-testid="area-chip"]')).toBeNull();
+    expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Newer needs-you alert', 'Plain alert today']);
+    for (const band of ['Today', 'Yesterday', 'This Week', 'Older']) expect(screen.queryByText(band)).toBeNull();
+  });
+
+  it('desktop: the chip is 14px with a translucent grey tint, so it reads on a light or a dark panel', async () => {
+    serve({ pages: [RANKED_PAGE_1] });
+    await open();
+    const chip = screen.getAllByTestId('area-chip')[0];
+    expect(chip).toHaveStyle({ fontSize: '14px' });
+    expect(chip.style.background).toMatch(/rgba\(100, ?116, ?139/);
+    expect(chip.style.color).not.toBe('');
+  });
+
+  it('phone: shows the Area chip too', async () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      serve({ pages: [RANKED_PAGE_1] });
+      await open();
+      expect(screen.getAllByTestId('area-chip').map((c) => c.textContent)).toEqual(['Billing', 'Comms']);
+      expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Newer needs-you alert', 'Plain alert today']);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+
+  it('load more appends after the rows already shown, in the server order, and asks with the cursor', async () => {
+    const calls = serve();
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('FYI today');
+    expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Newer needs-you alert', 'Plain alert today', 'FYI today', 'FYI last week']);
+    expect(calls.some((u) => u.includes('before=0~'))).toBe(true);
+    expect(screen.getAllByTestId('area-chip').map((c) => c.textContent)).toEqual(['Billing', 'Comms', 'System']);
+    for (const band of ['Today', 'Yesterday', 'This Week', 'Older']) expect(screen.queryByText(band)).toBeNull();
+  });
+
+  it('Done removes only that row and the rest keep the server order', async () => {
+    serve();
+    await open();
+    const done = within(screen.getByText('Newer needs-you alert').closest('div[style*="min-height"]')).getByRole('button', { name: /done/i });
+    fireEvent.click(done);
+    await waitFor(() => expect(screen.queryByText('Newer needs-you alert')).toBeNull());
+    expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Plain alert today']);
+  });
+
+  it('a refresh (reopening the panel) shows the order the server sends now, not a time sort', async () => {
+    serve({ pages: [RANKED_PAGE_1] });
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: /close notifications/i }));
+    // a new needs-you row arrives and sits at the top; an older plain row moved up
+    const refreshed = [row('r9', 'Fresh needs-you alert', 3, { areaChip: 'Leads' }), RANKED_PAGE_1[2], RANKED_PAGE_1[0]];
+    serve({ pages: [refreshed] });
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Fresh needs-you alert');
+    expect(titlesOnScreen()).toEqual(['Fresh needs-you alert', 'Plain alert today', 'Old needs-you alert']);
+    expect(screen.getAllByTestId('area-chip').map((c) => c.textContent)).toEqual(['Leads', 'Billing']);
+  });
+
+  it('gate off (no order field): day bands as before, and no chip when the server sends none', async () => {
+    const plain = [row('p1', 'Plain alert today', 0), row('p2', 'Last month alert', 40)];
+    serve({ ranked: false, pages: [plain] });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Today');
+    expect(screen.getByText('Older')).toBeInTheDocument();
+    expect(screen.queryAllByTestId('area-chip')).toHaveLength(0);
   });
 });

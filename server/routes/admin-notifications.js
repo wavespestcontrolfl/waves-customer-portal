@@ -50,6 +50,8 @@ function notificationIssueLimit(value) {
 // exactly. A JS Date would round to the millisecond and skip or repeat rows
 // that share one. Without that field (a row from elsewhere) the ISO string of
 // the Date is the fallback.
+// GATE_ALERT_BELL_ORDER: the bell's cursor is "<rank>~<timestamp>~<id>" (rank 0, 1 or 2, see BELL_RANK_SQL in
+// services/notification-service.js). parseCursor reads both shapes; a two-part cursor has no `rank`.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // ISO-8601 or Postgres timestamptz text: date, 'T' or space, time, optional
 // fraction (up to microseconds), and a zone (never a naive time: it would be
@@ -61,15 +63,41 @@ function formatCursor(row, column = 'created_at', fullColumn = `${column}_cursor
   const at = new Date(row[column]);
   return Number.isNaN(at.getTime()) ? null : `${at.toISOString()}~${row.id}`;
 }
+// The ranked bell's cursor: the row's rank in front of the plain cursor. A row with no rank is rank 0 (never skips).
+function formatRankedCursor(row) {
+  const plain = formatCursor(row);
+  if (!plain) return null;
+  const rank = Number(row.bell_rank);
+  return `${rank === 1 || rank === 2 ? rank : 0}~${plain}`;
+}
 function parseCursor(raw) {
   if (typeof raw !== 'string' || !raw) return null;
-  const [at, id] = raw.split('~');
+  const parts = raw.split('~');
+  if (parts.length !== 2 && parts.length !== 3) return null;
+  const [rank, at, id] = parts.length === 3 ? parts : [null, ...parts];
   if (!id || !UUID_RE.test(id) || !TIMESTAMP_TEXT_RE.test(at) || Number.isNaN(new Date(at).getTime())) return null;
-  return { at, id };
+  if (rank === null) return { at, id };
+  return /^[012]$/.test(rank) ? { at, id, rank: Number(rank) } : null;
 }
-// Served rows carry the cursor text only to build `next`; the client never needs it.
-function withoutCursorFields({ created_at_cursor, ...row }) {  
+// Served rows carry the cursor text (and, ranked, the rank) only to build `next`; the client never needs them.
+function withoutCursorFields({ created_at_cursor, bell_rank, ...row }) {
   return row;
+}
+
+// GATE_ALERT_BELL_ORDER, read at call time. A test that mocks feature-gates without the reader reads it as off.
+function bellOrderOn() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.alertBellOrderLive === 'function' && gates.alertBellOrderLive() === true;
+  } catch { return false; }
+}
+// The row's Area when metadata.area is one of the nine Areas; nothing otherwise. Lazy require: only a ranked list needs it.
+function withAreaChips(rows) {
+  const { AREAS } = require('../services/admin-alert-compose');
+  return rows.map((row) => {
+    const area = parseMetadata(row.metadata).area;
+    return AREAS.includes(area) ? { ...row, areaChip: area } : row;
+  });
 }
 
 // GET /api/admin/notifications — list with pagination.
@@ -86,12 +114,15 @@ router.get('/', async (req, res, next) => {
     // feed between requests (Done here, another admin's Done, an auto-close),
     // so an offset would skip the rows that moved up; the cursor continues
     // strictly after the last row served. page stays for callers without one.
-    const before = parseCursor(req.query.before);
-    if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
+    const ranked = bellOrderOn();
+    const parsed = parseCursor(req.query.before);
+    if (req.query.before && !parsed) return res.status(400).json({ error: 'Invalid cursor' });
+    // Gate off: a ranked cursor (a panel open when the gate was unset) is read by its timestamp and id alone.
+    const before = parsed && !ranked ? { at: parsed.at, id: parsed.id } : parsed;
     const offset = before ? 0 : (page - 1) * limit;
     // fullAccess: an owner-only row (a Claude plan or copy) is listed for the owner login alone.
     const fullAccess = ibFullAccess(req);
-    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess });
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess, ...(ranked ? { ranked } : {}) });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
@@ -112,7 +143,9 @@ router.get('/', async (req, res, next) => {
       { role: req.techRole, fullAccess });
     // `sendCopyToClaude` marks a row step 1 refuses (customer contact, words our code did not write), owner login only.
     const marked = withSendCopyToClaudeFields(sendable, { role: req.techRole, fullAccess });
-    const rows = await withTextNoteSources(marked, { role: req.techRole });
+    const withSources = await withTextNoteSources(marked, { role: req.techRole });
+    // Ranked: one Area chip per row, from the stored label. The row's own metadata is read, never the customer's words.
+    const rows = ranked ? withAreaChips(withSources) : withSources;
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
@@ -120,7 +153,9 @@ router.get('/', async (req, res, next) => {
       // for the admin role while GATE_ALERT_SEND_TO_CLAUDE is on (no explainer needed).
       notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
-      next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
+      next: persisted.length > limit && lastServed ? (ranked ? formatRankedCursor(lastServed) : formatCursor(lastServed)) : null,
+      // The list is ranked (needs-you first, then newest first inside a rank): the bell keeps this order as served.
+      ...(ranked ? { order: 'needs-you-first' } : {}),
     });
   } catch (err) { next(err); }
 });
@@ -639,3 +674,5 @@ router.put('/:id/reopen', requireAdmin, async (req, res, next) => {
 });
 
 module.exports = router;
+// Test hooks (cursor shapes); not part of the router API.
+module.exports._cursor = { parseCursor, formatCursor, formatRankedCursor };
