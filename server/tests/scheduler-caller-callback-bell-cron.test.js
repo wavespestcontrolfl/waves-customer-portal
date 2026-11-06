@@ -1,5 +1,5 @@
 /**
- * Caller callback late bell in its own cron (server/services/scheduler.js, '0 5-59/15 8-20 * * *': minutes 5, 20, 35
+ * Caller callback late bell in its own cron (server/services/scheduler.js, '0 5,20,35,50 8-20 * * *': minutes 5, 20, 35
  * and 50 of every hour from 8 AM to 8 PM ET): gate off reads nothing; on, the job runs under runExclusive, so a
  * deploy overlap never raises it twice, and a failed run is logged, never thrown out of the tick.
  *
@@ -40,10 +40,12 @@ const { runCallerCallbackBell } = require('../services/caller-callback-bell');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
+const EXPRESSION = '0 5,20,35,50 8-20 * * *';
+
 function bellTick() {
   isEnabled.mockImplementation((name) => name === 'cronJobs');
   initScheduledJobs();
-  const registrations = cron.schedule.mock.calls.filter(([expression, task]) => expression === '0 5-59/15 8-20 * * *' && String(task).includes('runCallerCallbackBell'));
+  const registrations = cron.schedule.mock.calls.filter(([expression, task]) => expression === EXPRESSION && String(task).includes('runCallerCallbackBell'));
   expect(registrations).toHaveLength(1);
   expect(registrations[0][2]).toEqual({ timezone: 'America/New_York' });
   return registrations[0][1]();
@@ -52,6 +54,16 @@ function bellTick() {
 beforeEach(() => {
   jest.clearAllMocks();
   callerCallbackBellLive.mockReturnValue(false);
+});
+
+// node-cron 3 reads a stepped range ('5-59/15') as the range values divisible by the step (15, 30, 45): one run an
+// hour short and on the follow-up pager's minutes. Read the expression the way node-cron itself does.
+test('node-cron runs the job four times an hour, at minutes 5, 20, 35 and 50, 8 AM to 8 PM', () => {
+  const convert = jest.requireActual('node-cron/src/convert-expression');
+  const [, minutes, hours] = convert(EXPRESSION).split(' ');
+  expect(minutes).toBe('5,20,35,50');
+  expect(hours).toBe('8,9,10,11,12,13,14,15,16,17,18,19,20');
+  expect(convert('0 5-59/15 8-20 * * *').split(' ')[1]).toBe('15,30,45');
 });
 
 test('gate off: the tick returns before the lock or any read', async () => {

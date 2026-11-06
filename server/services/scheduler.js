@@ -5395,8 +5395,11 @@ function initScheduledJobs() {
   // GATE_CALLER_CALLBACK_PROMISE_CLOSE on it also closes the caller's own
   // promise when they called, texted or a person followed up. Nothing goes to
   // the caller.
+  // Minutes 5, 20, 35 and 50 as a LIST: node-cron 3 reads a stepped range such
+  // as '5-59/15' as the range values divisible by the step (15, 30, 45), which
+  // dropped one run an hour and moved the rest onto the pager's minutes.
   // =========================================================================
-  cron.schedule('0 5-59/15 8-20 * * *', async () => {
+  cron.schedule('0 5,20,35,50 8-20 * * *', async () => {
     if (!require('../config/feature-gates').callerCallbackBellLive()) return;
     try {
       await runExclusive('caller-callback-bell', async () => {
