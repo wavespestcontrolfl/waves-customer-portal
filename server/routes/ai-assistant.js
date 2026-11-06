@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { rateLimitKey } = require('../middleware/rate-limit-key');
+const { checkPortalChatCustomerCap } = require('../middleware/portal-chat-customer-cap');
 const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
@@ -116,6 +117,17 @@ router.post('/chat', authenticate, async (req, res, next) => {
     const customerId = req.customerId;
     const customerPhone = req.customer.phone || null;
     const requestId = suppliedRequestId || crypto.randomUUID();
+
+    // GATE_PORTAL_CHAT_CUSTOMER_CAP: per-customer minute and daily limits,
+    // checked after validation and before any model call. Over a limit the
+    // customer gets a canned reply (200, not retryable, no model call).
+    const cap = await checkPortalChatCustomerCap(customerId);
+    if (!cap.allowed) {
+      return res.json({
+        reply: cap.reply, escalated: false, generated: false, canReport: false, requestId,
+      });
+    }
+
     const rawChannelIdentifier = sessionId || customerId;
     const channelIdentifier = portalConversationIdentifier(rawChannelIdentifier, req.propertyId);
 
