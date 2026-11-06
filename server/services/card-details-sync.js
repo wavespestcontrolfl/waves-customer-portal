@@ -88,9 +88,12 @@ async function applyStripeCardDetails(pm, { source = 'webhook', database } = {})
     if (isBankMethodType(row.method_type)) continue;
     const { patch, fields, stored, next } = cardPatch(pm, row);
     if (!fields.length) continue;
+    // updated_at stays as it is: the Auto Pay fallback walk (stripe.js, autopay-eligibility.js) orders duplicate
+    // default cards by it, and the unanswered-reply check reads it as an account change. A detail refresh must not
+    // move either; the audit row records when it ran.
     const count = await knex('payment_methods')
       .where({ id: row.id, stripe_payment_method_id: pm.id })
-      .update({ ...patch, updated_at: new Date() });
+      .update(patch);
     if (!count) continue;
     updated += 1;
     logger.info(`[card-details-sync] row ${row.id} refreshed from Stripe (${source}): ${fields.join(', ')}`);

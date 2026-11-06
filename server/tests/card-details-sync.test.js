@@ -64,7 +64,8 @@ describe('applyStripeCardDetails', () => {
     expect(out).toEqual({ updated: 1 });
     expect(rows[0]).toMatchObject({ exp_month: '03', exp_year: '2029', last_four: '1111' });
     expect(knex.updates[0].filter).toEqual({ id: 'row-1', stripe_payment_method_id: 'pm_a' });
-    expect(knex.updates[0].patch.updated_at).toBeInstanceOf(Date);
+    // The Auto Pay fallback orders duplicate default cards by updated_at: a detail refresh never moves it.
+    expect(knex.updates[0].patch).not.toHaveProperty('updated_at');
     const audit = auditCardDetailsSynced.mock.calls[0][0];
     expect(audit).toMatchObject({
       payment_method_row_id: 'row-1', source: 'webhook', old_expiry: '11/2026', new_expiry: '03/2029',
@@ -155,7 +156,7 @@ describe('syncNearExpiryCards', () => {
       card({ id: 'bad', stripe_payment_method_id: 'pm_bad', exp_month: null, exp_year: 'x' }),
       card({ id: 'twodigit', stripe_payment_method_id: 'pm_two', exp_month: '12', exp_year: '26' }),
       card({ id: 'bank', stripe_payment_method_id: 'pm_bank', method_type: 'ach', exp_month: '01', exp_year: '2020' }),
-      card({ id: 'other', stripe_payment_method_id: 'pm_x', processor: 'square' }),
+      card({ id: 'other', stripe_payment_method_id: 'pm_x', processor: 'other_processor' }),
     ];
     stripe.retrievePaymentMethod.mockImplementation(async (id) => ({ id, type: 'card', customer: 'cus', card: { brand: 'visa', last4: '4242', exp_month: 1, exp_year: 2099 } }));
     const out = await syncNearExpiryCards({ now: NOW, database: fakeKnex(rows) });
