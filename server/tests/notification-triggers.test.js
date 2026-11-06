@@ -525,6 +525,24 @@ describe('triggerNotification bell outcome', () => {
       expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
     });
 
+    test('a dedupe hit on a keyed alert whose push already went sends no second push, as the bell loop does; a refresh still pushes', async () => {
+      const PushService = require('../services/push-notifications');
+      process.env.GATE_ALERT_RING_BUDGET = 'true';
+      const payload = { failures: ['golden_addr:Example (no parcel)'] };
+      const opts = { dedupeKey: 'property-lookup-canary:2026-11-06' };
+      pushOnlyDb();
+      jest.spyOn(ringBudget, 'budgetPushOnly').mockResolvedValue({ held: false, created: { id: 'n-1', deduped: true, refreshed: false } });
+      const stats = await triggerNotification('property_lookup_canary_failed', payload, opts);
+      expect(stats).toMatchObject({ bellWritten: false, deduped: true });
+      expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+
+      jest.restoreAllMocks();
+      pushOnlyDb();
+      jest.spyOn(ringBudget, 'budgetPushOnly').mockResolvedValue({ held: false, created: { id: 'n-1', deduped: true, refreshed: true } });
+      await triggerNotification('property_lookup_canary_failed', payload, opts);
+      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    });
+
     test('gate off: the budget is not consulted and nothing else changes', async () => {
       const PushService = require('../services/push-notifications');
       pushOnlyDb();

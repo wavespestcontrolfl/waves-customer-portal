@@ -542,7 +542,7 @@ describe('push-only recipients (every admin has bell entries off)', () => {
   test('within the budget the push goes and an Activity-only record counts it for the day', async () => {
     const { rows, write } = recorder();
     const out = await budget.budgetPushOnly({ connection: makeConn(stamped(9, today())), category: 'alert', metadata, write });
-    expect(out).toEqual({ held: false });
+    expect(out).toMatchObject({ held: false });
     expect(rows[0]).toMatchObject({ feed: 'activity', quiet: true, severity: 'fyi', ringBudgetPushOnly: true, ringBudgetDay: today(), triggerKey: 'dashboard_alert' });
   });
 
@@ -551,7 +551,7 @@ describe('push-only recipients (every admin has bell entries off)', () => {
     const conn = makeConn(stamped(10, today()));
     mockState.conn = conn;
     const out = await budget.budgetPushOnly({ connection: conn, category: 'alert', metadata, write });
-    expect(out).toEqual({ held: true });
+    expect(out).toMatchObject({ held: true });
     expect(rows[0]).toMatchObject({ feed: 'activity', quiet: true, ringBudgetHeld: today() });
     expect(rows[0]).not.toHaveProperty('ringBudgetDay');
     expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
@@ -559,12 +559,12 @@ describe('push-only recipients (every admin has bell entries off)', () => {
 
   test('an exempt alert is untouched, and a failed record write reads as not held (the push goes)', async () => {
     const { write } = recorder();
-    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'inbound_sms', metadata: {}, write })).toEqual({ held: false });
+    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'inbound_sms', metadata: {}, write })).toMatchObject({ held: false });
     expect(write).not.toHaveBeenCalled();
     const failing = jest.fn(async () => null);
-    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'alert', metadata, write: failing })).toEqual({ held: false });
+    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'alert', metadata, write: failing })).toMatchObject({ held: false, created: null });
     const throwing = jest.fn(async () => { throw new Error('x'); });
-    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'alert', metadata, write: throwing })).toEqual({ held: false });
+    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'alert', metadata, write: throwing })).toMatchObject({ held: false, created: null });
   });
 });
 

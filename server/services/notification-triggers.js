@@ -1462,12 +1462,21 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
+// A dedupe hit (no refresh) on a keyed row of a type whose first ring already delivered its push: no second push. The bell
+// loop and the push-only budget path read it the same way.
+function dedupeHitSkipsPush(created, { dedupeKey, triggerKey, refreshOnDedupe }) {
+  return Boolean(created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser'
+    || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead'
+    || (triggerKey === 'new_lead' && refreshOnDedupe)));
+}
+
 // No bell row because every admin turned bell entries off, but a phone push is going: that push takes the daily ring budget too
-// (alert-ring-budget.js budgetPushOnly). True when the budget held it, so the caller sends no push.
-async function pushOnlyBudgetHeld({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell }) {
-  if (bellWritten || anyBellEnabled || pushOnly || relayFailureCall || pushEnabledIds.length === 0 || !ringBudget.enabled()) return false;
-  const { held } = await ringBudget.budgetPushOnly({ connection: db, category: trigger.category, metadata: bellMetadata, write: writeBell });
-  return held;
+// (alert-ring-budget.js budgetPushOnly). `held`: the budget held it; `deduped`: its record was a dedupe hit whose push already
+// went (dedupeHitSkipsPush). Either way the caller sends no push.
+async function pushOnlyBudget({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell, dedupe }) {
+  if (bellWritten || anyBellEnabled || pushOnly || relayFailureCall || pushEnabledIds.length === 0 || !ringBudget.enabled()) return { held: false, deduped: false };
+  const { held, created } = await ringBudget.budgetPushOnly({ connection: db, category: trigger.category, metadata: bellMetadata, write: writeBell });
+  return { held, deduped: !held && dedupeHitSkipsPush(created, dedupe) };
 }
 
 async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
@@ -1677,7 +1686,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (ringBudget.isHeld(created)) ringHeld = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
+          if (dedupeHitSkipsPush(created, { dedupeKey, triggerKey, refreshOnDedupe })) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -1685,7 +1694,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     }
 
-    ringHeld = ringHeld || await pushOnlyBudgetHeld({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell });
+    const pushOnlyVerdict = await pushOnlyBudget({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell,
+      dedupe: { dedupeKey, triggerKey, refreshOnDedupe } });
+    ringHeld = ringHeld || pushOnlyVerdict.held;
+    dedupedNoPush = dedupedNoPush || pushOnlyVerdict.deduped;
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };

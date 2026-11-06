@@ -292,7 +292,7 @@ const dbHandle = () => require('../models/db');
 //          retention retires it) counts it toward the day's ten;
 //   hold - past the budget: the held row is written (Held alerts in Activity, one count row), and the caller sends no push.
 // Exempt rows (customer contact and the rest) are untouched. A write that fails reads as "not held": the push goes.
-// Returns { held }. Never throws.
+// Returns { held, created } (created: the write's result, so the caller can read a dedupe hit). Never throws.
 async function budgetPushOnly({ connection, category, metadata, write }) {
   try {
     const verdict = await applyBudget({ connection, category, metadata });
@@ -300,12 +300,14 @@ async function budgetPushOnly({ connection, category, metadata, write }) {
     const held = verdict.outcome === 'hold';
     const row = held ? verdict.metadata : { ...verdict.metadata, feed: 'activity', quiet: true, severity: 'fyi', [PUSH_ONLY_KEY]: true };
     const created = await write(row);
-    if (!created || created.suppressed) return { held: false };
-    if (held) await afterHeldInsert(connection, verdict.day);
-    return { held };
+    if (!created || created.suppressed) return { held: false, created: null };
+    // A dedupe hit writes no new row: nothing new to count or list (the caller decides whether its push already went).
+    const hit = created.deduped && !created.refreshed;
+    if (held && !hit) await afterHeldInsert(connection, verdict.day);
+    return { held, created };
   } catch (err) {
     logger.warn(`[ring-budget] push-only verdict failed, pushing as before: ${err?.code || err?.name || 'error'}`);
-    return { held: false };
+    return { held: false, created: null };
   }
 }
 
