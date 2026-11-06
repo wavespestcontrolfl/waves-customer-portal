@@ -177,6 +177,7 @@
  *   GATE_CONTACT_LOGIN_HOLDER_ONLY=true (security audit run 3: contact sign-in, which GATE_CONTACT_LOGIN allows, is open only to a slot phone the account holder's own signed-in portal save listed in service_preferences.login_attested_phone_keys (written only by the portal contacts save; a holder who attested contacts before this gate re-saves them once to restore their contacts' sign-in). A trigger (migration 20261105060000) cuts the list to the phones still in a slot whenever any writer changes the slot phones, so a removed number that is re-added does not regain sign-in. The account-level consent stamp, whatever wrote it (the call pipeline's call_pipeline_request, the grandfather backfill, a recipient YES), no longer authorizes sign-in by itself, because the call pipeline stamps a number from an unauthenticated caller's words. Those contacts keep receiving texts exactly as before. Because a contact session is re-checked on every request, a live contact session on such a slot ends at its next request (401). Applies to the sign-in codes, the per-request session check and contact push devices. Read at call time via contactLoginHolderOnlyLive(), strict 'true', dark by default; off = byte-identical to before. Sends nothing to a customer. The owner flips it.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
+ *   GATE_MONEY_NOTICE_CATCHUP=true (owner 2026-11-06, "jobs 1-6": three money-notice jobs catch up after one lost daily tick. Autopay pre-charge reminders also match a phone customer whose charge is 2 or 1 days away and who has no reminder in the last 25 days; annual-prepay renewal notices (30/15/7) and termite bond renewal texts (30/15/7) match a notice whose day passed at most 3 days ago and is still unsent; invoice follow-ups get a second Tue-Fri run at 1:16 PM ET under the same lock, which sends only touches still due today and skips a row an interrupted send left claimed. Read at call time via moneyNoticeCatchupLive(), strict 'true', dark by default; off = each job matches only its exact day as before. Kill switch: unset.)
  *   GATE_IB_RECORD_PAYMENT=true (the Intelligence Bar's record_payment write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can record money ALREADY RECEIVED outside the portal (cash, check, Zelle, Venmo, PayPal or other) against one open invoice on a confirm card (never owner-direct), by running the Invoices page's own Record payment handler (POST /admin/invoices/:id/record-payment) in process. Settles the whole amount due and sends NO receipt (a receipt is the separate resend_receipt tool or the Invoices page). It never charges a card, creates a Stripe payment, refunds or voids; read at call time via ibRecordPaymentLive(), strict === 'true', dark by default, needs GATE_IB_PLATFORM; kill: unset)
  *   GATE_IB_RECORD_PAYMENT_PARTIAL=true (the Intelligence Bar's record_payment card may record PART of a bill (an amount less than the balance due) when GATE_PARTIAL_PAYMENTS is on too, owner 2026-10-28/29 "the bar does what the Invoices page does": the same recordManualPayment writer, a bar-only internal marker, the Invoices page's part-payment refusals, and the amount owed the card showed pinned and re-checked at Confirm. Never a receipt, never a card charge; read at call time via ibRecordPaymentPartialLive(), strict === 'true', dark by default; needs GATE_IB_RECORD_PAYMENT, GATE_IB_PLATFORM and GATE_PARTIAL_PAYMENTS; kill: unset)
  *   GATE_IB_ACCEPT_ESTIMATE=true (the Intelligence Bar's accept_estimate marks one sent or viewed estimate accepted from the bar, exactly as the estimate page's Mark accepted does (same handler, same conversion), always behind a confirm card that shows the service lines, the monthly bill before and after, the billing lane and tier, and every customer message; owner ruling 2026-10-07 Q5. Read at call time via ibAcceptEstimateLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
@@ -551,6 +552,8 @@ const gates = {
   bidKit: process.env.GATE_BID_KIT === 'true',
   // GATE_BID_KIT_PRODUCT_LIST_SYNC (daily Product List rebuild in the Bid kit, dark). Boot-log entry only; the call-time reader is bidKitProductListSyncLive().
   bidKitProductListSync: process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC === 'true',
+  // GATE_MONEY_NOTICE_CATCHUP (money-notice jobs catch up after one lost tick, dark). Boot-log entry only; the call-time reader is moneyNoticeCatchupLive().
+  moneyNoticeCatchup: process.env.GATE_MONEY_NOTICE_CATCHUP === 'true',
   // GATE_PRODUCT_INTAKE_GUARD (near-name guard + EPA number/label for agent-created pesticides, dark). Boot-log entry only; the call-time reader is productIntakeGuardLive().
   productIntakeGuard: process.env.GATE_PRODUCT_INTAKE_GUARD === 'true',
   // GATE_REVIEW_FIRST_ASK_LOCK (first review ask box locked on for a never-asked customer, dark). Boot-log entry only; the call-time reader is reviewFirstAskLockLive().
@@ -6506,6 +6509,13 @@ function ibStaffAutopayOffLive() {
   return process.env.GATE_IB_STAFF_AUTOPAY_OFF === 'true';
 }
 
+// Catch-up for three money-notice jobs (autopay pre-charge, renewal notices, invoice
+// follow-ups), read at CALL time. Strict `=== 'true'`, dark in every environment;
+// unsetting it is the kill switch. Off = every job matches only its exact day.
+function moneyNoticeCatchupLive() {
+  return process.env.GATE_MONEY_NOTICE_CATCHUP === 'true';
+}
+
 // The Staff page "Hired" button (routes/admin-timetracking.js POST
 // /technicians/:id/hire and /hire/resend), read at CALL time. Strict
 // `=== 'true'`, dark in every environment; unsetting it is the kill switch.
@@ -9705,6 +9715,8 @@ module.exports.contactLoginLive = contactLoginLive;
 module.exports.contactLoginHolderOnlyLive = contactLoginHolderOnlyLive;
 // GATE_IB_STAFF_AUTOPAY_OFF reader, on its own line.
 module.exports.ibStaffAutopayOffLive = ibStaffAutopayOffLive;
+// GATE_MONEY_NOTICE_CATCHUP reader, on its own line.
+module.exports.moneyNoticeCatchupLive = moneyNoticeCatchupLive;
 // GATE_HIRED_PACKET reader, on its own line.
 module.exports.hiredPacketLive = hiredPacketLive;
 // GATE_STAFF_DOC_PREFILL reader, on its own line.

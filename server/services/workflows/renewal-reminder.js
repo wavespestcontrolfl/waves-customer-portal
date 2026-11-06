@@ -2,6 +2,23 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+
+// GATE_MONEY_NOTICE_CATCHUP (owner 2026-11-06): a termite bond 30/15/7 text
+// whose day passed at most this many days ago, and that has not gone out
+// (the 35-day 'renewal' cooldown below), still matches on the next run, so a
+// lost 10:12 tick is made up. One day, not the 3 of NOTICE_CATCHUP_DAYS in
+// annual-prepay-renewals.js: these texts state the time left in relative words
+// ("in 30 days", "in 2 weeks", "in just 1 week"), so a later send would state
+// it wrong. A prepay notice names the exact end date, so it can wait longer.
+const RENEWAL_CATCHUP_DAYS = 1;
+
+// The earliest renewal date a rung may still notice today. Gate off, the
+// exact day only (`DATE(col) BETWEEN d AND d`, the same match as `= d`).
+function earliestRenewalDate(dateStr) {
+  if (!require('../../config/feature-gates').moneyNoticeCatchupLive()) return dateStr;
+  return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), -RENEWAL_CATCHUP_DAYS));
+}
 
 // Counters that mean the termite renewal sweep did something worth a log
 // line: EVERY action counter runTermiteAnnualRenewalSweep returns (Codex
@@ -179,7 +196,7 @@ class RenewalReminder {
         // branch guards on phone itself.
         const customers = await db('customers')
           .whereNotNull(field.column)
-          .whereRaw(`DATE(${field.column}) = ?`, [dateStr])
+          .whereRaw(`DATE(${field.column}) BETWEEN ? AND ?`, [earliestRenewalDate(dateStr), dateStr])
           .whereNull('deleted_at') // soft-deleted customers get no renewal outreach
           .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', field.column);
 
