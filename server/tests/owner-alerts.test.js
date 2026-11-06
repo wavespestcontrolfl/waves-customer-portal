@@ -152,8 +152,7 @@ test('whyFromFreeText keeps a clean first sentence and drops one that breaks the
 // denylisted internal_admin_alert trigger and reaches nobody. Every internal or admin alert text must opt in
 // with allowOwnerSms (a real text), whatever its recipient is called: the first version of this guard matched
 // only `process.env.ADAM_PHONE` and missed 18 sends written as ADMIN_ALERT_PHONE, ADAM_CELL, OWNER_PHONE,
-// ADMIN_PHONE or a literal number. The one kept send is the tax reminder's legacy branch, which runs only while
-// GATE_TAX_DEADLINE_BELLS is off.
+// ADMIN_PHONE or a literal number. No send is kept: the tax reminder's old text branch is gone.
 test('no server code sends an internal alert text without allowOwnerSms, whatever the recipient is called', () => {
   const root = path.join(__dirname, '..');
   const offenders = [];
@@ -174,7 +173,7 @@ test('no server code sends an internal alert text without allowOwnerSms, whateve
   };
   walk(path.join(root, 'routes'));
   walk(path.join(root, 'services'));
-  expect(offenders).toEqual(['services/scheduler.js']);
+  expect(offenders).toEqual([]);
 });
 
 test('the shipped ring picks: the three money alerts and the customer contacts ring, every other kind is quiet', () => {

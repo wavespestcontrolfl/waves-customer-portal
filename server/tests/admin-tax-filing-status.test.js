@@ -1,7 +1,7 @@
 /**
  * PUT /admin/tax/filings/:id (owner 2026-10-30, tax deadline bells): status must be one the table uses, a
  * payroll row (source_key payroll:) needs a confirmation number to become filed or paid, a paid row with no
- * paid date gets today (ET), and a marked row's reminder bells close while GATE_TAX_DEADLINE_BELLS is on.
+ * paid date gets today (ET), and a marked row's reminder bells close.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -58,7 +58,6 @@ beforeEach(() => {
   updates.length = 0;
   mockState.row = payrollRow();
   closeBellsForFiling.mockClear();
-  delete process.env.GATE_TAX_DEADLINE_BELLS;
 });
 
 const put = async (body) => {
@@ -140,13 +139,7 @@ describe('paid date', () => {
 });
 
 describe('reminder bells', () => {
-  test('gate off: nothing is closed', async () => {
-    await put({ status: 'filed', confirmationNumber: 'EFT-1' });
-    expect(closeBellsForFiling).not.toHaveBeenCalled();
-  });
-
-  test('gate on: marking filed or paid closes the row\'s bells; another status does not', async () => {
-    process.env.GATE_TAX_DEADLINE_BELLS = 'true';
+  test('marking filed or paid closes the row\'s bells; another status does not', async () => {
     await put({ status: 'filed', confirmationNumber: 'EFT-1' });
     expect(closeBellsForFiling).toHaveBeenCalledWith('f1');
     closeBellsForFiling.mockClear();
