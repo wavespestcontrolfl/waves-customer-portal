@@ -2246,6 +2246,31 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Catch-up for the Monday 7:00 sweep above (GATE_WATERING_CATCHUP, owner 2026-11-06
+  // "jobs 1-6": "Monday catch-up runs from 8:00 to 11:00. The send key blocks repeats."):
+  // Monday 8:01, 9:01, 10:01 and 11:01. A lost 7:00 tick, or a deploy that killed the
+  // sweep, left every customer it had not reached without that week's email. Runs only
+  // when job_health shows no finished run this ET week; checked before the lock and again
+  // under it. Same lock name, so a 7:00 sweep still running makes this tick skip. The
+  // per customer-week send checks block repeats; the noon plan cutoff is unchanged.
+  // Minute :01 on Monday 8-11 is shared only with jobs that run every 5 minutes or more often.
+  // Not registered with deploy-kill-retry: that retry can fire up to 2 h after a killed run
+  // started, outside the approved window; the next hourly tick here covers a killed run.
+  cron.schedule('1 8-11 * * 1', async () => {
+    if (!require('../config/feature-gates').wateringCatchupLive()) return;
+    try {
+      const catchUp = require('./irrigation-weekly-catchup');
+      if (!(await catchUp.sweepWeekIsMissing())) return;
+      logger.warn('[irrigation-weekly-email] catch-up: this week\'s sweep has not finished, running it now');
+      await runExclusive('irrigation-weekly-email', async () => {
+        const result = await catchUp.runWeeklyIrrigationEmailCatchUp();
+        logger.info(`[irrigation-weekly-email] catch-up run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly irrigation email catch-up failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // WEEKLY TURF VARIANCE DIGEST (kill: TURF_VARIANCE_DIGEST_DISABLED=1)
   // Monday 7:05am ET — owner ACT email ONLY when the last 30 days of
