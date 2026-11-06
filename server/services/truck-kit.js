@@ -1,5 +1,5 @@
 /**
- * Truck kit (GATE_TRUCK_KIT, dark): what rides on each truck, and a
+ * Truck kit: what rides on each truck, and a
  * technician's truck check (docs/tool-inventory-tracker-scope.md, PR 1).
  *
  * A technician's truck is the live equipment row with category 'vehicle'
@@ -22,7 +22,6 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { truckKitLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { reportEquipmentIssue } = require('./equipment-maintenance');
 const { raiseAdminAlert } = require('./admin-alert-compose');
@@ -251,10 +250,6 @@ function requirementsFor(serviceType, { serviceKey = null, serviceCategory = nul
 }
 const serviceLinesFor = (serviceType, opts) => requirementsFor(serviceType, opts).lines;
 
-function truckKitEnabled() {
-  return truckKitLive();
-}
-
 class TruckCheckError extends Error {
   constructor(code, message, extra = {}) {
     super(message);
@@ -462,10 +457,9 @@ async function toolGapsForTruck(vehicleId, serviceLines, conn = db, promote = ne
 }
 
 // The job card's readiness call (job-card.js buildJobCard, readinessOnly):
-// nothing while the kit is dark, and a failed read is reported, never fatal,
-// so the stock and weather holds always stand.
+// a failed read is reported, never fatal, so the stock and weather holds
+// always stand.
 async function readinessToolIssue(facts, conn = db) {
-  if (!truckKitLive()) return null;
   try {
     return await module.exports.toolGapIssue({
       technicianId: facts.technicianId, serviceLine: facts.serviceLine, serviceType: facts.serviceType,
@@ -496,7 +490,7 @@ function toolGapLabel(gaps) {
 // hold like company stock or weather.
 // serviceType, when given, adds the companion lines of a combined job.
 async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey = null, serviceCategory = null, addons = [] }, conn = db) {
-  if (!truckKitLive() || !technicianId) return null;
+  if (!technicianId) return null;
   const { lines, promote, restrict } = serviceType ? requirementsFor(serviceType, { serviceKey, serviceCategory, addons }) : { lines: [serviceLine].filter(Boolean), promote: new Set(), restrict: null };
   if (!lines.length) return null;
   let truck;
@@ -765,7 +759,6 @@ module.exports = {
   CHECK_INTERVAL_DAYS,
   TOOL_ALERT_TYPES,
   TruckCheckError,
-  truckKitEnabled,
   truckForTechnician,
   kitForTruck,
   lastCheckForTruck,

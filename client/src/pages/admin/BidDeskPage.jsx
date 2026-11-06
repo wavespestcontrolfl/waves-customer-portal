@@ -176,7 +176,7 @@ function DueCell({ bid }) {
   );
 }
 
-function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = ALL_BID_COLUMNS, adaptiveColumns = false }) {
+function BidTable({ bids, selectedId, onSelect, visibleColumns = ALL_BID_COLUMNS, adaptiveColumns = false }) {
   const visible = new Set(visibleColumns);
   const adaptiveMinWidth = visibleColumns.reduce((total, id) => total + (BID_COLUMN_WIDTHS[id] || 0), 0);
   return (
@@ -211,10 +211,10 @@ function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = 
                 >
                   <span className="min-w-0 break-words">{titleOf(bid)}</span>
                 </Button>
-                {(bid.historical || (checklistLive && bid.checklist_progress?.required > 0)) && (
+                {(bid.historical || bid.checklist_progress?.required > 0) && (
                   <span className="flex flex-wrap gap-1">
                     {bid.historical && <Badge className="whitespace-nowrap">Earlier</Badge>}
-                    {checklistLive && bid.checklist_progress?.required > 0 && (
+                    {bid.checklist_progress?.required > 0 && (
                       <Badge className="whitespace-nowrap" tone={bid.checklist_progress.checked === bid.checklist_progress.required ? "strong" : "neutral"} title="Required checklist lines checked">
                         {bid.checklist_progress.checked}/{bid.checklist_progress.required}
                       </Badge>
@@ -263,10 +263,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
-      // The checklist fields arrive only while GATE_BID_CHECKLIST is on; without them the panel is not shown.
-      const extras = data.checklist_live
-        ? { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] }
-        : null;
+      const extras = { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
       if (!keepDrafts || resetDueDraft || !dueEditedAtNow.current) {
         setDueInput(etDatetimeLocalValue(data.bid.due_at));
@@ -506,7 +503,7 @@ function BidDeskControls({
 }
 
 function BidDeskResults({
-  error, loading, loadedCount, shown, displayed, selectedId, onSelect, checklistLive, enhanced,
+  error, loading, loadedCount, shown, displayed, selectedId, onSelect, enhanced,
   visibleColumns, page, totalPages, pageSize, onPageChange, onPageSizeChange,
 }) {
   return (
@@ -521,7 +518,6 @@ function BidDeskResults({
           bids={displayed}
           selectedId={selectedId}
           onSelect={onSelect}
-          checklistLive={checklistLive}
           visibleColumns={enhanced ? visibleColumns : ALL_BID_COLUMNS}
           adaptiveColumns={enhanced}
         />
@@ -546,7 +542,6 @@ function BidDeskResults({
 export default function BidDeskPage({ embedded = false }) {
   const [params, setParams] = useSearchParams();
   const [bids, setBids] = useState([]);
-  const [checklistLive, setChecklistLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState({ text: "", off: false });
   const enhancedControls = params.get("tableControls") !== "0";
@@ -566,7 +561,6 @@ export default function BidDeskPage({ embedded = false }) {
     try {
       const data = await api("/");
       setBids(data.bids);
-      setChecklistLive(data.checklist_live === true);
       setError({ text: "", off: false });
     } catch (err) {
       setError({ text: err.message, off: err.status === 404 });
@@ -649,9 +643,7 @@ export default function BidDeskPage({ embedded = false }) {
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
         Bid invites that reached the shared inbox (BuildingConnected, Procore, city and HOA requests). A due date is read from the invite
-        and shows as Unconfirmed until you confirm or type it. {checklistLive
-          ? "Reminders go to the bell 14, 7 and 2 days before a confirmed date, and 2 days before the questions date and the site visit."
-          : "Reminders go to the bell 7 and 2 days before a confirmed date."} Nothing here
+        and shows as Unconfirmed until you confirm or type it. Reminders go to the bell 14, 7 and 2 days before a confirmed date, and 2 days before the questions date and the site visit. Nothing here
         is sent to a buyer or a contractor.
       </div>
 
@@ -687,7 +679,6 @@ export default function BidDeskPage({ embedded = false }) {
             displayed={displayed}
             selectedId={selectedId}
             onSelect={select}
-            checklistLive={checklistLive}
             enhanced={enhancedControls}
             visibleColumns={visibleColumns}
             page={page}

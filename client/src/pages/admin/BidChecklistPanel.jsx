@@ -2,12 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ActionFeedback, Badge, Button, Checkbox, Field, Input, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
-import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { buildKitIndex, pillForLine } from "./bidChecklistKit";
 import { etDatetimeLocalValue } from "../../lib/timezone";
 
-// Bid Desk checklist panel (GATE_BID_CHECKLIST, dark). The page shows it only when the server says the gate is on
-// (`checklist_live` in the bid's reply). It records what the operator knows about a bid: the solicitation type, the
+// Bid Desk checklist panel. It records what the operator knows about a bid: the solicitation type, the
 // questions and site-visit dates, the estimate and proposal, the documents that came by email, a checklist and the
 // submission record. Nothing here is sent to a buyer, a general contractor or an agency.
 
@@ -382,7 +380,7 @@ function Submission({ bid, busy, save, invite }) {
 }
 
 /**
- * @param bid       the bid row (with the columns GATE_BID_CHECKLIST adds)
+ * @param bid       the bid row (with the checklist columns)
  * @param extras    { checklist, progress, estimate, documents } from the bid's reply
  * @param save      (body, doneMessage) => Promise<boolean>: a PATCH of the bid, by the page
  * @param invite    true while the Decision field says Submitted: the submission record is invited, never required
@@ -394,12 +392,10 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
   const [refreshError, setRefreshError] = useState("");
   const first = useRef(true);
 
-  // The Bid kit list, read once per panel (GATE_BID_KIT). It loads beside the checklist and the pills appear when it
-  // arrives. Flag off, a refused or failed read, or an unusable reply: no pills and no message, the checklist is as before.
-  const kitLive = useFeatureFlag("bid_kit");
+  // The Bid kit list, read once per panel. It loads beside the checklist and the pills appear when it
+  // arrives. A refused or failed read, or an unusable reply: no pills and no message, the checklist is as before.
   const [kit, setKit] = useState(null);
   useEffect(() => {
-    if (!kitLive) { setKit(null); return undefined; }
     let live = true;
     (async () => {
       try {
@@ -410,7 +406,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
       } catch { /* the checklist shows without kit pills */ }
     })();
     return () => { live = false; };
-  }, [kitLive]);
+  }, []);
 
   // Reloads the lines, progress, estimate and documents. A failure (network error, a refusal, the gate turned off) is
   // shown in the checklist section until the next success; it never throws.
@@ -422,7 +418,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
       const res = await adminFetch(`/admin/bid-desk/${bidId}`);
       const body = await res.json().catch(() => ({}));
       if (seq !== refreshSeq.current) return;
-      if (!(res.ok && body.checklist_live)) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setState({ checklist: body.checklist, progress: body.checklist_progress, missing: body.checklist_missing ?? 0, estimate: body.estimate, documents: body.documents });
       // The list row's chip follows at once, not on the next list load.
       if (onProgress) onProgress(bidId, body.checklist_progress);

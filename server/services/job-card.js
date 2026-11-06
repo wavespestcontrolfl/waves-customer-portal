@@ -1954,9 +1954,9 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   }
   if (readinessOnly) {
     const readiness = dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
-    // Truck kit (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md PR 2): a
-    // required tool the assigned truck lacks is a hold like stock or weather
-    // (gate, add-ons and the never-fatal read live in truck-kit.js).
+    // Truck kit (docs/tool-inventory-tracker-scope.md PR 2): a required tool
+    // the assigned truck lacks is a hold like stock or weather (add-ons and
+    // the never-fatal read live in truck-kit.js).
     return require('./truck-kit').addReadinessToolIssue(readiness, facts, dbh);
   }
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));

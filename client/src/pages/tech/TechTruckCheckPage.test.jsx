@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// The truck check (GATE_TRUCK_KIT): the kit grouped by category, every item
+// The truck check: the kit grouped by category, every item
 // Here unless an earlier check already reported it, one tap per problem, one
 // save that posts a state for every item; a kit the office changed reloads.
 import React from 'react';
@@ -86,10 +86,6 @@ describe('TechTruckCheckPage', () => {
     status = () => ok({ enabled: true, truck: { id: 'v1', name: 'Synthetic truck' }, kit: [], lastCheck: null, due: false });
     mount();
     expect(await screen.findByText('Nothing on the list yet')).toBeInTheDocument();
-    cleanup();
-    status = () => ok({ enabled: false }, 404);
-    mount();
-    expect(await screen.findByText('Truck checks are not turned on yet.')).toBeInTheDocument();
     cleanup();
     status = () => ok({ error: 'Database unavailable' }, 503);
     mount();

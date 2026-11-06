@@ -34,7 +34,7 @@
 // invoice (the renewal fence owns it) and a statement-accrued invoice.
 //
 // An invoice with NO visit linkage at all (a manual or project invoice, or a record link whose record
-// names no visit) IS covered while GATE_BILL_TO_NO_VISIT_INVOICES is on (owner ruling 2026-10-22, "move"): the Bill-To resolver
+// names no visit) IS covered (owner ruling 2026-10-22, "move"): the Bill-To resolver
 // gives it the customer's default payer (invoice-payer-ownership.js reads it as the payer's), so it
 // moves with the customer default exactly like a visit-linked invoice - withdrawn when a default payer
 // is set, released when it is cleared, fenced and its checkout invalidated on the way. A visit-scoped
@@ -46,20 +46,15 @@ function scopeIsEmpty({ customerId, scheduledServiceId, scheduledServiceIds, pay
   return !customerId && !scheduledServiceId && !(scheduledServiceIds && scheduledServiceIds.length) && !payerId && !invoiceId;
 }
 
-// Invoices with no packet, no statement and no annual-prepay term: the ones that ride a visit, and (gate on)
-// the ones that ride none, judged through the customer default alone.
-const coversNoVisit = () => {
-  const live = require('../config/feature-gates').billToNoVisitInvoicesLive;
-  return typeof live === 'function' && live() === true; // a stubbed gate module without the reader reads as off
-};
+// Invoices with no packet, no statement and no annual-prepay term: the ones that ride a visit, and the ones that
+// ride none, judged through the customer default alone.
 function visitLinkedBase(trx, statusesExcluded) {
-  const query = trx('invoices').whereNotIn('status', statusesExcluded)
+  return trx('invoices').whereNotIn('status', statusesExcluded)
     .whereNull('payer_id').whereNull('payer_statement_id')
     .whereNull('visit_completion_packet_id').whereNull('annual_prepay_term_id')
     // An annual-prepay invoice is identified by the TERM's own link too: some carry a visit link and a NULL
     // annual_prepay_term_id (annual-prepay-renewals.js), and a visit's payer must never withdraw the year.
     .whereNotIn('id', trx('annual_prepay_terms').whereNotNull('prepay_invoice_id').select('prepay_invoice_id'));
-  return coversNoVisit() ? query : query.where((q) => q.whereNotNull('scheduled_service_id').orWhereNotNull('service_record_id'));
 }
 
 // A SUPERSET prefilter: the live resolver, run per invoice under held rows, is the authority.
@@ -169,11 +164,9 @@ const stampedPayerOf = (error) => /^payer_billed:([^:]+)/.exec(String(error || '
 // and for an invoice in ANY status: ownerTransitions skips terminal invoices (a voided one), but an unvoid restores a draft and
 // then withdraws it from the customer when this answer is a payer, so a caller deciding whether a restore is safe needs the answer
 // before the restore. A SUPERSET of what the withdrawal acts on (it also skips annual-prepay and statement invoices).
-// An invoice with no visit answers through the customer default while GATE_BILL_TO_NO_VISIT_INVOICES is on (the withdrawal
-// moves it then too).
+// An invoice with no visit answers through the customer default (the withdrawal moves it too).
 async function liveVisitPayerOf(database, invoice) {
   const visitId = await linkedVisitOf(invoice, database);
-  if (!visitId && !coversNoVisit()) return null;
   const { state, activeBefore } = await readOwnerState(database, invoice, visitId, { lock: false, pending: null });
   return ownerOf(state, activeBefore);
 }
@@ -196,7 +189,6 @@ async function ownerTransitions(database, scope = {}, { mode = 'post', pending =
   const out = [];
   for (const row of rows) {
     const visitId = await linkedVisitOf(row, database);
-    if (!visitId && !coversNoVisit()) continue;
     const { state, activeBefore, activeAfter } = await readOwnerState(database, row, visitId, { lock, pending: mode === 'pre' ? pending : null });
     const ids = { visitId, customerId: row.customer_id };
     let beforeOwner;

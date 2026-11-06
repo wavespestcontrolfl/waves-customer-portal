@@ -1971,7 +1971,7 @@ async function loadAutoDispatchSummary(today, conn = db) {
     // started after 4:10 must not shadow it, or the ledger reports the wrong
     // (often zero) day-moves. triggered_by='cron' is stamped by audit.startRun
     // from the scheduler's runAutoDispatch({ triggeredBy: 'cron' }); the 5 AM
-    // catch-up (GATE_AUTO_DISPATCH_CATCH_UP) stamps 'catch_up' and is the same
+    // catch-up stamps 'catch_up' and is the same
     // night's run when the 4:10 one was cut off, so it counts here too.
     // Latest cron run of ANY status — filtering to successful statuses let a
     // failed 4:10 run vanish from the ledger (run:null) or be shadowed by an

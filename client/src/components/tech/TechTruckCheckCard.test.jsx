@@ -15,7 +15,7 @@ describe('TechTruckCheckCard', () => {
   it('renders only while a check is due', () => {
     const { container } = mount(kit({ due: false }));
     expect(container).toBeEmptyDOMElement();
-    mount({ enabled: false });
+    mount(null);
     expect(screen.queryByText('Truck check due')).not.toBeInTheDocument();
     mount(kit({ truck: null }));
     expect(screen.queryByText('Truck check due')).not.toBeInTheDocument();

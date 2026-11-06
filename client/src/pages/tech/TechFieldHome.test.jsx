@@ -51,7 +51,7 @@ it('puts the onboarding card at the top of Today, above the route, and not on To
   expect(screen.queryByTestId('onboarding-slot')).not.toBeInTheDocument();
 });
 
-// Truck kit (GATE_TRUCK_KIT, PR 2): a stop whose checklist needs a tool the
+// Truck kit (PR 2): a stop whose checklist needs a tool the
 // truck lacks says so on the Up next card and carries a tag in the route list.
 it('names the tools a stop needs that are not on the truck, and only on that stop', () => {
   const stops = groupServicesIntoStops([row('one', 'confirmed'), row('two', 'confirmed')]);

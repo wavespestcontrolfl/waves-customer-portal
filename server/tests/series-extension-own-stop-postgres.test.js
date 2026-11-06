@@ -4,8 +4,7 @@
  * admin-schedule.js#extendSeriesOnceLocked puts the new row on its cadence
  * date and joins nothing: the customer's own stop at the same place keeps the
  * hour (one trip); another customer's stop in the hour hands it off without a
- * time (GATE_PLAN_TAKEN_HOUR_HANDOFF) or, gate off, books through with the
- * overlap logged. Real Postgres on the migrated schema, synthetic customers,
+ * time. Real Postgres on the migrated schema, synthetic customers,
  * every test rolled back.
  */
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
@@ -177,10 +176,7 @@ postgres('series extension and the customer\'s own stop', () => {
         scheduled_date: date, status: 'pending', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
       });
     };
-    afterEach(() => { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; });
-
     test('books the date of the customer\'s own lawn visit, keeps the hour (one trip) and joins nothing', async () => {
-      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
       const trx = await mockPg.transaction();
       try {
         const { w, date } = await alignedPest(trx);
@@ -197,21 +193,7 @@ postgres('series extension and the customer\'s own stop', () => {
       } finally { await trx.rollback(); }
     });
 
-    test('another customer\'s visit in the hour, hand-off off: books through on the cadence date with the hour', async () => {
-      const trx = await mockPg.transaction();
-      try {
-        const { w, date } = await alignedPest(trx);
-        await otherCustomersVisit(trx, w, date);
-        await extend(trx, w.pestParent.id);
-        const rows = await extensionRows(trx, w.pestParent.id);
-        expect(rows).toHaveLength(1);
-        expect(dateOf(rows[0].scheduled_date)).toBe(date);
-        expect(String(rows[0].window_start).slice(0, 5)).toBe('09:00');
-      } finally { await trx.rollback(); }
-    });
-
-    test('another customer\'s visit in the hour, hand-off on: the cadence date without a time, due that date', async () => {
-      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    test('another customer\'s visit in the hour: the cadence date without a time, due that date', async () => {
       const trx = await mockPg.transaction();
       try {
         const { w, date } = await alignedPest(trx);

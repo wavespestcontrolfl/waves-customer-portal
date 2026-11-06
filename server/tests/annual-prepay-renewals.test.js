@@ -2414,7 +2414,6 @@ describe('annual prepay renewal helpers', () => {
     afterEach(() => {
       jest.restoreAllMocks();
       delete process.env.GATE_PREPAY_SEED_SERIES_SLOT;
-      delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
     });
 
     const queueQuarterly = (absences = []) => {
@@ -2435,10 +2434,8 @@ describe('annual prepay renewal helpers', () => {
     };
     const inserted = (i) => insertQueries[i].insert.mock.calls[0][0];
     const gateOn = () => { process.env.GATE_PREPAY_SEED_SERIES_SLOT = 'true'; };
-    const handoffGateOn = () => { process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true'; };
 
     test('gate off: seeds carry no technician and no time, and nothing extra is read', async () => {
-      handoffGateOn();
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
       expect(slotSpy).not.toHaveBeenCalled();
       const tables = db.mock.calls.map((c) => c[0]);
@@ -2452,7 +2449,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on with a source visit: every seed carries the technician and the time', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
       expect(slotSpy).toHaveBeenCalledTimes(1);
@@ -2466,7 +2462,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, the source technician is not assignable: seeds carry no technician', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       slotSpy.mockResolvedValue({ technicianId: null, windowStart: '09:00' });
       await seedQuarterly();
@@ -2477,7 +2472,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, the technician is out on one date: only that seed has no technician', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       await seedQuarterly([{ technician_id: 'tech-1', absence_date: '2026-09-15' }]);
       expect(inserted(0).technician_id).toBe('tech-1');
@@ -2488,7 +2482,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, one hour is taken: that seed is windowless with recurring_dispatch_due_date; the others keep the time', async () => {
       gateOn();
-      handoffGateOn();
       const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff')
         .mockImplementation(async (conn, row) => row.scheduled_date === '2026-12-15');
       await seedQuarterly();
@@ -2506,7 +2499,6 @@ describe('annual prepay renewal helpers', () => {
     // Pre-push audit P1: a copied time is a timed insert, fenced by the occupancy date lock like seedTimedFirstVisit.
     test('gate on, the occupancy date lock is busy: no copied time is written unfenced (seeds handed off)', async () => {
       gateOn();
-      handoffGateOn();
       const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
       jest.spyOn(require('../services/scheduling/occupancy'), 'tryAcquireOccupancyLock').mockResolvedValue(false);
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
@@ -2519,7 +2511,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, the technician is offboarded after the slot read: the per-seed recheck leaves every seed unassigned', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       recheckSpy.mockResolvedValue(null);
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
@@ -2528,20 +2519,8 @@ describe('annual prepay renewal helpers', () => {
       for (let i = 0; i < 4; i += 1) expect(inserted(i)).toMatchObject({ technician_id: null, window_start: '09:00' });
     });
 
-    test('gate on, taken-hour hand-off gate off: technician only, no time and no probe', async () => {
-      gateOn();
-      const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
-      await seedQuarterly();
-      expect(probe).not.toHaveBeenCalled();
-      for (let i = 0; i < 4; i += 1) {
-        expect(inserted(i)).toMatchObject({ technician_id: 'tech-1', window_start: null, window_end: null });
-        expect(inserted(i)).not.toHaveProperty('recurring_dispatch_due_date');
-      }
-    });
-
     test('gate on, no source visit: seeds are as they were', async () => {
       gateOn();
-      handoffGateOn();
       slotSpy.mockResolvedValue(null);
       await seedQuarterly();
       const tables = db.mock.calls.map((c) => c[0]);
@@ -2553,7 +2532,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on: the slot is resolved once per term, not once per seeded visit', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       await seedQuarterly();
       expect(slotSpy).toHaveBeenCalledTimes(1);
@@ -2574,7 +2552,6 @@ describe('annual prepay renewal helpers', () => {
 
       test('keeps its promised window and gets the technician; the later visit gets the slot time', async () => {
         gateOn();
-        handoffGateOn();
         jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
         await expect(seedPromised()).resolves.toMatchObject({ createdCount: 2 });
         expect(inserted(0)).toMatchObject({ scheduled_date: '2026-08-01', technician_id: 'tech-1', window_start: '08:00', window_end: '09:00' });
@@ -2584,7 +2561,6 @@ describe('annual prepay renewal helpers', () => {
 
       test('on the technician\'s out day the promised visit keeps its window and has no technician', async () => {
         gateOn();
-        handoffGateOn();
         jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
         await seedPromised([{ technician_id: 'tech-1', absence_date: '2026-08-01' }]);
         expect(inserted(0)).toMatchObject({ technician_id: null, window_start: '08:00' });

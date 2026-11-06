@@ -1,4 +1,4 @@
-// Bid Desk checklist (GATE_BID_CHECKLIST): the new reminder rules, their notification copy and the templates.
+// Bid Desk checklist: the reminder rules, their notification copy and the templates.
 // Pure: no database, no clock. Synthetic bids only.
 const { reminderDue, datesDue } = require('../services/bid-desk/rules');
 const { reminderSpec, questionsReminderSpec, jobWalkReminderSpec } = require('../services/bid-desk/alerts');
@@ -17,33 +17,24 @@ const bid = (over = {}) => ({
 const due = (ms, over = {}) => bid({ due_at: at(ms), due_confirmed: true, ...over });
 
 describe('the 14-day reminder', () => {
-  const on = { checklist: true };
-
   test('fires once, only for a date more than 7 and at most 14 days away', () => {
-    expect(reminderDue(due(15 * DAY), NOW, on)).toBeNull();
-    expect(reminderDue(due(14 * DAY), NOW, on)).toBe('14d');
-    expect(reminderDue(due(10 * DAY), NOW, on)).toBe('14d');
-    expect(reminderDue(due(10 * DAY, { reminder_14d_sent_at: NOW }), NOW, on)).toBeNull();
+    expect(reminderDue(due(15 * DAY), NOW)).toBeNull();
+    expect(reminderDue(due(14 * DAY), NOW)).toBe('14d');
+    expect(reminderDue(due(10 * DAY), NOW)).toBe('14d');
+    expect(reminderDue(due(10 * DAY, { reminder_14d_sent_at: NOW }), NOW)).toBeNull();
     // Inside 7 days the 14-day reminder is moot: the 7-day one is owed instead, and a late 14-day one never fires.
-    expect(reminderDue(due(7 * DAY), NOW, on)).toBe('7d');
-    expect(reminderDue(due(7 * DAY, { reminder_7d_sent_at: NOW }), NOW, on)).toBeNull();
-    expect(reminderDue(due(1 * DAY), NOW, on)).toBe('2d');
+    expect(reminderDue(due(7 * DAY), NOW)).toBe('7d');
+    expect(reminderDue(due(7 * DAY, { reminder_7d_sent_at: NOW }), NOW)).toBeNull();
+    expect(reminderDue(due(1 * DAY), NOW)).toBe('2d');
   });
 
   test('an unconfirmed, historical, flagged, closed-notice or decided bid never gets it', () => {
-    expect(reminderDue(due(10 * DAY, { due_confirmed: false }), NOW, on)).toBeNull();
-    expect(reminderDue(due(10 * DAY, { historical: true }), NOW, on)).toBeNull();
-    expect(reminderDue(due(10 * DAY, { needs_date_confirmation: true }), NOW, on)).toBeNull();
-    expect(reminderDue(due(10 * DAY, { source_active: false }), NOW, on)).toBeNull();
-    for (const status of ['no_bid', 'submitted', 'won', 'lost']) expect(reminderDue(due(10 * DAY, { status }), NOW, on)).toBeNull();
-    expect(reminderDue(due(10 * DAY, { status: 'bid' }), NOW, on)).toBe('14d');
-  });
-
-  test('with the gate off there is no 14-day reminder, and the 7-day and 2-day ones are unchanged', () => {
-    expect(reminderDue(due(10 * DAY), NOW)).toBeNull();
-    expect(reminderDue(due(10 * DAY), NOW, { checklist: false })).toBeNull();
-    expect(reminderDue(due(7 * DAY), NOW)).toBe('7d');
-    expect(reminderDue(due(2 * DAY), NOW)).toBe('2d');
+    expect(reminderDue(due(10 * DAY, { due_confirmed: false }), NOW)).toBeNull();
+    expect(reminderDue(due(10 * DAY, { historical: true }), NOW)).toBeNull();
+    expect(reminderDue(due(10 * DAY, { needs_date_confirmation: true }), NOW)).toBeNull();
+    expect(reminderDue(due(10 * DAY, { source_active: false }), NOW)).toBeNull();
+    for (const status of ['no_bid', 'submitted', 'won', 'lost']) expect(reminderDue(due(10 * DAY, { status }), NOW)).toBeNull();
+    expect(reminderDue(due(10 * DAY, { status: 'bid' }), NOW)).toBe('14d');
   });
 });
 

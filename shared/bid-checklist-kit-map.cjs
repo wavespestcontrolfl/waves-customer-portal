@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Which Bid kit papers a Bid Desk checklist line needs (GATE_BID_KIT + GATE_BID_CHECKLIST, admin only). Data only, no I/O
+ * Which Bid kit papers a Bid Desk checklist line needs (admin only). Data only, no I/O
  * and no requires, so the admin page can load it through the `@bid-checklist-kit-map` alias. The page reads the kit
  * (GET /api/admin/bid-kit) and shows the kit's own status beside each mapped line. It never ticks a line.
  *

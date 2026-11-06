@@ -189,7 +189,7 @@ const TECHNICIAN_ALLOW_LIST = [
   // stock. Receiving, marking ordered, cancelling and stock adjustments stay
   // admin-only.
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/inventory\/waveguard-forecast\/[^/]+\/restock-request$/ },
-  // Truck check (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md): a
+  // Truck check (docs/tool-inventory-tracker-scope.md): a
   // technician reads their own truck's kit and records a check of it. The
   // route resolves the truck from the login (the equipment row with category
   // vehicle assigned to req.technicianId), never from the body. Marking a tool

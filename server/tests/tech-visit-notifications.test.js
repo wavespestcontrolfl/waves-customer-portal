@@ -241,6 +241,11 @@ function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT, vis
   });
 }
 
+// A non-auto-dispatch mover's push is held for the bundle sweep; this runs the
+// sweep once the tech's changes have gone quiet. The auto-dispatch actor is
+// never bundled and, outside a run, pushes on its own at once.
+const flushNow = () => notices.flushBundledPushes({ now: new Date(Date.now() + notices.BUNDLE_QUIET_MS + 1000) });
+
 describe('notifyTechVisitChange', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -288,6 +293,7 @@ describe('notifyTechVisitChange', () => {
       service_type: 'Pest Control', when: 'Thu Sep 10, 9–11 AM', address: '4312 Cortez Rd W, Bradenton', actor: 'by Adam',
     });
     // Owner ruling 2026-09-05: the push is one line, no details.
+    await flushNow();
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: 'You have a new visit on your route', body: '', url: '/tech', tag: 'visit-visit-1',
     }));
@@ -318,6 +324,7 @@ describe('notifyTechVisitChange', () => {
       type: 'visit_cancelled',
       payload: { headline: 'Visit cancelled', actor: 'by Adam' },
     });
+    await flushNow();
     expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route was cancelled' }));
   });
 
@@ -402,7 +409,7 @@ describe('notifyTechVisitChange', () => {
 
   test('a failed feed insert means NO push for that card (a push with no card behind it sends the tech to an empty feed)', async () => {
     mockWriteCard.mockResolvedValueOnce(false);
-    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(out).toEqual({ sent: false, skipped: 'error' });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
     // The insert error's message carries the SQL with its bound values (the
@@ -439,6 +446,7 @@ describe('notifyTechVisitChange', () => {
       snapshot: { date: '2026-09-10', windowStart: '09:00', windowEnd: '11:00' },
     });
     expect(mockWriteCard.mock.calls[0][1].payload.when).toBe('Thu Sep 10, 9–11 AM');
+    await flushNow();
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
     jest.clearAllMocks();
     // Superseded: the row was moved again after this hook committed.
@@ -456,14 +464,14 @@ describe('notifyTechVisitChange', () => {
 
   test('a push failure is logged and the card still counts as sent', async () => {
     mockSendToAdminUser.mockRejectedValueOnce(new Error('apns down'));
-    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(out).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('push failed'));
   });
 
   test('a current push is re-checked at the provider boundary and sent', async () => {
-    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(out).toEqual({ sent: true });
     // The recheck is the sender's beforeHandoff (each device's final
     // boundary, after FCM's OAuth too) — codex #5421 r2/r3.
@@ -478,7 +486,7 @@ describe('notifyTechVisitChange', () => {
 
   test('a stale push is skipped when a NEWER card exists for the same tech and visit (the newer push lands)', async () => {
     newerCard = { id: 'card-newer' };
-    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     // The card is durable; only the push is withheld.
     expect(out).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
@@ -504,7 +512,7 @@ describe('notifyTechVisitChange', () => {
       if (table === 'tech_notifications as n') return newerCardsQuery();
       throw new Error(`unexpected table ${table}`);
     });
-    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(out).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
@@ -524,7 +532,7 @@ describe('notifyTechVisitChange', () => {
       if (table === 'tech_notifications') return cardsTable();
       throw new Error(`unexpected table ${table}`);
     });
-    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(out).toEqual({ sent: true });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
@@ -593,16 +601,18 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     ]);
   });
 
-  test('gate on, inside a run: an auto-dispatch move writes its card marked with the run and holds its push; any other mover still pushes', async () => {
+  test('gate on, inside a run: an auto-dispatch move writes its card marked with the run and holds its push; any other mover is bundled', async () => {
     notices._test.setCurrentAutoDispatchRun('run-1');
     await move('auto_dispatch');
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
     expect(mockWriteCard.mock.calls[0][1].payload).toMatchObject({ actor: 'by auto-dispatch', push_held_run: 'run-1' });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
 
+    // Any other mover is held for the bundle sweep, never for the run's summary.
     await move('customer_self_serve');
     expect(mockWriteCard.mock.calls[1][1].payload).not.toHaveProperty('push_held_run');
-    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(mockWriteCard.mock.calls[1][1].payload).toHaveProperty('push_bundle');
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
   test('gate off: an auto-dispatch move pushes per visit, as before, and is never marked held', async () => {
@@ -715,7 +725,7 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
   });
 });
 
-describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-10-22)', () => {
+describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
   const TECH2 = { ...TECH, id: 'tech-2' };
   const techs = { 'tech-1': TECH, 'tech-2': TECH2, [ADAM_ID]: ADAM };
   let visitRows = {};
@@ -731,7 +741,6 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
-    process.env.GATE_TECH_PUSH_BUNDLE = 'true';
     cardRows.length = 0;
     notices._test.setCurrentAutoDispatchRun(null);
     visitRows = {};
@@ -747,21 +756,13 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
   afterAll(() => {
     newerFromRows = false;
     delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
-    delete process.env.GATE_TECH_PUSH_BUNDLE;
   });
 
-  test('gate on: the card is written at once with its own push held; nothing is pushed yet', async () => {
+  test('the card is written at once with its own push held; nothing is pushed yet', async () => {
     expect(await officeMove('v-1')).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
     expect(cardRows[0].payload.push_bundle).toEqual({ kind: 'rescheduled', snapshot: null, previous_status: null });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
-  });
-
-  test('gate off: every change pushes on its own, as before, and nothing is marked held', async () => {
-    delete process.env.GATE_TECH_PUSH_BUNDLE;
-    await officeMove('v-1');
-    expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route moved', tag: 'visit-v-1' }));
   });
 
   test('a burst of 17 moves for one tech sends ONE push once it goes quiet, opening /admin/today', async () => {
@@ -845,13 +846,6 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     } finally {
       delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
     }
-  });
-
-  test('cards held before the gate went off still go out on the next sweep', async () => {
-    await officeMove('v-1');
-    await officeMove('v-2');
-    delete process.env.GATE_TECH_PUSH_BUNDLE;
-    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
   });
 
   test('the notifications kill switch off DROPS held bundles: no push now, none later', async () => {
@@ -1194,7 +1188,7 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
       order.push(`push:${techId}`);
       await new Promise((r) => setTimeout(r, 5));
     });
-    await notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID });
+    await notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: 'auto_dispatch' });
     expect(order).toEqual(['card:tech-1:visit_unassigned', 'card:tech-2:visit_assigned', 'push:tech-1', 'push:tech-2']);
     mockWriteCard.mockResolvedValue(undefined);
     mockSendToAdminUser.mockResolvedValue({ sent: 1 });

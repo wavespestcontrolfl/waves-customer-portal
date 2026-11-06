@@ -9,7 +9,7 @@ import { adminFetch } from "../../lib/adminFetch";
 import { etDateString, formatETDate, formatETDateOnly, formatETTime } from "../../lib/timezone";
 import { STATUS_LABEL, SIGN_OFF_REFUSAL, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, PUBLIC_OR_PRIVATE, REFERENCE_DETAIL_KEYS } from "@bid-kit-catalog";
 
-// Bid kit (GATE_BID_KIT, dark, admin only). The papers and facts every government bid asks for. Nothing here is public and
+// Bid kit (admin only). The papers and facts every government bid asks for. Nothing here is public and
 // nothing is sent to anyone. A status comes from the server; a sign-off belongs to the version of the item you looked at,
 // and any edit to the item clears it. Every write carries the version the page loaded; when the server says the item
 // changed (409) the open editors close and the list is read again. No AI anywhere.
@@ -538,13 +538,13 @@ function SummaryLine({ overall }) {
 function useKit() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState({ text: "", off: false });
+  const [error, setError] = useState({ text: "" });
   const load = useCallback(async () => {
     try {
       setData(await api("/"));
-      setError({ text: "", off: false });
+      setError({ text: "" });
     } catch (err) {
-      setError({ text: err.message, off: err.status === 404 });
+      setError({ text: err.message });
     } finally {
       setLoading(false);
     }
@@ -657,39 +657,33 @@ export default function BidKitPage({ embedded = false }) {
         anyone. A sign-off covers the item as you saw it; any change clears it.
       </div>
 
-      {error.off ? (
-        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Bid kit is not turned on yet.</div>
-      ) : (
-        <>
-          <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="View">
-            <Button size="sm" variant={view === "checklist" ? "primary" : "secondary"} aria-pressed={view === "checklist"} onClick={() => setView("checklist")}>Checklist</Button>
-            <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => setView("facts")}>Facts sheet</Button>
-            {data && view === "checklist" && <SummaryLine overall={data.summary.overall} />}
+      <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="View">
+        <Button size="sm" variant={view === "checklist" ? "primary" : "secondary"} aria-pressed={view === "checklist"} onClick={() => setView("checklist")}>Checklist</Button>
+        <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => setView("facts")}>Facts sheet</Button>
+        {data && view === "checklist" && <SummaryLine overall={data.summary.overall} />}
+      </div>
+
+      {error.text && <ActionFeedback error onRetry={load} className="mb-3">{error.text}</ActionFeedback>}
+      {actions.message.text && <ActionFeedback error={actions.message.error} className="mb-3">{actions.message.text}</ActionFeedback>}
+      {loading && !data && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading the kit…</div>}
+
+      {view === "facts" && <FactsSheet />}
+
+      {view === "checklist" && data && (
+        <div className="grid gap-5">
+          {checklist.map((section) => (
+            <Section key={section.key} section={section} counts={sectionCounts[section.key]} editing={editing} busy={actions.busy} focusId={focusId} handlers={handlers} />
+          ))}
+          <div>
+            <Button size="sm" variant="secondary" disabled={actions.busy} onClick={() => setEditing(editing === NEW_CUSTOM ? "" : NEW_CUSTOM)}>Add another item</Button>
+            {editing === NEW_CUSTOM && (
+              <Editor
+                entry={CUSTOM_ENTRY} busy={actions.busy} onArchive={() => {}} onCancel={closeEditors}
+                onSave={(body, extra) => actions.save({ item: { key: "custom", kind: extra.kind, label: "" }, row: null }, body, extra)}
+              />
+            )}
           </div>
-
-          {error.text && <ActionFeedback error onRetry={load} className="mb-3">{error.text}</ActionFeedback>}
-          {actions.message.text && <ActionFeedback error={actions.message.error} className="mb-3">{actions.message.text}</ActionFeedback>}
-          {loading && !data && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading the kit…</div>}
-
-          {view === "facts" && <FactsSheet />}
-
-          {view === "checklist" && data && (
-            <div className="grid gap-5">
-              {checklist.map((section) => (
-                <Section key={section.key} section={section} counts={sectionCounts[section.key]} editing={editing} busy={actions.busy} focusId={focusId} handlers={handlers} />
-              ))}
-              <div>
-                <Button size="sm" variant="secondary" disabled={actions.busy} onClick={() => setEditing(editing === NEW_CUSTOM ? "" : NEW_CUSTOM)}>Add another item</Button>
-                {editing === NEW_CUSTOM && (
-                  <Editor
-                    entry={CUSTOM_ENTRY} busy={actions.busy} onArchive={() => {}} onCancel={closeEditors}
-                    onSave={(body, extra) => actions.save({ item: { key: "custom", kind: extra.kind, label: "" }, row: null }, body, extra)}
-                  />
-                )}
-              </div>
-            </div>
-          )}
-        </>
+        </div>
       )}
     </UiSurface>
   );

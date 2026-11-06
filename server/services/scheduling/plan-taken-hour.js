@@ -1,8 +1,7 @@
 /**
  * PLAN TAKEN-HOUR HAND-OFF (owner 2026-10-22, auto-dispatch audit decision
  * D4: "If the automatic visit plan lands on a taken time, leave the visit
- * without a time so the tool picks a free one"). Dark behind
- * GATE_PLAN_TAKEN_HOUR_HANDOFF, read at call time (unset = live kill).
+ * without a time so the tool picks a free one").
  *
  * Two kinds of plan writer copy the plan's hour onto a new visit without
  * asking whether it is free, and the 10-22 audit traced double bookings to
@@ -14,7 +13,7 @@
  *     the completion-time extend through walkExtensionCandidates, and the
  *     plan-alert extend/convert actions), which insert on a clash and log it
  *     (cadenceSlotHandoffFields).
- * Gate on, a new plan visit whose hour another customer's live visit already
+ * A new plan visit whose hour another customer's live visit already
  * holds is written WINDOWLESS and handed to auto-dispatch with its cadence
  * date as recurring_dispatch_due_date: the shape a series move gives a
  * deferred occurrence (rebooker.js rescheduleSeries; the due-date lifecycle
@@ -47,8 +46,7 @@
  * CALL FOLLOW-UP FREE HOUR (owner 2026-10-22, "fix", after the Oct 30 call
  * follow-up landed on another customer's 10 AM): the call pipeline's visit 2
  * (call-recording-processor.js) copies visit 1's hour when the call set no
- * time. Dark behind GATE_CALL_FOLLOWUP_FREE_HOUR (call time). On, when the
- * same "taken" rule holds any of visit 2's span on its date (its hour, or
+ * time. When the same "taken" rule holds any of visit 2's span on its date (its hour, or
  * its whole job when longer), visit 2 takes the nearest whole hour that day
  * where that span fits the shift and is free (callFollowUpWindow): the
  * night tool never places a one-off visit (it loads recurring series only),
@@ -59,23 +57,16 @@
  * time, owner 2026-10-04 "same time"), keep theirs; a day with no free hour
  * keeps the copied one, as before.
  */
-const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { toDateStr } = require('../auto-dispatch/dates');
 const { seriesCandidateDateClashRows, parseHHMM, minutesToHHMM } = require('./window-rules');
 const { formatSmsTime } = require('../../utils/sms-time-format');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
-const GATE = 'GATE_PLAN_TAKEN_HOUR_HANDOFF';
-const CALL_FOLLOWUP_GATE = 'GATE_CALL_FOLLOWUP_FREE_HOUR';
 const HANDOFF_MIN_DAYS_OUT = 4;
 // The rows that are no stop in the hour: the night tool's own
 // (rebooker.js probeMoveConflicts).
 const TAKEN_EXCLUDE_STATUSES = [...NOT_A_ROUTE_STOP_STATUSES, 'completed'];
-
-function handoffEnabled() {
-  return !!gateEnvValue(GATE);
-}
 
 // The first date the hand-off applies to (ET).
 function firstHandoffDate(now = new Date()) {
@@ -101,10 +92,10 @@ function handoffFields(date, cols = null) {
 
 // Whether `row` (a new plan visit: customer, technician, date, window, and
 // its own place fields) would land on an hour another stop holds, and is far
-// enough out for the night tool to place it. False with the gate off,
-// without a window, or inside HANDOFF_MIN_DAYS_OUT — nothing is read then.
+// enough out for the night tool to place it. False without a window, or
+// inside HANDOFF_MIN_DAYS_OUT — nothing is read then.
 async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = new Date() } = {}) {
-  if (!handoffEnabled() || !row || !row.window_start) return false;
+  if (!row || !row.window_start) return false;
   const day = toDateStr(date);
   if (!day || day < firstHandoffDate(now)) return false;
   return hourTaken(conn, row, day);
@@ -143,7 +134,7 @@ function freeHourCandidates(plannedMin, spanMin) {
 
 // The window visit 2 of a call is written with (CALL FOLLOW-UP FREE HOUR,
 // header): `planned` (its window_start, window_end and window_display) unless
-// the gate is on, the call set no time, it is no package visit, and another
+// the call set no time, it is no package visit, and another
 // stop holds part of its span on `date` — then the span at the nearest whole
 // hour that day where it fits the shift and is free, or `planned` when there
 // is none. The span is the planned window, or the job's `durationMinutes`
@@ -157,7 +148,7 @@ function freeHourCandidates(plannedMin, spanMin) {
 async function callFollowUpWindow(conn, { visit1 = {}, customerId, technicianId = null, date, durationMinutes = null }, planned, { hourStated = false, packageVisit = false } = {}) {
   const day = toDateStr(date);
   const plannedMin = parseHHMM(planned?.window_start);
-  if (!gateEnvValue(CALL_FOLLOWUP_GATE) || hourStated || packageVisit || !day || plannedMin == null) return planned;
+  if (hourStated || packageVisit || !day || plannedMin == null) return planned;
   const plannedEndMin = parseHHMM(planned.window_end);
   const spanMin = Math.max(plannedEndMin > plannedMin ? plannedEndMin - plannedMin : 60, Number(durationMinutes) || 0);
   const span = (startMin) => ({ window_start: minutesToHHMM(startMin), window_end: minutesToHHMM(Math.min(startMin + spanMin, 23 * 60 + 59)) });
@@ -193,7 +184,7 @@ async function callFollowUpWindow(conn, { visit1 = {}, customerId, technicianId 
 // The seeder's batch: each row whose hour is taken comes back handed off
 // (the fields `cols` has). Returns the rows; the input array is not changed.
 async function handOffTakenHours(conn, rows, { now = new Date(), cols = null } = {}) {
-  if (!handoffEnabled() || !Array.isArray(rows) || !rows.length) return rows;
+  if (!Array.isArray(rows) || !rows.length) return rows;
   const out = [];
   for (const row of rows) {
     out.push(await takenHourHandoff(conn, row, { now }) ? { ...row, ...handoffFields(row.scheduled_date, cols) } : row);
@@ -206,6 +197,6 @@ async function handOffTakenHours(conn, rows, { now = new Date(), cols = null } =
 }
 
 module.exports = {
-  GATE, CALL_FOLLOWUP_GATE, HANDOFF_MIN_DAYS_OUT, TAKEN_EXCLUDE_STATUSES, handoffEnabled, firstHandoffDate, handoffFields,
+  HANDOFF_MIN_DAYS_OUT, TAKEN_EXCLUDE_STATUSES, firstHandoffDate, handoffFields,
   takenHourHandoff, handOffTakenHours, callFollowUpWindow,
 };

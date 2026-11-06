@@ -1,6 +1,6 @@
 'use strict';
 
-// Bid kit logging (GATE_BID_KIT, dark). A Knex or driver error message can carry the SQL bindings, and a binding in this
+// Bid kit logging. A Knex or driver error message can carry the SQL bindings, and a binding in this
 // kit can be a reference's name, email or address, or a custom label. So nothing in the bid-kit modules logs or passes on an
 // error's message: a log line is a fixed sentence plus the error's code or name (the way the notification service logs).
 

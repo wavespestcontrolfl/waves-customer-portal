@@ -49,7 +49,6 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
     mockPg = database;
-    process.env.GATE_BID_KIT = 'true';
     process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC = 'true';
   });
   beforeEach(async () => {
@@ -64,7 +63,6 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
-    delete process.env.GATE_BID_KIT;
     delete process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC;
     if (database) await database.destroy();
   });

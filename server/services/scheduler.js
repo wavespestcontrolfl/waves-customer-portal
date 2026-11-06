@@ -4,7 +4,6 @@ const db = require('../models/db');
 // process startup, NOT at query-build time — a marker stamped after this
 // instant belongs to a newer gate-on pod and must never be deleted.
 const PROCESS_BOOT_AT = new Date();
-const TwilioService = require('./twilio');
 const logger = require('./logger');
 
 // Reviewer-facing note for a scheduled reply retired by the fire-time amount /
@@ -119,7 +118,6 @@ function amountsStaleNote(reason) {
 }
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
-const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue, aioGapSweepMonthlyLive } = require('../config/feature-gates');
@@ -901,8 +899,8 @@ function initScheduledJobs() {
           // proofreader's own gate is off.
           const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: getAutoDispatchConfig().proofreaderEnabled === true });
           if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
-          // The move-check-down notice by the same rule: it closes when its
-          // gate or the check is off; with no run, nothing else changes it.
+          // The move-check-down notice by the same rule: it closes when the
+          // check is off; with no run, nothing else changes it.
           const checkDown = await require('./auto-dispatch/check-down-notice').noteRun(null, { enabled: getAutoDispatchConfig().proofreaderEnabled === true, nowDate: new Date() });
           if (checkDown.action === 'error') failures.push(new Error('move-check-down notice upkeep failed'));
           if (failures.length) throw failures[0];
@@ -977,16 +975,15 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY MIN — Bundled tech pushes (GATE_TECH_PUSH_BUNDLE). A burst of
+  // EVERY MIN — Bundled tech pushes. A burst of
   // visit changes (an office script, many single moves in a row) sends each
   // tech ONE push once their changes go quiet, not one per visit. Registered
-  // before the GATE_CRON_JOBS return below, like the reconcile above: with
-  // the bundle gate on, deliver() holds pushes whether or not cron jobs run,
+  // before the GATE_CRON_JOBS return below, like the reconcile above:
+  // deliver() holds pushes whether or not cron jobs run,
   // and only this sweep sends them (Codex #6459 r2). No runExclusive on
   // purpose: each tech's cards are claimed in one UPDATE under the sweep's own
   // token, so overlapping deploy instances never push the same cards, and no
-  // lock is held across a push (owner ruling 2026-09-30, #5421). It runs with
-  // the gate off too, so cards held before a flip still go out.
+  // lock is held across a push (owner ruling 2026-09-30, #5421).
   // =========================================================================
   cron.schedule('* * * * *', async () => {
     try {
@@ -1176,8 +1173,7 @@ function initScheduledJobs() {
   cron.scheduleTimeout(pmGuardFirstsTick, 120 * 1000);
   cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
 
-  // EVERY MINUTE — Gmail-style scheduled emails (GATE_EMAIL_SEND_LATER; the
-  // sender returns at once with the gate off). A minute keeps "9:00 AM" at
+  // EVERY MINUTE — Gmail-style scheduled emails. A minute keeps "9:00 AM" at
   // 9:00-9:01. No cron lease: the row claim (FOR UPDATE SKIP LOCKED) makes
   // each email go out at most once across the fleet, and a lease could wait
   // or skip and send late. runScheduledSweep records job_health so that a
@@ -1989,17 +1985,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 5:00AM — Auto-Dispatch CATCH-UP (GATE_AUTO_DISPATCH_CATCH_UP, dark;
-  // owner 2026-10-26). A deploy that restarts the server during the 4:10 run
+  // DAILY 5:00AM — Auto-Dispatch CATCH-UP (owner 2026-10-26). A deploy that restarts the server during the 4:10 run
   // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
   // 2026-10-26). If today has no finished night run, this job settles the
   // dead cron run row and runs the night tool once more (triggered_by
   // 'catch_up', at most one a day). It holds the same writer lock as 4:10.
-  // Gate off: returns before any database read.
   // =========================================================================
   cron.schedule('0 5 * * *', async () => {
-    // Call-time read so a Railway var flip takes effect on the next tick.
-    if (!require('../config/feature-gates').autoDispatchCatchUpLive()) return;
     if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) return;
     try {
       await runExclusive('auto-dispatch-catch-up', async () => {
@@ -2619,12 +2611,12 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (GATE_BID_DESK_SAM, dark; needs GATE_BID_DESK and SAM_GOV_API_KEY):
+  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (needs GATE_BID_DESK and SAM_GOV_API_KEY):
   // files federal pest control and grounds notices from the official SAM.gov Opportunities API as bid opportunities
   // and rings one admin notification per new bid. Two API calls a day. No AI call; it sends nothing to an agency,
-  // contractor or customer. The gate is read per run, so a flip or an unset needs no restart.
+  // contractor or customer. GATE_BID_DESK is read per run, so a flip or an unset needs no restart.
   cron.schedule('0 25 7 * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskSamLive()) return;
+    if (!require('../config/feature-gates').bidDeskLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-sam', async () => {
         const result = await require('./bid-desk/sam-gov').runSamGovPoll();
@@ -7722,7 +7714,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8:23AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
+  // DAILY 8:23AM — Tax Deadline Alerting (admin bell reminders for upcoming filings)
   // 8:23 not 8:00: it shared the 8:00:00 minute with the monthly-billing
   // sweep and pool exhaustion failed it 4 runs straight (job_health:
   // "Timeout acquiring a connection"). One minute per job — #3208 rule.
@@ -7732,65 +7724,14 @@ function initScheduledJobs() {
     try {
       await runExclusive('tax-deadline-alerts', async () => {
       const now = new Date();
-      const today = etDateString(now);
-      const futureDate = etDateString(addETDays(now, 14));
 
       // Payroll tax rows (GATE_PAYROLL_TAX_CALENDAR; returns at once when off)
       // so quarters with no pay run and new hires are on the calendar and
       // get this run's reminder. Never throws.
       await require('./payroll-tax-calendar').syncPayrollFilingsSafe();
 
-      // GATE_TAX_DEADLINE_BELLS (owner 2026-10-30): the reminders ring the admin bell, one per row and
-      // stage, in place of the text below (the bell policy had silenced that text since 2026-09-01).
-      // The typeof guard keeps a suite that mocks feature-gates without the reader on today's text.
-      const gates = require('../config/feature-gates');
-      if (typeof gates.taxDeadlineBellsLive === 'function' && gates.taxDeadlineBellsLive()) {
-        await require('./tax-deadline-reminders').runTaxDeadlineReminders({ now });
-        return;
-      }
-
-      // Find filings due in the next 14 days that haven't been reminded yet
-      const upcomingFilings = await db('tax_filing_calendar')
-        .where('due_date', '>=', today)
-        .where('due_date', '<=', futureDate)
-        .whereNot('status', 'filed')
-        .whereNot('status', 'paid')
-        .where(function () {
-          this.whereNull('reminder_sent_at')
-            .orWhere('reminder_sent', false);
-        })
-        .orderBy('due_date');
-
-      if (upcomingFilings.length === 0) {
-        return;
-      }
-
-      // Build reminder message. due_date is a DATE column — pg hands it
-      // back as midnight, so `new Date(f.due_date)` rendered in ET shows
-      // the previous day. Anchor the calendar date at ET noon instead
-      // (dateOnly + T12:00 pattern, same as admin-schedule.js) so both the
-      // displayed date and the day-count math stay on the right ET day.
-      const todayNoon = parseETDateTime(`${today}T12:00`);
-      const lines = upcomingFilings.map(f => {
-        const dueDate = parseETDateTime(`${dateOnlyString(f.due_date)}T12:00`);
-        const daysUntil = Math.round((dueDate.getTime() - todayNoon.getTime()) / (24 * 60 * 60 * 1000));
-        const amountStr = f.amount_due ? ` ($${parseFloat(f.amount_due).toLocaleString()})` : '';
-        return `- ${f.title}${amountStr} — due ${dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })} (${daysUntil} day${daysUntil !== 1 ? 's' : ''})`;
-      });
-
-      const message = `Tax Deadline Alert:\n\n${lines.join('\n')}\n\nReview in the admin portal.`;
-
-      // Send SMS to admin
-      if (process.env.ADAM_PHONE) {
-        await TwilioService.sendSMS(process.env.ADAM_PHONE, message, { messageType: 'internal_alert' });
-        logger.info(`[tax-alerts] Sent ${upcomingFilings.length} deadline reminder(s) via SMS`);
-      }
-
-      // Mark reminders as sent
-      const ids = upcomingFilings.map(f => f.id);
-      await db('tax_filing_calendar')
-        .whereIn('id', ids)
-        .update({ reminder_sent: true, reminder_sent_at: new Date() });
+      // Owner 2026-10-30: the reminders ring the admin bell, one per row and stage.
+      await require('./tax-deadline-reminders').runTaxDeadlineReminders({ now });
       });
     } catch (err) {
       logger.error(`Tax deadline alert failed: ${err.message}`);
@@ -8677,7 +8618,7 @@ function initScheduledJobs() {
   // DAILY 6AM ET — Credential expiry check (credentials v1 §7)
   // Scans business_credentials for anything expiring within 60 days; fires a
   // `credential_expiring_soon` notification per credential (deduped 7d). The Bid kit
-  // expiry check (GATE_BID_KIT, dark) rides the same slot.
+  // expiry check rides the same slot.
   // =========================================================================
   cron.schedule('5 6 * * *', async () => {
     logger.info('Running: Credential expiry check');
@@ -8687,8 +8628,8 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Credential expiry check failed: ${err.message}`);
     }
-    // Bid kit (GATE_BID_KIT, dark): one admin bell per kit paper that expired or expires within 30 days, once a week each.
-    // Gate off = returns before any query. Admin bell only. runExclusive: the sweep reads open bells, then rings at most
+    // Bid kit: one admin bell per kit paper that expired or expires within 30 days, once a week each.
+    // Admin bell only. runExclusive: the sweep reads open bells, then rings at most
     // three; a deploy overlap must not run two sweeps that each ring three.
     try {
       await runExclusive('bid-kit-expiry', async () => {
