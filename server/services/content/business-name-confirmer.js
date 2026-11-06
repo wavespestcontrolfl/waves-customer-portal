@@ -21,8 +21,11 @@
  * frontmatter and top-level metadata, the link destinations, and the body,
  * bounded to MAX_INPUT_CHARS.
  *
- * Result: { ok: true, key, companies: [canonical name…], checked_at } or
- * { ok: false, key, reason, retryable }. `key` hashes the exact input sent;
+ * Result: { ok: true, key, companies: [canonical name…], checked_at,
+ * exempted_names? } or { ok: false, key, reason, retryable }. A name the
+ * draft carries for an approved reason (an affiliate product it links, the
+ * author's own background — withoutExemptNames below) moves from
+ * `companies` to `exempted_names`. `key` hashes the exact input sent;
  * a stored result with the same key is returned without a call, so the
  * merge-time poller never re-calls and a Codex fix that leaves the text
  * unchanged reuses the run's extraction. Never throws.
@@ -169,6 +172,83 @@ function canonicalCompanies(names) {
   return [...out].sort();
 }
 
+// Names a draft carries that are never a company it presents as a provider
+// or an alternative, however the model reads them (owner 2026-11-06: the
+// Bradenton and North Port affiliate pilot drafts parked
+// named_competitor_off_list on exactly these on 2026-09-30):
+// - an active affiliate registry product the draft links with
+//   <AffiliateLink>: the link's visible text ("an adjustable door sweep"),
+//   the row's display_name, or a leading run of its words, which is the
+//   maker ("KS Hardware" for "KS Hardware adjustable double-bubble exterior
+//   door sweep (36 in)"). The owner approves each row by merging it
+//   (docs/affiliate-links-pilot.md); the content guardrails hold the links
+//   themselves to the registry and the brief. Same kill switch as those
+//   guardrails, read the same way: off, no product name is exempt.
+// - the author's own background: the adam-augusta byline tells the writer
+//   to mention Adam's turf-care years at Augusta National
+//   (intercept-brief-seeder BYLINE_AUTHORS).
+// A curated competitor is never exempt, so no link text or product name can
+// carry one past the owner list.
+const AUTHOR_BACKGROUND_NAMES = ['Augusta National', 'Augusta National Golf Club'];
+
+function exemptionKey(value) {
+  return String(value || '').trim().replace(/['’]s?$/i, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ').trim()
+    .replace(/^(?:an?|the) /, '');
+}
+
+// { text, displayName } for each <AffiliateLink> in the body whose product
+// is an active registry row. Any lookup failure exempts nothing.
+function linkedAffiliateProducts(draft) {
+  const body = String(draft?.body || draft?.content || '');
+  if (process.env.GATE_AFFILIATE_LINKS !== 'true' || !body.includes('<AffiliateLink')) return [];
+  try {
+    const { collectAffiliateLinkTags } = require('./content-guardrails')._internals;
+    const index = require('../../../packages/affiliate-registry').productIndex();
+    return collectAffiliateLinkTags(body)
+      .map((tag) => ({ text: tag.text, entry: tag.productId ? index.get(tag.productId) : null }))
+      .filter(({ entry }) => entry?.state === 'active')
+      .map(({ text, entry }) => ({ text, displayName: entry.row.display_name }));
+  } catch (err) {
+    logger.warn(`[business-name-confirmer] affiliate product lookup failed (${err.message}) — no product name exempted`);
+    return [];
+  }
+}
+
+function exemptNameMatcher(draft) {
+  const exact = new Set(AUTHOR_BACKGROUND_NAMES.map(exemptionKey));
+  const displayNames = [];
+  for (const product of linkedAffiliateProducts(draft)) {
+    exact.add(exemptionKey(product.text));
+    const display = exemptionKey(product.displayName);
+    exact.add(display);
+    if (display) displayNames.push(display);
+  }
+  exact.delete('');
+  return (name) => {
+    const key = exemptionKey(name);
+    if (!key || competitorFacts.findCompetitor(name)) return false;
+    return exact.has(key) || displayNames.some((display) => display.startsWith(`${key} `));
+  };
+}
+
+// The extraction with its names (`companies` plus any earlier
+// `exempted_names`) split again under the CURRENT rules, so a stored result
+// reused after the kill switch goes off or a product leaves the registry
+// gets its product names back in `companies`. Same object when there is
+// nothing to split.
+function withoutExemptNames(extraction, draft) {
+  const earlier = Array.isArray(extraction.exempted_names) ? extraction.exempted_names : [];
+  const isExempt = exemptNameMatcher(draft);
+  const names = [...new Set([...extraction.companies, ...earlier])].sort();
+  const exempted = names.filter(isExempt);
+  if (!exempted.length && !earlier.length) return extraction;
+  const result = { ...extraction, companies: names.filter((name) => !isExempt(name)) };
+  if (exempted.length) result.exempted_names = exempted;
+  else delete result.exempted_names;
+  return result;
+}
+
 /**
  * extractCompanyNames(draft, { prior }) — see the module header.
  * `retryable: true` marks provider / output failures (an outage should
@@ -178,7 +258,7 @@ async function extractCompanyNames(draft, { prior = null, brief = null, final = 
   const text = extractionInput(draft, brief, { final });
   if (text === null) return { ok: false, key: null, reason: 'draft_too_long_for_extraction', retryable: false };
   const key = inputKey(text);
-  if (prior && prior.ok === true && prior.key === key && Array.isArray(prior.companies)) return prior;
+  if (prior && prior.ok === true && prior.key === key && Array.isArray(prior.companies)) return withoutExemptNames(prior, draft);
   try {
     const result = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.fastStructured,
@@ -208,7 +288,7 @@ async function extractCompanyNames(draft, { prior = null, brief = null, final = 
       logger.warn(`[business-name-confirmer] extraction failed (${reason}) — draft deferred`);
       return { ok: false, key, reason, retryable: true };
     }
-    return { ok: true, key, companies: canonicalCompanies(companies), checked_at: new Date().toISOString() };
+    return withoutExemptNames({ ok: true, key, companies: canonicalCompanies(companies), checked_at: new Date().toISOString() }, draft);
   } catch (err) {
     logger.warn(`[business-name-confirmer] extraction threw (${err.message}) — draft deferred`);
     return { ok: false, key, reason: `threw:${String(err.message).slice(0, 180)}`, retryable: true };
@@ -404,5 +484,5 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
 module.exports = {
   extractCompanyNames,
   assertOwnerListForCommit,
-  _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies, ownNames, normalizeOwnName, textFields },
+  _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies, ownNames, normalizeOwnName, textFields, AUTHOR_BACKGROUND_NAMES },
 };

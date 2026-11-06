@@ -103,10 +103,12 @@ describe('server dictation endpoint', () => {
     mockCustomerAllowed.mockResolvedValue(true);
     mockHints.mockResolvedValue({ prompt: 'SERVER-BUILT WORD LIST', keywords: ['Examplesmith', 'Todayman'] });
     delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
+    delete process.env.GATE_DICTATION_LIVE_WORDS;
     mockTranscribe.mockResolvedValue({ text: '  Treated the lanai for roaches. ' });
     mockImplausible.mockReturnValue(false);
   });
   afterAll(() => {
+    delete process.env.GATE_DICTATION_LIVE_WORDS;
     delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
     if (originalGate === undefined) delete process.env.GATE_SERVER_DICTATION;
     else process.env.GATE_SERVER_DICTATION = originalGate;
@@ -130,7 +132,7 @@ describe('server dictation endpoint', () => {
     delete process.env.GATE_SERVER_DICTATION;
     await withServer(async (baseUrl) => {
       const avail = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await avail.json()).toEqual({ available: false, everyBox: false });
+      expect(await avail.json()).toEqual({ available: false, everyBox: false, liveWords: false });
       const res = await clip(baseUrl);
       expect(res.status).toBe(404);
       expect(mockHints).not.toHaveBeenCalled();
@@ -148,15 +150,21 @@ describe('server dictation endpoint', () => {
   test('gate on: availability needs the transcriber key', async () => {
     await withServer(async (baseUrl) => {
       const on = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await on.json()).toEqual({ available: true, everyBox: false });
+      expect(await on.json()).toEqual({ available: true, everyBox: false, liveWords: false });
+      process.env.GATE_DICTATION_LIVE_WORDS = 'true';
+      const live = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
+      expect(await live.json()).toEqual({ available: true, everyBox: false, liveWords: true });
       delete process.env.OPENAI_API_KEY;
       const noKey = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await noKey.json()).toEqual({ available: false, everyBox: false });
+      expect(await noKey.json()).toEqual({ available: false, everyBox: false, liveWords: false });
     });
   });
 
   test('GATE_DICTATION_EVERY_BOX: everyBox needs the gate exactly "true" AND server dictation available', async () => {
-    const ask = async (baseUrl) => (await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } })).json();
+    const ask = async (baseUrl) => {
+      const { available, everyBox } = await (await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } })).json();
+      return { available, everyBox };
+    };
     const originalEveryBox = process.env.GATE_DICTATION_EVERY_BOX;
     try {
       await withServer(async (baseUrl) => {

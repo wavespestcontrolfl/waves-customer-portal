@@ -24,6 +24,27 @@ function writeManifest(briefs, extra = {}) {
   return p;
 }
 
+// The content brief the engine composes from one shipped manifest brief.
+function composeSeedBrief(manifest, id) {
+  const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
+  const payload = manifest.briefs.find((brief) => brief.id === id);
+  const opportunity = seeder._internals.rowForBrief(payload, manifest);
+  return new ContentBriefBuilder()._composeBrief({
+    opportunity: { ...opportunity, id: `opp-${id}` },
+    signals: { serp_profile: null, customer_signal: null, conversion_feedback: null },
+    decision: {
+      action_type: 'new_supporting_blog',
+      page_type: 'supporting-blog',
+      final_score: opportunity.score,
+      score_breakdown: opportunity.score_breakdown,
+      human_review_required: false,
+      human_review_reason: null,
+      router_notes: null,
+    },
+    existingBriefVersions: 0,
+  });
+}
+
 const VALID_BRIEF = {
   id: 'X1',
   action: 'new_supporting_blog',
@@ -442,10 +463,10 @@ describe('category-seed-seeder: affiliate_products (pilot briefs)', () => {
     expect(() => seeder.loadManifest(writeManifest([affiliate({ affiliate_products: [] })]))).toThrow(/at most 3/);
   });
 
-  test('the shipped affiliate pilot manifest loads: six hub posts, every product an active registry row, ≤3 per post, unique slugs', () => {
+  test('the shipped affiliate pilot manifest loads: five hub posts, every product an active registry row, ≤3 per post, unique slugs', () => {
     const file = path.join(__dirname, '../data/affiliate-pilot-briefs-v1.json');
     const manifest = seeder.loadManifest(file);
-    expect(manifest.briefs).toHaveLength(6);
+    expect(manifest.briefs).toHaveLength(5);
     const { productIndex } = require('../../packages/affiliate-registry');
     const idx = productIndex();
     for (const b of manifest.briefs) {
@@ -454,36 +475,35 @@ describe('category-seed-seeder: affiliate_products (pilot briefs)', () => {
       for (const p of b.affiliate_products) expect(idx.get(p.product_id)?.state).toBe('active');
       expect(b.window).toBe('immediate');
     }
-    expect(new Set(manifest.briefs.map((b) => b.slug)).size).toBe(6);
-    // Playbook composition: 2 prevention (pest exclusion), 2 measurement, 2 field-tool — six distinct products across the set.
-    expect(new Set(manifest.briefs.flatMap((b) => b.affiliate_products.map((p) => p.product_id))).size).toBe(6);
+    expect(new Set(manifest.briefs.map((b) => b.slug)).size).toBe(5);
+    // Composition: 2 prevention (pest exclusion), 2 measurement, 1 field-tool — five distinct products.
+    // AP05 (catch cups, Parrish) left the set 2026-11-06: a live post owns its topic.
+    expect(new Set(manifest.briefs.flatMap((b) => b.affiliate_products.map((p) => p.product_id))).size).toBe(5);
+    expect(manifest.briefs.map((b) => b.id)).not.toContain('AP05');
+  });
+
+  // The 2026-09-29/30 lawn drafts failed hub_link_present twice each: a
+  // lawn post has no hub page, so the check wants the brief city's own lawn
+  // page, and the briefs never named it.
+  test.each([
+    ['AP03', '/lawn-care-venice-fl/'],
+    ['AP04', '/lawn-care-lakewood-ranch-fl/'],
+  ])('lawn pilot brief %s requires %s, and a draft linking it passes hub_link_present', (id, route) => {
+    const manifest = seeder.loadManifest(path.join(__dirname, '../data/affiliate-pilot-briefs-v1.json'));
+    const { checkHubLinkPresent } = require('../services/content/content-quality-gate')._internals;
+    const brief = composeSeedBrief(manifest, id);
+    expect(brief.internal_links_to_add).toContain(route);
+    expect(checkHubLinkPresent({ body: `Ask about [lawn care](${route}).` }, brief)).toEqual({ ok: true });
+    expect(checkHubLinkPresent({ body: 'Questions? [Contact us](/contact/).' }, brief)).toEqual({ ok: false, reason: 'no_hub_link_found' });
   });
 });
 
 
 describe('regional service-diversity manifest', () => {
   const manifest = seeder.loadManifest(path.join(__dirname, '../data/service-diversity-briefs-20260924.json'));
-  const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
   const { checkHubLinkPresent } = require('../services/content/content-quality-gate')._internals;
 
-  function composeBrief(id) {
-    const payload = manifest.briefs.find((brief) => brief.id === id);
-    const opportunity = seeder._internals.rowForBrief(payload, manifest);
-    return new ContentBriefBuilder()._composeBrief({
-      opportunity: { ...opportunity, id: `opp-${id}` },
-      signals: { serp_profile: null, customer_signal: null, conversion_feedback: null },
-      decision: {
-        action_type: 'new_supporting_blog',
-        page_type: 'supporting-blog',
-        final_score: opportunity.score,
-        score_breakdown: opportunity.score_breakdown,
-        human_review_required: false,
-        human_review_reason: null,
-        router_notes: null,
-      },
-      existingBriefVersions: 0,
-    });
-  }
+  const composeBrief = (id) => composeSeedBrief(manifest, id);
 
   test.each([
     ['BG01', '/tree-and-shrub-care-bradenton-fl/'],

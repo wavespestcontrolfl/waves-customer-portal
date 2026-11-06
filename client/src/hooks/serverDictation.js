@@ -4,8 +4,8 @@
 // per-session availability answer and the clip upload. See useSpeechDictation.js.
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
-// One answer per session (per login token): { token, value } once the server has
-// said yes or no, and the request still in flight so mics mounting together share
+// One answer per session (per login token): { token, value, liveWords } once the server has
+// said yes or no (liveWords: it will also stream the words while the person talks), and the request still in flight so mics mounting together share
 // one call. A failed request is not remembered, so the next mic asks again.
 let answered = null;
 let inFlight = null;
@@ -13,6 +13,11 @@ let inFlight = null;
 /** The remembered answer for this login, or undefined when the server has not been asked yet. */
 export function knownServerDictation(token) {
   return answered && answered.token === token ? answered.value : undefined;
+}
+
+/** True when the server said it will show live words (GATE_DICTATION_LIVE_WORDS) for this login. */
+export function knownLiveWords(token) {
+  return answered && answered.token === token ? answered.liveWords === true : false;
 }
 
 /** True when the server will transcribe clips (gate on and a transcriber key set). Never rejects. */
@@ -30,7 +35,7 @@ export function checkServerDictation(token) {
       if (!d) return false;
       const value = d.available === true;
       // `everyBox` (GATE_DICTATION_EVERY_BOX) rides beside it: the staff-wide mic on text boxes with none.
-      answered = { token, value, everyBox: value && d.everyBox === true };
+      answered = { token, value, everyBox: value && d.everyBox === true, liveWords: value && d.liveWords === true };
       return value;
     })
     .catch(() => false)
