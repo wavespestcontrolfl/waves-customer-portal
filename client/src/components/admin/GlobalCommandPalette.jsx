@@ -27,7 +27,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import DictationButton from "../tech/DictationButton";
 import useDictationPending from "../../hooks/dictationPending";
-import { useSendToClaudeIdea, SendToClaudeButton, SendToClaudeNote, SendToClaudeRow, SendAnswerToClaude, useSendAnswerToClaude } from "./SendToClaudeIdea";
+import { useSendToClaudeIdea, SendToClaudeButton, SendToClaudeNote, SendToClaudeRow, SendAnswerToClaude, useSendAnswerToClaude, pickIds } from "./SendToClaudeIdea";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
@@ -336,13 +336,16 @@ function renderMarkdown(text, onNavigate) {
 }
 
 // The stuck-answer mark for a reply (GATE_IB_ANSWER_SEND_TO_CLAUDE): the gap id the server saved, and the owner's own
-// question for this exchange (null when it came from a tap or carried photos). Null when the reply is not marked.
+// question for this exchange (null when it came from a tap or carried photos), with the page route and record ids of the
+// moment he pressed Ask: a thread keeps an answer on screen after he opens another record, so a send never takes the page
+// it is on now. Null when the reply is not marked.
 function stuckAnswerFrom(data, { ask, held, taskId, exchange }) {
   if (data.answerClaude?.stuck !== true) return null;
   const source = ask || held;
   return {
     gapId: Number.isInteger(data.answerClaude.gapId) ? data.answerClaude.gapId : null,
-    question: source?.question ?? null, pasted: source?.pasted === true, forResponse: data.response, taskId, exchange,
+    question: source?.question ?? null, pasted: source?.pasted === true, route: source?.route ?? null, ids: source?.ids ?? {},
+    forResponse: data.response, taskId, exchange,
   };
 }
 
@@ -810,9 +813,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       // an idle thread starts a new conversation (threadRolledOver on the reply),
       // so a retry goes out byte for byte as first sent.
       const request = queryPayloadFor(q, selectedTarget);
-      // The owner's own words and paste mark for this exchange, read before the composer clears. Only the composer's text
-      // counts: a tapped choice, quick action or recent is not what he wrote for this answer, and photos can't go.
-      const ask = !text && !attachments.length ? { question: q, pasted: pastedRef.current === true } : null;
+      // The owner's own words, paste mark, page route and record ids for this exchange, read before the composer clears.
+      // Only the composer's text counts: a tapped choice, quick action or recent is not what he wrote for this answer, and
+      // photos can't go.
+      const ask = !text && !attachments.length
+        ? { question: q, pasted: pastedRef.current === true, route: location.pathname, ids: pickIds(ibPageData) }
+        : null;
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
@@ -875,7 +881,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, attachments, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments, userId],
+    [prompt, loading, attachments, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments, userId, location.pathname, ibPageData],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -938,7 +944,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const cardsShown = Boolean(pendingActions.length || activeTask?.pendingActions?.length || activeTask?.receipts?.length);
   const shownAnswerClaude = claudeIdea.answerButton && answerClaude && answerClaude.forResponse === response && !loading && !cardsShown ? answerClaude : null;
   const shownChoices = cardsShown ? null : choices;
-  const answerSend = useSendAnswerToClaude({ pageData: ibPageData, route: location.pathname, exchange: answerClaude?.exchange });
+  const answerSend = useSendAnswerToClaude({ exchange: answerClaude?.exchange });
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
     onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved}  variant="dark" />;

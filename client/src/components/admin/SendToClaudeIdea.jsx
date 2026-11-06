@@ -15,7 +15,8 @@ const UNDO_MS = 10000;
 export const IDEA_HELP = 'Ask uses the paid AI. Send to Claude opens a tab on the Mac at no cost.';
 const ID_KEYS = ['customer_id', 'property_id', 'estimate_id', 'appointment_id', 'product_id', 'viewed_date'];
 
-const pickIds = (pageData) => Object.fromEntries(ID_KEYS.filter((key) => pageData?.[key]).map((key) => [key, pageData[key]]));
+// The record ids a send carries: only the known id keys of the page data.
+export const pickIds = (pageData) => Object.fromEntries(ID_KEYS.filter((key) => pageData?.[key]).map((key) => [key, pageData[key]]));
 
 // The send button's state for one palette. `onSent` clears the composer (prompt, attachments, paste mark) after a send.
 export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, dictationUsedRef, pageData, route, onSent, onRestore }) {
@@ -191,60 +192,82 @@ export function SendToClaudeRow({ claude, hidden = false }) {
   );
 }
 
-// A stuck bar answer's one-tap send (GATE_IB_ANSWER_SEND_TO_CLAUDE). Same route and body shape as the box button, but the text
-// is a GIVEN one: the owner's own question for that answer, captured when he pressed Ask. Nothing the bar or a tool wrote
-// ever goes through here. Ten seconds of Undo follow a send; an Undo has no composer text to put back.
-// `exchange` names the answer the send belongs to: a new one clears the last note.
-export function useSendAnswerToClaude({ pageData, route, exchange }) {
-  const [sending, setSending] = useState(false);
-  const sendingRef = useRef(false);
-  const [note, setNote] = useState(null); // { kind: 'sent' | 'duplicate' | 'error' | 'cancelled', text, id?, at?, undoable? }
+// A stuck bar answer's one-tap send (GATE_IB_ANSWER_SEND_TO_CLAUDE). Same route and body shape as the box button, but
+// every part is the answer's own snapshot, taken when the owner pressed Ask: his question, the paste mark, and the page route
+// and record ids of that moment (a thread keeps an old answer on screen after he opens another record). Nothing the bar or
+// a tool wrote ever goes through here. Ten seconds of Undo follow a send; an Undo has no composer text to put back.
+// `exchange` names the answer on screen. A new one clears the last note, and a send or Undo that finishes after the answer
+// changed shows nothing: its note and its Undo belong to the earlier answer.
+export function useSendAnswerToClaude({ exchange }) {
+  const [sendingFor, setSendingFor] = useState(null); // the exchange whose send is in flight, or null
+  const sendingRef = useRef(null);
+  const undoingRef = useRef(false);
+  const exchangeRef = useRef(exchange);
+  exchangeRef.current = exchange;
+  // { kind: 'sent' | 'duplicate' | 'error' | 'cancelled', text, exchange, id?, at?, undoable? }
+  const [note, setNote] = useState(null);
   const timerRef = useRef(null);
   useEffect(() => () => clearTimeout(timerRef.current), []);
   useEffect(() => { clearTimeout(timerRef.current); setNote(null); }, [exchange]);
 
-  const send = useCallback(async (question, pasted) => {
-    if (typeof question !== 'string' || !question.trim() || sendingRef.current) return;
-    sendingRef.current = true;
-    setSending(true);
+  // `answer`: { question, pasted, route, ids, exchange } as the palette captured them at Ask. One send at a time.
+  const send = useCallback(async (answer) => {
+    const question = answer?.question;
+    if (typeof question !== 'string' || !question.trim() || sendingRef.current !== null) return;
+    const forExchange = answer.exchange;
+    const stillShown = () => exchangeRef.current === forExchange;
+    sendingRef.current = forExchange;
+    setSendingFor(forExchange);
     try {
       const out = await adminFetch('/admin/claude-ideas', {
         method: 'POST',
-        body: JSON.stringify({ text: question, page: { route }, ids: pickIds(pageData), pasted: pasted === true }),
+        body: JSON.stringify({ text: question, page: { route: answer.route ?? null }, ids: answer.ids || {}, pasted: answer.pasted === true }),
       });
+      if (!stillShown()) return;
       if (out?.duplicate) {
-        setNote({ kind: 'duplicate', text: 'You already sent this idea. Claude has it.' });
+        setNote({ kind: 'duplicate', text: 'You already sent this idea. Claude has it.', exchange: forExchange });
       } else if (out?.sent) {
-        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true });
+        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true, exchange: forExchange });
         clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(() => setNote((now) => (now?.kind === 'sent' ? { ...now, undoable: false } : now)), UNDO_MS);
+        timerRef.current = setTimeout(() => setNote((now) => (
+          now?.kind === 'sent' && now.exchange === forExchange ? { ...now, undoable: false } : now)), UNDO_MS);
       } else {
-        setNote({ kind: 'error', text: "Couldn't send it. Try again." });
+        setNote({ kind: 'error', text: "Couldn't send it. Try again.", exchange: forExchange });
       }
     } catch {
-      setNote({ kind: 'error', text: "Couldn't send it. Try again." });
+      if (stillShown()) setNote({ kind: 'error', text: "Couldn't send it. Try again.", exchange: forExchange });
     } finally {
-      sendingRef.current = false;
-      setSending(false);
+      sendingRef.current = null;
+      setSendingFor(null);
     }
-  }, [pageData, route]);
+  }, []);
 
   const undo = useCallback(async () => {
-    if (!note?.undoable || sendingRef.current) return;
-    sendingRef.current = true;
+    if (!note?.undoable || undoingRef.current) return;
+    const { id, at, exchange: forExchange } = note;
+    undoingRef.current = true;
     clearTimeout(timerRef.current);
     try {
-      await adminFetch(`/admin/claude-ideas/${encodeURIComponent(note.id)}/cancel`, { method: 'POST', body: JSON.stringify({ at: note.at }) });
-      setNote({ kind: 'cancelled', text: 'Cancelled.' });
+      await adminFetch(`/admin/claude-ideas/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify({ at }) });
+      if (exchangeRef.current === forExchange) setNote({ kind: 'cancelled', text: 'Cancelled.', exchange: forExchange });
     } catch (err) {
       const started = err?.status === 409 && err?.details?.error === 'started';
-      setNote({ kind: 'error', text: started ? 'Claude already started on it.' : "Couldn't cancel. Claude has it." });
+      if (exchangeRef.current === forExchange) {
+        setNote({ kind: 'error', text: started ? 'Claude already started on it.' : "Couldn't cancel. Claude has it.", exchange: forExchange });
+      }
     } finally {
-      sendingRef.current = false;
+      undoingRef.current = false;
     }
   }, [note]);
 
-  return { sending, note, send, undo };
+  // `busy`: any send is in flight (the button waits); `sending`: this answer's own send is (the button says so).
+  return {
+    busy: sendingFor !== null,
+    sending: sendingFor !== null && sendingFor === exchange,
+    note: note && note.exchange === exchange ? note : null,
+    send,
+    undo,
+  };
 }
 
 // Under a stuck answer. `answer`: { gapId, question, pasted }; `claude`: useSendAnswerToClaude's result. A gap row exists:
@@ -268,19 +291,19 @@ export function SendAnswerToClaude({ answer, claude, variant = 'desktop' }) {
         <button
           type="button"
           data-testid="answer-send-to-claude"
-          onClick={() => claude.send(answer.question, answer.pasted)}
-          disabled={claude.sending}
+          onClick={() => claude.send(answer)}
+          disabled={claude.busy}
           style={{
             padding: look.pad,
             minHeight: look.min || undefined,
             borderRadius: variant === 'mobile' ? 10 : 8,
             border: `1px solid ${look.border}`,
             background: '#FFFFFF',
-            color: claude.sending ? '#A1A1AA' : look.text,
+            color: claude.busy ? '#A1A1AA' : look.text,
             fontSize: 14,
             fontWeight: 500,
             fontFamily: 'Roboto, Arial, sans-serif',
-            cursor: claude.sending ? 'not-allowed' : 'pointer',
+            cursor: claude.busy ? 'not-allowed' : 'pointer',
             whiteSpace: 'nowrap',
           }}
         >

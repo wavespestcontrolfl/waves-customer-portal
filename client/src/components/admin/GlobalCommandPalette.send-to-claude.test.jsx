@@ -17,6 +17,8 @@ vi.mock('../tech/DictationButton', () => ({ default: () => null }));
 vi.mock('../../utils/imageCompression', () => ({ encodeJpegDataUrl: vi.fn(async () => 'data:image/jpeg;base64,QUJD') }));
 
 const CUSTOMER = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const OTHER_CUSTOMER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const THREAD = '00000000-0000-4000-8000-0000000000b2';
 const IDEA_ID = '00000000-0000-4000-8000-0000000000a1';
 const AT = '2026-11-03T15:00:00.000Z';
 const ANSWER = 'There is no manual prepay option in this bar. Nothing was changed.';
@@ -26,8 +28,12 @@ let ideaAnswer;
 let statusAnswer;
 let queryAnswer;
 
+// The page the palette sits on; a test opens another customer with switchPageCustomer.
+let switchPageCustomer = () => {};
 function Page() {
-  usePublishIntelligenceBarPageData({ customer_id: CUSTOMER, viewed_date: '2026-11-03' });
+  const [customerId, setCustomerId] = React.useState(CUSTOMER);
+  switchPageCustomer = setCustomerId;
+  usePublishIntelligenceBarPageData({ customer_id: customerId, viewed_date: '2026-11-03' });
   return null;
 }
 async function mount({ mobile = false } = {}) {
@@ -293,6 +299,45 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
     }]);
     expect(JSON.stringify(ideaPosts())).not.toContain('manual prepay');
     expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('an answer a thread keeps after the page changes sends the page and record ids of its own Ask', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, { ...stuck(null), threadId: THREAD, threadSeq: 1, threadsEnabled: true });
+    await mount({ mobile });
+    await askQuestion();
+    act(() => switchPageCustomer(OTHER_CUSTOMER));
+    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
+    expect(await screen.findByText('Sent to Claude.')).toBeInTheDocument();
+    expect(ideaPosts()).toEqual([{
+      text: QUESTION,
+      page: { route: '/admin/customers' },
+      ids: { customer_id: CUSTOMER, viewed_date: '2026-11-03' },
+      pasted: false,
+    }]);
+  });
+
+  it('a send that finishes after a newer answer arrived shows nothing under the newer answer', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    let finishSend = () => {};
+    ideaAnswer = () => new Promise((resolve) => { finishSend = () => resolve(reply(200, { sent: true, id: IDEA_ID, at: AT, message: 'Sent to Claude.' })); });
+    await mount({ mobile });
+    await askQuestion();
+    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
+    await waitFor(() => expect(ideaPosts()).toHaveLength(1));
+    const NEXT_ANSWER = 'Nothing was changed. The bar found no tool for that request.';
+    queryAnswer = () => reply(200, { ...stuck(null), response: NEXT_ANSWER });
+    type('Move every Friday visit to Thursday');
+    fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
+    await screen.findByText(NEXT_ANSWER);
+    expect(answerButton()).toBeDisabled();
+    expect(answerButton()).toHaveTextContent('Send to Claude (free)');
+    await act(async () => { finishSend(); });
+    expect(screen.queryByText('Sent to Claude.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+    await waitFor(() => expect(answerButton()).toBeEnabled());
+    expect(ideaPosts()).toHaveLength(1);
   });
 
   it('a typed question is sent with pasted false', async () => {
