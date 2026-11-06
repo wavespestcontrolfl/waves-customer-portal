@@ -229,9 +229,30 @@ function toCalendarDay(node, [head, ...rest]) {
 
 const withheld = (text) => (text ? `[withheld: ${String(text).length} characters]` : text);
 
+// GATE_CLAUDE_INPUT_GUARD, read at call time; a missing or throwing reader reads as off.
+function claudeInputGuardOn() {
+  try { return require('../config/feature-gates').claudeInputGuardLive?.() === true; } catch { return false; }
+}
+
+// Alert categories whose body our own code writes (system faults, cost and token alerts, agent reports). Every other row's
+// `why` can quote an outside sender (a customer text, an email subject, a Messenger message, a voicemail, a lead form) or a
+// vendor or model, so it stays server side. New categories join only after reading their emitters.
+const CODE_WRITTEN_ALERT_CATEGORIES = new Set(['system', 'llm_cost', 'agents', 'token_alert']);
+const WHY_WITHHELD = 'text withheld: may quote an outside sender; look the item up by id';
+
+// An item with no category is a standing count, whose label our code writes and whose `why` is null.
+const guardNeedsMeItem = (item) => (
+  item && item.why && item.category && !CODE_WRITTEN_ALERT_CATEGORIES.has(item.category) ? { ...item, why: WHY_WITHHELD } : item
+);
+
 // A gap row from someone other than the owner (quoted_words: a technician,
 // customer or caller) keeps its counts but not their words.
 const PREPARE = {
+  needs_me: (result) => {
+    if (!claudeInputGuardOn()) return result;
+    const guard = (items) => (Array.isArray(items) ? items.map(guardNeedsMeItem) : items);
+    return { ...result, items: guard(result.items), unsorted: guard(result.unsorted) };
+  },
   list_gap_reports: (result) => ({
     ...result,
     groups: (result.groups || []).map((group) => ({

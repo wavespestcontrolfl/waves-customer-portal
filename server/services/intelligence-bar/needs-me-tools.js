@@ -40,6 +40,8 @@ function toBarItem(item) {
   return {
     id: item.id,
     kind: item.kind,
+    // The alert's category: the admin MCP keeps `why` only for categories whose body our code writes (routes/mcp-admin.js).
+    ...(item.category ? { category: item.category } : {}),
     area: item.area,
     severity: item.severity,
     who: item.who,
