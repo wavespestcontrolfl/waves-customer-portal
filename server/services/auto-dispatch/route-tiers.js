@@ -301,6 +301,10 @@ function resolveAnchor(service, anchorMap) {
  * Callers that do not pass it are unchanged, byte for byte (route-reorder's
  * 4:20 pass, the rebooker).
  *
+ * `opts.anyPromise` (GATE_DAY_ONLY_PROMISE, owner 2026-11-05 "D1 a") is honored only when `toldLock` is: ANY
+ * resolved promise then freezes the visit, a day-only one or an unknown window too, because this tool moves
+ * DATES and a customer told only the day was still told that day.
+ *
  * Returns { failed, frozen:Set<id> }:
  *   failed=true  → the status could not be read; callers MUST treat EVERY
  *                  visit as frozen (fail closed).
@@ -373,7 +377,8 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
     }
 
     if (toldLock) {
-      for (const id of await require('./told-visits').loadToldVisitIds(db, serviceIds, now)) frozen.add(id);
+      const told = await require('./told-visits').loadToldVisitIds(db, serviceIds, now, ...(opts.anyPromise === true ? [{ anyPromise: true }] : []));
+      for (const id of told) frozen.add(id);
     }
 
     return { failed: false, frozen };
