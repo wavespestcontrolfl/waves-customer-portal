@@ -7,10 +7,11 @@ const { etDateString, addETDays, parseETDateTime } = require('../../utils/dateti
 // GATE_MONEY_NOTICE_CATCHUP (owner 2026-11-06): a termite bond 30/15/7 text
 // whose day passed at most this many days ago, and that has not gone out
 // (the 35-day 'renewal' cooldown below), still matches on the next run, so a
-// lost 10:12 tick is made up. Smaller than the 8-day gap between the 15 and 7
-// rungs, so a late match never reaches the next rung's day. Same bound as
-// NOTICE_CATCHUP_DAYS in annual-prepay-renewals.js.
-const RENEWAL_CATCHUP_DAYS = 3;
+// lost 10:12 tick is made up. One day, not the 3 of NOTICE_CATCHUP_DAYS in
+// annual-prepay-renewals.js: these texts state the time left in relative words
+// ("in 30 days", "in 2 weeks", "in just 1 week"), so a later send would state
+// it wrong. A prepay notice names the exact end date, so it can wait longer.
+const RENEWAL_CATCHUP_DAYS = 1;
 
 // The earliest renewal date a rung may still notice today. Gate off, the
 // exact day only (`DATE(col) BETWEEN d AND d`, the same match as `= d`).

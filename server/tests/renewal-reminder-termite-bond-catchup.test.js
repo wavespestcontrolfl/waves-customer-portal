@@ -1,7 +1,8 @@
 // GATE_MONEY_NOTICE_CATCHUP, termite bond renewal texts (owner 2026-11-06, "jobs 1-6"):
 // the 10:12 run matched `DATE(termite_renewal_date) = today + N` for N = 30/15/7, so a
 // lost tick dropped that day's notice. Gate on, each rung also matches a renewal date
-// whose notice day passed at most 3 days ago; the existing 35-day 'renewal' text
+// whose notice day passed at most 1 day ago (the texts state the time left in relative
+// words, so a later send would state it wrong); the existing 35-day 'renewal' text
 // cooldown keeps it to one text. Gate off, the match is the exact day (BETWEEN d AND d).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -88,14 +89,14 @@ test('gate off: a renewal whose 30-day text day was yesterday gets nothing', asy
   expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
-test('gate on: windows reach 3 days back and never touch the next rung\'s window', async () => {
+test('gate on: windows reach 1 day back and never touch the next rung\'s window', async () => {
   process.env.GATE_MONEY_NOTICE_CATCHUP = 'true';
   await renewalReminder.checkAndSend();
-  expect(rungWindows).toEqual([[plus(27), plus(30)], [plus(12), plus(15)], [plus(4), plus(7)]]);
+  expect(rungWindows).toEqual([[plus(29), plus(30)], [plus(14), plus(15)], [plus(6), plus(7)]]);
   for (let i = 0; i + 1 < rungWindows.length; i++) expect(rungWindows[i + 1][1] < rungWindows[i][0]).toBe(true);
 });
 
-test.each([[29, 30], [27, 30], [13, 15], [4, 7]])(
+test.each([[29, 30], [14, 15], [6, 7]])(
   'gate on: renewal %s days out (its %s-day text missed) gets one text with that rung\'s wording', async (daysOut, rung) => {
     process.env.GATE_MONEY_NOTICE_CATCHUP = 'true';
     customers = [bondCustomer(plus(daysOut))];
@@ -105,7 +106,7 @@ test.each([[29, 30], [27, 30], [13, 15], [4, 7]])(
   },
 );
 
-test.each([26, 16, 11, 8, 3])('gate on: renewal %s days out is outside every window: no text', async (daysOut) => {
+test.each([28, 26, 16, 13, 11, 8, 5, 3])('gate on: renewal %s days out is outside every window: no text', async (daysOut) => {
   process.env.GATE_MONEY_NOTICE_CATCHUP = 'true';
   customers = [bondCustomer(plus(daysOut))];
   await expect(renewalReminder.checkAndSend()).resolves.toEqual({ sent: 0 });
@@ -114,7 +115,7 @@ test.each([26, 16, 11, 8, 3])('gate on: renewal %s days out is outside every win
 
 test('gate on: the 35-day renewal-text cooldown blocks a repeat inside the late window', async () => {
   process.env.GATE_MONEY_NOTICE_CATCHUP = 'true';
-  customers = [bondCustomer(plus(28))];
+  customers = [bondCustomer(plus(29))];
   recentRenewalText = { id: 'sms-1' };
   await expect(renewalReminder.checkAndSend()).resolves.toEqual({ sent: 0 });
   expect(sendCustomerMessage).not.toHaveBeenCalled();
