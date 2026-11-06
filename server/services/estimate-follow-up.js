@@ -407,13 +407,13 @@ function moneySummary(est = {}) {
   return "";
 }
 
-// GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (owner 2026-10-21): the follow-up emails that
+// Monthly average (owner 2026-10-21): the follow-up emails that
 // render the price row (unviewed, viewed, final, expiring notice) show the same
 // average copy as the delivery email. `estimate_average_note` is the context sentence
 // (a paragraph block the templates carry, dropped when blank). Built from a row read
 // now by emailAverageParts, the delivery email's own resolver and eligibility
 // (commercial, quote-required, closed, prepay/monthly-billed, one-time-only all
-// withheld). Returns the payload UNCHANGED (same object) with the gate off, when no
+// withheld). Returns the payload UNCHANGED (same object) when no
 // average applies, or when the template's ACTIVE version cannot show the context
 // sentence, so those emails stay byte-identical. A template the migration skipped
 // (custom plain-text body, price block removed, publish race) would otherwise print
@@ -443,7 +443,6 @@ async function averageNoteVersionId(templateKey) {
 // averageText is the exact copy put in the email (the send-time check compares it).
 async function applyMonthlyAverage(payload, est, templateKey) {
   const unchanged = { payload, versionId: null, averageText: null };
-  if (!isEnabled("estimateFollowupMonthlyAverage")) return unchanged;
   try {
     const versionId = await averageNoteVersionId(templateKey);
     if (!versionId) return unchanged;

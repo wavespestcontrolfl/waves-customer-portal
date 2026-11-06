@@ -49,11 +49,6 @@ jest.mock('../routes/estimate-public', () => ({
   bookingServiceFor: jest.fn(),
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
-const mockGate = { on: true };
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return { ...actual, isEnabled: jest.fn((gate) => (gate === 'estimateMonthlyAverage' ? mockGate.on : actual.isEnabled(gate))) };
-});
 const mockBilling = { ctx: { billsPerApplication: true, livePricing: null } };
 jest.mock('../services/estimate-proposal-billing', () => ({
   resolveProposalBillingContext: jest.fn(async () => mockBilling.ctx),
@@ -194,7 +189,6 @@ describe('service names from the proposal lines', () => {
 
 describe('delivery email: application months', () => {
   beforeEach(() => {
-    mockGate.on = true;
     mockBilling.ctx = { billsPerApplication: true, livePricing: null };
   });
 
@@ -226,11 +220,6 @@ describe('delivery email: application months', () => {
       expect(average.note).not.toContain('Months with');
       expect(average.note).not.toContain('Other months');
     }
-  });
-
-  test('the monthly-average gate off still gives nothing', async () => {
-    mockGate.on = false;
-    expect(await emailAverageParts(pestMosquito)).toBeNull();
   });
 
   test('the reviewed-copy text includes the breakdown', async () => {
