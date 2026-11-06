@@ -9,7 +9,9 @@
  * before the lock skips, a failed read under the lock rejects with nothing billed.
  *
  * Unresolved customers (a failure before any charge, nothing armed) hold the bookmark through
- * the day after the billing date; a later run releases it with one alert naming the count.
+ * the day after the billing date; a later run releases it with one alert naming the count, and
+ * only once that alert is saved. With no bookmark, the first gate-on 8:00 tick writes a boundary
+ * the day before today, so a first run that holds or throws stays owed.
  *
  * BillingCron.processMonthlyBilling is faked here; who a date's run charges, skips or leaves
  * alone is billing-cron-monthly-catchup.test.js.
@@ -29,6 +31,8 @@ jest.mock('../models/db', () => jest.fn((table) => {
       merge: () => {
         if (mockWriteError) return Promise.reject(mockWriteError);
         mockWrites.push(row);
+        // The next read sees the write, as the table would (multi-tick tests).
+        mockBookmarkRow = { last_sent_at: row.last_sent_at };
         return Promise.resolve();
       },
     }),
@@ -198,9 +202,9 @@ describe('8:00 tick (runMonthlyBillingTick)', () => {
     expect(writtenDates()).toEqual(['2026-11-12']);
   });
 
-  test('gate on, no bookmark yet: bookmark starts at today', async () => {
+  test('gate on, no bookmark yet: the boundary (yesterday) is written before the run, then the bookmark moves to today', async () => {
     await catchUp.runMonthlyBillingTick();
-    expect(writtenDates()).toEqual(['2026-11-12']);
+    expect(writtenDates()).toEqual(['2026-11-11', '2026-11-12']);
   });
 
   test('gate on, an earlier date still owed: the 8:00 run bills only today and leaves the bookmark for the catch-up', async () => {
@@ -219,9 +223,17 @@ describe('8:00 tick (runMonthlyBillingTick)', () => {
   });
 
   test('a run that throws moves no bookmark', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-11');
     BillingCron.processMonthlyBilling.mockRejectedValueOnce(new Error('cohort read failed'));
     await expect(catchUp.runMonthlyBillingTick()).rejects.toThrow('cohort read failed');
     expect(mockWrites).toEqual([]);
+  });
+
+  test('a FIRST run that throws (no bookmark yet) leaves only the boundary, so the catch-up owes today', async () => {
+    BillingCron.processMonthlyBilling.mockRejectedValueOnce(new Error('cohort read failed'));
+    await expect(catchUp.runMonthlyBillingTick()).rejects.toThrow('cohort read failed');
+    expect(writtenDates()).toEqual(['2026-11-11']);
+    expect(await catchUp.catchUpNeeded()).toBe(true);
   });
 });
 
@@ -313,13 +325,57 @@ describe('the hold is bounded', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('a failed alert only logs: the bookmark still moves past the released date', async () => {
-    notifyAdmin.mockRejectedValueOnce(new Error('bell write failed'));
+  // Codex pre-push P1 on 2c0b54f2b0: a date is released only once its alert row is saved.
+  test.each([
+    ['the alert write throws', () => notifyAdmin.mockRejectedValueOnce(new Error('bell write failed'))],
+    ['notifyAdmin resolves null (insert failed)', () => notifyAdmin.mockResolvedValueOnce(null)],
+    ['nothing was written (suppressed)', () => notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true })],
+  ])('%s: the bookmark holds; the next tick re-runs the date, raises the alert again, then releases it', async (_label, failOnce) => {
+    failOnce();
+    mockBookmarkRow = bookmarkAt('2026-11-09');
+    resultsByDate({ '2026-11-10': { unresolved: ['cust-x'] } });
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['2026-11-10', '2026-11-11', '2026-11-12']);
+    expect(mockWrites).toEqual([]);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('alert billing-monthly-unbilled:2026-11-10'));
+    expect(await catchUp.catchUpNeeded()).toBe(true);
+
+    BillingCron.processMonthlyBilling.mockClear();
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['2026-11-10', '2026-11-11', '2026-11-12']);
+    expect(alerts().map((a) => a.opts.dedupeKey)).toEqual(['billing-monthly-unbilled:2026-11-10', 'billing-monthly-unbilled:2026-11-10']);
+    expect(writtenDates()).toEqual(['2026-11-10', '2026-11-11', '2026-11-12']);
+  });
+
+  test('a repeat after a lost bookmark write finds the saved row: notifyAdmin\'s dedupe answer releases the date', async () => {
+    notifyAdmin.mockResolvedValueOnce({ id: 'n-1', deduped: true });
     mockBookmarkRow = bookmarkAt('2026-11-09');
     resultsByDate({ '2026-11-10': { unresolved: ['cust-x'] } });
     await catchUp.runMonthlyBillingCatchUp();
     expect(writtenDates()).toEqual(['2026-11-10', '2026-11-11', '2026-11-12']);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('alert billing-monthly-unbilled:2026-11-10 failed: bell write failed'));
+  });
+
+  test('both alerts ask for the bell (needs-you money item; the bell policy would drop them with no row)', async () => {
+    setNow('2026-11-02T15:29:00Z');
+    mockBookmarkRow = bookmarkAt('2026-10-29');
+    resultsByDate({ '2026-11-01': { unresolved: ['cust-x'] } });
+    setNow('2026-11-03T15:29:00Z');
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(alerts().map((a) => [a.opts.dedupeKey, a.opts.bell])).toEqual([
+      ['billing-monthly-unfinished:2026-10', true], ['billing-monthly-unbilled:2026-11-01', true],
+    ]);
+  });
+
+  test('an unsaved month alert keeps the bookmark in last month (dates still billed); the next tick raises it again', async () => {
+    setNow('2026-11-02T15:29:00Z');
+    mockBookmarkRow = bookmarkAt('2026-10-29');
+    notifyAdmin.mockResolvedValueOnce(null);
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['2026-11-01', '2026-11-02']);
+    expect(mockWrites).toEqual([]);
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(alerts().map((a) => a.opts.dedupeKey)).toEqual(['billing-monthly-unfinished:2026-10', 'billing-monthly-unfinished:2026-10']);
+    expect(writtenDates()).toEqual(['2026-11-01', '2026-11-02']);
   });
 });
 
@@ -347,11 +403,77 @@ describe('8:00 tick: the same completion check', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('gate on: an unsaved month alert keeps the bookmark', async () => {
+    setNow('2026-11-01T13:00:00Z');
+    mockBookmarkRow = bookmarkAt('2026-10-30');
+    notifyAdmin.mockResolvedValueOnce(null);
+    await catchUp.runMonthlyBillingTick();
+    expect(mockWrites).toEqual([]);
+  });
+
   test('gate on, first run of a month: an unfinished earlier month raises its alert from the 8:00 tick', async () => {
     setNow('2026-11-01T13:00:00Z');
     mockBookmarkRow = bookmarkAt('2026-10-30');
     await catchUp.runMonthlyBillingTick();
     expect(alerts().map((a) => a.opts.dedupeKey)).toEqual(['billing-monthly-unfinished:2026-10']);
     expect(writtenDates()).toEqual(['2026-11-01']);
+  });
+});
+
+// Codex pre-push P1 on 2c0b54f2b0: with no bookmark, a first run that left customers unresolved
+// wrote nothing, and the next morning's finished run set the bookmark past that date for good.
+describe('first run with no bookmark', () => {
+  const at = (iso) => setNow(iso);
+
+  test('first run incomplete; the next morning\'s finished run does not pass it; the catch-up holds it, then alerts and releases', async () => {
+    resultsByDate({ '2026-11-12': { unresolved: ['cust-b'] } });
+    at('2026-11-12T13:00:00Z'); // Thu 8:00 ET, no bookmark
+    await catchUp.runMonthlyBillingTick();
+    expect(writtenDates()).toEqual(['2026-11-11']);
+    at('2026-11-12T15:29:00Z');
+    expect(await catchUp.catchUpNeeded()).toBe(true);
+
+    at('2026-11-13T13:00:00Z'); // Fri 8:00 ET: today finishes, the 12th is still owed
+    const fri = await catchUp.runMonthlyBillingTick();
+    expect(fri.owedBefore).toEqual(['2026-11-12']);
+    expect(writtenDates()).toEqual(['2026-11-11']);
+
+    at('2026-11-13T15:29:00Z'); // Fri 10:29: the 12th is inside the hold
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(writtenDates()).toEqual(['2026-11-11']);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+
+    at('2026-11-14T15:29:00Z'); // Sat 10:29: released with one alert
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(alerts().map((a) => a.opts.dedupeKey)).toEqual(['billing-monthly-unbilled:2026-11-12']);
+    expect(writtenDates()).toEqual(['2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14']);
+    // Never a date before the first attempted one.
+    expect(billedDates().filter((d) => d !== 'today' && d < '2026-11-12')).toEqual([]);
+  });
+
+  test('a first run on the 1st sets the boundary on the last day of last month: no month alert, no earlier date billed', async () => {
+    resultsByDate({ '2026-11-01': { unresolved: ['cust-b'] } });
+    at('2026-11-01T12:00:00Z');
+    await catchUp.runMonthlyBillingTick();
+    expect(writtenDates()).toEqual(['2026-10-31']);
+    at('2026-11-01T15:29:00Z');
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['today', '2026-11-01']);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a boundary write that fails only logs; the run still bills today', async () => {
+    mockWriteError = new Error('write failed');
+    const out = await catchUp.runMonthlyBillingTick();
+    expect(out).toMatchObject({ charged: 1 });
+    expect(mockWrites).toEqual([]);
+  });
+
+  test('gate off: no boundary, no read, even when the first run is incomplete', async () => {
+    billingMonthlyCatchupLive.mockReturnValue(false);
+    mockReadError = new Error('a read must not happen');
+    resultsByDate({ '2026-11-12': { unresolved: ['cust-b'] } });
+    await catchUp.runMonthlyBillingTick();
+    expect(mockWrites).toEqual([]);
   });
 });
