@@ -24,8 +24,8 @@
  * for a visit that was just reassigned, and the answer never says whether a
  * customer or visit exists. Admins are unrestricted.
  *
- * GATE_DICTATION_CUSTOMER_NAMES adds customer names to the word list and their surnames to the
- * transcriber's keyword hints (services/dictation-word-list.js buildDictationHints); off = as above.
+ * The word list carries customer names and their surnames go to the transcriber's keyword
+ * hints (services/dictation-word-list.js buildDictationHints).
  *
  * GATE_DICTATION_MONEY_NORMALIZE reads dictated dollar amounts (utils/spoken-money.js) and adds
  * `money: { changes, ambiguous }` beside `text`. The text itself is returned exactly as heard: a parser can
@@ -93,23 +93,16 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
 
       // Ids only, already fenced. The prompt is built here from our own records;
       // nothing the client sends other than an id ever reaches the transcriber.
-      const { buildDictationPrompt, buildDictationHints } = require('../services/dictation-word-list');
+      const { buildDictationHints } = require('../services/dictation-word-list');
       const { customerId, serviceId } = req.dictationContext;
-      // GATE_DICTATION_CUSTOMER_NAMES: the customer-name section and surname keyword hints. A
-      // technician login's names come from its OWN stops only (the word list reads req's scope
-      // from the login, never from the client). Off = the call below is exactly as it was.
-      const namesOn = featureGates.dictationCustomerNamesLive() === true;
-      let prompt;
-      let keywords = null;
-      if (namesOn) {
-        ({ prompt, keywords } = await buildDictationHints({
-          customerId,
-          serviceId,
-          scope: isTechnicianRequest(req) ? { technicianId: req.technicianId } : {},
-        }));
-      } else {
-        prompt = await buildDictationPrompt({ customerId, serviceId });
-      }
+      // The customer-name section and surname keyword hints. A technician login's names come
+      // from its OWN stops only (the word list reads req's scope from the login, never from
+      // the client).
+      const { prompt, keywords } = await buildDictationHints({
+        customerId,
+        serviceId,
+        scope: isTechnicianRequest(req) ? { technicianId: req.technicianId } : {},
+      });
 
       const { transcribeWithOpenAI, isImplausibleTranscript } = require('../services/call-recording-processor');
       const voiceFill = require('../services/fast-complete-voice-fill');

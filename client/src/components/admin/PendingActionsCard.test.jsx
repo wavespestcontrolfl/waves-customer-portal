@@ -327,7 +327,7 @@ test('an expired card of any other tool keeps the ask-again line and offers no S
   expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
 });
 
-// GATE_IB_MULTI_CARD: several independent cards in one answer. Each card says
+// Several independent cards in one answer. Each card says
 // which one it is, has its own Confirm and Cancel, and deciding one never
 // touches another.
 const twoCards = [

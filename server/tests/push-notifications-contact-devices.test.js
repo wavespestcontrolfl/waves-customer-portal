@@ -18,6 +18,7 @@ jest.mock('../services/account-properties', () => ({
 jest.mock('../config/feature-gates', () => ({
   gateEnvValue: jest.fn(() => false),
   contactLoginLive: () => process.env.GATE_CONTACT_LOGIN === 'true',
+  contactLoginHolderOnlyLive: () => process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY === 'true',
 }));
 
 const db = require('../models/db');

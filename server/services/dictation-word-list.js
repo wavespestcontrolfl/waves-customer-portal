@@ -14,8 +14,7 @@
  * section also has its own ceiling so a long product list cannot push out the
  * sections below it.
  *
- * GATE_DICTATION_CUSTOMER_NAMES (buildDictationHints; the route chooses it, gate off keeps
- * buildDictationPrompt exactly as it was): adds "Customers who may be named" right after the
+ * buildDictationHints adds "Customers who may be named" right after the
  * named customer: the customer on screen, customers with a visit today or tomorrow, customers
  * who texted or called in the last 48 hours, then recently updated active customers; full
  * names, "First Last". Products shrink to make room (the 1800-character cap does not move).
@@ -35,7 +34,7 @@ const PROMPT_MAX_CHARS = 1800;
 const INTRO = 'Dictated by Waves Pest Control staff (pest control and lawn care, Southwest Florida).';
 // Own ceiling per section, in characters of the list itself (the label is extra).
 const SECTION_CAPS = Object.freeze({ customer: 150, technicians: 300, products: 750, services: 300, terms: 450 });
-// With GATE_DICTATION_CUSTOMER_NAMES the product list gives up room for the customer names.
+// The product list gives up room for the customer names.
 const NAMES_SECTION_CAPS = Object.freeze({ ...SECTION_CAPS, products: 400, customers: 350 });
 const NAME_MAX_CHARS = 60;
 // Live visit statuses the route list counts (a finished or cancelled stop is not "on the route").
@@ -143,14 +142,6 @@ async function namedCustomerRow(knex, { customerId, serviceId }) {
   return (await knex('customers').where({ id }).first('first_name', 'last_name')) || null;
 }
 
-/** The named customer's name: from `customerId`, else the customer behind `serviceId`. */
-async function customerNames(knex, context) {
-  const row = await namedCustomerRow(knex, context);
-  if (!row) return [];
-  const full = cleanName(`${row.first_name || ''} ${row.last_name || ''}`);
-  return uniqueNames([full, row.first_name, row.last_name]);
-}
-
 async function technicianNames(knex) {
   const rows = await knex('technicians').where({ employment_status: 'active' }).orderBy('name').select('name');
   const names = [];
@@ -182,28 +173,7 @@ async function serviceNames(knex) {
   return uniqueNames(rows.flatMap((row) => [row.name, row.short_name]));
 }
 
-/**
- * The transcription prompt for one dictation request.
- * `context` = { customerId?, serviceId? }, ids only. Never throws on a failed
- * source: the prompt just carries fewer sections.
- */
-async function buildDictationPrompt(context = {}, knex = db) {
-  const [customer, technicians, products, services] = await Promise.all([
-    safely('customer', () => customerNames(knex, context || {})),
-    safely('technicians', () => technicianNames(knex)),
-    safely('products', () => productNames(knex)),
-    safely('services', () => serviceNames(knex)),
-  ]);
-  return composePrompt([
-    { key: 'customer', label: 'Customer on this screen: ', names: customer },
-    { key: 'technicians', label: 'Staff who may be named: ', names: technicians },
-    { key: 'products', label: 'Products that may be said: ', names: products },
-    { key: 'services', label: 'Services that may be said: ', names: services },
-    { key: 'terms', label: 'Other words that may be said: ', names: termList() },
-  ]);
-}
-
-// ── GATE_DICTATION_CUSTOMER_NAMES ───────────────────────────────────────────
+// ── Customer names ──────────────────────────────────────────────────────────
 
 // (scope key|ET day) -> { at, people }. In memory, 5 minutes, so each clip does not re-query.
 const nameCache = new Map();
@@ -303,7 +273,7 @@ async function customerPeople(knex, scope, now = new Date()) {
 
 /**
  * The prompt AND the transcriber keyword hints for one dictation request with
- * GATE_DICTATION_CUSTOMER_NAMES on. `context` = { customerId?, serviceId?, scope? } where
+ * `context` = { customerId?, serviceId?, scope? } where
  * `scope` = { technicianId } for a technician login (absent = admin). The ids must already
  * be fenced by the route. Never throws on a failed source.
  */
@@ -344,7 +314,6 @@ module.exports = {
   SECTION_CAPS,
   NAMES_SECTION_CAPS,
   KEYWORD_MAX,
-  buildDictationPrompt,
   buildDictationHints,
   resetNameCache,
   composePrompt,

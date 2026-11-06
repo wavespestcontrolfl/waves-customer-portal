@@ -38,6 +38,7 @@ const SHARE_DROP = 1 / 3;
 const AREA = 'sms';
 
 const pct = (n, d) => (d ? `${Math.round((100 * n) / d)}%` : '-');
+const isoOrNull = (t) => (t ? new Date(t).toISOString() : null);
 
 async function buildReport({ dbi, now = new Date(), days = 60, liveVersion = null }) {
   const since = new Date(now.getTime() - days * 86400 * 1000);
@@ -132,6 +133,11 @@ async function buildReport({ dbi, now = new Date(), days = 60, liveVersion = nul
       holdout: p.holdout_incident_keys?.length || 0,
       pr: p.pr_number || null,
       shipped: p.shipped_version || null,
+      // Dates for the weekly agent-loop scoreboard (~/.claude/bin/loop-score): days from proposal to fix live,
+      // and the age of each open proposal.
+      createdAt: isoOrNull(p.created_at),
+      updatedAt: isoOrNull(p.updated_at),
+      shippedAt: isoOrNull(p.shipped_at),
       devRun: runById.get(p.dev_run_id) || null,
       holdoutRun: runById.get(p.holdout_run_id) || null,
     })),

@@ -1035,7 +1035,7 @@ function keepRowProblem(row) {
 }
 
 // keepNotes: response key paths of a keep-mode row that hold free-text notes. They are kept ONLY while
-// GATE_IB_READ_NOTES is on (the returned-notes branch then scrubs them); with the gate off the projection is
+// the owner login reads them (the returned-notes branch then scrubs them); on the office login the projection is
 // exactly `keep`. The same path syntax as keep, but a free-text name is allowed here, and a field that is
 // never kept (KEEP_NEVER) is still refused (Codex #6375 r14).
 function keepNotesProblem(row) {

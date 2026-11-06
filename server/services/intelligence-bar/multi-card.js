@@ -1,12 +1,11 @@
 /**
- * Several confirm cards in one Intelligence Bar answer (GATE_IB_MULTI_CARD,
- * owner request 2026-10-20).
+ * Several confirm cards in one Intelligence Bar answer (owner request
+ * 2026-10-20).
  *
- * Today, on the platform path, the first confirm card of a request closes the
- * write frontier: every later write proposal gets `dependency_unresolved`, so
- * "update Smith's phone and move Jones to Friday" needs two requests. With the
- * gate on, a later write may mint its own card when it is INDEPENDENT of every
- * earlier unconfirmed card of the same request:
+ * On the platform path, the first confirm card of a request closes the write
+ * frontier for anything that is not independent: such a later write proposal
+ * gets `dependency_unresolved`. A later write may mint its own card when it is
+ * INDEPENDENT of every earlier unconfirmed card of the same request:
  *   - it is an open edit (the allowlist below). A refund, card charge, price,
  *     rate or tier change, setting, delete, merge, bulk change, outside-service
  *     action or record-creating action never joins a set. Such a card, when it
@@ -111,7 +110,7 @@ function admit(toolUse, openCards) {
   return null;
 }
 
-// Added to the system prompt while the gate is on.
+// Added to the system prompt on the platform path.
 const PROMPT = `
 
 SEVERAL CARDS IN ONE ANSWER:

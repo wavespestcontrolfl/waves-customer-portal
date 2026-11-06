@@ -2673,18 +2673,16 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
   }
 });
 
-// Sound-alike rows (GATE_CUSTOMER_SEARCH_FUZZY): when the exact search found fewer than 3
+// Sound-alike rows: when the exact search found fewer than 3
 // customers and reads as a name, "Did you mean" rows follow the exact ones on page 1. The
 // exact rows, `total` and the paging do not change; `approximateCount` says how many rows at
 // the end of `customers` carry `approximate: true`. `unsearched()` is the directory query with
 // its filters and the technician's assigned-visit scope but no text search, so the survivors are
-// read back through the same limits. Gate off: the rows come back untouched and `extra` is empty.
+// read back through the same limits. Without `suggest=1` or a search, the rows come back untouched and `extra` is empty.
 // Opt-in per caller (`suggest=1`): only a screen that marks the rows as suggestions asks for them;
 // every other consumer (bulk actions, plain pickers) gets today's exact rows (Codex pre-push).
 async function appendApproximateCustomers({ page, search, totalCount, exactRows, mappedRows, unsearched, withListColumns, suggest = false }) {
-  // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
-  const enabled = require('../config/feature-gates').customerSearchFuzzyLive();
-  if (!enabled || !search || !suggest) return { rows: mappedRows, extra: {} };
+  if (!search || !suggest) return { rows: mappedRows, extra: {} };
   let approximate = [];
   // Every exact match must be on this page, so none can come back as a suggestion here and
   // as an exact row on a later page (Codex r3; a small page limit would split them).
@@ -2827,7 +2825,7 @@ router.get('/', async (req, res, next) => {
     // search UIs keep working.
     const mappedRows = customers.map(mapCustomerListRow);
 
-    // Sound-alike rows after the exact ones (GATE_CUSTOMER_SEARCH_FUZZY; see appendApproximateCustomers).
+    // Sound-alike rows after the exact ones (see appendApproximateCustomers).
     const fuzzy = await appendApproximateCustomers({
       page, search: filters.search, totalCount, exactRows: customers, mappedRows,
       // The directory's own filters and the technician's scope, no text search.
@@ -3662,7 +3660,9 @@ router.get('/:id', async (req, res, next) => {
         ? db('estimates').where({ customer_id: c.id })
         : require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), c)
       ).orderBy('created_at', 'desc'),
-      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
+      // Each payment's own brand/last-four snapshot first (as getPaymentHistory): a card the
+      // account updater replaced keeps its old number on earlier payments.
+      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payments.card_brand, payment_methods.card_brand) as card_brand'), db.raw('COALESCE(payments.card_last_four, payment_methods.last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       lifetimeRevenueFor(db, c.id).then(net => ({ net })).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
       // Upcoming, active-only — drives Customer 360's next appointment.

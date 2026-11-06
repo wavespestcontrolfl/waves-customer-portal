@@ -22,8 +22,8 @@
  * A service record that is not completed, or that has no scheduled visit (no mint lock to serialize invoice writers on), is
  * left to the page too. An invoice total over what the decimal(10,2) columns hold, or a tax rate past four decimals, is refused.
  *
- * Always a confirm card (write-gates.js two-step), admin only, never owner-direct, platform path only, dark behind
- * GATE_IB_CREATE_INVOICE (which needs GATE_IB_PLATFORM).
+ * Always a confirm card (write-gates.js two-step), admin only, never owner-direct, platform path only (needs
+ * GATE_IB_PLATFORM).
  *
  *   unconfirmed -> a PREVIEW: nothing is written. Its `_version` pins what the card showed (customer, every line,
  *                  notes, dates, the tax rate, the server-computed subtotal, tax and total, the linked visit and
@@ -41,8 +41,9 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString, addETDays, etCalendarDayOf } = require('../../utils/datetime-et');
 
-function createInvoiceLive() {
-  return require('../../config/feature-gates').ibCreateInvoiceLive() === true;
+// The tool exists only on the platform path (GATE_IB_PLATFORM), read at call time.
+function onPlatformPath() {
+  return require('../../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM') === true;
 }
 
 const MAX_LINES = 25;
@@ -538,7 +539,7 @@ async function executeCreateInvoiceTool(toolName, input = {}, actionContext = {}
   if (actionContext?.isAdmin === false || (input.confirmed === true && actionContext?.isAdmin !== true)) {
     return refusal('Creating invoices is limited to admin accounts', 'permission_denied');
   }
-  if (!createInvoiceLive()) return refusal('Creating an invoice from the bar is switched off.', 'gate_off');
+  if (!onPlatformPath()) return refusal('Creating an invoice from the bar is switched off.', 'gate_off');
   try {
     // Only /confirm-action sets confirmed (route-derived, never a model param).
     return input.confirmed === true ? await commitCreate(input) : await buildPlan(input);
@@ -554,6 +555,6 @@ module.exports = {
   CREATE_INVOICE_TOOLS,
   executeCreateInvoiceTool,
   recheckApprovedScope,
-  createInvoiceLive,
+  onPlatformPath,
   cardLines,
 };

@@ -1,5 +1,5 @@
-// The Intelligence Bar model failure notice against real PostgreSQL
-// (GATE_IB_MODEL_FAILURE_NOTICE): one quiet gap row per code, one admin bell in a
+// The Intelligence Bar model failure notice against real PostgreSQL:
+// one quiet gap row per code, one admin bell in a
 // rolling hour however many failures land, and a saved change read back from the
 // task's real receipts. The route wiring is pinned in
 // admin-intelligence-bar-model-failure.test.js.

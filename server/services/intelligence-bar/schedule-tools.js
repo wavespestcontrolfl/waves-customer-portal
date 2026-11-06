@@ -9,7 +9,7 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
-const { ibTargetRulesV2Live, secondTechLowsLive } = require('../../config/feature-gates');
+const { secondTechLowsLive } = require('../../config/feature-gates');
 const logger = require('../logger');
 const { assertAssignableTechnician, applyAssignable } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
@@ -823,7 +823,7 @@ async function optimizeTechRoute(input) {
 // locked re-read), kept as named predicates. Each compares one stop against what the
 // operator approved.
 //
-// The owner binds too when the approved snapshot carries it (GATE_IB_TARGET_RULES_V2
+// The owner binds too when the approved snapshot carries it (the preview
 // puts customer_id on each previewed stop): a stop re-pointed to another customer
 // between preview and commit is drift (Codex #6369 r16).
 const stopOwnerChanged = (approved, customerId) => approved?.customer_id !== undefined
@@ -922,10 +922,9 @@ async function assignTechnician(input, actionContext = {}) {
     scheduled_date: s.scheduled_date,
     current_tech: s.current_tech_name || 'Unassigned',
     ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
-    // GATE_IB_TARGET_RULES_V2: the stop's owner by id, so owner-direct can tell a named
-    // customer from a same-name one. Only while the gate is on (off = preview unchanged);
-    // the executor's drift check reads id, tech, date and visit only.
-    ...(ibTargetRulesV2Live() && s.customer_id ? { customer_id: String(s.customer_id) } : {}),
+    // The stop's owner by id, so owner-direct can tell a named customer from a
+    // same-name one. The executor's drift check reads id, tech, date and visit only.
+    ...(s.customer_id ? { customer_id: String(s.customer_id) } : {}),
   }));
 
   if (confirmed !== true) {

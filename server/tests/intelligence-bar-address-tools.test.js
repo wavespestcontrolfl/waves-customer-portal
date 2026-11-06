@@ -414,7 +414,9 @@ describe('changesAddress', () => {
   });
 
   test('a non-address internal edit still runs without a card on the owner login', () => {
-    expect(executesWithoutCard('update_customer', { customer_id: 'c1', updates: { lead_source: 'Referral' } })).toBe(true);
+    // customer c1 is the one the owner named (target rules: a customer edit needs a named or on-screen customer)
+    const grounding = require('../services/intelligence-bar/owner-direct').targetGrounding({ targets: [{ customer_id: 'c1' }], page: { ids: {} } });
+    expect(executesWithoutCard('update_customer', { customer_id: 'c1', updates: { lead_source: 'Referral' } }, undefined, undefined, grounding)).toBe(true);
     expect(executesWithoutCard('update_lead_contact', { lead_id: 'l1', first_name: 'Pat' })).toBe(true);
   });
 });

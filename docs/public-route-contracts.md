@@ -3951,7 +3951,7 @@ the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
 Visit, in Motion" recap and consumes `/api/reports/:token/recap` +
 `/recap/video`, with the tokenized noindex/no-referrer/no-store headers),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
+`/api/stripe/webhook` (its `payment_method.automatically_updated` handling is the `GATE_CARD_DETAILS_SYNC` paragraph after this list), `/api/webhooks/twilio` (all Twilio inbound;
 recruiting replies (classification is NOT gated — `GATE_RECRUITING_COMMS`
 is the send / public-link kill switch only; applicants texted before it
 was turned off keep classifying from stored evidence for the window; a
@@ -4119,6 +4119,8 @@ receipts can be repaired without dispatching again; repair preserves original
 delivery time. Deliberate suppression is terminal. Push-only retries reuse the
 message tag without renotification; provider acceptance followed by a crash
 before receipt persistence remains ambiguous and can repeat a provider handoff.
+
+`GATE_CARD_DETAILS_SYNC` (dark; Stripe audit 2026-11-05, #7672): `POST /api/stripe/webhook` handles `payment_method.automatically_updated`, the event Stripe's card account updater sends when it renews or replaces a saved card. Signature verification, the `stripe_webhook_events` claim and dedupe, and the response bodies are unchanged. With the gate off, the handler logs the PaymentMethod id and changes nothing; the dispatcher marks the event processed and answers `200 { received: true }`, so Stripe does not deliver it again and that update is never applied. With the gate on, the handler refreshes the card by id through `refreshCardFromStripe` (`server/services/card-details-sync.js`); the card details in the payload are never applied. The refresh reads the card's `payment_methods` rows, then re-reads the PaymentMethod from Stripe (`retrievePaymentMethod`), and writes each non-bank row's expiry, last four, brand and funding only while that row still holds what was read before the Stripe read (compare-and-set). So neither an older event that arrives late nor an overlapping daily refresh can overwrite newer details; a row that changed meanwhile sends the refresh round again, up to 3 tries. Funding is written only when Stripe gives one, `updated_at` is not changed (the Auto Pay fallback orders duplicate default cards by it), a payment linked to a card whose brand or last four changes keeps its own snapshot (filled first when it has none), and each changed row gets one `audit_log` row. A PaymentMethod with no Stripe customer is skipped and answered `200`. A Stripe read that fails or returns nothing, or a card still changing after 3 tries, throws: the dispatcher records the error and answers `500`, and Stripe retries. Nothing is sent to a customer and nothing is charged by this handler. Rollout order: turn the gate on first, then add `payment_method.automatically_updated` to the live endpoint's enabled events. The other order acknowledges, and so loses, every update that arrives while the gate is off. The same gate also runs a daily 8:31 AM ET refresh (`syncNearExpiryCards`, scheduler job `card-details-sync`) of the cards whose stored expiry is unreadable or falls on or before the current ET month plus two; that job is not a route.
 
 Shared-phone text link (always on; owner 2026-10-10 "link text", gate removed 2026-10-31): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, leaves the text unlinked (unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. A mark-linked text joins the customer's unified-inbox thread as that one message; the number's earlier unknown-contact thread is never promoted into the marked account. Sends nothing.
 
@@ -6457,7 +6459,15 @@ customer's `service_contact*_phone` slot whose holder attestation
 `DISABLE_CONTACT_CONSENT_GATE` SMS rollback switch never opens the login) —
 resolved ONLY when no active account-holder row carries the number
 (`resolveLoginIdentity`: the holder first; a contact on several rows lands
-on the primary profile, then the oldest). send-code then sends that contact
+on the primary profile, then the oldest). A second gate narrows who counts (`GATE_CONTACT_LOGIN_HOLDER_ONLY`,
+dark; strict `=== 'true'`, read at call time — `contactLoginHolderOnlyLive()`): when live, `contactSlotMayLogIn` also
+requires the phone to be listed in `service_preferences.login_attested_phone_keys`,
+which only the signed-in holder's portal contacts save writes (a holder who
+attested contacts before the gate re-saves them once to restore their sign-in). Any other writer of the slot phones (admin edit, call pipeline, dedupe) cannot add to that list, and a database trigger (migration 20261105060000) cuts it to the phones still stored in a slot, so a removed number that is later re-added does not regain sign-in.
+A consent stamp written by the call pipeline, the grandfather backfill or a
+recipient YES no longer admits a number by itself: send-code sends no code,
+verify-code answers the same 401, and a live contact session ends at its next
+request with the same 401. Texts to those contacts are unchanged. For an admitted contact, send-code then sends
 the OTP under the same uniform body; verify-code mints a session whose
 access AND refresh tokens carry `contactKey` (the last-10 phone key, also
 `customer_refresh_tokens.contact_key`) and returns `actor { kind:

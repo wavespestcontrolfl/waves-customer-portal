@@ -521,6 +521,25 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/email',
     }),
   },
+  // The reminder banner for a lead's call request (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind"). A missed
+  // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
+  // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,
+  // run by the alert-relevance sweep). pushOnly: the bell row already exists and is not rewritten, so `rule` is the
+  // retention expiry. `build` takes the bell row's own words as alertTitle/alertBody/alertLink. Admin-only like the
+  // lead bell; the owner can switch it off in Push Settings.
+  lead_call_reminder: {
+    label: 'Reminder: a lead still waits for a call',
+    category: 'lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'Leads — call a lead back',
+      body: ['Reminder: nobody has reached this lead yet.', p.alertBody].filter(Boolean).join(' '),
+      link: p.alertLink || '/admin/leads',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a

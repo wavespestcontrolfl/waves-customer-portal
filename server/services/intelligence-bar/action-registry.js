@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibPrepaySwitchLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
+const { gateEnvValue, ibAcceptEstimateLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibPrepaySwitchLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive, officeReadLive, ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL } = require('./admin-read-tools');
@@ -169,7 +169,8 @@ const GATED_ACTIONS = {
   create_payment_plan: () => ibPaymentPlanLive(),
   cancel_payment_plan: () => ibPaymentPlanLive(),
   compose_email: () => ibComposeEmailLive(),
-  create_invoice: () => ibCreateInvoiceLive(),
+  // No gate of its own; like the gated tools above it exists only on the platform path.
+  create_invoice: () => gateEnvValue('GATE_IB_PLATFORM'),
   set_customer_bill_to: () => ibSetBillToLive(),
   list_agent_review_drafts: () => ibAgentReviewDraftsLive(),
   approve_agent_review_draft: () => ibAgentReviewDraftsLive(),

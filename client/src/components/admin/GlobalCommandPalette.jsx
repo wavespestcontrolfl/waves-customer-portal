@@ -463,7 +463,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const ibPageData = useIntelligenceBarPageData();
   // The customer on screen, id only (never words): the server spells their name right when it hears
   // the mic. The mic's existing "Customer on this screen" section already uses this id; the wider
-  // name list needs GATE_DICTATION_CUSTOMER_NAMES.
+  // name list is added on the server.
   const dictationContext = ibPageData?.customer_id ? { customerId: String(ibPageData.customer_id) } : undefined;
   const { notifyMutation } = useIntelligenceBarActions();
   const context = detectContext(location.pathname, location.search, location.hash, user);
@@ -1040,7 +1040,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   }, []);
 
   // Text pasted or dropped into the message (a customer's email or text, say) is not all the
-  // operator's own words; the server then shows a card for every write (GATE_IB_TARGET_RULES_V2).
+  // operator's own words; the server then shows a card for every write.
   const notePastedText = useCallback((e) => {
     if ((e.clipboardData || e.dataTransfer)?.getData("text/plain")) pastedRef.current = true;
   }, []);

@@ -159,9 +159,10 @@ describe('loadRequestTaint (once per request)', () => {
     test('a login without full access still reads the thread record', async () => {
       expect((await load({ fullAccess: false, threadId: THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(true);
     });
-    test('two thread queries per request at most: the general marker, then the v2 marker (gate off too, audit run 3)', async () => {
+    test('one thread query per request', async () => {
       await load({ threadId: OTHER_THREAD, conversationHistory: plainHistory });
-      expect(mockDb).toHaveBeenCalledTimes(2);
+      // One check for each of the three thread markers (general read, v2 read, same-name choice), however many tools run.
+      expect(mockDb).toHaveBeenCalledTimes(3);
     });
     test('a login without full access is not tainted by the no-record rule', async () => {
       expect((await load({ fullAccess: false, conversationHistory: plainHistory })).untrustedRead).toBe(false);
@@ -174,7 +175,8 @@ describe('loadRequestTaint (once per request)', () => {
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: JSON.stringify({ status: 200, endpoint: '/x', data: { a: 1 } }) }] },
     ];
     expect((await load({ history: blocks, threadId: OTHER_THREAD })).untrustedRead).toBe(true);
-    expect(mockDb).not.toHaveBeenCalled();
+    // No taint lookup; only the same-name choice marker is checked for the thread.
+    expect(mockDb).toHaveBeenCalledTimes(1);
   });
   test('owner-direct off: the flag decides nothing, so no lookup is made', async () => {
     expect((await load({ threadId: THREAD, conversationHistory: plainHistory, needed: false })).untrustedRead).toBe(false);

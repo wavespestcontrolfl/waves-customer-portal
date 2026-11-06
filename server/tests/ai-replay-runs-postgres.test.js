@@ -356,7 +356,8 @@ test('export refuses a directory inside the repository, however it is spelled', 
       { area: 'calls', disposition: 'confirmed_mistake', cell: 'call_extraction/appointment_agreed_missed', n: 1 },
       { area: 'sms', disposition: 'confirmed_mistake', cell: `${CELL.surface}/${CELL.failure_mode}`, n: 12 },
     ]);
-    expect(r.proposals[0]).toMatchObject({ area: 'sms', status: 'pending', incidents: 12, dev: 10, holdout: 2, devRun: expect.objectContaining({ status: 'passed' }) });
+    expect(r.proposals[0]).toMatchObject({ area: 'sms', status: 'pending', incidents: 12, dev: 10, holdout: 2, devRun: expect.objectContaining({ status: 'passed' }),
+      createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), updatedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), shippedAt: null });
     // 12 drafts is under the 20-draft floor: the rate is printed but labelled inconclusive.
     expect(r.versions).toEqual([expect.objectContaining({ version: V12, drafts: 12, judgedShare: '100%', verdict: expect.stringMatching(/^inconclusive/) })]);
     expect(r.versions[0].cells).toEqual([{ cell: `${CELL.surface}/${CELL.failure_mode}`, confirmed: 12, per100: 100 }]);
