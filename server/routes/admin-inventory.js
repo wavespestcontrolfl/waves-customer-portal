@@ -2779,8 +2779,8 @@ router.post('/:productId/adjust', async (req, res, next) => {
     const result = await inventoryOperations.adjustStock(req.params.productId, {
       movementType: body.movementType || 'correction', quantity: body.quantity, unit: body.unit,
       lotNumber: body.lotNumber, reason: body.reason, note: body.note,
-    }, { actorId: req.technicianId, source: 'admin_manual_adjustment', allowConversion: false });
-    res.json({ success: true, product: mapProduct(result.product), movement: result.movement });
+    }, { actorId: req.technicianId, source: 'admin_manual_adjustment', allowConversion: false, idempotencyKey: body.idempotencyKey });
+    res.json({ success: true, product: mapProduct(result.product), movement: result.movement, ...(result.replayed ? { replayed: true } : {}) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);

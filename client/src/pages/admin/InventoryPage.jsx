@@ -53,9 +53,15 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
     return r.json();
   });
+}
+// One key per Manual Adjustment draft: the server applies a draft once, so a
+// repeat send (a double tap, a retry after a lost reply) never adds stock twice.
+function newAdjustmentKey() {
+  return globalThis.crypto?.randomUUID?.()
+    ?? `adj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 function safeExternalHref(value) {
   try {
@@ -3887,14 +3893,17 @@ function ExpandedProduct({
   const [movements, setMovements] = useState([]);
   const [movementLoading, setMovementLoading] = useState(true);
   const movementSequence = useRef(0);
-  const [adjustForm, setAdjustForm] = useState({
+  const [adjustForm, setAdjustForm] = useState(() => ({
     movementType: "restock",
     quantity: "",
     unit: product.inventoryUnit || "oz",
     lotNumber: "",
     reason: "",
     note: "",
-  });
+    idempotencyKey: newAdjustmentKey(),
+  }));
+  const [adjusting, setAdjusting] = useState(false);
+  const adjustingRef = useRef(false);
   const loadMovements = useCallback(async () => {
     const sequence = ++movementSequence.current;
     // Movements are owner-only (rows carry costUsed; owner 2026-10-03,
@@ -3927,10 +3936,14 @@ function ExpandedProduct({
   }, [loadMovements, product.inventoryUnit, inventoryRefresh]);
 
   const submitAdjustment = async () => {
+    // One send at a time: a second tap while the first is saving does nothing.
+    if (adjustingRef.current) return;
     if (!adjustForm.quantity || !adjustForm.unit) {
       showToast?.("Amount and unit required");
       return;
     }
+    adjustingRef.current = true;
+    setAdjusting(true);
     try {
       await adminFetch(`/admin/inventory/${product.id}/adjust`, {
         method: "POST",
@@ -3946,11 +3959,25 @@ function ExpandedProduct({
         lotNumber: "",
         reason: "",
         note: "",
+        idempotencyKey: newAdjustmentKey(),
       }));
       await loadMovements();
       onInventoryChanged?.();
     } catch (e) {
-      showToast?.(`Failed: ${e.message}`);
+      // A failure keeps the draft's key, so sending it again cannot apply it
+      // twice. A 409 ends the draft (its key was already saved with other
+      // values, or the save did not verify): start a new one, show the history.
+      if (e.status === 409) {
+        showToast?.("Not applied. Check Movement History: an earlier send of this adjustment may already be saved.");
+        setAdjustForm((f) => ({ ...f, quantity: "", idempotencyKey: newAdjustmentKey() }));
+        await loadMovements();
+        onInventoryChanged?.();
+      } else {
+        showToast?.(`Failed: ${e.message}`);
+      }
+    } finally {
+      adjustingRef.current = false;
+      setAdjusting(false);
     }
   };
   const queueRefresh = async (vendorPricing) => {
@@ -4266,8 +4293,9 @@ function ExpandedProduct({
               onClick={submitAdjustment}
               variant="primary"
               className="mt-[8px] w-full"
+              disabled={adjusting}
             >
-              Apply Adjustment
+              {adjusting ? "Applying…" : "Apply Adjustment"}
             </Button>{" "}
           </Card>
         )}{" "}
