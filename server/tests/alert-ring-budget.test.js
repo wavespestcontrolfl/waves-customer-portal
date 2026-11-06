@@ -167,6 +167,24 @@ describe('exemption predicate', () => {
     expect(budget.exemptReason({ ...base, metadata: { ...base.metadata, timeCritical: 'true' } })).toBeNull();
   });
 
+  test('an owner-only row is exempt, so its title can never reach the shared count row', () => {
+    expect(budget.exemptReason({ category: 'alert', metadata: { ownerOnly: true } })).toBe('owner_only');
+    expect(budget.exemptReason({ category: 'alert', metadata: { ownerOnly: 'true' } })).toBe('owner_only');
+    expect(budget.exemptReason({ category: 'alert', metadata: { ownerOnly: false } })).toBeNull();
+    expect(budget.exemptReason({ category: 'alert', metadata: { ownerOnly: 'false' } })).toBeNull();
+  });
+
+  test('the count row\'s read of held rows leaves out owner-only rows (second lock)', async () => {
+    const sqls = [];
+    const conn = makeConn();
+    const real = conn;
+    const spy = (...a) => { const c = real(...a); const w = c.whereRaw; c.whereRaw = (sql, b) => { sqls.push(sql); return w(sql, b); }; return c; };
+    spy.raw = real.raw;
+    mockState.conn = spy;
+    await budget.writeCountRow(DAY, spy);
+    expect(sqls.some((q) => /COALESCE\(metadata->>'ownerOnly', ''\) <> 'true'/.test(q))).toBe(true);
+  });
+
   test('the count row is exempt; an ordinary non-customer row and a bell:true row are budgeted', () => {
     expect(budget.exemptReason({ category: 'system', metadata: { ringBudget: 'count' } })).toBe('count_row');
     expect(budget.exemptReason({ category: 'inventory', metadata: {} })).toBeNull();
@@ -428,6 +446,16 @@ describe('refresh of a held row', () => {
     expect(budget.heldToday(held, { category: 'alert', metadata: { note: 'x' } })).toBe(true);
     expect(budget.heldToday(held, { category: 'alert', metadata: { timeCritical: true } })).toBe(false);
     expect(budget.heldToday(held, { category: 'inbound_sms', metadata: {} })).toBe(false);
+  });
+
+  test('a held row is promoted only by a time-critical emission, on any day, and only while the gate is on', () => {
+    expect(budget.promotesHeld({ ringBudgetHeld: '2020-01-01' }, { timeCritical: true })).toBe(true);
+    expect(budget.promotesHeld({ ringBudgetHeld: todayDay }, JSON.stringify({ timeCritical: true }))).toBe(true);
+    expect(budget.promotesHeld({ ringBudgetHeld: todayDay }, { note: 'x' })).toBe(false);
+    expect(budget.promotesHeld({ ringBudgetHeld: todayDay }, { timeCritical: 'true' })).toBe(false);
+    expect(budget.promotesHeld({ feed: 'activity' }, { timeCritical: true })).toBe(false);
+    process.env.GATE_ALERT_RING_BUDGET = '';
+    expect(budget.promotesHeld({ ringBudgetHeld: todayDay }, { timeCritical: true })).toBe(false);
   });
 
   test('a ringing refresh brings a held row back into the bell and drops the held stamp', () => {

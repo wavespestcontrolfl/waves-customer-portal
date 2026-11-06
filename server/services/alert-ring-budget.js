@@ -12,6 +12,9 @@
 //   - an auto-dispatch notice (category schedule_conflict, or a dedupe key in DISPATCH_KEY_PREFIXES);
 //   - time-critical field work: the combined-booking check's urgent case (a visit today or tomorrow with no time or
 //     technician) stamps metadata.timeCritical true, and docs/admin-notifications.md section 3 says it always rings;
+//   - an owner-only row (metadata.ownerOnly, a Claude plan or copy): the count row is shared by every admin login, and
+//     holding such a row would copy its title into it. An owner-only row is never held, so its words never reach the count
+//     row or the Activity "Held alerts" list; it rings as it does without the budget;
 //   - the count row itself.
 // A `bell: true` site tag is NOT an exemption: those rows are budgeted unless they are one of the above (a tag only says
 // "this belongs in the bell", not "this is a customer").
@@ -98,21 +101,32 @@ function registryRule(triggerKey) {
   } catch { return null; }
 }
 
+const isOwnerOnly = (meta) => meta.ownerOnly === true || meta.ownerOnly === 'true';
+
 // Why a row is exempt from the budget, or null when it is budgeted. Pure apart from the registry read.
 function exemptReason({ category, metadata, dedupeKey } = {}) {
   const meta = metaOf(metadata);
   if (meta[MARK_KEY] === COUNT_MARK) return 'count_row';
+  if (isOwnerOnly(meta)) return 'owner_only';
   const triggerKey = meta.triggerKey || null;
   const rule = registryRule(triggerKey);
-  if (meta.contact === true || rule?.contact === true) return 'customer_contact';
-  if (CUSTOMER_CATEGORIES.includes(category) || (triggerKey && CUSTOMER_TRIGGER_KEYS.includes(triggerKey))) return 'customer_contact';
-  if (meta.promise === true || rule?.promise === true) return 'promise';
-  if (triggerKey && PROMISE_TRIGGER_KEYS.includes(triggerKey)) return 'promise';
-  if (meta.timeCritical === true) return 'time_critical';
-  const key = String(dedupeKey ?? meta.dedupeKey ?? '');
-  if (DISPATCH_CATEGORIES.includes(category) || DISPATCH_KEY_PREFIXES.some((p) => key.startsWith(p))) return 'dispatch';
-  return null;
+  return customerReason(category, meta, triggerKey, rule)
+    || promiseReason(meta, triggerKey, rule)
+    || (meta.timeCritical === true ? 'time_critical' : null)
+    || dispatchReason(category, String(dedupeKey ?? meta.dedupeKey ?? ''));
 }
+
+function customerReason(category, meta, triggerKey, rule) {
+  const declared = meta.contact === true || rule?.contact === true;
+  return declared || CUSTOMER_CATEGORIES.includes(category) || (triggerKey && CUSTOMER_TRIGGER_KEYS.includes(triggerKey)) ? 'customer_contact' : null;
+}
+
+function promiseReason(meta, triggerKey, rule) {
+  const declared = meta.promise === true || rule?.promise === true;
+  return declared || (triggerKey && PROMISE_TRIGGER_KEYS.includes(triggerKey)) ? 'promise' : null;
+}
+
+const dispatchReason = (category, key) => (DISPATCH_CATEGORIES.includes(category) || DISPATCH_KEY_PREFIXES.some((p) => key.startsWith(p)) ? 'dispatch' : null);
 
 // Rings stamped for one Eastern day. Reads on the writer's own connection, so a row written earlier in the same open
 // transaction counts.
@@ -172,6 +186,12 @@ function heldToday(existingMeta, incoming = null, now = new Date()) {
   return !(incoming && exemptReason({ category: incoming.category, metadata: incoming.metadata }));
 }
 
+// A standing row the budget held, refreshed by an emission that is time-critical now (the combined-booking check's urgent
+// case): it must come back into the bell and ring whether or not the problem or its words changed. Held on any day.
+function promotesHeld(existingMeta, incomingMeta) {
+  return enabled() && Boolean(metaOf(existingMeta)[HELD_KEY]) && metaOf(incomingMeta).timeCritical === true;
+}
+
 // ---- the count row ----
 
 async function readHeld(connection, day) {
@@ -179,6 +199,9 @@ async function readHeld(connection, day) {
     .where({ recipient_type: 'admin' })
     .where('created_at', '>', connection.raw(`now() - interval '${WINDOW_HOURS} hours'`))
     .whereRaw(`metadata->>'${HELD_KEY}' = ?`, [day])
+    // The count row is shared by every admin login: an owner-only row's title never goes into it (it is never held; this is
+    // the second lock, for a row stamped by other means).
+    .whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'")
     .orderBy('created_at', 'asc')
     .limit(1000)
     .select('title', 'created_at');
@@ -301,6 +324,7 @@ module.exports = {
   applyBudget,
   isHeld,
   heldToday,
+  promotesHeld,
   noteHeld,
   afterHeldInsert,
   writeCountRow,

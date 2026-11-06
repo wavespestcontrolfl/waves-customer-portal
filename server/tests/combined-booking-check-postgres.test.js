@@ -299,6 +299,42 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a booking alert held past the ring budget comes back into the bell and rings when its visit becomes due today (the real refresh policy)', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    process.env.GATE_ALERT_RING_BUDGET = 'true';
+    try {
+      const { etDateString } = require('../utils/datetime-et');
+      const day = etDateString(new Date());
+      for (let i = 0; i < 10; i += 1) {
+        await trx('notifications').insert({ recipient_type: 'admin', category: 'inventory', title: `fill ${i}`, body: 'x', metadata: JSON.stringify({ ringBudgetDay: day }) });
+      }
+      const est = await acceptedEstimate(trx, lines);
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 1 });
+      const [held] = await alertsOf(trx, est.estimateId);
+      expect(held.metadata).toMatchObject({ feed: 'activity', quiet: true, ringBudgetHeld: day });
+      expect(held.metadata).not.toHaveProperty('timeCritical');
+
+      // The same problem on the same services, now due today: ringOnNewProblem alone would say no ring, and the text is the same.
+      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null, scheduled_date: day });
+      await runCombinedBookingCheck({ conn: trx, ringBudget: 10 });
+      const [after] = await alertsOf(trx, est.estimateId);
+      expect(after.id).toBe(held.id);
+      expect(after.metadata.timeCritical).toBe(true);
+      expect(after.metadata).not.toHaveProperty('ringBudgetHeld');
+      expect(after.metadata.feed).toBeNull();
+      expect(after.metadata.quiet).toBe(false);
+      expect(after.read_at).toBeNull();
+      expect(after.metadata.rungAt).toBeTruthy();
+    } finally {
+      delete process.env.GATE_ALERT_RING_BUDGET;
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('the hourly urgent pass rings a visit due tomorrow and leaves far-off problems to the daily run', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

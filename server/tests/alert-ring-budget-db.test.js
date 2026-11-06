@@ -242,6 +242,48 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     expect(await countRow(etDateString())).toBeUndefined();
   });
 
+  test('audiences: an owner-only row is never held or copied into the shared count row; technician and non-owner logins see neither held rows nor the count row', async () => {
+    const day = etDateString();
+    for (let i = 0; i < 10; i += 1) await write(`fill ${i}`);
+    // An owner-only row past the budget rings as it does without the budget: unstamped, not held.
+    const secret = await write('owner secret words', { category: 'alert', metadata: { fixture: RUN, ownerOnly: true } });
+    const secretRow = await get(secret.id);
+    expect(secretRow.metadata.ringBudgetHeld).toBeUndefined();
+    expect(secretRow.metadata.ringBudgetDay).toBeUndefined();
+    // A held ordinary row makes the count row; a row stamped held with ownerOnly by other means stays out of its list.
+    const ordinary = await write('ordinary held words');
+    const [forced] = await db('notifications').insert({
+      recipient_type: 'admin', category: 'alert', title: `${RUN} forced owner-only held title`, body: 'x',
+      metadata: JSON.stringify({ fixture: RUN, ownerOnly: true, feed: 'activity', quiet: true, ringBudgetHeld: day }),
+    }).returning('id');
+    made.push(forced.id);
+    await budget.writeCountRow(day);
+    const count = await waitFor(() => countRow(day));
+    made.push(count.id);
+    expect(count.detail).toContain('ordinary held words');
+    expect(count.detail).not.toContain('forced owner-only held title');
+    expect(count.detail).not.toContain('owner secret words');
+    expect(count.title).toBe('System — 1 more alert held today');
+
+    // Activity "Held alerts": the owner login (fullAccess) sees the forced owner-only row, any other login does not.
+    const since = new Date(Date.now() - 3600 * 1000);
+    const ownerIds = (await activity._private.loadHeldRows(db, since, null, true)).map((r) => r.id);
+    const otherIds = (await activity._private.loadHeldRows(db, since, null, false)).map((r) => r.id);
+    expect(ownerIds).toEqual(expect.arrayContaining([forced.id, ordinary.id]));
+    expect(otherIds).toContain(ordinary.id);
+    expect(otherIds).not.toContain(forced.id);
+    // Even a focus id cannot load it for another login.
+    expect((await activity._private.loadHeldRows(db, since, forced.id, false)).map((r) => r.id)).not.toContain(forced.id);
+
+    // The bell: a non-owner admin login never lists an owner-only row; a technician login lists neither held rows nor the count row.
+    const adminIds = (await NotificationService.getAdminNotifications(500, 0, { role: 'admin' })).map((r) => r.id);
+    expect(adminIds).toContain(count.id);
+    expect(adminIds).not.toContain(secret.id);
+    expect(adminIds).not.toContain(ordinary.id);
+    const techIds = (await NotificationService.getAdminNotifications(500, 0, { role: 'technician' })).map((r) => r.id);
+    for (const id of [count.id, ordinary.id, secret.id, forced.id]) expect(techIds).not.toContain(id);
+  });
+
   test('the Activity feed lists held alerts and leaves out the count row, ops digests and Claude\'s queue', async () => {
     const day = etDateString();
     const rows = [];
