@@ -2,14 +2,15 @@
 
 /**
  * Ads health alerts (owner 2026-11-05, "ALERT", after the Ad health card, #7627). Every 2 hours (scheduler.js) this
- * reads the card's own Google Ads sections (ads-health.js) and the portal's upload log, and keeps two rows true:
+ * reads Google Ads (the card's serving section in ads-health.js, plus the disapproved ads) and the portal's upload
+ * log, and keeps two rows true:
  *
  * 1. Google Ads, for a person (needs-you, the bell). One standing Leads row for every enabled campaign Google says
  *    cannot serve (primary status Not eligible or Misconfigured) and every enabled ad Google disapproved in an
- *    enabled campaign. A pause, an end date and the ads of a paused campaign are someone's own choice and never
- *    count. The row rings when a campaign or an ad joins the set, refreshes quietly when one leaves, and closes
- *    itself (done) at zero: a standing condition with episodes (docs/admin-notifications.md section 4,
- *    admin-alert-episodes.js), the shape of unassigned-timed-visits-check.js.
+ *    enabled ad group of an enabled campaign. A pause (of a campaign, an ad group or an ad) and an end date are
+ *    someone's own choice and never count. The row rings when a campaign or an ad joins the set, refreshes quietly
+ *    when one leaves, and closes itself (done) at zero: a standing condition with episodes
+ *    (docs/admin-notifications.md section 4, admin-alert-episodes.js), the shape of unassigned-timed-visits-check.js.
  * 2. Conversion uploads, for Claude (broken, Claude's queue). One engineering digest row in the Activity feed while
  *    a live Google upload row failed or Google partly refused its batch, or a live Meta upload row failed, on a try
  *    in the last 48 hours, or while Google's upload check reads Needs attention. A failed upload is our own fault,
@@ -41,6 +42,7 @@ const SHADOW_ACTION = 'ads_health_alert.shadow';
 const LINK = '/admin/ppc'; // Ads -> Dashboard, where the Ad health card shows the same facts
 const UPLOAD_WINDOW_HOURS = 48; // the uploads run daily (6:40 and 6:45 AM ET): one missed run still shows
 const CANNOT_SERVE = new Set(['NOT_ELIGIBLE', 'MISCONFIGURED']);
+const MAX_ADS = 200; // past this many disapproved ads the set counts as one item (composeGoogle)
 const MAX_UPLOAD_ROWS = 200; // ops-digest caps itemKeys at 200
 const LIST_LIMIT = 25;
 const ERROR_CHARS = 200;
@@ -53,25 +55,44 @@ const when = (at) => `${formatETDayDate(new Date(at))} at ${formatETTime(new Dat
 // Google Ads: campaigns that cannot serve and disapproved ads
 // ---------------------------------------------------------------------------
 
-// The card's two Google sections, or null when Google Ads is not set up. A section Google refused throws.
-async function readGoogle() {
-  if (!getCustomer()) return null;
-  const [serving, disapprovals] = await Promise.all([Health.servingSection(), Health.disapprovalSection()]);
-  const refused = [serving, disapprovals].find((section) => section?.error);
-  if (refused) throw new Error(refused.error);
-  return { serving, disapprovals };
+// Every enabled ad Google disapproved in an enabled ad group of an enabled campaign, filtered by Google. The card's
+// disapprovals read lists the first 50 ads not fully approved, which can hide a disapproved one past them, and a set
+// that may be incomplete must never read as clean. A paused campaign's ads never count: the pause is someone's own
+// choice, and a disapproval there rings at the first check after the campaign is turned back on.
+async function readDisapprovedAds(customer) {
+  const rows = await customer.query(`
+    SELECT campaign.name, ad_group.name, ad_group_ad.ad.id, ad_group_ad.policy_summary.policy_topic_entries
+    FROM ad_group_ad
+    WHERE ad_group_ad.policy_summary.approval_status = 'DISAPPROVED'
+      AND ad_group_ad.status = 'ENABLED'
+      AND ad_group.status = 'ENABLED'
+      AND campaign.status = 'ENABLED'
+    LIMIT ${MAX_ADS + 1}`);
+  const ads = rows.slice(0, MAX_ADS).map((row) => ({
+    campaign: row.campaign?.name || null,
+    adGroup: row.ad_group?.name || null,
+    adId: row.ad_group_ad?.ad?.id != null ? String(row.ad_group_ad.ad.id) : null,
+    topics: (row.ad_group_ad?.policy_summary?.policy_topic_entries || []).map((entry) => entry.topic).filter(Boolean),
+  }));
+  return { ads: ads.filter((ad) => ad.adId), capped: rows.length > MAX_ADS };
 }
 
-// What stops an ad from serving now. A paused campaign's ads never count: the pause is someone's own choice, and
-// a disapproval there rings at the first check after the campaign is turned back on. The disapprovals read names
-// its campaign only; Google Ads keeps campaign names unique in an account (DUPLICATE_CAMPAIGN_NAME), so the name
-// joins the two reads.
-function googleProblems({ serving, disapprovals }) {
-  const enabled = (serving.campaigns || []).filter((c) => c.status === 'ENABLED');
-  const enabledNames = new Set(enabled.map((c) => c.name));
-  const ads = (disapprovals.ads || []).filter((ad) => ad.adId && ad.approvalStatus === 'DISAPPROVED'
-    && ad.status === 'ENABLED' && enabledNames.has(ad.campaign));
-  return { campaigns: enabled.filter((c) => CANNOT_SERVE.has(c.primaryStatus)), ads, adsCapped: ads.length > 0 && Boolean(disapprovals.truncated) };
+// The card's serving section and the disapproved ads, or null when Google Ads is not set up. A read that fails throws.
+async function readGoogle() {
+  const customer = getCustomer();
+  if (!customer) return null;
+  const [serving, disapproved] = await Promise.all([Health.servingSection(), readDisapprovedAds(customer)]);
+  if (serving?.error) throw new Error(serving.error);
+  return { serving, disapproved };
+}
+
+// What stops an ad from serving now: an enabled campaign Google says cannot serve, and the disapproved ads.
+function googleProblems({ serving, disapproved }) {
+  return {
+    campaigns: (serving.campaigns || []).filter((c) => c.status === 'ENABLED' && CANNOT_SERVE.has(c.primaryStatus)),
+    ads: disapproved.ads,
+    adsCapped: disapproved.capped,
+  };
 }
 
 const reasonWords = (c) => (c.reasons || []).map(Health.words).join(', ');
@@ -115,8 +136,7 @@ function googleDetail({ campaigns, ads, adsCapped }) {
     }
   }
   if (ads.length) {
-    lines.push('', adsCapped ? 'Disapproved ads (Google lists more than 50 ads not fully approved; these come from the first 50):'
-      : 'Disapproved ads:');
+    lines.push('', adsCapped ? `Disapproved ads (more than ${MAX_ADS}; the first ones Google listed):` : 'Disapproved ads:');
     for (const ad of ads.slice(0, LIST_LIMIT)) {
       lines.push(`- ${ad.campaign}, ${ad.adGroup || 'ad group'}, ad ${ad.adId}${topicWords(ad) ? `: ${topicWords(ad)}` : ''}`);
     }
@@ -125,9 +145,9 @@ function googleDetail({ campaigns, ads, adsCapped }) {
 }
 
 function composeGoogle(problems) {
-  // Over 50 ads not fully approved, the read returns the first 50 in no fixed order, so a new ad cannot be told from
-  // one that moved onto the page: the ads then count as one item, which rings once and not on each shift.
-  const adKeys = problems.adsCapped ? ['ad:first-50-only'] : problems.ads.map((ad) => `ad:${ad.adId}`);
+  // Past MAX_ADS the read returns a first page in no fixed order, so a new ad cannot be told from one that moved onto
+  // the page: the ads then count as one item, which rings once and not on each shift.
+  const adKeys = problems.adsCapped ? [`ad:over-${MAX_ADS}`] : problems.ads.map((ad) => `ad:${ad.adId}`);
   const itemKeys = [...problems.campaigns.map((c) => `campaign:${c.id}`), ...adKeys].sort();
   return {
     spec: {
@@ -296,7 +316,10 @@ async function applyUploads(composed) {
     // Claude's queue only, as owner-alerts.js: no email path, so a row that cannot be written reads as a miss.
     sendEmail: async () => ({ ok: false, error: 'ads health alerts have no email path' }),
   });
-  return { count: composed.count, outcome: result?.channel === 'in_app' ? 'recorded' : 'not_recorded' };
+  // deliverOpsDigest catches a failed row write and takes the email path, which this alert does not have: a lost
+  // row must fail the tick (job_health), not read as a healthy run.
+  if (result?.channel !== 'in_app') throw new Error('the upload alert row was not written');
+  return { count: composed.count, outcome: 'recorded' };
 }
 
 // ---------------------------------------------------------------------------

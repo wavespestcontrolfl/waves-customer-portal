@@ -330,5 +330,5 @@ async function buildAdsHealth(now = new Date()) {
   };
 }
 
-// The Google readers and the enum words are shared with the ads health alerts (ads-health-alerts.js).
-module.exports = { buildAdsHealth, servingSection, disapprovalSection, uploadCheckSection, words };
+// The serving and upload-check readers and the enum words are shared with the ads health alerts (ads-health-alerts.js).
+module.exports = { buildAdsHealth, servingSection, uploadCheckSection, words };
