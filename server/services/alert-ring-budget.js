@@ -145,6 +145,18 @@ async function countRung(connection, day) {
   return Number(row?.n) || 0;
 }
 
+// The day count, isolated from a caller's transaction: there a failed count (a statement timeout, say) would abort the whole
+// transaction, and the insert after it would fail with 25P02 and take the caller's other work with it. So inside a
+// transaction the count runs in its own savepoint (knex's nested transaction), which a failure rolls back alone. `impl`
+// lets a test make the count fail on the savepoint itself.
+const impl = { countRung };
+async function countRungIsolated(connection, day) {
+  if (connection?.isTransaction === true && typeof connection.transaction === 'function') {
+    return connection.transaction((savepoint) => impl.countRung(savepoint, day));
+  }
+  return impl.countRung(connection, day);
+}
+
 /**
  * The budget verdict for one admin row about to be inserted (NotificationService.create). Never throws.
  * Returns { outcome, metadata, day? }:
@@ -161,7 +173,7 @@ async function applyBudget({ connection, category, metadata, now = new Date() } 
     const day = etDateString(now);
     let used = 0;
     try {
-      used = await countRung(connection, day);
+      used = await countRungIsolated(connection, day);
     } catch (err) {
       // Ring as before, but stamp the day so this ring still counts for the rows after it.
       logger.warn(`[ring-budget] count unreadable, ringing as before: ${err?.code || err?.name || 'error'}`);
@@ -335,4 +347,5 @@ module.exports = {
   writeCountRow,
   countSpec,
   detailFor,
+  _private: { impl },
 };

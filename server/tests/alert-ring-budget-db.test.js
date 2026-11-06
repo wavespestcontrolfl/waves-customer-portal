@@ -231,6 +231,36 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     expect(heldId).toBeTruthy();
   });
 
+  test('a count that fails inside a caller\'s transaction is rolled back alone: the row rings as before and the caller\'s own work commits', async () => {
+    const { impl } = budget._private;
+    const real = impl.countRung;
+    // The count runs failing SQL on the connection it is handed (the savepoint), as a statement timeout would. Without the
+    // savepoint this aborts the caller's transaction: the insert fails with 25P02 and the commit takes the caller's work down.
+    impl.countRung = (conn) => conn.raw('select 1/0');
+    let rowId;
+    let sideId;
+    try {
+      await db.transaction(async (trx) => {
+        const [side] = await trx('notifications').insert({
+          recipient_type: 'admin', category: 'inventory', title: `${RUN} caller work`, body: 'x', metadata: JSON.stringify({ fixture: RUN, feed: 'activity' }),
+        }).returning('id');
+        sideId = side.id;
+        const row = await NotificationService.create({
+          recipientType: 'admin', category: 'inventory', title: `${RUN} count fails`, body: 'x', metadata: { fixture: RUN }, connection: trx,
+        });
+        expect(row && row.id).toBeTruthy();
+        rowId = row.id;
+      });
+    } finally {
+      impl.countRung = real;
+    }
+    made.push(rowId, sideId);
+    const written = await get(rowId);
+    expect(written).toBeTruthy();
+    expect(budget.isHeld(written)).toBe(false);
+    expect(await get(sideId)).toBeTruthy();
+  });
+
   test('gate off: nothing is stamped or held, however many rows', async () => {
     process.env.GATE_ALERT_RING_BUDGET = '';
     const rows = [];
