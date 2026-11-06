@@ -275,6 +275,17 @@ function resolveAnchor(service, anchorMap) {
   return toDateStr(service.scheduled_date); // never moved — its date IS the anchor
 }
 
+// GATE_NIGHT_TOLD_LOCK: the columns that say what the customer was told.
+const TOLD_LOCK_COLUMNS = ['reminder_24h_sent', 'reminder_72h_sent', 'windows_preclosed', 'cancelled'];
+
+// A row the customer was really told a time by: the 24-hour reminder went out,
+// or the 72-hour one did. A windows_preclosed placeholder or a cancelled row
+// is not a sent 72-hour reminder (ops lib/move-visit.js holdReason, same rule).
+function sentOrTold(r) {
+  if (r.reminder_24h_sent === true) return true;
+  return r.reminder_72h_sent === true && r.windows_preclosed !== true && r.cancelled !== true;
+}
+
 /**
  * Bulk reminder-freeze lookup for a set of scheduled_service ids.
  *
@@ -291,6 +302,13 @@ function resolveAnchor(service, anchorMap) {
  * that do not pass it (rebooker's staff series moves) keep the 72-hour
  * behavior, byte for byte.
  *
+ * `opts.toldLock` (GATE_NIGHT_TOLD_LOCK, owner 2026-11-05 "D1 a") only counts
+ * together with `lock24h`: a night tool never changes a time the customer was
+ * already told, so a REALLY sent 72-hour reminder (reminder_72h_sent, not a
+ * windows_preclosed placeholder, not cancelled) freezes the visit as well as a
+ * sent 24-hour one, whatever the band. Callers that do not pass it are
+ * unchanged, byte for byte (route-reorder's 4:20 pass, the rebooker).
+ *
  * Returns { failed, frozen:Set<id> }:
  *   failed=true  → the status could not be read; callers MUST treat EVERY
  *                  visit as frozen (fail closed).
@@ -302,12 +320,15 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
   if (!serviceIds || serviceIds.length === 0) return { failed: false, frozen: new Set() };
   const lock24h = !!opts && opts.lock24h === true;
   const sentColumn = lock24h ? 'reminder_24h_sent' : 'reminder_72h_sent';
+  const toldLock = lock24h && opts.toldLock === true;
   const bandHours = freezeHours === undefined ? sendableHoursFor(lock24h) : freezeHours;
   try {
     const rows = await db('appointment_reminders')
       .whereIn('scheduled_service_id', serviceIds)
       .select('scheduled_service_id', 'customer_id', 'appointment_time',
-        sentColumn, 'suppressed_by_sibling');
+        sentColumn, 'suppressed_by_sibling',
+        ...(toldLock ? TOLD_LOCK_COLUMNS : []));
+    const isSent = (r) => (toldLock ? sentOrTold(r) : r[sentColumn] === true);
 
     // Inside the sender's claimable band ⇒ frozen regardless of flag (the row
     // may be mid-send). Unparseable appointment_time ⇒ frozen (fail closed).
@@ -337,7 +358,7 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
         // Placeholder — its own flags never mean a send. The slot's OWNER row
         // (checked below) decides.
         suppressed.push(r);
-      } else if (r[sentColumn] === true) {
+      } else if (isSent(r)) {
         frozen.add(r.scheduled_service_id);
       }
     }
@@ -348,12 +369,13 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
       // reminder (72h, or 24h under lock24h) went out, the merged-label text
       // covered the suppressed visit too.
       const customerIds = [...new Set(suppressed.map((r) => r.customer_id).filter(Boolean))];
-      const owners = await db('appointment_reminders')
+      const ownerQuery = db('appointment_reminders')
         .whereIn('customer_id', customerIds)
-        .where('suppressed_by_sibling', false)
+        .where('suppressed_by_sibling', false);
+      const owners = await (toldLock ? ownerQuery.select('customer_id', 'appointment_time', ...TOLD_LOCK_COLUMNS) : ownerQuery
         .where(sentColumn, true)
-        .select('customer_id', 'appointment_time');
-      const sentSlots = new Set(owners.map((o) => `${o.customer_id}:${new Date(o.appointment_time).getTime()}`));
+        .select('customer_id', 'appointment_time'));
+      const sentSlots = new Set(owners.filter((o) => !toldLock || sentOrTold(o)).map((o) => `${o.customer_id}:${new Date(o.appointment_time).getTime()}`));
       for (const r of suppressed) {
         if (sentSlots.has(`${r.customer_id}:${new Date(r.appointment_time).getTime()}`)) {
           frozen.add(r.scheduled_service_id);

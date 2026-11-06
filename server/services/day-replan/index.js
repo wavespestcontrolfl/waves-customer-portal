@@ -19,6 +19,11 @@
  *   auto_dispatch_excluded), not part of a grouped visit (another live row shares its visit_id), no
  *   other live stop that day for the same customer (co-visits stay together), its appointment starts
  *   more than 24.25 hours from now (America/New_York), and its 24-hour reminder is not sent.
+ * GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a": a night tool never changes a time the customer was already told) fixes
+ * four more kinds of stop, checked after the rules above: customer_confirmed, first_or_one_time (not a recurring
+ * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
+ * and an unreadable history keeps the stop fixed) and reminder_72h_sent (a really sent 72-hour reminder). Gate off:
+ * none of these apply, as before.
  * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
  * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
@@ -85,7 +90,24 @@ function legMin(a, b) {
   return RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(a.lat, a.lng, b.lat, b.lng)).minutes;
 }
 
-async function loadDayStops(conn, dateStr) {
+// GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): a night tool never changes a time the customer was already told.
+// Read once per day load, call time, strict 'true'; an unreadable gate is off (today's rules).
+function nightToldLockOn() {
+  try {
+    const gates = require('../../config/feature-gates');
+    return typeof gates.nightToldLockLive === 'function' && gates.nightToldLockLive() === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// The extra columns the told-lock reasons read (first_or_one_time, person_placed). Gate off: none, as before.
+const TOLD_LOCK_SELECT = [
+  'scheduled_services.recurring_parent_id', 'scheduled_services.recurring_dispatch_due_date',
+  'scheduled_services.date_exception', 'scheduled_services.date_exception_source', 'scheduled_services.date_exception_at',
+];
+
+async function loadDayStops(conn, dateStr, toldLock = nightToldLockOn()) {
   const { _internals, CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
   return dayStopsQuery(conn, {
     dateStr,
@@ -108,6 +130,7 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.property_id', 'scheduled_services.service_address_state', 'scheduled_services.recurring_dispatch_due_date',
       conn.raw('scheduled_services.lat AS raw_lat'), conn.raw('scheduled_services.lng AS raw_lng'),
       ...guardedCoordSelects(conn),
+      ...(toldLock ? TOLD_LOCK_SELECT : []),
     ],
   }).whereRaw(_internals.LIVE_HOLD_SQL);
 }
@@ -121,12 +144,46 @@ async function loadReminder24hSent(conn, ids) {
   return new Set(rows.filter((r) => r.reminder_24h_sent === true).map((r) => r.scheduled_service_id));
 }
 
+/**
+ * Ids whose 72-hour reminder really went out: reminder_72h_sent, and the row is neither a windows_preclosed
+ * placeholder nor cancelled (ops lib/move-visit.js: a pre-closed placeholder is not a sent reminder).
+ * Throws when the read fails (the caller skips the day).
+ */
+async function loadReminder72hSent(conn, ids) {
+  if (!ids.length) return new Set();
+  const rows = await conn('appointment_reminders')
+    .whereIn('scheduled_service_id', ids)
+    .select('scheduled_service_id', 'reminder_72h_sent', 'windows_preclosed', 'cancelled');
+  return new Set(rows
+    .filter((r) => r.reminder_72h_sent === true && r.windows_preclosed !== true && r.cancelled !== true)
+    .map((r) => r.scheduled_service_id));
+}
+
+/**
+ * Ids of stops a person (staff or the customer) placed on their current date or time, by the auto-dispatch rule
+ * (eligibility.isPersonPlacedVisit: the newest slot-changing reschedule_log row by a non-automatic initiator that
+ * lands on the date, or a person date exception). A day holds a handful of rows, so one bounded read per row.
+ * isPersonPlacedVisit fails CLOSED: a read failure counts as placed, so the stop stays fixed.
+ */
+async function loadPersonPlaced(conn, rows) {
+  const { isPersonPlacedVisit } = require('../auto-dispatch/eligibility');
+  const placed = new Set();
+  for (const row of rows) {
+    const verdict = await isPersonPlacedVisit(row, conn);
+    if (!verdict || verdict.placed !== false) placed.add(row.id);
+  }
+  return placed;
+}
+
 /** The date's live rows and the facts every tech-day plan of that date reads. Null when the date has no rows. Throws on a failed read. */
 async function loadDayContext(conn, dateStr, now) {
-  const rows = await loadDayStops(conn, dateStr);
+  const toldLock = nightToldLockOn();
+  const rows = await loadDayStops(conn, dateStr, toldLock);
   if (!rows || rows.length === 0) return null;
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
-  return { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
+  const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
+  if (!toldLock) return ctx;
+  return { ...ctx, toldLock, sent72: await loadReminder72hSent(conn, rows.map((r) => r.id)), personPlaced: await loadPersonPlaced(conn, rows) };
 }
 
 /**
@@ -165,7 +222,20 @@ function officeReviewPending(row) {
   return OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) && row.customer_confirmed !== true;
 }
 
-function fixedReason(row, { dateStr, now, visitCounts, customerCounts, sent24 }) {
+/**
+ * GATE_NIGHT_TOLD_LOCK reasons, checked after the existing ones: a time the customer was told or chose does not
+ * change. A told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed.
+ */
+function toldLockReason(row, { sent72, personPlaced }) {
+  if (row.customer_confirmed === true) return 'customer_confirmed';
+  if (row.is_recurring !== true || row.recurring_parent_id == null) return 'first_or_one_time';
+  if (!personPlaced || personPlaced.has(row.id)) return 'person_placed';
+  if (!sent72 || sent72.has(row.id)) return 'reminder_72h_sent';
+  return null;
+}
+
+function fixedReason(row, ctx) {
+  const { dateStr, now, visitCounts, customerCounts, sent24 } = ctx;
   if (!MOVABLE_STATUSES.includes(row.status)) return 'status';
   if (row.reservation_expires_at) return 'hold';
   if (row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return 'staff_lock';
@@ -176,7 +246,7 @@ function fixedReason(row, { dateStr, now, visitCounts, customerCounts, sent24 })
   if (row.customer_id != null && customerCounts.get(row.customer_id) > 1) return 'same_customer';
   if (!startsMoreThanLockAway(row, dateStr, now)) return 'within_24h';
   if (sent24.has(row.id)) return 'reminder_24h_sent';
-  return null;
+  return ctx.toldLock === true ? toldLockReason(row, ctx) : null;
 }
 
 /** Hours a row's booked window covers (window_start up to window_end, else start + estimate, else 60 min), at least one. */

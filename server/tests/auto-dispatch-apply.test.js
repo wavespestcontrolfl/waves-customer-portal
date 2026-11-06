@@ -918,6 +918,23 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true });
   });
 
+  test('GATE_NIGHT_TOLD_LOCK (config.nightToldLock with nightLock24h): tiers siblings are frozen by a sent 72-hour reminder too; the option is passed only then', async () => {
+    const members = [primary, { id: 's2', status: 'pending' }, { id: 's3', status: 'confirmed' }];
+    const guard = (config) => makeMemberGuard({ service: SERVICE, best: BEST, config: { guardMode: 'tiers', ...config }, techChanged: false });
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set(['s3']) });
+    const trx = fakeTrx();
+    await expect(guard({ nightLock24h: true, nightToldLock: true })({ trx, members })).rejects.toMatchObject({
+      code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3', message: expect.stringContaining('72-hour reminder was sent'),
+    });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true, toldLock: true });
+    // The told-lock reads nothing without nightLock24h, and nightLock24h alone is today's call.
+    routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
+    await guard({ nightLock24h: false, nightToldLock: true })({ trx: fakeTrx(), members }).catch(() => {});
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(expect.anything(), ['s2', 's3'], expect.any(Date));
+    await guard({ nightLock24h: true, nightToldLock: false })({ trx: fakeTrx(), members }).catch(() => {});
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(expect.anything(), ['s2', 's3'], expect.any(Date), undefined, { lock24h: true });
+  });
+
   test('the primary is rechecked on the move transaction with a fresh row read (Codex #6055 r5, r7)', async () => {
     const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
     const { makeMoveGuard } = require('../services/auto-dispatch/apply');
