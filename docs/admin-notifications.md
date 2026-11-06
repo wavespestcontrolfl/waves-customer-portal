@@ -578,6 +578,21 @@ The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BAN
 accepted it; otherwise the text goes out as before. The owner can turn the type off in Push Settings (Alerts group,
 "Evening nudge: visits still open"), which sends the text instead. It sends nothing to a customer.
 
+Stuck-booking alert (owner 2026-11-05, "1, 2 and 3": the estimate page audit's fix 3 and fix 1's second step; no gate):
+`server/services/estimate-stuck-alert.js` raises one standing bell per estimate (category `estimate_stuck`, dedupeKey
+`estimate_stuck:<estimate id>`) when a customer gets stuck on the estimate page: the 90-day look-ahead found no times,
+five date or Waves AI searches in a row came back empty, a time they picked expired with no booking, the time list
+answered an error, or Approve was refused for a reason the page does not walk them through. The same row says when a
+customer came back to an expired estimate. It rings at most once per Eastern day (the day is the `dedupeVersion`, and
+`ringOnRefresh` rings only a new day); a second reason the same day rewrites the row without a ring. A ring also sends a
+phone banner with the New lead sound (`bell-banners.js` kind `estimate_stuck`, 7:00 AM to 9:00 PM Eastern). The category
+rings by default and the owner can silence it under Push Settings ("Customers stuck booking an estimate"); while it is
+silenced nothing raises or refreshes (notifyAdmin reads the mute only on a fresh insert) and the 5-minute pass closes the
+open rows. Bots, staff
+browsers and the office network never raise it. The 5-minute estimate tick closes a row once its estimate is accepted,
+declined or archived. Each date search, hold start and hold end is an `audit_log` row (`estimate_slot_search`,
+`estimate_hold_started`, `estimate_hold_ended`) for the next booking audit. It sends nothing to a customer.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns

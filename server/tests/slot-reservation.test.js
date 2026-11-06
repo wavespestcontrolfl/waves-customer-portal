@@ -1,6 +1,8 @@
 jest.mock('../models/db', () => jest.fn());
 // Moving PR B1: no move by default; one test sets a move-in date.
 jest.mock('../services/customer-moves', () => ({ lockMoveForConversion: jest.fn(async () => null) }));
+// The sweep hands the holds it deleted to the stuck-booking alert (estimate-stuck-alert.js).
+jest.mock('../services/estimate-stuck-alert', () => ({ noteExpiredHolds: jest.fn(async () => 0) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -2310,6 +2312,11 @@ describe('releaseExpiredReservations', () => {
     // Committed rows carry no scheduled_date here, so the per-date lock and
     // collision probe short-circuit (their contracts live in occupancy.js).
     const committed = [{ id: 'visit-a', scheduled_date: null }, { id: 'visit-b', scheduled_date: null }];
+    const swept = [
+      { id: 'hold-1', source_estimate_id: '11111111-1111-4111-8111-111111111111', scheduled_date: '2026-11-10', window_start: '09:00:00', created_at: '2026-11-05T14:00:00Z' },
+      { id: 'hold-2', source_estimate_id: null, scheduled_date: '2026-11-10', window_start: '10:00:00', created_at: '2026-11-05T14:01:00Z' },
+      { id: 'hold-3', source_estimate_id: '22222222-2222-4222-8222-222222222222', scheduled_date: '2026-11-11', window_start: '13:30:00', created_at: '2026-11-05T14:02:00Z' },
+    ];
 
     const selectChain = {
       where: jest.fn(() => selectChain),
@@ -2334,7 +2341,8 @@ describe('releaseExpiredReservations', () => {
       whereRaw: jest.fn(() => delChain),
       where: jest.fn(() => delChain),
       whereNull: jest.fn(() => delChain),
-      del: jest.fn(async () => 3),
+      // DELETE ... RETURNING: the deleted holds, for their end records and the stuck alert.
+      del: jest.fn(async () => swept),
     };
     db.mockImplementationOnce(() => selectChain) // expired-committed SELECT
       .mockImplementationOnce(() => delChain);   // uncommitted-hold DELETE
@@ -2358,7 +2366,27 @@ describe('releaseExpiredReservations', () => {
 
     // Pass 2: the DELETE is scoped to uncommitted holds only.
     expect(delChain.whereNull).toHaveBeenCalledWith('customer_id');
-    expect(delChain.del).toHaveBeenCalled();
+    expect(delChain.del).toHaveBeenCalledWith(['id', 'source_estimate_id', 'scheduled_date', 'window_start', 'created_at']);
+    // Every deleted hold goes to the stuck alert, which records each estimate hold's end.
+    expect(require('../services/estimate-stuck-alert').noteExpiredHolds).toHaveBeenCalledWith(swept);
+  });
+
+  test('a sweep that deleted nothing reports 0 and wakes no alert', async () => {
+    const stuck = require('../services/estimate-stuck-alert');
+    stuck.noteExpiredHolds.mockClear();
+    const selectChain = {
+      where: jest.fn(() => selectChain),
+      whereNotNull: jest.fn(() => selectChain),
+      select: jest.fn(async () => []),
+    };
+    const delChain = {
+      whereRaw: jest.fn(() => delChain),
+      whereNull: jest.fn(() => delChain),
+      del: jest.fn(async () => []),
+    };
+    db.mockImplementationOnce(() => selectChain).mockImplementationOnce(() => delChain);
+    await expect(slotReservation.releaseExpiredReservations()).resolves.toEqual({ rescued: 0, released: 0 });
+    expect(stuck.noteExpiredHolds).not.toHaveBeenCalled();
   });
 });
 

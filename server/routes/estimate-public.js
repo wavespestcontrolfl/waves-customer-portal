@@ -10391,6 +10391,8 @@ function logAcceptRefusals(req, res, next) {
       const code = (payload && payload.code) || 'no-code';
       const reason = String((payload && payload.error) || '').slice(0, 160);
       logger.info(`[estimate-accept] refused ${res.statusCode} ${code} for estimate ${res.locals.acceptEstimateId || 'unknown'}: ${reason}`);
+      // The office's stuck alert for a refusal the page does not walk them through (estimate-stuck-alert.js; never throws).
+      require('../services/estimate-stuck-alert').noteAcceptRefused(req, res.locals.acceptEstimateId, res.statusCode, payload);
     }
     return send(payload);
   };
@@ -32111,6 +32113,11 @@ async function recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRen
   } catch (err) {
     logger.warn(`[estimate-expired-open] audit write failed for estimate ${estimate.id}: ${err.message}`);
   }
+  // The office's "came back to an expired estimate" alert, not awaited so the page never waits on it
+  // (estimate-stuck-alert.js; never throws).
+  require('../services/estimate-stuck-alert').noteExpiredReturn(estimate, {
+    offered: extensionOffered, selfServe: extensionSelfServeNow(estimate),
+  });
 }
 
 // The 404 body for an expired estimate that passes

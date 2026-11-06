@@ -7435,6 +7435,8 @@ function initScheduledJobs() {
       } catch (err) {
         logger.warn(`[est-engage] hot-view settle pass failed: ${err.message}`);
       }
+      // The same for the stuck-booking alerts of estimates that settled (estimate-stuck-alert.js; never throws).
+      await require('./estimate-stuck-alert').closeSettledStuckAlerts();
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }
