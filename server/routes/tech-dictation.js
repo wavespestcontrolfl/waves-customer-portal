@@ -1,7 +1,7 @@
 /**
  * Staff voice-to-text through our own transcriber (GATE_SERVER_DICTATION).
  *
- *   GET  /api/tech/dictation/availability  -> { available }
+ *   GET  /api/tech/dictation/availability  -> { available, liveWords }
  *   POST /api/tech/dictation                -> { text }
  *        multipart: audio (the clip), duration_seconds; query: customer_id?, service_id?
  *
@@ -57,26 +57,18 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // route (tech-track.js), so the two routes cannot each spend 40 clips.
 
 
-const { UUID_RE } = require('../services/dictation-word-list');
-const uuidOrNull = (value) => (UUID_RE.test(String(value || '')) ? String(value) : null);
-
-const db = require('../models/db');
-const { isTechnicianRequest, technicianServicesCustomer, technicianVisitRowInScope } = require('../services/technician-visit-scope');
+const { fenceDictationContext } = require('../services/dictation-context');
+const { isTechnicianRequest } = require('../services/technician-visit-scope');
 
 // The context ids the caller may steer the word list with, as a plain object on
-// req. Runs before the upload is buffered.
+// req (the fence is shared with the live words: services/dictation-context.js).
+// Runs before the upload is buffered.
 async function fenceContext(req, res, next) {
   try {
-    let customerId = uuidOrNull(req.query?.customer_id);
-    let serviceId = uuidOrNull(req.query?.service_id);
-    if (isTechnicianRequest(req)) {
-      if (serviceId) {
-        const svc = await db('scheduled_services').where({ id: serviceId }).first('id', 'technician_id', 'status', 'scheduled_date');
-        if (!svc || !technicianVisitRowInScope(req, svc)) serviceId = null;
-      }
-      if (customerId && !(await technicianServicesCustomer(req, customerId))) customerId = null;
-    }
-    req.dictationContext = { customerId, serviceId };
+    req.dictationContext = await fenceDictationContext(req, {
+      customerId: req.query?.customer_id,
+      serviceId: req.query?.service_id,
+    });
     return next();
   } catch (err) { return next(err); }
 }
@@ -85,7 +77,8 @@ const gateOn = () => featureGates.serverDictationLive() === true;
 const NOT_AVAILABLE = { error: 'Server dictation is not available' };
 
 router.get('/availability', (req, res) => {
-  res.json({ available: gateOn() && Boolean(process.env.OPENAI_API_KEY) });
+  const available = gateOn() && Boolean(process.env.OPENAI_API_KEY);
+  res.json({ available, liveWords: available && featureGates.dictationLiveWordsLive() === true });
 });
 
 // Gate first, so a gate-off request never costs 15 MB of memory in multer.
