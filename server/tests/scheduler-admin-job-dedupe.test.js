@@ -4,8 +4,9 @@
  *     failed (or the check itself failed), so job_health records it.
  *   - morning email digest: runs under runExclusive('email-digest-daily') and
  *     raises its bell under a per-ET-day dedupeKey.
- *   - Tax Advisor and SEO Advisor weekly reports: run under runExclusive, so a
- *     deploy overlap makes one report and one paid model call, not two.
+ *   - SEO Advisor weekly report: runs under runExclusive, so a deploy overlap
+ *     makes one report and one paid analysis, not two. (The Sunday Tax Advisor
+ *     tick is unchanged: it has never run, and fixing it is the owner's call.)
  *
  * Mock baseline copied from scheduler-alert-retention-cron.test.js.
  */
@@ -39,12 +40,6 @@ jest.mock('../services/dashboard-alerts-cron', () => ({
   runDashboardAlertsCheck: jest.fn(),
   COUNT_ESCALATION_COOLDOWN_MS: {},
 }));
-jest.mock('../services/tax-advisor', () => {
-  const generateWeeklyReport = jest.fn();
-  const TaxAdvisor = jest.fn(() => ({ generateWeeklyReport }));
-  TaxAdvisor.generateWeeklyReport = generateWeeklyReport;
-  return TaxAdvisor;
-});
 jest.mock('../services/seo/seo-advisor', () => ({ generateWeeklyReport: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
@@ -52,7 +47,6 @@ const db = require('../models/db');
 const { runExclusive } = require('../utils/cron-lock');
 const { isEnabled } = require('../config/feature-gates');
 const { runDashboardAlertsCheck } = require('../services/dashboard-alerts-cron');
-const TaxAdvisor = require('../services/tax-advisor');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
@@ -148,27 +142,7 @@ describe('morning email digest', () => {
   });
 });
 
-describe('weekly advisor reports run under a lock', () => {
-  test('Tax Advisor: one report per lease; a held lease runs nothing', async () => {
-    const tick = tickFor('0 7 * * 0', 'tax-advisor-weekly');
-    await tick();
-    expect(runExclusive).toHaveBeenCalledWith('tax-advisor-weekly', expect.any(Function));
-    expect(TaxAdvisor.generateWeeklyReport).toHaveBeenCalledTimes(1);
-
-    jest.clearAllMocks();
-    runExclusive.mockResolvedValue({ skipped: true, reason: 'lease_held' });
-    await tick();
-    expect(TaxAdvisor.generateWeeklyReport).not.toHaveBeenCalled();
-  });
-
-  test('Tax Advisor: a failed run fails the job and is logged, never thrown out of the tick', async () => {
-    TaxAdvisor.generateWeeklyReport.mockRejectedValue(new Error('boom'));
-    const tick = tickFor('0 7 * * 0', 'tax-advisor-weekly');
-    await expect(tick()).resolves.toBeUndefined();
-    await expect(healthOutcome('tax-advisor-weekly')).rejects.toThrow('boom');
-    expect(logger.error).toHaveBeenCalledWith('Tax Advisor failed: boom');
-  });
-
+describe('the weekly SEO Advisor report runs under a lock', () => {
   test('SEO Advisor: one report per lease; a held lease runs nothing', async () => {
     const tick = tickFor('0 7 * * 1', 'seo-advisor-weekly');
     await tick();

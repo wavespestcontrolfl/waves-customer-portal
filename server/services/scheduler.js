@@ -7606,14 +7606,10 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 7 * * 0', async () => {
     try {
-      // runExclusive: a deploy overlap must not run the paid model call twice
-      // and store two reports.
-      await runExclusive('tax-advisor-weekly', async () => {
-        const TaxAdvisor = require('./tax-advisor');
-        const advisor = new TaxAdvisor();
-        await advisor.generateWeeklyReport();
-        logger.info('Tax Advisor weekly report generated');
-      });
+      const TaxAdvisor = require('./tax-advisor');
+      const advisor = new TaxAdvisor();
+      await advisor.generateWeeklyReport();
+      logger.info('Tax Advisor weekly report generated');
     } catch (err) {
       logger.error(`Tax Advisor failed: ${err.message}`);
     }
