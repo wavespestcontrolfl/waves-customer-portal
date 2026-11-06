@@ -19,6 +19,7 @@ const {
   hasUnresolvedSiblingStripeOutcome,
   deriveMonthlyChargeIdempotencyKey,
   findCollectedMonthlyPayment,
+  monthlyAttemptHasRecovery,
 } = require('./retry-collectibility');
 const { isEnabled } = require('../config/feature-gates');
 const { isCollectionHoldRefusal } = require('./collections/collection-hold');
@@ -230,15 +231,19 @@ const MONTHLY_LOCK_RETRY_DELAY_MS = 3000;
 
 // Run fn() under the per-customer collection lock; the lock closes the
 // check-then-charge race against charge-now and the retry sweep. Resolves
-// to exactly one of { alreadyCollected } | { unresolvedOutcome } |
-// { paymentResult }; a held-elsewhere claim rejects with
+// to exactly one of { alreadyCollected } | { alreadyAttempted, attemptRecovered }
+// | { unresolvedOutcome } | { paymentResult }; a held-elsewhere claim rejects with
 // BILLING_CLAIM_HELD_ELSEWHERE for retryOnContention.
 // `attemptedSince` is set only by a catch-up run (the billing date it makes
 // up). Then a failed or refunded attempt for this month dated that day or
 // later resolves to { alreadyAttempted }: the run being made up (or a later
-// collector) already tried this card, and its decline already armed the retry
-// ladder and sent the one notice. A catch-up never tries that card again and
-// never sends a second decline text or email.
+// collector) already tried this card. A catch-up never tries that card again and
+// never sends a second decline text or email. attemptRecovered says whether that
+// attempt has somewhere to go (monthlyAttemptHasRecovery: armed for the retry
+// sweep, or ended on purpose: superseded, refunded, ambiguous or SCA park,
+// ladder exhausted or stopped). A bare failed row (a run killed between charge()
+// inserting it and the arming write) has none, so the customer is reported
+// unresolved and the bookmark holds.
 function collectMonthlyDuesUnderLock(customer, period, attemptedSince = null) {
   return withCustomerBillingLock(customer.id, async () => {
     const existingCharge = await findCollectedMonthlyPayment(customer.id, period);
@@ -248,7 +253,10 @@ function collectMonthlyDuesUnderLock(customer, period, attemptedSince = null) {
       const attempt = await findCollectedMonthlyPayment(customer.id, period, {
         statuses: ['failed', 'refunded'], withDuesInvoice: false, onOrAfter: attemptedSince,
       });
-      if (attempt) return { alreadyAttempted: attempt };
+      if (attempt) {
+        const attemptRecovered = await monthlyAttemptHasRecovery(customer.id, period, { onOrAfter: attemptedSince });
+        return { alreadyAttempted: attempt, attemptRecovered };
+      }
     }
 
     // Codex round-2 P0: a SIBLING attempt for this SAME obligation
@@ -570,8 +578,9 @@ const BillingCron = {
     let failed = 0;
     // Customers this run could not charge AND left no recovery path for: the failure came
     // before any charge attempt was recorded (a read or lock error, an unpersisted deferral),
-    // so no retry row is armed. A recorded decline is not here: its armed row is the recovery.
-    // The catch-up keeps its bookmark before a date with any (billing-monthly-catchup.js).
+    // so no retry row is armed. A catch-up also adds a customer whose earlier attempt is a bare
+    // failed row nothing armed or parked. A recorded decline is not here: its armed row is the
+    // recovery. The catch-up keeps its bookmark before a date with any (billing-monthly-catchup.js).
     const unresolvedCustomerIds = [];
 
     for (const customer of customers) {
@@ -737,11 +746,15 @@ const BillingCron = {
         }
 
         // Catch-up only (see collectMonthlyDuesUnderLock): no charge, no text, no email.
+        // An attempt with no recovery path is unresolved: the bookmark holds and the
+        // office is told (billing-monthly-catchup.js), never a re-charge.
         if (lockOutcome.alreadyAttempted) {
+          const { attemptRecovered } = lockOutcome;
           await logAutopay(customer.id, 'skipped_already_attempted', {
             paymentId: lockOutcome.alreadyAttempted.id,
-            details: { source: 'autopay_catch_up', billed_month: monthKey, billing_date: billingDate },
+            details: { source: 'autopay_catch_up', billed_month: monthKey, billing_date: billingDate, recovery_path: attemptRecovered },
           });
+          if (!attemptRecovered) unresolvedCustomerIds.push(customer.id);
           skipped++;
           continue;
         }

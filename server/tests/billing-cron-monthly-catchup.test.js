@@ -12,9 +12,10 @@
  *   the 8:00 run would have tried the card that day, so the catch-up does too;
  * - a date outside this ET month is refused before anything is read.
  *
- * The payments table is an in-memory ledger. findCollectedMonthlyPayment is answered from it
- * with the predicate's real shape (billed_month stamp, status list, onOrAfter date floor); the
- * SQL itself is pinned in retry-collectibility.test.js. Harness after
+ * The payments table is an in-memory ledger. findCollectedMonthlyPayment and
+ * monthlyAttemptHasRecovery are answered from it with the predicate's real shape (billed_month
+ * stamp, status list, onOrAfter date floor) and the real monthlyAttemptRecovery rule; the SQL
+ * itself is pinned in retry-collectibility.test.js. Harness after
  * billing-cron-collection-hold.test.js. Fixed clock: Thursday 2026-11-12, 10:29 AM ET.
  */
 let mockCustomers = [];
@@ -59,11 +60,16 @@ jest.mock('../models/db', () => {
 
 jest.mock('../services/retry-collectibility', () => {
   const actual = jest.requireActual('../services/retry-collectibility');
+  const monthRows = (customerId, monthKey, statuses, onOrAfter) => mockLedger.filter((r) => r.customer_id === customerId
+    && statuses.includes(r.status) && r.billed_month === monthKey && (!onOrAfter || r.payment_date >= onOrAfter));
   return {
     ...actual,
     findCollectedMonthlyPayment: jest.fn(async (customerId, { monthKey }, { statuses = ['paid', 'processing'], onOrAfter = null } = {}) => (
-      mockLedger.find((r) => r.customer_id === customerId && statuses.includes(r.status)
-        && r.billed_month === monthKey && (!onOrAfter || r.payment_date >= onOrAfter))
+      monthRows(customerId, monthKey, statuses, onOrAfter)[0]
+    )),
+    monthlyAttemptHasRecovery: jest.fn(async (customerId, { monthKey }, { onOrAfter = null } = {}) => (
+      monthRows(customerId, monthKey, ['failed', 'refunded'], onOrAfter)
+        .some((r) => actual.monthlyAttemptRecovery(r) !== actual.ATTEMPT_RECOVERY.NONE)
     )),
     hasUnresolvedSiblingStripeOutcome: jest.fn(async () => ({ blocked: false })),
     deriveMonthlyChargeIdempotencyKey: jest.fn(async (customerId) => `autopay_monthly_${customerId}_test`),
@@ -99,7 +105,7 @@ const StripeService = require('../services/stripe');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const BillingRetryEmail = require('../services/billing-retry-email-obligation');
 const { logAutopay } = require('../services/autopay-log');
-const { findCollectedMonthlyPayment } = require('../services/retry-collectibility');
+const { findCollectedMonthlyPayment, monthlyAttemptHasRecovery } = require('../services/retry-collectibility');
 const BillingCron = require('../services/billing-cron');
 
 const TODAY = '2026-11-12';
@@ -193,9 +199,9 @@ describe('a card the killed run declined earlier the same day', () => {
     expect(events('charge_failed')).toEqual([]);
     expect(events('skipped_already_attempted')).toEqual([{
       id: 'cust-c',
-      opts: { paymentId: prior.id, details: { source: 'autopay_catch_up', billed_month: MONTH, billing_date: TODAY } },
+      opts: { paymentId: prior.id, details: { source: 'autopay_catch_up', billed_month: MONTH, billing_date: TODAY, recovery_path: true } },
     }]);
-    expect(out).toMatchObject({ charged: 0, failed: 0, skipped: 1 });
+    expect(out).toMatchObject({ charged: 0, failed: 0, skipped: 1, unresolvedCustomerIds: [] });
     // The prior attempt's row is left exactly as the killed run wrote it.
     expect(mockLedger).toEqual([prior]);
   });
@@ -244,6 +250,7 @@ describe('the 8:00 run (no billingDate) is unchanged', () => {
     await BillingCron.processMonthlyBilling();
     expect(chargedIds()).toEqual(['cust-a', 'cust-b', 'cust-c']);
     for (const call of findCollectedMonthlyPayment.mock.calls) expect(call[2]).toBeUndefined();
+    expect(monthlyAttemptHasRecovery).not.toHaveBeenCalled();
   });
 });
 
@@ -295,5 +302,80 @@ describe('unresolved customers: a failure before the charge with nothing armed',
     const out = await BillingCron.processMonthlyBilling();
     expect(out.unresolvedCustomerIds).toEqual(['cust-a']);
     expect(sendCustomerMessage.mock.calls.every(([msg]) => msg.customerId !== 'cust-a')).toBe(true);
+  });
+});
+
+// Codex pre-push P1 on f8d2b24abf: charge() records the failed row before billing-cron arms
+// next_retry_at. A run killed between those two writes leaves a bare failed row that the retry
+// sweep never selects. The catch-up fence still never charges it (no text, no email), but it
+// reports the customer unresolved, so the bookmark holds and the office is told.
+describe('a bare failed row: the run died after the failed-row insert, before the retry arm', () => {
+  const bareRow = (customerId, extra = {}) => ledgerRow(customerId, 'failed', TODAY, { next_retry_at: null, retry_count: 0, superseded_by_payment_id: null, ...extra });
+  const expectNothingSent = () => {
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BillingRetryEmail.pendingDescriptor).not.toHaveBeenCalled();
+    expect(BillingRetryEmail.reconcilePendingNotices).not.toHaveBeenCalled();
+    expect(BillingRetryEmail.sendPaymentRetryNotice).not.toHaveBeenCalled();
+  };
+
+  test('is reported unresolved and never charged, texted or emailed; the row is left as it is', async () => {
+    const prior = bareRow('cust-c');
+    mockCustomers = [customer('cust-c', 12)];
+    const out = await catchUpRun();
+    expectNothingSent();
+    expect(out).toMatchObject({ charged: 0, failed: 0, skipped: 1, unresolvedCustomerIds: ['cust-c'] });
+    expect(events('skipped_already_attempted')).toEqual([{
+      id: 'cust-c',
+      opts: { paymentId: prior.id, details: { source: 'autopay_catch_up', billed_month: MONTH, billing_date: TODAY, recovery_path: false } },
+    }]);
+    expect(mockLedger).toEqual([{ ...prior }]);
+    expect(monthlyAttemptHasRecovery).toHaveBeenCalledWith('cust-c', expect.objectContaining({ monthKey: MONTH }), { onOrAfter: TODAY });
+  });
+
+  test.each([
+    ['armed for the retry sweep', { next_retry_at: '2026-11-14T15:00:00.000Z' }],
+    ['ambiguous outcome, parked', { metadata: { ambiguous_outcome: true }, superseded_by_payment_id: 'self' }],
+    ['ambiguous outcome, park write lost', { metadata: { ambiguous_outcome: true } }],
+    ['SCA-parked (requires_action, unarmed on purpose)', { metadata: { requires_action: true } }],
+    ['ladder exhausted', { retry_count: 3 }],
+  ])('%s: not reported, not charged', async (_label, extra) => {
+    bareRow('cust-c', extra);
+    mockCustomers = [customer('cust-c', 12)];
+    const out = await catchUpRun();
+    expectNothingSent();
+    expect(out).toMatchObject({ charged: 0, skipped: 1, unresolvedCustomerIds: [] });
+  });
+
+  test('a refunded row is not reported', async () => {
+    ledgerRow('cust-c', 'refunded', TODAY, { next_retry_at: null });
+    mockCustomers = [customer('cust-c', 12)];
+    const out = await catchUpRun();
+    expectNothingSent();
+    expect(out.unresolvedCustomerIds).toEqual([]);
+  });
+
+  test('run the date twice after the killed run: the first bills only the unreached customer; both report the bare row, neither charges it', async () => {
+    ledgerRow('cust-a', 'paid', TODAY);
+    bareRow('cust-c');
+    const first = await catchUpRun();
+    expect(chargedIds()).toEqual(['cust-b']);
+    expect(first).toMatchObject({ charged: 1, skipped: 2, unresolvedCustomerIds: ['cust-c'] });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // cust-b's receipt only
+
+    jest.clearAllMocks();
+    const second = await catchUpRun();
+    expectNothingSent();
+    expect(second).toMatchObject({ charged: 0, skipped: 3, unresolvedCustomerIds: ['cust-c'] });
+    expect(mockLedger.filter((r) => r.customer_id === 'cust-c')).toHaveLength(1);
+  });
+
+  test('a failed recovery read under the lock is unresolved and charges nothing', async () => {
+    bareRow('cust-c', { next_retry_at: '2026-11-14T15:00:00.000Z' });
+    mockCustomers = [customer('cust-c', 12)];
+    monthlyAttemptHasRecovery.mockRejectedValueOnce(new Error('connection terminated'));
+    const out = await catchUpRun();
+    expectNothingSent();
+    expect(out.unresolvedCustomerIds).toEqual(['cust-c']);
   });
 });

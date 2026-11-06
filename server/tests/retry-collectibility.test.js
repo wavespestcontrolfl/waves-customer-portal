@@ -10,6 +10,7 @@ let mockAmbiguousSiblingRow = null;
 let mockDuesInvoiceRow = null;
 let mockDuesPaymentRow = null;
 let mockCalls = [];
+let mockAttemptRows = [];
 
 jest.mock('../models/db', () => {
   function builder(table) {
@@ -48,7 +49,8 @@ jest.mock('../models/db', () => {
       const collectedLookup = b._wheres.some(([m, a]) => m === 'whereIn' && a === 'status');
       return Promise.resolve(collectedLookup ? mockCollectedRow : mockPaidMonthlyRow);
     };
-    b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+    // A list read of payments answers mockAttemptRows (monthlyAttemptHasRecovery).
+    b.then = (resolve, reject) => Promise.resolve(table === 'payments' ? mockAttemptRows : []).then(resolve, reject);
     return b;
   }
   const db = jest.fn((table) => { mockCalls.push(table); return builder(table); });
@@ -65,6 +67,7 @@ const db = require('../models/db');
 const prepay = require('../services/annual-prepay-renewals');
 const {
   REASONS, DISPOSITIONS, loadRetryContext, armedRetryQuery, classifyFailedPaymentRetry, findCollectedMonthlyPayment, _private,
+  ATTEMPT_RECOVERY, monthlyAttemptRecovery, monthlyAttemptHasRecovery,
 } = require('../services/retry-collectibility');
 
 const CUSTOMER = {
@@ -384,6 +387,63 @@ describe('findCollectedMonthlyPayment onOrAfter (monthly catch-up attempt fence)
     const wheres = lastPaymentsQuery()._wheres;
     expect(wheres).toEqual(expect.arrayContaining([['whereIn', 'status', ['paid', 'processing']]]));
     expect(wheres.some(([m, col, op]) => m === 'where' && col === 'payment_date' && op === '>=')).toBe(false);
+  });
+});
+
+// Codex pre-push P1 on f8d2b24abf: the catch-up's attempt fence must not treat a bare failed
+// row (a run killed after charge() inserted it, before billing-cron armed it) as recovered.
+describe('monthlyAttemptRecovery (what became of an attempt the catch-up fence found)', () => {
+  const bare = { id: 'p1', status: 'failed', superseded_by_payment_id: null, next_retry_at: null, retry_count: 0, failure_reason: 'Your card was declined.', metadata: { billed_month: '2026-11' } };
+
+  test('a bare failed row (inserted, never armed, never parked) has no recovery path', () => {
+    expect(monthlyAttemptRecovery(bare)).toBe(ATTEMPT_RECOVERY.NONE);
+    expect(monthlyAttemptRecovery({ ...bare, metadata: JSON.stringify({ requires_action: false, ambiguous_outcome: false }) })).toBe(ATTEMPT_RECOVERY.NONE);
+  });
+
+  test('a row armed for the retry sweep is ARMED', () => {
+    expect(monthlyAttemptRecovery({ ...bare, next_retry_at: '2026-11-15T15:00:00.000Z' })).toBe(ATTEMPT_RECOVERY.ARMED);
+  });
+
+  test.each([
+    ['refunded', { status: 'refunded' }],
+    ['superseded by a collector', { superseded_by_payment_id: 'paid-2' }],
+    ['ambiguous outcome, parked (self-superseded)', { superseded_by_payment_id: 'p1', metadata: { ambiguous_outcome: true } }],
+    ['ambiguous outcome, park write lost', { metadata: JSON.stringify({ ambiguous_outcome: true }) }],
+    ['SCA park (requires_action, left unarmed on purpose)', { metadata: { requires_action: true } }],
+    ['ladder exhausted', { retry_count: 3, failure_reason: 'Final retry failed: declined' }],
+    ['ladder stopped by the sweep', { failure_reason: "declined — retry ladder stopped: autopay disabled (collect manually)" }],
+  ])('%s is ENDED', (_label, patch) => {
+    expect(monthlyAttemptRecovery({ ...bare, ...patch })).toBe(ATTEMPT_RECOVERY.ENDED);
+  });
+
+  test('an exhausted row with next_retry_at still set is ENDED, matching armedRetryQuery (retry_count < 3)', () => {
+    expect(monthlyAttemptRecovery({ ...bare, retry_count: 3, next_retry_at: '2026-11-15T15:00:00.000Z' })).toBe(ATTEMPT_RECOVERY.ENDED);
+  });
+});
+
+describe('monthlyAttemptHasRecovery', () => {
+  const period = { monthKey: '2026-11', monthStart: '2026-11-01', monthEnd: '2026-11-30' };
+  const lastPaymentsQuery = () => db.mock.results.filter((r, i) => db.mock.calls[i][0] === 'payments').pop().value;
+  const bare = (id) => ({ id, status: 'failed', superseded_by_payment_id: null, next_retry_at: null, retry_count: 0, failure_reason: 'declined', metadata: {} });
+  afterEach(() => { mockAttemptRows = []; });
+
+  test('reads this month\'s failed/refunded rows from the date on, with the fence\'s own month predicate', async () => {
+    mockAttemptRows = [bare('p1')];
+    await expect(monthlyAttemptHasRecovery('cust-1', period, { onOrAfter: '2026-11-12' })).resolves.toBe(false);
+    const wheres = lastPaymentsQuery()._wheres;
+    expect(wheres).toEqual(expect.arrayContaining([
+      ['where', { customer_id: 'cust-1' }],
+      ['whereIn', 'status', ['failed', 'refunded']],
+      ['where', 'payment_date', '>=', '2026-11-12'],
+    ]));
+    expect(wheres.some(([m]) => m === 'select')).toBe(true);
+  });
+
+  test('any armed or ended row is a recovery path; only bare rows are not', async () => {
+    mockAttemptRows = [bare('p1'), { ...bare('p2'), next_retry_at: '2026-11-15T15:00:00.000Z' }];
+    await expect(monthlyAttemptHasRecovery('cust-1', period, { onOrAfter: '2026-11-12' })).resolves.toBe(true);
+    mockAttemptRows = [bare('p1'), bare('p2')];
+    await expect(monthlyAttemptHasRecovery('cust-1', period, { onOrAfter: '2026-11-12' })).resolves.toBe(false);
   });
 });
 
