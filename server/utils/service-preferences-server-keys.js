@@ -7,6 +7,9 @@ const SERVER_OWNED_PREF_KEYS = [
   'unconsented_slot_phone_keys',
   // The office's confirmation of an Attach-filed contact (GATE_CALL_ADDRESS_FAMILY_CARD): never client-writable.
   'office_confirmed_slot_phones',
+  // The phones the signed-in holder's own portal contacts save listed for contact login
+  // (GATE_CONTACT_LOGIN_HOLDER_ONLY): written only by that save, never client-writable.
+  'login_attested_phone_keys',
 ];
 
 // `next` with every server-owned key carried over from `raw` (the stored blob).
