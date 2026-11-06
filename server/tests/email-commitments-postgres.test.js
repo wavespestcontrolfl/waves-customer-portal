@@ -801,10 +801,12 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(result).toMatchObject({ processed: 1, failed: 0 });
     const row = await mockPg('call_commitments').first();
     expect(row).toMatchObject({ email_id: email.id, party: 'waves', channel: 'email', description: 'reschedule Friday' });
-    // The subject rode inside the JSON payload, never the prompt text.
-    const prompt = dispatchWithFallback.mock.calls[0][1].text;
+    // The subject rode inside the JSON payload, never the rules: not in the
+    // cached system prompt, and not in the user text ahead of the JSON.
+    const { system, text: prompt } = dispatchWithFallback.mock.calls[0][1];
     expect(prompt).toContain('"subject":"Please reschedule Friday"');
-    expect(prompt.slice(0, prompt.indexOf('Return only JSON'))).not.toContain('Please reschedule Friday');
+    expect(system).not.toContain('Please reschedule Friday');
+    expect(prompt.slice(0, prompt.indexOf('{'))).not.toContain('Please reschedule Friday');
   });
 
   test('subject-only ask: a later reply repeating the subject behind Re: neither blanks the first email\'s subject nor re-asks', async () => {
