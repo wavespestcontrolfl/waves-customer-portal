@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-// Pay page layout (owner 2026-11-06): the payment block (method choice and
-// card form) renders above the invoice details so it is near the top on a
-// phone. The DocumentActionBar stays first. States that never show a card
+// Pay page layout (owner 2026-11-06): the card form (method choice and card
+// form) renders above the invoice details so it is near the top on a phone.
+// The DocumentActionBar stays first; the FAQ and "Other ways to pay" stay
+// below the invoice details. States that never show a card
 // form (here: a missing invoice) are early returns and render as before.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
@@ -57,6 +58,8 @@ const BODY = {
   payer: null,
   processor: 'stripe',
   stripe: { available: true, publishableKey: 'pk_test_1' },
+  payFaq: true,
+  manualPayOptions: { zelle: { recipient: 'pay@example.com' } },
 };
 
 function fakeStripe() {
@@ -85,7 +88,7 @@ afterEach(() => {
 const before = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 describe('pay page — payment block above the invoice details (owner 2026-11-06)', () => {
-  it('renders the action bar first, then the card form, then line items, totals and notes', async () => {
+  it('renders the action bar, the card form, the invoice details, then the FAQ and other ways to pay', async () => {
     const { getStripe } = await import('../lib/stripeLoader');
     getStripe.mockResolvedValue(fakeStripe());
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {
@@ -102,13 +105,18 @@ describe('pay page — payment block above the invoice details (owner 2026-11-06
     const itemsHeading = screen.getByText('Invoice items');
     const totalDue = screen.getByText('Total due');
     const notes = screen.getByText('Synthetic invoice note');
+    const faq = screen.getByText('Why is there a card fee, and how do I avoid it?');
+    const otherWays = screen.getByRole('button', { name: /Other ways to pay/ });
 
     expect(before(actionBar, methods)).toBe(true);
-    expect(before(methods, itemsHeading)).toBe(true);
-    expect(before(methods, totalDue)).toBe(true);
-    expect(before(methods, notes)).toBe(true);
-    // The payment block is still inside the print-hidden panel.
+    for (const detail of [itemsHeading, totalDue, notes]) expect(before(methods, detail)).toBe(true);
+    for (const below of [faq, otherWays]) {
+      for (const detail of [itemsHeading, totalDue, notes]) expect(before(detail, below)).toBe(true);
+    }
+    // Both payment panels stay off the printout, as before.
     expect(methods.closest('.waves-pay-payment-panel')).toHaveClass('waves-no-print');
+    expect(faq.closest('.waves-pay-payment-panel')).toHaveClass('waves-no-print');
+    expect(otherWays.closest('.waves-pay-payment-panel')).toBe(faq.closest('.waves-pay-payment-panel'));
   });
 
   it('a state with no card form (invoice not found) renders as before, with no payment block', async () => {

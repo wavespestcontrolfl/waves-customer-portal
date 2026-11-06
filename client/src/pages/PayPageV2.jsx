@@ -2787,8 +2787,9 @@ export default function PayPageV2() {
           {/* Amount-due hero removed (owner 2026-08-31: the figure already
               shows in the line items and on the Pay button). */}
 
-            {/* Payment block sits above the invoice details so the card form is near
-                the top on a phone (owner 2026-11-06); the DocumentActionBar stays first.
+            {/* Card form sits above the invoice details so it is near the top on a
+                phone (owner 2026-11-06); the DocumentActionBar stays first. The FAQ
+                and "Other ways to pay" stay below the details, in the second panel.
                 waves-no-print: the payment inputs, consent and Pay button stay off the invoice printout. */}
             <div className="waves-pay-payment-panel waves-no-print" style={{ marginBottom: SP.xl }}>
             {/* "Pay securely / amount / status" header removed (owner
@@ -2841,39 +2842,6 @@ export default function PayPageV2() {
               <div style={{ padding: '24px 0', textAlign: 'center', color: DOC.muted, fontSize: FS.body }}>
                 Loading payment form…
               </div>
-            )}
-            <PayFaq
-              enabled={!!data.payFaq}
-              cardSurchargeRate={stripeSetup?.cardSurchargeRate}
-              zelle={!!data.manualPayOptions?.zelle?.recipient && !stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup)}
-              saveRequired={!payer && saveCardRequired}
-              thirdPartyBilled={!!payer}
-            />
-            {/* Hidden once /setup reports a combined-balance PI (the server
-                already withholds the block when siblings preview; this
-                covers the setup verdict). Amount: /setup's post-credit
-                anchor amount once it answers, else the GET's projected
-                post-credit amount — never the raw pre-credit amountDue. */}
-            {/* creditPending: account credit will apply at /setup, so until
-                /setup answers (post-credit baseAmount) no transfer is offered
-                at all — a projection is not a reservation (codex r3 P1). */}
-            {!stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup) && (
-              <OtherWaysToPay
-                options={data.manualPayOptions}
-                invoiceNumber={invoice.invoiceNumber}
-                amountDue={stripeSetup?.baseAmount ?? data.manualPayOptions?.amountDue ?? invoice.amountDue ?? invoice.total}
-                token={token}
-                version={stripeSetup?.version ?? data.manualPayOptions?.version ?? invoice.version ?? null}
-                onInvoiceChanged={(fresh) => {
-                  // A mounted PaymentForm confirms the PI it was minted for
-                  // (pre-push P0): once /setup has answered, a changed
-                  // invoice takes the SAME full reload the staleInvoice 409
-                  // path uses — never a data swap beside the old client
-                  // secret. Before /setup answers there is no PI to strand.
-                  if (stripeSetup) { window.location.reload(); return; }
-                  setData(fresh);
-                }}
-              />
             )}
             </div>
 
@@ -3152,6 +3120,43 @@ export default function PayPageV2() {
                 </p>
               </div>
             )}
+
+            {/* Second panel (same print-hidden panel class as the card form's) keeps the FAQ and other ways to pay at the end of the card. */}
+            <div className="waves-pay-payment-panel waves-no-print">
+            <PayFaq
+              enabled={!!data.payFaq}
+              cardSurchargeRate={stripeSetup?.cardSurchargeRate}
+              zelle={!!data.manualPayOptions?.zelle?.recipient && !stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup)}
+              saveRequired={!payer && saveCardRequired}
+              thirdPartyBilled={!!payer}
+            />
+            {/* Hidden once /setup reports a combined-balance PI (the server
+                already withholds the block when siblings preview; this
+                covers the setup verdict). Amount: /setup's post-credit
+                anchor amount once it answers, else the GET's projected
+                post-credit amount — never the raw pre-credit amountDue. */}
+            {/* creditPending: account credit will apply at /setup, so until
+                /setup answers (post-credit baseAmount) no transfer is offered
+                at all — a projection is not a reservation (codex r3 P1). */}
+            {!stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup) && (
+              <OtherWaysToPay
+                options={data.manualPayOptions}
+                invoiceNumber={invoice.invoiceNumber}
+                amountDue={stripeSetup?.baseAmount ?? data.manualPayOptions?.amountDue ?? invoice.amountDue ?? invoice.total}
+                token={token}
+                version={stripeSetup?.version ?? data.manualPayOptions?.version ?? invoice.version ?? null}
+                onInvoiceChanged={(fresh) => {
+                  // A mounted PaymentForm confirms the PI it was minted for
+                  // (pre-push P0): once /setup has answered, a changed
+                  // invoice takes the SAME full reload the staleInvoice 409
+                  // path uses — never a data swap beside the old client
+                  // secret. Before /setup answers there is no PI to strand.
+                  if (stripeSetup) { window.location.reload(); return; }
+                  setData(fresh);
+                }}
+              />
+            )}
+            </div>
 
             {/* In-card PDF/Print chips superseded by the DocumentActionBar
                 at the top of the page (owner 2026-07-09). */}
