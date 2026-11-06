@@ -6,7 +6,7 @@ import { renderHook, act } from '@testing-library/react';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
 import { adminFetch } from '../../utils/admin-fetch';
-import { useSendToClaudeIdea } from './SendToClaudeIdea';
+import { useSendToClaudeIdea, SENT_PASTED_NOTE } from './SendToClaudeIdea';
 
 const IDEA_ID = '00000000-0000-4000-8000-0000000000b2';
 const AT = '2026-11-03T20:00:00.000Z';
@@ -40,6 +40,18 @@ describe('useSendToClaudeIdea', () => {
     await act(async () => { await h.result.current.undo(); });
     expect(h.onRestore).toHaveBeenCalledWith('An idea');
     expect(h.dictationUsedRef.current).toBe(true);
+  });
+
+  it('a pasted idea says it gets a plan only; a typed one says sent', async () => {
+    adminFetch.mockImplementation(async (url) => (url.endsWith('/status') ? { enabled: true } : { sent: true, id: IDEA_ID, at: AT }));
+    const pastedSend = setup();
+    pastedSend.pastedRef.current = true;
+    await act(async () => { await pastedSend.result.current.send(); });
+    expect(pastedSend.result.current.note).toMatchObject({ kind: 'sent', text: SENT_PASTED_NOTE, pasted: true, undoable: true });
+    expect(SENT_PASTED_NOTE).toBe('Sent to Claude. It has pasted text, so you get a plan only, in your bell.');
+    const typedSend = setup();
+    await act(async () => { await typedSend.result.current.send(); });
+    expect(typedSend.result.current.note).toMatchObject({ kind: 'sent', text: 'Sent to Claude.', pasted: false });
   });
 
   it('keeps the box when a photo is still being converted as the send answers', async () => {

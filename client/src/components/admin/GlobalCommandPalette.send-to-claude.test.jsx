@@ -101,7 +101,9 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude besid
     fireEvent.paste(box, { clipboardData: { getData: () => 'pasted words' } });
     type('Show the last tech note on this card.');
     fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
-    expect(await screen.findByText('Sent to Claude.')).toBeInTheDocument();
+    // A paste in the box: the Mac opens a locked tab that writes a plan only (owner 2026-11-05 "lock pastes").
+    expect(await screen.findByText('Sent to Claude. It has pasted text, so you get a plan only, in your bell.')).toBeInTheDocument();
+    expect(screen.queryByText('Sent to Claude.')).not.toBeInTheDocument();
     const posts = callsTo('/claude-ideas').filter(([, init]) => init?.method === 'POST');
     expect(posts).toHaveLength(1);
     expect(JSON.parse(posts[0][1].body)).toEqual({
