@@ -4,6 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FocusedBoxMic from "./FocusedBoxMic";
+import { Dialog } from "../ui/Dialog";
 import useDictationPending from "../../hooks/dictationPending";
 import { forgetServerDictation } from "../../hooks/serverDictation";
 import { IntelligenceBarPageDataProvider, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
@@ -284,7 +285,7 @@ describe("FocusedBoxMic", () => {
     );
     await focusBox();
     const mic = await screen.findByRole("button", { name: MIC });
-    expect(mic.parentElement).toBe(document.querySelector("[data-modal-panel]"));
+    expect(mic.closest("[data-modal-panel]")).toBe(document.querySelector("[data-modal-panel]"));
   });
 
   it("box removed while RECORDING: the clip is abandoned (nothing uploaded), the hold is released and the notice shows", async () => {
@@ -326,5 +327,63 @@ describe("FocusedBoxMic", () => {
     // Re-render with the preview: any state change in the component does it.
     await act(async () => { screen.getByLabelText("notes").blur(); });
     expect(await screen.findByTestId("dictation-live-words")).toHaveTextContent("gate is on the left");
+  });
+
+  const anchorCount = () => document.querySelectorAll("[data-focused-box-mic-anchor]").length;
+
+  it("keyboard: in a ui/Dialog the mic is the next Tab stop after its box, Shift+Tab returns, Tab goes on", async () => {
+    stubServer({ available: true, everyBox: true });
+    await mount(
+      <Dialog open onClose={() => {}} aria-label="Cancel plan">
+        <button type="button">First</button>
+        <textarea aria-label="notes" />
+        <button type="button">Last</button>
+      </Dialog>,
+    );
+    const box = screen.getByLabelText("notes");
+    await focusBox();
+    const mic = await screen.findByRole("button", { name: MIC });
+    expect(box.nextElementSibling).toBe(mic.parentElement); // right after the box, in DOM order
+    expect(mic.parentElement.style.display).toBe("contents");
+
+    await act(async () => { fireEvent.keyDown(box, { key: "Tab" }); });
+    expect(document.activeElement).toBe(mic);
+    // Focus moving from the box to the mic keeps the box (and the mic).
+    expect(screen.getByRole("button", { name: MIC })).toBe(mic);
+
+    await act(async () => { fireEvent.keyDown(mic, { key: "Tab", shiftKey: true }); });
+    expect(document.activeElement).toBe(box);
+
+    await act(async () => { fireEvent.keyDown(box, { key: "Tab" }); });
+    expect(document.activeElement).toBe(mic);
+    await act(async () => { fireEvent.keyDown(mic, { key: "Tab" }); });
+    expect(document.activeElement).toBe(screen.getByText("Last"));
+    // Focus left the box and the mic: both are gone, no stray stop is left.
+    expect(screen.queryByRole("button", { name: MIC })).toBeNull();
+    expect(anchorCount()).toBe(0);
+  });
+
+  it("leaves no container behind after focus moves to a non-box element, or after the box is removed", async () => {
+    stubServer({ available: true, everyBox: true });
+    let closeBox;
+    function Host() {
+      const [open, setOpen] = useState(true);
+      closeBox = () => setOpen(false);
+      return <>{open && <textarea aria-label="notes" />}<button type="button">Elsewhere</button></>;
+    }
+    await mount(<Host />);
+    await focusBox();
+    await screen.findByRole("button", { name: MIC });
+    expect(anchorCount()).toBe(1);
+    await act(async () => { screen.getByText("Elsewhere").focus(); });
+    expect(anchorCount()).toBe(0);
+    expect(screen.queryByRole("button", { name: MIC })).toBeNull();
+
+    await focusBox();
+    await screen.findByRole("button", { name: MIC });
+    expect(anchorCount()).toBe(1);
+    await act(async () => { closeBox(); });
+    await waitFor(() => expect(anchorCount()).toBe(0));
+    expect(screen.queryByRole("button", { name: MIC })).toBeNull();
   });
 });

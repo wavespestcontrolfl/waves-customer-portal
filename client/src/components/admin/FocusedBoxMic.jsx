@@ -100,6 +100,11 @@ function useFocusedBox(micRef) {
     };
     const onOut = (event) => {
       if (micRef.current?.contains(event.relatedTarget)) return;
+      // Focus leaving the mic (Tab, Shift+Tab, a click) ends the box too, unless it goes back to the box.
+      if (micRef.current?.contains(event.target)) {
+        setBox((current) => (event.relatedTarget === current ? current : null));
+        return;
+      }
       setBox((current) => (current === event.target ? null : current));
     };
     document.addEventListener("focusin", onIn);
@@ -236,12 +241,12 @@ function MicButton({ micRef, host, place, listening, uploading, liveText, onTap 
   // Pinned to a box that left the screen: the mic stays reachable so a recording can be stopped.
   // A dialog with a transform makes `fixed` relative to itself: measure once per place and shift back.
   const [nudge, setNudge] = useState({ host, x: 0, y: 0 });
-  const measuredFor = useRef("");
+  const measuredFor = useRef(null);
   useLayoutEffect(() => {
     if (host === document.body || !place || !micRef.current) return;
     const key = `${place.left},${place.top}`;
-    if (measuredFor.current === key) return;
-    measuredFor.current = key;
+    if (measuredFor.current?.key === key && measuredFor.current.host === host) return;
+    measuredFor.current = { key, host };
     const rect = micRef.current.getBoundingClientRect();
     const dx = place.left - rect.left;
     const dy = place.top - rect.top;
@@ -288,6 +293,35 @@ function MicButton({ micRef, host, place, listening, uploading, liveText, onTap 
     </>,
     host,
   );
+}
+
+// The mic is rendered into a zero-layout container placed right after the box, so it is the very next
+// stop in DOM order: Tab from the box reaches it, Shift+Tab from it returns, and useModalFocus (which
+// cycles DOM order inside a dialog panel) includes it. Created when the mic shows for a box, removed
+// when it hides, the box changes or the box leaves the page.
+function useAnchorAfter(box, active) {
+  const [anchor, setAnchor] = useState(null);
+  useLayoutEffect(() => {
+    if (!box || !active || !box.isConnected) {
+      setAnchor(null);
+      return undefined;
+    }
+    const el = document.createElement("span");
+    el.style.display = "contents";
+    el.setAttribute("data-focused-box-mic-anchor", "true");
+    box.after(el);
+    setAnchor(el);
+    return () => {
+      el.remove();
+      setAnchor(null);
+    };
+  }, [box, active]);
+  return anchor;
+}
+
+function pickMicHost(anchor, busy, fallback) {
+  if (anchor?.isConnected) return anchor;
+  return busy ? fallback : null;
 }
 
 function FocusedBoxMicInner() {
@@ -350,6 +384,11 @@ function FocusedBoxMicInner() {
   const target = busy ? pinned : focused;
   const place = useBoxPlace(target, busy ? onGone : undefined);
   const host = hostFor(target);
+  const show = Boolean(busy || (focused && place));
+  const anchor = useAnchorAfter(show ? target : null, show);
+  // The mic's own host: the container after its box. If that box is gone (an upload still running),
+  // the mic falls back to the notice host so the state stays visible.
+  const micHost = pickMicHost(anchor, busy, host);
 
   const onTap = useCallback(() => {
     if (!sessionRef.current && focused) {
@@ -360,10 +399,9 @@ function FocusedBoxMicInner() {
   }, [focused, toggle]);
 
   if (!supported || mode !== "upload") return <Notice message={notice} host={host} />;
-  const show = busy || (focused && place);
   return (
     <>
-      {show ? <MicButton micRef={micRef} host={host} place={place} listening={listening} uploading={uploading} liveText={liveText} onTap={onTap} /> : null}
+      {show && micHost ? <MicButton micRef={micRef} host={micHost} place={place} listening={listening} uploading={uploading} liveText={liveText} onTap={onTap} /> : null}
       <Notice message={notice} host={host} />
     </>
   );
