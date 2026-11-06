@@ -974,6 +974,15 @@ HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Existing stops are planned at the owner planning
 minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
 window span; the visit being offered keeps its own resolved allowance.
+`GET /api/public/estimates/:token/available-slots?date=` with a date past the
+browse horizon answers `400 { error: 'date is beyond the booking horizon',
+lastBookableDate, horizonDays }` (owner 2026-11-06, new-customer walk E2):
+`horizonDays` is the horizon the route compared against (the seasonal browse
+horizon, `seasonalMaxHorizonDays()`, when seasonal browse applies, else
+`MAX_SLOT_HORIZON_DAYS`), and `lastBookableDate` is today plus that many days as
+an ET `YYYY-MM-DD`. The estimate page words "We book up to N days ahead. Pick a
+date on or before <day>." from these two fields; a 400 without them keeps the old
+retry message.
 `/book`'s self-booking offers (`/api/booking/availability`, `/find-slots`,
 the `/capture-intent` revalidation, public re-service, and inspection
 booking) evaluate the new visit at every position in the technician's route,
