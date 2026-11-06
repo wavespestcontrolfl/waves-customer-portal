@@ -83,17 +83,17 @@ function moveEmailDayArg(dayOnly, kind) {
   return dayOnly === true && kind === 'rescheduled' ? { dayOnly: true } : {};
 }
 
-/** The metadata a day-only move send adds: the day marker (no slot is recorded) plus the occurrence fields a bounced text
- *  and the ABA guard read (guard_slot_ms, promised_date, move_notice_slot_ms). Never read as a promise. */
+/** The metadata a day-only move send adds: B1's day fields (DAY_PROMISE_META plus the occurrence guard dayGuardMeta, the
+ *  same fields promiseMetaOf carries through every stored-for-later path) and move_notice_slot_ms, the slot a bounced text's
+ *  email quotes. None of them is read as a promise but the marker. */
 function dayMoveMeta(slotMs) {
   const { DAY_PROMISE_META } = require('./time-promise');
   return {
     ...DAY_PROMISE_META,
-    ...(Number.isFinite(slotMs) ? { guard_slot_ms: slotMs, promised_date: etDateString(new Date(slotMs)), move_notice_slot_ms: slotMs } : {}),
+    ...require('./appointment-reminders').dayGuardMeta(slotMs),
+    ...(Number.isFinite(slotMs) ? { move_notice_slot_ms: slotMs } : {}),
   };
 }
-
-const DAY_META_KEYS = ['window_unknown', 'promise_level', 'guard_slot_ms', 'promised_date', 'move_notice_slot_ms'];
 
 /** Puts the day marker on `meta` when the send was decided day-only, and remembers the object so a day row that fails to
  *  render can take it off again (dayFellBack). Returns `meta`. */
@@ -108,7 +108,7 @@ function withDayMeta(meta, state, slotMs) {
 function dayFellBack(state, keep = {}) {
   state.dayOnly = false;
   if (state.meta) {
-    for (const key of DAY_META_KEYS) delete state.meta[key];
+    for (const key of [...require('./time-promise').PROMISE_META_KEYS, 'move_notice_slot_ms']) delete state.meta[key];
     Object.assign(state.meta, keep);
   }
 }
@@ -150,7 +150,6 @@ module.exports = {
   DAY_RESCHEDULED_KEY,
   DAY_RAIN_KEY,
   DAY_SERIES_KEYS,
-  DAY_META_KEYS,
   renderDayRow,
   moveNoticeDayOnly,
   customerMoveDayOnly,

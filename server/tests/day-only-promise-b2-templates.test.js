@@ -192,3 +192,41 @@ describe('the callers pass what the decision needs (source scans)', () => {
     expect(act).toContain('previousDate: dateOnlyString(svc.scheduled_date)');
   });
 });
+
+describe('B2 day sends carry B1\'s day fields through every stored-for-later path', () => {
+  const { dayMoveMeta, dayFellBack, withDayMeta } = require('../services/day-only-move-notice');
+  const timePromise = require('../services/time-promise');
+  const SLOT = Date.parse('2026-11-27T14:00:00Z');
+
+  test('promiseMetaOf of a B2 day send is exactly B1\'s four fields; the move-only slot is not carried', () => {
+    const meta = withDayMeta({ scheduled_service_id: 'ss1', rendered_slot_ms: SLOT }, { dayOnly: true }, SLOT);
+    expect(Object.keys(timePromise.promiseMetaOf(meta)).sort()).toEqual([...timePromise.PROMISE_META_KEYS].sort());
+    expect(timePromise.promiseMetaOf(meta)).toEqual({ promise_level: 'day', window_unknown: true, guard_slot_ms: SLOT, promised_date: '2026-11-27' });
+    expect(meta.move_notice_slot_ms).toBe(SLOT);
+  });
+
+  test('dayMoveMeta is built from B1\'s helpers (DAY_PROMISE_META + dayGuardMeta), not a second list', () => {
+    const src = read('services/day-only-move-notice.js');
+    expect(src).toContain('...DAY_PROMISE_META');
+    expect(src).toMatch(/\.dayGuardMeta\(slotMs\)/);
+    expect(src).toContain('PROMISE_META_KEYS');
+    expect(dayMoveMeta(undefined)).toEqual({ window_unknown: true, promise_level: 'day' });
+  });
+
+  test('a fallback to the window copy removes exactly B1\'s fields and the move slot, keeping the rest', () => {
+    const state = { dayOnly: true };
+    const meta = withDayMeta({ scheduled_service_id: 'ss1', rendered_slot_ms: SLOT }, state, SLOT);
+    dayFellBack(state, { move_notice_slot_ms: SLOT });
+    expect(state.dayOnly).toBe(false);
+    expect(meta).toEqual({ scheduled_service_id: 'ss1', rendered_slot_ms: SLOT, move_notice_slot_ms: SLOT });
+  });
+
+  test('B2 adds no second chokepoint, no second persisted-fields list and no stored-body replay of its own', () => {
+    const b2Files = ['services/day-only-move-notice.js', 'routes/admin-schedule.js', 'routes/admin-dispatch.js', 'services/rain-out.js'];
+    for (const f of b2Files) {
+      const src = read(f);
+      expect(src).not.toMatch(/\bpromiseMetaOf\(|\bisDayPromise\(|replay_purpose/);
+      expect(src).not.toMatch(/revalidateDelayedDaySend|delayedSendIsStale/);
+    }
+  });
+});

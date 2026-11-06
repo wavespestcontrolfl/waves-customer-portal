@@ -252,13 +252,33 @@ describe('a bounced day-only reschedule text (handleUndeliveredSms)', () => {
     mockDb.first.appointment_reminders = { appointment_time: '2099-11-04T21:00:00.000Z', service_type: 'Pest Control', cancelled: false };
   });
 
-  test('still outside the cutoff and no hour told since: the DAY email, never the unknown-window phrase', async () => {
+  test('through the delayed-send chokepoint: the shared decision still says day and no hour told since: the DAY email, never the unknown-window phrase', async () => {
     jest.spyOn(timePromise, 'loadPromiseLevels').mockResolvedValue(new Map([['svc-1', 'day']]));
+    const decision = jest.spyOn(timePromise, 'dayOnlySendDecision').mockResolvedValue({ dayOnly: true });
     await bounce();
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledTimes(1);
     const sent = AppointmentEmail.sendAppointmentRescheduledEmail.mock.calls[0][0];
     expect(sent).toMatchObject({ dayOnly: true, windowUnknown: false, appointmentTime: new Date(SLOT_MS) });
     expect(sent.arrivalWindow).toBe('between 4:00 PM and 6:00 PM');
+    expect(decision).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1', reminder24hEnabled: true }));
+  });
+
+  test('the shared decision no longer says day (gate rolled back, inside the cutoff, 24-hour reminder off): today\'s window email, with the real window', async () => {
+    jest.spyOn(timePromise, 'loadPromiseLevels').mockResolvedValue(new Map([['svc-1', 'day']]));
+    jest.spyOn(timePromise, 'dayOnlySendDecision').mockResolvedValue({ dayOnly: false });
+    await bounce();
+    const sent = AppointmentEmail.sendAppointmentRescheduledEmail.mock.calls[0][0];
+    expect(sent).not.toHaveProperty('dayOnly');
+    expect(sent).toMatchObject({ windowUnknown: false, arrivalWindow: 'between 4:00 PM and 6:00 PM' });
+  });
+
+  test('a replayed day text keeps only B1\'s promise fields: the quoted slot is recovered from guard_slot_ms', async () => {
+    jest.spyOn(timePromise, 'loadPromiseLevels').mockResolvedValue(new Map([['svc-1', 'day']]));
+    jest.spyOn(timePromise, 'dayOnlySendDecision').mockResolvedValue({ dayOnly: true });
+    const { move_notice_slot_ms: _dropped, ...kept } = dayAudit.metadata;
+    mockDb.first.messaging_audit_log = { ...dayAudit, metadata: kept };
+    await bounce();
+    expect(AppointmentEmail.sendAppointmentRescheduledEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true, appointmentTime: new Date(SLOT_MS) });
   });
 
   test('an hour was told since (the 24-hour text, a newer window): the stale recovery is suppressed', async () => {

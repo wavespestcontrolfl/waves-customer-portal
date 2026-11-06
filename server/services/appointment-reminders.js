@@ -758,7 +758,9 @@ function bouncedNoticeKind(audit) {
 // reminder row's, which its claim binding (cancellationStillOwned) proves is
 // still the same cancellation.
 function bouncedNoticeTime(kind, meta, row) {
-  const quoted = [meta.rendered_slot_ms, meta.move_notice_slot_ms]
+  // A day-only text records no rendered slot; its queued-and-replayed twin keeps only B1's promise fields, so the guard slot
+  // (guard_slot_ms) is the last place the quoted slot survives.
+  const quoted = [meta.rendered_slot_ms, meta.move_notice_slot_ms, meta.guard_slot_ms]
     .filter((ms) => ms != null).map(Number).find(Number.isFinite);
   if (quoted !== undefined) return new Date(quoted);
   return kind === 'cancelled' && row?.appointment_time ? new Date(row.appointment_time) : null;
@@ -774,14 +776,15 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
     logger.info(`[appt-remind] bounced ${kind} notice for ${scheduledServiceId}: no quoted time on record, no email`);
     return;
   }
-  // GATE_DAY_ONLY_PROMISE part B2: a bounced DAY-ONLY reschedule text (window_unknown only because it quoted no window) is
-  // revalidated for NOW before its recovery email: still outside the cutoff -> the day-only email; inside it -> today's
-  // window email; a later promise already stands (or none can be read) -> no email.
+  // GATE_DAY_ONLY_PROMISE part B2: a bounced DAY-ONLY reschedule text (window_unknown only because it quoted no window) goes
+  // through B1's delayed-send chokepoint (revalidateDelayedDaySend) before its recovery email: 'day' -> the day-only email;
+  // 'window' (inside the cutoff, the gate rolled back, the 24-hour reminder off) -> today's window email; 'suppress' (a later
+  // promise already stands, or none can be read) -> no email.
   const dayText = kind === 'rescheduled' && isDayPromise(meta);
   let dayOnly = false;
   if (dayText) {
-    const verdict = await dayRecoveryVerdict({ scheduledServiceId, apptTime });
-    if (verdict === 'stale') {
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime });
+    if (verdict === 'suppress') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
       return;
     }
@@ -7334,6 +7337,8 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
 }
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
 AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;
+// GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) build their day fields with the same helper.
+AppointmentReminders.dayGuardMeta = dayGuardMeta;
 
 // Shared with twilio.js's en-route/arrival senders (owner ruling
 // 2026-09-25) — see the function's own comment.

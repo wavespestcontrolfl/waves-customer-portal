@@ -841,12 +841,13 @@ async function sendRescheduledVariant({ customerId, scheduledServiceId, appointm
   });
 }
 
-// dayOnly (GATE_DAY_ONLY_PROMISE part B2): the day-only email; a missing or disabled day template sends today's window email.
+// dayOnly (GATE_DAY_ONLY_PROMISE part B2): the day-only email; a day template that is missing, disabled or refuses to render sends
+// today's window email (B1's windowFallbackAllowed rule; the move email leg runs only when the text reached nobody, so it is never strict).
 async function sendAppointmentRescheduledEmail(args = {}) {
   if (args.dayOnly === true) {
     const result = await sendRescheduledVariant(args);
-    if (!dayTemplateUnavailable(result)) return result;
-    logger.warn('[appointment-email] appointment.rescheduled_day is missing or disabled - sending the window email');
+    if (!windowFallbackAllowed(result, args)) return result;
+    logger.warn('[appointment-email] appointment.rescheduled_day could not be sent (template missing, disabled or refused) - sending the window email');
   }
   return sendRescheduledVariant({ ...args, dayOnly: false });
 }

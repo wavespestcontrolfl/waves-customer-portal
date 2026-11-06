@@ -13,6 +13,7 @@ jest.mock('../services/notification-service', () => ({
 }));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue(undefined),
+  dayGuardMeta: (ms) => (Number.isFinite(ms) ? { guard_slot_ms: ms, promised_date: require('../utils/datetime-et').etDateString(new Date(ms)) } : {}),
   markRescheduleNoticeSent: jest.fn().mockResolvedValue({ updated: 1 }),
 }));
 jest.mock('../services/dispatch-assignment', () => ({

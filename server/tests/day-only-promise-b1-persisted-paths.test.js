@@ -247,6 +247,9 @@ describe('persist and replay paths are accounted for', () => {
     const reminders = read('services/appointment-reminders.js');
     // the bounce recovery
     expect(reminders).toMatch(/async function recoverBouncedNotice[\s\S]*?revalidateDelayedDaySend\(/);
+    // the bounced MOVE notice's recovery (GATE_DAY_ONLY_PROMISE part B2) is the same chokepoint, no second mechanism
+    expect(reminders).toMatch(/async function deliverBouncedMoveNoticeEmail[\s\S]*?revalidateDelayedDaySend\(/);
+    expect(reminders.match(/async function deliverBouncedMoveNoticeEmail[\s\S]*?\n}\n/)[0]).not.toMatch(/dayOnlyNow\(|dayOnlySendDecision\(|dayOnlyMoveDecision\(/);
     // the morning replay of queued contacts, via the registry's recheck
     const registry = read('services/messaging/deferred-replay-registry.js');
     expect(registry).toMatch(/appointment_notice_contact_deferred: \{[\s\S]*?dayPromiseStillValid\(meta\)/);
@@ -268,12 +271,13 @@ describe('persist and replay paths are accounted for', () => {
     for (const rail of rails) expect(read(rail)).toMatch(/dayOnlyStoredCopyStale\(/);
   });
 
-  test('isDayOnlyEmail knows exactly the two day templates', () => {
+  test('isDayOnlyEmail knows exactly the three day templates (B2 adds the move email)', () => {
     const { isDayOnlyEmail, DAY_EMAIL_TEMPLATE_KEYS } = require('../services/time-promise');
-    expect(DAY_EMAIL_TEMPLATE_KEYS).toEqual(['appointment.confirmation_day', 'appointment.reminder_72h_day']);
+    expect(DAY_EMAIL_TEMPLATE_KEYS).toEqual(['appointment.confirmation_day', 'appointment.reminder_72h_day', 'appointment.rescheduled_day']);
     expect(isDayOnlyEmail({ template_key: 'appointment.confirmation_day' })).toBe(true);
     expect(isDayOnlyEmail({ template_key: 'appointment.reminder_72h_day' })).toBe(true);
-    for (const key of ['appointment.confirmation', 'appointment.reminder_72h', 'appointment.reminder_24h', '', null, undefined]) {
+    expect(isDayOnlyEmail({ template_key: 'appointment.rescheduled_day' })).toBe(true);
+    for (const key of ['appointment.confirmation', 'appointment.reminder_72h', 'appointment.reminder_24h', 'appointment.rescheduled', '', null, undefined]) {
       expect(isDayOnlyEmail({ template_key: key })).toBe(false);
     }
     expect(isDayOnlyEmail(null)).toBe(false);
@@ -283,6 +287,7 @@ describe('persist and replay paths are accounted for', () => {
     const email = read('services/appointment-email.js');
     expect(email).toMatch(/dayTemplateKey\('appointment\.confirmation', true, dayOnly\)/);
     expect(email).toMatch(/\$\{eventKey\}_day/);
+    expect(email).toMatch(/dayTemplateKey\('appointment\.rescheduled', true, dayOnly\)/); // B2's move email
   });
 
   test('no other file carries or recognises a stored day-only body without being decided here', () => {

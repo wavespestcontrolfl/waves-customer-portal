@@ -53,7 +53,7 @@ function withPromiseMeta(meta, saved) {
 
 // The email templates a day-only send uses (services/appointment-email.js; seeded by the B1 migration). A stored copy of
 // one of these is a DAY promise that was true when it was written.
-const DAY_EMAIL_TEMPLATE_KEYS = Object.freeze(['appointment.confirmation_day', 'appointment.reminder_72h_day']);
+const DAY_EMAIL_TEMPLATE_KEYS = Object.freeze(['appointment.confirmation_day', 'appointment.reminder_72h_day', 'appointment.rescheduled_day']);
 
 /** Is this stored email message a day-only appointment email? (Both stored-copy email rails ask this before a re-send.) */
 function isDayOnlyEmail(message) {

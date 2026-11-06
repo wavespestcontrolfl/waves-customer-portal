@@ -26,6 +26,7 @@ jest.mock('../services/appointment-reminders', () => ({
   safeSendAppointment: jest.fn(async () => false),
   visitPrefsRow: jest.fn(async () => ({})),
   getReminderPrefs: jest.fn(async () => ({ serviceReminder24h: true, smsEnabled: true, reminder24hChannel: 'sms' })),
+  dayGuardMeta: (ms) => (Number.isFinite(ms) ? { guard_slot_ms: ms, promised_date: require('../utils/datetime-et').etDateString(new Date(ms)) } : {}),
   reminder24hWillSend: (prefs) => Boolean(prefs && !prefs.unavailable && prefs.serviceReminder24h),
   smsServiceLabelStored: jest.fn((label) => label),
   markRescheduleNoticeSent: jest.fn(async () => {}),

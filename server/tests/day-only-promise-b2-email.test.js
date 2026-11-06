@@ -108,8 +108,8 @@ describe('the day-only reschedule email', () => {
     expect(logged()[0]).not.toHaveProperty('promise_level');
   });
 
-  test('a missing or disabled day template sends today\'s window email (a customer always gets the notice)', async () => {
-    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
+  test('a missing, disabled or refusing day template (the library\'s own tagged refusal) sends today\'s window email (a customer always gets the notice)', async () => {
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(await libraryRefusal());
     const result = await send({ dayOnly: true });
     expect(result.ok).toBe(true);
     expect(sent().map((c) => c.templateKey)).toEqual(['appointment.rescheduled_day', 'appointment.rescheduled']);
@@ -117,3 +117,15 @@ describe('the day-only reschedule email', () => {
     expect(sent()[1].idempotencyKey).toMatch(new RegExp(`^appointment\\.rescheduled:ss1:${Date.parse(WHEN)}:1783000000000:`));
   });
 });
+
+// A deterministic pre-dispatch refusal exactly as the library raises it (its own private tag), from its real template resolution.
+async function libraryRefusal() {
+  const actualLib = jest.requireActual('../services/email-template-library');
+  const database = () => ({ where: () => ({ first: async () => undefined }) });
+  try {
+    await actualLib.resolveTemplateForSend({ templateKey: 'appointment.rescheduled_day', database });
+  } catch (err) {
+    return err;
+  }
+  throw new Error('the library did not refuse');
+}

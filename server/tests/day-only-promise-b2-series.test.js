@@ -9,6 +9,7 @@ jest.mock('../services/appointment-reminders', () => ({
   safeSendAppointment: jest.fn(),
   visitPrefsRow: jest.fn(async () => ({})),
   markRescheduleNoticeSent: jest.fn(async () => ({})),
+  dayGuardMeta: (ms) => (Number.isFinite(ms) ? { guard_slot_ms: ms, promised_date: require('../utils/datetime-et').etDateString(new Date(ms)) } : {}),
   reminder72hStillReachable: () => true,
   reminder24hStillReachable: () => true,
 }));
@@ -175,9 +176,10 @@ describe('recordSentWindowFallback keeps the day marker', () => {
     expect(recordAuditEvent.mock.calls[0][0].metadata).not.toHaveProperty('promise_level');
   });
 
-  test('the sender passes the marker only for a day-only notice', () => {
+  test('the sender passes the marker only for a day-only notice (B1\'s promiseLevelOf)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
-    expect(src).toContain('...dayPromiseLevelArg(sendInput.metadata)');
-    expect(src).toContain("metadata?.promise_level === 'day' ? { promiseLevel: 'day' } : {}");
+    expect(src).toContain('promiseLevel: promiseLevelOf(sendInput.metadata)');
+    expect(src).toContain("metadata?.promise_level === 'day' ? 'day' : null");
   });
+
 });
