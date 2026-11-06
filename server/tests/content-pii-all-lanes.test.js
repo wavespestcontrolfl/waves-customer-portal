@@ -181,6 +181,15 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
+  test.each([
+    'Orkin John Smith reported ants in the kitchen last spring.',
+    'Last spring John Smith Truly Nolen came out about the ants.',
+    'The National Pest Management Association Mary Jones survey found termites in Parrish.',
+  ])('live: a customer name touching an approved name still holds the draft: %s', (body) => {
+    process.env[GATE] = 'true';
+    expect(evalLane(brief, body).checks.redaction_passed.ok).toBe(false);
+  });
+
   test('live: a customer surname that matches a one-word competitor alias still holds the draft', () => {
     process.env[GATE] = 'true';
     const r = evalLane(brief, 'John Massey reported ants in Parrish last spring.');

@@ -1179,8 +1179,11 @@ function blankApprovedPublicEntities(text) {
   // Each capitalized word becomes 'Waves' (on the redactor's NAME_ALLOWLIST)
   // and connector words stay, so the text keeps its capitalization: the
   // redactor's pii_confidence_low test reads the case ratio, and blanking
-  // the only capitalized words of a sentence tripped it.
-  const standIn = (span) => span.split(/( +)/).map((w) => (/^[A-Z]/.test(w) ? 'Waves' : w)).join('');
+  // the only capitalized words of a sentence tripped it. The stand-in is
+  // fenced by ' ; ' on both sides so it can never join a neighbouring
+  // capitalized word into one allowlisted run: "Orkin John Smith" must
+  // still read John Smith as a name (pre-push audit r4).
+  const standIn = (span) => `; ${span.split(/( +)/).map((w) => (/^[A-Z]/.test(w) ? 'Waves' : w)).join('')} ;`;
   const names = [...approvedCompetitorNames(), ...PUBLIC_BODIES].sort((a, b) => b.length - a.length);
   let out = String(text);
   for (const name of names) {
