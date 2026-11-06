@@ -51,6 +51,8 @@ const RUNNER_CONFIRM_POLLS = 2;
 const RUNNER_REASONS = ['scheduler:unavailable', 'scheduler:disabled', 'scheduler:silent'];
 const DEFAULT_SILENT_AFTER_MINUTES = 60;
 // An owed write older than this is dropped (logged): the run log has shown it ~288 times.
+// A dropped clear can leave its row standing; the next alert for that key retires it
+// first (`replace`), and an outage row is meant to stand until someone closes it.
 const OWED_MAX_MS = 48 * 60 * 60 * 1000;
 const POLL_TIMEOUT_MS = 60 * 1000;
 const HTTP_TIMEOUT_MS = 20 * 1000;
@@ -332,16 +334,19 @@ function enqueueAlert(state, { slot = null, key, parts, at, replace }) {
   });
 }
 
-// Close a slot. An alert still owed is simply dropped (nothing went out); else the
-// row is retired, and an alert that went out by email gets a closing email.
+// Close a slot. An alert still owed is dropped, but its row is retired all the same:
+// a POST that timed out may have landed while its email failed, so an owed alert does
+// not prove that no row stands. Only an alert that went out by email (via 'email')
+// gets a closing email.
 function enqueueClear(state, { slot, key, at, email }) {
-  const owed = state.outbox.some((i) => i.kind === 'alert' && i.slot === slot);
   state.outbox = state.outbox.filter((i) => !(i.kind === 'alert' && i.slot === slot));
   const { via } = state[slot];
   state[slot].alertId = null;
   state[slot].via = null;
-  if (owed) return;
-  state.outbox.push({ id: `clear:${key}:${at}`, kind: 'clear', slot, key, at, via, tries: 0, ...(via === 'email' ? { email } : {}) });
+  state.outbox.push({
+    id: `clear:${key}:${at}`, kind: 'clear', slot, key, at, via, tries: 0, resolved: false,
+    ...(via === 'email' ? { email, emailed: false } : {}),
+  });
 }
 
 // down: open at the paging threshold; close when the portal answers (ok or config).
@@ -432,16 +437,22 @@ async function flushAlert(item, io) {
   return { ok: false, reason: `row ${post.reason}; email ${mail.reason}` };
 }
 
+// The two parts of a clear are tracked on the item, so a retry repeats only the part
+// that failed: the retire (idempotent, always owed) and the closing email (once).
 async function flushClear(item, io) {
-  // A post that timed out may still have landed, so the row is retired either way.
-  const resolved = await io.resolveRow(item.key, item.at);
-  if (item.via === 'email') {
-    const mail = await io.sendEmail(item.email);
-    return mail.ok ? { ok: true, via: 'email' } : { ok: false, reason: `email ${mail.reason}` };
+  const failed = [];
+  if (!item.resolved) {
+    const resolved = await io.resolveRow(item.key, item.at);
+    if (resolved.ok) item.resolved = true;
+    else failed.push(`resolve ${resolved.reason}`);
   }
-  if (resolved.ok) return { ok: true, via: 'row' };
-  // Only a row known to stand must be retired; an alert of unknown delivery is done.
-  return item.via === 'row' ? { ok: false, reason: `resolve ${resolved.reason}` } : { ok: true, via: 'none' };
+  if (item.via === 'email' && !item.emailed) {
+    const mail = await io.sendEmail(item.email);
+    if (mail.ok) item.emailed = true;
+    else failed.push(`email ${mail.reason}`);
+  }
+  if (failed.length) return { ok: false, reason: failed.join('; ') };
+  return { ok: true, via: item.via === 'email' ? 'email' : 'row' };
 }
 
 async function flush(state, io, now) {

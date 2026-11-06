@@ -281,7 +281,7 @@ describe('delivery: portal down', () => {
     expect(calls.posts.map((p) => p.key)).toEqual([deliver.KEYS.down, `outside-watchdog-outage:${at(0)}`]);
   });
 
-  test('an alert that fails both ways stays owed and is retried; recovery first drops it but keeps the outage row', async () => {
+  test('an alert that fails both ways stays owed and is retried; recovery drops it, still retires its row, and keeps the outage row', async () => {
     const state = deliver.defaultState();
     const failing = fakeIo({ post: () => ({ ok: false, reason: 'unreachable:TypeError' }), mail: () => ({ ok: false, reason: 'exit_1' }) });
     await step(state, down(3, 20), failing.io, 20);
@@ -292,8 +292,27 @@ describe('delivery: portal down', () => {
     expect(failing.calls.mails).toHaveLength(2);
     const healthy = fakeIo();
     await step(state, report(), healthy.io, 40);
+    // A timed-out POST may have landed, so the dropped alert's row is retired anyway.
+    expect(healthy.calls.resolves).toEqual([{ key: deliver.KEYS.down, observedAt: at(40) }]);
     expect(healthy.calls.mails).toEqual([]);
     expect(healthy.calls.posts.map((p) => p.key)).toEqual([`outside-watchdog-outage:${at(0)}`]);
+    expect(state.outbox).toEqual([]);
+  });
+
+  test('the closing email goes once while the retire is retried', async () => {
+    const state = deliver.defaultState();
+    const viaEmail = fakeIo({ post: () => ({ ok: false, reason: 'unreachable:TimeoutError' }) });
+    await step(state, down(3, 20), viaEmail.io, 20);
+    expect(state.down.via).toBe('email');
+    const noResolve = fakeIo({ resolve: () => ({ ok: false, reason: 'unreachable:TypeError' }) });
+    await step(state, report(), noResolve.io, 30);
+    await deliver.flush(state, noResolve.io, new Date(at(40)));
+    expect(noResolve.calls.mails.map((m) => m.subject)).toEqual(['Waves portal answering again (outside watchdog)']);
+    expect(state.outbox).toEqual([expect.objectContaining({ kind: 'clear', slot: 'down', resolved: false, emailed: true, tries: 2 })]);
+    const healthy = fakeIo();
+    await deliver.flush(state, healthy.io, new Date(at(50)));
+    expect(healthy.calls.mails).toEqual([]);
+    expect(healthy.calls.resolves).toEqual([{ key: deliver.KEYS.down, observedAt: at(30) }]);
     expect(state.outbox).toEqual([]);
   });
 
