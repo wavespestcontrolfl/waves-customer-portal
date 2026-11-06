@@ -1630,7 +1630,8 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   const lateReRung = await lateReRingPass(now);
   const estimateReRung = await estimateReRingPass(now);
   const bookingsRaised = await unfinishedBookingsPass(now);
-  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}), ...(bookingsRaised ? { bookingsRaised } : {}) };
+  const leadCallReminders = await leadCallReminderPass(now);
+  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}), ...(bookingsRaised ? { bookingsRaised } : {}), ...(leadCallReminders ? { leadCallReminders } : {}) };
 }
 
 // GATE_PORTAL_LATE_RERING: portal items past their one business hour ring once more (portal-late-rering.js).
@@ -1672,6 +1673,19 @@ async function unfinishedBookingsPass(now) {
   }
 }
 
+// GATE_LEAD_CALL_REMINDER: a lead's call request (a missed press-1 ring, a night call-back bell) still open after one
+// business hour sends ONE phone banner (lead-call-reminder.js). After the closes above, so a bell this run just closed
+// sends nothing. Off: nothing is read or written. A failure is logged and never fails the sweep.
+async function leadCallReminderPass(now) {
+  if (!require('../config/feature-gates').leadCallReminderLive?.()) return null;
+  try {
+    return (await require('./lead-call-reminder').runLeadCallReminder({ now })).reminded || null;
+  } catch (err) {
+    logger.warn(`[alert-relevance] the lead call reminder pass failed: ${errSummary(err)}`);
+    return null;
+  }
+}
+
 module.exports = {
   runAdminAlertRelevanceSweep,
   quoteAnswered,
@@ -1684,4 +1698,5 @@ module.exports = {
   judge,
   whereLiveBooking,
   CLASSES,
+  bookedVisitsByCustomer,
 };
