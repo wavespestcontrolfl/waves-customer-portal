@@ -532,14 +532,19 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off' });
   });
 
-  test('gate off but the retry is already settled (committed): the send goes on as any other', async () => {
+  test('gate off after a COMMIT: the enrollment kept the retry address (now the profile email), lost its provenance, and its next step goes out', async () => {
     ctx = await setup({ sent: 1 });
     await webhook.handleEvent(bounce(ctx.send));
-    await ledger(ctx.customerId).update({ status: 'committed' });
+    await runner.sendStep(ctx.enrollment.id); // step 1 to the other spelling
+    await retrySendOf(ctx.enrollment.id, 'commit-clears-1');
+    await delivered('commit-clears-1');
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    const after = await enrollmentRow(ctx.enrollment.id);
+    expect(after).toMatchObject({ status: 'active', email: OTHER });
+    expect(after.metadata.spelling_retry_email).toBeUndefined();
     delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
     await runner.sendStep(ctx.enrollment.id);
-    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
-    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    expect(sendgrid.sendOne).toHaveBeenLastCalledWith(expect.objectContaining({ to: OTHER, subject: 'Step 2' }));
   });
 
   test('gate switched off at the provider boundary itself (after the early check): nothing is sent, the retry ends', async () => {
@@ -771,5 +776,108 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(rec.status).toBe('send_failed');
     expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'failed', reason: 'send_failed', retry_send_id: rec.recovery_message_id });
     expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
+
+  // ── A rejected correction never leaves an enrollment mailing the retry address (P1-E, pre-push audit) ───────────────────
+  const noProvenance = async (id) => expect((await enrollmentRow(id)).metadata.spelling_retry_email).toBeUndefined();
+
+  test('email changed by hand before the queued retry step: enrollments are retargeted to the new email, provenance cleared, nothing goes to the retry address', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await db('customers').where({ id: ctx.customerId }).update({ email: 'jonny.doe@example.com' });
+
+    const first = await runner.sendStep(ctx.enrollment.id);
+
+    expect(first).toMatchObject({ sent: false, deferred: true });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'email_changed' });
+    for (const id of [ctx.enrollment.id, sibling.enrollment.id]) {
+      expect(await enrollmentRow(id)).toMatchObject({ status: 'active', email: 'jonny.doe@example.com' });
+      await noProvenance(id);
+    }
+    // The bounced step is still due: the next tick sends it to the hand-set email.
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenLastCalledWith(expect.objectContaining({ to: 'jonny.doe@example.com', subject: 'Step 1' }));
+  });
+
+  test('email changed by hand between the retry send and its delivery: the commit is rejected and the sibling follows the new email', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'changed-1');
+    await db('customers').where({ id: ctx.customerId }).update({ email: 'jonny.doe@example.com' });
+
+    await delivered('changed-1');
+
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe('jonny.doe@example.com');
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'email_changed' });
+    expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'active', email: 'jonny.doe@example.com' });
+    await noProvenance(sibling.enrollment.id);
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ email: 'jonny.doe@example.com' });
+  });
+
+  test('owned by another customer at the commit: the commit is rejected and every provenance enrollment is cancelled like a hard bounce', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'owned-1');
+    await seedCustomer(OTHER); // someone else claimed the address after the send
+
+    await delivered('owned-1');
+
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'owned_by_other' });
+    for (const id of [sibling.enrollment.id, ctx.enrollment.id]) {
+      expect(await enrollmentRow(id)).toMatchObject({ status: 'cancelled' });
+      expect(await cancelReason(id)).toBe('hard_bounce');
+      await noProvenance(id);
+    }
+  });
+
+  test.each([
+    ['owned_by_other', async () => { await seedCustomer(OTHER); }],
+    ['suppressed', async () => { await db('email_suppressions').insert({ email: OTHER, status: 'active', suppression_type: 'bounce', source: 'test', suppressed_at: new Date() }); }],
+  ])('%s found right before the queued retry send: nothing is sent, the claim is skipped, every provenance enrollment is cancelled', async (reason, makeProblem) => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await makeProblem();
+
+    await runner.sendStep(ctx.enrollment.id);
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason });
+    for (const id of [ctx.enrollment.id, sibling.enrollment.id]) {
+      expect(await enrollmentRow(id)).toMatchObject({ status: 'cancelled' });
+      expect(await cancelReason(id)).toBe('hard_bounce');
+      await noProvenance(id);
+    }
+  });
+
+  test.each(['skipped', 'failed', 'committed'])('a %s claim never lets a provenance-marked send through', async (status) => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await ledger(ctx.customerId).update({ status }); // settled behind the enrollment's back
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    await noProvenance(ctx.enrollment.id);
+  });
+
+  test('the other spelling bounces too: a sibling still pointed at it is cancelled and loses its provenance', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'retry-bounced-2');
+    await webhook.handleEvent(bounce({ sendgrid_message_id: 'retry-bounced-2' }, OTHER));
+    await flush();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+    expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    await noProvenance(sibling.enrollment.id);
   });
 });

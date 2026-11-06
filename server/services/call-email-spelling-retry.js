@@ -36,6 +36,7 @@ const TABLE = 'call_email_spelling_retries';
 const CHANNEL = 'automation';
 const EMAIL_CHANNEL = 'email_message';
 const NO_RETRY = Object.freeze({ retried: false });
+const EMAIL_SHAPE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // automation_enrollments.metadata key: the retry address this enrollment now mails (retry provenance).
 const RETRY_PROVENANCE_KEY = 'spelling_retry_email';
 
@@ -81,13 +82,71 @@ async function claimRetry({ customerId, sourceCallId = null, bouncedEmail, retry
 async function settleClaim({ customerId, bouncedEmail, channel = EMAIL_CHANNEL, sendId = null, originId = null }, { status, reason = null }, client = db) {
   if (!sendId && !originId) return;
   try {
-    await client(TABLE)
+    const query = client(TABLE)
       .where({ customer_id: customerId, channel, status: 'resending' })
-      .modify((q) => (sendId ? q.where({ retry_send_id: sendId }) : q.where({ bounced_email: norm(bouncedEmail), origin_send_id: originId }).whereNull('retry_send_id')))
-      .update({ status, reason, committed_at: status === 'committed' ? new Date() : null, updated_at: new Date() });
+      .modify((q) => (sendId ? q.where({ retry_send_id: sendId }) : q.where({ bounced_email: norm(bouncedEmail), origin_send_id: originId }).whereNull('retry_send_id')));
+    await applySettlement(query, { status, reason }, client, channel);
   } catch (err) {
     logger.warn(`[call-email-spelling-retry] could not settle the claim as ${status}: ${err.code || err.name}`);
   }
+}
+
+/**
+ * THE chokepoint for leaving `resending` (every settlement of an automation claim goes through it): the claim moves, and its
+ * enrollments are dealt with in the same call. A commit keeps them on the retry address (now the profile email) and clears
+ * their retry provenance; ANY other outcome releases them (releaseRetryEnrollments), so an active enrollment never keeps mailing
+ * the address of a claim that did not commit. The tracked path has no provenance enrollments and only moves the claim.
+ */
+async function applySettlement(query, { status, reason = null }, client = db, channel = CHANNEL) {
+  const patch = { status, reason, committed_at: status === 'committed' ? new Date() : null, updated_at: new Date() };
+  if (channel !== CHANNEL) {
+    await query.update(patch);
+    return [];
+  }
+  const rows = await query.update(patch).returning('*');
+  for (const row of rows) {
+    if (status === 'committed') await clearRetryProvenance({ customerId: row.customer_id, retryEmail: row.retry_email }, client);
+    else await releaseRetryEnrollments({ customerId: row.customer_id, retryEmail: row.retry_email, reason }, client);
+  }
+  return rows;
+}
+
+// The customer's ACTIVE enrollments carrying retry provenance for this address.
+function provenanceEnrollments(client, customerId, retryEmail) {
+  return client('automation_enrollments')
+    .where({ customer_id: customerId, status: 'active' })
+    .whereRaw(`LOWER(COALESCE(metadata->>'${RETRY_PROVENANCE_KEY}', '')) = ?`, [norm(retryEmail)]);
+}
+
+/** A commit: the retry address is now the profile email; the enrollments keep it and lose the provenance. */
+async function clearRetryProvenance({ customerId, retryEmail }, client = db) {
+  await provenanceEnrollments(client, customerId, retryEmail)
+    .update({ metadata: client.raw(`COALESCE(metadata, '{}'::jsonb) - '${RETRY_PROVENANCE_KEY}'`), updated_at: new Date() });
+}
+
+/**
+ * The claim did NOT commit: end what it started for this customer's provenance enrollments (still active, still mailing the
+ * retry address). Staff set a different valid primary email by hand (`email_changed`): retarget them to it, which is what the
+ * customer-email fanout would have done had they still pointed at the old address (it matches only the previous primary).
+ * Otherwise cancel them the way today's hard bounce does (cancel_reason hard_bounce). The provenance goes either way.
+ */
+async function releaseRetryEnrollments({ customerId, retryEmail, reason }, client = db) {
+  let current = null;
+  if (reason === 'email_changed') {
+    const customer = await client('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+    const email = norm(customer?.email);
+    if (EMAIL_SHAPE_RE.test(email)) current = email;
+  }
+  const query = provenanceEnrollments(client, customerId, retryEmail);
+  if (current) {
+    await query.update({ email: current, metadata: client.raw(`COALESCE(metadata, '{}'::jsonb) - '${RETRY_PROVENANCE_KEY}'`), updated_at: new Date() });
+    return;
+  }
+  await query.update({
+    status: 'cancelled', next_send_at: null, completed_at: new Date(),
+    metadata: client.raw(`jsonb_set(COALESCE(metadata,'{}'::jsonb) - '${RETRY_PROVENANCE_KEY}', '{cancel_reason}', ?::jsonb, true)`, [JSON.stringify('hard_bounce')]),
+    updated_at: new Date(),
+  });
 }
 
 /**
@@ -157,11 +216,45 @@ async function eligibleOtherSpelling({ enrollment, bounced }, client) {
   const other = recovery.settledOtherSpelling(call.ai_extraction, bounced);
   if (!other) return null;
 
-  const { suppressionCoversEmail } = require('../utils/email-equivalence');
-  const suppressed = await client('email_suppressions').where(suppressionCoversEmail(other)).where({ status: 'active' }).first('id');
-  if (suppressed) return null;
-  if (await recovery.correctedAddressOwnedByOther(other, customer.id, client)) return null;
+  if (await retryAddressProblem(other, customer.id, client)) return null;
   return { other, sourceCallId: call.id, customerId: customer.id };
+}
+
+/** Why the retry address may not be mailed right now: 'suppressed', 'owned_by_other' (another customer, lead or estimate), or null. */
+async function retryAddressProblem(address, customerId, client) {
+  const { suppressionCoversEmail } = require('../utils/email-equivalence');
+  const suppressed = await client('email_suppressions').where(suppressionCoversEmail(address)).where({ status: 'active' }).first('id');
+  if (suppressed) return 'suppressed';
+  return (await require('./email-bounce-recovery').correctedAddressOwnedByOther(address, customerId, client)) ? 'owned_by_other' : null;
+}
+
+/**
+ * The send-boundary verdict for a provenance-marked automation send, asked right before the queued retry step is created and
+ * again right before the provider request (automation-runner.js). null = send. Otherwise the reason it must not go: the gate is
+ * off; the claim is no longer `resending` (a settled claim is never a pass); the customer's primary email is no longer the
+ * bounced address (staff changed it); or the retry address is now suppressed or belongs to someone else.
+ */
+async function retrySendVerdict({ customerId, retryEmail }, client = db) {
+  if (!gateLive()) return 'gate_off';
+  const address = norm(retryEmail);
+  const claim = await client(TABLE).where({ customer_id: customerId, retry_email: address, channel: CHANNEL }).orderBy('created_at', 'desc').first();
+  if (!claim || claim.status !== 'resending') return 'claim_settled';
+  const customer = await client('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+  if (!customer || norm(customer.email) !== norm(claim.bounced_email)) return 'email_changed';
+  return retryAddressProblem(address, customerId, client);
+}
+
+/**
+ * End a retry that must not send (the verdict above): the still-`resending` claim is skipped with the reason, which releases
+ * the customer's provenance enrollments; a claim already settled only has its leftover enrollments released.
+ */
+async function stopRetry({ customerId, retryEmail, reason }, client = db) {
+  const claim = await client(TABLE).where({ customer_id: customerId, retry_email: norm(retryEmail), channel: CHANNEL }).orderBy('created_at', 'desc').first();
+  if (claim && claim.status === 'resending') {
+    await applySettlement(client(TABLE).where({ id: claim.id, status: 'resending' }), { status: 'skipped', reason }, client);
+    return;
+  }
+  await releaseRetryEnrollments({ customerId, retryEmail, reason }, client);
 }
 
 const PREP_LOCK_WAIT_MS = 5000;
@@ -206,13 +299,13 @@ async function startRetry({ sendRow, bounced }, client) {
   if (!row.claimed) return NO_RETRY; // tried before for this customer + address, by either path: never twice
 
   const { rewindEnrollmentToStep } = require('./automation-runner');
-  // spelling_retry_email is the retry provenance the runner's send boundary reads (kill switch): see endGatedRetry.
+  // spelling_retry_email is the retry provenance the runner's send boundary reads (kill switch): see retrySendVerdict.
   const rewound = await rewindEnrollmentToStep({
     enrollment, stepId: sendRow.step_id, email: found.other, metadata: { [RETRY_PROVENANCE_KEY]: found.other },
   }, client);
   if (!rewound) {
     // A later step already went out or the cursor moved: nothing is re-sent, the webhook cancels as it does today.
-    await client(TABLE).where({ id: row.id }).update({ status: 'skipped', reason: 'sequence_cursor_moved', updated_at: new Date() });
+    await applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status: 'skipped', reason: 'sequence_cursor_moved' }, client);
     return NO_RETRY;
   }
   // The customer's other live enrollments to the same address follow it (no step is re-sent for them).
@@ -230,41 +323,11 @@ async function startRetry({ sendRow, bounced }, client) {
   return { retried: true, retryEmail: found.other };
 }
 
-/**
- * Kill switch at the runner's send boundary (automation-runner.js, before the row is queued and again at the provider
- * boundary). The caller has already found that the gate is off and that the enrollment carries retry provenance for this
- * recipient. Only a claim that is STILL `resending` is ended (a committed or failed one means the address is settled and
- * the send proceeds): it becomes `skipped` / `gate_off` and every active enrollment of the customer addressed to the retry
- * address is cancelled the way today's hard bounce cancels (cancel_reason hard_bounce). True = the send must not happen.
- */
-async function endGatedRetry({ customerId, retryEmail }, client = db) {
-  const address = norm(retryEmail);
-  const ended = await client(TABLE)
-    .where({ customer_id: customerId, retry_email: address, channel: CHANNEL, status: 'resending' })
-    .update({ status: 'skipped', reason: 'gate_off', updated_at: new Date() });
-  if (Number(ended) === 0) return false;
-  await client('automation_enrollments')
-    .where({ customer_id: customerId, status: 'active' })
-    .whereRaw('LOWER(email) = ?', [address])
-    .update({
-      status: 'cancelled', next_send_at: null, completed_at: new Date(),
-      metadata: client.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('hard_bounce')]),
-      updated_at: new Date(),
-    });
-  return true;
-}
-
-/** True while a claim for this customer + retry address is still `resending` (read-only, for the provider boundary). */
-async function retryStillPending({ customerId, retryEmail }, client = db) {
-  const row = await client(TABLE).where({ customer_id: customerId, retry_email: norm(retryEmail), channel: CHANNEL, status: 'resending' }).first('id');
-  return !!row;
-}
-
 /** The retry send itself hard-bounced: its (bound) claim fails. Returns { retryFailed, bouncedEmail } or null. */
 async function settleRetryBounce({ sendRow, customerId }, client) {
   const row = await claimForSend({ channel: CHANNEL, sendId: sendRow.id, customerId }, client);
   if (!row) return null;
-  await client(TABLE).where({ id: row.id }).update({ status: 'failed', reason: 'retry_address_bounced', updated_at: new Date() });
+  await applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status: 'failed', reason: 'retry_address_bounced' }, client);
   return { retryFailed: true, bouncedEmail: row.bounced_email };
 }
 
@@ -309,8 +372,7 @@ async function onAutomationDelivered({ sendRow }, client = db) {
   const row = await claimForSend({ channel: CHANNEL, sendId: sendRow.id, customerId: await enrollmentCustomerId(sendRow, client) }, client);
   if (!row || norm(row.retry_email) !== address) return { committed: false };
 
-  const settle = (status, reason) => client(TABLE).where({ id: row.id })
-    .update({ status, reason, committed_at: status === 'committed' ? new Date() : null, updated_at: new Date() });
+  const settle = (status, reason) => applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status, reason }, client);
   const before = await client('customers').where({ id: row.customer_id }).forUpdate().first();
   if (!before) { await settle('skipped', 'customer_gone'); return { committed: false }; }
   const { lockCustomerEmail } = require('../utils/customer-comms-lock');
@@ -348,5 +410,6 @@ async function onAutomationDelivered({ sendRow }, client = db) {
 }
 
 module.exports = {
-  onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, bindTrackedRetrySend, gateLive, endGatedRetry, retryStillPending, lockPrepSend, CHANNEL, EMAIL_CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+  onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, bindTrackedRetrySend, gateLive,
+  retrySendVerdict, stopRetry, releaseRetryEnrollments, lockPrepSend, CHANNEL, EMAIL_CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
 };
