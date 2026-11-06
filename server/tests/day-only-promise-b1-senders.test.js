@@ -191,7 +191,7 @@ describe('the booking confirmation', () => {
     const send = await run(150);
     expect(send.metadata).toEqual({
       original_message_type: 'confirmation', templateKey: 'appointment_confirmation_day_v1', scheduled_service_id: 'svc-1',
-      ...DAY_PROMISE_META, useCustomerChannel: true,
+      ...DAY_PROMISE_META, guard_slot_ms: NOW.getTime() + 150 * HOUR, promised_date: '2026-11-16', useCustomerChannel: true,
     });
     // The canonical sender keeps the slot to guard the send but is told the body quoted no window, so the audit drops it.
     expect(send.renderedSlotMs).toBe(NOW.getTime() + 150 * HOUR);
@@ -419,6 +419,9 @@ describe('the 72-hour reminder', () => {
     expect(send.metadata).toMatchObject({ original_message_type: 'reminder_72h', templateKey: 'reminder_72h_day_v1', ...DAY_PROMISE_META });
     expect(send.promisedWindowUnknown).toBe(true);
     expect(send.renderedSlotMs).toBe(reminderRow().appointment_time.getTime());
+    // The occurrence guard (a bounced grouped text, a move since) rides beside the marker, never as a promise.
+    expect(send.metadata).toMatchObject({ guard_slot_ms: reminderRow().appointment_time.getTime(), promised_date: '2026-05-08' });
+    expect(send.metadata).not.toHaveProperty('rendered_slot_ms');
   });
 
   test('the decision is asked with the visit, its start and the 24-hour preference', async () => {
@@ -455,6 +458,8 @@ describe('the 72-hour reminder', () => {
     expect(send.metadata).toMatchObject({ templateKey: 'reminder_72h_no_reply_v1' });
     expect(send.metadata).not.toHaveProperty('promise_level');
     expect(send.metadata).not.toHaveProperty('window_unknown');
+    expect(send.metadata).not.toHaveProperty('guard_slot_ms');
+    expect(send.metadata).not.toHaveProperty('promised_date');
     expect(send.metadata.rendered_slot_ms).toBe(reminderRow().appointment_time.getTime());
     expect(send).not.toHaveProperty('promisedWindowUnknown');
   });

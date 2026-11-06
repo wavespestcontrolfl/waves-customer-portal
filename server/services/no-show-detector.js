@@ -447,7 +447,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     () => conn('email_messages')
       .whereIn(conn.raw("split_part(idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
       .whereIn(conn.raw("split_part(idempotency_key, ':', 2)"), visitIds)
-      .whereRaw("split_part(idempotency_key, ':', 3) ~ '^[0-9]+$'")
+      // Segment 3 is the slot epoch, or (GATE_DAY_ONLY_PROMISE) `day-<YYYY-MM-DD>` for a day-only email, which quoted no
+      // hour: recovered as a DAY promise (level 'day', no slot) below, so the evidence survives a failed interaction
+      // insert. A numeric key behaves exactly as before.
+      .whereRaw("(split_part(idempotency_key, ':', 3) ~ '^[0-9]+$' OR split_part(idempotency_key, ':', 3) ~ '^day-[0-9]{4}-[0-9]{2}-[0-9]{2}$')")
       .whereIn('status', DELIVERED_EMAIL_STATUSES)
       .whereNotNull('sent_at').where('sent_at', '<=', now)
       .select('id', 'sent_at', conn.raw("split_part(idempotency_key, ':', 2) as visit_id"),
@@ -502,7 +505,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // seriesSupersessions/latestPromises dedupe by visit anyway.
       .select('em.id', 'em.sent_at', 'sv.id as visit_id', 'keyed.id as stop_id',
         conn.raw("split_part(em.idempotency_key, ':', 1) as tier"),
-        conn.raw("split_part(em.idempotency_key, ':', 5) as occurrence")),
+        conn.raw("split_part(em.idempotency_key, ':', 5) as occurrence"),
+        // A day-only grouped email (GATE_DAY_ONLY_PROMISE) ends its key with `:day` in segment 6 (a window email has the
+        // recipient token there), so the recovered unknown-window event can be read as a day promise.
+        conn.raw("split_part(em.idempotency_key, ':', 6) = 'day' as day_only")),
     // A call-created booking: the visit row itself carries source_call_log_id
     // (a FK written in the booking transaction), so the window the agent
     // committed on that call is derivable from durable state — no separate
@@ -701,12 +707,16 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .map(sendKey));
     return groupedEmails
       .filter((r) => !recoveredSends.has(sendKey(r)))
-      .map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
-        source: 'email', source_id: r.id }));
+      .map((r) => ({ visit_id: r.visit_id, start_at: null, ...(r.day_only === true ? { level: 'day' } : {}),
+        communicated_at: r.sent_at, source: 'email', source_id: r.id }));
   })();
-  const directEmailFallbacks = directEmails.map((r) => ({ visit_id: r.visit_id,
-    start_at: new Date(Number(r.slot_ms)).toISOString(), grouped: r.stop_wide === true, communicated_at: r.sent_at,
-    source: 'email', source_id: r.id }));
+  // A key whose segment 3 is `day-<date>` was a day-only email: a day promise, no slot (never an invented hour).
+  const directEmailFallbacks = directEmails.map((r) => (/^day-/.test(String(r.slot_ms))
+    ? { visit_id: r.visit_id, start_at: null, level: 'day', grouped: r.stop_wide === true, communicated_at: r.sent_at,
+      source: 'email', source_id: r.id }
+    : { visit_id: r.visit_id,
+      start_at: new Date(Number(r.slot_ms)).toISOString(), grouped: r.stop_wide === true, communicated_at: r.sent_at,
+      source: 'email', source_id: r.id }));
   return [
     ...noticeEvents,
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,

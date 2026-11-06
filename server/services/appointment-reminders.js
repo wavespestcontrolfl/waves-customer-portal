@@ -1276,13 +1276,35 @@ function noteDayRender(meta, state, rendered) {
   applyPromiseMeta(meta, state.dayOnly);
 }
 
-/** Puts the day-only marker on a send's metadata, or takes it off when the window copy went out instead. */
+/** The non-promise occurrence fields a day-only send adds beside DAY_PROMISE_META: the slot the send was guarded on
+ *  (guard_slot_ms) and the ET date it promised (promised_date). The audit drops rendered_slot_ms for a day-only send, and
+ *  the no-show reader reads ONLY rendered_slot_ms, so these identify the occurrence (a bounced grouped text, a move
+ *  since) without restoring an hour promise. */
+function dayGuardMeta(slotMs) {
+  return Number.isFinite(slotMs) ? { guard_slot_ms: slotMs, promised_date: etDateString(new Date(slotMs)) } : {};
+}
+
+/** The ET date a bounced text was about: its rendered slot, or (a day-only text) its promised date / guard slot. Null
+ *  when the audit row carries neither (an ungrouped legacy send). */
+function bouncedOccurrenceDate(metadata) {
+  const rendered = Number(metadata?.rendered_slot_ms);
+  if (metadata?.rendered_slot_ms != null && Number.isFinite(rendered)) return etDateString(new Date(rendered));
+  if (!isDayPromise(metadata)) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(metadata.promised_date || ''))) return metadata.promised_date;
+  const guard = Number(metadata.guard_slot_ms);
+  return metadata.guard_slot_ms != null && Number.isFinite(guard) ? etDateString(new Date(guard)) : null;
+}
+
+/** Puts the day-only marker (and the occurrence guard fields) on a send's metadata, or takes them off when the window copy
+ *  went out instead. */
 function applyPromiseMeta(meta, dayOnly) {
   if (dayOnly) {
-    Object.assign(meta, require('./time-promise').DAY_PROMISE_META);
+    Object.assign(meta, require('./time-promise').DAY_PROMISE_META, dayGuardMeta(meta.rendered_slot_ms));
   } else {
     delete meta.window_unknown;
     delete meta.promise_level;
+    delete meta.guard_slot_ms;
+    delete meta.promised_date;
   }
   return meta;
 }
@@ -5374,8 +5396,9 @@ const AppointmentReminders = {
               // bounced notice is stale; the re-armed rows own the new
               // date. Every grouped send stamps rendered_slot_ms, so a
               // missing stamp means an ungrouped send — per-row copy.
-              const slotMs = Number(audit.metadata?.rendered_slot_ms);
-              const textedDate = Number.isFinite(slotMs) ? etDateString(new Date(slotMs)) : null;
+              // A day-only text records no rendered_slot_ms (it promised no hour), so its occurrence comes from the
+              // non-promise guard fields instead (bouncedOccurrenceDate).
+              const textedDate = bouncedOccurrenceDate(audit.metadata);
               const visitDate = visit.scheduled_date instanceof Date
                 ? visit.scheduled_date.toISOString().slice(0, 10)
                 : String(visit.scheduled_date || '').slice(0, 10);
@@ -7152,7 +7175,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
         appointment_contact_role: recipient.role,
         scheduled_service_id: scheduledServiceId,
         entry_point: 'recipient_optin_confirmed_replay',
-        ...(ladder.dayOnly === true ? require('./time-promise').DAY_PROMISE_META : {}),
+        ...(ladder.dayOnly === true ? { ...require('./time-promise').DAY_PROMISE_META, ...dayGuardMeta(apptTime.getTime()) } : {}),
       },
     });
     // The shared delivery verdict (disabled template / owner-silence sentinels

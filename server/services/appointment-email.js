@@ -503,8 +503,16 @@ function dayStamp(apptTime) {
   return apptTime ? `day-${etDateString(apptTime)}` : 'day';
 }
 
-function slotStamp(apptTime, dayOnly) {
-  return dayOnly ? dayStamp(apptTime) : apptStamp(apptTime);
+// The key a send is made under. A window email keeps today's key (the caller's, or `<event>:<visit>:<slot epoch>`). A
+// day-only email puts the day in the slot position even for a key the caller supplies (a coalesced notice's numeric
+// slot becomes `day-<date>`; a grouped reminder's `<event>:visit:<stop>:<effect>:<date>` gains a trailing `:day`), so the
+// no-show detector's key recovery reads a day promise and never invents an hour from a day-only email.
+function emailKey(prefix, supplied, apptTime, dayOnly) {
+  if (!dayOnly) return supplied || `${prefix}:${apptStamp(apptTime)}`;
+  const parts = String(supplied || `${prefix}:${apptStamp(apptTime)}`).split(':');
+  if (parts[1] === 'visit') return `${parts.join(':')}:day`;
+  if (/^[0-9]+$/.test(parts[2])) parts[2] = dayStamp(apptTime);
+  return parts.join(':');
 }
 
 // The day-only template of an event (`<event>_day`) when this send is day-only and the event has one, else the event's own.
@@ -553,7 +561,7 @@ async function sendConfirmationVariant({ customerId, scheduledServiceId, appoint
       // (renderBlocks skips a cta with no href) — never a broken button.
       reschedule_url: clean(rescheduleUrl),
     },
-    idempotencyKey: idempotencyKey || `appointment.confirmation:${scheduledServiceId || customerId}:${slotStamp(apptTime, dayOnly)}`,
+    idempotencyKey: emailKey(`appointment.confirmation:${scheduledServiceId || customerId}`, idempotencyKey, apptTime, dayOnly),
     categories: ['appointment_confirmation'],
     triggerEventId: `appointment.confirmation:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null, ...dayOnlyMetadata(dayOnly) },
@@ -652,7 +660,7 @@ async function sendReminderVariant({ customerId, scheduledServiceId, appointment
     templateKey,
     eventType: eventKey,
     payload,
-    idempotencyKey: idempotencyKey || `${eventKey}:${scheduledServiceId || customerId}:${slotStamp(apptTime, templateKey !== eventKey)}`,
+    idempotencyKey: emailKey(`${eventKey}:${scheduledServiceId || customerId}`, idempotencyKey, apptTime, templateKey !== eventKey),
     categories: [is72 ? 'appointment_reminder_72h' : 'appointment_reminder_24h'],
     triggerEventId: `${eventKey}:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null, ...dayOnlyMetadata(templateKey !== eventKey) },
