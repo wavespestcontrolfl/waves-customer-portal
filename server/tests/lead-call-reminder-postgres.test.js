@@ -12,6 +12,9 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
+// The first test opens the first connection; on a loaded machine that alone can pass jest's 5 s default.
+jest.setTimeout(60000);
+
 const MIN = 60 * 1000;
 // 3:00 PM ET on a weekday, inside the 8 AM to 8 PM send hours (EST, UTC-5). Every row's time is set from it.
 const NOW = new Date('2026-11-05T15:00:00-05:00');
