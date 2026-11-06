@@ -36,8 +36,8 @@ jest.mock('../services/admin-alert-episodes', () => ({
 jest.mock('../services/ops-digest', () => ({
   ...jest.requireActual('../services/ops-digest'),
   deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'd1' })),
+  resolveOpsDigest: jest.fn(async () => 1),
 }));
-jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 
 const db = require('../models/db');
@@ -46,7 +46,6 @@ const { getCustomer } = require('../services/ads/google-ads');
 const Health = require('../services/ads/ads-health');
 const Episodes = require('../services/admin-alert-episodes');
 const OpsDigest = require('../services/ops-digest');
-const FallOff = require('../services/ops-digest-fall-off');
 const AuditLog = require('../services/audit-log');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { runAdsHealthAlerts, _private } = require('../services/ads/ads-health-alerts');
@@ -226,7 +225,7 @@ describe('true', () => {
     expect(args.text).toContain('Unparseable gclid (12.5%)');
     expect(args.text).toContain('last try Thu, Nov 5 at 6:40 AM: Synthetic upload error');
     await expect(args.sendEmail()).resolves.toMatchObject({ ok: false });
-    expect(FallOff.retireIfClean).not.toHaveBeenCalled();
+    expect(OpsDigest.resolveOpsDigest).not.toHaveBeenCalled();
     expect(result.uploads).toEqual({ count: 4, outcome: 'recorded' });
   });
 
@@ -240,15 +239,22 @@ describe('true', () => {
     uploads({ actions: [{ name: 'Test - Qualified Lead', status: 'EXCELLENT', alerts: [] }] });
     const result = await runAdsHealthAlerts({ now: NOW });
     expect(OpsDigest.deliverOpsDigest).not.toHaveBeenCalled();
-    expect(FallOff.retireIfClean).toHaveBeenCalledWith('ads-upload-health', { resolvedBy: 'ads-health-alerts:clean-run' });
+    expect(OpsDigest.resolveOpsDigest).toHaveBeenCalledWith({
+      key: 'ads-upload-health', source: null, resolvedBy: 'ads-health-alerts:clean-run', throwOnError: true,
+    });
     expect(result.uploads).toEqual({ count: 0, outcome: 'retired' });
+  });
+
+  test('a retire that fails fails the tick, so a stale upload row never reads as clear', async () => {
+    OpsDigest.resolveOpsDigest.mockRejectedValueOnce(new Error('synthetic update failure'));
+    await expect(runAdsHealthAlerts({ now: NOW })).rejects.toThrow('ads health alerts: upload alert: synthetic update failure');
   });
 
   test('an upload check Google refused leaves the upload row as it is; the bell still updates', async () => {
     Health.uploadCheckSection.mockResolvedValue({ error: "Google's upload check could not be read: synthetic" });
     await expect(runAdsHealthAlerts({ now: NOW })).rejects.toThrow('upload read');
     expect(OpsDigest.deliverOpsDigest).not.toHaveBeenCalled();
-    expect(FallOff.retireIfClean).not.toHaveBeenCalled();
+    expect(OpsDigest.resolveOpsDigest).not.toHaveBeenCalled();
     expect(Episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
   });
 
@@ -283,7 +289,7 @@ test('shadow writes no alert, and one audit row only when the problems change', 
   expect(AuditLog.recordAuditEvent).toHaveBeenCalledTimes(2);
   expect(AuditLog.recordAuditEvent.mock.calls[1][0].metadata.google).toMatchObject({ itemKeys: [], joined: [], emptied: true });
 
-  for (const write of [Episodes.raiseAdminAlertWithReopen, Episodes.closeAdminAlertKeys, OpsDigest.deliverOpsDigest, FallOff.retireIfClean]) {
+  for (const write of [Episodes.raiseAdminAlertWithReopen, Episodes.closeAdminAlertKeys, OpsDigest.deliverOpsDigest, OpsDigest.resolveOpsDigest]) {
     expect(write).not.toHaveBeenCalled();
   }
 });

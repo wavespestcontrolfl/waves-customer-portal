@@ -16,7 +16,7 @@
  *    in the last 48 hours, or while Google's upload check reads Needs attention. A failed upload is our own fault,
  *    so it never rings the owner (docs/admin-notifications.md section 5, owner 2026-10-26). The writers keep one row
  *    per conversion and stamp updated_at on every try, so a retry that works clears its row; the first clean run
- *    retires the digest (ops-digest-fall-off.js).
+ *    retires the digest (resolveOpsDigest, the in-process fall-off; a failed retire fails the tick).
  *
  * A source that cannot be read changes nothing: its row stays as it is until a run can read it, and the run throws
  * at the end so job_health shows the failed tick. GATE_ADS_HEALTH_ALERTS (adsHealthAlertsMode()): off = no query;
@@ -305,7 +305,10 @@ function composeUploads(found) {
 // Activity feed reads ops_digest rows only, and an engineering row never reaches the bell.
 async function applyUploads(composed) {
   if (!composed.count) {
-    const retired = await require('../ops-digest-fall-off').retireIfClean(UPLOAD_KEY, { resolvedBy: 'ads-health-alerts:clean-run' });
+    // The fall-off of ops-digest-fall-off.js, but a retire that fails throws: a stale row must fail the tick.
+    const retired = await require('../ops-digest').resolveOpsDigest({
+      key: UPLOAD_KEY, source: null, resolvedBy: 'ads-health-alerts:clean-run', throwOnError: true,
+    });
     return { count: 0, outcome: retired ? 'retired' : 'clear' };
   }
   const alert = composeAdminAlert(composed.spec);
