@@ -535,6 +535,22 @@ existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
 second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
 
+Lead call-back reminder banner (owner 2026-11-05, "remind"; gate `GATE_LEAD_CALL_REMINDER`, dark): two kinds of lead
+bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
+answered) and a night call-back bell (`lead-call-text-followup:<requestId>`, raised by `lead-call-text-followup.js`
+`raiseLeadBell`) send no banner. With the gate on, the alert-relevance sweep (every 10 minutes, after its closes) runs
+`server/services/lead-call-reminder.js`. A bell of those kinds that is still open one business hour after its latest
+event (the follow-up SLA's clock, 8 AM to 8 PM ET) sends ONE banner (`lead_call_reminder`, the Missed call sound) when
+nobody has reached the lead since. "Reached" uses the shared contact witnesses after that event: a person's text, a call
+a person placed and spoke on, an inbound call a person answered, a person's Gmail send to the lead's customer's own
+address, a visit booked for that customer, or an estimate handed off. A deleted lead, or one a person closed, sends nothing. Banners go out
+only from 8:00 AM up to 8:00 PM Eastern, and only for bells of the last 24 hours. The banner carries the row's own title,
+body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` to admin-role phones with a tag per row.
+The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
+and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
+still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
+still waits for a call") or by unsetting the gate. It sends nothing to a lead.
+
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
 

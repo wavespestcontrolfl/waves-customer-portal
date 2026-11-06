@@ -97,12 +97,19 @@ const PROBE_INPUTS = [
   { customer_id: 'cust-x', updates: { last_name: 'Sample', notes: 'x' } }, { customer_id: 'cust-x', updates: { phone: '555-0100' } }, { customer_id: 'cust-x', updates: { email: 'a@example.invalid' } },
   { label: null }, { label: 'rental' }, { appointment_id: 'appt-x', new_date: '2030-01-01' },
 ];
-const PROBE_PREVIEWS = [null, { pinned_appointment: { id: 'appt-x' } }, { pinned_appointment: { id: 'appt-x', visit_id: 'visit-x' } },
+const PROBE_PREVIEWS = [null, { pinned_appointment: { id: 'appt-x', customer_id: 'cust-x' } }, { pinned_appointment: { id: 'appt-x', customer_id: 'cust-x', visit_id: 'visit-x' } },
   { notes_replaced: { before: null } }, { notes_replaced: { before: 'existing' } }];
+
+// Target rules (owner ruling 2026-10-12 decision 3): an owner-direct customer edit runs without a card only for a
+// customer the message named or the page shows. The probes and the case calls below treat their customer as that
+// customer, so the cells show the other conditions.
+const NAMED_CUSTOMER = 'cust-x';
+const namedGrounding = (ownerDirect, ...ids) => ownerDirect.targetGrounding({ targets: [NAMED_CUSTOMER, ...ids].map((customer_id) => ({ customer_id })), page: { ids: {} } });
 
 function ownerPolicyProbe(ownerDirect, tool) {
   const results = new Set();
-  for (const input of PROBE_INPUTS) for (const preview of PROBE_PREVIEWS) results.add(ownerDirect.executesWithoutCard(tool, input, preview));
+  const grounding = namedGrounding(ownerDirect);
+  for (const input of PROBE_INPUTS) for (const preview of PROBE_PREVIEWS) results.add(ownerDirect.executesWithoutCard(tool, { customer_id: NAMED_CUSTOMER, ...input }, preview, null, grounding));
   return { canBeDirect: results.has(true), canBeCard: results.has(false) };
 }
 
@@ -296,7 +303,14 @@ function schemaProblems(call, registry, updatableCustomerFields, gapKeys) {
 // Every other actor or mode: a write always takes its card.
 function expectedCard(c, calls, ownerDirect) {
   if (c.actor === 'owner' && c.mode === 'owner_direct_on') {
-    return calls.some((k) => !ownerDirect.executesWithoutCard(k.tool, k.input, k.preview || null));
+    return calls.some((k) => {
+      // The case's customer is the one the owner named: put its id where owner-direct looks for it.
+      const named = k.input && k.input.customer_id !== undefined ? String(k.input.customer_id) : NAMED_CUSTOMER;
+      const preview = k.preview ? { ...k.preview } : null;
+      if (preview && preview.pinned_appointment) preview.pinned_appointment = { ...preview.pinned_appointment, customer_id: named };
+      if (preview && Array.isArray(preview.stops)) preview.stops = preview.stops.map((stop) => ({ ...stop, customer_id: named }));
+      return !ownerDirect.executesWithoutCard(k.tool, { customer_id: named, ...k.input }, preview, null, namedGrounding(ownerDirect, named));
+    });
   }
   return true;
 }

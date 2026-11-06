@@ -1,9 +1,9 @@
 /**
- * GATE_IB_READ_NOTES (owner ruling 2026-10-13): the general read returns
+ * Returned notes (owner ruling 2026-10-13): the general read returns
  * free-text notes, scrubbed by ONE fixed-format scrubber, cut at 1,000
  * characters, still marked untrusted. Gate codes and lockbox instructions come
- * back as written (no prose rules). Gate off or a non-owner login: the
- * withholding is unchanged. Synthetic data only; fake secrets are built by
+ * back as written (no prose rules). A non-owner login: the
+ * withholding is unchanged (ib-admin-read-office.test.js). Synthetic data only; fake secrets are built by
  * concatenation so a scanner does not flag the repo.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -57,16 +57,15 @@ const SHAPES = {
   'URL user:password': ['https://admin:' + 'hunter22@host.example.test/x', 'hunter22'],
 };
 
-describe('GATE_IB_READ_NOTES on, owner login', () => {
+describe('owner login returns notes', () => {
   let before;
   beforeEach(() => {
-    before = { general: process.env.GATE_IB_GENERAL_READ, platform: process.env.GATE_IB_PLATFORM, notes: process.env.GATE_IB_READ_NOTES };
+    before = { general: process.env.GATE_IB_GENERAL_READ, platform: process.env.GATE_IB_PLATFORM };
     process.env.GATE_IB_GENERAL_READ = 'true';
     process.env.GATE_IB_PLATFORM = 'true';
-    process.env.GATE_IB_READ_NOTES = 'true';
   });
   afterEach(() => {
-    for (const [name, key] of [['GATE_IB_GENERAL_READ', 'general'], ['GATE_IB_PLATFORM', 'platform'], ['GATE_IB_READ_NOTES', 'notes']]) {
+    for (const [name, key] of [['GATE_IB_GENERAL_READ', 'general'], ['GATE_IB_PLATFORM', 'platform']]) {
       if (before[key] === undefined) delete process.env[name]; else process.env[name] = before[key];
     }
   });
@@ -147,47 +146,16 @@ describe('GATE_IB_READ_NOTES on, owner login', () => {
     expect(result).not.toHaveProperty('notes_returned');
   });
 
-  test('a non-owner login is refused, gate on', async () => {
+  test('a non-owner login is refused', async () => {
     const result = await read(ENTRY, { notes: 'gate code 1234' }, { ...READER, fullAccess: false });
     expect(result).toMatchObject({ code: 'permission_denied' });
     expect(JSON.stringify(result)).not.toContain('1234');
   });
 
-  test('GATE_IB_READ_NOTES without the general read gate returns nothing', async () => {
+  test('without the general read gate nothing is returned', async () => {
     process.env.GATE_IB_GENERAL_READ = 'false';
     const result = await read(ENTRY, { notes: 'gate code 1234' });
     expect(result).toMatchObject({ code: 'gate_off' });
-  });
-});
-
-describe('GATE_IB_READ_NOTES off: today\'s withholding, byte for byte', () => {
-  const body = { id: 1, notes: 'the gate code is 1234', nested: [{ reason: 'lockbox 4521' }], details: { a: 'b' }, label: 'ok' };
-  let before;
-  beforeEach(() => {
-    before = { general: process.env.GATE_IB_GENERAL_READ, platform: process.env.GATE_IB_PLATFORM, notes: process.env.GATE_IB_READ_NOTES };
-    process.env.GATE_IB_GENERAL_READ = 'true';
-    process.env.GATE_IB_PLATFORM = 'true';
-  });
-  afterEach(() => {
-    for (const [name, key] of [['GATE_IB_GENERAL_READ', 'general'], ['GATE_IB_PLATFORM', 'platform'], ['GATE_IB_READ_NOTES', 'notes']]) {
-      if (before[key] === undefined) delete process.env[name]; else process.env[name] = before[key];
-    }
-  });
-
-  test.each([undefined, 'false', 'TRUE', '1'])('GATE_IB_READ_NOTES=%s withholds every note', async (value) => {
-    if (value === undefined) delete process.env.GATE_IB_READ_NOTES; else process.env.GATE_IB_READ_NOTES = value;
-    const result = await read(ENTRY, body);
-    expect(result.data).toEqual({
-      id: 1,
-      notes: `[note withheld: ${body.notes.length} characters]`,
-      nested: [{ reason: `[note withheld: ${body.nested[0].reason.length} characters]` }],
-      details: `[note withheld: ${JSON.stringify(body.details).length} characters]`,
-      label: 'ok',
-    });
-    expect(result.notes_withheld).toBe(3);
-    expect(result).not.toHaveProperty('notes_returned');
-    expect(result.note).toMatch(/Free-text notes are not read through this tool/);
-    expect(JSON.stringify(result)).not.toContain('1234');
   });
 });
 
@@ -292,7 +260,7 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
 
 describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
   const { scrubNote, SCAN_LIMIT } = require('../utils/note-secret-scrubber');
-  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM'];
   let saved;
   beforeEach(() => { saved = gates.map(g => process.env[g]); gates.forEach(g => { process.env[g] = 'true'; }); });
   afterEach(() => gates.forEach((g, i) => { if (saved[i] === undefined) delete process.env[g]; else process.env[g] = saved[i]; }));
@@ -398,7 +366,7 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
 
 describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, random-token backstop', () => {
   const { scrubNote, trimToScanLimit, SCAN_LIMIT, REMOVED } = require('../utils/note-secret-scrubber');
-  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM'];
   let saved;
   beforeEach(() => {
     saved = gates.map(name => process.env[name]);
@@ -966,7 +934,7 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
   });
 });
 
-describe('Codex #6375 r14: keep-mode rows return their reviewed note fields while GATE_IB_READ_NOTES is on', () => {
+describe('Codex #6375 r14: keep-mode rows return their reviewed note fields', () => {
   const INVOICE = catalog.entries.find(entry => entry.endpoint === '/admin/invoices/:id');
   const INVOICE_ID = '20000000-0000-4000-8000-00000000000a';
   const body = {
@@ -976,7 +944,7 @@ describe('Codex #6375 r14: keep-mode rows return their reviewed note fields whil
     internal_secret_column: 'dropped',
     line_items: [{ description: 'Quarterly pest service', quantity: 1, amount: 99, hidden_cost: 5 }],
   };
-  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM'];
   let saved;
   beforeEach(() => { saved = gates.map(name => process.env[name]); process.env.GATE_IB_GENERAL_READ = 'true'; process.env.GATE_IB_PLATFORM = 'true'; });
   afterEach(() => { gates.forEach((name, i) => { if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i]; }); });
@@ -990,8 +958,7 @@ describe('Codex #6375 r14: keep-mode rows return their reviewed note fields whil
     expect(INVOICE.keep).not.toContain('notes');
   });
 
-  test('gate on: notes and line-item descriptions come back scrubbed, other columns stay dropped', async () => {
-    process.env.GATE_IB_READ_NOTES = 'true';
+  test('notes and line-item descriptions come back scrubbed, other columns stay dropped', async () => {
     const result = await ask();
     expect(result.data.notes).toContain('Gate opens late.');
     expect(result.data.notes).toContain('[removed]');
@@ -1001,20 +968,11 @@ describe('Codex #6375 r14: keep-mode rows return their reviewed note fields whil
     expect(result.notes_returned).toBeGreaterThanOrEqual(2);
     expect(result).not.toHaveProperty('notes_withheld');
   });
-
-  test('gate off: the projection is exactly as before, notes and descriptions absent', async () => {
-    delete process.env.GATE_IB_READ_NOTES;
-    const result = await ask();
-    expect(result.data).not.toHaveProperty('notes');
-    expect(result.data.line_items[0]).toEqual({ quantity: 1, amount: 99 });
-    expect(result).not.toHaveProperty('notes_returned');
-    expect(result.note).not.toContain('reviewed note fields');
-  });
 });
 
-describe('Codex #6375 r18: the estimate list returns reviewNotes under estimatorEngine while the notes gate is on', () => {
+describe('Codex #6375 r18: the estimate list returns reviewNotes under estimatorEngine', () => {
   const ESTIMATES = catalog.entries.find(entry => entry.endpoint === '/admin/estimates');
-  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM'];
   let saved;
   beforeEach(() => { saved = gates.map(name => process.env[name]); process.env.GATE_IB_GENERAL_READ = 'true'; process.env.GATE_IB_PLATFORM = 'true'; });
   afterEach(() => { gates.forEach((name, i) => { if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i]; }); });
@@ -1032,8 +990,7 @@ describe('Codex #6375 r18: the estimate list returns reviewNotes under estimator
     expect(ESTIMATES.keepNotes).not.toContain('estimates.*.reviewNotes');
   });
 
-  test('gate on: reviewNotes comes back scrubbed under estimatorEngine, other keys stay dropped', async () => {
-    process.env.GATE_IB_READ_NOTES = 'true';
+  test('reviewNotes comes back scrubbed under estimatorEngine, other keys stay dropped', async () => {
     const result = await ask();
     const estimate = result.data.estimates[0];
     expect(estimate.estimatorEngine).toEqual({ reviewNotes: 'Check the north fence. DB_PASSWORD=[removed]' });
@@ -1041,27 +998,18 @@ describe('Codex #6375 r18: the estimate list returns reviewNotes under estimator
     expect(estimate).not.toHaveProperty('extra');
     expect(result.notes_returned).toBeGreaterThanOrEqual(2);
   });
-
-  test('gate off: no estimatorEngine and no notes', async () => {
-    delete process.env.GATE_IB_READ_NOTES;
-    const result = await ask();
-    const estimate = result.data.estimates[0];
-    expect(estimate).not.toHaveProperty('notes');
-    expect(JSON.stringify(estimate)).not.toContain('north fence');
-  });
 });
 
 // Follow-ups to the #6375 known limits (redirect depth, CVV= form, card-number span). Synthetic data only.
 describe('#6375 follow-ups', () => {
   let before;
   beforeEach(() => {
-    before = { general: process.env.GATE_IB_GENERAL_READ, platform: process.env.GATE_IB_PLATFORM, notes: process.env.GATE_IB_READ_NOTES };
+    before = { general: process.env.GATE_IB_GENERAL_READ, platform: process.env.GATE_IB_PLATFORM };
     process.env.GATE_IB_GENERAL_READ = 'true';
     process.env.GATE_IB_PLATFORM = 'true';
-    process.env.GATE_IB_READ_NOTES = 'true';
   });
   afterEach(() => {
-    for (const [name, key] of [['GATE_IB_GENERAL_READ', 'general'], ['GATE_IB_PLATFORM', 'platform'], ['GATE_IB_READ_NOTES', 'notes']]) {
+    for (const [name, key] of [['GATE_IB_GENERAL_READ', 'general'], ['GATE_IB_PLATFORM', 'platform']]) {
       if (before[key] === undefined) delete process.env[name]; else process.env[name] = before[key];
     }
   });

@@ -6457,7 +6457,15 @@ customer's `service_contact*_phone` slot whose holder attestation
 `DISABLE_CONTACT_CONSENT_GATE` SMS rollback switch never opens the login) —
 resolved ONLY when no active account-holder row carries the number
 (`resolveLoginIdentity`: the holder first; a contact on several rows lands
-on the primary profile, then the oldest). send-code then sends that contact
+on the primary profile, then the oldest). A second gate narrows who counts (`GATE_CONTACT_LOGIN_HOLDER_ONLY`,
+dark; strict `=== 'true'`, read at call time — `contactLoginHolderOnlyLive()`): when live, `contactSlotMayLogIn` also
+requires the phone to be listed in `service_preferences.login_attested_phone_keys`,
+which only the signed-in holder's portal contacts save writes (a holder who
+attested contacts before the gate re-saves them once to restore their sign-in). Any other writer of the slot phones (admin edit, call pipeline, dedupe) cannot add to that list, and a database trigger (migration 20261105060000) cuts it to the phones still stored in a slot, so a removed number that is later re-added does not regain sign-in.
+A consent stamp written by the call pipeline, the grandfather backfill or a
+recipient YES no longer admits a number by itself: send-code sends no code,
+verify-code answers the same 401, and a live contact session ends at its next
+request with the same 401. Texts to those contacts are unchanged. For an admitted contact, send-code then sends
 the OTP under the same uniform body; verify-code mints a session whose
 access AND refresh tokens carry `contactKey` (the last-10 phone key, also
 `customer_refresh_tokens.contact_key`) and returns `actor { kind:

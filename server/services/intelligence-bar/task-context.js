@@ -3,7 +3,6 @@
  */
 const db = require('../../models/db');
 const { normalizeEmail } = require('../../utils/contact-normalize');
-const { ibTargetRulesV2Live } = require('../../config/feature-gates');
 const { MAX_LABEL_CHARS, isChoiceLabelShape } = require('./choice-tools');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -96,17 +95,17 @@ const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
 const setQuantified = prompt => SET_QUANTIFIER_RE.test(normalizeName(withoutContacts(targetClause(prompt))));
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|stop|visit|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
 const CUSTOMER_LOOKUP_LIMIT = 10;
-// GATE_IB_TARGET_RULES_V2 (owner 2026-10-20): a same-name lookup lists up to 25
+// Owner 2026-10-20: a same-name lookup lists up to 25
 // rows. The fetch asks for one more than it lists, so exactly 25 rows are
-// complete and a 26th marks the lookup as capped. Read at call time; off = 10.
+// complete and a 26th marks the lookup as capped.
 const CUSTOMER_LOOKUP_LISTED_V2 = 25;
 // The 25-row lookup, choice labels and last-visit reads apply to the owner-direct
-// scope only (owner login + GATE_IB_OWNER_DIRECT + the v2 gate); the route passes
+// scope only (owner login + GATE_IB_OWNER_DIRECT); the route passes
 // `ownerDirectScope` to resolve(). Every other admin keeps 10 rows (Codex #6369 r10).
-const targetRulesV2Scope = scope => scope === true && ibTargetRulesV2Live();
+const targetRulesV2Scope = scope => scope === true;
 const customerLookupLimit = (scope = true) => (targetRulesV2Scope(scope) ? CUSTOMER_LOOKUP_LISTED_V2 + 1 : CUSTOMER_LOOKUP_LIMIT);
 
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9, r17): in the owner-direct scope every typed-target
+// Codex #6369 r9, r17: in the owner-direct scope every typed-target
 // parse (names, cities, phones, emails, the "First L., City" reply) reads only the first
 // characters of the message: resolve() cuts the prompt once, and typedCustomerIds cuts it again
 // for direct callers. A multi-megabyte prompt cannot make the parse materialize every match; the
@@ -409,7 +408,7 @@ async function loadPage(pageData, prompt) {
 function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort, nameHint, onScreenPick = null) {
   if (!complete || cohort) return { target: null, targets: [], ambiguous: true };
   if (candidates.length === 1) return { target: candidates[0], targets: candidates, ambiguous: false };
-  // GATE_IB_TARGET_RULES_V2: the owner is viewing one of several same-name customers
+  // The owner is viewing one of several same-name customers
   // and typed that name: the validated on-screen customer is the target, no choices
   // (Codex #6369 r13). Not a pick when the viewed customer is not among the matches.
   if (onScreenPick && candidates.some(candidate => candidate.customer_id === onScreenPick.customer_id)) {
@@ -421,7 +420,7 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort
   return { target: target || null, targets: target ? [target] : [], ambiguous: false };
 }
 
-// GATE_IB_TARGET_RULES_V2 (owner 2026-10-20). The last visit date of each
+// Owner 2026-10-20. The last visit date of each
 // listed customer, so the model can tell same-name rows apart and offer them as
 // buttons. One grouped read; a failed read leaves the date blank, never fails
 // the request.
@@ -441,7 +440,7 @@ async function withLastVisit(candidates) {
 }
 
 // The customers THIS message names: a name the operator typed, or a phone or
-// email they typed. GATE_IB_TARGET_RULES_V2 asks it of an owner-direct edit:
+// email they typed. Target rules ask it of an owner-direct edit:
 // the customer the model found by itself (a call log, a search) is not in this
 // list, so that edit keeps its card. A name shared by several customers names
 // none of them, unless a city or phone/email in the message narrows it to one.
@@ -786,7 +785,7 @@ async function initialFormIds(prompt) {
   return rows.length === 1 ? [String(rows[0].id)] : [];
 }
 
-// The text of the choice button for one same-name customer (GATE_IB_TARGET_RULES_V2).
+// The text of the choice button for one same-name customer.
 // offer_choices drops a label over MAX_LABEL_CHARS, so a long one becomes
 // "First L., City", which initialFormIds resolves back. null = no button can name this
 // customer (no city, still too long, or it looks like another same-name customer's):
@@ -984,7 +983,7 @@ const singleTarget = (customer, provenance) => {
 // customer. A request relying on the unavailable viewed record still stops.
 const pageErrorStage = r => (r.page.error && PAGE_REFERENCE_RE.test(targetClause(r.prompt)) && !r.named.length ? r.page : null);
 
-// GATE_IB_TARGET_RULES_V2, owner-direct scope: the on-screen customer is the pick among
+// Owner-direct scope: the on-screen customer is the pick among
 // several same-name customers only when the message typed nothing that names a customer.
 // A typed city, phone or email (one customer or several) is explicit evidence: it beats
 // the page, so there is no on-screen pick and the same-name note handles the choice
@@ -1020,8 +1019,8 @@ async function candidatesStage(r) {
   return null;
 }
 
-// Owner-direct v2 scope only: once a target is settled, only that customer stays in the candidates.
-// With the gate off, or for another admin, the candidates are left exactly as the lookup found them.
+// Owner-direct scope only: once a target is settled, only that customer stays in the candidates.
+// For another admin, the candidates are left exactly as the lookup found them.
 function collapseCandidates(r) {
   if (targetRulesV2Scope(r.ownerDirectScope)) r.candidates = [r.selection.target];
 }
@@ -1669,10 +1668,10 @@ function ownerDirectContext(context = {}) {
   return { ...rest, page: rest.page || { ids: {}, records: {} }, candidates: rest.candidates || [],
     target: rest.target || null, targets, requestedRecords: rest.requestedRecords || {},
     ambiguous: false, ownerDirect: true,
-    ...(ibTargetRulesV2Live() && context.typedCustomerIds ? sameNameNote(context) : {}) };
+    ...(context.typedCustomerIds ? sameNameNote(context) : {}) };
 }
 
-// GATE_IB_TARGET_RULES_V2: what the model is told about customers that share
+// What the model is told about customers that share
 // the name the owner typed. The rows (name, city, last visit) are already in
 // `candidates`; the note says what to do with them. offer_choices shows 4
 // buttons at most, so a longer list is offered by the most recent visits.

@@ -1,4 +1,4 @@
-// "Did you mean" divider for the admin customer pickers (GATE_CUSTOMER_SEARCH_FUZZY).
+// "Did you mean" divider for the admin customer pickers.
 //
 // The customer list endpoints append sound-alike rows after the exact rows,
 // each flagged `approximate: true`. A picker that renders the list puts this

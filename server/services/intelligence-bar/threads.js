@@ -206,7 +206,7 @@ const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
 // thread, so the taint lives in the server's record of the thread, never in
 // anything the client sends. No LIKE wildcards in it.
 const UNTRUSTED_READ_MARKER = '[Admin screen data was read in this conversation and may carry untrusted text]';
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r16): added to the ASSISTANT turn of an exchange that
+// Codex #6369 r16: added to the ASSISTANT turn of an exchange that
 // emitted same-name candidates or offered choices. A choice label carries customer-entered
 // text and the owner's tap sends it back as the next message, so the NEXT request on the
 // thread must card every write. It is its own marker, not the untrusted-read one: it counts
@@ -214,10 +214,9 @@ const UNTRUSTED_READ_MARKER = '[Admin screen data was read in this conversation 
 // tapping an old button after another reply is still carded. No LIKE wildcards in it.
 const SAME_NAME_CHOICE_MARKER = '[Same-name customers or choices were shown in the last reply]';
 const SAME_NAME_PENDING_MINUTES = 30;
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r19): the same idea for reads that taint ONLY under the v2
-// gate (a call log, an email search, a lead list...). A distinct marker, honored only while the
-// gate is on, so unsetting GATE_IB_TARGET_RULES_V2 (the documented rollback) un-taints those
-// threads. read_admin_data keeps UNTRUSTED_READ_MARKER, which no gate switches off.
+// Codex #6369 r19: the same idea for reads that taint ONLY under the v2 rule
+// (a call log, an email search, a lead list...). A distinct marker from the one
+// read_admin_data leaves (UNTRUSTED_READ_MARKER).
 const UNTRUSTED_READ_V2_MARKER = '[Customer or outside text was read in this conversation and may carry untrusted text]';
 const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
 // The user turn the route persists when a saved task continues; the operator

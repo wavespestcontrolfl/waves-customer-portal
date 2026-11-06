@@ -321,7 +321,7 @@ async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, s
   const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
     || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
   if (existing) return existing;
-  // GATE_IB_MULTI_CARD: the request's own open cards (ids the route minted a moment ago,
+  // Several cards in one answer: the request's own open cards (ids the route minted a moment ago,
   // judged independent of this one) are not a preceding unresolved action.
   const siblings = new Set((siblingCardIds || []).map(String));
   if (previous.some(row => !(row.status === 'pending' && siblings.has(String(row.id)))

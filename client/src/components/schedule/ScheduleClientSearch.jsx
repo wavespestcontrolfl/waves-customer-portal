@@ -2,8 +2,7 @@
 // appointments from any schedule view, then jump straight to that day.
 //
 // Reuses the existing GET /admin/schedule/list endpoint, which filters by
-// customer name and defaults to today-forward. With GATE_CUSTOMER_SEARCH_FUZZY
-// on, a name that finds fewer than 3 appointments also returns the upcoming
+// customer name and defaults to today-forward. A name that finds fewer than 3 appointments also returns the upcoming
 // appointments of sound-alike customers (`approximate: true`) after the exact
 // ones; they show under a "Did you mean" divider.
 // Results are grouped by customer (a name like "Smith" can match several) and
