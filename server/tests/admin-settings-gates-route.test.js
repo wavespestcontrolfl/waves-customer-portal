@@ -103,6 +103,12 @@ describe('readsOn follows each gate\'s own parser (codex #7732)', () => {
     for (const [value, on] of [['true', true], ['on', true], ['1', true], ['TRUE', true], ['false', false]]) {
       withEnv({ GATE_ADMIN_OPS_QUEUE: value }, () => expect(row('GATE_ADMIN_OPS_QUEUE').readsOn).toBe(on));
     }
+    // A gate whose readers all live outside feature-gates.js: the catalogue
+    // sees no reader evidence there, but every real reader is gateEnvValue.
+    expect(catalog.get('GATE_LAWN_MIN_AFTER_DISCOUNT').reader).toBe('strict');
+    for (const [value, on] of [['on', true], ['1', true], ['TRUE', true], ['false', false]]) {
+      withEnv({ GATE_LAWN_MIN_AFTER_DISCOUNT: value }, () => expect(row('GATE_LAWN_MIN_AFTER_DISCOUNT').readsOn).toBe(on));
+    }
   });
 });
 

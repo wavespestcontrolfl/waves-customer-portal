@@ -77,14 +77,53 @@ function flipStatus(name, entry) {
   return { flippable: true, notFlippableReason: null };
 }
 
-// Whether the code reads the variable as on, by the gate's own parser: a
-// strict reader takes exactly 'true'; a gateEnvValue reader takes 1 / true /
-// on in any case. Computed from the raw value, which the list may withhold.
+// How the code parses each gate, across EVERY file that reads it (the reader
+// files docs/gate-index.md lists), not only feature-gates.js (codex #7732):
+// 'strict' = every reader compares to exactly 'true'; 'loose' = every reader
+// uses gateEnvValue (1 / true / on, any case); 'mixed' = both. Built once per
+// process from the source files; a file that cannot be read adds nothing.
+let readerKindCache = null;
+function readerKinds() {
+  if (readerKindCache) return readerKindCache;
+  const root = path.join(__dirname, '..', '..');
+  const sources = new Map();
+  const source = (file) => {
+    if (!sources.has(file)) {
+      try { sources.set(file, fs.readFileSync(path.join(root, file), 'utf8')); } catch { sources.set(file, ''); }
+    }
+    return sources.get(file);
+  };
+  const kinds = new Map();
+  try {
+    for (const line of fs.readFileSync(GATE_INDEX, 'utf8').split('\n')) {
+      const m = line.match(/^- `(GATE_[A-Z0-9_]+)` — ((?:`[^`]+`(?:, )?)+)/);
+      if (!m) continue;
+      const name = m[1];
+      let strict = false;
+      let loose = false;
+      for (const [, file] of m[2].matchAll(/`([^`]+)`/g)) {
+        const src = source(file);
+        if (src.includes(`process.env.${name} === 'true'`)) strict = true;
+        if (src.includes(`gateEnvValue('${name}')`)) loose = true;
+      }
+      kinds.set(name, strict && loose ? 'mixed' : loose ? 'loose' : 'strict');
+    }
+  } catch {
+    // unreadable index → every gate falls back to the catalogue's reader
+  }
+  readerKindCache = kinds;
+  return kinds;
+}
+
+// Whether the code reads the variable as on. 'true' is on and an unset
+// variable is off for every reader; any other value is on only when every
+// reader takes it (a gateEnvValue-only gate: 1 / true / on, any case).
 function readsOnFor(name, entry) {
   const raw = process.env[name];
   if (raw === undefined) return false;
-  if (entry?.reader === 'loose') return ['1', 'true', 'on'].includes(String(raw).toLowerCase());
-  return raw === 'true';
+  if (raw === 'true') return true;
+  const kind = readerKinds().get(name) || entry?.reader || 'strict';
+  return kind === 'loose' && ['1', 'true', 'on'].includes(String(raw).toLowerCase());
 }
 
 // GATE_* names a gate's description says it depends on ("needs GATE_Y").
