@@ -416,4 +416,32 @@ describe('holder contact save prunes a removed contact\'s choices', () => {
     expect(res.status).toBe(200);
     expect(tables.service_contact_notification_prefs.map((r) => r.phone_key)).toEqual(['9415550303']);
   });
+
+  // GATE_CONTACT_LOGIN_HOLDER_ONLY: the signed-in holder's save is the only writer of
+  // the per-phone login attestation (service_preferences.login_attested_phone_keys).
+  test('a consented list save records exactly the saved phones as login-attested, keeping other preferences; an emptied list drops it', async () => {
+    tables.customers[0].service_preferences = JSON.stringify({ unconsented_slot_phone_keys: ['9415550999'] });
+    mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
+    const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContacts: [{ firstName: 'Terry', lastName: 'Tenant', phone: '+19415550303', email: '' }],
+      serviceContactsConsent: true,
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({
+      unconsented_slot_phone_keys: ['9415550999'], login_attested_phone_keys: ['9415550303'],
+    });
+    const cleared = await call('PUT', '/api/notifications/property-preferences/cust-1', { serviceContacts: [], serviceContactsConsent: true });
+    expect(cleared.status).toBe(200);
+    expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({ unconsented_slot_phone_keys: ['9415550999'] });
+  });
+
+  test('the legacy single-contact save lists slot 1 plus the surviving slots as login-attested', async () => {
+    mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
+    const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContact: { firstName: 'Nora', lastName: 'New', phone: '+19415550404', email: '' },
+      serviceContactsConsent: true,
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(tables.customers[0].service_preferences).login_attested_phone_keys.sort()).toEqual(['9415550303', '9415550404']);
+  });
 });

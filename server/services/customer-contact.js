@@ -485,18 +485,50 @@ function findServiceContactSlotByPhoneKey(customer, phoneKey) {
 // that helper honors DISABLE_CONTACT_CONSENT_GATE=1, the SMS fan-out rollback
 // switch, which must not open the login to unstamped numbers (codex r6 P1).
 //
-// GATE_CONTACT_LOGIN_HOLDER_ONLY (security audit run 3, dark): the stamp only
-// opens the login when the account holder wrote it themselves in the signed-in
-// portal. The call pipeline stamps a number from an unauthenticated caller's
-// words ('call_pipeline_request'); that, the grandfather backfill and any
-// other machine source keep their texts but no longer open a sign-in.
-const HOLDER_ATTESTED_CONSENT_SOURCE = 'portal_account_holder';
+// GATE_CONTACT_LOGIN_HOLDER_ONLY (security audit run 3, dark): the stamp alone
+// stops being enough. The call pipeline stamps a number from an unauthenticated
+// caller's words ('call_pipeline_request'), and a recipient's own YES can lift
+// the unconsented hold while an older holder stamp stays, so neither the stamp
+// nor its source says the HOLDER approved THIS phone. With the gate on, a slot
+// may sign in only when the holder's own portal save listed that phone
+// (service_preferences.login_attested_phone_keys, written only by
+// loginAttestedPrefs below). Texts are untouched.
+function parsedServicePrefs(customer = {}) {
+  let prefs = customer.service_preferences;
+  if (typeof prefs === 'string') {
+    try { prefs = JSON.parse(prefs); } catch { prefs = null; }
+  }
+  return prefs && typeof prefs === 'object' && !Array.isArray(prefs) ? prefs : {};
+}
+
+function loginAttestedPhoneKeys(customer = {}) {
+  const keys = parsedServicePrefs(customer).login_attested_phone_keys;
+  return new Set((Array.isArray(keys) ? keys : []).map((k) => phoneKeyOf(k)).filter(Boolean));
+}
+
+// The service_preferences value a holder's portal contacts save writes, from
+// the LOCKED row and the phones that save leaves stored. `attested` is true
+// only when the signed-in holder confirmed the consent statement on this save
+// (the same condition that stamps portal_account_holder); any other save drops
+// the list. Returns undefined when nothing needs writing.
+function loginAttestedPrefs(lockedRow, phones, attested) {
+  const prefs = { ...parsedServicePrefs(lockedRow) };
+  if (attested === true) {
+    prefs.login_attested_phone_keys = [...new Set((phones || []).map((p) => phoneKeyOf(p)).filter((k) => k.length >= 10))];
+  } else if (Object.prototype.hasOwnProperty.call(prefs, 'login_attested_phone_keys')) {
+    delete prefs.login_attested_phone_keys;
+  } else {
+    return undefined;
+  }
+  return prefs;
+}
+
 function contactSlotMayLogIn(customer, phoneKey) {
   const key = phoneKeyOf(phoneKey);
   if (!customer || !key) return false;
   if (!customer.service_contacts_consent_at || unconsentedSlotPhoneKeys(customer).has(key)) return false;
   if (!require('../config/feature-gates').contactLoginHolderOnlyLive()) return true;
-  return customer.service_contacts_consent_source === HOLDER_ATTESTED_CONSENT_SOURCE;
+  return loginAttestedPhoneKeys(customer).has(key);
 }
 
 // True if this customer has a distinct service contact configured (any slot).
@@ -525,6 +557,7 @@ module.exports = {
   getServiceContactSmsRecipient,
   getServiceContactSlots,
   contactSlotMayLogIn,
+  loginAttestedPrefs,
   findServiceContactSlotByPhoneKey,
   phoneKeyOf,
   isServiceContactRole,

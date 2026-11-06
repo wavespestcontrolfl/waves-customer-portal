@@ -397,39 +397,52 @@ describe('customer contact recipient routing', () => {
 });
 
 describe('contactSlotMayLogIn — GATE_CONTACT_LOGIN_HOLDER_ONLY', () => {
-  const { contactSlotMayLogIn } = require('../services/customer-contact');
+  const { contactSlotMayLogIn, loginAttestedPrefs } = require('../services/customer-contact');
   const KEY = '5552220000';
-  const stamped = (source) => ({ ...customer, service_contacts_consent_source: source });
+  const withPrefs = (prefs, source = 'portal_account_holder') => ({
+    ...customer, service_contacts_consent_source: source, service_preferences: prefs,
+  });
+  const listed = (keys) => JSON.stringify({ login_attested_phone_keys: keys });
 
   afterEach(() => { delete process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY; });
 
   test('gate off: the stamp alone authorizes login whatever wrote it (unchanged)', () => {
     for (const source of ['call_pipeline_request', 'portal_account_holder', null]) {
-      expect(contactSlotMayLogIn(stamped(source), KEY)).toBe(true);
+      expect(contactSlotMayLogIn(withPrefs(null, source), KEY)).toBe(true);
     }
   });
 
-  test('gate on: only the holder\'s portal attestation authorizes login', () => {
+  test('gate on: only a phone the holder\'s portal save listed authorizes login, whatever the stamp source', () => {
     process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
-    expect(contactSlotMayLogIn(stamped('portal_account_holder'), KEY)).toBe(true);
-    for (const source of ['call_pipeline_request', 'legacy_grandfathered_backfill', 'recipient_optin_confirmed', null, undefined]) {
-      expect(contactSlotMayLogIn(stamped(source), KEY)).toBe(false);
+    expect(contactSlotMayLogIn(withPrefs(listed([KEY])), KEY)).toBe(true);
+    expect(contactSlotMayLogIn(withPrefs({ login_attested_phone_keys: [KEY] }, 'call_pipeline_request'), KEY)).toBe(true);
+    for (const source of ['call_pipeline_request', 'legacy_grandfathered_backfill', 'recipient_optin_confirmed', 'portal_account_holder', null]) {
+      expect(contactSlotMayLogIn(withPrefs(null, source), KEY)).toBe(false);
+      expect(contactSlotMayLogIn(withPrefs(listed(['5559990000']), source), KEY)).toBe(false);
     }
   });
 
   test('gate on: an unstamped account or an unconsented slot phone is still refused', () => {
     process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
-    expect(contactSlotMayLogIn({ ...stamped('portal_account_holder'), service_contacts_consent_at: null }, KEY)).toBe(false);
-    expect(contactSlotMayLogIn({
-      ...stamped('portal_account_holder'),
-      service_preferences: JSON.stringify({ unconsented_slot_phone_keys: [KEY] }),
-    }, KEY)).toBe(false);
+    expect(contactSlotMayLogIn({ ...withPrefs(listed([KEY])), service_contacts_consent_at: null }, KEY)).toBe(false);
+    expect(contactSlotMayLogIn(withPrefs(JSON.stringify({ login_attested_phone_keys: [KEY], unconsented_slot_phone_keys: [KEY] })), KEY)).toBe(false);
   });
 
   test('a call-stamped contact still receives texts with the gate on (only login changes)', () => {
     process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
-    expect(getAppointmentContacts(stamped('call_pipeline_request'), { appointment_notify_primary: false })).toEqual([
+    expect(getAppointmentContacts(withPrefs(null, 'call_pipeline_request'), { appointment_notify_primary: false })).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
     ]);
+  });
+
+  test('loginAttestedPrefs: an attested save lists the stored phones and keeps other prefs; any other save drops the list', () => {
+    const row = { service_preferences: JSON.stringify({ unconsented_slot_phone_keys: ['5551110001'], login_attested_phone_keys: ['5550000000'] }) };
+    expect(loginAttestedPrefs(row, ['+1 (555) 222-0000', '', null, '5552220000'], true)).toEqual({
+      unconsented_slot_phone_keys: ['5551110001'], login_attested_phone_keys: ['5552220000'],
+    });
+    expect(loginAttestedPrefs(row, ['5552220000'], false)).toEqual({ unconsented_slot_phone_keys: ['5551110001'] });
+    expect(loginAttestedPrefs({ service_preferences: null }, ['5552220000'], false)).toBeUndefined();
+    expect(loginAttestedPrefs({ service_preferences: null }, ['5552220000'], true)).toEqual({ login_attested_phone_keys: ['5552220000'] });
+    expect(loginAttestedPrefs({ service_preferences: { a: 1 } }, [], true)).toEqual({ a: 1, login_attested_phone_keys: [] });
   });
 });
