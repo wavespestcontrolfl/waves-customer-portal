@@ -698,13 +698,14 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
 }
 
 // ── Pay-page FAQ (GATE_PAY_PAGE_FAQ, 2026-09-03) ───────────────────
-// Three or four questions directly under the Pay button, above "Other ways
-// to pay". Every answer restates a fact this page already carries (the
+// Three or four questions at the end of the pay card, below the invoice
+// details and above "Other ways to pay" (the card form moved above the
+// details on 2026-11-06). Every answer restates a fact this page already carries (the
 // method tiles, the consent copy, the bank-processing / verification
 // states, the Zelle panel) — nothing here is a new business rule, and the
 // surcharge percent is DERIVED from the same rate the tile shows, never a
 // typed string. Native <details> so there is no state to fence; rendered
-// only inside the payment panel, so it leaves with the panel on success /
+// only inside a payment panel, so it leaves with the panel on success /
 // bank-processing. Renders nothing unless the server sent `payFaq` (gate).
 const FAQ_SUMMARY = {
   listStyle: 'none',
