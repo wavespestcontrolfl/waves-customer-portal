@@ -101,6 +101,18 @@ function nightToldLockOn() {
   }
 }
 
+// GATE_DAY_ONLY_PROMISE (owner 2026-11-05 "D2 a"): until the 24-hour text a customer may have been told only the DAY.
+// Read once per day load, call time, strict 'true'; it counts only while the told-lock is on. An unreadable gate is off.
+function dayOnlyOn() {
+  try {
+    if (!nightToldLockOn()) return false;
+    const gates = require('../../config/feature-gates');
+    return typeof gates.dayOnlyPromiseLive === 'function' && gates.dayOnlyPromiseLive() === true;
+  } catch {
+    return false;
+  }
+}
+
 // The extra columns the told-lock reasons read (first_or_one_time, person_placed). Gate off: none, as before.
 const TOLD_LOCK_SELECT = [
   'scheduled_services.recurring_parent_id', 'scheduled_services.recurring_dispatch_due_date',
@@ -161,6 +173,26 @@ async function loadToldIds(conn, rows, now) {
 }
 
 /**
+ * GATE_DAY_ONLY_PROMISE: what the customer was told for each stop, in ONE bulk read (told-visits.loadPromiseLevels).
+ * Returns { told, dayTold }: `told` = stops with an hour promise (a known slot, or an unknown window, which counts as
+ * an hour on purpose), `dayTold` = stops told only the day. A failed read fails CLOSED: every stop counts as told an
+ * hour, so the day stays fixed.
+ */
+async function loadToldLevels(conn, rows, now) {
+  const ids = rows.map((r) => r.id);
+  try {
+    const levels = await require('../auto-dispatch/told-visits').loadPromiseLevels(conn, ids, now);
+    return {
+      told: new Set(ids.filter((id) => levels.get(id) === 'hour')),
+      dayTold: new Set(ids.filter((id) => levels.get(id) === 'day')),
+    };
+  } catch (err) {
+    logger.warn(`[day-replan] the told-level read failed (${err.message}); the day stays fixed`);
+    return { told: new Set(ids), dayTold: new Set() };
+  }
+}
+
+/**
  * Ids of stops a person (staff or the customer) placed on their current date or time, by the auto-dispatch rule
  * (eligibility.isPersonPlacedVisit: the newest slot-changing reschedule_log row by a non-automatic initiator that
  * lands on the date, or a person date exception). A day holds a handful of rows, so one bounded read per row.
@@ -184,7 +216,9 @@ async function loadDayContext(conn, dateStr, now) {
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
   const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
   if (!toldLock) return ctx;
-  return { ...ctx, toldLock, told: await loadToldIds(conn, rows, now), personPlaced: await loadPersonPlaced(conn, rows) };
+  const dayOnly = dayOnlyOn();
+  const facts = dayOnly ? await loadToldLevels(conn, rows, now) : { told: await loadToldIds(conn, rows, now) };
+  return { ...ctx, toldLock, ...facts, personPlaced: await loadPersonPlaced(conn, rows) };
 }
 
 /**
@@ -227,10 +261,14 @@ function officeReviewPending(row) {
  * GATE_NIGHT_TOLD_LOCK reasons, checked after the existing ones: a time the customer was told or chose does not
  * change. A told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed.
  */
-function toldLockReason(row, { told, personPlaced }) {
+function toldLockReason(row, { told, personPlaced, dayTold }) {
   if (row.customer_confirmed === true) return 'customer_confirmed';
-  if (row.is_recurring !== true || row.recurring_parent_id == null) return 'first_or_one_time';
-  if (!personPlaced || personPlaced.has(row.id)) return 'person_placed';
+  // GATE_DAY_ONLY_PROMISE: a stop the customer was told only the DAY for (dayTold) may change its hour inside that
+  // day, so being a first or one-time visit, or being placed by a person, does not fix it (the re-plan only changes
+  // the hour). A confirmed stop above stays fixed, which is the conservative side.
+  const dayOnly = !!dayTold && dayTold.has(row.id);
+  if (!dayOnly && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
+  if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
   if (!told || told.has(row.id)) return 'time_told';
   return null;
 }
@@ -636,6 +674,9 @@ function applyDeps() {
     fixedReason,
     // GATE_NIGHT_TOLD_LOCK: the move transaction re-reads the told-lock facts (apply.js recheckVisit).
     toldLockOn: nightToldLockOn,
+    // GATE_DAY_ONLY_PROMISE: the move transaction re-reads what the customer was told (apply.js toldLockFacts).
+    dayOnlyOn,
+    loadPromiseLevels: (conn, ids, now) => require('../auto-dispatch/told-visits').loadPromiseLevels(conn, ids, now),
     isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
     // The ids among `ids` the customer has a known time for (the no-show detector's promise reader); throws when unreadable.
     loadToldIds: (conn, ids, now) => require('../auto-dispatch/told-visits').loadToldVisitIds(conn, ids, now),

@@ -247,9 +247,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // Generic appointment texts also include links and preparation tips;
       // only a scheduling notice can replace the customer's promised window.
       // Legacy move notices without a saved time still count as unknown.
+      // GATE_DAY_ONLY_PROMISE: a day-only move notice is a purpose 'appointment' row with NO saved slot, so none of
+      // the other predicates fetch it. Left unread, the reader would fall back to an OLDER known window (the trap
+      // the LEGACY_SCHEDULING_MESSAGE_TYPES note describes) and keep enforcing a window the visit no longer holds.
+      // Only the day-only senders write the marker (services/time-promise.js DAY_PROMISE_META).
       .whereRaw(`(a.purpose = ANY(?::text[]) OR (a.purpose = 'appointment' AND
         (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
-          OR a.metadata->>'original_message_type' = ANY(?::text[]))))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
+          OR a.metadata->>'original_message_type' = ANY(?::text[])
+          OR a.metadata->>'promise_level' = 'day')))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
       .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
       // Live delivery state comes from the sms_log row Twilio's status
       // callback updates. A LINKED row must currently read sent/delivered/
@@ -621,16 +626,22 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // interaction insert fails the KNOWN window is already on the message side,
   // and a check that looked only at interaction rows let the later email row
   // survive as an unknown-window fallback and outrank it (codex P1 round 21).
+  // GATE_DAY_ONLY_PROMISE: a row whose metadata carries promise_level 'day' was a day-only promise (no hour was
+  // told). Its event gets level: 'day' and, having no slot, start_at null, so it behaves as an unknown window in
+  // latestPromises / stopPromise (newest wins, a tie goes to the known window). The alerting below treats a latest
+  // day promise like an unknown window: no no-show alert until the 24-hour text records the real window. An
+  // unmarked row gets no `level` key at all, so every existing event keeps its exact shape.
+  const levelOf = (metadata) => (metadata?.promise_level === 'day' ? { level: 'day' } : {});
   const noticeEvents = [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id,
-      start_at: slotOf(r.metadata), tier: reminderTier(r.purpose || r.metadata?.original_message_type),
+      start_at: slotOf(r.metadata), ...levelOf(r.metadata), tier: reminderTier(r.purpose || r.metadata?.original_message_type),
       // notificationEventKey is the visit-effect claim the GROUPED send was
       // made under (appointment-reminders.js): it marks copy that speaks for
       // the whole stop, not just this member's own service.
       grouped: !!r.metadata?.notificationEventKey,
       communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: slotOf(r.metadata),
-      tier: reminderTier(r.metadata?.event_type),
+      ...levelOf(r.metadata), tier: reminderTier(r.metadata?.event_type),
       grouped: String(r.em_key || '').includes(':visit:') || !!r.metadata?.notificationEventKey,
       // The retry's send time when there is one (see the select above), then
       // the interaction row's own snapshot, then its insert time. A promise
