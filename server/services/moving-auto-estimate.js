@@ -9,7 +9,8 @@
  * our area and has no estimate yet, once, and saves the new-home estimate the
  * office would make from the Moving card: the same estimate save, with the
  * move's stamp and its $99 waiver, priced by the server. The estimate is a
- * draft: nothing goes to the customer from here.
+ * draft: nothing goes to the customer from here (services/moving-auto-send.js
+ * sends it, behind its own gate).
  *
  * Free checks run first, so a move the office must price costs nothing: the
  * old-house stop already ran, the
@@ -201,7 +202,9 @@ async function hasComingAddon(rootId, today) {
 }
 
 // The plan the move takes along, as the facts the price needs (its visit
-// schedule and current visit price), or a refusal code.
+// schedule and current visit price) and its catalog name for the customer's
+// text (an older label read with its schedule, config/service-name-aliases.js),
+// or a refusal code.
 async function planFacts(move, today) {
   const plan = await movingPestPlan(move);
   if (!plan) return { code: 'not_pest_only' };
@@ -210,7 +213,9 @@ async function planFacts(move, today) {
   if (!cadence) return { code: 'cadence' };
   const currentPrice = Number(plan.estimated_price);
   if (!(currentPrice > 0)) return { code: 'no_price' };
-  return { cadence, currentPrice };
+  const { legacyCatalogName } = require('../config/service-name-aliases');
+  const planName = legacyCatalogName(plan.service_type, plan.recurring_pattern) || String(plan.service_type).trim();
+  return { cadence, currentPrice, planName };
 }
 
 // The free checks, in order: a refusal code, or the facts the pricing needs.
@@ -238,17 +243,18 @@ async function freeChecks(move, today = require('../utils/datetime-et').etDateSt
   if (kept.length !== 1 || kept[0] !== 'svcPest') return { code: 'not_pest_only' };
   const plan = await planFacts(move, today);
   if (plan.code) return plan;
-  const { cadence, currentPrice } = plan;
+  const { cadence, currentPrice, planName } = plan;
   const pest = pestServiceFor(cadence);
   if (!pest) return { code: 'engine' };
   const { _private: { wholeHomeAddress } } = require('./lead-draft-measurements');
   if (!wholeHomeAddress(source.move.address)) return { code: 'unit' };
-  return { source, cadence, currentPrice, pest };
+  return { source, cadence, currentPrice, planName, pest };
 }
 
 // The estimate save's own body for this move: the customer, the new address,
 // the move (its stamp and $99 waiver come from the save), and the engine input.
-function estimateBody(move, facts, engineInputs, measured) {
+// `digest` is the dry run's engine result, recorded on the final save.
+function estimateBody(move, facts, engineInputs, measured, digest = null) {
   const { source, cadence, currentPrice } = facts;
   // The estimator form's own keys (EstimateToolViewV2 buildDefaultEstimateForm),
   // so a reopened draft shows the facts it was priced on.
@@ -284,6 +290,10 @@ function estimateBody(move, facts, engineInputs, measured) {
           homeSqFt: measured.homeSqFt,
           lotSqFt: measured.lotSqFt,
           measurementSource: measured.source,
+          planName: facts.planName,
+          // The auto-send (services/moving-auto-send.js) sends the draft only
+          // while it still holds this price.
+          ...(digest ? { engineResultDigest: digest } : {}),
         },
       },
     },
@@ -381,7 +391,7 @@ async function autoEstimateMove(moveId, { now }) {
   const outside = bandNote(price.visitPrice, facts.currentPrice);
   if (outside) return leaveToOffice(move, price.visitPrice < facts.currentPrice ? 'band_low' : 'band_high', { now, note: outside });
   const saved = await saveEstimate({
-    body: { ...body, waveguardTier: price.tier, clientDraftId: crypto.randomUUID() },
+    body: { ...estimateBody(move, facts, home.engineInputs, home.measured, price.digest), waveguardTier: price.tier, clientDraftId: crypto.randomUUID() },
     expectedEngineResultDigest: price.digest,
   });
   if (saved.refused) return leaveToOffice(move, 'refused', { now, note: saved.refused.message });

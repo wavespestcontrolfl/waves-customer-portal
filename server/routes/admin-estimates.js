@@ -1007,6 +1007,20 @@ function estimateSmsPhoneProblem(estimate) {
   return problem ? `${problem} Fix the phone on the contact or the estimate, then send again. Nothing was sent.` : null;
 }
 
+// The text an estimate goes out with: the moving one, which names the plan that
+// comes along, for a new-home estimate the app made for a move
+// (services/moving-auto-estimate.js) while GATE_MOVING_AUTO_SEND is on; the
+// standard one for every other estimate. The preview and the send both read it.
+function estimateSmsTemplate(estimate) {
+  const data = parseEstimateData(estimate.estimate_data) || {};
+  const stamp = data.move && data.automation && data.automation.moveAutoEstimate;
+  const planName = stamp ? String(stamp.planName || '').trim() : '';
+  if (planName && require('../config/feature-gates').movingAutoSendLive?.() === true) {
+    return { key: 'estimate_sent_move', vars: { plan_name: planName } };
+  }
+  return { key: 'estimate_sent', vars: {} };
+}
+
 async function buildEstimateSendPreview(estimate) {
   const firstName = await estimateGreetingFirstName(db, estimate);
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
@@ -1017,8 +1031,9 @@ async function buildEstimateSendPreview(estimate) {
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
   // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
   const averageText = require('../services/estimate-monthly-average').averageText(average);
-  const sms = await smsTemplatesRouter.getTemplate('estimate_sent', {
-    first_name: firstName, estimate_url: viewUrl,
+  const smsTemplate = estimateSmsTemplate(estimate);
+  const sms = await smsTemplatesRouter.getTemplate(smsTemplate.key, {
+    first_name: firstName, estimate_url: viewUrl, ...smsTemplate.vars,
   }, {}, { noVariants: true, audit: false });
   let email = null;
   const library = sendgrid.isConfigured() ? await EmailTemplateLibrary.loadTemplateByKey(proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery') : null;
@@ -3116,12 +3131,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         channels.sms = { ok: false, error: nanpPhoneProblem(estimate.customer_phone) || `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
-          const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
+          const smsTemplate = estimateSmsTemplate(estimate);
+          const currentSmsBody = await smsTemplatesRouter.getTemplate(smsTemplate.key, { first_name: firstName, estimate_url: smsViewUrl, ...smsTemplate.vars }, {
             workflow: 'admin_estimate_send',
             entity_type: 'estimate',
             entity_id: estimate.id,
           }, { noVariants: !!options.reviewedMessages });
-          if (!currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
+          if (!currentSmsBody) throw new Error(`SMS template ${smsTemplate.key} is missing or inactive`);
           const smsBody = options.reviewedMessages
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
@@ -3150,12 +3166,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               capturedAt: estimate.created_at || new Date().toISOString(),
             },
             entryPoint: 'admin_estimate_send',
+            // The app's own send of a new-home estimate (services/moving-auto-send.js)
+            // is automation, not an office click: its entry point keeps the text
+            // inside 8 AM to 8 PM ET (validators/send-window.js).
+            ...(options.movingAutoSend === true ? { entryPoint: 'moving_auto_send' } : {}),
             metadata: {
               original_message_type: 'estimate_sent',
             },
           });
           if (!result.sent) {
-            channels.sms = { ok: false, uncertain: result.code === 'PROVIDER_FAILURE' && result.terminal !== true, error: result.reason || result.code || 'SMS send blocked/failed' };
+            // The code tells the auto-send a text held for the morning from one refused.
+            channels.sms = { ok: false, uncertain: result.code === 'PROVIDER_FAILURE' && result.terminal !== true, ...(result.code ? { code: result.code } : {}), error: result.reason || result.code || 'SMS send blocked/failed' };
             logger.error(`Estimate SMS failed: ${result.reason || result.code || 'unknown'}`);
           } else {
             // Suppression is not a provider handoff and never publishes an
