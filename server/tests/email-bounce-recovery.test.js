@@ -1567,9 +1567,9 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
-  test('never twice: when the other-spelling resend itself bounces, the loop guard runs and no lookup or resend happens', async () => {
+  test('never twice, and no card (owner 2026-11-05): when the other-spelling resend itself bounces, the loop guard runs, the alert stays, and no lookup, resend or call-audio read-back card happens', async () => {
     process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
-    const rec = { id: 'rec1', status: 'resent', customer_id: 'c1', bounced_email: 'jondoe@example.com' };
+    const rec = { id: 'rec1', status: 'resent', customer_id: 'c1', bounced_email: 'jondoe@example.com', corrected_email: 'jondoh@example.com', correction_rule: 'call_other_spelling' };
     const mockDb = orderedDb({ first: (table) => (table === 'email_bounce_recoveries' ? rec : null) });
     db.mockImplementation(mockDb);
     const res = await recovery.attemptRecovery(
@@ -1580,7 +1580,17 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     expect(reverify.findSourceCall).not.toHaveBeenCalled();
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(ledger(mockDb).pop().data).toMatchObject({ status: 'redelivered_bounced' });
-    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledWith(expect.objectContaining({ bouncedEmail: 'jondoh@example.com', sourceEmail: 'jondoe@example.com' }));
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
+
+  test('a domain-corrector recovery that bounces again still re-listens to the call (only the other-spelling rule drops the card)', async () => {
+    const rec = { id: 'rec2', status: 'resent', customer_id: 'c1', bounced_email: 'jondoe@gmial.com', corrected_email: 'jondoe@gmail.com', correction_rule: 'domain_typo' };
+    db.mockImplementation(orderedDb({ first: (table) => (table === 'email_bounce_recoveries' ? rec : null) }));
+    await recovery.attemptRecovery(
+      { id: 'msg2', recipient_email_snapshot: 'jondoe@gmail.com', categories: ['email_template', 'bounce_recovery'], template_key: 'estimate.delivery' },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledWith(expect.objectContaining({ bouncedEmail: 'jondoe@gmail.com', sourceEmail: 'jondoe@gmial.com' }));
   });
 
   test('the success bell names both addresses and the rule (existing wording, unchanged)', async () => {

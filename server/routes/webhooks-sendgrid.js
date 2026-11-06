@@ -205,6 +205,21 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
   res.status(retryNeeded ? 500 : 200).json({ received: events.length, processed });
 });
 
+/**
+ * GATE_CALL_BOUNCE_OTHER_SPELLING (owner 2026-11-05), the route side of an automation hard bounce. True = the other-spelling
+ * retry owns this bounce and nothing else is raised for it (no untracked alert, no transcript rescue, no read-back card):
+ * the bounced step was re-queued to the call's other spelling, or that other spelling bounced too, in which case the
+ * office gets the one existing bounced-contact alert for the address on file, and still no rescue or card.
+ */
+function settleSpellingOutcome(spelling, ev) {
+  if (spelling?.retried) return true;
+  if (!spelling?.retryFailed) return false;
+  bounceRecovery.alertBouncedContactAddress(spelling.bouncedEmail, {
+    ...ev, reason: `its other spelling from the call bounced too: ${String(ev.reason || ev.response || 'mailbox rejected').trim()}`,
+  }).catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+  return true;
+}
+
 async function handleEvent(ev) {
   const messageId = ev.sg_message_id ? ev.sg_message_id.split('.')[0] : null;
   if (!messageId) return;
@@ -365,7 +380,11 @@ async function handleEvent(ev) {
     return;
   }
   if (automationSend) {
-    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
+    let spelling = null;
+    const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
+      spelling = await handleAutomationEvent(ev, automationSend, trx);
+    });
+    if (processedNew && settleSpellingOutcome(spelling, ev)) return;
     if (processedNew) {
       // Automations span both streams: newsletter-group templates
       // (cold_lead nurture, referral nudges) are MARKETING — their bounces
@@ -1075,6 +1094,9 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
           status: 'delivered', delivered_at: now, updated_at: now,
         });
       }
+      // A send to the other spelling of a call-captured address delivered: that address replaces the bounced one on
+      // the customer (owner 2026-11-05). Nothing happens for any other send.
+      await require('../services/call-email-spelling-retry').onAutomationDelivered({ sendRow }, client);
       break;
 
     case 'open':
@@ -1108,7 +1130,12 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
       // bad, just that we already knew. Cancelling on either was destructive
       // since enrollment.status='cancelled' is terminal.
       if (ev.type === 'bounce') {
+        // GATE_CALL_BOUNCE_OTHER_SPELLING (owner 2026-11-05): a call-captured address whose other spelling the call
+        // settled is retried once instead of cancelling; the caller then raises no alert, rescue or card.
+        const spelling = await require('../services/call-email-spelling-retry').onAutomationHardBounce({ ev, sendRow }, client);
+        if (spelling.retried) return spelling;
         await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' }, client);
+        return spelling;
       }
       break;
     }
@@ -1151,6 +1178,7 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
     default:
       break;
   }
+  return null;
 }
 
 async function unsubscribeNewsletterSubscriber(email, at, client = db) {
@@ -1217,6 +1245,7 @@ module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
 module.exports.handleNewsletterEvent = handleNewsletterEvent;
 module.exports.handleEmailMessageEvent = handleEmailMessageEvent;
+module.exports.handleAutomationEvent = handleAutomationEvent;
 module.exports.handleEvent = handleEvent;
 module.exports.staleEmailSuppressionGroupKey = staleEmailSuppressionGroupKey;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;

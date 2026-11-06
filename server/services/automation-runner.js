@@ -684,6 +684,49 @@ function nextSequenceStep(enrollment, steps) {
 }
 
 /**
+ * Put an enrollment back one step so that step is sent again, to `email`, on the next tick (owner 2026-11-05: a
+ * hard-bounced call-captured address is retried once at the other spelling the call settled; the webhook does this in
+ * its own transaction). Allowed ONLY when `stepId` is the last step the enrollment passed (its cursor anchor), so
+ * nothing later was sent and the step goes out exactly once more: the tick's next step is then `stepId` again, and
+ * advanceEnrollment moves past it as for any send. The passed set loses `stepId`; the anchor falls back to the
+ * previous passed step (null = none, which the legacy reading of current_step resolves to the same place). A completed
+ * enrollment becomes active again. Fenced on the cursor the caller saw (current_step, last passed step id), so a tick
+ * that advanced it first makes this a no-op. Returns true when the enrollment was rewound.
+ */
+async function rewindEnrollmentToStep({ enrollment, stepId, email }, client = db) {
+  const steps = await client('automation_steps')
+    .where({ template_key: enrollment.template_key, enabled: true })
+    .orderBy('step_order', 'asc')
+    .orderBy('id', 'asc');
+  const step = steps.find((s) => String(s.id) === String(stepId));
+  if (!step) return false;
+  const { anchor, passedIds } = sequenceCursor(enrollment, steps);
+  if (!anchor || Number(anchor[0]) !== Number(step.step_order) || String(anchor[1]) !== String(step.id)) return false;
+  const remaining = passedIds.filter((id) => id !== String(step.id));
+  const prior = steps.filter((s) => remaining.includes(String(s.id)) && keyAfter(stepKey(step), stepKey(s))).pop() || null;
+  const cursor = {
+    passed_step_order: prior ? Number(prior.step_order) : null,
+    passed_step_id: prior ? String(prior.id) : null,
+    passed_step_ids: remaining,
+  };
+  const priorPassedId = String(enrollmentMetadata(enrollment).passed_step_id ?? '');
+  const updated = await client('automation_enrollments')
+    .where({ id: enrollment.id, current_step: enrollment.current_step })
+    .whereIn('status', ['active', 'completed'])
+    .whereRaw("COALESCE(metadata->>'passed_step_id', '') = ?", [priorPassedId])
+    .update({
+      status: 'active',
+      email,
+      current_step: steps.indexOf(step),
+      next_send_at: new Date(),
+      completed_at: null,
+      metadata: client.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(cursor)]),
+      updated_at: new Date(),
+    });
+  return Number(updated) === 1;
+}
+
+/**
  * Send one step for an enrollment. Advances the cursor on success,
  * marks the enrollment complete if it was the last step, or failed
  * if SendGrid rejects.
@@ -1098,6 +1141,7 @@ module.exports = {
   enrollCustomer,
   sendStep,
   advanceEnrollment,
+  rewindEnrollmentToStep,
   nextSequenceStep,
   processDueSteps,
   testSequence,
