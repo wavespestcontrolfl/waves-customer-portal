@@ -13,6 +13,10 @@
   flex-wrap: wrap;
   margin-top: 18px;
 }
+/* Room for the RECOMMENDED badge, which rises 16px above its pill. */
+[data-glass-theme] .gc-freq:has(.gc-freq-rec) {
+  margin-top: 26px;
+}
 [data-glass-theme] .gc-freq-btn {
   position: relative;
   flex: 1;
@@ -252,6 +256,16 @@
   background: #fff;
   border: 1px solid #dadce0;
   box-shadow: 0 1px 3px rgba(60, 64, 67, 0.12);
+}
+/* Phones: a 374px card (340 + padding) overran the ~308px strip, so the
+   first review was always cut. The whole card now ends inside the strip,
+   short of its edge fade (the strip is the viewport less 82px of page
+   gutter and card padding). */
+@media (max-width: 640px) {
+  [data-glass-theme] .gc-rm-card {
+    box-sizing: border-box;
+    width: min(374px, calc(100vw - 96px));
+  }
 }
 [data-glass-theme] .gc-gr-head {
   display: flex;
