@@ -56,7 +56,7 @@ describe('clampLeadText', () => {
 
   test('both /calculate lead writes (insert and token update) go through the clamp', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
-    expect(src).toMatch(/db\('leads'\)\.insert\(clampLeadText\(\{\s*first_name: contactFirstName/);
+    expect(src).toMatch(/db\('leads'\)\.insert\(\{\s*(?:\/\/[^\n]*\s*)*\.\.\.clampLeadText\(\{\s*first_name: contactFirstName/);
     expect(src).toMatch(/const updateFields = clampLeadText\(\{\s*first_name: contactFirstName/);
   });
 });

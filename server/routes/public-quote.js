@@ -2478,34 +2478,38 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       duplicateOfLeadId = dedupeOn ? await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest }) : null;
     }
     if (!lead) {
-      const rows = await db('leads').insert(clampLeadText({
-        first_name: contactFirstName,
-        last_name: contactLastName,
-        email: contactEmail,
-        phone: contactPhone,
-        address: quoteFullAddress,
-        city: quoteCity || null,
-        zip: quoteZip || null,
-        service_interest: serviceInterest,
-        service_key: leadServiceKey,
-        lead_type: 'quote_wizard',
-        first_contact_channel: 'website_quote',
-        lead_source_id: sourceMeta.leadSourceId,
-        monthly_value: leadMonthlyValue,
-        status: duplicateOfLeadId ? 'duplicate' : 'new',
-        gclid,
-        wbraid,
-        gbraid,
-        fbclid,
-        fbc,
-        fbp,
-        anon_id: anonId,
-        heard_about: wizardHeardAbout.heardAbout,
-        heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
-        extracted_data: duplicateOfLeadId
-          ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
-          : extractedData,
-      })).returning(['id']);
+      const rows = await db('leads').insert({
+        // Spread, not insert(clampLeadText(...)): this insert line is the
+        // registered lead-writer anchor (config/lead-writer-registry.js).
+        ...clampLeadText({
+          first_name: contactFirstName,
+          last_name: contactLastName,
+          email: contactEmail,
+          phone: contactPhone,
+          address: quoteFullAddress,
+          city: quoteCity || null,
+          zip: quoteZip || null,
+          service_interest: serviceInterest,
+          service_key: leadServiceKey,
+          lead_type: 'quote_wizard',
+          first_contact_channel: 'website_quote',
+          lead_source_id: sourceMeta.leadSourceId,
+          monthly_value: leadMonthlyValue,
+          status: duplicateOfLeadId ? 'duplicate' : 'new',
+          gclid,
+          wbraid,
+          gbraid,
+          fbclid,
+          fbc,
+          fbp,
+          anon_id: anonId,
+          heard_about: wizardHeardAbout.heardAbout,
+          heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
+          extracted_data: duplicateOfLeadId
+            ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
+            : extractedData,
+        }),
+      }).returning(['id']);
       lead = rows[0];
     }
     // The label was computed from a read of the target; if the office closed
