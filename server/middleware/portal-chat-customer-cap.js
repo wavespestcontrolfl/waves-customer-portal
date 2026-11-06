@@ -12,8 +12,11 @@
  *      so it survives deploys and holds across processes.
  * The minute check runs first and costs no database call, so a request refused
  * for speed never burns the day's budget. A counter error fails open (the
- * minute window still applies). Gate off: allowed at once, nothing counted.
- * Over a limit the route answers with a canned reply and makes no model call.
+ * minute window still applies; one that hangs fails open after 2 s). Gate off:
+ * allowed at once, nothing counted.
+ * The route calls this inside the claimed turn (after replay resolution, under
+ * the turn deadline). Over a limit it answers with a canned reply and makes no
+ * model call.
  */
 const { consumeSharedDailyCap } = require('./public-llm-shared-cap');
 
@@ -21,6 +24,7 @@ const MINUTE_WINDOW_MS = 60 * 1000;
 const MINUTE_MAX = 10;
 const DAILY_ENV_VAR = 'PORTAL_CHAT_DAILY_CAP_PER_CUSTOMER';
 const DAILY_DEFAULT_MAX = 60;
+const COUNTER_TIMEOUT_MS = 2000;
 
 // Owner approval pending on this text (PR body, "Copy for owner approval").
 const MINUTE_LIMIT_REPLY = "You're sending messages faster than I can keep up. Please wait a minute and try again.";
@@ -59,12 +63,20 @@ async function checkPortalChatCustomerCap(customerId, now = Date.now()) {
     return { allowed: true };
   }
   if (!takeMinuteSlot(String(customerId), now)) return { allowed: false, reply: MINUTE_LIMIT_REPLY };
-  const daily = await consumeSharedDailyCap({
-    bucket: `portal-chat:${customerId}`,
-    envVar: DAILY_ENV_VAR,
-    defaultMax: DAILY_DEFAULT_MAX,
-    gate: portalChatCustomerCapLive,
+  // A counter that hangs (not just errors) fails open after COUNTER_TIMEOUT_MS.
+  let timer;
+  const failOpen = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ allowed: true }), COUNTER_TIMEOUT_MS);
   });
+  const daily = await Promise.race([
+    consumeSharedDailyCap({
+      bucket: `portal-chat:${customerId}`,
+      envVar: DAILY_ENV_VAR,
+      defaultMax: DAILY_DEFAULT_MAX,
+      gate: portalChatCustomerCapLive,
+    }),
+    failOpen,
+  ]).finally(() => clearTimeout(timer));
   if (!daily.allowed) return { allowed: false, reply: DAILY_LIMIT_REPLY };
   return { allowed: true };
 }

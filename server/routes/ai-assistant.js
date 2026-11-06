@@ -118,16 +118,6 @@ router.post('/chat', authenticate, async (req, res, next) => {
     const customerPhone = req.customer.phone || null;
     const requestId = suppliedRequestId || crypto.randomUUID();
 
-    // GATE_PORTAL_CHAT_CUSTOMER_CAP: per-customer minute and daily limits,
-    // checked after validation and before any model call. Over a limit the
-    // customer gets a canned reply (200, not retryable, no model call).
-    const cap = await checkPortalChatCustomerCap(customerId);
-    if (!cap.allowed) {
-      return res.json({
-        reply: cap.reply, escalated: false, generated: false, canReport: false, requestId,
-      });
-    }
-
     const rawChannelIdentifier = sessionId || customerId;
     const channelIdentifier = portalConversationIdentifier(rawChannelIdentifier, req.propertyId);
 
@@ -145,6 +135,14 @@ router.post('/chat', authenticate, async (req, res, next) => {
       propertyId: req.propertyId || null,
       channelIdentifier,
       processTurn: async (turn) => {
+        // GATE_PORTAL_CHAT_CUSTOMER_CAP: per-customer minute and daily limits.
+        // Checked here, once the turn is claimed and under its deadline: a
+        // replay of a finished requestId returns its saved result without
+        // spending a slot, and a slow counter cannot outlive the turn. Over a
+        // limit the reply is canned (not retryable) and no model is called.
+        const cap = await checkPortalChatCustomerCap(customerId);
+        if (!cap.allowed) return { reply: cap.reply, escalated: false, generated: false };
+
         // The free re-service button books at the account's primary address,
         // so a failed read or a secondary selection withholds it. Let deadline
         // and query-cancellation errors reach the coordinator; swallowing one

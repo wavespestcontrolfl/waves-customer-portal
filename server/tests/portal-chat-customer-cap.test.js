@@ -122,7 +122,7 @@ describe('portal chat per-customer cap', () => {
       expect((await (await post(baseUrl, 'cust-b')).json()).reply).toBe('Hi there');
     });
     expect(WavesAssistant.processMessage).toHaveBeenCalledTimes(11);
-    expect(mockPortalTurn).toHaveBeenCalledTimes(11);
+    expect(mockPortalTurn).toHaveBeenCalledTimes(12); // the refused turn still goes through the coordinator
   });
 
   test('gate on: a minute-refused turn does not burn the daily budget', async () => {
@@ -165,6 +165,34 @@ describe('portal chat per-customer cap', () => {
       const res = await post(baseUrl, 'cust-a');
       expect((await res.json()).reply).toBe('Hi there');
     });
+  });
+
+  test('a replayed requestId (turn returns its saved result) spends no slot', async () => {
+    process.env.GATE_PORTAL_CHAT_CUSTOMER_CAP = 'true';
+    const db = require('../models/db');
+    mockPortalTurn.mockImplementationOnce(async (args) => ({
+      reply: 'saved answer', escalated: false, generated: true, requestId: args.requestId,
+    }));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'cust-a');
+      expect((await res.json()).reply).toBe('saved answer');
+    });
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a counter that hangs fails open after 2 s', async () => {
+    process.env.GATE_PORTAL_CHAT_CUSTOMER_CAP = 'true';
+    const db = require('../models/db');
+    db.raw.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers();
+    try {
+      const pending = checkPortalChatCustomerCap('cust-a');
+      await jest.advanceTimersByTimeAsync(2100);
+      expect(await pending).toEqual({ allowed: true });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('a validation failure is refused before it can count', async () => {
