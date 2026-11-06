@@ -148,14 +148,27 @@ async function loadFellOffAlerts({ now = new Date(), database = db, limit = CAND
     return { row, meta, eventAt, who: named.get(String(row.id)) || null };
   }).map((entry) => ({ ...entry, item: witnessItem(entry.row, entry.meta, entry.who, entry.eventAt) }));
   const bundles = await loadBundles(judged.map((e) => e.item).filter(Boolean), database);
+  const { entries, failed } = await settleEntries(judged, bundles, database);
+  entries.sort((a, b) => b.at.getTime() - a.at.getTime());
+  return { kind: 'fell-off', count: entries.length, capped, unchecked: bundles === null || failed, entries };
+}
+
+// The alerts no person answered. A reply check that throws (the quote witness reads the database on its own) lists that
+// alert and marks the week unchecked, with one warning for the run; it never aborts the Monday review.
+async function settleEntries(judged, bundles, database) {
   const entries = [];
+  let failed = false;
   for (const entry of judged) {
     const bundle = entry.item && bundles ? bundles.get(String(entry.row.id)) : null;
-    if (await answered({ item: entry.item, bundle, eventAt: entry.eventAt, meta: entry.meta, database })) continue;
+    try {
+      if (await answered({ item: entry.item, bundle, eventAt: entry.eventAt, meta: entry.meta, database })) continue;
+    } catch (err) {
+      if (!failed) logger.warn(`[monday-review] a reply check failed; the alert is listed unchecked: ${require('./notification-service').safeErrorSummary(err)}`);
+      failed = true;
+    }
     entries.push({ name: entry.who?.name || '', title: String(entry.row.title || '').trim(), at: entry.eventAt });
   }
-  entries.sort((a, b) => b.at.getTime() - a.at.getTime());
-  return { kind: 'fell-off', count: entries.length, capped, unchecked: bundles === null, entries };
+  return { entries, failed };
 }
 
 // "Jane Doe: SMS from Jane Doe" would say the name twice, so a title that already holds the name stands alone.
@@ -170,5 +183,5 @@ module.exports = {
   entryLine,
   ENTRY_SHOWN,
   WINDOW_DAYS,
-  _private: { isCustomerContact, witnessItem, answered, latestEventAt },
+  _private: { isCustomerContact, witnessItem, answered, latestEventAt, settleEntries },
 };

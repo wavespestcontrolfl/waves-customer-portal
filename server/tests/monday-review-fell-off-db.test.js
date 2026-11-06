@@ -200,6 +200,34 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     expect((await listed()).names).not.toContain('Reschedule note from Mike');
   });
 
+  test('a quote lookup that fails lists that alert, marks the week unchecked and leaves the other entries alone', async () => {
+    const relevance = require('../services/admin-alert-relevance');
+    const flaky = await addCustomer('Oscar');
+    const [row] = await db('notifications').insert({
+      recipient_type: 'admin', category: 'schedule', title: `Reschedule note from Oscar Fell${RUN}`, body: 'fixture', link: `/admin/customers/${flaky.id}`,
+      created_at: ago(5), done_at: ago(2), done_by: 'quiet-72h', resolution: 'No new activity for 3 days',
+      metadata: JSON.stringify({ severity: 'needs-you', who: 'person', contact: true, customerId: flaky.id }),
+    }).returning('id');
+    created.notifications.push(row.id);
+    const plain = await addCustomer('Papa');
+    await textAlert(plain, { name: 'Papa' });
+    const answeredCustomer = await addCustomer('Quebec');
+    const quebec = await textAlert(answeredCustomer, { name: 'Quebec' });
+    await staffText(answeredCustomer, new Date(quebec.sentAt.getTime() + 3 * HOUR));
+    const spy = jest.spyOn(relevance, 'quoteAnswered').mockRejectedValue(new Error('canceling statement due to statement timeout'));
+    try {
+      const { out, names } = await listed();
+      expect(spy).toHaveBeenCalled();
+      expect(out.unchecked).toBe(true);
+      expect(names).toContain('Reschedule note from Oscar'); // listed, unchecked
+      expect(names).toContain('Papa'); // a text alert never reads the quote witness
+      expect(names).not.toContain('Quebec'); // still judged answered by its text
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await listed()).out.unchecked).toBe(false);
+  });
+
   test('the Monday text names the listed alerts and nothing else changes', async () => {
     const review = require('../services/monday-review-bell');
     const customer = await addCustomer('November');

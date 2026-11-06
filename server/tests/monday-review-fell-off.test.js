@@ -175,6 +175,18 @@ describe('which loader the gate picks for list 1', () => {
     expect(fellOff.loadFellOffAlerts).not.toHaveBeenCalled();
   });
 
+  test('on, and the fell-off list cannot be read at all: the other lists still go out, with one warning', async () => {
+    process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
+    fellOff.loadFellOffAlerts.mockRejectedValue(new Error('connection reset'));
+    const out = await review.runMondayReview({
+      now: MONDAY, database: emptyDatabase(), gateEnabled: true, loaders: { ...rest, promises: async () => PROMISES },
+    });
+    expect(out).toMatchObject({ count: 1, outcome: 'raised', counts: { promises: 2 } });
+    expect(notifyAdmin.mock.calls[0][2]).toBe('Waiting for you: 2 late promises.');
+    expect(require('../services/logger').warn).toHaveBeenCalledTimes(1);
+    expect(require('../services/logger').warn.mock.calls[0][0]).toContain('without it');
+  });
+
   test('a test that mocks feature-gates without the reader reads the gate as off', () => {
     jest.isolateModules(() => {
       jest.doMock('../config/feature-gates', () => ({ mondayReviewBellLive: () => true }));
@@ -238,6 +250,24 @@ describe('the reply judgement', () => {
   test('no bundle (the alert could not be checked) is not an answer', async () => {
     expect(await judge(customerItem, undefined)).toBe(false);
     expect(await judge(null, undefined)).toBe(false);
+  });
+
+  test('a reply check that throws lists that alert, marks the week unchecked and warns once; the rest are judged', async () => {
+    const { settleEntries } = fellOff._private;
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    quoteAnswered.mockRejectedValueOnce(new Error('canceling statement due to statement timeout')).mockRejectedValueOnce(new Error('again'));
+    const mk = (id, bundleOver) => ({
+      row: { id, title: `Alert ${id}` }, meta: {}, eventAt: EVENT, who: { name: `Name ${id}` },
+      item: { id, kind: 'customer', refs: { customerId: `c${id}` } }, bundle: bundle(bundleOver),
+    });
+    const judged = [mk('a'), mk('b'), mk('c', { textAt: at(2) })];
+    const bundles = new Map(judged.map((e) => [e.row.id, e.bundle]));
+    const out = await settleEntries(judged, bundles, jest.fn());
+    expect(out.failed).toBe(true);
+    expect(out.entries.map((e) => e.title)).toEqual(['Alert a', 'Alert b']); // c was answered by a text
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).not.toContain('Name');
   });
 
   test('what each alert is read by: a text by its text, a customer by id, then the call or email it names, else nothing', () => {

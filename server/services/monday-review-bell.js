@@ -317,7 +317,17 @@ async function closeReviewRows({ database = db, now = new Date(), keepKey = null
 }
 
 // List 1: the 14-day unread list, or (GATE_MONDAY_FELL_OFF_LINE) the customer alerts that fell off with no reply.
-const loadFirstList = (ctx) => (fellOffLineLive() ? require('./monday-review-fell-off').loadFellOffAlerts(ctx) : loadUnreadAlerts(ctx));
+// The fell-off list fails open: if it cannot be read at all, the week goes out with the other three lists and a warning
+// (the 14-day list keeps the module's stance that a read failure throws).
+async function loadFirstList(ctx) {
+  if (!fellOffLineLive()) return loadUnreadAlerts(ctx);
+  try {
+    return await require('./monday-review-fell-off').loadFellOffAlerts(ctx);
+  } catch (err) {
+    logger.warn(`[monday-review] fell-off list not read; this week goes out without it: ${require('./notification-service').safeErrorSummary(err)}`);
+    return { kind: 'fell-off', count: 0, capped: false, unchecked: true, entries: [] };
+  }
+}
 
 const defaultLoaders = {
   alerts: loadFirstList,
