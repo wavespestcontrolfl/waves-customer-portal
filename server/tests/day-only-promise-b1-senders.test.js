@@ -286,6 +286,39 @@ describe('the booking confirmation', () => {
     expect(Object.keys(send).sort()).not.toContain('promisedWindowUnknown');
   });
 
+  describe('the 24-hour reminder must really be sendable (Codex P1-3)', () => {
+    const asked = () => timePromise.dayOnlySendDecision.mock.calls[0][1].reminder24hEnabled;
+
+    test('texts off + the 24-hour channel is text: the decision is told the reminder will NOT go (window copy follows)', async () => {
+      prefsRow = { sms_enabled: false, service_reminder_24h: true, service_reminder_24h_channel: 'sms' };
+      await run(150);
+      expect(asked()).toBe(false);
+    });
+
+    test('an email-only customer (texts off, 24-hour channel email): the reminder will go, so the day is allowed', async () => {
+      prefsRow = { sms_enabled: false, email_enabled: true, service_reminder_24h: true, service_reminder_24h_channel: 'email' };
+      await run(150);
+      expect(asked()).toBe(true);
+    });
+
+    test('texts on and the default channel: allowed', async () => {
+      await run(150);
+      expect(asked()).toBe(true);
+    });
+
+    test('the service-contact replay asks with the same predicate, and unreadable preferences are false without asking', async () => {
+      const apptTime = new Date(NOW.getTime() + 150 * HOUR);
+      prefsRow = { sms_enabled: false, service_reminder_24h: true, service_reminder_24h_channel: 'sms' };
+      await AppointmentReminders._test.replayDayOnly({ customerId: 'cust-1', scheduledServiceId: 'svc-1', apptTime });
+      expect(asked()).toBe(false);
+      jest.clearAllMocks();
+      timePromise.dayOnlySendDecision.mockResolvedValue(DAY_YES);
+      prefsRow = { sms_enabled: false, email_enabled: true, service_reminder_24h: true, service_reminder_24h_channel: 'email' };
+      expect(await AppointmentReminders._test.replayDayOnly({ customerId: 'cust-1', scheduledServiceId: 'svc-1', apptTime })).toBe(true);
+      expect(asked()).toBe(true);
+    });
+  });
+
   describe('with the real decision', () => {
     beforeEach(() => {
       timePromise.dayOnlySendDecision.mockImplementation(jest.requireActual('../services/time-promise').dayOnlySendDecision);
@@ -424,6 +457,19 @@ describe('the 72-hour reminder', () => {
     expect(send.metadata).not.toHaveProperty('rendered_slot_ms');
   });
 
+  test('the 72-hour decision uses the 24-hour reminder\'s own predicate: texts off + text channel is false; an email-only customer is true', async () => {
+    prefsRow = { sms_enabled: false, service_reminder_24h: true, service_reminder_72h: true, service_reminder_24h_channel: 'sms', service_reminder_72h_channel: 'email', email_enabled: true };
+    await run(plain);
+    expect(timePromise.dayOnlySendDecision.mock.calls[0][1].reminder24hEnabled).toBe(false);
+    jest.clearAllMocks();
+    smsTemplates.getTemplate.mockImplementation(async (key) => (enabled.has(key) ? `rendered:${key}` : null));
+    buildRescheduleLink.mockResolvedValue({ url: LINK, line: `Reschedule here: ${LINK}\n\n` });
+    timePromise.dayOnlySendDecision.mockResolvedValue(DAY_YES);
+    prefsRow = { sms_enabled: false, service_reminder_24h: true, service_reminder_72h: true, service_reminder_24h_channel: 'email', service_reminder_72h_channel: 'email', email_enabled: true };
+    await run(plain);
+    expect(timePromise.dayOnlySendDecision.mock.calls[0][1].reminder24hEnabled).toBe(true);
+  });
+
   test('the decision is asked with the visit, its start and the 24-hour preference', async () => {
     await run(plain);
     const [conn, arg] = timePromise.dayOnlySendDecision.mock.calls[0];
@@ -560,5 +606,33 @@ describe('render72hReminder', () => {
   test('a link-less visit still gets the day line (how to reach someone)', async () => {
     await render72hReminder({ vars: { ...vars, reschedule_line: '' }, rescheduleUrl: null, context, dayOnly: true });
     expect(templateCall('reminder_72h_day_v1')[1].reschedule_line).toBe('Need a different day or a set time? Reply here or call.\n\n');
+  });
+});
+
+describe('reminder24hWillSend: the 24-hour branch\'s own skip-and-close predicate', () => {
+  const { reminder24hWillSend } = AppointmentReminders._test;
+  const prefs = (over) => ({ unavailable: false, serviceReminder24h: true, reminder24hChannel: 'sms', smsEnabled: true, ...over });
+
+  test.each([
+    ['reminder on, texts on, text channel', {}, true],
+    ['reminder off', { serviceReminder24h: false }, false],
+    ['texts off + text channel (the branch skips and closes)', { smsEnabled: false }, false],
+    ['texts off + email channel (it still sends by email)', { smsEnabled: false, reminder24hChannel: 'email' }, true],
+    ['texts off + both channel', { smsEnabled: false, reminder24hChannel: 'both' }, true],
+    ['texts off + app channel', { smsEnabled: false, reminder24hChannel: 'push' }, true],
+    ['unreadable preferences', { unavailable: true }, false],
+  ])('%s', (_label, over, expected) => {
+    expect(reminder24hWillSend(prefs(over))).toBe(expected);
+  });
+
+  test('missing preferences: false', () => {
+    expect(reminder24hWillSend(null)).toBe(false);
+    expect(reminder24hWillSend(undefined)).toBe(false);
+  });
+
+  test('the 24-hour branch itself calls this function (one predicate, so they cannot drift)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
+    expect(src).toContain('if (!reminder24hWillSend(prefs)) {');
+    expect(src).not.toMatch(/!prefs\.serviceReminder24h \|\|/);
   });
 });

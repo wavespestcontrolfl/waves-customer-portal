@@ -1233,6 +1233,15 @@ const DAY_72H_KEY = 'reminder_72h_day_v1';
 const DAY_72H_NO_PICK_KEY = 'reminder_72h_no_reply_day_v1';
 const DAY_CONFIRMATION_KEYS = Object.freeze({ v2: 'appointment_confirmation_day_v2', v1: 'appointment_confirmation_day_v1' });
 
+/** Will the 24-hour reminder actually go out for this customer? The ONE predicate the 24-hour branch of the reminder scan
+ *  skips-and-closes on (the reminder is on, and a text-only choice is not paired with texts being off), shared with the
+ *  day-only decision so the two cannot drift: a day-only promise ("we'll text your arrival window the day before") is made
+ *  only when that reminder will really be sent. Unreadable or missing preferences: false (window copy). */
+function reminder24hWillSend(prefs) {
+  if (!prefs || prefs.unavailable) return false;
+  return Boolean(prefs.serviceReminder24h) && !(prefs.reminder24hChannel === 'sms' && !prefs.smsEnabled);
+}
+
 /** True when this send may promise only the day. Gate off (or any error): false, and nothing is read. */
 async function dayOnlyForSend({ id, startAt, reminder24hEnabled }) {
   try {
@@ -1250,7 +1259,7 @@ async function dayOnlyForSend({ id, startAt, reminder24hEnabled }) {
  *  no 24-hour text will ever follow) is never day-only. */
 async function confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs }) {
   if (!scheduledServiceId || record?.windows_preclosed === true) return false;
-  return dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: prefs?.serviceReminder24h });
+  return dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs) });
 }
 
 /** The `dayOnly: true` argument of an email leg, or nothing: the window email's call keeps its exact shape. */
@@ -1293,6 +1302,41 @@ function bouncedOccurrenceDate(metadata) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(String(metadata.promised_date || ''))) return metadata.promised_date;
   const guard = Number(metadata.guard_slot_ms);
   return metadata.guard_slot_ms != null && Number.isFinite(guard) ? etDateString(new Date(guard)) : null;
+}
+
+/** What a bounced DAY-ONLY text's recovery email may say NOW (a bounce can arrive hours later): 'day' only while the
+ *  visit is still outside the cutoff and its latest promise is not an hour; 'window' once inside the cutoff (the 24-hour
+ *  text owns the window); 'stale' when the latest promise is already an hour (the 24-hour text went, or anything newer
+ *  than the bounced text) or the promise cannot be read, so a recovery never becomes a newer day promise over a known
+ *  window. */
+async function dayRecoveryVerdict({ scheduledServiceId, apptTime }) {
+  if (!scheduledServiceId) return 'window';
+  try {
+    const now = new Date();
+    const level = (await require('./time-promise').loadPromiseLevels(db, [scheduledServiceId], now)).get(scheduledServiceId);
+    if (level === 'hour') return 'stale';
+    const hours = (new Date(apptTime).getTime() - now.getTime()) / 3600000;
+    return hours > require('./time-promise').DAY_PROMISE_CUTOFF_HOURS ? 'day' : 'window';
+  } catch (err) {
+    logger.warn(`[appt-remind] day-only bounce recovery for ${scheduledServiceId}: promise unreadable (${err.message})`);
+    return 'stale';
+  }
+}
+
+/** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text is revalidated for
+ *  NOW first (dayRecoveryVerdict): still valid -> a day-only email; no longer valid -> today's window copy, or nothing
+ *  when it would be stale. */
+async function recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey }) {
+  let dayOnly = false;
+  if (isDayPromise(audit.metadata)) {
+    const verdict = await dayRecoveryVerdict({ scheduledServiceId, apptTime });
+    if (verdict === 'stale') {
+      logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
+      return;
+    }
+    dayOnly = verdict === 'day';
+  }
+  await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel, ...dayOnlyArg(dayOnly) });
 }
 
 /** Puts the day-only marker (and the occurrence guard fields) on a send's metadata, or takes them off when the window copy
@@ -4798,7 +4842,7 @@ const AppointmentReminders = {
               : await require('./estimate-card-holds').cardHoldReminderLine(r.scheduled_service_id);
             // GATE_DAY_ONLY_PROMISE: the whole stop is promised only the day, or none of it (the stop's earliest slot
             // decides the cutoff; one ineligible member means window copy). Gate off: false, nothing read.
-            const day72State = { dayOnly: await dayOnlyForSend({ id: r.scheduled_service_id, startAt: apptCopy72, reminder24hEnabled: prefs.serviceReminder24h }) };
+            const day72State = { dayOnly: await dayOnlyForSend({ id: r.scheduled_service_id, startAt: apptCopy72, reminder24hEnabled: reminder24hWillSend(prefs) }) };
             // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the
             // pre-check above passed at 19:59, the clock crossed 20:00
             // mid-flight) back out so the hold defers instead of marking.
@@ -4937,7 +4981,7 @@ const AppointmentReminders = {
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
-          if (!prefs.serviceReminder24h || (channel24 === 'sms' && !prefs.smsEnabled)) {
+          if (!reminder24hWillSend(prefs)) {
             // Close the window like the neighboring skip branches — see the
             // 72h twin above: guarded on appointment_time so a concurrent
             // move's re-arm is never stomped; 0 rows matched = the row
@@ -5424,7 +5468,7 @@ const AppointmentReminders = {
       }
 
       // A bounced day-only text is followed by the day-only email (GATE_DAY_ONLY_PROMISE).
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel, ...dayOnlyArg(isDayPromise(audit.metadata)) });
+      await recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }
@@ -6967,6 +7011,9 @@ AppointmentReminders._test = {
   deliverAppointmentNotice,
   withReminderSendFence,
   deliverConfirmation,
+  reminder24hWillSend,
+  replayDayOnly,
+  dayRecoveryVerdict,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,
@@ -7119,7 +7166,7 @@ async function replayDayOnly({ customerId, scheduledServiceId, apptTime }) {
     if (!require('./time-promise').dayOnlyPromiseOn()) return false;
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     if (prefs.unavailable) return false;
-    return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: prefs.serviceReminder24h });
+    return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs) });
   } catch {
     return false;
   }

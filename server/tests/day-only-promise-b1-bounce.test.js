@@ -21,7 +21,14 @@ jest.mock('../services/estimate-card-holds', () => ({
   cardHoldReminderNote: jest.fn(async () => ''),
 }));
 
+jest.mock('../services/time-promise', () => ({
+  ...jest.requireActual('../services/time-promise'),
+  loadPromiseLevels: jest.fn(),
+}));
+
 const db = require('../models/db');
+const timePromise = require('../services/time-promise');
+const logger = require('../services/logger');
 const AppointmentEmail = require('../services/appointment-email');
 const NotificationService = require('../services/notification-service');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -55,7 +62,11 @@ function setDbQueues(queues) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Three days before the visit: outside the 24.25 h cutoff, so a day-only recovery is still valid.
+  jest.useFakeTimers().setSystemTime(new Date('2026-06-19T14:00:00.000Z'));
+  timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, 'none'])));
 });
+afterEach(() => { jest.useRealTimers(); });
 
 const SLOT = Date.parse('2026-06-22T13:00:00.000Z');
 const DAY_META = { promise_level: 'day', window_unknown: true, guard_slot_ms: SLOT, promised_date: '2026-06-22' };
@@ -154,5 +165,60 @@ describe('a bounced window grouped reminder is unchanged', () => {
     const call = AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0];
     expect(call).not.toHaveProperty('dayOnly');
     expect(call.idempotencyKey).toBeUndefined();
+  });
+});
+
+// A bounce can arrive hours after the text: the day-only recovery is revalidated for NOW (Codex P1-4).
+describe('a delayed bounce of a day-only text is revalidated before it recovers by email', () => {
+  test('still early with nothing newer: the day-only email, as before', async () => {
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_early');
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date));
+    expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true });
+  });
+
+  test('the 24-hour text already delivered a window (the latest promise is an hour): no day email, suppressed as stale', async () => {
+    timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss-owner', 'hour']]));
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_after_24h');
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('suppressed as stale'));
+  });
+
+  test('inside the cutoff with nothing newer: today\'s window copy, never a day promise', async () => {
+    jest.setSystemTime(new Date('2026-06-21T20:00:00.000Z')); // 17 h before the grouped 9:00 ET slot
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_cutoff');
+    const call = AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0];
+    expect(call).not.toHaveProperty('dayOnly');
+    expect(call).toMatchObject({ kind: '72h', appointmentTime: new Date('2026-06-22T13:00:00.000Z'), idempotencyKey: 'appointment.reminder_72h:visit:visit-9:reminder_72h:2026-06-22' });
+  });
+
+  test('the promise cannot be read: suppressed (it must not become a newer day promise over a window we cannot see)', async () => {
+    timePromise.loadPromiseLevels.mockRejectedValue(new Error('read failed'));
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_unreadable');
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('promise unreadable'));
+  });
+
+  test('a bounced day-only CONFIRMATION is revalidated the same way', async () => {
+    timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss1', 'hour']]));
+    const auditChain = chain({ first: { channel: 'sms', purpose: 'appointment_confirmation', customer_id: 'c1', metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss1', ...DAY_META } } });
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [chain({ first: { id: 'c1', phone: '+19415551234', line_type: null } })],
+      appointment_reminders: [chain({ first: { appointment_time: '2026-06-22T13:00:00.000Z', service_type: 'Pest Control' } }), chain({})],
+    });
+    await bounce('SM_conf');
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('a window bounce is never revalidated (no promise read, same recovery)', async () => {
+    groupedWorld({ metadata: { rendered_slot_ms: SLOT } });
+    await bounce('SM_window_plain');
+    expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
   });
 });
