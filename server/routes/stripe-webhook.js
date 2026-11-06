@@ -1009,6 +1009,10 @@ router.post(
           await handlePaymentMethodDetached(event.data.object);
           break;
 
+        case 'payment_method.automatically_updated':
+          await handlePaymentMethodAutomaticallyUpdated(event.data.object);
+          break;
+
         case 'setup_intent.succeeded':
           // The event's timestamp is the closest thing to the confirmation
           // moment the backstop can know (SetupIntent.created is the mint).
@@ -4873,6 +4877,32 @@ async function handleRefundFailed(refund) {
       await resettleAppointmentFeeFromPi(piId);
     }
   }
+}
+
+/**
+ * payment_method.automatically_updated — Stripe's card account updater renewed
+ * a saved card (new expiry, sometimes a new last four). Refresh the card by id
+ * through card-details-sync refreshCardFromStripe: it re-reads the card from
+ * Stripe (never the event payload) and writes a row only while it still holds
+ * what was read before that read, so neither an older event delivered late nor
+ * an overlapping daily refresh can overwrite newer details. Errors propagate:
+ * the dispatcher records them and Stripe retries; stripe_webhook_events already
+ * dedupes replays. Gated by GATE_CARD_DETAILS_SYNC.
+ */
+async function handlePaymentMethodAutomaticallyUpdated(paymentMethod) {
+  if (require('../config/feature-gates').gates?.cardDetailsSync !== true) {
+    logger.info(`[stripe-webhook] Card auto-update ignored (GATE_CARD_DETAILS_SYNC off): ${paymentMethod.id}`);
+    return;
+  }
+  const result = await require('../services/card-details-sync')
+    .refreshCardFromStripe(paymentMethod.id, { source: 'webhook' });
+  if (result.stripeMissing) throw new Error('Stripe not configured: cannot re-read payment method for card auto-update');
+  if (result.conflict) throw new Error('Card auto-update kept meeting a concurrent refresh; Stripe will deliver it again');
+  if (result.detached) {
+    logger.info(`[stripe-webhook] Card auto-update skipped (no Stripe customer): ${paymentMethod.id}`);
+    return;
+  }
+  logger.info(`[stripe-webhook] Card auto-update applied to ${result.updated} saved card row(s): ${paymentMethod.id}`);
 }
 
 /**
@@ -9204,6 +9234,7 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
 module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
+module.exports._handlePaymentMethodAutomaticallyUpdated = handlePaymentMethodAutomaticallyUpdated;
 module.exports._withDisputeRenewalGate = withDisputeRenewalGate;
 module.exports._handleDisputeCreated = handleDisputeCreated;
 module.exports._handleDisputeClosed = handleDisputeClosed;
