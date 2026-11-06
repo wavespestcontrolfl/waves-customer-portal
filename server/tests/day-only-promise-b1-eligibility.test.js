@@ -92,6 +92,51 @@ describe('dayOnlyEligibility: a first or one-time visit', () => {
   });
 });
 
+describe('dayOnlyEligibility: a first or one-time visit also fails once the customer picked its slot', () => {
+  const customerMove = { s1: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_self_serve' }] };
+  const staffMove = { s1: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'admin' }] };
+
+  test('an office booking the customer then rescheduled themselves: not eligible (the hour is now theirs)', async () => {
+    const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')], moves: customerMove });
+    expect((await verdict(conn)).s1.eligible).toBe(false);
+  });
+
+  test('an office booking that only staff moved: eligible', async () => {
+    const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')], moves: staffMove });
+    expect((await verdict(conn)).s1.eligible).toBe(true);
+  });
+
+  test('an office booking with a customer date exception newer than the staff move: not eligible', async () => {
+    const services = [svc('s1', { date_exception: true, date_exception_source: 'customer_portal', date_exception_at: '2026-11-09T10:00:00Z' })];
+    const conn = fakeConn({ services, reminders: [office('s1')], moves: staffMove });
+    expect((await verdict(conn)).s1.eligible).toBe(false);
+  });
+
+  test('the move history unreadable: not eligible (fail closed)', async () => {
+    const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')], failOn: 'reschedule_log' });
+    expect((await verdict(conn)).s1.eligible).toBe(false);
+  });
+
+  test('a customer source is rejected on the source alone: no move-history read at all', async () => {
+    const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1', 'booking_new')], moves: staffMove });
+    expect((await verdict(conn)).s1.eligible).toBe(false);
+    expect(conn.calls.reschedule_log).toBeUndefined();
+  });
+
+  test('customer_asked_time false still skips both the source rule and the customer-pick rule', async () => {
+    const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false })], reminders: [office('s1', 'booking_new')], moves: customerMove });
+    expect((await verdict(conn)).s1.eligible).toBe(true);
+    expect(conn.calls.reschedule_log).toBeUndefined();
+  });
+
+  test('stop-wide: one member the customer rescheduled makes the whole stop ineligible', async () => {
+    const services = [svc('s1', { visit_id: 'v1' }), svc('s2', { visit_id: 'v1' })];
+    const moves = { s2: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_sms' }] };
+    const conn = fakeConn({ services, reminders: [office('s1'), office('s2')], moves });
+    expect((await verdict(conn, ['s1', 's2'])).s1.eligible).toBe(false);
+  });
+});
+
 describe('dayOnlyEligibility: a recurring child is judged by who placed its slot, never by its source', () => {
   test('never moved: eligible (a system-placed recurring visit), even with an unknown source', async () => {
     const conn = fakeConn({ services: [child('s1')], reminders: [office('s1', 'cron_selfheal')] });
