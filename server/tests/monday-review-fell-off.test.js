@@ -213,120 +213,73 @@ describe('which loader the gate picks for list 1', () => {
   });
 });
 
-describe('the reply judgement', () => {
-  const { answered, witnessItem, isCustomerContact } = fellOff._private;
-  const EVENT = new Date('2026-10-30T15:00:00Z');
-  const at = (hours) => new Date(EVENT.getTime() + hours * 3600 * 1000);
-  const bundle = (over = {}) => ({
-    anchor: EVENT, customerId: null, shared: null, textAt: null, backAt: null, inAt: null, visitAt: null, quote: false, replyAt: null, lastInboundAt: null, ...over,
+describe('the sweep\'s verdict decides who is listed', () => {
+  const { judgeOne, judgeRows, isCustomerContact } = fellOff._private;
+  const logger = require('../services/logger');
+  const row = (id = 'n1') => ({ id, category: 'inbound_sms', metadata: {} });
+  // A stand-in for admin-alert-relevance: only the four calls the loader makes.
+  const relevance = (over = {}) => ({
+    classify: jest.fn(() => ({ key: 'inbound_sms', contact: 'sms' })),
+    subjectFor: jest.fn(() => ({ contact: { anchor: new Date() }, contactUnknown: false })),
+    judge: jest.fn(() => ({ reason: null, would: null })),
+    ...over,
   });
-  const customerItem = { id: 'n1', kind: 'customer', refs: { customerId: 'c1' } };
-  const smsItem = { id: 'n2', kind: 'sms', refs: { sid: 'SM1', customerId: 'c1' } };
-  const judge = (item, b, eventAt = EVENT) => answered({ item, bundle: b, eventAt, meta: {}, database: jest.fn() });
-  // The estimate hand-off witness is the relevance sweep's own (its SQL runs in the Postgres suite).
-  let quoteAnswered;
-  beforeEach(() => { quoteAnswered = jest.spyOn(require('../services/admin-alert-relevance'), 'quoteAnswered').mockResolvedValue(false); });
-  afterEach(() => quoteAnswered.mockRestore());
+  const state = () => ({ warned: false });
 
-  test('a person text, call back, answered call or email after the event answers it', async () => {
-    for (const field of ['textAt', 'backAt', 'inAt', 'replyAt']) {
-      expect(await judge(customerItem, bundle({ [field]: at(2) }))).toBe(true);
+  beforeEach(() => logger.warn.mockClear());
+
+  test('a verdict of either kind (it would close, or it closes) means handled', () => {
+    for (const verdict of [{ reason: 'Answered by text', would: null }, { reason: null, would: 'Answered by text' }]) {
+      expect(judgeOne(relevance({ judge: jest.fn(() => verdict) }), row(), {}, '2026-11-02', state())).toEqual({ handled: true });
     }
   });
 
-  test('contact before the event, or at the same instant, answers nothing', async () => {
-    expect(await judge(customerItem, bundle({ textAt: at(-5), backAt: EVENT }), at(1))).toBe(false);
-    // The alert was refreshed after the reply: the later event is the boundary.
-    expect(await judge(customerItem, bundle({ textAt: at(2) }), at(5))).toBe(false);
+  test('the sweep is asked as if the contact gate were on, and is handed the day in Eastern time', () => {
+    const r = relevance();
+    judgeOne(r, row(), { data: 1 }, '2026-11-02', state());
+    expect(r.classify).toHaveBeenCalledWith(row(), { assumeContactLive: true });
+    expect(r.subjectFor).toHaveBeenCalledWith(row(), { data: 1 }, '2026-11-02');
   });
 
-  test('a booking answers a call, email or portal alert, never a text', async () => {
-    expect(await judge(customerItem, bundle({ visitAt: at(3) }))).toBe(true);
-    expect(await judge(smsItem, bundle({ shared: false, visitAt: at(3) }))).toBe(false);
-    // A text alert read by its customer after the text could not be found is a text alert still.
-    expect(await judge(smsItem, bundle({ shared: null, visitAt: at(3) }))).toBe(false);
-    expect(await judge(smsItem, bundle({ shared: false, textAt: at(1) }))).toBe(true);
+  test('no verdict with its witnesses read: listed, checked', () => {
+    expect(judgeOne(relevance(), row(), {}, '2026-11-02', state())).toEqual({ handled: false, unchecked: false });
   });
 
-  test('the bundle quote flag is never trusted: a quote is asked again at the floor, for the customer the bundle resolved', async () => {
-    const voiceItem = { id: 'n3', kind: 'voice', refs: { customerId: null } };
-    // The flag is read from the original call, so it can name a quote older than the alert's latest event.
-    expect(await judge(voiceItem, bundle({ customerId: 'c9', quote: true }), at(4))).toBe(false);
-    expect(quoteAnswered.mock.calls[0][1]).toMatchObject({ customerId: 'c9', bellAt: at(4) });
-    quoteAnswered.mockResolvedValue(true);
-    expect(await judge(voiceItem, bundle({ customerId: 'c9', quote: false }), at(4))).toBe(true);
-    // No customer anywhere: nothing to ask, not answered.
-    quoteAnswered.mockClear();
-    expect(await judge(voiceItem, bundle({ quote: true }), at(4))).toBe(false);
-    expect(quoteAnswered).not.toHaveBeenCalled();
-    // A text alert never reads the quote witness.
-    expect(await judge(smsItem, bundle({ shared: false, customerId: 'c9', quote: true }), at(4))).toBe(false);
-    expect(quoteAnswered).not.toHaveBeenCalled();
+  test('listed and unchecked: no subject data, no class, a class without its witnesses, a failed witness load', () => {
+    expect(judgeOne(relevance(), row(), null, '2026-11-02', state())).toEqual({ handled: false, unchecked: true });
+    expect(judgeOne(relevance({ classify: jest.fn(() => null) }), row(), {}, '2026-11-02', state())).toEqual({ handled: false, unchecked: true });
+    const noWitness = relevance({ subjectFor: jest.fn(() => ({ contact: null, contactUnknown: false })) });
+    expect(judgeOne(noWitness, row(), {}, '2026-11-02', state())).toEqual({ handled: false, unchecked: true });
+    const failedLoad = relevance({ subjectFor: jest.fn(() => ({ contact: null, contactUnknown: true })) });
+    expect(judgeOne(failedLoad, row(), {}, '2026-11-02', state())).toEqual({ handled: false, unchecked: true });
+    // A class that judges without contact witnesses has nothing missing.
+    const plain = relevance({ classify: jest.fn(() => ({ key: 'lead_repeat_form' })), subjectFor: jest.fn(() => ({ contact: null })) });
+    expect(judgeOne(plain, row(), {}, '2026-11-02', state())).toEqual({ handled: false, unchecked: false });
   });
 
-  test('a quote handed to the customer after the event answers a non-text alert, read at the later of anchor and event', async () => {
-    quoteAnswered.mockResolvedValue(true);
-    expect(await judge(customerItem, bundle(), at(2))).toBe(true);
-    expect(quoteAnswered.mock.calls[0][1]).toMatchObject({ customerId: 'c1', bellAt: at(2) });
-    quoteAnswered.mockClear();
-    expect(await judge(smsItem, bundle({ shared: false }), at(2))).toBe(false);
-    expect(quoteAnswered).not.toHaveBeenCalled();
-  });
-
-  test('no bundle (the alert could not be checked) is not an answer', async () => {
-    expect(await judge(customerItem, undefined)).toBe(false);
-    expect(await judge(null, undefined)).toBe(false);
-  });
-
-  test('an alert with no witness bundle, or whose check throws, is listed unchecked; a thrown check warns once; the rest are judged', async () => {
-    const { settleEntries } = fellOff._private;
-    const logger = require('../services/logger');
-    logger.warn.mockClear();
-    quoteAnswered.mockRejectedValueOnce(new Error('canceling statement due to statement timeout')).mockRejectedValueOnce(new Error('again'));
-    const mk = (id, bundleOver, item = { id, kind: 'customer', refs: { customerId: `c${id}` } }) => ({
-      row: { id, title: `Alert ${id}` }, meta: {}, eventAt: EVENT, who: { name: `Name ${id}` }, item, bundle: bundle(bundleOver),
-    });
-    const judged = [mk('a'), mk('b'), mk('c', { textAt: at(2) }), mk('d'), mk('e', {}, null)];
-    // d has an item but no bundle was found for it; e names nothing the witnesses can find.
-    const bundles = new Map(judged.filter((e) => ['a', 'b', 'c'].includes(e.row.id)).map((e) => [e.row.id, e.bundle]));
-    const out = await settleEntries(judged, bundles, jest.fn());
-    expect(out.entries.map((e) => [e.title, e.unchecked])).toEqual([
-      ['Alert a', true], ['Alert b', true], ['Alert d', true], ['Alert e', true],
-    ]); // c was answered by a text
-    expect(out.unverified).toBe(4);
+  test('a row that throws is listed unchecked; the run warns once, with no row data', () => {
+    const boom = relevance({ judge: jest.fn(() => { throw new Error('boom for Jane Doe'); }) });
+    const shared = state();
+    expect(judgeOne(boom, row('a'), {}, '2026-11-02', shared)).toEqual({ handled: false, unchecked: true });
+    expect(judgeOne(boom, row('b'), {}, '2026-11-02', shared)).toEqual({ handled: false, unchecked: true });
     expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn.mock.calls[0][0]).not.toContain('Name');
+    expect(logger.warn.mock.calls[0][0]).not.toContain('Jane');
   });
 
-  test('a checked, unanswered alert is listed without the unchecked mark', async () => {
-    const { settleEntries } = fellOff._private;
-    const judged = [{ row: { id: 'a', title: 'Alert a' }, meta: {}, eventAt: EVENT, who: null, item: customerItem }];
-    const out = await settleEntries(judged, new Map([['a', bundle()]]), jest.fn());
-    expect(out.entries).toEqual([{ name: '', title: 'Alert a', at: EVENT, unchecked: false }]);
-    expect(out.unverified).toBe(0);
-  });
-
-  test('an email answers a customer alert but never a text alert, including a text read by its customer', async () => {
-    expect(await judge(customerItem, bundle({ replyAt: at(2) }))).toBe(true);
-    expect(await judge(smsItem, bundle({ shared: false, replyAt: at(2) }))).toBe(false);
-    // The text could not be found and the alert was read by its customer: a later email still answers no text.
-    expect(await judge(smsItem, bundle({ shared: null, replyAt: at(2) }))).toBe(false);
-    quoteAnswered.mockClear();
-    expect(quoteAnswered).not.toHaveBeenCalled();
-    // A person's text or call still answers it.
-    expect(await judge(smsItem, bundle({ shared: null, textAt: at(2) }))).toBe(true);
-    expect(await judge(smsItem, bundle({ shared: null, backAt: at(2) }))).toBe(true);
-  });
-
-  test('what each alert is read by: a text by its text, a customer by id, then the call or email it names, else nothing', () => {
-    const row = (over = {}) => ({ category: 'inbound_sms', link: '/admin/communications?message=SM123', ...over });
-    expect(witnessItem(row(), {}, { id: 'c1' }, EVENT)).toMatchObject({ kind: 'sms', refs: { sid: 'SM123', customerId: 'c1', unknownSender: false }, alt: { kind: 'customer', refs: { customerId: 'c1' } } });
-    expect(witnessItem(row(), {}, null, EVENT)).toMatchObject({ kind: 'sms', refs: { sid: 'SM123', customerId: null, unknownSender: true }, alt: null });
-    expect(witnessItem(row({ category: 'alert', link: '/admin/x' }), {}, { id: 'c1' }, EVENT)).toMatchObject({ kind: 'customer', refs: { customerId: 'c1' } });
-    expect(witnessItem(row({ category: 'voicemail_callback', link: null }), { payload: { callLogId: 'cl1', phone: '+15555550100' } }, null, EVENT))
-      .toMatchObject({ kind: 'voice', refs: { callLogId: 'cl1' } });
-    expect(witnessItem(row({ category: 'inbound_email', link: null }), { payload: { emailId: 'e1' } }, null, EVENT)).toMatchObject({ kind: 'email', refs: { emailId: 'e1' } });
-    expect(witnessItem(row({ category: 'new_lead', link: null }), {}, null, EVENT)).toBeNull();
+  test('a subject load that fails lists its whole batch unchecked, with one warning', async () => {
+    const real = require('../services/admin-alert-relevance');
+    const spy = jest.spyOn(real, 'loadSubjects').mockRejectedValue(new Error('canceling statement due to statement timeout'));
+    try {
+      const rows = Array.from({ length: 450 }, (_v, i) => row(`n${i}`));
+      const verdicts = await judgeRows(rows, jest.fn(), MONDAY);
+      expect(verdicts.size).toBe(450);
+      expect([...verdicts.values()].every((v) => v.handled === false && v.unchecked === true)).toBe(true);
+      expect(spy).toHaveBeenCalledTimes(3); // 200 + 200 + 50
+      expect(spy.mock.calls[0][2]).toEqual({ judgeContact: true });
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('a customer contact is a contact category or a declared contact; money and system rows are not', () => {

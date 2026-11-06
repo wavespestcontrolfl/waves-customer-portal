@@ -266,7 +266,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactMode: 'off', contactFailed: false });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactMode: 'off', contactFailed: false, assumeContact: false });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -379,7 +379,7 @@ function contactRefs(kind, row, data, cls) {
 async function loadContact(rows, data, conn) {
   const items = [];
   for (const row of rows) {
-    const cls = classify(row);
+    const cls = classify(row, { assumeContactLive: data.assumeContact });
     // A class with its own gate (the lead_contacted class) reads witnesses by that gate; every
     // other class by GATE_ALERT_CONTACT_CLOSE, as before.
     if (!cls || (cls.gate ? cls.gate() === 'off' : data.contactMode === 'off')) continue;
@@ -420,7 +420,7 @@ async function loadNoteVisits(rows, data, conn) {
   if (data.contactMode === 'off') return;
   const items = [];
   for (const row of rows) {
-    if (classify(row)?.key !== TEXT_NOTE_CLASS) continue;
+    if (classify(row, { assumeContactLive: data.assumeContact })?.key !== TEXT_NOTE_CLASS) continue;
     const refs = contactRefs('customer', row, data);
     const bellAt = row.created_at ? new Date(row.created_at) : null;
     if (refs && bellAt && !Number.isNaN(bellAt.getTime())) items.push({ id: row.id, customerId: refs.customerId, bellAt });
@@ -552,7 +552,7 @@ async function quoteAnswered(conn, { meta, customerId, bellAt }) {
 async function loadLeadHandoffs(rows, data, conn) {
   if (leadContactedCloseMode() === 'off') return;
   for (const row of rows) {
-    const cls = classify(row);
+    const cls = classify(row, { assumeContactLive: data.assumeContact });
     if (cls?.key !== 'lead_contacted') continue;
     const lead = data.leads.get(refsFromRow(row).leadId);
     const customerId = lead?.customer_id ? uuidOrNull(String(lead.customer_id)) : null;
@@ -607,9 +607,15 @@ function bounceSubject(meta, data) {
 // The live records for a batch of notification rows: one query per table per
 // batch (a lead's estimate is only known once the lead is loaded, so estimates
 // run second). Plain reads — never a lock.
-async function loadSubjects(rows, conn = db) {
+// `judgeContact` (the Monday review's fell-off list reads the sweep's verdicts on rows the sweep may not judge): read the
+// customer-contact witnesses whatever GATE_ALERT_CONTACT_CLOSE says, as `shadow` when it is off. The sweep never passes it.
+async function loadSubjects(rows, conn = db, { judgeContact = false } = {}) {
   const data = emptyData();
   data.contactMode = alertContactCloseMode();
+  if (judgeContact) {
+    data.assumeContact = true;
+    if (data.contactMode === 'off') data.contactMode = 'shadow';
+  }
   const all = rows.map(refsFromRow);
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
@@ -1315,10 +1321,10 @@ function judge(cls, s) {
 // exist only while GATE_ALERT_CONTACT_CLOSE is shadow or true, and a class with its
 // own `gate` only while that gate is; the re-arm pass asks for them in every mode
 // (`anyMode`) so a gate switched back off puts back what it closed.
-function classify(row, { anyMode = false } = {}) {
+function classify(row, { anyMode = false, assumeContactLive = false } = {}) {
   const meta = parseMeta(row.metadata);
   const dedupeKey = String(meta.dedupeKey || '');
-  const contactLive = anyMode || alertContactCloseMode() !== 'off';
+  const contactLive = anyMode || assumeContactLive || alertContactCloseMode() !== 'off';
   return CLASSES.find((c) => (!c.contactOnly || contactLive)
     && (!c.gate || anyMode || c.gate() !== 'off')
     && c.categories.includes(row.category)
@@ -1683,6 +1689,5 @@ module.exports = {
   parseMeta,
   judge,
   whereLiveBooking,
-  bookedVisitsByCustomer,
   CLASSES,
 };

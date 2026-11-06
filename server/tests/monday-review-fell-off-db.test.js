@@ -1,7 +1,7 @@
 /**
  * Monday review bell, list 1 as "customer alerts that fell off with no reply" (GATE_MONDAY_FELL_OFF_LINE; owner
  * 2026-11-05, decision D3) against live Postgres: the loader's SQL, the customer-contact test, the name read and the
- * shared reply witnesses (admin-alert-contact-witnesses.js) on real rows. Every fixture carries this run's marker,
+ * relevance sweep's own verdicts (admin-alert-relevance.js classify / loadSubjects / subjectFor / judge) on real rows. Every fixture carries this run's marker,
  * so counts never depend on rows other suites left behind and cleanup touches only what this suite wrote. It
  * refuses any database but a private QA one or CI's.
  */
@@ -37,6 +37,7 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
 
   afterAll(async () => {
     jest.restoreAllMocks();
+    restoreEnv();
     if (!db) return;
     if (created.notifications.length) await db('notifications').whereIn('id', created.notifications).del();
     if (created.sms.length) await db('sms_log').whereIn('id', created.sms).del();
@@ -45,6 +46,15 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     if (created.visits.length) await db('scheduled_services').whereIn('id', created.visits).del();
     if (created.customers.length) await db('customers').whereIn('id', created.customers).del();
   }, 60000);
+
+  // Gates the sweep honors, set for one test and put back.
+  const savedEnv = {};
+  const setEnv = (name, value) => { if (!(name in savedEnv)) savedEnv[name] = process.env[name]; process.env[name] = value; };
+  const restoreEnv = () => {
+    for (const [name, value] of Object.entries(savedEnv)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    for (const name of Object.keys(savedEnv)) delete savedEnv[name];
+  };
+  afterEach(restoreEnv);
 
   const phone = () => `+1555${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
 
@@ -66,7 +76,7 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     const sentAt = ago(sentDaysAgo);
     await addSms({
       direction: 'inbound', from_phone: customer.phone, to_phone: '+15550000002', twilio_sid: sid, customer_id: customer.id,
-      status: 'received', created_at: sentAt,
+      status: 'received', created_at: sentAt, message_body: 'Can someone call me back about my service please',
     });
     const [row] = await db('notifications').insert({
       recipient_type: 'admin', category, title: `SMS from ${name} Fell${RUN}`, body: 'fixture', link: `/admin/communications?message=${sid}`,
@@ -82,7 +92,7 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
   }
 
   const staffText = (customer, at, over = {}) => addSms({
-    direction: 'outbound', to_phone: customer.phone, customer_id: customer.id, twilio_sid: `SM${RUN}${randomUUID().replace(/-/g, '').slice(0, 20)}`,
+    direction: 'outbound', from_phone: '+15550000002', to_phone: customer.phone, customer_id: customer.id, twilio_sid: `SM${RUN}${randomUUID().replace(/-/g, '').slice(0, 20)}`,
     status: 'delivered', message_type: 'manual', metadata: JSON.stringify({ human_authored: 'true' }), created_at: at, ...over,
   });
 
@@ -90,6 +100,17 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
   const listed = async () => {
     const out = await fellOff.loadFellOffAlerts({ now: NOW });
     return { out, names: out.entries.filter((e) => e.title.includes(`Fell${RUN}`)).map((e) => e.title.replace(` Fell${RUN}`, '').replace('SMS from ', '')).sort() };
+  };
+
+  const mine = (out) => out.entries.filter((e) => e.title.includes(`Fell${RUN}`));
+  const insertAlert = async (over) => {
+    const { metadata, ...rest } = over;
+    const [row] = await db('notifications').insert({
+      recipient_type: 'admin', body: 'fixture', created_at: ago(5), done_at: ago(2), done_by: 'quiet-72h', resolution: 'No new activity for 3 days',
+      metadata: JSON.stringify({ severity: 'needs-you', who: 'person', ...metadata }), ...rest,
+    }).returning('id');
+    created.notifications.push(row.id);
+    return row.id;
   };
 
   test('lists the quiet-closed customer text nobody answered, by name, and only that one among the cases that follow', async () => {
@@ -123,12 +144,25 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     const { out, names } = await listed();
     expect(names).toEqual(['Alpha', 'Charlie']);
     expect(out).toMatchObject({ kind: 'fell-off', capped: false });
-    // Every fixture here resolves a witness bundle, so none of this run's entries carries the unchecked mark.
-    expect(out.entries.filter((e) => e.title.includes(`Fell${RUN}`)).every((e) => e.unchecked === false)).toBe(true);
+    // The sweep judged these by their witnesses, so none carries the unchecked mark.
+    expect(mine(out).every((e) => e.unchecked === false)).toBe(true);
     const alpha = out.entries.find((e) => e.title.includes('Alpha'));
     expect(alpha.name).toBe(`Alpha Fell${RUN}`);
     expect(alpha.at.getTime()).toBeGreaterThan(ago(5.1).getTime());
     expect(out.count).toBe(out.entries.length);
+  });
+
+  test('the list does not depend on the mode of GATE_ALERT_CONTACT_CLOSE', async () => {
+    const answered = await addCustomer('Uniform');
+    const uniform = await textAlert(answered, { name: 'Uniform' });
+    await staffText(answered, new Date(uniform.sentAt.getTime() + 3 * HOUR));
+    await textAlert(await addCustomer('Victor'), { name: 'Victor' });
+    for (const mode of ['off', 'shadow', 'true']) {
+      setEnv('GATE_ALERT_CONTACT_CLOSE', mode);
+      const { names } = await listed();
+      expect(names).toContain('Victor');
+      expect(names).not.toContain('Uniform');
+    }
   });
 
   test('a text that was not delivered, an automated text and a bare call row answer nothing', async () => {
@@ -158,136 +192,135 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     expect((await listed()).names).not.toContain('Juliet');
   });
 
-  test('a ringing refresh moves the boundary: a reply before the latest ring does not answer the alert', async () => {
-    const customer = await addCustomer('Kilo');
-    const alert = await textAlert(customer, { name: 'Kilo', metadata: { rungAt: ago(3).toISOString() } });
-    await staffText(customer, new Date(alert.sentAt.getTime() + 2 * HOUR)); // after the first text, before the refresh
-    expect((await listed()).names).toContain('Kilo');
+  describe('a portal chat hand-off that a reminder re-rang (GATE_PORTAL_CHAT_ANSWERED_CLOSE)', () => {
+    // portal-late-rering.js bumps created_at for the reminder and keeps the original ask in metadata.askedAt, so a reply
+    // between the two still counts. The sweep's boundary rule, not a second one here, decides.
+    const chatAlert = (customer, name) => insertAlert({
+      category: 'alert', title: `Portal chat from ${name} Fell${RUN}`, link: `/admin/customers/${customer.id}`, created_at: ago(3),
+      metadata: {
+        dedupeKey: `portal-chat-escalation:${RUN}-${name}`, doneWhen: 'customer_answered', topic: 'billing', contact: true,
+        customerId: customer.id, askedAt: ago(5).toISOString(), lateReRungAt: ago(3).toISOString(),
+      },
+    });
+
+    test('a reply between the original ask and the reminder answers it; one from before the ask does not', async () => {
+      setEnv('GATE_PORTAL_CHAT_ANSWERED_CLOSE', 'true');
+      const between = await addCustomer('Whiskey');
+      await chatAlert(between, 'Whiskey');
+      await staffText(between, ago(4)); // after askedAt (5 days ago), before the re-rung created_at (3 days ago)
+      const before = await addCustomer('Xray');
+      await chatAlert(before, 'Xray');
+      await staffText(before, ago(6)); // before the ask
+      const unanswered = await addCustomer('Yankee');
+      await chatAlert(unanswered, 'Yankee');
+      const { out } = await listed();
+      const titles = mine(out).map((e) => e.title);
+      expect(titles.some((t) => t.includes('Whiskey'))).toBe(false);
+      expect(titles.some((t) => t.includes('Xray'))).toBe(true);
+      expect(titles.some((t) => t.includes('Yankee'))).toBe(true);
+      expect(mine(out).filter((e) => /Xray|Yankee/.test(e.title)).every((e) => e.unchecked === false)).toBe(true);
+      // The date shown is the day the customer asked, not the reminder's.
+      expect(out.entries.find((e) => e.title.includes('Yankee')).at.getTime()).toBe(ago(5).getTime());
+    });
+
+    test('with the class\'s own gate off the sweep does not judge it: listed, unchecked', async () => {
+      setEnv('GATE_PORTAL_CHAT_ANSWERED_CLOSE', '');
+      const customer = await addCustomer('Zulu');
+      await chatAlert(customer, 'Zulu');
+      await staffText(customer, ago(4));
+      const entry = mine((await listed()).out).find((e) => e.title.includes('Zulu'));
+      expect(entry).toMatchObject({ unchecked: true });
+    });
   });
 
-  test('a text from a number with no customer on file is listed until a person replies to that number', async () => {
+  test('a text from a number with no customer on file: judged only while its own gate is on, answered by a reply to that number', async () => {
     const stranger = phone();
     const sid = `SM${RUN}${randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const sentAt = ago(5);
-    await addSms({ direction: 'inbound', from_phone: stranger, to_phone: '+15550000002', twilio_sid: sid, status: 'received', created_at: sentAt });
-    const [row] = await db('notifications').insert({
-      recipient_type: 'admin', category: 'inbound_sms', title: `SMS from Lima Fell${RUN}`, body: 'fixture', link: `/admin/communications?message=${sid}`,
-      created_at: sentAt, done_at: ago(2), done_by: 'quiet-72h', resolution: 'No new activity for 3 days',
-      metadata: JSON.stringify({ severity: 'needs-you', who: 'person', triggerKey: 'sms_reply', dedupeKey: `sms-reply:${sid}`, payload: { twilioSid: sid } }),
-    }).returning('id');
-    created.notifications.push(row.id);
-    const first = await listed();
-    expect(first.names).toContain('Lima');
-    expect(first.out.entries.find((e) => e.title.includes('Lima')).name).toBe('');
+    await addSms({ direction: 'inbound', from_phone: stranger, to_phone: '+15550000002', twilio_sid: sid, status: 'received', created_at: sentAt, message_body: 'Please call me' });
+    await insertAlert({
+      category: 'inbound_sms', title: `SMS from Lima Fell${RUN}`, link: `/admin/communications?message=${sid}`, created_at: sentAt,
+      metadata: { triggerKey: 'sms_reply', dedupeKey: `sms-reply:${sid}`, payload: { twilioSid: sid } },
+    });
+    // Its class is off: not judged, so it is listed and says so.
+    const off = await listed();
+    expect(off.names).toContain('Lima');
+    expect(off.out.entries.find((e) => e.title.includes('Lima'))).toMatchObject({ name: '', unchecked: true });
+    // Class on, nobody replied: listed, and checked.
+    setEnv('GATE_PROMISE_PHONE_MATCH_CLOSE', 'true');
+    const on = await listed();
+    expect(on.out.entries.find((e) => e.title.includes('Lima'))).toMatchObject({ unchecked: false });
     await addSms({
-      direction: 'outbound', to_phone: stranger, twilio_sid: `SM${RUN}${randomUUID().replace(/-/g, '').slice(0, 20)}`, status: 'delivered',
+      direction: 'outbound', from_phone: '+15550000002', to_phone: stranger, twilio_sid: `SM${RUN}${randomUUID().replace(/-/g, '').slice(0, 20)}`, status: 'delivered',
       message_type: 'manual', metadata: JSON.stringify({ human_authored: 'true' }), created_at: new Date(sentAt.getTime() + 3 * HOUR),
     });
     expect((await listed()).names).not.toContain('Lima');
   });
 
-  test('a declared customer contact outside the contact categories is judged by the customer, and a booked visit answers it', async () => {
-    const customer = await addCustomer('Mike');
-    const [row] = await db('notifications').insert({
-      recipient_type: 'admin', category: 'schedule', title: `Reschedule note from Mike Fell${RUN}`, body: 'fixture', link: `/admin/customers/${customer.id}`,
-      created_at: ago(5), done_at: ago(2), done_by: 'quiet-72h', resolution: 'No new activity for 3 days',
-      metadata: JSON.stringify({ severity: 'needs-you', who: 'person', contact: true, customerId: customer.id }),
-    }).returning('id');
-    created.notifications.push(row.id);
-    expect((await listed()).names).toContain('Reschedule note from Mike');
-    // A visit booked for that customer after the alert answers it (the new-lead rule's live top-level booking).
-    const [visit] = await db('scheduled_services').insert({
-      customer_id: customer.id, scheduled_date: '2026-11-10', service_type: `Fixture ${RUN}`, status: 'confirmed', created_at: ago(1),
-    }).returning('id');
-    created.visits.push(visit.id);
-    expect((await listed()).names).not.toContain('Reschedule note from Mike');
+  test('a repeat-form alert is answered by an estimate handed over after the form, never by one handed over before', async () => {
+    const quoted = await addCustomer('Mike');
+    const earlier = await addCustomer('November');
+    const bell = (customer, name) => insertAlert({
+      category: 'lead', title: `Repeat form from ${name} Fell${RUN}`, created_at: ago(5),
+      metadata: { dedupeKey: `lead-repeat-form:${customer.id}`, contact: true, customerId: customer.id, leadId: null },
+    });
+    await bell(quoted, 'Mike');
+    await bell(earlier, 'November');
+    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+    for (const [customer, at] of [[quoted, ago(3)], [earlier, ago(6)]]) {
+      const [estimate] = await db('estimates').insert({ status: 'sent', customer_id: customer.id, sent_at: at, estimate_data: delivered(at), created_at: ago(7) }).returning('id');
+      created.estimates.push(estimate.id);
+    }
+    const titles = mine((await listed()).out).map((e) => e.title);
+    expect(titles.some((t) => t.includes('Mike'))).toBe(false);
+    expect(titles.some((t) => t.includes('November'))).toBe(true);
   });
 
-  test('a quote lookup that fails lists that alert, marks the week unchecked and leaves the other entries alone', async () => {
-    const relevance = require('../services/admin-alert-relevance');
-    const flaky = await addCustomer('Oscar');
-    const [row] = await db('notifications').insert({
-      recipient_type: 'admin', category: 'schedule', title: `Reschedule note from Oscar Fell${RUN}`, body: 'fixture', link: `/admin/customers/${flaky.id}`,
-      created_at: ago(5), done_at: ago(2), done_by: 'quiet-72h', resolution: 'No new activity for 3 days',
-      metadata: JSON.stringify({ severity: 'needs-you', who: 'person', contact: true, customerId: flaky.id }),
-    }).returning('id');
-    created.notifications.push(row.id);
-    const plain = await addCustomer('Papa');
-    await textAlert(plain, { name: 'Papa' });
+  test('a customer contact no class judges (a missed call; a declared contact with no class) is listed with the unchecked mark', async () => {
+    const customer = await addCustomer('Romeo');
+    await insertAlert({
+      category: 'missed_call', title: `Missed call from Romeo Fell${RUN}`, link: '/admin/communications',
+      metadata: { triggerKey: 'customer_missed_call', customerId: customer.id },
+    });
+    await insertAlert({
+      category: 'schedule', title: `Reschedule note from Sierra Fell${RUN}`, link: `/admin/customers/${customer.id}`,
+      metadata: { contact: true, customerId: customer.id },
+    });
+    const { out } = await listed();
+    const entries = mine(out).filter((e) => /Romeo|Sierra/.test(e.title));
+    expect(entries).toHaveLength(2);
+    expect(entries.every((e) => e.unchecked === true)).toBe(true);
+    expect(out.unchecked).toBe(true);
+    expect(out.uncheckedCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a subject load that fails lists every alert, unchecked, and the review still has its list', async () => {
+    const customer = await addCustomer('Papa');
+    await textAlert(customer, { name: 'Papa' });
     const answeredCustomer = await addCustomer('Quebec');
     const quebec = await textAlert(answeredCustomer, { name: 'Quebec' });
     await staffText(answeredCustomer, new Date(quebec.sentAt.getTime() + 3 * HOUR));
-    const spy = jest.spyOn(relevance, 'quoteAnswered').mockRejectedValue(new Error('canceling statement due to statement timeout'));
+    const spy = jest.spyOn(require('../services/admin-alert-relevance'), 'loadSubjects').mockRejectedValue(new Error('canceling statement due to statement timeout'));
     try {
       const { out, names } = await listed();
       expect(spy).toHaveBeenCalled();
+      expect(names).toEqual(expect.arrayContaining(['Papa', 'Quebec'])); // nothing could be checked, so nothing is hidden
+      expect(mine(out).every((e) => e.unchecked === true)).toBe(true);
       expect(out.unchecked).toBe(true);
-      expect(names).toContain('Reschedule note from Oscar'); // listed, unchecked
-      expect(names).toContain('Papa'); // a text alert never reads the quote witness
-      expect(names).not.toContain('Quebec'); // still judged answered by its text
     } finally {
       spy.mockRestore();
     }
-    const after = await listed();
-    expect(after.out.entries.filter((e) => e.title.includes(`Fell${RUN}`)).every((e) => e.unchecked === false)).toBe(true);
-  });
-
-  test('a customer contact alert that names no customer, text, call or email is listed with the unchecked mark', async () => {
-    const [row] = await db('notifications').insert({
-      recipient_type: 'admin', category: 'missed_call', title: `Missed call from Romeo Fell${RUN}`, body: 'fixture', link: '/admin/communications',
-      created_at: ago(5), done_at: ago(2), done_by: 'quiet-72h', resolution: 'No new activity for 3 days',
-      metadata: JSON.stringify({ severity: 'needs-you', who: 'person', triggerKey: 'customer_missed_call' }),
-    }).returning('id');
-    created.notifications.push(row.id);
-    try {
-      const { out, names } = await listed();
-      expect(names).toContain('Missed call from Romeo');
-      const entry = out.entries.find((e) => e.title.includes(`Romeo Fell${RUN}`));
-      expect(entry.unchecked).toBe(true);
-      expect(out.unchecked).toBe(true);
-      expect(out.uncheckedCount).toBeGreaterThanOrEqual(1);
-      // Entries whose reply was checked carry no mark.
-      expect(out.entries.filter((e) => e.title.includes('Fell') && !e.title.includes('Romeo')).every((e) => e.unchecked === false)).toBe(true);
-    } finally {
-      await db('notifications').where({ id: row.id }).del();
-      created.notifications = created.notifications.filter((id) => id !== row.id);
-    }
-  });
-
-  test('a quote handed over between the original call and the alert\'s latest event does not answer it; one handed over after does', async () => {
-    const relevance = require('../services/admin-alert-relevance');
-    const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
-    const eventAt = ago(4); // the bell was rung again 4 days ago; the voicemail itself came in 6 days ago
-    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
-    const run = async (customer, quoteAt) => {
-      const [call] = await db('call_log').insert({
-        direction: 'inbound', status: 'completed', customer_id: customer.id, from_phone: customer.phone, to_phone: '+15550000002', created_at: ago(6),
-      }).returning('id');
-      created.calls.push(call.id);
-      const [estimate] = await db('estimates').insert({ status: 'sent', customer_id: customer.id, sent_at: quoteAt, estimate_data: delivered(quoteAt), created_at: ago(7) }).returning('id');
-      created.estimates.push(estimate.id);
-      const item = { id: `voice-${customer.id}`, kind: 'voice', bellAt: eventAt, refs: { callLogId: call.id, customerId: null, phone: customer.phone } };
-      const bundles = await loadContactBundles([item], { conn: db, bookedVisits: (ids) => relevance.bookedVisitsByCustomer(db, ids) });
-      const bundle = bundles.get(item.id);
-      return { bundle, answered: await fellOff._private.answered({ item, bundle, eventAt, meta: {}, database: db }) };
-    };
-    const between = await run(await addCustomer('Sierra'), ago(5));
-    // The bundle's own flag is read from the original call, so it says "quoted" here; the alert's latest event is later.
-    expect(between.bundle.quote).toBe(true);
-    expect(between.bundle.customerId).toBeTruthy();
-    expect(between.answered).toBe(false);
-    const after = await run(await addCustomer('Tango'), ago(3));
-    expect(after.answered).toBe(true);
+    expect((await listed()).names).not.toContain('Quebec');
   });
 
   test('the Monday text names the listed alerts and nothing else changes', async () => {
     const review = require('../services/monday-review-bell');
-    const customer = await addCustomer('November');
-    await textAlert(customer, { name: 'November' });
+    const customer = await addCustomer('Oscar');
+    await textAlert(customer, { name: 'Oscar' });
     const out = await fellOff.loadFellOffAlerts({ now: NOW });
     const [list] = review._private.buildLists({ alerts: out });
     expect(list.key).toBe('fellOff');
     expect(list.count).toBe(out.count);
-    expect(list.detail).toContain(`SMS from November Fell${RUN} (`);
+    expect(list.detail).toContain(`SMS from Oscar Fell${RUN} (`);
   });
 });

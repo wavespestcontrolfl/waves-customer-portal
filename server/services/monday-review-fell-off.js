@@ -13,20 +13,16 @@
 //   - A customer contact: a bell row in a customer-contact category (admin-alert-routing.js
 //     CUSTOMER_CONTACT_CATEGORIES) or one that declares `contact`/`promise` itself or through its registry type
 //     (admin-alert-send-to-claude.js declaredContact). The money categories never fall off, so none is judged here.
-//   - No reply reached that person after the alert's latest event (its creation, or the last ringing refresh or
-//     ask time, admin-alert-relevance.js bellEventAt). The witnesses are the sweep's own, loaded by
-//     admin-alert-contact-witnesses.js loadContactBundles and never re-derived here:
-//       texts   a person's delivered text (staff-contact.js operatorReplySql + smsDeliveredSql, minus a proactive draft);
-//       calls   a call a person placed and spoke on, or an inbound call a human answered (ended calls only);
-//       emails  a person's Gmail SENT row linked to the customer;
-//       quotes  handedOffWithin + whereEstimateCustomerOwnership (admin-alert-relevance.js quoteAnswered), never sent_at;
-//       visits  the new-lead class's live top-level booking predicate (whereLiveBooking).
-//     A text alert is answered by a text or a call only (the Messages reader's own rule); the other kinds also count
-//     a booking and a quote. A call_log row alone is never contact: a bridge row is written before Twilio dials.
-//     read_at is never evidence.
-//   - When the reply cannot be checked (the sender or customer cannot be identified, or the witness read fails) the
-//     alert is LISTED. The owner reads the list: an alert shown that was answered costs a glance, one hidden that was
-//     not costs a customer.
+//   - Not handled. "Handled" is the relevance sweep's own verdict (admin-alert-relevance.js: classify, loadSubjects,
+//     subjectFor, judge), never a second opinion written here. The sweep owns every boundary rule: the ask time a
+//     portal reminder keeps (askedAt), a re-rung bell's latest event, a shared phone, an unknown sender's latest text,
+//     a person's text, call or email, a live booking, a quote handed over (handedOffWithin, never sent_at). A row with
+//     a verdict, `reason` or `would`, is handled and left out, so the list does not depend on the mode of
+//     GATE_ALERT_CONTACT_CLOSE (loadSubjects `judgeContact` reads the contact witnesses even when that gate is off).
+//     The sweep's other gates are honored: a class whose own gate is off is not judged, so its rows are listed.
+//   - When a row cannot be checked it is LISTED and marked unchecked: no class judges it (a missed call, say), the
+//     class needs witnesses it could not identify, or the subject load failed. The owner reads the list: an alert
+//     shown that was answered costs a glance, one hidden that was not costs a customer.
 //   - Internal test customers are left out.
 //
 // Read only. Sends nothing to a customer, calls no paid API.
@@ -35,11 +31,14 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { QUIET_BY } = require('./admin-alert-retention');
 const { cutAtWord } = require('./admin-alert-compose');
+const { etDateString } = require('../utils/datetime-et');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_DAYS = 7;
 // The runaway bound on rows read; 7 days of quiet closes is a few dozen.
 const CANDIDATE_LIMIT = 1000;
+// Rows judged per subject load, the sweep's own page size.
+const JUDGE_BATCH = 200;
 const ENTRY_SHOWN = 15;
 const TITLE_CHARS = 60;
 
@@ -61,80 +60,58 @@ function isCustomerContact(row, meta) {
   return CUSTOMER_CONTACT_CATEGORIES.has(row.category) || declaredContact(meta);
 }
 
-// The alert's latest event: its creation, its ask time, or the last ringing refresh (never a Reopen's hold stamp).
-function latestEventAt(row) {
-  const { bellEventAt } = require('./admin-alert-relevance');
-  const times = [toDate(row.created_at), bellEventAt(row)].filter(Boolean);
-  return times.length ? new Date(Math.max(...times.map((d) => d.getTime()))) : null;
+// One warning per run, whatever failed, with the error code only.
+function warnOnce(state, what, err) {
+  if (state.warned) return;
+  state.warned = true;
+  logger.warn(`[monday-review] ${what}: ${require('./notification-service').safeErrorSummary(err)}`);
 }
 
-function linkParam(link, name) {
-  try { return new URL(String(link || ''), 'http://monday.local').searchParams.get(name); } catch { return null; }
-}
-
-// What the witness loader needs for one row: the kind of contact and the references it reads. `alt` is the customer-level
-// reading to try when the text, call or email it names cannot be found. Null when the row names nothing the witnesses
-// can find (it is listed, unchecked).
-function witnessItem(row, meta, named, eventAt) {
-  const payload = parseMeta(meta.payload);
-  const customerId = named?.id || null;
-  const sid = linkParam(row.link, 'message') || payload.twilioSid || null;
-  const byCustomer = customerId ? { id: row.id, kind: 'customer', bellAt: eventAt, refs: { customerId } } : null;
-  if (sid && (row.category === 'inbound_sms' || !customerId)) {
-    return { id: row.id, kind: 'sms', bellAt: eventAt, refs: { sid, customerId, unknownSender: !customerId }, alt: byCustomer };
-  }
-  if (byCustomer) return byCustomer;
-  if (payload.callLogId) return { id: row.id, kind: 'voice', bellAt: eventAt, refs: { callLogId: payload.callLogId, customerId: null, phone: payload.phone } };
-  if (payload.emailId) return { id: row.id, kind: 'email', bellAt: eventAt, refs: { emailId: payload.emailId, customerId: null } };
-  return null;
-}
-
-// Did a person reach the customer after the alert's latest event? `bundle` is the witness bundle (absent = unchecked, listed).
-async function answered({ item, bundle, eventAt, meta, database }) {
-  if (!bundle) return false;
-  const floor = Math.max(bundle.anchor.getTime(), eventAt.getTime(), bundle.lastInboundAt ? new Date(bundle.lastInboundAt).getTime() : 0);
-  const after = (at) => !!at && new Date(at).getTime() > floor;
-  // A person's text or call answers any alert. A text's bundle carries `shared` (true or false); every other kind
-  // carries null, and a text alert read by its customer after the text could not be found is a text alert still. Only
-  // the other kinds are answered by an email, a booking or a quote (the Messages reader's own text-or-call rule).
-  if (after(bundle.textAt) || after(bundle.backAt) || after(bundle.inAt)) return true;
-  if (bundle.shared !== null || item.kind === 'sms') return false;
-  if (after(bundle.replyAt) || after(bundle.visitAt)) return true;
-  // A quote answers it only when it was handed to the customer after `floor`. The bundle's own `quote` flag is read from
-  // the original call or email, not from the alert's latest event, so it is never trusted here: the shared quote
-  // witness is asked again at the floor, for the customer the bundle resolved.
-  const customerId = item.refs.customerId || bundle.customerId;
-  if (!customerId) return false;
-  const { quoteAnswered } = require('./admin-alert-relevance');
-  return quoteAnswered(database, { meta, customerId, bellAt: new Date(floor) });
-}
-
-// The witness bundles for these items (a Map by notification id), or null when the read fails (every alert is then
-// listed, unchecked). An item whose named text, call or email is not on file is read again by its customer.
-async function loadBundles(items, database) {
-  if (!items.length) return new Map();
+// The sweep's verdict on one row: { handled } or { handled: false, unchecked }.
+function judgeOne(relevance, row, data, todayET, state) {
+  if (!data) return { handled: false, unchecked: true };
   try {
-    const { loadContactBundles } = require('./admin-alert-contact-witnesses');
-    const { bookedVisitsByCustomer } = require('./admin-alert-relevance');
-    const deps = { conn: database, bookedVisits: (ids) => bookedVisitsByCustomer(database, ids) };
-    const bundles = await loadContactBundles(items, deps);
-    const retry = items.filter((i) => i.alt && !bundles.has(String(i.id))).map((i) => i.alt);
-    if (retry.length) for (const [id, bundle] of await loadContactBundles(retry, deps)) bundles.set(id, bundle);
-    return bundles;
+    const cls = relevance.classify(row, { assumeContactLive: true });
+    if (!cls) return { handled: false, unchecked: true };
+    const subject = relevance.subjectFor(row, data, todayET);
+    const verdict = relevance.judge(cls, subject);
+    if (verdict.reason || verdict.would) return { handled: true };
+    // A class that judges by the contact witnesses, whose witnesses could not be found or read, has judged nothing.
+    return { handled: false, unchecked: Boolean(subject.contactUnknown || (cls.contact && !subject.contact)) };
   } catch (err) {
-    logger.warn(`[monday-review] reply witnesses failed to load; the fell-off list is unchecked: ${require('./notification-service').safeErrorSummary(err)}`);
-    return null;
+    warnOnce(state, 'a reply check failed; the alert is listed unchecked', err);
+    return { handled: false, unchecked: true };
   }
+}
+
+// Map of row id -> { handled, unchecked }. A subject load that fails leaves its batch listed, unchecked.
+async function judgeRows(rows, database, now) {
+  const relevance = require('./admin-alert-relevance');
+  const todayET = etDateString(now);
+  const state = { warned: false };
+  const verdicts = new Map();
+  for (let i = 0; i < rows.length; i += JUDGE_BATCH) {
+    const batch = rows.slice(i, i + JUDGE_BATCH);
+    let data = null;
+    try {
+      data = await relevance.loadSubjects(batch, database, { judgeContact: true });
+    } catch (err) {
+      warnOnce(state, 'reply witnesses failed to load; the alerts are listed unchecked', err);
+    }
+    for (const row of batch) verdicts.set(String(row.id), judgeOne(relevance, row, data, todayET, state));
+  }
+  return verdicts;
 }
 
 /**
- * -> { kind: 'fell-off', count, capped, unchecked, uncheckedCount, entries: [{ name, title, at, unchecked }] } (newest first).
- * `unchecked` is true when any listed alert's reply could not be checked; `uncheckedCount` says how many.
+ * -> { kind: 'fell-off', count, capped, unchecked, uncheckedCount, entries: [{ name, title, at, unchecked }] } (newest
+ * first). `unchecked` is true when any listed alert could not be checked; `uncheckedCount` says how many.
  * `entries` holds every alert found; the Monday text shows the first ENTRY_SHOWN.
  */
 async function loadFellOffAlerts({ now = new Date(), database = db, limit = CANDIDATE_LIMIT } = {}) {
   const { customersForAlerts } = require('./admin-alert-customer');
   const { isInternalTestCustomerId } = require('./internal-test-customers');
+  const { bellEventAt } = require('./admin-alert-relevance');
   const since = new Date(now.getTime() - WINDOW_DAYS * DAY_MS);
   const rows = await database('notifications')
     .where({ recipient_type: 'admin', done_by: QUIET_BY }).whereNotNull('done_at').where('done_at', '>=', since)
@@ -147,38 +124,17 @@ async function loadFellOffAlerts({ now = new Date(), database = db, limit = CAND
   const contact = rows.filter((row) => isCustomerContact(row, parseMeta(row.metadata)));
   const named = await customersForAlerts(database, contact);
   const kept = contact.filter((row) => !isInternalTestCustomerId(named.get(String(row.id))?.id));
-  const judged = kept.map((row) => {
-    const meta = parseMeta(row.metadata);
-    const eventAt = latestEventAt(row) || toDate(row.created_at) || now;
-    return { row, meta, eventAt, who: named.get(String(row.id)) || null };
-  }).map((entry) => ({ ...entry, item: witnessItem(entry.row, entry.meta, entry.who, entry.eventAt) }));
-  const bundles = await loadBundles(judged.map((e) => e.item).filter(Boolean), database);
-  const { entries, unverified } = await settleEntries(judged, bundles, database);
+  const verdicts = await judgeRows(kept, database, now);
+  const entries = kept.filter((row) => !verdicts.get(String(row.id)).handled).map((row) => ({
+    name: named.get(String(row.id))?.name || '',
+    title: String(row.title || '').trim(),
+    // The day the customer reached us: the ask time a portal reminder keeps, else the bell's latest event.
+    at: bellEventAt(row) || toDate(row.created_at) || now,
+    unchecked: verdicts.get(String(row.id)).unchecked === true,
+  }));
   entries.sort((a, b) => b.at.getTime() - a.at.getTime());
-  return { kind: 'fell-off', count: entries.length, capped, unchecked: unverified > 0, uncheckedCount: unverified, entries };
-}
-
-// The alerts no person answered. An alert whose reply could not be checked is listed with `unchecked: true`: it has no
-// witness bundle (nothing identifies its customer, text, call or email, or the witness read failed), or its check threw
-// (the quote witness reads the database on its own; one warning for the run, and the review goes on).
-async function settleEntries(judged, bundles, database) {
-  const entries = [];
-  let unverified = 0;
-  let warned = false;
-  for (const entry of judged) {
-    const bundle = entry.item && bundles ? bundles.get(String(entry.row.id)) : null;
-    let unchecked = !bundle;
-    try {
-      if (await answered({ item: entry.item, bundle, eventAt: entry.eventAt, meta: entry.meta, database })) continue;
-    } catch (err) {
-      unchecked = true;
-      if (!warned) logger.warn(`[monday-review] a reply check failed; the alert is listed unchecked: ${require('./notification-service').safeErrorSummary(err)}`);
-      warned = true;
-    }
-    if (unchecked) unverified += 1;
-    entries.push({ name: entry.who?.name || '', title: String(entry.row.title || '').trim(), at: entry.eventAt, unchecked });
-  }
-  return { entries, unverified };
+  const uncheckedCount = entries.filter((e) => e.unchecked).length;
+  return { kind: 'fell-off', count: entries.length, capped, unchecked: uncheckedCount > 0, uncheckedCount, entries };
 }
 
 // "Jane Doe: SMS from Jane Doe" would say the name twice, so a title that already holds the name stands alone.
@@ -193,5 +149,5 @@ module.exports = {
   entryLine,
   ENTRY_SHOWN,
   WINDOW_DAYS,
-  _private: { isCustomerContact, witnessItem, answered, latestEventAt, settleEntries },
+  _private: { isCustomerContact, judgeOne, judgeRows },
 };
