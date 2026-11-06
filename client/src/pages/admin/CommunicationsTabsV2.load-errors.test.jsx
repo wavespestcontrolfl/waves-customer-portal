@@ -268,6 +268,32 @@ describe("CSR Coach load failures", () => {
   });
 });
 
+describe("CSR Coach task list", () => {
+  // The header counts every open task; the list used to stop at 10 with no way to see the rest.
+  it.each([
+    [12, true],
+    [10, false],
+  ])("lists %i follow-up tasks with a Show all button only when more than 10", async (count, hasMore) => {
+    coachFetch({
+      tasks: { tasks: Array.from({ length: count }, (_, i) => taskRow(i + 1)), pending: count, overdue: 0 },
+    });
+
+    render(<CSRCoachTabV2 />);
+    await screen.findByText(/Action 1\b/);
+    expect(screen.getAllByRole("button", { name: "Mark Done" })).toHaveLength(Math.min(count, 10));
+    if (!hasMore) {
+      expect(screen.queryByRole("button", { name: "Show all" })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Showing 10 of/)).not.toBeInTheDocument();
+      return;
+    }
+    expect(screen.getByText("Showing 10 of 12")).toBeInTheDocument();
+    expect(screen.getByText(/Pending:/)).toHaveTextContent("Pending: 12");
+    fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(screen.getAllByRole("button", { name: "Mark Done" })).toHaveLength(12);
+    expect(screen.queryByRole("button", { name: "Show all" })).not.toBeInTheDocument();
+  });
+});
+
 describe("CSR Coach task actions", () => {
   it("disables the task buttons during the PUT and keeps the task with the error when it fails", async () => {
     let release;

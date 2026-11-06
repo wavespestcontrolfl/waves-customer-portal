@@ -35,6 +35,11 @@ describe('MobileServiceEditModal save payload', () => {
   });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); saveNotice.shown.length = 0; });
 
+  it('says the cadence pick changes the visit name only', () => {
+    render(<MobileServiceEditModal desktopVisible service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByText('Changes the visit name only. Use Edit appointment to change how often visits repeat.')).toBeInTheDocument();
+  });
+
   it('omits serviceType when the tech did not pick a different tier', async () => {
     const onSaved = vi.fn();
     render(<MobileServiceEditModal desktopVisible service={SERVICE} onClose={vi.fn()} onSaved={onSaved} />);
