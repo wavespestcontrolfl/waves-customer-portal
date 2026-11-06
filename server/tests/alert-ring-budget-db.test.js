@@ -17,7 +17,6 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
   let etDateString;
   const RUN = `ring-budget-test-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const made = [];
-  const FAR_DAY_PREFIX = '2031-';
 
   const bellRows = (ids) => NotificationService._private.excludeActivityOnlyFromBell(
     db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids));
@@ -30,13 +29,14 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     return row;
   };
   const countRow = (day) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${day}`]).first();
-  const clearToday = async () => {
-    const day = etDateString();
-    await db('notifications').where({ recipient_type: 'admin' })
-      .where((q) => q.whereRaw("metadata->>'ringBudgetDay' = ?", [day]).orWhereRaw("metadata->>'ringBudgetHeld' = ?", [day]).orWhereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${day}`]))
-      .del();
-    await db('notifications').where({ recipient_type: 'admin' }).whereRaw("starts_with(metadata->>'ringBudgetDay', ?)", [FAR_DAY_PREFIX]).del();
-  };
+  // Rows this suite owns, and only those: its fixture marker, its title prefix, the ids it tracked, and the day's count row (the
+  // guard in beforeAll proves none existed before the suite started, so a count row for today is the suite's own).
+  const OWN_PREFIX = 'ring-budget-test-';
+  const ownRows = () => db('notifications').where({ recipient_type: 'admin' }).where((q) => {
+    q.whereRaw("metadata->>'fixture' = ?", [RUN]).orWhereRaw('starts_with(title, ?)', [RUN]).orWhereIn('id', made);
+    q.orWhereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${etDateString()}`]);
+  });
+  const clearOwn = () => ownRows().del();
   const waitFor = async (fn, ms = 3000) => {
     const end = Date.now() + ms;
     for (;;) {
@@ -47,24 +47,42 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     }
   };
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    // The budget counts every stamped row of the day, so this suite needs a database it can own: a private QA database or the
+    // isolated CI database (the guard the other *-db suites use).
+    const target = new URL(process.env.DATABASE_URL);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
+    const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
+    if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database: this suite counts every ring-budget row of the day');
     db = require('../models/db');
     NotificationService = require('../services/notification-service');
     budget = require('../services/alert-ring-budget');
     activity = require('../services/agent-activity');
     ({ etDateString } = require('../utils/datetime-et'));
+    // Leftovers of an earlier run of this suite are ours by their prefix; anything else already stamped for today is not, and
+    // would change every count below, so refuse to run rather than delete it.
+    await db('notifications').where({ recipient_type: 'admin' })
+      .where((q) => q.whereRaw('starts_with(title, ?)', [OWN_PREFIX]).orWhereRaw("starts_with(metadata->>'fixture', ?)", [OWN_PREFIX])).del();
+    const day = etDateString();
+    const foreign = await db('notifications').where({ recipient_type: 'admin' })
+      .where('created_at', '>', db.raw("now() - interval '40 hours'"))
+      .where((q) => q.whereRaw("metadata->>'ringBudgetDay' = ?", [day]).orWhereRaw("metadata->>'ringBudgetHeld' = ?", [day])
+        .orWhereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${day}`]))
+      .count('* as n').first();
+    if (Number(foreign.n) > 0) {
+      throw new Error(`This database already holds ${foreign.n} ring-budget rows for today that this suite does not own; use a fresh private QA database`);
+    }
   });
   beforeEach(async () => {
     process.env.GATE_ALERT_RING_BUDGET = 'true';
-    await clearToday();
+    await clearOwn();
   });
   afterAll(async () => {
     delete process.env.GATE_ALERT_RING_BUDGET;
-    await db('notifications').whereIn('id', made).del();
-    await clearToday();
-    await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'fixture' = ?", [RUN]).del();
-    await db('notifications').where({ recipient_type: 'admin' }).whereRaw("starts_with(metadata->>'ringBudgetDay', ?)", [FAR_DAY_PREFIX]).del();
-    await db.destroy();
+    if (db) {
+      await clearOwn();
+      await db.destroy();
+    }
   });
 
   test('the day count follows Eastern midnight: 11:59 PM and 12:00 AM are different days, and the 25-hour fall-back day is one day', async () => {
@@ -401,6 +419,34 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
       jest.restoreAllMocks();
     }
   }, 60000);
+
+  test('Held alerts: an open held row stays listed however old; a done one only inside the window; the audience filters still apply', async () => {
+    const days = (n) => new Date(Date.now() - n * 24 * 3600 * 1000);
+    const insert = async (name, over = {}, meta = {}) => {
+      const [row] = await db('notifications').insert({
+        recipient_type: 'admin', category: 'inventory', title: `${RUN} ${name}`, body: 'x', created_at: days(3),
+        metadata: JSON.stringify({ fixture: RUN, feed: 'activity', quiet: true, ringBudgetHeld: '2020-01-01', ...meta }), ...over,
+      }).returning('id');
+      made.push(row.id);
+      return row.id;
+    };
+    const openOld = await insert('open old');
+    const resolvedOld = await insert('resolved old', {}, { resolved: true });
+    const doneOld = await insert('done old', { done_at: days(2) });
+    const doneRecent = await insert('done recent', { created_at: days(3), done_at: new Date() });
+    const ownerOld = await insert('owner only old', {}, { ownerOnly: true });
+    const since = new Date(Date.now() - 24 * 3600 * 1000);
+    const ids = (await activity._private.loadHeldRows(db, since, null, false)).map((r) => r.id);
+    expect(ids).toContain(openOld);
+    expect(ids).toContain(doneRecent);
+    expect(ids).not.toContain(resolvedOld);
+    expect(ids).not.toContain(doneOld);
+    expect(ids).not.toContain(ownerOld);
+    expect((await activity._private.loadHeldRows(db, since, null, true)).map((r) => r.id)).toContain(ownerOld);
+    // It reaches the feed itself: the old open row reads as an item under Held alerts.
+    const feed = activity.buildActivity({ held: await activity._private.loadHeldRows(db, since, null, false) });
+    expect(feed.items.filter((i) => i.agent === 'Held alerts').map((i) => i.notificationId)).toContain(openOld);
+  });
 
   test('the Activity feed lists held alerts and leaves out the count row, ops digests and Claude\'s queue', async () => {
     const day = etDateString();

@@ -588,9 +588,11 @@ async function loadClaudeQueueRows(db, since, focusId, fullAccess = false) {
   return rows;
 }
 
-// Alerts the daily ring budget held (metadata.ringBudgetHeld): the ones created, closed or resolved inside the window, plus the
-// focus id whatever its age. An ops_digest row stays under its own loader and a routed row under Claude's queue, so no row
-// shows twice. An owner-only row is left out unless the caller is the owner login.
+// Alerts the daily ring budget held (metadata.ringBudgetHeld). Same two windows as Claude's queue: every held row that is
+// still open (not done, not resolved) however old, so a held alert that still needs action stays visible after the Activity
+// window passes (the count row's link carries no focus id), plus the ones created, closed or resolved inside the window. The
+// focus id also loads one held row whatever its age. An ops_digest row stays under its own loader and a routed row under
+// Claude's queue, so no row shows twice. An owner-only row is left out unless the caller is the owner login.
 async function loadHeldRows(db, since, focusId, fullAccess = false) {
   const base = () => {
     const query = db('notifications')
@@ -601,14 +603,21 @@ async function loadHeldRows(db, since, focusId, fullAccess = false) {
       .whereRaw('category <> ?', [DIGEST_CATEGORY]);
     return fullAccess ? query : query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
   };
-  const windowed = await base()
-    .where((w) => w.where('created_at', '>=', since).orWhere('done_at', '>=', since))
+  const open = await base()
+    .whereNull('done_at')
+    .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
     .orderBy('created_at', 'desc')
+    .limit(PINNED_CAP);
+  const windowed = await base()
+    .where((w) => w.where('created_at', '>=', since)
+      .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since])
+      .orWhere('done_at', '>=', since))
+    .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz, done_at) DESC")
     .limit(MAX_ITEMS);
   const focused = focusId ? await base().where('id', focusId).limit(1) : [];
   const seen = new Set();
   const rows = [];
-  for (const row of [].concat(windowed || [], focused || [])) {
+  for (const row of [].concat(open || [], windowed || [], focused || [])) {
     const id = String(row.id);
     if (seen.has(id)) continue;
     seen.add(id);
