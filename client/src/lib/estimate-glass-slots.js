@@ -78,16 +78,22 @@ export function glassSlotMeta(slot) {
 const APPROVE_LABEL_DATE_AFTER_DAYS = 6;
 
 /**
- * The glass Approve button's text for a picked slot (owner 2026-11-06): "Approve — Mon 9:00 AM"
- * inside the coming week, "Approve — Mon, Nov 23, 9:00 AM" past 6 days, where the bare
- * weekday could mean two different Mondays. Days are counted on ET calendar dates.
+ * The picked slot's day and time on the Approve buttons (owner 2026-11-06): "Mon 9:00 AM"
+ * inside the coming week, "Mon, Nov 23, 9:00 AM" past 6 days, where the bare weekday could
+ * mean two different Mondays. Days are counted on ET calendar dates. A slot with no date
+ * keeps the short form.
  */
-export function approveSlotLabel(slotMeta, now = new Date()) {
+export function approveSlotWhen(slotMeta, now = new Date()) {
   const dayMs = 86400000;
   const daysOut = Math.round((new Date(`${slotMeta.date}T12:00:00Z`) - new Date(`${etDateString(now)}T12:00:00Z`)) / dayMs);
-  if (!(daysOut > APPROVE_LABEL_DATE_AFTER_DAYS)) return `Approve — ${slotMeta.dow} ${slotMeta.time}`;
+  if (!(daysOut > APPROVE_LABEL_DATE_AFTER_DAYS)) return `${slotMeta.dow} ${slotMeta.time}`;
   const monthDay = new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  return `Approve — ${slotMeta.dow}, ${monthDay}, ${slotMeta.time}`;
+  return `${slotMeta.dow}, ${monthDay}, ${slotMeta.time}`;
+}
+
+// The glass Approve button: "Approve — Mon 9:00 AM" / "Approve — Mon, Nov 23, 9:00 AM".
+export function approveSlotLabel(slotMeta, now = new Date()) {
+  return `Approve — ${approveSlotWhen(slotMeta, now)}`;
 }
 
 // The customer's arrival window is the slot start plus 2 hours (owner rule; the

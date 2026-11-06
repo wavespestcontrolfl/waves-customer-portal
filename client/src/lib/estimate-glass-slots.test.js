@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   approveSlotLabel,
+  approveSlotWhen,
   arrivalWindowLabel,
   firstVisitDayAndWindow,
   glassScarcityInfo,
@@ -148,5 +149,11 @@ describe('approveSlotLabel', () => {
 
   it('counts days on the ET calendar, not the UTC one (9 PM ET Friday is already Saturday in UTC)', () => {
     expect(approveSlotLabel(meta('2026-11-13'), new Date('2026-11-07T02:00:00Z'))).toBe('Approve — Fri, Nov 13, 9:00 AM');
+  });
+
+  it('approveSlotWhen is the same rule without the prefix (the sticky bar uses it)', () => {
+    expect(approveSlotWhen(meta('2026-11-09'), FRIDAY)).toBe('Mon 9:00 AM');
+    expect(approveSlotWhen(meta('2026-11-23'), FRIDAY)).toBe('Mon, Nov 23, 9:00 AM');
+    expect(approveSlotWhen({ dow: 'Tue', time: '9 AM' }, FRIDAY)).toBe('Tue 9 AM');
   });
 });
