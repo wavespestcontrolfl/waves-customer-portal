@@ -167,7 +167,7 @@ describe("FocusedBoxMic", () => {
     stubServer({ available: true, everyBox: true });
     function Host() {
       const [open, setOpen] = useState(true);
-      return <>{open && <textarea aria-label="notes" defaultValue="Hello" />}<button type="button" onClick={() => setOpen(false)}>Close box</button></>;
+      return <>{open && <textarea aria-label="notes" defaultValue="Hello" />}<button type="button" onClick={() => setOpen(false)}>Close</button></>;
     }
     await mount(<Host />);
     await focusBox();
@@ -175,7 +175,7 @@ describe("FocusedBoxMic", () => {
     const stop = await screen.findByRole("button", { name: "Stop dictation" });
     await act(async () => { fireEvent.click(stop); });
     await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
-    await act(async () => { fireEvent.click(screen.getByText("Close box")); });
+    await act(async () => { fireEvent.click(screen.getByText("Close")); });
     await act(async () => { resolveClip({ ok: true, json: async () => ({ text: "lost words" }) }); });
     expect(await screen.findByRole("status")).toHaveTextContent(/closed before the words came back/);
     expect(screen.queryByLabelText("notes")).toBeNull();
@@ -191,6 +191,7 @@ describe("FocusedBoxMic", () => {
         <textarea aria-label="notes" defaultValue="Hello" onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }} />
         <button type="button" onClick={send}>Send follow-up</button>
         <button type="button" onClick={cancel}>Cancel</button>
+        <button type="button" onClick={send}>Save and close</button>
       </div>,
     );
     await focusBox();
@@ -200,6 +201,7 @@ describe("FocusedBoxMic", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
 
     await act(async () => { fireEvent.click(screen.getByText("Send follow-up")); });
+    await act(async () => { fireEvent.click(screen.getByText("Save and close")); });
     expect(send).not.toHaveBeenCalled();
     await act(async () => { fireEvent.keyDown(screen.getByLabelText("notes"), { key: "Enter", metaKey: true }); });
     expect(send).not.toHaveBeenCalled();

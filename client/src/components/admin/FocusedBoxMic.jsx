@@ -27,14 +27,15 @@ const NOTICES = {
 };
 
 // Buttons that stay live while words are on the way: they leave the box, they do not read it.
-const SAFE_BUTTON = /\b(cancel|close|back|dismiss|discard|stop|no thanks)\b/i;
+// The whole label must be one of these words ("Save and close" is not): a longer label may send.
+const SAFE_BUTTON = /^\s*(cancel|close|back|dismiss|discard|no thanks|×|x)( dialog| modal| window| panel)?\s*$/i;
 
 const RECHECK_MS = 5 * 60 * 1000;
 
 /**
  * Asks the server whether the every-box mic is on: once at mount, then again when
  * the page comes back to the front (at most every five minutes), so turning the
- * gate off reaches an open session without a reload. A failed check changes nothing.
+ * gate off reaches an open session without a reload. A failed check turns it off (fail closed).
  * Nothing renders until the server says yes.
  */
 function useEveryBox() {
@@ -51,7 +52,8 @@ function useEveryBox() {
       if (document.visibilityState === "hidden" || Date.now() - checkedAt < RECHECK_MS) return;
       checkedAt = Date.now();
       refreshEveryBoxDictation(token).then((answer) => {
-        if (!disposed && answer !== null) setOn(answer);
+        // Fail closed: a check that could not reach the server turns the mic off until the next one.
+      if (!disposed) setOn(answer === true);
       });
     };
     document.addEventListener("visibilitychange", recheck);
