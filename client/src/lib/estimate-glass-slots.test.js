@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  approveSlotLabel,
+  arrivalWindowLabel,
+  firstVisitDayAndWindow,
   glassScarcityInfo,
   glassSlotIsStale,
   glassSlotMeta,
@@ -110,5 +113,40 @@ describe('glassScarcityInfo', () => {
       { date: '2026-07-07', openCount: 1 },
       NOW,
     )).toEqual({ count: 1, label: 'Only 1 opening on Tuesday — 9:00 AM' });
+  });
+});
+
+describe('first visit line pieces', () => {
+  it('the arrival window is the start plus two hours, with AM/PM once when both ends share it', () => {
+    expect(arrivalWindowLabel('09:00')).toBe('9:00-11:00 AM');
+    expect(arrivalWindowLabel('11:00')).toBe('11:00 AM-1:00 PM');
+    expect(arrivalWindowLabel('13:00:00')).toBe('1:00-3:00 PM');
+    expect(arrivalWindowLabel('')).toBeNull();
+  });
+
+  it('names the ET calendar day and the window, independent of the browser zone', () => {
+    expect(firstVisitDayAndWindow('2026-11-09', '09:00')).toBe('Mon, Nov 9, 9:00-11:00 AM');
+    expect(firstVisitDayAndWindow(undefined, '09:00')).toBeNull();
+    expect(firstVisitDayAndWindow('2026-11-09', null)).toBeNull();
+  });
+});
+
+describe('approveSlotLabel', () => {
+  // Fri 2026-11-06, 10:00 ET.
+  const FRIDAY = new Date('2026-11-06T15:00:00Z');
+  const meta = (date) => glassSlotMeta({ slotId: 's', date, windowStart: '09:00' });
+
+  it('keeps the weekday-and-time label for a visit within 6 days', () => {
+    expect(approveSlotLabel(meta('2026-11-09'), FRIDAY)).toBe('Approve — Mon 9:00 AM');
+    expect(approveSlotLabel(meta('2026-11-12'), FRIDAY)).toBe('Approve — Thu 9:00 AM');
+  });
+
+  it('adds the date once the visit is 7 or more days out', () => {
+    expect(approveSlotLabel(meta('2026-11-13'), FRIDAY)).toBe('Approve — Fri, Nov 13, 9:00 AM');
+    expect(approveSlotLabel(meta('2026-11-23'), FRIDAY)).toBe('Approve — Mon, Nov 23, 9:00 AM');
+  });
+
+  it('counts days on the ET calendar, not the UTC one (9 PM ET Friday is already Saturday in UTC)', () => {
+    expect(approveSlotLabel(meta('2026-11-13'), new Date('2026-11-07T02:00:00Z'))).toBe('Approve — Fri, Nov 13, 9:00 AM');
   });
 });

@@ -49,12 +49,13 @@ import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
 import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
+import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-slots';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import {
@@ -229,7 +230,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
   // Slot-aware label (PR C): once a slot is picked the CTA names it, so the
   // action reads as confirming THAT visit rather than restarting the flow.
   const label = glass
-    ? (slotMeta ? `Approve — ${slotMeta.dow} ${slotMeta.time}` : GLASS_COPY.ctaMain)
+    ? (slotMeta ? approveSlotLabel(slotMeta) : GLASS_COPY.ctaMain)
     : 'Get service today!';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
@@ -4210,7 +4211,18 @@ export function ContactGapFields({
   );
 }
 
-export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
+// The acceptance line on the confirm step says "at the price shown": this shows it,
+// the same first-application amount the invoice box above the CTA shows.
+function ConfirmFirstVisitAmount({ amount }) {
+  if (!(amount > 0)) return null;
+  return (
+    <div data-testid="confirm-first-visit-amount" style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
+      First application: <strong>{fmtMoney(amount)}</strong>
+    </div>
+  );
+}
+
+export function ReviewPhase({ website = false, firstVisitAmount, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -4321,6 +4333,7 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
                 ? `Visit: ${new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${slotMeta.time ? ` · ${slotMeta.time}` : ''}`
                 : `Slot: ${slotId}`}
       </div>
+      <ConfirmFirstVisitAmount amount={firstVisitAmount} />
       {autoPaySlot}
       {acceptanceTermsSlot}
       {contactSlot}
@@ -4375,7 +4388,25 @@ function embeddedLinkTarget() {
   return new URLSearchParams(window.location.search).get('embed') === '1' ? '_top' : undefined;
 }
 
-export function SuccessCard({ acceptResult, appointmentLabel = null, recurring = false }) {
+// "Mon, Nov 9, 9:00-11:00 AM" for the booked card, from the appointment the
+// customer already had or the slot they just booked; null when neither has a start time.
+function successFirstVisit(existingAppointment, selectedSlotMeta) {
+  return existingAppointment
+    ? firstVisitDayAndWindow(existingAppointment.scheduledDate, existingAppointment.windowStart)
+    : firstVisitDayAndWindow(selectedSlotMeta?.date, selectedSlotMeta?.windowStart);
+}
+
+// The booked card's first-visit line; only for a visit that is actually committed.
+function FirstVisitLine({ committed, firstVisit }) {
+  if (!committed || !firstVisit) return null;
+  return (
+    <div style={{ fontSize: 17, fontWeight: 600, color: COLORS.navy, marginTop: 10 }}>
+      Your first visit: {firstVisit}.
+    </div>
+  );
+}
+
+export function SuccessCard({ acceptResult, appointmentLabel = null, firstVisit, recurring = false }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
@@ -4405,6 +4436,7 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {title}
         </div>
+        <FirstVisitLine committed={reservationCommitted} firstVisit={firstVisit} />
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {invoicePayUrl
             ? (isOneTimeInvoice
@@ -10142,6 +10174,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             : (selectedSlotMeta?.date
               ? `${new Date(`${selectedSlotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${selectedSlotMeta.time ? ` · ${selectedSlotMeta.time}` : ''}`
               : null)}
+          firstVisit={successFirstVisit(existingAppointment, selectedSlotMeta)}
           recurring={serviceMode !== 'one_time'}
         />
     );
@@ -10401,6 +10434,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           <ReviewPhase
             website={websiteMode}
             paymentTiming={paymentTiming}
+            firstVisitAmount={confirmStepFirstVisitAmount({
+              serviceMode, paymentPreference, siteConfirmationHold: !!estimate.siteConfirmationHold, selectedFrequency: combinedFrequency,
+            })}
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
             existingAppointment={existingAppointment}

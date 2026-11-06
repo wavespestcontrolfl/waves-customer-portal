@@ -36,6 +36,41 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // never show it as the arrival window.
 const ARRIVAL_WINDOW_MINUTES = 120;
 
+// How far ahead the date box reaches. Mirror of the server's
+// MAX_SLOT_HORIZON_DAYS (estimate-slot-availability.js); the slots API's 400 for a
+// date past the limit carries the server's own last day and day count, and those win.
+const BOOKING_HORIZON_DAYS = 90;
+
+// A failed date lookup is `true` (try again) or, for a date past the booking
+// limit, { lastDate, days } so the page can name the last day that works.
+async function bookingLimitFrom(res) {
+  if (res.status !== 400) return null;
+  const body = await res.json().catch(() => null);
+  return body?.lastBookableDate
+    ? { lastDate: body.lastBookableDate, days: Number(body.horizonDays) || BOOKING_HORIZON_DAYS }
+    : null;
+}
+
+function PickedDateError({ error, onRetry }) {
+  if (error.lastDate) {
+    const lastDay = new Date(`${error.lastDate}T12:00:00Z`)
+      .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    return (
+      <div role="alert" style={{ fontSize: 16, color: W.textBody, marginBottom: 12 }}>
+        We book up to {error.days} days ahead. Pick a date on or before {lastDay}.
+      </div>
+    );
+  }
+  return (
+    <div role="alert" style={{ fontSize: 16, color: W.textBody, marginBottom: 12 }}>
+      We couldn’t load times for that day. Please try again.
+      <button type="button" onClick={onRetry} style={{ ...GOLD_CTA, display: 'block', width: '100%', marginTop: 12 }}>
+        Try again
+      </button>
+    </div>
+  );
+}
+
 function formatSlotDate(date, windowStart) {
   try {
     const d = new Date(date + 'T' + (windowStart || '00:00') + ':00');
@@ -251,7 +286,7 @@ export default function SlotPicker({
   const pad2 = (n) => String(n).padStart(2, '0');
   const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   const browseMin = toYmd(new Date());
-  const browseMax = (() => {
+  const browse = (() => {
     // Mirror of the server's seasonalMaxHorizonDays (codex r19 P2): a
     // seasonal (Feb–Oct) mosquito selection in the Nov–Jan gap may browse
     // through the season opener + the default window — on Nov 1–2 the next
@@ -261,7 +296,7 @@ export default function SlotPicker({
       && ([selectedFrequency, serviceCadences?.mosquito]
         .some((v) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
           .includes(String(v || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'))));
-    let horizonDays = 90;
+    let horizonDays = BOOKING_HORIZON_DAYS;
     if (seasonalSelected) {
       // Walk to the date that gives a full 90-day complement of IN-SEASON
       // days (Feb–Oct), crossing the Nov–Jan gap — mirror of the server's
@@ -280,12 +315,13 @@ export default function SlotPicker({
         at.setDate(at.getDate() + 1);
         steps += 1;
       }
-      horizonDays = Math.max(90, steps);
+      horizonDays = Math.max(BOOKING_HORIZON_DAYS, steps);
     }
     const d = new Date();
     d.setDate(d.getDate() + horizonDays);
-    return toYmd(d);
+    return { max: toYmd(d), days: horizonDays };
   })();
+  const browseMax = browse.max;
 
   const formatPickedDate = (ymd) => {
     try {
@@ -353,19 +389,25 @@ export default function SlotPicker({
       setPickedLoading(false);
       return;
     }
+    // A typed date past the box's max never reaches the slots API (it answers 400).
+    if (date > browseMax) {
+      setPickedLoading(false);
+      setPickedError({ lastDate: browseMax, days: browse.days });
+      return;
+    }
     setPickedLoading(true);
     try {
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
-      if (!res.ok) throw new Error('slot fetch failed');
+      if (!res.ok) throw Object.assign(new Error('slot fetch failed'), { limit: await bookingLimitFrom(res) });
       const body = await res.json();
       if (latestPickedRequestRef.current !== requestId) return;
       if (isContactReview(body)) { reportContactReview(body); return; }
       setPickedData(body);
-    } catch {
+    } catch (err) {
       if (latestPickedRequestRef.current !== requestId) return;
-      setPickedError(true);
+      setPickedError(err?.limit || true);
     } finally {
       if (latestPickedRequestRef.current === requestId) {
         setPickedLoading(false);
@@ -501,7 +543,7 @@ export default function SlotPicker({
           />
         </div>
         <div style={{ fontSize: 14, color: W.textCaption, marginTop: 8 }}>
-          We'll check open windows up to 90 days out.
+          We'll check open windows up to {BOOKING_HORIZON_DAYS} days out.
         </div>
       </div>
     </div>
@@ -579,12 +621,7 @@ export default function SlotPicker({
         <GlassScarcityBadge info={glassScarcityInfo(allSlots, data?.metadata?.firstDayAvailability)} />
       ) : null}
       {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 12 }}>Loading times…</div> : pickedError ? (
-        <div role="alert" style={{ fontSize: 16, color: W.textBody, marginBottom: 12 }}>
-          We couldn’t load times for that day. Please try again.
-          <button type="button" onClick={() => onPickDate(pickedDate)} style={{ ...GOLD_CTA, display: 'block', width: '100%', marginTop: 12 }}>
-            Try again
-          </button>
-        </div>
+        <PickedDateError error={pickedError} onRetry={() => onPickDate(pickedDate)} />
       ) : picker}
       {dateFinder}
     </div>
