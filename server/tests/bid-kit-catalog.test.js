@@ -1,4 +1,4 @@
-// Bid kit catalog and status rule (GATE_BID_KIT): the ordered list, the pure status function (including the
+// Bid kit catalog and status rule: the ordered list, the pure status function (including the
 // expiry-equals-today edge in America/New_York), the counts, change detection and the tax-ID guard. No database.
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 

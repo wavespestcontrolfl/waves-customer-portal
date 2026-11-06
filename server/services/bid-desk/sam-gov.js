@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Bid Desk SAM.gov reader (GATE_BID_DESK_SAM, dark; PR 2). Federal bids for pest control and grounds work come from
+ * Bid Desk SAM.gov reader (PR 2). Federal bids for pest control and grounds work come from
  * the official SAM.gov Get Opportunities API (https://open.gsa.gov/api/get-opportunities-public-api/), the only bid
  * source with a sanctioned API (the SAM.gov website itself forbids scraping).
  *
@@ -18,7 +18,7 @@
  * agency, a contractor or a customer. The API key is never logged (errors carry the HTTP status only).
  */
 const db = require('../../models/db');
-const { bidDeskSamLive, bidDeskAutoDatesLive, bidDeskNotOurWorkLive } = require('../../config/feature-gates');
+const { bidDeskLive, bidDeskAutoDatesLive, bidDeskNotOurWorkLive } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 const { deliverOwedAlerts } = require('./index');
 const { OPEN_STATUSES, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
@@ -407,11 +407,11 @@ async function fileNotices(notices, now) {
 }
 
 /**
- * Reads notices posted since the cursor and files the ones in scope. Inert unless bidDeskSamLive() and an API key.
+ * Reads notices posted since the cursor and files the ones in scope. Inert unless bidDeskLive() and an API key.
  * @returns {Promise<{ skipped?: string, read?: number, filed?: number, rung?: number, skippedByReason?: object }>}
  */
 async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, apiKey = process.env.SAM_GOV_API_KEY } = {}) {
-  if (!bidDeskSamLive()) return { skipped: 'gate_off' };
+  if (!bidDeskLive()) return { skipped: 'gate_off' };
   const key = String(apiKey || '').trim();
   if (!key) return { skipped: 'no_api_key' };
 

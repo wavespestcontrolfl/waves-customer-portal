@@ -5,7 +5,7 @@
  *
  *   attachPatch(bid, parsed, kind)  what a later email changes on an existing bid
  *   reminderDue(bid, now)           which due-date reminder (if any) is owed right now
- *   datesDue(bid, now)              the questions and job-walk reminders owed right now (GATE_BID_CHECKLIST)
+ *   datesDue(bid, now)              the questions and job-walk reminders owed right now
  *   daysLeft(dueAt, now)            whole ET calendar days until the due date
  *   lapsedBid(bid, now)             a bid that closes itself (GATE_BID_DESK_AUTO_DATES; the caller checks the gate)
  *
@@ -52,12 +52,12 @@ function attachPatch(bid, parsed, kind) {
 }
 
 /**
- * '7d' | '2d' | null (and '14d' when `checklist` is on: GATE_BID_CHECKLIST). A reminder needs a due date the operator
+ * '14d' | '7d' | '2d' | null. A reminder needs a due date the operator
  * confirmed, an open status, a bid that is not historical, and (a SAM.gov bid) a notice still open on SAM.gov. Each
  * fires once: a bid already inside 2 days that never had the 7-day reminder gets the 2-day one only, and the 14-day
  * reminder is only for a date still more than 7 days away.
  */
-function reminderDue(bid, now = new Date(), { checklist = false } = {}) {
+function reminderDue(bid, now = new Date()) {
   if (!bid || bid.historical || bid.due_confirmed !== true || !bid.due_at || bid.needs_date_confirmation) return null;
   // A notice SAM.gov lists as closed (archived, awarded, gone) never reminds, even after the date is confirmed.
   if (bid.source_active === false) return null;
@@ -66,13 +66,13 @@ function reminderDue(bid, now = new Date(), { checklist = false } = {}) {
   if (!(left > 0)) return null;
   if (left <= 2 * DAY_MS) return bid.reminder_2d_sent_at ? null : '2d';
   if (left <= 7 * DAY_MS) return bid.reminder_7d_sent_at ? null : '7d';
-  if (checklist && left <= 14 * DAY_MS) return bid.reminder_14d_sent_at ? null : '14d';
+  if (left <= 14 * DAY_MS) return bid.reminder_14d_sent_at ? null : '14d';
   return null;
 }
 
 /**
- * The date reminders of GATE_BID_CHECKLIST: ['questions'] and / or ['job_walk'], each owed once, 2 days before its date.
- * The caller checks the gate. The same eligibility as the due-date reminders: an open bid that is not historical, a
+ * The questions and job-walk date reminders: ['questions'] and / or ['job_walk'], each owed once, 2 days before its date.
+ * The same eligibility as the due-date reminders: an open bid that is not historical, a
  * notice still open on SAM.gov, and no date waiting on an addendum check (an addendum may move these dates too). A
  * questions date is never read from mail, so a value there was typed by the operator and counts as confirmed. A
  * job-walk date can be read from an invite, so it reminds only once `job_walk_confirmed` is true (the operator typed it
