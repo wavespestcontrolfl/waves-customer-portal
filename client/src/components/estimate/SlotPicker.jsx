@@ -379,7 +379,12 @@ export default function SlotPicker({
   const listSlots = (payload) => (payload ? [...(payload.primary || []), ...(payload.expander || [])] : []);
   const shownSlots = (view.slots || bodySlots(activePayload || data))
     .filter((slot) => !(glass && glassSlotIsStale(slot)));
-  const availability = toAvailability(shownSlots);
+  // Look-ahead: the list shows only the earliest few, but the day grid draws
+  // every open day the 90-day read found, so no open day reads "no open times".
+  const gridSlots = view.slots
+    ? view.all.filter((slot) => !(glass && glassSlotIsStale(slot)))
+    : shownSlots;
+  const availability = toAvailability(gridSlots);
   // The API lists are engine-ordered (soonest / route-optimal first) — the
   // top three feed the picker's "Our best times" strip.
   // display_tier (GATE_CUSTOMER_RAIN_RANK): the server's rain tier for a slot

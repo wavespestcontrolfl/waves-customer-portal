@@ -472,6 +472,23 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(screen.getByText(/pick one that works for you/i)).toBeInTheDocument();
   });
 
+  it('the day grid marks every day the 90-day read opened, while the list stays at 3', async () => {
+    stubFetch({
+      wide: {
+        primary: [SLOT_NOV21, SLOT_NOV22, SLOT_DEC06],
+        expander: [SLOT_DEC13, SLOT_DEC20],
+        metadata: { firstDayAvailability: { date: '2099-11-21', openCount: 1 } },
+      },
+    });
+    renderPicker();
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
+    expect(pickChips()).toHaveLength(3);
+    // Days beyond the 3 listed times still have openings in the grid.
+    expect(screen.getByRole('option', { name: /Sunday, December 13, 1 opening/ })).toBeEnabled();
+    expect(screen.getByRole('option', { name: /Sunday, December 20, 1 opening/ })).toBeEnabled();
+    expect(screen.queryByRole('option', { name: /Sunday, December 13, no open times/ })).not.toBeInTheDocument();
+  });
+
   it('says "Looking further ahead…" while the 90-day read runs', async () => {
     const pending = deferred();
     vi.stubGlobal('fetch', vi.fn((url) => (String(url).includes('windowDays=90') ? pending.promise : Promise.resolve(jsonResponse(EMPTY_14)))));

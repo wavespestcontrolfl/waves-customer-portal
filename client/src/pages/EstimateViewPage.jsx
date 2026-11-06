@@ -2711,11 +2711,16 @@ function HoldCountdownBar({ secondsRemaining, checking = false, holdLimitReached
   // Threshold-only aria-live announcement (3:00 and 1:00) — not every tick.
   // Reset above 3:00 so an extension that pushes the clock back up can
   // announce the same thresholds again on the way back down.
+  // No clock yet (null): say nothing. Above 3:00 the message is cleared too,
+  // so a stale threshold line never stays in the live region.
   const announcedRef = useRef({ warm: false, urgent: false });
   const [announcement, setAnnouncement] = useState('');
+  const clockKnown = Number.isFinite(secondsRemaining);
   useEffect(() => {
+    if (!clockKnown) return;
     if (secondsRemaining > 180) {
       announcedRef.current = { warm: false, urgent: false };
+      setAnnouncement('');
       return;
     }
     if (secondsRemaining <= 60 && !announcedRef.current.urgent) {
@@ -2725,7 +2730,10 @@ function HoldCountdownBar({ secondsRemaining, checking = false, holdLimitReached
       announcedRef.current.warm = true;
       setAnnouncement('Three minutes left to keep your held time.');
     }
-  }, [secondsRemaining]);
+  }, [secondsRemaining, clockKnown]);
+
+  // Before the first tick there is no time to show: render nothing rather than 0:00.
+  if (!clockKnown) return null;
 
   return (
     <div
@@ -4403,6 +4411,9 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         {invoicePayUrl ? (
           <a
             href={invoicePayUrl}
+            // Inside the website's estimate dialog (embed=1) the frame never
+            // grows past the estimate, so the pay page opens in the full window.
+            target={new URLSearchParams(window.location.search).get('embed') === '1' ? '_top' : undefined}
             style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 16 }}
           >{payNowLabel}</a>
         ) : null}
@@ -6101,6 +6112,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
+  // Website flow: counts customer time picks. The payment choices mount under
+  // the slot list, far below a phone screen, so a pick scrolls to them. A
+  // selection restored at mount or after a review cancel never bumps it.
+  const [websitePickTick, setWebsitePickTick] = useState(0);
+  useEffect(() => {
+    if (websitePickTick === 0 || typeof window === 'undefined') return undefined;
+    // Next frame: the payment section mounts with the pick's own render.
+    const frame = window.requestAnimationFrame(() => scrollToPaymentSection());
+    return () => window.cancelAnimationFrame(frame);
+  }, [websitePickTick]);
   // First open slot ymd, reported up by SlotPicker for the hero {date} token.
   const [firstSlotDate, setFirstSlotDate] = useState(null);
   // Slot metadata for the glass slot-aware CTAs/tech chip ("Approve — Tue
@@ -6319,7 +6340,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
-  const [countdownSeconds, setCountdownSeconds] = useState(0);
+  // null = no clock yet (no hold, or the first tick has not run). Starting at
+  // 0 made a new hold read as "less than one minute left" for one render.
+  const [countdownSeconds, setCountdownSeconds] = useState(null);
   const countdownRef = useRef(null);
   // Hold-extend state (fix/reservation-hold-expiry). holdLimitReached mirrors
   // the server's 60-min-from-creation ceiling (POST .../extend 409
@@ -7224,7 +7247,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Countdown timer tied to reservation.expiresAt
   useEffect(() => {
     if (!reservation?.expiresAt) {
-      setCountdownSeconds(0);
+      setCountdownSeconds(null);
       if (countdownRef.current) clearInterval(countdownRef.current);
       return undefined;
     }
@@ -10597,7 +10620,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
-                  onSelect={(slotId) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotId(slotId); }}
+                  onSelect={(slotId) => {
+                    if (SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) return;
+                    setSelectedSlotId(slotId);
+                    if (websiteMode && slotId) setWebsitePickTick((t) => t + 1);
+                  }}
                   onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
                   selectedSlotFallbackMeta={selectedSlotMeta}
                   licenseNumber={estimate.licenseNumber}
@@ -10916,7 +10943,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           would cover the confirm/cancel buttons. */}
       {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
         <GlassStickyBookBar
-          show={stickyBarPriced}
+          // Hidden while a remove/restore confirm is open: the bar would sit on
+          // its "Keep it" button, and a tap there would approve the plan.
+          show={stickyBarPriced && !((optOut.phase === 'preview' || optOut.phase === 'submitting') && optOut.quote)}
           slotMeta={selectedSlotMeta}
           onApprove={selectedSlotMeta ? scrollToPaymentSection : promptPickTime}
         />
