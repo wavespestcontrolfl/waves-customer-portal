@@ -28,12 +28,13 @@ const text = (id, body, first = 'Sara', last = 'Exampleton', at = '2026-11-06T15
 // A knex that records the read chain and answers select() with `rows` (or throws `error`).
 function fakeKnex(rows, { calls = [], error = null } = {}) {
   return (table) => {
-    const state = { table, joins: [], where: [], whereNotNull: [] };
+    const state = { table, joins: [], where: [], whereNotNull: [], whereRaw: [] };
     calls.push(state);
     const chain = {
       join(...args) { state.joins.push(args); return chain; },
       where(...args) { state.where.push(args); return chain; },
       whereNotNull(column) { state.whereNotNull.push(column); return chain; },
+      whereRaw(sql) { state.whereRaw.push(sql); return chain; },
       orderBy(...args) { state.orderBy = args; return chain; },
       select(...columns) { state.columns = columns; return error ? Promise.reject(error) : Promise.resolve(rows); },
     };
@@ -57,7 +58,7 @@ describe('runTextNameSpellingCheck', () => {
     expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
 
-  test('reads outbound staff texts of the 24 hours before now, with the name of the customer each went to', async () => {
+  test('reads outbound staff texts of the 24 hours before now, sent ones only, with the name of the customer each went to', async () => {
     const calls = [];
     await runTextNameSpellingCheck({ knex: fakeKnex([], { calls }), now: NOW });
 
@@ -68,6 +69,9 @@ describe('runTextNameSpellingCheck', () => {
     expect(read.whereNotNull).toEqual(['s.admin_user_id', 's.message_body']);
     expect(read.where).toContainEqual(['s.created_at', '>=', new Date('2026-11-06T04:32:00Z')]);
     expect(read.columns).toEqual(['s.id', 's.created_at', 's.message_body', 'c.first_name', 'c.last_name']);
+    // the shared filter leaves out send reservations ('sending' placeholders) on the aliased table
+    expect(read.whereRaw).toHaveLength(1);
+    expect(read.whereRaw[0]).toContain("s.status = 'sending'");
   });
 
   test('a text that greets its customer by another listed spelling posts one FIX row listing the text by id', async () => {

@@ -22,6 +22,7 @@ const sendgrid = require('./sendgrid-mail');
 const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const { respellRecordName } = require('../utils/name-spelling');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { formatETDayDate, formatETTime } = require('../utils/datetime-et');
 
 const OPS_KEY = 'text-name-spelling';
@@ -36,9 +37,10 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Staff-sent texts of the window with the name of the customer each went to.
+// Staff-sent texts of the window with the name of the customer each went to. A send reservation
+// (a 'sending' placeholder) or a canceled text never reached the customer, so it is left out.
 function readStaffTexts(knex, since) {
-  return knex('sms_log as s')
+  return excludeUnresolvedSendReservations(knex('sms_log as s'), 's')
     .join('customers as c', 'c.id', 's.customer_id')
     .where('s.direction', 'outbound')
     .whereNotNull('s.admin_user_id')
