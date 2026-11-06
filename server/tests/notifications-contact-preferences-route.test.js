@@ -435,13 +435,23 @@ describe('holder contact save prunes a removed contact\'s choices', () => {
     expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({ unconsented_slot_phone_keys: ['9415550999'] });
   });
 
-  test('the legacy single-contact save lists slot 1 plus the surviving slots as login-attested', async () => {
+  test('the legacy single-contact save attests slot 1 only: a surviving phone keeps an attestation it had and a phone filed without one gains none', async () => {
+    tables.customers[0].service_preferences = JSON.stringify({ login_attested_phone_keys: ['9415550303', '9415550777'] });
     mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
     const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
       serviceContact: { firstName: 'Nora', lastName: 'New', phone: '+19415550404', email: '' },
       serviceContactsConsent: true,
     });
     expect(res.status).toBe(200);
+    // The surviving slot-2 phone stays attested; the old slot-1 phone (replaced) and an unlisted key are gone.
     expect(JSON.parse(tables.customers[0].service_preferences).login_attested_phone_keys.sort()).toEqual(['9415550303', '9415550404']);
+
+    tables.customers[0].service_preferences = null;
+    const second = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContact: { firstName: 'Nora', lastName: 'New', phone: '+19415550404', email: '' },
+      serviceContactsConsent: true,
+    });
+    expect(second.status).toBe(200);
+    expect(JSON.parse(tables.customers[0].service_preferences).login_attested_phone_keys).toEqual(['9415550404']);
   });
 });

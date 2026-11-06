@@ -1475,11 +1475,17 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
         }
-        // The same per-phone login attestation as the list save, over the phones
-        // this save leaves stored (slot 1 plus the locked survivors).
-        const legacyLoginPrefs = require('../services/customer-contact').loginAttestedPrefs(
+        // Per-phone login attestation (GATE_CONTACT_LOGIN_HOLDER_ONLY). This save
+        // submitted slot 1 only, so only slot 1 is newly attested; slots 2 and 3 keep
+        // an attestation they already hold and gain none (a phone the call pipeline
+        // filed meanwhile needs the holder's explicit full-list save).
+        const { loginAttestedPrefs, loginAttestedPhoneKeys, phoneKeyOf } = require('../services/customer-contact');
+        const alreadyAttested = loginAttestedPhoneKeys(legacyLockedBefore);
+        const legacyLoginPrefs = loginAttestedPrefs(
           legacyLockedBefore,
-          [contact.phone, ...[2, 3].map((n) => legacyLockedBefore[`service_contact${n}_phone`])],
+          [contact.phone, ...[2, 3]
+            .map((n) => legacyLockedBefore[`service_contact${n}_phone`])
+            .filter((phone) => alreadyAttested.has(phoneKeyOf(phone)))],
           !!legacyConsentUpdates.service_contacts_consent_at,
         );
         await trx('customers').where({ id: req.params.customerId }).update({

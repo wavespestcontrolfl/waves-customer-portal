@@ -558,6 +558,7 @@ module.exports = {
   getServiceContactSlots,
   contactSlotMayLogIn,
   loginAttestedPrefs,
+  loginAttestedPhoneKeys,
   findServiceContactSlotByPhoneKey,
   phoneKeyOf,
   isServiceContactRole,
