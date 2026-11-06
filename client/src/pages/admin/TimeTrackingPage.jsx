@@ -271,9 +271,12 @@ export default function TimeTrackingPage() {
     .filter((key) => key !== "payroll" || payrollGateOpen)
     .filter((key) => key !== "pay-stubs" || payStubs.status === "ready")
     .filter((key) => readStaffRole() === "admin" || !OFFICE_ONLY_STAFF_TABS.has(key));
-  const setTab = (value) => {
+  // weekStart: the Monday an Approvals link opens (the same ?weekStart= a
+  // timesheet bell carries).
+  const setTab = (value, weekStart = null) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
+    if (weekStart) next.set("weekStart", weekStart);
     if (value !== "documents") { next.delete("document"); next.delete("version"); }
     setSearchParams(next);
   };
@@ -324,7 +327,12 @@ export default function TimeTrackingPage() {
       {tab === "approvals" && (
         <ApprovalsTab showToast={showToast} weekStartParam={searchParams.get("weekStart")} />
       )}
-      {tab === "entries" && <EntriesTab showToast={showToast} />}
+      {tab === "entries" && (
+        <EntriesTab
+          showToast={showToast}
+          onOpenApprovals={(weekStart) => setTab("approvals", weekStart)}
+        />
+      )}
       {tab === "analytics" && <AnalyticsTab />}
       {tab === "team" && <TeamTab showToast={showToast} />}
       {tab === "documents" && (controlledDocumentsAvailable ? <>
@@ -1484,7 +1492,7 @@ const dayCellButton = {
 // =============================================================================
 // ENTRIES TAB
 // =============================================================================
-export function EntriesTab({ showToast }) {
+export function EntriesTab({ showToast, onOpenApprovals }) {
   const [entries, setEntries] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -1551,12 +1559,16 @@ export function EntriesTab({ showToast }) {
         showToast("Entry voided");
         load();
       } catch (e) {
-        showToast("Void failed");
+        // The server's own refusal (an approved or paid week, ...) says what
+        // to do next; a bare "failed" does not.
+        showToast(`Void failed: ${e.data?.error || e.message}`);
       }
     },
     [load],
   );
 
+  // Returns the server's refusal (an approved or paid week, an entry changed
+  // meanwhile, ...) so the form shows it and keeps the draft open.
   const handleEdit = useCallback(
     async (formData) => {
       try {
@@ -1567,8 +1579,9 @@ export function EntriesTab({ showToast }) {
         showToast("Entry updated");
         setEditModal(null);
         load();
+        return null;
       } catch (e) {
-        showToast("Edit failed");
+        return e.data?.error || "Could not save the entry";
       }
     },
     [load],
@@ -1864,6 +1877,14 @@ export function EntriesTab({ showToast }) {
                     >
                       {e.status}
                     </span>
+                    {e.approval_status === "approved" && (
+                      <span
+                        title="This entry's week is approved. Unlock the week in Approvals before you edit or void it."
+                        style={{ ...sBadge(D.green + "22", D.green), marginLeft: 4 }}
+                      >
+                        approved
+                      </span>
+                    )}
                   </td>{" "}
                   <td style={tdStyle}>
                     {e.status !== "voided" && (
@@ -1929,6 +1950,7 @@ export function EntriesTab({ showToast }) {
           entry={editModal}
           onClose={() => setEditModal(null)}
           onSave={handleEdit}
+          onOpenApprovals={onOpenApprovals}
         />
       )}
       {addOpen && (
@@ -2087,7 +2109,7 @@ function AddShiftModal({ techs, defaultTechId, onClose, onSave }) {
   );
 }
 
-function EditEntryModal({ entry, onClose, onSave }) {
+function EditEntryModal({ entry, onClose, onSave, onOpenApprovals }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
   const [form, setForm] = useState({
@@ -2098,6 +2120,49 @@ function EditEntryModal({ entry, onClose, onSave }) {
     notes: entry.notes || "",
     edit_reason: "",
   });
+  // The server's refusal of the last save. The draft stays as typed.
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const approved = entry.approval_status === "approved";
+  // The payroll week the server checks: the Monday of the clock-in's Eastern
+  // date (staffWeekStartForWorkDate on the server).
+  const weekStart = entry.clock_in ? getMonday(new Date(entry.clock_in)) : null;
+  const approvalsLink =
+    onOpenApprovals && weekStart ? (
+      <button
+        type="button"
+        onClick={() => onOpenApprovals(weekStart)}
+        style={{ ...sBtn(D.card, D.text), marginTop: 8 }}
+      >
+        Open week of {weekStart} in Approvals
+      </button>
+    ) : null;
+
+  const save = async () => {
+    // If a clock field wasn't touched, send back the exact stored instant
+    // rather than re-deriving it from the ET wall clock. A wall-clock string
+    // can't distinguish the two 1 AM instants on a DST fall-back day, so
+    // re-deriving an untouched value would silently shift a repeated-hour
+    // entry by an hour on any unrelated edit. Only convert when the operator
+    // changed it.
+    const resolve = (field, original) =>
+      form[field] === etDatetimeLocalValue(original)
+        ? original
+          ? new Date(original).toISOString()
+          : null
+        : etDatetimeLocalToISO(form[field]);
+    setSaving(true);
+    setError("");
+    const failure = await onSave({
+      ...form,
+      clock_in: resolve("clock_in", entry.clock_in),
+      clock_out: resolve("clock_out", entry.clock_out),
+    });
+    if (failure) {
+      setError(failure);
+      setSaving(false);
+    }
+  };
 
   return createPortal(
     <div
@@ -2119,6 +2184,8 @@ function EditEntryModal({ entry, onClose, onSave }) {
     >
       {" "}
       <div
+        role="dialog"
+        aria-label="Edit time entry"
         style={{
           ...sCard,
           maxWidth: 500,
@@ -2153,6 +2220,22 @@ function EditEntryModal({ entry, onClose, onSave }) {
         >
           Edit Time Entry
         </div>
+        {approved && (
+          <div
+            style={{
+              fontSize: 14,
+              color: D.amber,
+              marginBottom: 12,
+              padding: 8,
+              background: D.amber + "11",
+              borderRadius: 6,
+            }}
+          >
+            This entry&apos;s week is approved. Unlock the week in Approvals
+            before you change it.
+            {approvalsLink && <div>{approvalsLink}</div>}
+          </div>
+        )}
         {entry.original_clock_in && (
           <div
             style={{
@@ -2282,6 +2365,12 @@ function EditEntryModal({ entry, onClose, onSave }) {
               placeholder="Why is this being changed?"
             />{" "}
           </div>{" "}
+          {error && (
+            <div role="alert" style={{ fontSize: 14, color: D.red }}>
+              {error}
+              {!approved && approvalsLink && <div>{approvalsLink}</div>}
+            </div>
+          )}
           <div
             style={{
               display: "flex",
@@ -2295,32 +2384,14 @@ function EditEntryModal({ entry, onClose, onSave }) {
               Cancel
             </button>{" "}
             <button
-              disabled={!form.edit_reason}
-              onClick={() => {
-                // If a clock field wasn't touched, send back the exact stored
-                // instant rather than re-deriving it from the ET wall clock.
-                // A wall-clock string can't distinguish the two 1 AM instants
-                // on a DST fall-back day, so re-deriving an untouched value
-                // would silently shift a repeated-hour entry by an hour on any
-                // unrelated edit. Only convert when the operator changed it.
-                const resolve = (field, original) =>
-                  form[field] === etDatetimeLocalValue(original)
-                    ? original
-                      ? new Date(original).toISOString()
-                      : null
-                    : etDatetimeLocalToISO(form[field]);
-                onSave({
-                  ...form,
-                  clock_in: resolve("clock_in", entry.clock_in),
-                  clock_out: resolve("clock_out", entry.clock_out),
-                });
-              }}
+              disabled={!form.edit_reason || saving}
+              onClick={save}
               style={{
                 ...sBtn(D.teal, D.white),
-                opacity: form.edit_reason ? 1 : 0.5,
+                opacity: form.edit_reason && !saving ? 1 : 0.5,
               }}
             >
-              Save Changes
+              {saving ? "Saving..." : "Save Changes"}
             </button>{" "}
           </div>{" "}
         </div>{" "}
