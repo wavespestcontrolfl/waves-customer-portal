@@ -58,6 +58,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 const communicationsRouter = require('../routes/admin-communications');
+const { technicianMayReach } = require('../middleware/technician-scope');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
@@ -175,5 +176,10 @@ describe('POST /admin/communications/name-check', () => {
     for (const word of ['Sarah', 'Sara', 'swordfish', 'Testa', CUSTOMER_UUID]) {
       expect(logged).not.toContain(word);
     }
+  });
+
+  it('is on the technician allow list for POST only, so the default-deny scope lets it through', () => {
+    expect(technicianMayReach('POST', '/api/admin/communications/name-check')).toBe(true);
+    expect(technicianMayReach('GET', '/api/admin/communications/name-check')).toBe(false);
   });
 });
