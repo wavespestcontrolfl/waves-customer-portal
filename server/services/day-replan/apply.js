@@ -162,16 +162,17 @@ const TOLD_ROW_COLUMNS = [
   'customer_confirmed', 'is_recurring', 'recurring_parent_id', 'scheduled_date', 'recurring_dispatch_due_date',
   'date_exception', 'date_exception_source', 'date_exception_at',
 ];
-const TOLD_REMINDER_COLUMNS = ['reminder_72h_sent', 'windows_preclosed', 'cancelled'];
 
 /**
- * The told-lock facts for one visit, read inside its move transaction, so a 72-hour reminder sent or a person placement
- * made after the fresh plan still stops the write. isPersonPlacedVisit fails closed (an unreadable history = placed).
+ * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer or a person
+ * placement made after the fresh plan still stops the write. The told read is the no-show detector's promise reader (a
+ * 72-hour flag with no real promise does not stop the write); a read that throws stops the write (fail closed).
+ * isPersonPlacedVisit fails closed too (an unreadable history = placed).
  */
-async function toldLockFacts(trx, deps, { row, reminder, id, dateStr }) {
-  const sent72 = reminder && reminder.reminder_72h_sent === true && reminder.windows_preclosed !== true && reminder.cancelled !== true;
+async function toldLockFacts(trx, deps, { row, id, dateStr }) {
+  const told = await deps.loadToldIds(trx, [id], deps.now());
   const verdict = await deps.isPersonPlacedVisit({ ...row, scheduled_date: dateStr }, trx);
-  return { toldLock: true, sent72: new Set(sent72 ? [id] : []), personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
+  return { toldLock: true, told: new Set(told), personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
 }
 
 /**
@@ -192,14 +193,14 @@ async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
     ? await live(trx('scheduled_services').where({ customer_id: row.customer_id, scheduled_date: dateStr }).whereNot({ id }))
       .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())').first('id') : null;
   const reminder = await trx('appointment_reminders').where({ scheduled_service_id: id })
-    .first('reminder_24h_sent', ...(toldLock ? TOLD_REMINDER_COLUMNS : []));
+    .first('reminder_24h_sent');
   const ctx = {
     dateStr,
     now: deps.now(),
     visitCounts: new Map(row.visit_id != null ? [[row.visit_id, mate ? 2 : 1]] : []),
     customerCounts: new Map(row.customer_id != null ? [[row.customer_id, sameCustomer ? 2 : 1]] : []),
     sent24: new Set(reminder && reminder.reminder_24h_sent === true ? [id] : []),
-    ...(toldLock ? await toldLockFacts(trx, deps, { row, reminder, id, dateStr }) : {}),
+    ...(toldLock ? await toldLockFacts(trx, deps, { row, id, dateStr }) : {}),
   };
   const why = deps.fixedReason(row, ctx) || deps.fixedReason({ ...row, window_start: minToHhmm(toStart) }, ctx);
   if (why) throw Object.assign(coded('NOT_MOVABLE', `the visit is no longer movable: ${why}`), { why });

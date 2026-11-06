@@ -266,12 +266,18 @@ describe('a moved visit must still be movable under the fence', () => {
   // GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): the move transaction re-reads the told-lock facts.
   const recurring = { a: { route_order: 1, is_recurring: true, recurring_parent_id: 'p-a' }, b: { route_order: 2, is_recurring: true, recurring_parent_id: 'p-b' },
     c: { route_order: 3, is_recurring: true, recurring_parent_id: 'p-c' }, d: { route_order: 4, is_recurring: true, recurring_parent_id: 'p-d' } };
-  const toldLockOver = (on) => ({ toldLockOn: () => on, isPersonPlacedVisit: jest.fn(async () => ({ placed: false })) });
+  // loadToldIds is the no-show detector's promise reader (a known-slot promise = told); `told` is the set of ids it answers with.
+  const toldLockOver = (on, told = []) => ({
+    toldLockOn: () => on,
+    isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+    loadToldIds: jest.fn(async (_conn, ids) => new Set(ids.filter((id) => told.includes(id)))),
+  });
 
-  test('told-lock on: its 72-hour reminder went out meanwhile', async () => {
-    const w = plan4({ rowExtra: recurring, over: toldLockOver(true) });
-    w.lockDayRows.mockImplementationOnce(async () => { w.db.reminders.push({ scheduled_service_id: 'b', reminder_72h_sent: true }); });
-    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:reminder_72h_sent', moved: 0 });
+  test('told-lock on: the customer was told a time for it meanwhile', async () => {
+    const over = toldLockOver(true);
+    const w = plan4({ rowExtra: recurring, over });
+    w.lockDayRows.mockImplementationOnce(async () => { over.loadToldIds.mockImplementation(async (_conn, ids) => new Set(ids.filter((id) => id === 'b'))); });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
   });
 
@@ -283,16 +289,27 @@ describe('a moved visit must still be movable under the fence', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('told-lock on: a pre-closed 72-hour placeholder does not stop the write', async () => {
-    const w = plan4({ rowExtra: recurring, over: toldLockOver(true) });
-    w.lockDayRows.mockImplementationOnce(async () => { w.db.reminders.push({ scheduled_service_id: 'b', reminder_72h_sent: true, windows_preclosed: true }); });
-    expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
-  });
-
-  test('told-lock off: a 72-hour reminder sent meanwhile changes nothing (today)', async () => {
-    const w = plan4({ rowExtra: recurring, over: toldLockOver(false) });
+  test('told-lock on: a 72-hour flag with no real promise does not stop the write', async () => {
+    const over = toldLockOver(true);
+    const w = plan4({ rowExtra: recurring, over });
     w.lockDayRows.mockImplementationOnce(async () => { w.db.reminders.push({ scheduled_service_id: 'b', reminder_72h_sent: true }); });
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
+    expect(over.loadToldIds).toHaveBeenCalled();
+  });
+
+  test('told-lock on: a promise read that fails stops the write (fail closed)', async () => {
+    const over = toldLockOver(true);
+    over.loadToldIds = jest.fn(async () => { throw new Error('promise read down'); });
+    const w = plan4({ rowExtra: recurring, over });
+    expect(await w.run()).toEqual({ status: 'failed', reason: 'write_failed:error', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+  });
+
+  test('told-lock off: a told time changes nothing (today), and nothing is read', async () => {
+    const over = toldLockOver(false, ['b']);
+    const w = plan4({ rowExtra: recurring, over });
+    expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
+    expect(over.loadToldIds).not.toHaveBeenCalled();
   });
 
   test('its visit now has another live member', async () => {

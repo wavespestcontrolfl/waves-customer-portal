@@ -1,7 +1,7 @@
 // GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a") at the apply-time grouped-sibling
 // guards: with the run's config carrying nightLock24h AND nightToldLock, the
 // tiers and flex sibling freeze reads pass { lock24h: true, toldLock: true } to
-// loadReminderFreeze, and a sibling whose 72-hour reminder was sent refuses the
+// loadReminderFreeze, and a sibling the customer was already told a time for refuses the
 // move. Gate off or nightLock24h off: the exact calls of today. Synthetic ids only.
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
@@ -25,11 +25,11 @@ const FROZEN = { failed: false, frozen: new Set(['s2']) };
 beforeEach(() => { jest.clearAllMocks(); });
 
 describe('checkTiersSiblingBounds', () => {
-  test('told-lock on: passes { lock24h, toldLock } and refuses a frozen sibling with a text that names the 72-hour reminder', async () => {
+  test('told-lock on: passes { lock24h, toldLock } and refuses a frozen sibling with a text that says the customer was already told', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValue(FROZEN);
     const trx = jest.fn();
     await expect(checkTiersSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, true, true))
-      .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('72-hour reminder was sent') });
+      .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('already told its time') });
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true });
   });
 

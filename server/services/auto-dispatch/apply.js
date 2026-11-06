@@ -434,7 +434,7 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
 }
 
 // The run's one read of GATE_NIGHT_TOLD_LOCK (config.nightToldLock) counts only
-// together with config.nightLock24h: a really sent 72-hour reminder then freezes
+// together with config.nightLock24h: a known-slot promise then freezes
 // a visit too (loadReminderFreeze opts.toldLock). Only this config carries it;
 // the rain pass and route-reorder never build it.
 function toldLockOf(config) {
@@ -448,7 +448,7 @@ function freezeOpts(toldLock) {
 }
 
 function reminderWindowText(lock24h, toldLock) {
-  if (lock24h && toldLock) return 'is inside its 24-hour reminder window or its 72-hour reminder was sent (frozen)';
+  if (lock24h && toldLock) return 'is inside its 24-hour reminder window or the customer was already told its time (frozen)';
   return `is inside its ${lock24h ? 24 : 72}-hour reminder window (frozen)`;
 }
 
@@ -456,8 +456,8 @@ function reminderWindowText(lock24h, toldLock) {
 // sibling's OWN durable anchor and tier radius must admit best.date.
 // GATE_NIGHT_LOCK_24H (`lock24h`, the run's one read): the freeze is the
 // 24-hour reminder's band and sent flag instead of the 72-hour one.
-// GATE_NIGHT_TOLD_LOCK (`toldLock`, only with lock24h): a really sent 72-hour
-// reminder freezes a sibling too.
+// GATE_NIGHT_TOLD_LOCK (`toldLock`, only with lock24h): a sibling the customer
+// was already told a time for (a known-slot promise) is frozen too.
 async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false, toldLock = false) {
   const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, freezeOpts(toldLock)] : []));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');

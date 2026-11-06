@@ -22,8 +22,8 @@
  * GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a": a night tool never changes a time the customer was already told) fixes
  * four more kinds of stop, checked after the rules above: customer_confirmed, first_or_one_time (not a recurring
  * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
- * and an unreadable history keeps the stop fixed) and reminder_72h_sent (a really sent 72-hour reminder). Gate off:
- * none of these apply, as before.
+ * and an unreadable history keeps the stop fixed) and time_told (the customer has a known time from a delivered
+ * text, email, call or booking, by the no-show detector's promise reader). Gate off: none of these apply, as before.
  * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
  * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
@@ -145,18 +145,19 @@ async function loadReminder24hSent(conn, ids) {
 }
 
 /**
- * Ids whose 72-hour reminder really went out: reminder_72h_sent, and the row is neither a windows_preclosed
- * placeholder nor cancelled (ops lib/move-visit.js: a pre-closed placeholder is not a sent reminder).
- * Throws when the read fails (the caller skips the day).
+ * Ids of stops the customer has been told a time for: the no-show detector's promise reader (a delivered text or
+ * push, an email, a call commitment, a booking, an applied reschedule, a series move), the latest promise with a known
+ * slot. reminder_72h_sent is not used: it is also set when the 72-hour reminder was skipped. A promise with an unknown
+ * window does not fix a stop in this change. A failed read fails CLOSED: every stop counts as told, so the day stays fixed.
  */
-async function loadReminder72hSent(conn, ids) {
-  if (!ids.length) return new Set();
-  const rows = await conn('appointment_reminders')
-    .whereIn('scheduled_service_id', ids)
-    .select('scheduled_service_id', 'reminder_72h_sent', 'windows_preclosed', 'cancelled');
-  return new Set(rows
-    .filter((r) => r.reminder_72h_sent === true && r.windows_preclosed !== true && r.cancelled !== true)
-    .map((r) => r.scheduled_service_id));
+async function loadToldIds(conn, rows, now) {
+  const ids = rows.map((r) => r.id);
+  try {
+    return await require('../auto-dispatch/told-visits').loadToldVisitIds(conn, ids, now);
+  } catch (err) {
+    logger.warn(`[day-replan] the told-time read failed (${err.message}); the day stays fixed`);
+    return new Set(ids);
+  }
 }
 
 /**
@@ -183,7 +184,7 @@ async function loadDayContext(conn, dateStr, now) {
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
   const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
   if (!toldLock) return ctx;
-  return { ...ctx, toldLock, sent72: await loadReminder72hSent(conn, rows.map((r) => r.id)), personPlaced: await loadPersonPlaced(conn, rows) };
+  return { ...ctx, toldLock, told: await loadToldIds(conn, rows, now), personPlaced: await loadPersonPlaced(conn, rows) };
 }
 
 /**
@@ -226,11 +227,11 @@ function officeReviewPending(row) {
  * GATE_NIGHT_TOLD_LOCK reasons, checked after the existing ones: a time the customer was told or chose does not
  * change. A told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed.
  */
-function toldLockReason(row, { sent72, personPlaced }) {
+function toldLockReason(row, { told, personPlaced }) {
   if (row.customer_confirmed === true) return 'customer_confirmed';
   if (row.is_recurring !== true || row.recurring_parent_id == null) return 'first_or_one_time';
   if (!personPlaced || personPlaced.has(row.id)) return 'person_placed';
-  if (!sent72 || sent72.has(row.id)) return 'reminder_72h_sent';
+  if (!told || told.has(row.id)) return 'time_told';
   return null;
 }
 
@@ -636,6 +637,8 @@ function applyDeps() {
     // GATE_NIGHT_TOLD_LOCK: the move transaction re-reads the told-lock facts (apply.js recheckVisit).
     toldLockOn: nightToldLockOn,
     isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
+    // The ids among `ids` the customer has a known time for (the no-show detector's promise reader); throws when unreadable.
+    loadToldIds: (conn, ids, now) => require('../auto-dispatch/told-visits').loadToldVisitIds(conn, ids, now),
     rowHours,
     excludedStatuses: EXCLUDED_STATUSES,
     // The rebooker's own occupancy statuses for a move: a completed morning visit never blocks an afternoon one.

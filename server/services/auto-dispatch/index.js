@@ -712,7 +712,7 @@ function reminderFreezeHours(guardMode, lock24h) {
 // are exactly the pre-gate call (the band alone); gate on they add the
 // explicit lock24h option, so no caller's default ever changes.
 // GATE_NIGHT_TOLD_LOCK (`toldLock`, the run's one read, only with lock24h): the
-// option also freezes a visit whose 72-hour reminder was really sent.
+// option also freezes a visit the customer was told a time for (a known-slot promise).
 function freezeReadArgs(guardMode, lock24h, toldLock = false) {
   const hours = reminderFreezeHours(guardMode, lock24h);
   if (lock24h !== true) return [hours];
@@ -721,7 +721,7 @@ function freezeReadArgs(guardMode, lock24h, toldLock = false) {
 
 
 // The run's one read of GATE_NIGHT_TOLD_LOCK (config.nightToldLock) counts only
-// together with config.nightLock24h: a really sent 72-hour reminder then freezes
+// together with config.nightLock24h: a known-slot promise then freezes
 // a visit too (loadReminderFreeze opts.toldLock). Only this config carries it;
 // the rain pass and route-reorder never build it.
 function toldLockOf(config) {
@@ -732,7 +732,7 @@ function toldLockOf(config) {
 // says 73-hour and tiers 72-hour (the 09-25 wording); gate on, both are the
 // 24-hour reminder. Codes stay the same either way.
 function frozenReminderLabel(guardMode, lock24h, toldLock = false) {
-  if (lock24h === true) return toldLock === true ? '24-hour or 72-hour' : '24-hour';
+  if (lock24h === true) return toldLock === true ? '24-hour or told-time' : '24-hour';
   return guardMode === 'flex' ? '73-hour' : '72-hour';
 }
 
