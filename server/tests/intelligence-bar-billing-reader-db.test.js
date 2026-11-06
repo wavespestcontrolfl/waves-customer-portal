@@ -627,8 +627,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
         expectHeld(list, ['z_attached', 'z_sibling', 'z_live']);
         expect(by(list, 'z_plain')).toMatchObject({ collectible: true, balance_due: 15 });
         expect(list.account_summary).toMatchObject({ total_due: 15, needs_reconciliation_count: 3 });
-        // The pay page's read-only form of the check: it cancels and unstamps nothing.
-        expect(guard.neutralizeOpenPaymentIntent).toHaveBeenCalledWith(`pi_attached_${run}`, { inspectOnly: true });
+        // The pay page's read-only form of the check (it cancels and unstamps nothing), asked ONCE per call although
+        // two siblings share the intent and both the summary and the list fence them.
+        expect(guard.neutralizeOpenPaymentIntent.mock.calls.filter(([piId]) => piId === `pi_attached_${run}`)).toEqual([[`pi_attached_${run}`, { inspectOnly: true }]]);
       }
       // Canceled, or nothing attached yet (the pay page mints one on load): the balance is stated, siblings too.
       guard.neutralizeOpenPaymentIntent.mockClear();
@@ -639,6 +640,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       // A live payments row on the intent holds it without asking Stripe (the collection paths' own in-flight check).
       expectHeld(list, ['z_live']);
       expect(guard.neutralizeOpenPaymentIntent.mock.calls.some(([piId]) => piId === `pi_live_${run}`)).toBe(false);
+      expect(guard.neutralizeOpenPaymentIntent).toHaveBeenCalledTimes(1);
       expect(list.account_summary).toMatchObject({ total_due: 115, needs_reconciliation_count: 1 });
       const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
       expect(detail.invoice).toMatchObject({ collectible: true, balance_due: 20, needs_reconciliation: false });

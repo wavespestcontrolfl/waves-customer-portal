@@ -303,7 +303,12 @@ async function resolveBillingCustomer(input, actionContext) {
 // buckets, the fences, recorded payments, credit, plans) runs on this connection, so status buckets, re-read rows and
 // payment linkage cannot disagree. None of the functions called takes a lock or starts its own top-level
 // transaction in read-only mode (the read-only charge fence releases and promotes nothing).
-const inSnapshot = (work) => db.transaction(work, { isolationLevel: 'repeatable read', readOnly: true });
+// The call's one Stripe inspector (attachedIntentInert) lives and dies with its snapshot.
+const intentInspectors = new WeakMap();
+const inSnapshot = (work) => db.transaction((database) => {
+  intentInspectors.set(database, intentInspector());
+  return work(database);
+}, { isolationLevel: 'repeatable read', readOnly: true });
 
 // A best-effort read inside the snapshot runs in its own SAVEPOINT (a nested transaction): when its SQL fails, only
 // the savepoint rolls back and the shared REPEATABLE READ transaction stays usable. Catching the error alone would
@@ -485,17 +490,40 @@ async function linkedVisitVerdict(invoice, database) {
 // createInvoicePaymentIntent, recordManualPayment), so it does not hold the balance. Both of their checks must pass:
 // no live payments row records the intent (their own in-flight check), and Stripe reads it canceled or with nothing
 // attached, through the pay page's bounded inspection (prepaid-pi-guard inspectOnly: it cancels and unstamps nothing).
-// Anything else, or a read that fails, is not inert.
+// Anything else, or a read that fails, is not inert; so is any read outside a tool call's snapshot (no inspector).
 const TERMINAL_PAYMENT_ROW_STATUSES = ['failed', 'canceled', 'cancelled', 'refunded'];
-async function attachedIntentInert(invoice, database) {
+async function attachedIntentInert(invoice, database, inspect) {
+  if (!inspect) return false;
   const piId = String(invoice.stripe_payment_intent_id);
   const live = await database('payments').where({ stripe_payment_intent_id: piId }).whereNotIn('status', TERMINAL_PAYMENT_ROW_STATUSES).first('id');
   if (live) return false;
-  const verdict = await require('../prepaid-pi-guard').neutralizeOpenPaymentIntent(piId, { inspectOnly: true });
-  return verdict.ok === true;
+  return inspect(piId);
 }
 
-async function decideCollectibility(invoice, listed, database) {
+// One tool call's Stripe inspections. Each PaymentIntent is asked once (combined siblings, and the summary and the list
+// that fence the same invoices, share the answer), and all of them share one time budget: once it is spent, an attached
+// intent holds the balance without asking, the fail-closed answer. A slow Stripe then keeps the call's snapshot
+// connection for at most the budget plus one inspection's own 5 s bound, however many invoices the call fences.
+const INSPECTION_BUDGET_MS = 5000;
+function intentInspector() {
+  const answers = new Map();
+  let spentMs = 0;
+  const ask = async (piId) => {
+    const started = Date.now();
+    try {
+      const verdict = await require('../prepaid-pi-guard').neutralizeOpenPaymentIntent(piId, { inspectOnly: true });
+      return verdict.ok === true;
+    } finally {
+      spentMs += Date.now() - started;
+    }
+  };
+  return (piId) => {
+    if (!answers.has(piId)) answers.set(piId, spentMs >= INSPECTION_BUDGET_MS ? Promise.resolve(false) : ask(piId));
+    return answers.get(piId);
+  };
+}
+
+async function decideCollectibility(invoice, listed, database, inspect) {
   const status = invoiceStatusKey(invoice.status);
   try {
     assertInvoiceCollectible(invoice);
@@ -524,7 +552,7 @@ async function decideCollectibility(invoice, listed, database) {
   const linked = await linkedVisitVerdict(fresh, database);
   if (linked && linked.neverRan) return { ...held('needs_reconciliation', VISIT_DID_NOT_HAPPEN_REASON), row: fresh };
   if (linked && linked.payerBilled) return { ...held('not_collectible', MEMBER_REASONS.payer_billed), payer_billed: true, row: fresh };
-  if (fresh.stripe_payment_intent_id && !(await attachedIntentInert(fresh, database))) {
+  if (fresh.stripe_payment_intent_id && !(await attachedIntentInert(fresh, database, inspect))) {
     return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
   }
   return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(fresh), row: fresh };
@@ -540,7 +568,7 @@ async function invoiceCollectibility(listed, database) {
       const current = (await savepoint('invoices').where({ id: listed.id }).first()) || listed;
       // Ownership changed during the read: the invoice is refused for this customer, never projected under their header.
       if (String(current.customer_id) !== String(listed.customer_id)) return held('unavailable', RECORD_CHANGED_REASON);
-      const verdict = await decideCollectibility(current, listed, savepoint);
+      const verdict = await decideCollectibility(current, listed, savepoint, intentInspectors.get(database));
       return { ...verdict, row: verdict.row || current };
     });
   } catch (err) {
@@ -1119,4 +1147,4 @@ async function executeBillingReaderTool(toolName, input = {}, actionContext = {}
   }
 }
 
-module.exports = { BILLING_READER_TOOLS, executeBillingReaderTool };
+module.exports = { BILLING_READER_TOOLS, executeBillingReaderTool, _private: { intentInspector } };
