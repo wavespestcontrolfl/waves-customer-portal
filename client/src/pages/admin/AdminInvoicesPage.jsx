@@ -6643,15 +6643,18 @@ function CreateInvoice({
   ]);
   const draftBaselineRef = useRef(null);
   const draftReady = !discountsLoading;
+  // The schedule-retry panel shows only after the invoice row exists, so the
+  // form holds nothing left to lose there.
+  const draftSaved = !!pendingScheduleInvoice;
   useEffect(() => {
     if (!draftReady) return;
     if (draftBaselineRef.current === null)
       draftBaselineRef.current = draftSnapshot;
-    onDirtyChange(draftBaselineRef.current !== draftSnapshot);
-  }, [draftReady, draftSnapshot, onDirtyChange]);
+    onDirtyChange(!draftSaved && draftBaselineRef.current !== draftSnapshot);
+  }, [draftReady, draftSaved, draftSnapshot, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   useEffect(() => {
-    if (!draftBaselineRef.current || draftBaselineRef.current === draftSnapshot)
+    if (draftSaved || !draftBaselineRef.current || draftBaselineRef.current === draftSnapshot)
       return undefined;
     const warn = (event) => {
       event.preventDefault();
@@ -6659,7 +6662,7 @@ function CreateInvoice({
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [draftSnapshot]);
+  }, [draftSaved, draftSnapshot]);
   useEffect(() => {
     let alive = true;
     setDiscountsLoading(true);
