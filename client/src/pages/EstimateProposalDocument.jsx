@@ -407,7 +407,7 @@ export default function EstimateProposalDocument({ data, token }) {
     || correctiveWork.some((work) => work.taxable === true)
     || programList.some((program) => program.taxable === true);
   const taxRatePct = Number(totals.taxRate) > 0 ? (Number(totals.taxRate) * 100).toFixed(2) : null;
-  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "$X a month" under
+  // Monthly average (owner 2026-10-20): "$X a month" under
   // each per-application line, plus one plan line when there are two or more
   // services. The server sends the inputs only when the gate is on and the
   // lines reconcile to the stored monthly total; the shared builder (also used

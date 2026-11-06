@@ -71,7 +71,7 @@ router.post('/close-older', requireLive, async (req, res, next) => {
 // their portal thread, the item and its bells close, and the customer gets one notice (app push, else email).
 // `requestId` makes a retried click return the first answer instead of sending a second one.
 const replySchema = Joi.object({
-  kind: Joi.string().valid('chat', 'request').required(),
+  kind: Joi.string().valid('chat', 'request', 'message').required(),
   id: Joi.string().uuid().required(),
   body: Joi.string().allow('').max(PortalMessages.BODY_MAX * 2).required(),
   requestId: Joi.string().uuid().optional(),
@@ -94,6 +94,42 @@ router.post('/reply', requireLive, async (req, res, next) => {
     if (err instanceof PortalMessages.PortalMessageError) return res.status(err.status).json({ error: err.message, code: err.code });
     next(err);
   }
+});
+
+// GATE_PORTAL_MESSAGES: GET /api/admin/portal-inbox/messages/:id?before=ISO -> { messages, hasMore }
+// The whole portal thread behind a message item (the item's text is a cut preview): the newest 50 messages,
+// oldest first, every body whole. Read only.
+const threadSchema = Joi.object({ before: Joi.date().iso().optional() });
+router.get('/messages/:id', requireLive, async (req, res, next) => {
+  if (!portalMessagesLive()) return res.status(404).json({ enabled: false });
+  if (Joi.string().uuid().validate(req.params.id).error) return res.status(400).json({ error: 'id must be a UUID' });
+  const { value, error } = threadSchema.validate(req.query, { stripUnknown: true });
+  if (error) return res.status(400).json({ error: error.details[0].message });
+  try {
+    res.set('Cache-Control', 'private, no-store');
+    res.json(await PortalMessages.staffThread(req.params.id, { before: value.before ? value.before.toISOString() : null }));
+  } catch (err) {
+    if (err instanceof PortalMessages.PortalMessageError) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/messages/:id/handled { throughId } -> { handled, open }
+// Mark handled on a customer's portal message item, through the newest customer message the screen showed (the
+// item's throughId): the thread is stamped handled through it and its bells close when nothing is left open.
+// Sends nothing. handled:false = an answer or another Mark handled got there first; open:true = the customer
+// wrote again after throughId, so the item stays.
+const handledSchema = Joi.object({ throughId: Joi.string().uuid().required() });
+router.post('/messages/:id/handled', requireLive, async (req, res, next) => {
+  if (!portalMessagesLive()) return res.status(404).json({ enabled: false });
+  if (Joi.string().uuid().validate(req.params.id).error) return res.status(400).json({ error: 'id must be a UUID' });
+  const { error, value } = handledSchema.validate(req.body || {});
+  if (error) return res.status(400).json({ error: error.message });
+  try {
+    const result = await portalInbox.markMessageHandled(req.params.id, value.throughId, { technicianId: req.technicianId, role: req.techRole });
+    if (!result) return res.status(404).json({ error: 'This message is gone.' });
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

@@ -302,3 +302,50 @@ describe('only the customer switches back to text (explicit-choice markers)', ()
     expect((await send()).delivered).toBe(true);
   });
 });
+
+describe("a technician's On-my-way tap keeps the customer's channel (useCustomerChannel)", () => {
+  // sendTechEnRoute marks a manual tap operatorInitiated (send-window marker) AND
+  // metadata.useCustomerChannel. Before this rule the operator flag forced SMS, so
+  // no tapped en-route notice ever reached the app (0 of 34 in 30 days, 11-04 audit).
+  const route = (overrides = {}) => PushRouting.decidePushRoute({
+    gateOn: true, customerId: 'c-1', messageType: 'tech_en_route', hasMedia: false, humanAuthored: false,
+    operatorInitiated: true, useCustomerChannel: true, ...overrides,
+  });
+
+  it('gate on: a tapped en-route notice routes push_first like an automated one', () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    expect(route()).toBe('push_first');
+  });
+
+  it('gate on: a tapped reminder follows the any-device policy too', () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    expect(route({ messageType: 'appointment_reminder' })).toBe('push_first');
+  });
+
+  it('gate off: the operator lock stands (byte-identical)', () => {
+    expect(route()).toBe('sms_only');
+    expect(route({ messageType: 'appointment_reminder' })).toBe('sms_only');
+  });
+
+  it('gate on: an operator send WITHOUT the mark still stays a text (staff chose Text)', () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    expect(route({ useCustomerChannel: undefined })).toBe('sms_only');
+    expect(route({ useCustomerChannel: 'true' })).toBe('sms_only');
+    expect(route({ messageType: 'receipt', useCustomerChannel: false })).toBe('sms_only');
+  });
+
+  it('gate on: an admin-attributed send with the mark follows the policy; without it, a text', () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    expect(route({ operatorInitiated: false, adminAttributed: true })).toBe('push_first');
+    expect(route({ operatorInitiated: false, adminAttributed: true, useCustomerChannel: false })).toBe('sms_only');
+  });
+
+  it('gate on: the mark never lifts the other text-only rules', () => {
+    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+    expect(route({ humanAuthored: true })).toBe('sms_only');
+    expect(route({ hasMedia: true })).toBe('sms_only');
+    expect(route({ bundledReview: true, messageType: 'service_complete' })).toBe('sms_only');
+    expect(route({ messageType: 'appointment_confirmation' })).toBe('sms_only');
+    expect(route({ gateOn: false })).toBe('sms_only');
+  });
+});

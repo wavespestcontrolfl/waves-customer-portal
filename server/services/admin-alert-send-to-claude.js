@@ -100,7 +100,17 @@ const registryRule = (meta) => {
 
 // The allow-list (see the header): the code marks it Claude's, or it is a system alert or a Mac ops check digest with no
 // customer, or a reviewed check.
+// GATE_CLAUDE_INPUT_GUARD, read at call time; a missing or throwing reader reads as off.
+function claudeInputGuardOn() {
+  try { return require('../config/feature-gates').claudeInputGuardLive?.() === true; } catch { return false; }
+}
+
+// A purchase-receipt bell (dedupe key `purchase-receipt:` or `purchase-receipt-undelivered:`) quotes the marketplace seller's
+// listing title and the inventory model's reason, so its words do not come from our code.
+const receiptDerived = (row, meta) => row.category === 'inventory' && String(meta.dedupeKey || '').startsWith('purchase-receipt');
+
 function writtenByOurCode(row, meta) {
+  if (claudeInputGuardOn() && receiptDerived(row, meta)) return false;
   if (meta.who === 'claude' || meta.severity === 'broken' || registryRule(meta)?.who === 'claude') return true;
   const systemRow = SYSTEM_CATEGORIES.has(row.category) || (row.category === 'ops_digest' && meta.source === MAC_CHECKS_SOURCE);
   if (systemRow && !namesCustomer(meta)) return true;

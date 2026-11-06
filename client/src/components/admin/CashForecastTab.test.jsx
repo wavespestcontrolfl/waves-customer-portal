@@ -20,7 +20,7 @@ class FakeResizeObserver {
 const IN = { stripe: 0, visits: 0, invoices: 0, dues: 0, new_work: 0, prepay_sales: 0 };
 const OUT = {
   products_fuel: 0, products_fuel_extra: 0, ai_software: 0, card_payments_off_feed: 0, other_spending: 0,
-  card_owed: 0, payroll: 0, taxes: 0, planned: 0, hire: 0,
+  repeating_bills: 0, card_owed: 0, payroll: 0, taxes: 0, planned: 0, hire: 0,
 };
 const week = (start, end, over = {}) => ({
   week_start: start,
@@ -32,6 +32,7 @@ const week = (start, end, over = {}) => ({
   end_expected: over.expected ?? null,
   end_booked_with_hire: over.bookedHire ?? over.booked ?? 9000,
   end_expected_with_hire: over.expectedHire ?? null,
+  bills: over.bills || [],
 });
 const forecastBody = (over = {}) => ({
   fetched_at: "2026-11-05T14:00:00.000Z",
@@ -190,6 +191,51 @@ describe("Cash forecast tab", () => {
     expect(await screen.findByText("Lowest week with the planned hire")).toBeInTheDocument();
     expect(screen.getByText("$6,400 · week of Nov 9")).toBeInTheDocument();
     expect(within(screen.getByRole("table")).getByText("With the hire")).toBeInTheDocument();
+  });
+
+  it("lists each repeating bill; a mark is sent with PUT, cleared with DELETE, then the forecast is read again", async () => {
+    const bill = { key: "ACME LOAN", label: "ACME LOAN 1", line: "other_spending", amount_usd: 366.5, day_of_month: 7,
+      last_day: "2026-10-07", count: 3, next_day: "2026-11-07", mark: null };
+    let mark = null;
+    const sent = [];
+    routes.set("GET /api/admin/banking/cash-forecast", () => response(forecastBody({
+      repeating: [{ ...bill, mark }],
+      weeks: [
+        week("2026-11-02", "2026-11-08", { days: 4, out: { repeating_bills: 366.5 }, bills: [{ key: "ACME LOAN", label: "ACME LOAN 1", day: "2026-11-07", amount_usd: 366.5, mark }] }),
+        week("2026-11-09", "2026-11-15"),
+      ],
+    })));
+    routes.set("PUT /api/admin/banking/cash-forecast/marks/ACME%20LOAN", (body) => {
+      sent.push(["PUT", body]);
+      mark = body.mark;
+      return response({ key: "ACME LOAN", mark, updated_at: "T" });
+    });
+    routes.set("DELETE /api/admin/banking/cash-forecast/marks/ACME%20LOAN", () => {
+      sent.push(["DELETE", null]);
+      mark = null;
+      return response({ key: "ACME LOAN", mark: null, removed: true });
+    });
+    render(<CashForecastTab />);
+    expect(await screen.findByText("Repeating bills")).toBeInTheDocument();
+    expect(screen.getByText("About $367 every month, next Nov 7")).toBeInTheDocument();
+    const choice = screen.getByLabelText("Business or household: ACME LOAN 1");
+    expect(choice).toHaveValue("");
+    fireEvent.change(choice, { target: { value: "household" } });
+    await waitFor(() => expect(reads("GET /api/admin/banking/cash-forecast")).toBe(2));
+    expect(await screen.findByLabelText("Business or household: ACME LOAN 1")).toHaveValue("household");
+    // the week's lines name the bill, its day and its mark
+    const table = within(screen.getByRole("table"));
+    fireEvent.click(table.getByText("Nov 2 (4 days)"));
+    expect(table.getByText("Repeating bills")).toBeInTheDocument();
+    expect(table.getByText("ACME LOAN 1 · Nov 7 · Household")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Business or household: ACME LOAN 1"), { target: { value: "" } });
+    await waitFor(() => expect(reads("GET /api/admin/banking/cash-forecast")).toBe(3));
+    expect(sent).toEqual([["PUT", { mark: "household" }], ["DELETE", null]]);
+  });
+
+  it("with no repeating bill, the section says so", async () => {
+    render(<CashForecastTab />);
+    expect(await screen.findByText("No bill repeats monthly in the bank feed yet.")).toBeInTheDocument();
   });
 
   it("a failed first read offers a retry; a failed refresh keeps the last numbers", async () => {

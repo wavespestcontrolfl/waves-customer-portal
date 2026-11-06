@@ -1,23 +1,21 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): GET /:token/data carries
-// `monthlyAverageEnabled` for the page and, on the document pass,
-// `proposal.monthlyAverage` for the PDF. Both are ABSENT with the gate off, so
-// the response is byte-identical to before.
+// Monthly average (owner 2026-10-20): GET /:token/data carries, on the
+// document pass, `proposal.monthlyAverage` for the PDF. The page needs no switch
+// field (`monthlyAverageEnabled` is no longer sent).
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql) => sql);
   return mock;
 });
-const mockGate = { on: true };
 jest.mock('../services/estimate-proposal-billing', () => ({
   ...jest.requireActual('../services/estimate-proposal-billing'),
   resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
 }));
 jest.mock('../config/feature-gates', () => ({
   ...jest.requireActual('../config/feature-gates'),
-  isEnabled: jest.fn((gate) => gate === 'estimateDocPdf' || (gate === 'estimateMonthlyAverage' && mockGate.on)),
+  isEnabled: jest.fn((gate) => gate === 'estimateDocPdf'),
   gateEnvValue: jest.fn(() => false),
   gates: {},
 }));
@@ -108,8 +106,8 @@ async function withServer(fn) {
   }
 }
 
-describe('GET /:token/data — monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () => {
-  beforeEach(() => { mockGate.on = true; dbRows = { estimates: perApplicationRow() }; });
+describe('GET /:token/data — monthly average', () => {
+  beforeEach(() => { dbRows = { estimates: perApplicationRow() }; });
 
   test('document pass: the inputs reconcile to the stored monthly total', async () => {
     await withServer(async (baseUrl) => {
@@ -122,17 +120,6 @@ describe('GET /:token/data — monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)',
         bundleDiscountPct: 0.1,
         oneTime: { amount: 99, setup: true },
       });
-      expect(body.monthlyAverageEnabled).toBe(true);
-    });
-  });
-
-  test('gate off: neither key exists, the response is as before', async () => {
-    mockGate.on = false;
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
-      const body = await res.json();
-      expect(body.documentRender).toBe(true);
-      expect(body.proposal).not.toHaveProperty('monthlyAverage');
       expect(body).not.toHaveProperty('monthlyAverageEnabled');
     });
   });

@@ -38,7 +38,16 @@ function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// The stored step HTML is operator-authored but still raw HTML served from the
+// portal origin (the same origin as the app and its session storage). The
+// `sandbox` CSP directive with no allow-* tokens gives the document an opaque
+// origin and blocks script, forms, popups and top navigation, so stored HTML
+// cannot run script as the portal. Plain email HTML (text, images, links,
+// inline styles) renders the same. Sent on every status, set before any work.
+const PREVIEW_CSP = 'sandbox';
+
 router.get('/:stepId/:token', async (req, res) => {
+  res.set('Content-Security-Policy', PREVIEW_CSP);
   try {
     const { stepId, token } = req.params;
     const step = await db('automation_steps').where({ id: stepId, preview_token: token }).first();
@@ -101,4 +110,4 @@ function notFoundPage() {
 }
 
 module.exports = router;
-module.exports._test = { fill };
+module.exports._test = { fill, PREVIEW_CSP };
