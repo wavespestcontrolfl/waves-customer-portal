@@ -287,7 +287,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     if (!fromTechId && newTechId) {
       await require('./dispatch-alerts').autoResolveUnassignedAlertsForJob({ jobId, resolvedBy: actorId, trx: assignmentTrx });
     }
-    // GATE_ROUTE_CHECK_ASSIGN_SAVES: the update above dropped the old stop
+    // Route check on saves: the update above dropped the old stop
     // number; an office board assign (`place: true`, only PUT /jobs/:id/assign)
     // numbers the visit on the new technician's day in this same transaction,
     // under the fences taken above (the advisory lock re-enters in one

@@ -17,9 +17,9 @@ jest.mock('../services/scheduling/occupancy', () => ({
   findConflictingVisits: jest.fn(async () => []),
   fenceBookingDay: jest.fn(async () => ({ acquired: true, keys: [] })),
 }));
-// GATE_ROUTE_CHECK_AUTO_SAVES reader stands in for arrival-route's (read at call time).
+// The arrival-window routing reader stands in for arrival-route's (read at call time).
 jest.mock('../services/scheduling/arrival-route', () => ({
-  routeCheckAutoSavesLive: () => process.env.GATE_ROUTE_CHECK_AUTO_SAVES === 'true',
+  arrivalWindowRoutingEnabled: () => process.env.GATE_ADMIN_ARRIVAL_WINDOWS === 'true',
   placeMovedVisit: jest.fn(async () => [1]),
 }));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 'alert-1' })) }));
@@ -382,17 +382,17 @@ describe('ensurePackageFollowUpVisit', () => {
   });
 });
 
-describe('GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b)', () => {
-  afterEach(() => { delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES; });
+describe('route check on saves (owner 2026-10-29, Route Check Everywhere 2b)', () => {
+  afterEach(() => { delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS; });
 
-  test('gate off (unset): no placement, same child', async () => {
+  test('arrival-window routing off (unset): no placement, same child', async () => {
     const { trx } = fakeTrx();
     expect(await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS })).toMatchObject({ id: 'child-1' });
     expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 
-  test('gate on: visit 2 is placed once, on the booking transaction, after its insert, with its source', async () => {
-    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+  test('visit 2 is placed once, on the booking transaction, after its insert, with its source', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const { trx } = fakeTrx();
     expect(trx.isTransaction).toBe(true);
     await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
@@ -401,8 +401,8 @@ describe('GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 
     expect(createScheduledService.mock.invocationCallOrder[0]).toBeLessThan(placeMovedVisit.mock.invocationCallOrder[0]);
   });
 
-  test('gate on, a throwing placement: the child still books and the primary is untouched', async () => {
-    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+  test('a throwing placement: the child still books and the primary is untouched', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     placeMovedVisit.mockRejectedValueOnce(new Error('route boom'));
     const { trx } = fakeTrx();
     expect(await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS })).toMatchObject({ id: 'child-1' });
@@ -411,7 +411,7 @@ describe('GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 
   });
 
   test('an existing live child is returned as before and not placed again', async () => {
-    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const { trx } = fakeTrx({ existingChild: { id: 'child-old', status: 'confirmed' } });
     await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
     expect(placeMovedVisit).not.toHaveBeenCalled();

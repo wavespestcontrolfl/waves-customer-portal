@@ -1120,11 +1120,11 @@ test('a DATE-ONLY move of an end-less row probes its DERIVED end (never skipped)
   expect(rawCall[1]).toEqual(['12:00', 60, '10:00']);
 });
 
-// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): a
+// Route check on saves (owner 2026-10-29, Route Check Everywhere 2a): a
 // moved row also gets the arrival-window route check as a SECOND advisory
 // probe, its warning rides the same overlapWarnings list, and its technician's
 // day is numbered inside the write transaction. Never blocks the move.
-describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
+describe('bulk reschedule route check', () => {
   const occupancy = require('../services/scheduling/occupancy');
   const arrivalRoute = require('../services/scheduling/arrival-route');
   const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2099-01-15. Review the route before driving it.';
@@ -1136,7 +1136,6 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(null);
   });
   afterEach(() => {
-    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
     delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     routeSpy.mockRestore();
     placeSpy.mockRestore();
@@ -1155,7 +1154,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     return bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload }).then((res) => ({ ...res, trx, updateChain }));
   };
 
-  test('gate off: no route check, no route number, no routeWarnings key', async () => {
+  test('arrival-window routing off: no route check, no route number, no routeWarnings key', async () => {
     const { body } = await run({ technician_id: 'tech-1' });
     expect(body.updated).toEqual(['svc-1']);
     expect(body.overlapWarnings).toEqual([]);
@@ -1164,8 +1163,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     expect(placeSpy).not.toHaveBeenCalled();
   });
 
-  test('gate on: the moved row is checked on cached road times, the warning comes back as routeWarnings (never as an overlap), the move commits, the row is numbered in the transaction', async () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+  test('the moved row is checked on cached road times, the warning comes back as routeWarnings (never as an overlap), the move commits, the row is numbered in the transaction', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const { body, trx, updateChain } = await run({ technician_id: 'tech-1' });
     expect(body.updated).toEqual(['svc-1']);
@@ -1185,8 +1183,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     expect(placeSpy.mock.invocationCallOrder[0]).toBeLessThan(routeSpy.mock.invocationCallOrder[0]);
   });
 
-  test('gate on: a row whose slot did not change is not route-checked or numbered', async () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+  test('a row whose slot did not change is not route-checked or numbered', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const { body } = await run({ technician_id: 'tech-1', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00' });
     expect(body.updated).toEqual(['svc-1']);
@@ -1196,8 +1193,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     expect(placeSpy).not.toHaveBeenCalled();
   });
 
-  test('gate on: a failed route read never fails the move', async () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+  test('a failed route read never fails the move', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     routeSpy.mockRejectedValue(new Error('route read broke'));
     const { body } = await run({ technician_id: 'tech-1' });
@@ -1207,8 +1203,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — bulk reschedule route check', () => {
     expect(body.routeWarnings).toEqual([]);
   });
 
-  test('gate on: a real overlap and a route result on the same row stay in their own lists', async () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+  test('a real overlap and a route result on the same row stay in their own lists', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const updateChain = chain();
     wireTrx({

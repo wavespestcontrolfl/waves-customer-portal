@@ -2,7 +2,7 @@
 
 /**
  * A one-technician day held in memory, answered by the REAL arrival evaluator
- * (evaluateArrivalPlacement), for GATE_ROUTE_CHECK_STAFF_SAVES tests. No
+ * (evaluateArrivalPlacement), for the route-check-on-saves tests. No
  * database and no Google: the saved check and the staff placement both read
  * and write this object the way the SQL-backed pair would.
  *

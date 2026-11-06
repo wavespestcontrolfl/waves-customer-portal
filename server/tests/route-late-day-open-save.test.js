@@ -63,8 +63,8 @@ function fakeConn(target) {
   return { conn, updates };
 }
 
-const GATES = ['GATE_STAFF_ROUTE_INSERTION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS', 'GATE_ROUTE_CHECK_STAFF_SAVES',
-  'GATE_ROUTE_CHECK_AUTO_SAVES', 'GATE_SCHEDULING_CAPACITY', 'GATE_SAVE_ROAD_TIMES'];
+const GATES = ['GATE_STAFF_ROUTE_INSERTION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS',
+  'GATE_SCHEDULING_CAPACITY', 'GATE_SAVE_ROAD_TIMES'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(GATES.map((k) => [k, process.env[k]]));
@@ -98,8 +98,6 @@ test('lateDays with the gate off is today\'s answer', async () => {
 });
 
 test('the staff save writer passes it; the automatic writer does not', async () => {
-  process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
-  process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
   const staff = fakeConn(NEW);
   await expect(placeStaffSavedVisit(staff.conn, { serviceId: 'N' })).resolves.toEqual(['A', 'N', 'B']);
   expect(staff.updates).toEqual(WRITTEN);

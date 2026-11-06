@@ -278,7 +278,7 @@ describe('the same technician moves as before when allowed', () => {
   });
 });
 
-describe('the route check is told who is asking (GATE_ROUTE_CHECK_STAFF_LISTS: Google is staff-only)', () => {
+describe('the route check is told who is asking (the route-checked day list: Google is staff-only)', () => {
   beforeEach(() => {
     db.__state.technicians.find((t) => t.id === 'tech-1').can_move_visits = true;
   });

@@ -1555,7 +1555,7 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
       if (!again.length && at !== -1) overlappedIds.splice(at, 1);
     }
   }
-  // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op when
+  // Route check (owner 2026-10-29; a no-op when arrival-window routing is
   // off): once every stop sits in its new place, each moved stop gets the
   // arrival-window check Edit's save runs, on the road times the pickers
   // already bought. ADVISORY ONLY: the warnings ride on the stops
@@ -2299,7 +2299,7 @@ async function findAvailableSlotsTool(input, actionContext) {
   const dateFrom = date_from || today;
   const dateTo = date_to || weekOut;
 
-  // GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29): the new stop is checked
+  // Route-checked list (owner 2026-10-29): the new stop is checked
   // by the dispatcher's arrival-window route check instead of the gap search.
   // Only an admin caller's search may buy Google road times (the acting
   // user's technician id is the spender); anyone else stays on the estimate.

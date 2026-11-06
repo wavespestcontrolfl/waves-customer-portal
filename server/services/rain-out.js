@@ -1568,7 +1568,7 @@ async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
   const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', {
     probeSpanMinutes: 60,
     travelGap: true,
-    // GATE_ROUTE_CHECK_STAFF_LISTS: the route check buys Google road times
+    // Route-checked day list: the route check buys Google road times
     // only for an admin caller; the tech route (isAdmin: false) and a call
     // with no caller stay on the estimate.
     caller,
