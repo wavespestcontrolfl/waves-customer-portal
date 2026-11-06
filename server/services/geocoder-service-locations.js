@@ -165,4 +165,5 @@ async function sweepUngeocodedServices({ limit = 25, now = new Date(), dryRun = 
 }
 
 // persistServicePin + SNAPSHOT_COLUMNS: the county pass's visit pins (geocoder-county-fallback.js) reuse this write.
-module.exports = { sweepUngeocodedServices, persistServicePin, SNAPSHOT_COLUMNS };
+// serviceRepairEnabled: the gates persistServicePin needs (the public reschedule page asks before it reads a row to pin).
+module.exports = { sweepUngeocodedServices, persistServicePin, SNAPSHOT_COLUMNS, serviceRepairEnabled: enabled };

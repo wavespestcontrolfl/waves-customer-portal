@@ -1031,6 +1031,16 @@ Confirm also answers `409 SCOPE_CHANGED` when the
 locked visit's plan cadence (`recurring_pattern`, `recurring_interval_days`) is
 not the one the request loaded: the allowance comes from it.
 
+Reschedule link caps (security audit run 3, owner 2026-11-05; `GATE_RESCHEDULE_CAP_ALL`, dark, read at call time via
+`rescheduleCapAllLive()`; rules in `docs/gates-and-env.md`). Needs no `GATE_RESCHEDULE_MOVE_LIMITS`. While set,
+`POST /api/public/reschedule/:token` commits at most 3 customer moves of one visit per ET day for every customer:
+the fourth answers `409 { code: 'MOVE_LIMIT' }` (after the idempotent replay, and again on the locked visit row inside the
+commit), `find-slots` answers the same `409 MOVE_LIMIT`, and `GET` answers `state: 'not_reschedulable'`,
+`reason: 'move_limit'`. No new payload field, no new route; the existing text-or-call card shows. A single-visit move made
+within 15 minutes of another customer move of the visit sends no `appointment_rescheduled` text; once the visit has been
+quiet for 15 minutes the confirmation sweep sends one text with the latest time. The page's pin lookup for a visit with no pin of its own uses the memoized
+`services/geocoder.js` and saves the pin through `persistServicePin`, so a page view makes no repeat Google request.
+
 Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
 dark, read at call time in `routes/reschedule-public.js`): `GET
 /api/public/reschedule/:token` may carry `nextVisit: { currentDate, byDate }`.
