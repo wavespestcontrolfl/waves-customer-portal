@@ -24,7 +24,7 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({}));
 jest.mock('../services/customer-contact', () => ({ getInvoiceEmailRecipients: jest.fn() }));
 jest.mock('../services/email-template', () => ({ currency: jest.fn() }));
-jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn(), dateOnlyString: jest.requireActual('../utils/date-only').dateOnlyString }));
+jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn() }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -42,6 +42,10 @@ const proposal = (paymentTerms) => ({
   commercialTerms: { paymentTerms },
 });
 
+// Synthetic estimate ids: the accept stamp names a uuid.
+const ACCEPTED_ID = '0b6a1f2e-3c4d-4e5f-8a9b-0c1d2e3f4a5b';
+const OPEN_ID = '9e8d7c6b-5a49-4b38-8c27-1d0e9f8a7b6c';
+
 const baseTables = () => ({
   invoices: [],
   payment_plans: [],
@@ -54,18 +58,16 @@ const baseTables = () => ({
     { id: 'ss-sent', source_estimate_id: 'est-sent' },
     { id: 'ss-home', source_estimate_id: 'est-home' },
     { id: 'ss-none', source_estimate_id: null },
-    // GATE_ESTIMATE_DUE_FIRST_VISIT: first visits booked by an estimate accept (pg DATE values, both read shapes).
-    { id: 'ss-first', source_estimate_id: 'est-home', scheduled_date: '2026-11-09' },
-    { id: 'ss-first-date', source_estimate_id: 'est-home', scheduled_date: new Date('2026-11-09T00:00:00Z') },
-    { id: 'ss-first-open', source_estimate_id: 'est-open', scheduled_date: '2026-11-09' },
-    { id: 'ss-first-bare', source_estimate_id: null, scheduled_date: '2026-11-09' },
+    // GATE_ESTIMATE_DUE_FIRST_VISIT: the first visit an accept booked for Nov 9, since moved to Nov 12.
+    { id: 'ss-first', source_estimate_id: ACCEPTED_ID, scheduled_date: '2026-11-12' },
   ],
   estimates: [
     { id: 'est-net30', status: 'accepted', bill_by_invoice: true, estimate_data: { proposal: proposal('net30') } },
     { id: 'est-autopay', status: 'accepted', bill_by_invoice: false, estimate_data: { proposal: proposal('autopay') } },
     { id: 'est-sent', status: 'sent', bill_by_invoice: true, estimate_data: { proposal: proposal('net30') } },
     { id: 'est-home', status: 'accepted', bill_by_invoice: false, estimate_data: { services: [] } },
-    { id: 'est-open', status: 'sent', bill_by_invoice: false, estimate_data: { services: [] } },
+    { id: ACCEPTED_ID, status: 'accepted', bill_by_invoice: false, estimate_data: { services: [] } },
+    { id: OPEN_ID, status: 'sent', bill_by_invoice: false, estimate_data: { services: [] } },
   ],
 });
 
@@ -255,17 +257,23 @@ describe('planFollowupSequence: the send card says where the reminders start', (
 
 // GATE_ESTIMATE_DUE_FIRST_VISIT (owner 2026-11-06 "walk all"): an estimate-accept invoice is due on its first visit's
 // day (estimate-public.js acceptInvoiceVisitDueDate), so its ladder starts there too: no reminder calls it late before
-// the visit. Accepted Tue Nov 3, first visit Mon Nov 9.
-describe('GATE_ESTIMATE_DUE_FIRST_VISIT: an accept bill due on its first visit starts on that day', () => {
-  const acceptBill = (overrides = {}) => bill({ due_date: '2026-11-09', scheduled_service_id: 'ss-first', ...overrides });
+// that day. The bill is the accept's by its notes stamp (invoices carry no estimate_id column), never by the visit's
+// current date: a visit moved after the accept keeps the start (Codex pre-push P1). Accepted Tue Nov 3, due Mon Nov 9.
+describe('GATE_ESTIMATE_DUE_FIRST_VISIT: an accept bill starts on its due date', () => {
+  const stamp = (estimateId) => `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`;
+  const acceptBill = (overrides = {}) => bill({
+    due_date: '2026-11-09', scheduled_service_id: 'ss-first', notes: stamp(ACCEPTED_ID), ...overrides,
+  });
+  const startsOnSendDay = (inserts) => {
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).not.toHaveProperty('anchor_at');
+    expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-11-06'));
+  };
 
-  test.each([
-    ['a pg DATE string', 'ss-first'],
-    ['a pg DATE read back as a UTC-midnight Date', 'ss-first-date'],
-  ])('gate on, visit date as %s: anchor_at is the due date and Day 3 counts from it', async (_label, visitId) => {
+  test('gate on, its visit moved to Nov 12 after the accept: still starts on the Nov 9 due date', async () => {
     process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
     const tables = baseTables();
-    tables.invoices = [acceptBill({ scheduled_service_id: visitId })];
+    tables.invoices = [acceptBill()];
     const { inserts } = setupDb(tables);
 
     await scheduleForInvoice('inv-1');
@@ -282,16 +290,19 @@ describe('GATE_ESTIMATE_DUE_FIRST_VISIT: an accept bill due on its first visit s
 
     await scheduleForInvoice('inv-1');
 
-    expect(inserts[0]).not.toHaveProperty('anchor_at');
-    expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-11-06'));
+    startsOnSendDay(inserts);
   });
 
   test.each([
-    ['due the day it went out (a same-day or no-visit accept)', { due_date: '2026-11-03' }],
-    ['due on a day that is not its visit day', { due_date: '2026-12-03' }],
-    ['a visit from an estimate that is not accepted', { scheduled_service_id: 'ss-first-open' }],
-    ['a visit with no source estimate', { scheduled_service_id: 'ss-first-bare' }],
-    ['no visit at all', { scheduled_service_id: null }],
+    ['an unstamped bill with a later due date', { notes: 'Spring aeration, billed ahead.' }],
+    ['no notes at all', { notes: null }],
+    ['a stamp that is not where the note starts', { notes: `Re-billed. ${stamp(ACCEPTED_ID)}` }],
+    ['a stamped bill whose estimate is not accepted', { notes: stamp(OPEN_ID) }],
+    ['a stamped bill whose estimate is gone', { notes: stamp('5f4e3d2c-1b0a-4987-a6b5-c4d3e2f1a0b9') }],
+    // An annual prepay ("Pay the year upfront") and every gate-off accept keep a due date of today.
+    ['a stamped annual prepay due the day it went out', {
+      due_date: '2026-11-03', notes: `Auto-generated from accepted estimate #${ACCEPTED_ID}. Customer selected "Pay the year upfront" for the plan.`,
+    }],
   ])('gate on, %s: starts when it went out, no anchor_at', async (_label, overrides) => {
     process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
     const tables = baseTables();
@@ -300,8 +311,7 @@ describe('GATE_ESTIMATE_DUE_FIRST_VISIT: an accept bill due on its first visit s
 
     await scheduleForInvoice('inv-1');
 
-    expect(inserts[0]).not.toHaveProperty('anchor_at');
-    expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-11-06'));
+    startsOnSendDay(inserts);
   });
 
   test('gate on, a won Net 30 proposal bill keeps its due-date start (the proposal rule runs first)', async () => {
@@ -316,7 +326,7 @@ describe('GATE_ESTIMATE_DUE_FIRST_VISIT: an accept bill due on its first visit s
     expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-12-06'));
   });
 
-  test('gate on, an Auto Pay hold keeps the visit-day start for when the hold releases', async () => {
+  test('gate on, an Auto Pay hold keeps the due-date start for when the hold releases', async () => {
     process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
     customerOnAutopay.mockResolvedValue(true);
     const tables = baseTables();
@@ -328,12 +338,27 @@ describe('GATE_ESTIMATE_DUE_FIRST_VISIT: an accept bill due on its first visit s
     expect(inserts[0]).toMatchObject({ status: 'autopay_hold', next_touch_at: null, anchor_at: new Date('2026-11-09T12:00:00Z') });
   });
 
-  test('gate on, the send card reports the visit day as startsOn', async () => {
+  test('gate on, a bill object without its notes reads them by id: the send card reports the due date as startsOn', async () => {
     process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
-    const { conn } = setupDb(baseTables());
+    const tables = baseTables();
+    tables.invoices = [acceptBill()];
+    const { conn } = setupDb(tables);
+    const { notes: _omitted, ...withoutNotes } = acceptBill();
 
-    const plan = await planFollowupSequence(acceptBill(), conn, { id: 'c-1' });
+    const plan = await planFollowupSequence(withoutNotes, conn, { id: 'c-1' });
 
     expect(plan).toMatchObject({ arms: true, state: 'active', startsOn: '2026-11-09' });
+  });
+
+  test('gate on, an unreadable estimate arms nothing on a direct send and leaves the bill to the adoption sweep', async () => {
+    process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
+    const tables = baseTables();
+    tables.invoices = [acceptBill({ scheduled_service_id: null })];
+    const { inserts } = setupDb(tables, { fail: 'estimates' });
+
+    await expect(scheduleForInvoice('inv-1')).resolves.toBeNull();
+
+    expect(inserts).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('left for adoption'));
   });
 });

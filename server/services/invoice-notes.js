@@ -21,10 +21,18 @@ function isAcceptMintNote(notes) {
   return ACCEPT_MINT_NOTE_START_RE.test(String(notes || ''));
 }
 
+// The estimate id a mint's note names, else null. Invoices carry no estimate_id column, so this stamp is the accept
+// mint's own durable link to its estimate (the same pattern estimate-deposits.js reads).
+const ACCEPT_MINT_ESTIMATE_ID_RE = /^Auto-generated from accepted estimate #([0-9a-fA-F-]{36})(?=\W|$)/;
+
+function acceptMintEstimateId(notes) {
+  return ACCEPT_MINT_ESTIMATE_ID_RE.exec(String(notes || ''))?.[1] || null;
+}
+
 // The notes a customer may see: the machine marker note becomes null; every
 // other note (staff-written, AI service summary) comes back unchanged.
 function customerVisibleInvoiceNotes(notes) {
   return isAcceptMintNote(notes) ? null : notes;
 }
 
-module.exports = { ACCEPT_MINT_NOTE_RE, isAcceptMintNote, customerVisibleInvoiceNotes };
+module.exports = { ACCEPT_MINT_NOTE_RE, isAcceptMintNote, customerVisibleInvoiceNotes, acceptMintEstimateId };
