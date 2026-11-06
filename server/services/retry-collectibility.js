@@ -166,13 +166,16 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
 // `statuses` narrows the payment statuses; `withDuesInvoice: false` leaves out
 // the completion-minted dues invoice fallback (it names no payment row);
 // `excludePaymentId` leaves out one row (a caller asking whether ANOTHER row
-// collected the month).
-async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true, excludePaymentId = null } = {}) {
+// collected the month). `onOrAfter` ('YYYY-MM-DD') keeps only rows dated that
+// ET day or later: the monthly catch-up asks it with the failed/refunded
+// statuses, "did a run on or after this billing date already try this month?".
+function monthlyObligationPayments(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses, excludePaymentId = null, onOrAfter = null }) {
   let query = conn('payments')
     .where({ customer_id: customerId })
     .whereIn('status', statuses);
   if (excludePaymentId) query = query.whereNot({ id: excludePaymentId });
-  const payment = await query
+  if (onOrAfter) query = query.where('payment_date', '>=', onOrAfter);
+  return query
     .where(function () {
       this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
         .orWhere(function () {
@@ -181,14 +184,64 @@ async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, m
             .andWhere('payment_date', '<=', monthEnd)
             .andWhere('description', 'like', '%WaveGuard Monthly%');
         });
-    })
-    .first();
+    });
+}
+
+async function findCollectedMonthlyPayment(customerId, period, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true, excludePaymentId = null, onOrAfter = null } = {}) {
+  const { monthKey } = period;
+  const payment = await monthlyObligationPayments(customerId, period, { conn, statuses, excludePaymentId, onOrAfter }).first();
   if (payment || !withDuesInvoice) return payment;
   // A live completion-minted dues invoice (paid, processing or still open)
   // IS this month's bill — an unpaid one is collected by the invoice
   // follow-up ladder, never by a second charge. No payment row to name.
   const duesInvoice = await findLiveStampedDuesInvoice(conn, customerId, monthKey);
   return duesInvoice ? { id: null, dues_invoice_id: duesInvoice.id } : undefined;
+}
+
+// The retry ladder's length: a failed monthly row is retried while retry_count is below it.
+const MAX_RETRY_RUNGS = 3;
+
+// What became of one failed or refunded attempt row for a month (the monthly catch-up asks
+// this about the attempt its fence found; billing-cron, GATE_BILLING_MONTHLY_CATCHUP).
+//   ARMED: the retry sweep will retry it (armedRetryQuery's rules).
+//   ENDED: a path ended it on purpose and told a person or settled it.
+//   NONE:  a bare failed row nothing armed or parked: a run died between charge()
+//          inserting the row and billing-cron arming it (or the arming write failed).
+const ATTEMPT_RECOVERY = Object.freeze({ ARMED: 'armed', ENDED: 'ended', NONE: 'none' });
+// The note processPaymentRetries appends when it disarms a row without superseding it
+// (lane not monthly, autopay disabled).
+const LADDER_STOPPED_NOTE = 'retry ladder stopped';
+const metaFlag = (value) => value === true || value === 'true';
+
+function monthlyAttemptRecovery(row) {
+  // Refunded: the money went back by a person's decision.
+  if (row.status === 'refunded') return ATTEMPT_RECOVERY.ENDED;
+  // Superseded: a collector resolved it (another door, Charge now, the sweep's
+  // already-collected branch), a retry rung's own row was folded into its original, or a
+  // park superseded it by its own id (ambiguous outcome, orphan charge, prepay absorbed).
+  if (row.superseded_by_payment_id != null) return ATTEMPT_RECOVERY.ENDED;
+  const meta = parseMeta(row);
+  // Ambiguous Stripe outcome: charge() stamps it on the row it inserts. Stripe may hold the
+  // money, so this row is never one to "charge by hand", even before billing-cron parks it.
+  if (metaFlag(meta.ambiguous_outcome)) return ATTEMPT_RECOVERY.ENDED;
+  // SCA park: charge() stamps requires_action; billing-cron leaves the row failed and unarmed
+  // on purpose and alerts the office (autopay-sca-parked.js).
+  if (metaFlag(meta.requires_action)) return ATTEMPT_RECOVERY.ENDED;
+  // Ladder exhausted: the last rung disarms the row, pauses service and alerts.
+  if (Number(row.retry_count || 0) >= MAX_RETRY_RUNGS) return ATTEMPT_RECOVERY.ENDED;
+  // Ladder stopped by the sweep (DISARM), with its note on the row.
+  if (String(row.failure_reason || '').includes(LADDER_STOPPED_NOTE)) return ATTEMPT_RECOVERY.ENDED;
+  if (row.status === 'failed' && row.next_retry_at != null) return ATTEMPT_RECOVERY.ARMED;
+  return ATTEMPT_RECOVERY.NONE;
+}
+
+// True when some failed or refunded attempt row for this month, dated `onOrAfter` or later,
+// is armed or ended on purpose. False means every such row is a bare failed row: the month
+// has no recovery path. Throws on a failed read.
+async function monthlyAttemptHasRecovery(customerId, period, { conn = db, onOrAfter = null } = {}) {
+  const rows = await monthlyObligationPayments(customerId, period, { conn, statuses: ['failed', 'refunded'], onOrAfter })
+    .select('id', 'status', 'superseded_by_payment_id', 'next_retry_at', 'retry_count', 'failure_reason', 'metadata');
+  return rows.some((row) => monthlyAttemptRecovery(row) !== ATTEMPT_RECOVERY.NONE);
 }
 
 async function hasUnresolvedSiblingStripeOutcome(customerId, monthKey, conn = db) {
@@ -350,7 +403,7 @@ function armedRetryQuery(conn = db, { dueBy = null, dueBefore = null, customerId
   const q = conn('payments')
     .where({ status: 'failed' })
     .whereNull('superseded_by_payment_id')
-    .where('retry_count', '<', 3)
+    .where('retry_count', '<', MAX_RETRY_RUNGS)
     .whereNotNull('next_retry_at');
   if (dueBy != null) q.where('next_retry_at', '<=', dueBy);
   if (dueBefore != null) q.where('next_retry_at', '<', dueBefore);
@@ -553,6 +606,9 @@ module.exports = {
   classifyFailedPaymentRetry,
   hasUnresolvedSiblingStripeOutcome,
   findCollectedMonthlyPayment,
+  ATTEMPT_RECOVERY,
+  monthlyAttemptRecovery,
+  monthlyAttemptHasRecovery,
   deriveMonthlyChargeIdempotencyKey,
   monthKeyOf,
   _private: { monthKeyOf, dateKeyOf, pausedOn, isMonthlyObligationRow, parseMeta },

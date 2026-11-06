@@ -9208,12 +9208,34 @@ function initScheduledJobs() {
       // overlapping deploy instances don't even race the per-customer
       // existingCharge check.
       await runExclusive('billing-monthly', async () => {
-        const BillingCron = require('./billing-cron');
-        const result = await BillingCron.processMonthlyBilling();
+        // Today's run, unchanged, then the catch-up bookmark (billing-monthly-catchup.js).
+        const result = await require('./billing-monthly-catchup').runMonthlyBillingTick();
         logger.info(`Monthly billing done: ${result.charged} charged, ${result.processing} processing, ${result.failed} failed, ${result.skipped} skipped`);
       });
     } catch (err) {
       logger.error(`Monthly billing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 10:29 + 14:29 ET — catch-up for the 8:00 run above (GATE_BILLING_MONTHLY_CATCHUP,
+  // owner 2026-11-06 O1). A lost or killed 8:00 run left that day's billing_day cohort
+  // uncharged until next month. These ticks bill each ET date of this month after the
+  // bookmark of the last finished run, under the SAME 'billing-monthly' lock, so they never
+  // overlap the 8:00 run. Customers already charged, or already tried on or after the date
+  // being made up, are skipped (no second charge, no second decline notice). Gate off: no
+  // read, no lock, no charge. Quiet minute: besides the every-minute jobs, only the gated
+  // review-sequence tick (4,9,…,59) also fires at :29 in these hours.
+  cron.schedule('29 10,14 * * *', async () => {
+    try {
+      const catchUp = require('./billing-monthly-catchup');
+      if (!(await catchUp.catchUpNeeded())) return;
+      logger.warn('[billing-monthly-catchup] a billing date this month has not finished — billing it now');
+      await runExclusive('billing-monthly', async () => {
+        const result = await catchUp.runMonthlyBillingCatchUp();
+        logger.info(`[billing-monthly-catchup] run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Monthly billing catch-up failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
