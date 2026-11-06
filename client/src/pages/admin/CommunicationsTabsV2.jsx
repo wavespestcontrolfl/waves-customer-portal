@@ -1234,14 +1234,6 @@ export function CSRCoachTabV2() {
                     >
                       Mark Done
                     </Button>{" "}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={busyTasks[t.id]}
-                      onClick={() => handleTaskUpdate(t.id, "in_progress")}
-                    >
-                      Reassign
-                    </Button>{" "}
                   </div>{" "}
                 </div>
               );
