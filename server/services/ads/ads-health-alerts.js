@@ -352,8 +352,11 @@ async function recordShadow({ google, uploads }, now) {
   const before = parseMeta(prior?.metadata);
   const sections = { google: shadowSection(before.google, google), uploads: shadowSection(before.uploads, uploads) };
   if (!sections.google.changed && !sections.uploads.changed) return { recorded: false };
+  // critical: a failed insert throws (the plain write only logs it), so a lost shadow row fails the tick instead of
+  // reading as recorded, and the next run sees the change again.
   await require('../audit-log').recordAuditEvent({
     actor_type: 'system', action: SHADOW_ACTION, resource_type: 'notifications', metadata: { at: now.toISOString(), ...sections },
+    critical: true,
   });
   return { recorded: true, google: sections.google.joined.length, uploads: sections.uploads.joined.length };
 }

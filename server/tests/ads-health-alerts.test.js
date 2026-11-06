@@ -267,7 +267,7 @@ test('shadow writes no alert, and one audit row only when the problems change', 
   await expect(runAdsHealthAlerts({ now: NOW })).resolves.toMatchObject({ mode: 'shadow', recorded: true, google: 1, uploads: 0 });
   expect(AuditLog.recordAuditEvent).toHaveBeenCalledTimes(1);
   const first = AuditLog.recordAuditEvent.mock.calls[0][0];
-  expect(first).toMatchObject({ actor_type: 'system', action: 'ads_health_alert.shadow', resource_type: 'notifications' });
+  expect(first).toMatchObject({ actor_type: 'system', action: 'ads_health_alert.shadow', resource_type: 'notifications', critical: true });
   expect(first.metadata.google).toMatchObject({ itemKeys: ['campaign:111'], joined: ['campaign:111'], emptied: false });
 
   mockTables.audit_log = { metadata: first.metadata };
@@ -282,4 +282,11 @@ test('shadow writes no alert, and one audit row only when the problems change', 
   for (const write of [Episodes.raiseAdminAlertWithReopen, Episodes.closeAdminAlertKeys, OpsDigest.deliverOpsDigest, FallOff.retireIfClean]) {
     expect(write).not.toHaveBeenCalled();
   }
+});
+
+test('a shadow row that cannot be written fails the tick, so the next run records the change again', async () => {
+  gates.adsHealthAlertsMode.mockReturnValue('shadow');
+  google({ campaigns: [campaign({ primaryStatus: 'MISCONFIGURED' })] });
+  AuditLog.recordAuditEvent.mockRejectedValueOnce(new Error('synthetic insert failure'));
+  await expect(runAdsHealthAlerts({ now: NOW })).rejects.toThrow('ads health alerts: shadow record: synthetic insert failure');
 });
