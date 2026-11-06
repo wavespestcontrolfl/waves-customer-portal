@@ -548,7 +548,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         // A card minted as preview-only before the switches' commit path
         // deployed is never confirmable (the server refuses it too).
         const previewOnly = action.contract?.preview_only === true;
-        // Several cards in one answer (GATE_IB_MULTI_CARD): each card says which
+        // Several cards in one answer: each card says which
         // one it is, and its buttons are described by that title (their names stay Confirm and Cancel). One card reads as before.
         const several = shown.length > 1;
         const titleId = `pending-card-title-${action.id}`;

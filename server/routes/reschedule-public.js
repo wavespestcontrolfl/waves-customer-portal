@@ -207,11 +207,17 @@ function nextVisitDisclosureMismatch(svc, body, nextVisit) {
 // Customer move limits (GATE_RESCHEDULE_MOVE_LIMITS, owner 2026-10-09; rules
 // in services/scheduling/customer-move-limits.js). Null = no limit.
 const MOVE_LIMIT_MESSAGE = "Let's find a time that works. Text or call us at (941) 297-5749 and our team will set it up.";
-// { limit, blocked }: `blocked` = a first visit past its online moves (the
-// office sets the time).
+// { limit, blocked }: `blocked` = a first visit past its online moves, or a
+// visit that took its day's moves (GATE_RESCHEDULE_CAP_ALL, every customer):
+// the office sets the time.
 async function loadMoveLimit(svc, elig) {
   const limit = await moveLimits.loadMoveLimit(svc, { database: db, missed: !!elig?.missed });
-  return { limit, blocked: !!limit?.firstVisitBlocked };
+  const capped = await moveLimits.dayCapReached(svc, { database: db });
+  return { limit, blocked: !!limit?.firstVisitBlocked || capped };
+}
+
+function moveLimitError() {
+  return Object.assign(new Error(MOVE_LIMIT_MESSAGE), { statusCode: 409, isOperational: true, code: 'MOVE_LIMIT' });
 }
 
 // GET and the search: the page verdict with the move limit folded in. A
@@ -302,6 +308,17 @@ async function assertMoveLimitAllows(svc, elig, range, config, date) {
   if (blocked || late) {
     throw Object.assign(new Error(MOVE_LIMIT_MESSAGE), { statusCode: 409, isOperational: true, code: 'MOVE_LIMIT' });
   }
+}
+
+// GATE_RESCHEDULE_CAP_ALL: a repeat move inside the correction window sends no
+// notice of its own; once the visit has been quiet that long the confirmation
+// sweep sends one with the latest time. handleReschedule's options argument, as
+// a spread: none when the move sends its notice as before (gate off, a first
+// move, an unreadable history).
+async function rescheduleNoticeOptions(svc) {
+  return await moveLimits.repeatMoveInWindow(svc, { database: db })
+    ? [{ deferNoticeMinutes: moveLimits.CORRECTION_MINUTES }]
+    : [];
 }
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
@@ -789,6 +806,58 @@ async function offerTechnicianScope(svc) {
   return line ? { serviceLines: [line] } : {};
 }
 
+// The pin for a visit with none of its own. Before GATE_RESCHEDULE_CAP_ALL every
+// call (each page view, search and commit check) made its own billed Google
+// request that nothing kept. With the gate on, the address goes through the
+// memoized strict services/geocoder.js, which asks Google once per address and
+// keeps the answer (a refusal too: no street-level match, outside the service
+// area, no result), then the pin is saved on the visit. A refusal leaves the
+// visit unplaced (no offers; the page hands it to the office) rather than
+// paying again. A transient failure (nothing memoized) keeps the old lookup.
+async function resolveVisitPin(svc, address, resolveBookingCoords) {
+  if (!moveLimits.moveCapAllEnabled()) {
+    return resolveBookingCoords({ address: address || null, city: svc.city || null });
+  }
+  if (address) {
+    const { location, permanent } = await require('../services/geocoder').geocodeAddressWithStatus(address);
+    if (location) {
+      await saveVisitPin(svc, location, address);
+      return location;
+    }
+    if (permanent) return { lat: null, lng: null };
+  }
+  return resolveBookingCoords({ address: address || null, city: svc.city || null });
+}
+
+function visitHasPin(row) {
+  return [row.lat, row.lng].every((value) => value != null && Number.isFinite(Number(value)) && Number(value) !== 0);
+}
+
+// Save the pin a view geocoded through persistServicePin, the service-location
+// backstop's own write (the technician-day lock, the staff-review recheck and a
+// write only to the visit exactly as read; it needs GATE_ROUTE_REORDER and
+// GATE_ROUTE_REORDER_REPAIR like that backstop). Only the address stamped on the
+// visit is saved: a visit on the customer's primary address takes the customer
+// pin the geocoder sweep owns. Best effort: a miss costs nothing, the memo
+// serves the next view.
+async function saveVisitPin(svc, location, address) {
+  try {
+    const locations = require('../services/geocoder-service-locations');
+    if (!locations.serviceRepairEnabled()) return;
+    const snapshot = await db('scheduled_services').where({ id: svc.id }).first(locations.SNAPSHOT_COLUMNS);
+    // A pin saved while the geocode was in flight (staff correction, the backstop) stands: only an unpinned row is written.
+    if (!snapshot || visitHasPin(snapshot)) return;
+    const stamp = [snapshot.service_address_line1, snapshot.service_address_city, snapshot.service_address_state, snapshot.service_address_zip]
+      .map((part) => String(part || '').trim());
+    if (stamp.some((part) => !part) || stamp.join(', ') !== address) return;
+    if (await locations.persistServicePin(db, snapshot, location)) {
+      await require('../services/dispatch-assignment').emitDispatchJobUpdate({ jobId: svc.id });
+    }
+  } catch (err) {
+    logger.warn(`[reschedule-public] visit pin save skipped for ${svc.id}: ${err.code || err.name || 'error'}`);
+  }
+}
+
 async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay, offer = false }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey, bookInsertionOffersLive } = booking._internals;
@@ -797,7 +866,7 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
   let lng = svc.longitude != null ? parseFloat(svc.longitude) : null;
   if (!lat || !lng) {
     const address = [svc.address_line1, svc.city, svc.state, svc.zip].filter(Boolean).join(', ');
-    const resolved = await resolveBookingCoords({ address: address || null, city: svc.city || null });
+    const resolved = await resolveVisitPin(svc, address, resolveBookingCoords);
     lat = resolved.lat;
     lng = resolved.lng;
   }
@@ -1315,6 +1384,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           statusCode: 409, isOperational: true, code: 'SLOT_TAKEN',
         });
       }
+      // GATE_RESCHEDULE_CAP_ALL day cap, counted under this row's lock (a missed visit too).
+      if (await moveLimits.dayCapReached(svc, { database: trx })) throw moveLimitError();
       // The size rule the page disclosed, judged again on the locked row for EVERY commit (a missed visit
       // too): a series re-anchor can change the regular date while the date and window the expect fence
       // pins stay put, and the single-versus-series decision was made on the unlocked read.
@@ -1483,7 +1554,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     } else {
       try {
-        await AppointmentReminders.handleReschedule(svc.id, `${date}T${slot.start_time}`);
+        await AppointmentReminders.handleReschedule(
+          svc.id,
+          `${date}T${slot.start_time}`,
+          ...await rescheduleNoticeOptions(svc),
+        );
       } catch (err) {
         logger.error(`[reschedule-public] reminder sync failed for ${svc.id}: ${err.message}`);
       }

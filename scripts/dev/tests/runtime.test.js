@@ -12,15 +12,16 @@ function runAs(version, code) {
     { cwd: root, encoding: 'utf8' });
 }
 
-test('runtime accepts the CI major with the existing minimum and rejects older or newer majors', () => {
-  for (const version of ['20.9.0', '20.20.2']) {
+test('runtime accepts the CI major from the patched minimum and rejects older patches or other majors', () => {
+  for (const version of ['24.22.1', '24.22.2', '24.30.0']) {
     const result = runAs(version, "require('./scripts/dev/runtime').checkRuntime(process.cwd())");
     assert.equal(result.status, 0, result.stderr);
   }
-  for (const version of ['18.20.0', '20.8.1', '22.0.0', '26.8.1']) {
+  for (const version of ['20.20.2', '22.23.4', '24.0.0', '24.21.9', '24.22.0', '26.13.0']) {
     const result = runAs(version, "require('./scripts/dev/runtime').checkRuntime(process.cwd())");
     assert.equal(result.status, 1);
     assert.match(result.stderr, /nvm install && nvm use/);
+    assert.match(result.stderr, /minimum 24\.22\.1/);
     assert.match(result.stderr, new RegExp(`Node ${version.replaceAll('.', '\\.')}`));
   }
 });
@@ -29,7 +30,7 @@ test('doctor rejects a mismatched runtime before dependency, port or database ch
   const result = runAs('26.8.1', `require('./scripts/dev/doctor').doctor({root:process.cwd()})
     .catch(error => { console.error(error.message); process.exitCode = 1; });`);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /does not match this checkout's Node 20/);
+  assert.match(result.stderr, /does not match this checkout's Node 24/);
 });
 
 test('worktree creation rejects a mismatched runtime before fetch, branch creation or install', () => {
@@ -37,7 +38,7 @@ test('worktree creation rejects a mismatched runtime before fetch, branch creati
     process.argv = [process.execPath, 'scripts/dev/worktree.js', 'create', 'runtime-test'];
     require('./scripts/dev/worktree');`);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /does not match this checkout's Node 20/);
+  assert.match(result.stderr, /does not match this checkout's Node 24/);
   assert.doesNotMatch(result.stderr, /UNEXPECTED MUTATION/);
 });
 
@@ -51,7 +52,7 @@ test('migration rejects an unsupported runtime before reading database credentia
     process.argv = [process.execPath, 'scripts/dev/run.js', 'migrate'];
     require('./scripts/dev/run');`);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /does not match this checkout's Node 20/);
+  assert.match(result.stderr, /does not match this checkout's Node 24/);
   assert.doesNotMatch(result.stderr, /UNEXPECTED/);
 });
 

@@ -291,6 +291,16 @@ function resolveAnchor(service, anchorMap) {
  * that do not pass it (rebooker's staff series moves) keep the 72-hour
  * behavior, byte for byte.
  *
+ * `opts.toldLock` (GATE_NIGHT_TOLD_LOCK, owner 2026-11-05 "D1 a") only counts
+ * together with `lock24h`: a night tool never changes a time the customer was
+ * already told, so a visit whose latest promise has a known slot (the
+ * no-show detector's record of what really went out, auto-dispatch/told-visits.js)
+ * is frozen too, whatever the band. reminder_72h_sent is not read for this: the
+ * sender also sets it when the 72-hour reminder was skipped. A promise with an
+ * unknown window does not freeze here. One bulk read; a failure is `failed: true`.
+ * Callers that do not pass it are unchanged, byte for byte (route-reorder's
+ * 4:20 pass, the rebooker).
+ *
  * Returns { failed, frozen:Set<id> }:
  *   failed=true  → the status could not be read; callers MUST treat EVERY
  *                  visit as frozen (fail closed).
@@ -302,6 +312,7 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
   if (!serviceIds || serviceIds.length === 0) return { failed: false, frozen: new Set() };
   const lock24h = !!opts && opts.lock24h === true;
   const sentColumn = lock24h ? 'reminder_24h_sent' : 'reminder_72h_sent';
+  const toldLock = lock24h && opts.toldLock === true;
   const bandHours = freezeHours === undefined ? sendableHoursFor(lock24h) : freezeHours;
   try {
     const rows = await db('appointment_reminders')
@@ -359,6 +370,10 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
           frozen.add(r.scheduled_service_id);
         }
       }
+    }
+
+    if (toldLock) {
+      for (const id of await require('./told-visits').loadToldVisitIds(db, serviceIds, now)) frozen.add(id);
     }
 
     return { failed: false, frozen };

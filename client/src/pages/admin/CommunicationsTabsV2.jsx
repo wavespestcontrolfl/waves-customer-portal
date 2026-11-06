@@ -872,6 +872,7 @@ export function CSRCoachTabV2() {
   const [reload, setReload] = useState({ n: 0, keys: null });
   const [busyTasks, setBusyTasks] = useState({});
   const [taskError, setTaskError] = useState("");
+  const [showAllTasks, setShowAllTasks] = useState(false);
 
   useEffect(() => {
     // First run loads every section; a retry reloads only the failed ones.
@@ -1187,7 +1188,7 @@ export function CSRCoachTabV2() {
               No pending follow-up tasks
             </div>
           ) : (
-            (tasks.tasks || []).slice(0, 10).map((t) => {
+            (tasks.tasks || []).slice(0, showAllTasks ? undefined : 10).map((t) => {
               const isOverdue =
                 t.status === "pending" && new Date(t.deadline) < new Date();
               return (
@@ -1233,18 +1234,24 @@ export function CSRCoachTabV2() {
                     >
                       Mark Done
                     </Button>{" "}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={busyTasks[t.id]}
-                      onClick={() => handleTaskUpdate(t.id, "in_progress")}
-                    >
-                      Reassign
-                    </Button>{" "}
                   </div>{" "}
                 </div>
               );
             })
+          )}
+          {!showAllTasks && (tasks?.tasks || []).length > 10 && (
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-14 text-ink-secondary">
+                Showing 10 of {tasks.tasks.length}
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowAllTasks(true)}
+              >
+                Show all
+              </Button>
+            </div>
           )}
         </CardBody>{" "}
       </Card>

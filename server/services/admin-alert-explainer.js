@@ -190,17 +190,35 @@ function explainerLive() {
   try { return require('../config/feature-gates').alertExplainerLive?.() === true; } catch { return false; }
 }
 
+// GATE_ALERT_CUSTOMER_LINE, read at call time; a missing or throwing reader reads as off.
+function customerLineLive() {
+  try { return require('../config/feature-gates').alertCustomerLineLive?.() === true; } catch { return false; }
+}
+
 // The bell list's persisted rows with what "What to do" needs, for the admin role while the gate is on: the customer
 // an alert names (`customer`), that the row can be explained (`explainable`) and its saved summary when it was written
 // for the text shown (`explainer`). The "Send to Claude" mark (`sendToClaude`) is not here: it needs no explainer gate,
 // so the list route adds it for every admin row (withSendToClaudeFields, admin-alert-send-to-claude.js). The stored
 // column itself never leaves the server. Never throws: a failed name read serves the rows without names.
+//
+// GATE_ALERT_CUSTOMER_LINE (owner 2026-11-05): with GATE_ALERT_EXPLAINER off, the customer line alone. The same admin-only
+// name read (a database read, no AI call) adds `customer` to each row it can name, and nothing else: no `explainable`,
+// no `explainer`, so the bell shows "Customer: Name" and keeps its "Show full text". GATE_ALERT_EXPLAINER on = the full
+// shape above, whatever this gate says. Both off = the rows as they are, minus the stored column.
 async function withExplainerFields(rows, { role } = {}) {
   const list = Array.isArray(rows) ? rows : [];
   const bare = list.map(({ explainer: _stored, ...row }) => row);
-  if (!list.length || role !== 'admin' || !explainerLive()) return bare;
+  if (!list.length || role !== 'admin') return bare;
+  const full = explainerLive();
+  if (!full && !customerLineLive()) return bare;
   let customers = new Map();
   try { customers = await customersForAlerts(db, list); } catch (err) { logger.warn(`[alert-explainer] names not read: ${NotificationService.safeErrorSummary(err)}`); }
+  if (!full) {
+    return bare.map((row) => {
+      const customer = customers.get(String(row.id));
+      return customer ? { ...row, customer } : row;
+    });
+  }
   return bare.map((row, i) => {
     const customer = customers.get(String(row.id));
     const explainer = servedExplainer(list[i].explainer, row.version);
@@ -211,6 +229,7 @@ async function withExplainerFields(rows, { role } = {}) {
 module.exports = {
   explainAdminAlert,
   explainerLive,
+  customerLineLive,
   withExplainerFields,
   servedExplainer,
   _private: { parseExplainer, promptText, fallbackExplainer, recentFailures, FAILURE_COOLDOWN_MS, SCHEMA, SYSTEM, STORE_VERSION },

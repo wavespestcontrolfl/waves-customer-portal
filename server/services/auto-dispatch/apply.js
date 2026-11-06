@@ -380,7 +380,19 @@ function makeMoveGuard({ service, best, config = {} }) {
     const placed = await isPersonPlacedVisit(row, trx, { refresh: true });
     if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
     if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
+    // GATE_NIGHT_TOLD_LOCK: a promise delivered after the pass-1 re-check (scoring can take minutes) still stops the
+    // move. Read on the move transaction; a failed read throws, so nothing moves (fail closed).
+    await assertNotToldOnMove(trx, row, config, refuse);
   };
+}
+
+// GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
+// transaction (makeMemberGuard covers the siblings, never the primary). Only with lock24h + toldLock (toldLockOf).
+async function assertNotToldOnMove(trx, row, config, refuse) {
+  if (!toldLockOf(config)) return;
+  const { loadToldVisitIds } = require('./told-visits');
+  const told = await loadToldVisitIds(trx, [row.id], new Date());
+  if (told.has(String(row.id)) || told.has(row.id)) throw refuse(row.id, 'has a time the customer was already told (frozen)');
 }
 
 // makeMemberGuard's own status/preferred-time pre-checks, extracted (Codex
@@ -433,15 +445,36 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
   }
 }
 
+// The run's one read of GATE_NIGHT_TOLD_LOCK (config.nightToldLock) counts only
+// together with config.nightLock24h: a known-slot promise then freezes
+// a visit too (loadReminderFreeze opts.toldLock). Only this config carries it;
+// the rain pass and route-reorder never build it.
+function toldLockOf(config) {
+  return !!config && config.nightLock24h === true && config.nightToldLock === true;
+}
+
+// loadReminderFreeze's option object for a night run: lock24h always, toldLock
+// when GATE_NIGHT_TOLD_LOCK is on too (toldLockOf).
+function freezeOpts(toldLock) {
+  return toldLock === true ? { lock24h: true, toldLock: true } : { lock24h: true };
+}
+
+function reminderWindowText(lock24h, toldLock) {
+  if (lock24h && toldLock) return 'is inside its 24-hour reminder window or the customer was already told its time (frozen)';
+  return `is inside its ${lock24h ? 24 : 72}-hour reminder window (frozen)`;
+}
+
 // ROUTE-TIERS sibling legality (extracted, unchanged behavior): each
 // sibling's OWN durable anchor and tier radius must admit best.date.
 // GATE_NIGHT_LOCK_24H (`lock24h`, the run's one read): the freeze is the
 // 24-hour reminder's band and sent flag instead of the 72-hour one.
-async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false) {
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, { lock24h: true }] : []));
+// GATE_NIGHT_TOLD_LOCK (`toldLock`, only with lock24h): a sibling the customer
+// was already told a time for (a known-slot promise) is frozen too.
+async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false, toldLock = false) {
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, freezeOpts(toldLock)] : []));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
-  if (frozen) throw refuse(frozen.id, `is inside its ${lock24h ? 24 : 72}-hour reminder window (frozen)`);
+  if (frozen) throw refuse(frozen.id, reminderWindowText(lock24h, toldLock));
   // Same legality math as the orchestrator's pass-1/apply-time checks, per
   // SIBLING: its own anchor (durable evidence, fail closed), its own
   // days-out tier radius, the destination floor — best.date must fall
@@ -470,10 +503,10 @@ async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse,
 // land before this move commits. Each sibling's DESTINATION must clear the
 // freeze too: best.date + that member's own derived start from the unit
 // mover's `targets` (a member with no target fails closed).
-async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, lock24h = false) {
+async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, lock24h = false, toldLock = false) {
   const now = new Date();
   const hours = flexTier.flexFreezeHoursFor(lock24h);
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, ...(lock24h ? [hours, { lock24h: true }] : [hours]));
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, ...(lock24h ? [hours, freezeOpts(toldLock)] : [hours]));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
   if (frozen) throw refuse(frozen.id, `is inside its ${hours}-hour reminder window (frozen)`);
@@ -543,9 +576,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a ${isSaturday(best.date) ? 'Saturday' : 'Sunday'}`);
     }
     if (guardMode === 'tiers') {
-      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, config.nightLock24h === true);
+      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, config.nightLock24h === true, toldLockOf(config));
     } else if (guardMode === 'flex') {
-      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, config.nightLock24h === true);
+      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, config.nightLock24h === true, toldLockOf(config));
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
     // GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service member holds the unit to the mowing rule as saved now.
@@ -1210,6 +1243,8 @@ module.exports = {
   // guard closures.
   checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds,
 };
+// Own line: the primary visit's told-time check (GATE_NIGHT_TOLD_LOCK), exported for its unit tests.
+module.exports.assertNotToldOnMove = assertNotToldOnMove;
 // Own lines: the day re-plan writer (services/day-replan/apply.js) runs the same silent reminder sync and pins the same fields.
 module.exports.syncMovedReminders = syncMovedReminders;
 module.exports.LOCATION_FIELDS = LOCATION_FIELDS;

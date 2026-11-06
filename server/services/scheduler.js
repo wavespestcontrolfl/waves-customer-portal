@@ -1398,7 +1398,10 @@ function initScheduledJobs() {
   cron.schedule('42 * * * *', async () => {
     try {
       await runExclusive('annual-prepay-restamp-sweep', async () => {
-        await require('./annual-prepay-renewals').restampUnstampedActiveTerms();
+        const summary = await require('./annual-prepay-renewals').restampUnstampedActiveTerms();
+        // A failed candidate query is logged and returned in the summary;
+        // throwing inside the lock makes this job's job_health row record it.
+        require('./workflows/renewal-reminder').throwIfRestampFailed(summary);
       });
     } catch (err) {
       logger.error(`[annual-prepay-restamp] hourly sweep failed: ${err.message}`);
@@ -4734,11 +4737,14 @@ function initScheduledJobs() {
     try {
       await runExclusive('appointment-reminders', async () => {
         const reminders = require('./appointment-reminders');
-        await reminders.checkAndSendReminders();
+        const scan = await reminders.checkAndSendReminders();
         // Settle stale cancellation-notice leases (GATE_CANCEL_NOTICE_HOOK;
         // no-op while the gate is off) — the durable half of the
         // shared-writer cancellation-notice hook in job-status.js.
         await reminders.sweepStaleCancellationClaims();
+        // After the later step ran: a failed main scan (not one customer's
+        // send) must reach job_health, which records only a throwing body.
+        if (scan?.scanFailed) throw new Error('appointment-reminders: reminder scan failed');
       });
     } catch (err) {
       logger.error(`Reminder check failed: ${err.message}`);
@@ -8712,13 +8718,14 @@ function initScheduledJobs() {
   // GATE_CALL_SELF_AUDIT (checked inside the service). Silence = healthy.
   // =========================================================================
   cron.schedule('40 3 * * *', async () => {
-    await runExclusive('call-self-audit', async () => {
-      try {
+    // The body throws on failure so job_health records it; the catch is outside runExclusive.
+    try {
+      await runExclusive('call-self-audit', async () => {
         const { runSelfAudit } = require('./call-self-audit');
         const result = await runSelfAudit();
         if (!result.skipped) logger.info(`[self-audit] nightly run: ${JSON.stringify({ audited: result.audited, breaches: result.breaches })}`);
-      } catch (e) { logger.error(`Call self-audit failed: ${e.message}`); }
-    });
+      });
+    } catch (e) { logger.error(`Call self-audit failed: ${e.message}`); }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -8748,13 +8755,14 @@ function initScheduledJobs() {
   // (checked inside the service); nothing acts on a test AI's answer.
   // =========================================================================
   cron.schedule('5 8 * * *', async () => {
-    await runExclusive('typed-decisions-daily-review', async () => {
-      try {
+    // The body throws on failure so job_health records it; the catch is outside runExclusive.
+    try {
+      await runExclusive('typed-decisions-daily-review', async () => {
         const { runDailyReviewItem } = require('./typed-decisions/daily-review-item');
         const result = await runDailyReviewItem();
         if (result.raised) logger.info(`[typed-decisions] daily review item raised: ${result.disagreements} disagreements, ${result.spotChecks} spot checks`);
-      } catch (e) { logger.error(`Typed-decisions daily review failed: ${e.message}`); }
-    });
+      });
+    } catch (e) { logger.error(`Typed-decisions daily review failed: ${e.message}`); }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -9128,6 +9136,28 @@ function initScheduledJobs() {
   } catch (err) {
     logger.error(`Bouncie mileage crons failed to init: ${err.message}`);
   }
+
+  // =========================================================================
+  // DAILY 8:31 AM — Card details sync (GATE_CARD_DETAILS_SYNC)
+  // Stripe's card account updater renews saved cards without telling us. This
+  // safety net re-reads the cards the portal thinks are expired or expiring
+  // from Stripe. It runs before the 9:00 Auto Pay pre-charge and payment-expiry
+  // jobs and the Monday 9:17 expiry warnings so they read Stripe's current
+  // expiry. Minute :31 at 8 AM is unused (one-minute-per-job rule above).
+  // =========================================================================
+  cron.schedule('31 8 * * *', async () => {
+    logger.info('Running: card details sync');
+    try {
+      await runExclusive('card-details-sync', async () => {
+        const result = await require('./card-details-sync').syncNearExpiryCards();
+        if (result.updated > 0) {
+          logger.info(`Card details sync: ${result.updated} refreshed of ${result.checked} checked (${result.detached} detached, ${result.errors} errors)`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Card details sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
 
   // =========================================================================
   // DAILY 9AM — Payment expiry check (cards expiring this/next month)

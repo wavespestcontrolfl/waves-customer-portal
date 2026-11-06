@@ -888,10 +888,11 @@ describe('annual prepay late-payment gap fixes', () => {
       expect(postCreditMovement).not.toHaveBeenCalled();
     });
 
-    test('sweep query failure degrades to empty summary, never throws', async () => {
+    test('sweep query failure degrades to an empty summary that names the failed pass, never throws', async () => {
       const conn = jest.fn(() => { throw new Error('boom'); });
       const summary = await AnnualPrepayRenewals.reconcileCoveredTermsSweep({ today: '2026-07-09', conn });
-      expect(summary).toEqual({ terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 });
+      // failedPasses lets the renewal-reminders run fail after its other steps ran.
+      expect(summary).toEqual({ terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0, failedPasses: ['covered-term query'] });
     });
 
     test('dispute-marker leg (Codex round-3 P2): a covered term still carrying the marker gets mode re-stamp, dues claw-back, and marker clear', async () => {

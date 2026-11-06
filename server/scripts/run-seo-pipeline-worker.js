@@ -59,6 +59,9 @@ process.on('SIGINT', () => { shutdown('SIGINT'); });
 process.on('SIGTERM', () => { shutdown('SIGTERM'); });
 
 async function main() {
+  // This worker still builds with Nixpacks, whose Node release can lag the portal
+  // image (deploy/portal.Dockerfile); the log shows which release runs.
+  console.log(JSON.stringify({ status: 'starting', node: process.version }));
   const once = process.argv.includes('--once') || process.env.SEO_PIPELINE_WORKER_ONCE === 'true';
   const result = await runSeoPipelineWorker({
     once,

@@ -88,7 +88,6 @@ beforeAll(() => {
   process.env.GATE_IB_INVOICE_EDITS = 'true';
   process.env.GATE_IB_INVOICE_REMINDERS = 'true';
   process.env.GATE_IB_PAYMENT_PLAN = 'true';
-  process.env.GATE_IB_CREATE_INVOICE = 'true';
   process.env.GATE_IB_COMPOSE_EMAIL = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
   process.env.GATE_IB_AGENT_REVIEW_DRAFTS = 'true';
@@ -114,7 +113,6 @@ afterAll(() => {
   delete process.env.GATE_IB_INVOICE_EDITS;
   delete process.env.GATE_IB_INVOICE_REMINDERS;
   delete process.env.GATE_IB_PAYMENT_PLAN;
-  delete process.env.GATE_IB_CREATE_INVOICE;
   delete process.env.GATE_IB_COMPOSE_EMAIL;
   delete process.env.GATE_IB_SET_BILL_TO;
   delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;

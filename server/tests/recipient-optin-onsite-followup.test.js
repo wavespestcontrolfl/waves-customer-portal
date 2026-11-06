@@ -674,7 +674,8 @@ describe('wiring', () => {
   const fs = require('fs');
   const read = (p) => fs.readFileSync(require.resolve(p), 'utf8');
   test('the 15-minute sweep retries unfinished follow-ups; the booking site reconciles an already-confirmed phone', () => {
-    expect(read('../index.js')).toContain('await sweepOnSiteFollowUps();');
+    expect(read('../index.js')).toContain('.runRecipientOptinSweeps();');
+    expect(read('../services/recipient-optin.js')).toContain('await sweepOnSiteFollowUps();');
     expect(read('../services/call-recording-processor.js')).toContain('rearmOnSiteFollowUp(customerId, phoneKey, svc.id)');
   });
   test('the replay claim is atomic on the row (one UPDATE ... RETURNING), never a read-then-write', () => {

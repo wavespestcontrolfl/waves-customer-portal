@@ -259,19 +259,23 @@ async function noAnswerBells(now) {
 
 /**
  * One scheduler tick. Each step runs on its own, so one failing step never
- * stops the others. Returns the counts; never throws.
+ * stops the others. Returns the counts. After every step has run, it throws
+ * when any step failed, so job_health records the tick as failed.
  */
 async function runLeadCallbackTick({ now = new Date() } = {}) {
   if (!isEnabled('leadCallTextFollowup')) return { skipped: 'gate_off' };
   const out = {};
+  const failed = [];
   for (const [name, step] of [['reminded', sendReminders], ['rang', ringDue], ['stranded', settleStrandedRings], ['noAnswer', noAnswerBells]]) {
     try {
       out[name] = await step(now);
     } catch (err) {
       logger.error(`[lead-callback-scheduler] ${name} step failed (${errCode(err)})`);
       out[name] = 'error';
+      failed.push(name);
     }
   }
+  if (failed.length > 0) throw new Error(`lead-callback-scheduler: ${failed.length} step(s) failed (${failed.join(', ')})`);
   return out;
 }
 

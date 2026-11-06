@@ -355,6 +355,7 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
 
   let candidates = [];
   let weeklyRuleFailed = false;
+  const failedRules = [];
   for (const rule of RULES) {
     try {
       candidates.push(...await rule({ now, knex }));
@@ -362,8 +363,14 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
       if (rule === weeklyPlanCandidates && appPlanEnabled()) weeklyRuleFailed = true;
       // One rule's failure never blocks the others.
       logger.warn(`[property-alerts] rule failed (${rule.name}): ${err.message}`);
+      failedRules.push(rule.name);
     }
   }
+  // Thrown after the sweep's last step so job_health records a failed rule
+  // read (runExclusive records only a throwing body); delivery is unchanged.
+  const throwIfRuleFailed = () => {
+    if (failedRules.length > 0) throw new Error(`property-alerts sweep: ${failedRules.length} rule(s) failed (${failedRules.join(', ')})`);
+  };
   const weeklyCustomers = new Set(candidates.filter((c) => c.ruleKey === 'irrigation_weekly_plan').map((c) => c.customerId));
   candidates = candidates.filter((candidate) => candidate.ruleKey === 'irrigation_weekly_plan'
     || (!weeklyCustomers.has(candidate.customerId) && !(weeklyRuleFailed && candidate.ruleKey === 'rain_skip_irrigation')));
@@ -372,6 +379,7 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
   if (!gateOn) {
     // Shadow mode: report what WOULD fire so the flip decision has data.
     logger.info(`[property-alerts] gate off — would evaluate ${candidates.length} candidate(s)`);
+    throwIfRuleFailed();
     return summary;
   }
 
@@ -395,6 +403,7 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
       logger.warn(`[property-alerts] candidate failed (${candidate.ruleKey}/${candidate.customerId}): ${err.message}`);
     }
   }
+  throwIfRuleFailed();
   return summary;
 }
 

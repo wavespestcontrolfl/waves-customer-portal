@@ -1,31 +1,14 @@
 /**
- * GATE_IB_MULTI_CARD admission rules (services/intelligence-bar/multi-card.js)
- * and the gate reader. The route and the real card store are exercised in
+ * Multi-card admission rules (services/intelligence-bar/multi-card.js). The route and the real card store are exercised in
  * intelligence-bar-multi-card-db.test.js.
  */
 const MultiCard = require('../services/intelligence-bar/multi-card');
-const Gates = require('../config/feature-gates');
 
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
 const C = '33333333-3333-4333-8333-333333333333';
 const note = (customer_id, notes = 'x') => ({ name: 'update_customer', input: { customer_id, updates: { notes } } });
 const open = (...uses) => uses.map(use => MultiCard.record(use.name, use.input));
-
-describe('GATE_IB_MULTI_CARD reader', () => {
-  const saved = { m: process.env.GATE_IB_MULTI_CARD, p: process.env.GATE_IB_PLATFORM };
-  afterEach(() => { process.env.GATE_IB_MULTI_CARD = saved.m; process.env.GATE_IB_PLATFORM = saved.p; if (saved.m === undefined) delete process.env.GATE_IB_MULTI_CARD; if (saved.p === undefined) delete process.env.GATE_IB_PLATFORM; });
-  test('dark by default, strict true, and needs the platform', () => {
-    delete process.env.GATE_IB_MULTI_CARD; process.env.GATE_IB_PLATFORM = 'true';
-    expect(Gates.ibMultiCardLive()).toBe(false);
-    process.env.GATE_IB_MULTI_CARD = '1';
-    expect(Gates.ibMultiCardLive()).toBe(false);
-    process.env.GATE_IB_MULTI_CARD = 'true';
-    expect(Gates.ibMultiCardLive()).toBe(true);
-    process.env.GATE_IB_PLATFORM = 'false';
-    expect(Gates.ibMultiCardLive()).toBe(false);
-  });
-});
 
 describe('multi-card admission', () => {
   test('a second edit on a different customer is admitted', () => {

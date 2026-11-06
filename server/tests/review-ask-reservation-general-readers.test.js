@@ -450,34 +450,35 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
   jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
   const csrCoach = require('../services/csr/csr-coach');
 
+  // Models only the reservation exclusion: the staff-text and delivery rules
+  // are proved on real Postgres (csr-follow-up-proof-postgres.test.js).
   function installDb({ sms, tasks }) {
     const updates = [];
     const smsQuery = (rows) => {
       let excludeReservations = false;
       let customerId;
       const q = {
-        where(col, val) { if (col === 'customer_id') customerId = val; return q; },
+        where(col, val) { if (col === 'os.customer_id') customerId = val; return q; },
         whereRaw(sql) { if (/review_ask_reservation/.test(sql)) excludeReservations = true; return q; },
+        whereNotExists: () => q,
+        modify(fn) { fn(q); return q; },
+        min: () => q,
         async first() {
           let out = rows.filter((r) => r.customer_id === customerId && r.direction === 'outbound');
           if (excludeReservations) out = out.filter((r) => !isUnresolvedSendReservation(r));
-          return out[0] ?? null;
+          return { at: out[0]?.created_at ?? null };
         },
       };
       return q;
     };
     db.mockImplementation((table) => {
-      if (table === 'sms_log') return smsQuery(sms);
+      if (table === 'sms_log as os') return smsQuery(sms);
       if (table === 'ai_follow_up_tasks') {
         const q = {
           whereIn: () => q,
           where: (col, val) => (col === 'id' ? { update: async (patch) => { updates.push({ id: val, ...patch }); return 1; } } : q),
           then: (resolve, reject) => Promise.resolve(tasks).then(resolve, reject),
         };
-        return q;
-      }
-      if (table === 'customer_interactions') {
-        const q = { where: () => q, whereIn: () => q, first: async () => null };
         return q;
       }
       return genericQuery([]);
@@ -487,7 +488,7 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
 
   // Both within the 72h hold: the reservation-still-hides case is the point
   // of the first test below; aging past 72h is covered separately.
-  const task = { id: 'task-1', customer_id: 'cust-csr-1', created_at: new Date(Date.now() - 48 * 3600000) };
+  const task = { id: 'task-1', customer_id: 'cust-csr-1', task_type: 'send_sms', created_at: new Date(Date.now() - 48 * 3600000) };
 
   test('a still-unresolved reservation after the task does NOT verify it', async () => {
     const updates = installDb({
@@ -498,13 +499,14 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
     expect(updates.filter((u) => u.status === 'verified')).toHaveLength(0);
   });
 
-  test('a real outbound text after the task still verifies it', async () => {
+  test('a text a person sent after the task still verifies it', async () => {
+    const sentAt = new Date(Date.now() - 24 * 3600000);
     const updates = installDb({
       tasks: [task],
-      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 24 * 3600000) }],
+      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'delivered', message_type: 'manual', metadata: { human_authored: true }, created_at: sentAt }],
     });
     await csrCoach.verifyFollowUps();
-    expect(updates.filter((u) => u.status === 'verified')).toHaveLength(1);
+    expect(updates.filter((u) => u.status === 'verified')).toEqual([expect.objectContaining({ verification_method: 'sms_log_match', completed_at: sentAt })]);
   });
 });
 

@@ -20,7 +20,7 @@ const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
 const {
-  MAX_RESULTS: MAX_NAME_MATCHES, MAX_RESULTS_V2: MAX_NAME_MATCHES_V2, isNameLikeSearch, rankNameMatches,
+  MAX_RESULTS_V2: MAX_NAME_MATCHES_V2, isNameLikeSearch, rankNameMatches,
   buildNameIndex, prefilterNameIndex, cachedNameIndex, resetNameIndexCache, MAX_SURVIVORS: MAX_NAME_SURVIVORS,
 } = require('./name-match');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
@@ -29,7 +29,7 @@ const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
-const { discountStackingLive, nameMatchV2Live } = require('../../config/feature-gates');
+const { discountStackingLive } = require('../../config/feature-gates');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
@@ -539,7 +539,7 @@ async function queryCustomers(input, readCustomerIds = [], pageCustomerId = null
   const exactCount = Number(matched.count);
   if (exactCount === 0) return await withApproximateCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped: readCustomerIds.length > 0 });
   // Name matcher v2: one exact hit can still be the wrong person.
-  const nameSearch = nameMatchV2Live() && !looksLikePlaceSearch(search, result.customers);
+  const nameSearch = !looksLikePlaceSearch(search, result.customers);
   if (exactCount === 1 && nameSearch) return await withAlternativeCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped: readCustomerIds.length > 0 });
   // Several exact hits: same rows, ordered by name fit and context.
   if (exactCount > 1 && nameSearch) return await withContextOrder(result, { search, offset, pageCustomerId, keepSort: !!sort_by });
@@ -651,24 +651,20 @@ const APPROXIMATE_CANDIDATE_CAP = 20000;
 
 // Rescue path for a dictated, misspelled name. `unsearched` is the main query
 // with its filters and customer scope but no text search. Contract: only the
-// first page (offset 0) gets a fallback, capped at min(limit, 5) rows (8 with
-// GATE_NAME_MATCH_V2), so
+// first page (offset 0) gets a fallback, capped at min(limit, 8) rows, so
 // has_more is false and there is no page 2 of guesses. Ranks the candidates by
 // sound and spelling in Node, then reads the best few with the main query's
 // columns. Returns `result` unchanged when nothing is close.
 async function withApproximateCustomers(result, unsearched, { search, limit, offset, pageCustomerId = null, scoped = false }) {
   if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
-  const v2 = nameMatchV2Live();
-  const found = v2
-    ? await rankScopedCustomerNames(unsearched, search, Math.min(limit, MAX_NAME_MATCHES_V2), pageCustomerId, scoped)
-    : { ranked: rankNameMatches(search, await nameCandidates(unsearched), { limit: Math.min(limit, MAX_NAME_MATCHES) }), context: null };
+  const found = await rankScopedCustomerNames(unsearched, search, Math.min(limit, MAX_NAME_MATCHES_V2), pageCustomerId, scoped);
   if (!found.ranked.length) return result;
-  const customers = await rankedCustomerRows(unsearched, found.ranked, v2 ? { search, context: found.context } : null);
+  const customers = await rankedCustomerRows(unsearched, found.ranked, { search, context: found.context });
   if (!customers.length) return result;
   return {
     ...result,
     approximate: true,
-    note: v2 ? APPROXIMATE_CUSTOMER_NOTE_V2 : APPROXIMATE_CUSTOMER_NOTE,
+    note: APPROXIMATE_CUSTOMER_NOTE_V2,
     customers,
     total_matching: customers.length,
     returned_count: customers.length,
@@ -687,19 +683,15 @@ function nameCandidates(unsearched, cap = APPROXIMATE_CANDIDATE_CAP) {
 // filtered search can reach any customer; scoring stays capped per request.
 const NAME_INDEX_BOOK_CAP = 200000;
 
-// Customer rows (main query columns) in ranked order. With `rescore` (v2) the
-// rows' CURRENT names are scored again, because the cached index can be up to
+// Customer rows (main query columns) in ranked order. The rows' CURRENT names
+// are scored again (`rescore`), because the cached index can be up to
 // five minutes old: a customer renamed since drops out unless the new name
-// still qualifies, and the score shown is the current one. v2 rows carry `match`.
-async function rankedCustomerRows(unsearched, ranked, rescore = null) {
+// still qualifies, and the score shown is the current one. Rows carry `match`.
+async function rankedCustomerRows(unsearched, ranked, rescore) {
   const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
-  if (rescore) {
-    const byId = new Map(rows.map(row => [row.id, row]));
-    return rankNameMatches(rescore.search, rows, { v2: true, limit: rows.length, context: rescore.context })
-      .map(entry => ({ ...customerListRow(byId.get(entry.id)), match: { score: entry.score, reasons: entry.reasons || [] } }));
-  }
-  const rank = new Map(ranked.map((r, i) => [r.id, i]));
-  return rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map(customerListRow);
+  const byId = new Map(rows.map(row => [row.id, row]));
+  return rankNameMatches(rescore.search, rows, { limit: rows.length, context: rescore.context })
+    .map(entry => ({ ...customerListRow(byId.get(entry.id)), match: { score: entry.score, reasons: entry.reasons || [] } }));
 }
 
 const APPROXIMATE_CUSTOMER_NOTE_V2 = `${APPROXIMATE_CUSTOMER_NOTE} Each row's match.reasons says if that person is on the operator's screen, has a visit today or tomorrow, or was texted or called in the last 7 days.`;
@@ -797,7 +789,7 @@ async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId
     : await allowedSurvivors(unsearched, search, index, include);
   if (!survivors.length) return { ranked: [], context: null };
   const context = await nameMatchContext(pageCustomerId, [...survivors.map(entry => entry.id), ...alsoIds]);
-  return { ranked: rankNameMatches(search, survivors, { v2: true, limit, context, prefiltered: true }), context };
+  return { ranked: rankNameMatches(search, survivors, { limit, context, prefiltered: true }), context };
 }
 
 // v2: the exact search found one customer. Rank the whole scoped book anyway
@@ -813,7 +805,7 @@ async function withAlternativeCustomers(result, unsearched, { search, limit, off
   const alternatives = await rankedCustomerRows(unsearched, others, { search, context });
   if (!alternatives.length) return result;
   // The exact hit is scored by its current name, like the alternatives.
-  const [now] = rankNameMatches(search, [exact], { v2: true, context });
+  const [now] = rankNameMatches(search, [exact], { context });
   return {
     ...result,
     alternatives,
@@ -831,7 +823,7 @@ async function withContextOrder(result, { search, offset, pageCustomerId, keepSo
   if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
   const rows = result.customers;
   const context = await nameMatchContext(pageCustomerId, rows.map(row => row.id));
-  const ranked = rankNameMatches(search, rows, { v2: true, limit: rows.length, context });
+  const ranked = rankNameMatches(search, rows, { limit: rows.length, context });
   if (!ranked.length) return result;
   const entries = new Map(ranked.map(entry => [entry.id, entry]));
   const withMatch = rows.map(row => (entries.has(row.id)

@@ -5325,9 +5325,35 @@ describe('annual prepay renewal helpers', () => {
     const missed = query({ rows: [] });
     setDbQueues({ annual_prepay_terms: [failingCandidates, late, undelivered, missed] });
     const allCols = new Proxy({}, { get: () => ({}) });
-    await expect(_private.runTermiteNoticePass('2026-09-26', allCols)).resolves.toBe(0);
+    const failedPasses = [];
+    await expect(_private.runTermiteNoticePass('2026-09-26', allCols, failedPasses)).resolves.toBe(0);
     expect(late.whereNotNull).toHaveBeenCalled();
     expect(missed.where).toHaveBeenCalled();
+    // The aborted pass is named so the renewal-reminders run can fail after every step ran.
+    expect(failedPasses).toContain('termite notice-obligation pass');
+  });
+
+  test('checkAndSend: an aborted termite pass is reported as failedPasses; the shared 30/15/7 loop still runs', async () => {
+    const failingCandidates = query();
+    failingCandidates.then = (resolve, reject) => Promise.reject(new Error('candidate query down')).then(resolve, reject);
+    const q30 = query({ rows: [] });
+    const q15 = query({ rows: [] });
+    const q7 = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: [] })],
+      annual_prepay_terms: [
+        query({ columnInfo: TERMITE_READY_COLS }),
+        failingCandidates,
+        query({ rows: [] }), query({ rows: [] }), query({ rows: [] }), query({ rows: [] }),
+        q30, q15, q7,
+      ],
+    });
+
+    await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({
+      sent: 0,
+      failedPasses: ['termite notice-obligation pass'],
+    });
+    expect(q7.whereNull).toHaveBeenCalled();
   });
 
   // Codex #4921 r4 P1: a transient columnInfo() failure used to be cached as
@@ -9213,7 +9239,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     expect(alreadyFiled.where.mock.calls.map((c) => c[0])).toContain('created_at');
   });
 
-  test('a failed term select or a missing table returns an empty summary and never throws', async () => {
+  test('a failed term select (named in failedPasses) or a missing table returns an empty summary and never throws', async () => {
     const failing = query({});
     failing.select = jest.fn(() => { throw new Error('connection terminated'); });
     setDbQueues({
@@ -9221,8 +9247,9 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       scheduled_services: [query({ columnInfo: COLUMNS })],
     });
     const refresh = jest.fn();
+    // The failed select is named in failedPasses (the renewal-reminders run fails on it); nothing throws here.
     await expect(AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh }))
-      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 });
+      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0, failedPasses: ['restamp query'] });
 
     _private.resetCachesForTests();
     db.schema = { hasTable: jest.fn().mockResolvedValue(false) };

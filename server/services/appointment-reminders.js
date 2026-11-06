@@ -530,7 +530,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return { ok: false, held: true, reason: 'move_hold' };
     }
     if (kind === 'confirmation') {
-      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl, idempotencyKey: emailIdempotencyKey || undefined });
     }
     if (kind === '72h' || kind === '24h') {
       return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined });
@@ -2631,6 +2631,73 @@ async function renderConfirmationBody({ scheduledServiceId, customerId, firstNam
   );
 }
 
+// A visit moved again within minutes of an earlier customer move sends no
+// notice of its own (options.deferNoticeMinutes, the public reschedule page's
+// repeat moves). The row takes the same hold a grouped unit move takes
+// (move_hold_until: every confirmation, 72h and 24h text of the visit waits, flags
+// unmarked) for that many minutes from THIS move, so each further move pushes the
+// deadline out, and the confirmation is re-armed, the same re-arm the send-window
+// hold takes in handleReschedule. The 15-minute stranded-confirmation sweep then
+// sends ONE text with the latest time once the visit has been quiet that long. No
+// token is stamped: the grouped-move release only frees holds that carry one, so
+// this hold simply lapses. A row that already carries a grouped-move hold is left alone. A windowless placeholder or a sibling-suppressed row keeps
+// the normal path: the sweep skips the first and the slot owner carries the second.
+// True only when asked and the row was re-armed; any miss sends as before.
+async function coalesceRescheduleNotice(record, newApptTime, options) {
+  const minutes = Number(options.deferNoticeMinutes);
+  if (!(minutes > 0) || record.windows_preclosed || record.suppressed_by_sibling) return false;
+  try {
+    const rearmed = await db('appointment_reminders')
+      .where({ id: record.id, appointment_time: newApptTime, suppressed_by_sibling: false, cancelled: false })
+      // A grouped-move hold (it carries a token) keeps its own deadline: the update misses and the
+      // move takes the normal path, where that hold defers the notice as it always has.
+      .whereNull('move_hold_token')
+      .update({
+        confirmation_sent: false,
+        confirmation_sent_at: null,
+        move_hold_until: new Date(Date.now() + minutes * 60 * 1000),
+        updated_at: new Date(),
+      });
+    return rearmed > 0;
+  } catch (rearmErr) {
+    logger.error(`[appt-remind] confirmation re-arm for coalesced reschedule notice failed: ${rearmErr.message}`);
+    return false;
+  }
+}
+
+// A lapsed move_hold_until with no token: the mark coalesceRescheduleNotice leaves (every
+// grouped-move hold stamps both).
+function isCoalescedNoticeRow(record) {
+  return !!record.move_hold_until && !record.move_hold_token;
+}
+
+// The email key of a deferred confirmation. The ordinary key (visit + slot) would dedupe a
+// move back to a slot that already got a confirmation (A, B, then A again within the
+// window) against that older email, leaving B as the customer's latest notice. The hold
+// stamp is one per burst and stays on the row until the send is marked, so a retry of the
+// same deferred notice keeps its key. Null for every other confirmation (default key).
+function coalescedNoticeEmailKey(record, scheduledServiceId, apptTime) {
+  if (!isCoalescedNoticeRow(record)) return null;
+  return `appointment.confirmation:${scheduledServiceId || record.customer_id}:${apptTime.getTime()}:coalesced:${new Date(record.move_hold_until).getTime()}`;
+}
+
+// The extra columns a delivered confirmation writes when it IS the deferred notice
+// of a coalesced reschedule (coalesceRescheduleNotice: a lapsed move_hold_until that
+// carries no token; every grouped-move hold stamps both). It stands in for the
+// reschedule notice the repeat moves did not send, so it covers the reminder windows
+// that notice would cover (reminderFlagsCoveredByNotice, the rule markRescheduleNoticeSent
+// applies), and it clears the spent hold so a later confirmation reads as ordinary.
+// Nothing for any other confirmation.
+function coalescedNoticeCover(record, apptTime, sent) {
+  if (!isCoalescedNoticeRow(record)) return {};
+  const covered = sent ? reminderFlagsCoveredByNotice(apptTime) : {};
+  return {
+    move_hold_until: null,
+    ...(covered.alreadyInside72hWindow ? { reminder_72h_sent: true, reminder_72h_sent_at: new Date() } : {}),
+    ...(covered.alreadyInside24hWindow ? { reminder_24h_sent: true, reminder_24h_sent_at: new Date() } : {}),
+  };
+}
+
 async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false, customerInitiated }) {
   if (apptTime.getTime() <= Date.now()) {
     // Deferred path (codex #3609 r22 P2): the time this sender read can have
@@ -2737,7 +2804,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         // night, and at 08:00 the past-appointment guard above closes the
         // row before the window ever admits the SMS.
         if (apptChannel(confirmationChannel) === 'both') {
-          const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel });
+          const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel, emailIdempotencyKey: coalescedNoticeEmailKey(record, scheduledServiceId, apptTime) });
           logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held — email leg ${heldEmailRes?.ok ? 'sent now' : `not sent (${heldEmailRes?.reason || heldEmailRes?.error || 'unknown'})`}, SMS deferred`);
         }
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — outside 8AM-8PM ET send window`);
@@ -2768,6 +2835,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         serviceLabel,
         rescheduleUrl: reschedule.url,
         smsOutcome,
+        emailIdempotencyKey: coalescedNoticeEmailKey(record, scheduledServiceId, apptTime),
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           const ladder = {};
@@ -2808,7 +2876,8 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       const marked = await db('appointment_reminders')
         .where({ id: record.id, appointment_time: apptTime })
         .update({ confirmation_sent: true, confirmation_sent_at: new Date(), confirmation_estimate_id: null,
-          ...(coversDayBefore ? { reminder_24h_sent: true, reminder_24h_sent_at: new Date() } : {}) });
+          ...(coversDayBefore ? { reminder_24h_sent: true, reminder_24h_sent_at: new Date() } : {}),
+          ...coalescedNoticeCover(record, apptTime, sent) });
       if (Number(marked) === 0) {
         logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} went out for a time that changed under the send — row left pending so the sweep resends the new time`);
       }
@@ -4989,6 +5058,9 @@ const AppointmentReminders = {
     } catch (err) {
       logger.error(`[appt-remind] checkAndSendReminders failed: ${err.message}`);
       results.errors++;
+      // The cron body throws on this flag after its later steps have run, so
+      // job_health records the failed scan.
+      results.scanFailed = true;
     }
 
     if (results.sent72h > 0 || results.sent24h > 0) {
@@ -5461,6 +5533,13 @@ const AppointmentReminders = {
 
       if (!sendNotification) {
         logger.info(`[appt-remind] Reschedule notice suppressed for ${scheduledServiceId}`);
+        return record;
+      }
+
+      // Coalesced notice (options.deferNoticeMinutes; GATE_RESCHEDULE_CAP_ALL,
+      // the public reschedule page's repeat moves): see coalesceRescheduleNotice.
+      if (await coalesceRescheduleNotice(record, newApptTime, options)) {
+        logger.info(`[appt-remind] Reschedule notice for ${scheduledServiceId} coalesced — the confirmation sweep sends the latest time`);
         return record;
       }
 

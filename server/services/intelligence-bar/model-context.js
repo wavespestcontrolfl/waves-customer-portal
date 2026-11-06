@@ -4,10 +4,9 @@
  *
  * Kept apart from task-context.js so the route can import it without the lookup code.
  */
-const { ibTargetRulesV2Live } = require('../../config/feature-gates');
 const TaskContext = require('./task-context');
 
-// What the model is shown of a task context (GATE_IB_TARGET_RULES_V2, Codex #6369 r14).
+// What the model is shown of a task context (Codex #6369 r14).
 // With more than one same-name customer in play, each customer row is cut to its id,
 // display name, plain city (safeChoiceCity or omitted), last visit and button text:
 // no address, version, link or other customer-entered text reaches the model. The
@@ -21,7 +20,7 @@ const slimCustomer = customer => (customer && typeof customer === 'object' ? {
 
 function modelContext(taskContext) {
   // Owner-direct requests only: every other admin keeps the legacy context (Codex #6369 r24).
-  if (!ibTargetRulesV2Live() || taskContext?.ownerDirect !== true || !(taskContext?.candidates?.length > 1)) return taskContext;
+  if (taskContext?.ownerDirect !== true || !(taskContext?.candidates?.length > 1)) return taskContext;
   const { page = {} } = taskContext;
   return { ...taskContext, candidates: taskContext.candidates.map(slimCustomer),
     target: slimCustomer(taskContext.target), targets: (taskContext.targets || []).map(slimCustomer),
