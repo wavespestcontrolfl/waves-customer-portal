@@ -19,6 +19,8 @@ process.env.SENDGRID_WEBHOOK_PUBLIC_KEY = sgKeys.publicKey.export({ type: 'spki'
 
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),
+  // The real classifier: which HTTP statuses are a definite rejection (round 14).
+  isDefiniteRejection: jest.requireActual('../services/sendgrid-mail').isDefiniteRejection,
   sendOne: jest.fn(async () => ({ messageId: 'retry-message-1' })),
   newsletterGroupId: () => 101,
   serviceGroupId: () => 202,
@@ -1453,6 +1455,164 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(status).toBe(200);
     expect((await ledger(ctx.customerId))[0].status).toBe('resending');
     expect(await eventLedger('ev-gateoff-arg')).toEqual([]);
+  });
+
+  // ── Ambiguous outcomes of the bound retry send stay settleable by the delivery webhook (round 14 P1) ────────────────────────
+  // The request left (the provider boundary passed) and then failed: SendGrid may hold the message.
+  const afterRequestLeft = (err) => sendgrid.sendOne.mockImplementationOnce(async (args) => {
+    await args.providerBoundaryCheck?.({});
+    throw err;
+  });
+  const httpError = (status) => Object.assign(new Error(`SendGrid ${status}: x`), { status });
+  const timeoutError = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+  const retrySteps = () => sendgrid.sendOne.mock.calls.filter(([a]) => a.to === OTHER && a.subject === 'Step 1');
+  const expectClaimOpen = async () => {
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending' });
+    expect((await enrollmentRow(ctx.enrollment.id)).status).not.toBe('cancelled');
+    expect((await enrollmentRow(ctx.enrollment.id)).status).not.toBe('failed');
+  };
+
+  test.each([
+    ['a lost response (timeout after the request left)', timeoutError],
+    ['a 5xx answer', () => httpError(503)],
+    ['a 408 answer', () => httpError(408)],
+    ['a network error', () => Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })],
+  ])('ambiguous: %s keeps the claim open, cancels nothing, sends nothing again; the signed delivery then commits once', async (name, makeErr) => {
+    await queuedRetry();
+    afterRequestLeft(makeErr());
+    const res = await runner.sendStep(ctx.enrollment.id);
+    expect(res).not.toMatchObject({ error: expect.anything() });
+    await expectClaimOpen();
+    const row = await retryRow();
+    expect(row).toMatchObject({ status: 'sent', sendgrid_message_id: null });
+    expect((await ledger(ctx.customerId))[0].retry_send_id).toBe(row.id);
+    // The enrollment moved past the step: the next tick does not repeat it.
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ next_send_at: new Date(Date.now() - 1000) });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(retrySteps()).toHaveLength(1);
+    // SendGrid did accept it after all: the delivery names the send by its custom arg only.
+    expect(await post([argEvent(row.id, 'ev-amb-1', { sg_message_id: 'amb-1.f' })])).toBe(200);
+    await expectCommittedOnce('ev-amb-1');
+    expect(await db('automation_step_sends').where({ id: row.id }).first()).toMatchObject({ sendgrid_message_id: 'amb-1', status: 'delivered' });
+    expect(retrySteps()).toHaveLength(1);
+  });
+
+  test('ambiguous, then the BOUNCE of the retry address arrives: the claim fails through the custom arg, no card', async () => {
+    await queuedRetry();
+    afterRequestLeft(timeoutError());
+    await runner.sendStep(ctx.enrollment.id);
+    const row = await retryRow();
+    expect(await post([{
+      event: 'bounce', type: 'bounce', email: OTHER, reason: '550 5.1.1', sg_event_id: 'ev-amb-2', sg_message_id: 'amb-2.f', [SEND_ID_ARG]: row.id,
+    }])).toBe(200);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+  });
+
+  test.each([['400', 400], ['401', 401], ['403', 403], ['404', 404], ['413', 413], ['422', 422], ['429', 429]])(
+    'definite rejection (%s) after the request left: the claim fails as before (send_failed) and the enrollment stops',
+    async (name, status) => {
+      await queuedRetry();
+      afterRequestLeft(httpError(status));
+      const res = await runner.sendStep(ctx.enrollment.id);
+      expect(res).toMatchObject({ sent: false });
+      expect(await retryRow()).toMatchObject({ status: 'failed' });
+      expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'send_failed' });
+      expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'failed' });
+    },
+  );
+
+  test('a request that never left (a provider boundary failure) is a definite non-send: the claim fails as before', async () => {
+    await queuedRetry();
+    sendgrid.sendOne.mockImplementationOnce(async () => { throw new Error('boundary lookup down'); }); // never reached the boundary
+    expect(await runner.sendStep(ctx.enrollment.id)).toMatchObject({ sent: false });
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'send_failed' });
+  });
+
+  test('post-acceptance DB failure at the message-id save: the claim stays open, the row is marked sent, nothing is sent again; the delivery commits once', async () => {
+    await queuedRetry();
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      await args.providerBoundaryCheck?.({});
+      return { messageId: 'acc-1' };
+    });
+    const undo = await failStatementWhen('automation_step_sends', 'UPDATE', "NEW.sendgrid_message_id = 'acc-1' AND NEW.status = 'sent'");
+    let res;
+    try {
+      res = await runner.sendStep(ctx.enrollment.id);
+    } finally {
+      await undo();
+    }
+    expect(res).not.toMatchObject({ error: expect.anything() });
+    await expectClaimOpen();
+    const row = await retryRow();
+    expect(row).toMatchObject({ status: 'sent', sendgrid_message_id: null });
+    expect(retrySteps()).toHaveLength(1);
+    expect(await post([argEvent(row.id, 'ev-acc-1', { sg_message_id: 'acc-1.f' })])).toBe(200);
+    await expectCommittedOnce('ev-acc-1');
+    expect(await db('automation_step_sends').where({ id: row.id }).first()).toMatchObject({ sendgrid_message_id: 'acc-1', status: 'delivered' });
+    expect(retrySteps()).toHaveLength(1);
+  });
+
+  test('post-acceptance DB failure that also stops the row and the enrollment writes: the next tick only moves the cursor, never sends again', async () => {
+    await queuedRetry();
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      await args.providerBoundaryCheck?.({});
+      return { messageId: 'acc-2' };
+    });
+    const undoRow = await failStatementWhen('automation_step_sends', 'UPDATE', "NEW.status = 'sent'");
+    await db.raw("CREATE OR REPLACE FUNCTION test_fail_enroll() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected enrollment failure'; END $$");
+    await db.raw(`CREATE TRIGGER test_fail_enroll BEFORE UPDATE ON automation_enrollments FOR EACH ROW WHEN (OLD.id = '${ctx.enrollment.id}' AND NEW.current_step <> OLD.current_step) EXECUTE FUNCTION test_fail_enroll()`);
+    try {
+      await runner.sendStep(ctx.enrollment.id);
+    } finally {
+      await undoRow();
+      await db.raw('DROP TRIGGER IF EXISTS test_fail_enroll ON automation_enrollments');
+    }
+    const row = await retryRow();
+    expect(row.status).toBe('dispatching'); // handed off, outcome unrecorded
+    await expectClaimOpen();
+    const cursorBefore = (await enrollmentRow(ctx.enrollment.id)).current_step;
+    await runner.sendStep(ctx.enrollment.id); // the next tick
+    expect(retrySteps()).toHaveLength(1); // the retry step was NOT dispatched again
+    expect((await enrollmentRow(ctx.enrollment.id)).current_step).toBeGreaterThan(cursorBefore);
+    await expectClaimOpen();
+    expect(await post([argEvent(row.id, 'ev-acc-2', { sg_message_id: 'acc-2.f' })])).toBe(200);
+    await expectCommittedOnce('ev-acc-2');
+  });
+
+  test('a send sendOne RETURNED (accepted) is never a failure, whatever failed after it', async () => {
+    await queuedRetry();
+    sendgrid.sendOne.mockImplementationOnce(async () => ({ messageId: 'acc-3' })); // returned without passing through the boundary hook
+    const undo = await failStatementWhen('automation_step_sends', 'UPDATE', "NEW.sendgrid_message_id = 'acc-3'");
+    try {
+      await runner.sendStep(ctx.enrollment.id);
+    } finally {
+      await undo();
+    }
+    await expectClaimOpen();
+    expect(await retryRow()).toMatchObject({ status: 'sent' });
+  });
+
+  test('ambiguous and then no event for 72 h: the claim is stale -- it no longer owns a bounce and fails as stale', async () => {
+    await queuedRetry();
+    afterRequestLeft(timeoutError());
+    await runner.sendStep(ctx.enrollment.id);
+    await expectClaimOpen();
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await ageClaim(ctx.customerId, 80);
+    const stray = await strayAutomationSend(sibling.enrollment.id, sibling.steps[0].id, 'amb-stale-1', BOUNCED);
+    await webhook.handleEvent(bounce(stray, BOUNCED));
+    await flush();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'stale' });
+  });
+
+  test('the classifier is the codebase\'s: sendgrid.isDefiniteRejection decides, and only for the bound retry send', async () => {
+    // Any other automation send keeps today\'s handling: a timeout still fails the row and the enrollment.
+    ctx = await setup({ sent: 1, call: false, customerEmail: 'jondoe-plain@example.com', email: 'jondoe-plain@example.com' });
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ next_send_at: new Date(Date.now() - 1000) });
+    afterRequestLeft(timeoutError());
+    expect(await runner.sendStep(ctx.enrollment.id)).toMatchObject({ sent: false });
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'failed' });
   });
 
   test('gate off: the same ledger-insert failure on a delivery of the bound retry send keeps today\'s 200', async () => {

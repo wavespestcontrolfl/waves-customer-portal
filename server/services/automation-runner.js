@@ -215,8 +215,9 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null }) {
   if (testRecipient) return null;
+  if (handedOffStep) return completeHandedOffRetry(enrollment, handedOffStep);
   if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
   const retryVerdict = await retryStopVerdict(enrollment, recipient);
   if (retryVerdict) {
@@ -976,6 +977,9 @@ async function insertStepSend({ enrollment, step, recipient, testRecipient }) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
   if (testRecipient || !enrollmentMetadata(enrollment).spelling_retry_email) return queued(db);
+  // The step's retry send was already handed to the provider and its outcome never recorded: it is NOT dispatched again.
+  const handedOff = await require('./call-email-spelling-retry').handedOffRetrySend({ enrollment, step });
+  if (handedOff) return Object.assign(handedOff, { retryHandedOff: true });
   return db.transaction(async (trx) => {
     const row = await queued(trx);
     const bind = await require('./call-email-spelling-retry').bindAutomationRetrySend({ enrollment, step, sendId: row.id, recipient }, trx);
@@ -991,7 +995,63 @@ async function insertStepSend({ enrollment, step, recipient, testRecipient }) {
 const retrySendCustomArgs = (sendRow) => (sendRow.retryBound
   ? { customArgs: { [require('./call-email-spelling-retry').SEND_ID_ARG]: sendRow.id } } : {});
 // A bound retry send's delivery / bounce event can land before the post-send save: its status is then kept, never rewound to 'sent'.
-const sentStatusFor = (sendRow) => (sendRow.retryBound ? db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END") : 'sent');
+const sentStatusFor = (sendRow) => (sendRow.retryBound
+  ? db.raw("CASE WHEN status IN ('queued', 'dispatching') THEN 'sent' ELSE status END") : 'sent');
+
+// ── The bound retry send's outcome can be ambiguous (round 14 P1) ───────────────────────────────────────────────────────────
+// The classifier is the codebase's own (transactional-email-provider-retry.js): a send is DEFINITELY not delivered only when the
+// request never left (no handoff started: the pre-send checks failed or the provider boundary stopped it, SendGrid not configured)
+// or SendGrid answered with a definite rejection (sendgrid.isDefiniteRejection: 400 401 403 404 405 413 415 422 429). Everything
+// else is ambiguous, because SendGrid may hold the message despite the lost response: a timeout or network error once the request
+// left, any other status (5xx, 408), and any failure AFTER sendOne returned (the provider accepted it; our save failed).
+const markHandoffStarted = (handoff, check) => async (...args) => {
+  const result = await check(...args);
+  handoff.started = true; // the provider boundary passed: the request goes out next
+  return result;
+};
+function retryOutcomeAmbiguous(handoff, err) {
+  if (handoff.accepted) return true;
+  if (!handoff.started) return false;
+  const neverSent = err?.annualOfferWithheld || err?.annualOfferGuardFailed || err?.providerBoundaryBlocked
+    || err?.code === 'SENDGRID_NOT_CONFIGURED';
+  return !neverSent && !sendgrid.isDefiniteRejection(err);
+}
+// Written before the bound retry send's request, so a crash or a failed save after the provider took it still leaves the mark
+// that it was handed off (handedOffRetrySend). Only the bound send; the deferral paths delete the row and nothing was sent.
+async function markRetryDispatching(sendRow) {
+  if (!sendRow.retryBound) return;
+  await db('automation_step_sends').where({ id: sendRow.id, status: 'queued' }).update({ status: 'dispatching', updated_at: new Date() });
+}
+// The step counts as sent: move the cursor past it exactly as a recorded send does.
+async function completeHandedOffRetry(enrollment, step) {
+  const steps = await enabledSequenceSteps(enrollment.template_key);
+  await stampPrepSentForSequence(enrollment, step, steps);
+  return advanceEnrollment(enrollment, steps, step);
+}
+// An ambiguous outcome is NOT a failed send. The claim stays `resending` and nothing is cancelled or sent again: the row is marked
+// sent (with the message id when the provider returned it), the enrollment moves past the step, and the signed delivery event
+// settles the claim through the row's custom arg (delivered: commit; bounced: failed). When no event ever comes, the claim's 72 h
+// window (CLAIM_STALE_MS) ends it. Each write is best effort: a failure here leaves the row `dispatching`, and the next tick finds
+// it (handedOffRetrySend) and only moves the cursor.
+async function settleAmbiguousRetrySend({ enrollment, step, sendRow, err, handoff }) {
+  logger.warn(`[automation-runner] retry send ${sendRow.id} outcome unknown (${handoff.accepted ? 'accepted, save failed' : (err.status || err.name || 'no status')}); left for the delivery webhook`);
+  const messageId = handoff.accepted?.messageId || null;
+  const writes = [...(messageId ? [{ sendgrid_message_id: messageId }, { sendgrid_message_id: messageId }] : []), {}];
+  for (const extra of writes) {
+    try {
+      await db('automation_step_sends').where({ id: sendRow.id }).update({ status: sentStatusFor(sendRow), sent_at: new Date(), updated_at: new Date(), ...extra });
+      break;
+    } catch (writeErr) {
+      logger.warn(`[automation-runner] retry send ${sendRow.id} could not be marked sent: ${writeErr.message}`);
+    }
+  }
+  try {
+    return await completeHandedOffRetry(enrollment, step);
+  } catch (advanceErr) {
+    logger.warn(`[automation-runner] retry send ${sendRow.id} handed off but the enrollment was not advanced: ${advanceErr.message}`);
+    return { sent: true, ambiguous: true };
+  }
+}
 
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const enrollmentId = enrollment.id;
@@ -1055,9 +1115,11 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const sendRow = await insertStepSend({ enrollment, step, recipient, testRecipient });
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
-    sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound });
+    sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
+    handedOffStep: sendRow.retryHandedOff ? step : null });
   if (deliveryBlock) return deliveryBlock;
 
+  const handoff = { started: false, accepted: null };
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
     to: recipient,
     fromEmail,
@@ -1069,13 +1131,15 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
     asmGroupId,
     ...retrySendCustomArgs(sendRow),
-    ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
+    ...(providerBoundaryCheck ? { providerBoundaryCheck: sendRow.retryBound ? markHandoffStarted(handoff, providerBoundaryCheck) : providerBoundaryCheck } : {}),
   });
   try {
+    await markRetryDispatching(sendRow);
     const res = billingSend
       ? await sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
       : await dispatchUnderContactBoundary({ dispatch, enrollment, step, recipient, testRecipient, sendId: sendRow.id });
     if (res?.sent === false) return res;
+    handoff.accepted = res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({
       // A bound retry send's delivery / bounce event can land before this save: its status is then kept, never rewound to 'sent'.
@@ -1092,22 +1156,32 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
 
     return advanceEnrollment(enrollment, steps, step);
   } catch (err) {
-    logger.error(`[automation-runner] send failed enrollment=${enrollment.id} step=${step.step_order}: ${err.message}`);
-    await db('automation_step_sends').where({ id: sendRow.id }).update({
-      status: 'failed',
-      failure_reason: err.message.slice(0, 500),
-      updated_at: new Date(),
-    });
-    if (testRecipient) throw err;
-    await failBoundRetrySend(enrollment, sendRow);
-
-    // Mark enrollment failed so it stops retrying. Operator can re-enroll
-    // later. Fenced on the step this attempt was for.
-    await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
-      status: 'failed', next_send_at: null, updated_at: new Date(),
-    });
-    return { sent: false, error: err.message };
+    return settleFailedSend({ enrollment, step, sendRow, err, testRecipient, handoff });
   }
+}
+
+// What a thrown sendStepLocked dispatch leaves behind. Every send but the BOUND call-spelling retry: the row fails and the
+// enrollment stops, as ever. The bound retry send is classified first (retryOutcomeAmbiguous): a definite non-delivery fails as
+// before; an AMBIGUOUS outcome is not a failure (settleAmbiguousRetrySend).
+async function settleFailedSend({ enrollment, step, sendRow, err, testRecipient, handoff }) {
+  logger.error(`[automation-runner] send failed enrollment=${enrollment.id} step=${step.step_order}: ${err.message}`);
+  if (!testRecipient && sendRow.retryBound && retryOutcomeAmbiguous(handoff, err)) {
+    return settleAmbiguousRetrySend({ enrollment, step, sendRow, err, handoff });
+  }
+  await db('automation_step_sends').where({ id: sendRow.id }).update({
+    status: 'failed',
+    failure_reason: err.message.slice(0, 500),
+    updated_at: new Date(),
+  });
+  if (testRecipient) throw err;
+  await failBoundRetrySend(enrollment, sendRow);
+
+  // Mark enrollment failed so it stops retrying. Operator can re-enroll
+  // later. Fenced on the step this attempt was for.
+  await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
+    status: 'failed', next_send_at: null, updated_at: new Date(),
+  });
+  return { sent: false, error: err.message };
 }
 
 // Moves an enrolment past a step: the one it just delivered or skipped (the

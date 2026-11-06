@@ -250,6 +250,22 @@ async function adoptRetrySendMessageId(sendRow, messageId, client = db) {
   return reread && String(reread.sendgrid_message_id || '') === String(messageId) ? reread : null;
 }
 
+/**
+ * The retry send of this enrollment step that was already HANDED OFF to the provider but whose outcome the runner never recorded
+ * (a lost response, a failed save after SendGrid accepted it, a crash): its row is `dispatching` or `sent` and its claim is still
+ * `resending`. The runner must not dispatch that step again; it only moves the cursor past it and the delivery webhook settles the
+ * claim. Null when there is none. A query on the bound row, no write.
+ */
+async function handedOffRetrySend({ enrollment, step }, client = db) {
+  if (!gateLive() || !enrollment?.customer_id) return null;
+  const row = await client('automation_step_sends as s')
+    .join(`${TABLE} as c`, 'c.retry_send_id', 's.id')
+    .where({ 'c.customer_id': enrollment.customer_id, 'c.channel': CHANNEL, 'c.status': 'resending', 's.enrollment_id': enrollment.id, 's.step_id': step.id })
+    .whereIn('s.status', ['dispatching', 'sent'])
+    .first('s.*');
+  return row || null;
+}
+
 /** GATE_CALL_BOUNCE_OTHER_SPELLING, read at call time: the one gate recheck every retry boundary goes through. */
 function gateLive() {
   return callBounceOtherSpellingLive();
@@ -586,5 +602,5 @@ async function commitDeliveredRetry({ sendRow }, client) {
 
 module.exports = {
   onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, gateLive,
-  findRetrySendByCustomArg, adoptRetrySendMessageId, SEND_ID_ARG, retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+  findRetrySendByCustomArg, adoptRetrySendMessageId, handedOffRetrySend, SEND_ID_ARG, retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
 };
