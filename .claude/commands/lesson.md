@@ -60,6 +60,51 @@ conversation: what was done wrong, what the correction was.)
 - Check the destination first — if an existing rule already covers this,
   sharpen that rule instead of adding a duplicate.
 
+## Check it on live data
+
+A test guards the code you fixed. It does not find the NEXT mistake of the
+same kind in live data, so the owner has to catch it again. Ask:
+
+**Would a scheduled, read-only check on live data have found this without
+the owner?**
+
+A lesson is not done until a check like that exists, you added it in this
+change, or the lesson says `no check yet: <reason>`. Pick the home:
+
+1. **A portal check** — the default for a mistake in portal behavior. A job in
+   `server/services/`, registered in `server/services/scheduler.js` inside
+   `runExclusive`, that raises one admin bell row per problem and closes the
+   row when the problem is gone. Add it in the SAME PR as the fix, dark
+   behind a `GATE_*` (the PR template's Kill switch line). Use the existing
+   self-closing helpers; do not hand-roll a close:
+   - A bell for the owner: `raiseAdminAlert` (`admin-alert-compose.js`) to
+     raise it, `closeAdminAlertKeys` and `openAdminAlertKeys`
+     (`admin-alert-episodes.js`) to close it. `caller-callback-bell.js` is
+     the model.
+   - An engineering finding: `deliverOpsDigest` (`ops-digest.js`) with
+     `fallOff: true`, which stamps the row's `opsKey`, and `retireIfClean`
+     (`ops-digest-fall-off.js`) on the clean run. `seo/owned-url-health.js`
+     is the model. Its email fallback goes to an internal address only.
+   Do not add a raw `notifyAdmin(` call; a ratchet test counts them.
+2. **The nightly call self-audit** (`call-self-audit.js`) — for a mistake in
+   how a call is read or handled. It re-reads calls with a paid model, so
+   widening what it samples or compares is new spend: stop and ask the owner,
+   with the cost per day and per month.
+3. **Text drafts** — a Mac job outside this repo (`max-sms-judge`) grades them
+   nightly. For a text mistake, note that in the lesson. Do not edit that job.
+4. **A check on the owner's MacBook Air** (`~/waves-ops/ops-crons/checks/`,
+   host adams-air). Each edit there needs the owner's OK. Write the proposed
+   check text in the lesson, say it is a proposal, and never edit the Air.
+
+Rules for any new check:
+- Read-only. It never writes a business record.
+- One bell row per problem, and the row closes itself when the problem is gone.
+- No paid API call. If the check needs one, stop and ask the owner first.
+- Never a customer text, email or call.
+
+If no home fits, write `no check yet: <reason>` in the lesson. Name the check,
+or that line, in the PR's Encoded lesson section.
+
 ## Ship it with the fix
 
 When committing is authorized, commit the rule on the SAME branch/PR as the fix for the mistake, so the
