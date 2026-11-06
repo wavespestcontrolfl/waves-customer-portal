@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boxFits, insertDictatedText, isEligibleBox } from "./dictationInsert";
+import { boxFits, insertDictatedText, isEligibleBox, readSelection } from "./dictationInsert";
 
 // FocusedBoxMic (GATE_DICTATION_EVERY_BOX): which boxes get the shared mic, and
 // how dictated words land in a box the mic does not own.
@@ -64,6 +64,25 @@ describe("insertDictatedText", () => {
     const el = box("<textarea>Gate is red now</textarea>");
     insertDictatedText(el, "blue", { start: 8, end: 11 });
     expect(el.value).toBe("Gate is blue now");
+  });
+
+  it("does not trust saved offsets after the box was edited while the words came back", () => {
+    const el = box("<textarea>Gate is red now</textarea>");
+    el.setSelectionRange(8, 11);
+    const saved = readSelection(el);
+    el.value = "Totally new text";
+    el.blur();
+    insertDictatedText(el, "blue", saved);
+    expect(el.value).toBe("Totally new text blue");
+    // Still focused: the words go where the caret is now.
+    const live = box("<textarea>Gate is red now</textarea>");
+    live.setSelectionRange(8, 11);
+    const savedLive = readSelection(live);
+    live.value = "Edited text";
+    live.focus();
+    live.setSelectionRange(6, 6);
+    insertDictatedText(live, "blue", savedLive);
+    expect(live.value).toBe("Edited blue text");
   });
 
   it("tells a controlled React textarea: the native setter plus a bubbling input event", () => {

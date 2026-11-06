@@ -24,11 +24,18 @@ export function boxFits(rect) {
   return Boolean(rect) && rect.width >= 120 && rect.height >= MIN_BOX_HEIGHT;
 }
 
-/** The box's selection now, or the end of its text when the browser will not say. */
+/** The box's selection now (and the text it was measured in), or the end of its text when the browser will not say. */
 export function readSelection(el) {
   const end = el.value.length;
   const start = Number.isInteger(el.selectionStart) ? el.selectionStart : end;
-  return { start, end: Number.isInteger(el.selectionEnd) ? el.selectionEnd : start };
+  return { start, end: Number.isInteger(el.selectionEnd) ? el.selectionEnd : start, value: el.value };
+}
+
+// The saved offsets mean something only in the text they were taken in. If the box was edited while
+// the words were coming back, use the caret it has now (when it has focus) or the end, never stale offsets.
+function currentSelection(el, selection) {
+  if (!selection || selection.value === undefined || selection.value === el.value) return selection;
+  return document.activeElement === el ? readSelection(el) : { start: el.value.length, end: el.value.length };
 }
 
 // How many characters the box still takes (maxLength), or Infinity.
@@ -56,7 +63,7 @@ function nativeSet(el, value) {
 }
 
 /**
- * Puts dictated `text` into `el` at the saved selection. One space goes before
+ * Puts dictated `text` into `el` at the saved selection (`readSelection` at the tap). One space goes before
  * the words when the character before the caret is not whitespace and the caret
  * is not at the start. The browser's own insert runs first, so the box's
  * undo history and React's onChange both see an ordinary typed edit; if the
@@ -70,7 +77,7 @@ export function insertDictatedText(el, text, selection) {
   const words = String(text || "").trim();
   if (!words) return { ok: true };
   const before = el.value;
-  const { start, end } = clampSelection(before, selection);
+  const { start, end } = clampSelection(before, currentSelection(el, selection));
   const lead = start > 0 && !/\s/.test(before[start - 1]) ? " " : "";
   if (roomFor(el, end - start) <= 0) return { ok: false, reason: "full" };
   let payload = lead + words;
