@@ -26,6 +26,11 @@ function ideaSendLive() {
   try { return require('../config/feature-gates').ibSendToClaudeLive?.() === true; } catch { return false; }
 }
 
+// GATE_IB_ANSWER_SEND_TO_CLAUDE (it needs GATE_IB_SEND_TO_CLAUDE too), read at call time; a missing or throwing reader reads as off.
+function answerSendLive() {
+  try { return require('../config/feature-gates').ibAnswerSendToClaudeLive?.() === true; } catch { return false; }
+}
+
 // The cleaned idea: { idea } or { error }. Required, 4,000 characters at most (code points).
 function cleanIdea(raw) {
   if (raw === undefined || raw === null || raw === '') return { error: 'idea_required' };
@@ -134,4 +139,4 @@ async function cancelClaudeIdea(id, { at, by, role, technicianId = null } = {}) 
   return { status: 200, body: { cancelled: true } };
 }
 
-module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, ideaSendLive, ideaDedupeKey, cleanRecords, routeOrNull };
+module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, ideaSendLive, answerSendLive, ideaDedupeKey, cleanRecords, routeOrNull };
