@@ -162,6 +162,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// switch_visit_to_annual_prepay: its card lines come from its own preview (prepay-switch-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('switch_visit_to_annual_prepay');
 // schedule_sms: its card lines come from its own preview (schedule-sms-tools.js cardLines): the exact text, who and when.
 CURATED_PREVIEW_TOOL_NAMES.add('schedule_sms');
 // The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
@@ -252,6 +254,7 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  switch_visit_to_annual_prepay: 'Switch a customer to annual prepay (unpaid prepay invoice; sends nothing)',
   schedule_sms: 'Schedule a text to a customer',
   edit_invoice: 'Edit an invoice’s title, notes or due date (sends nothing)',
   archive_invoice: 'Archive a voided invoice (sends nothing)',
@@ -947,6 +950,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // switch_visit_to_annual_prepay: the customer, the year's price, the invoice it voids, what pays it and that nothing is sent.
+  if (toolName === 'switch_visit_to_annual_prepay' && preview?.preview === true) {
+    for (const line of require('./prepay-switch-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // The invoice edit cards: the invoice, each change before -> after, what it does and that nothing is sent.
   if (['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(toolName) && preview?.preview === true) {
