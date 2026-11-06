@@ -144,6 +144,8 @@ const RERING = [
     decision: 'expire, capped: the nightly top-up meets the cancelled first visit again and raises one fresh row' },
   { emitter: 'sms-draft-canary', files: ['services/sms-draft-canary.js'], prefixes: ['sms-draft-canary:'], kind: 'periodic',
     decision: 'expire, capped: a canary that still fails raises one fresh row (and the owner text it sends)' },
+  { emitter: 'booking-funnel-canary', files: ['services/booking-funnel-canary.js'], prefixes: ['booking-funnel-canary:'], kind: 'periodic',
+    decision: 'expire, capped: a funnel that is still dead raises one fresh row (and the owner text it sends)' },
   { emitter: 'promise-overdue', files: ['services/sms-operational-actions.js', 'services/email-operational-actions.js'], prefixes: ['sms-commitment-source:', 'sms-commitment:', 'email-commitment:'], kind: 'periodic', live: 'promiseOpen',
     decision: 'skip while a promise it covers is still open; expire once none is' },
   { emitter: 'truck-kit', files: ['services/truck-kit.js'], prefixes: ['truck-kit:'], kind: 'event',

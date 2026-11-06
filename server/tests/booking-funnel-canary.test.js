@@ -1,8 +1,9 @@
 /**
  * Booking-funnel conversion canary: fires when real /book funnel entries see
  * zero conversions across a window (the July slot_sig outage signature),
- * stays quiet while a known outage persists (< 24h), sends a recovery notice
- * when conversions reappear, and no-ops entirely while the gate is unset.
+ * raises one keyed open-only bell (state is the row, so a restart re-rings
+ * nothing), texts the owner only for a fresh row, closes the row on recovery,
+ * rethrows read errors, and no-ops entirely while the gate is unset.
  */
 
 jest.mock('../services/logger', () => ({
@@ -32,8 +33,13 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
 }));
 
-jest.mock('../services/notification-service', () => ({
-  notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
+jest.mock('../services/admin-alert-compose', () => ({
+  raiseAdminAlert: jest.fn(async () => ({ id: 'notif-1' })),
+}));
+
+jest.mock('../services/admin-alert-episodes', () => ({
+  openAdminAlertKeys: jest.fn(async () => []),
+  closeAdminAlertKeys: jest.fn(async () => 1),
 }));
 
 jest.mock('../services/twilio', () => ({
@@ -42,9 +48,10 @@ jest.mock('../services/twilio', () => ({
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
-const NotificationService = require('../services/notification-service');
+const { raiseAdminAlert } = require('../services/admin-alert-compose');
+const episodes = require('../services/admin-alert-episodes');
 const TwilioService = require('../services/twilio');
-const { runBookingFunnelCanary, _test } = require('../services/booking-funnel-canary');
+const { runBookingFunnelCanary } = require('../services/booking-funnel-canary');
 
 // One run issues 4 counts in order: fast attempts, fast conversions,
 // slow attempts, slow conversions.
@@ -53,13 +60,16 @@ function queueCounts(fastAttempts, fastConversions, slowAttempts, slowConversion
     { n: String(slowAttempts) }, { n: String(slowConversions) });
 }
 
+// The standing open row for a key, as the episodes edge reports it.
+const openRows = (...keys) => episodes.openAdminAlertKeys.mockImplementation(async (_conn, key) => (keys.includes(key) ? [key] : []));
+
 beforeEach(() => {
   db.mockClear();
   db._queue.length = 0;
-  NotificationService.notifyAdmin.mockClear();
+  raiseAdminAlert.mockReset().mockResolvedValue({ id: 'notif-1' });
+  episodes.openAdminAlertKeys.mockReset().mockResolvedValue([]);
+  episodes.closeAdminAlertKeys.mockReset().mockResolvedValue(1);
   TwilioService.sendSMS.mockClear();
-  _test.state.alerting = null;
-  _test.state.lastAlertAt = 0;
   isEnabled.mockReturnValue(true);
   process.env.ADAM_PHONE = '+19415550001';
 });
@@ -70,14 +80,14 @@ test('no-ops while the gate is off (standard feature-gate registry)', async () =
   expect(result).toEqual({ skipped: true });
   expect(isEnabled).toHaveBeenCalledWith('bookingFunnelCanary');
   expect(db).not.toHaveBeenCalled();
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(raiseAdminAlert).not.toHaveBeenCalled();
 });
 
 test('stays quiet when the funnel is converting', async () => {
   queueCounts(6, 2, 9, 3);
   const result = await runBookingFunnelCanary();
   expect(result.firing).toBeNull();
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(raiseAdminAlert).not.toHaveBeenCalled();
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
@@ -85,57 +95,95 @@ test('stays quiet at low volume even with zero conversions', async () => {
   queueCounts(2, 0, 2, 0);
   const result = await runBookingFunnelCanary();
   expect(result.firing).toBeNull();
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(raiseAdminAlert).not.toHaveBeenCalled();
 });
 
-test('fires bell + owner SMS on attempts with zero conversions, then stays quiet while the outage persists', async () => {
+test('fires one keyed bell + owner SMS on attempts with zero conversions', async () => {
   queueCounts(6, 0, 8, 0);
   const first = await runBookingFunnelCanary();
   expect(first.firing).toBe('fast');
-  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-  expect(NotificationService.notifyAdmin.mock.calls[0][1]).toMatch(/booking funnel/i);
+  expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
+  expect(category).toBe('system');
+  expect(spec).toMatchObject({ area: 'System', severity: 'needs-you', link: '/admin/schedule' });
+  expect(opts).toMatchObject({ dedupeKey: 'booking-funnel-canary:fast', dedupeOpenOnly: true });
+  expect(opts.detail).toMatch(/ZERO bookings/);
+  // The real composer accepts the spec (headline, why, link, subject, done-when).
+  expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec)).not.toThrow();
   expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
   expect(TwilioService.sendSMS.mock.calls[0][2]).toMatchObject({
     messageType: 'internal_alert',
     allowOwnerSms: true,
   });
+});
 
+test('a restart or a persisting outage (the standing row dedupes) rings and texts nothing new', async () => {
+  raiseAdminAlert.mockResolvedValue({ id: 'notif-1', deduped: true });
   queueCounts(7, 0, 9, 0);
-  const second = await runBookingFunnelCanary();
-  expect(second.firing).toBe('fast');
-  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  const result = await runBookingFunnelCanary();
+  expect(result.firing).toBe('fast');
+  expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+});
+
+test('a suppressed raise (bell policy) is not a fresh episode', async () => {
+  raiseAdminAlert.mockResolvedValue({ id: null, suppressed: true });
+  queueCounts(7, 0, 9, 0);
+  await runBookingFunnelCanary();
+  expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+});
+
+test('a failed bell write still texts the owner (nothing was stored)', async () => {
+  raiseAdminAlert.mockRejectedValue(new Error('db down'));
+  queueCounts(6, 0, 8, 0);
+  await runBookingFunnelCanary();
   expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
 });
 
-test('slow rule catches low-traffic outages over 7 days', async () => {
+test('slow rule catches low-traffic outages over 7 days, under its own key', async () => {
   queueCounts(3, 0, 4, 0);
   const result = await runBookingFunnelCanary();
   expect(result.firing).toBe('slow');
-  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(raiseAdminAlert.mock.calls[0][2]).toMatchObject({ dedupeKey: 'booking-funnel-canary:slow' });
 });
 
-test('sends a recovery notice when conversions reappear after an alert', async () => {
-  queueCounts(6, 0, 8, 0);
+test('the other rule\'s standing row is closed when this rule takes over', async () => {
+  openRows('booking-funnel-canary:fast');
+  queueCounts(3, 0, 4, 0);
   await runBookingFunnelCanary();
-  expect(_test.state.alerting).toBe('fast');
+  expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(db, ['booking-funnel-canary:fast'], 'conversions_back', expect.any(Object));
+});
 
+test('closes the row and texts a recovery line when conversions reappear after an alert', async () => {
+  openRows('booking-funnel-canary:fast');
   queueCounts(5, 2, 8, 2);
   const result = await runBookingFunnelCanary();
   expect(result.firing).toBeNull();
-  expect(_test.state.alerting).toBeNull();
-  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
-  expect(NotificationService.notifyAdmin.mock.calls[1][1]).toMatch(/recovered/i);
+  expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(
+    db, ['booking-funnel-canary:fast'], 'conversions_back',
+    expect.objectContaining({ resolution: expect.stringMatching(/Recovered/) }),
+  );
+  expect(raiseAdminAlert).not.toHaveBeenCalled();
+  expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+  expect(TwilioService.sendSMS.mock.calls[0][1]).toMatch(/recovered/i);
 });
 
 test('clears quietly when the rule stops firing without conversions', async () => {
-  queueCounts(6, 0, 8, 0);
-  await runBookingFunnelCanary();
-  expect(_test.state.alerting).toBe('fast');
-
-  // Attempts fell below both thresholds and still no conversions — do not
-  // claim recovery, just drop the alert state.
+  openRows('booking-funnel-canary:fast');
+  // Attempts fell below both thresholds and still no conversions: do not
+  // claim recovery, just close the row.
   queueCounts(1, 0, 2, 0);
   await runBookingFunnelCanary();
-  expect(_test.state.alerting).toBeNull();
-  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(
+    db, ['booking-funnel-canary:fast'], 'conversions_back',
+    expect.objectContaining({ resolution: expect.stringMatching(/Cleared/) }),
+  );
+  expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+});
+
+test('a read error is logged and rethrown so job_health records the run', async () => {
+  db.schema.hasTable.mockRejectedValueOnce(new Error('connection lost'));
+  await expect(runBookingFunnelCanary()).rejects.toThrow('connection lost');
+  expect(raiseAdminAlert).not.toHaveBeenCalled();
+  expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });

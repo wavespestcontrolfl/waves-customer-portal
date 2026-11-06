@@ -27,7 +27,6 @@
   "services/appointment-reminders.js": 6,
   "services/autopay-setup-link.js": 1,
   "services/billing-email-no-replay.js": 1,
-  "services/booking-funnel-canary.js": 1,
   "services/call-booking-catalog.js": 1,
   "services/call-commitments-watchdog.js": 2,
   "services/call-ingest-watchdog.js": 2,

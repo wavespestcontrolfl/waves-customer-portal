@@ -8,6 +8,9 @@
 //   - escalated alert (count > last_push) → UPDATE state, notify admins
 //   - same alert, same/lower count        → UPDATE last_seen_at only (no notify)
 //   - cleared alert (in state, not now)   → DELETE state row (alert resolved silently)
+//   - alert whose read FAILED this tick   → keep its state row untouched. A
+//     timed-out read is "unknown", not "cleared"; deleting the row made the
+//     alert look new on the next tick and fire its push again.
 //
 // Restart-safe: state lives in Postgres, so a server restart doesn't
 // cause re-pushes for already-known alerts.
@@ -79,11 +82,14 @@ async function runDashboardAlertsCheckInner() {
   // potentially slow (other-DB queries, external lookups). Inside-
   // transaction time should be the minimum needed to hold the lock.
   let current;
+  let failedIds = new Set();
   try {
     // fresh: this tick persists new/escalated alert rows keyed on count, so it
     // must see the current state, not the read-path's 30s memo.
     const result = await computeDashboardAlerts({ fresh: true });
     current = result.alerts || [];
+    // A generator that emits several alert ids lists them in alertIds.
+    failedIds = new Set((result.failures || []).flatMap((f) => f.alertIds || [f.id]));
   } catch (err) {
     logger.error(`[dashboard-alerts-cron] computeDashboardAlerts failed: ${err.message}`);
     return { fired: 0, cleared: 0, error: err.message };
@@ -160,9 +166,10 @@ async function runDashboardAlertsCheckInner() {
 
       // Garbage-collect cleared alerts. Dismissals for a resolved
       // alert are harmless to keep around (they'll never match
-      // again unless the same alert id re-fires).
+      // again unless the same alert id re-fires). An id whose read failed
+      // this tick was not evaluated, so it is not cleared: keep its row.
       for (const stateRow of stateRows) {
-        if (!currentIds.has(stateRow.alert_id)) {
+        if (!currentIds.has(stateRow.alert_id) && !failedIds.has(stateRow.alert_id)) {
           await trx('dashboard_alert_state').where({ alert_id: stateRow.alert_id }).del();
           cleared += 1;
         }
@@ -203,7 +210,7 @@ async function runDashboardAlertsCheckInner() {
 
   }
 
-  return { fired, cleared, current: current.length };
+  return { fired, cleared, current: current.length, ...(failedIds.size ? { failedIds: [...failedIds] } : {}) };
 }
 
 // COUNT_ESCALATION_COOLDOWN_MS is shared with the live bell overlay
