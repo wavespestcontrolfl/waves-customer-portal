@@ -51,7 +51,8 @@ function notificationIssueLimit(value) {
 // that share one. Without that field (a row from elsewhere) the ISO string of
 // the Date is the fallback.
 // GATE_ALERT_BELL_ORDER: the bell's cursor is "<rank>~<timestamp>~<id>" (rank 0, 1 or 2, see BELL_RANK_SQL in
-// services/notification-service.js). parseCursor reads both shapes; a two-part cursor has no `rank`.
+// services/notification-service.js). parseCursor reads both shapes; a two-part cursor has no `rank`. The list route
+// continues only a cursor of the current order; the other shape restarts at page 1 (`restart: true`).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // ISO-8601 or Postgres timestamptz text: date, 'T' or space, time, optional
 // fraction (up to microseconds), and a zone (never a naive time: it would be
@@ -117,9 +118,12 @@ router.get('/', async (req, res, next) => {
     const ranked = bellOrderOn();
     const parsed = parseCursor(req.query.before);
     if (req.query.before && !parsed) return res.status(400).json({ error: 'Invalid cursor' });
-    // Gate off: a ranked cursor (a panel open when the gate was unset) is read by its timestamp and id alone.
-    const before = parsed && !ranked ? { at: parsed.at, id: parsed.id } : parsed;
-    const offset = before ? 0 : (page - 1) * limit;
+    // A cursor only continues the order it was made in. A three-part (ranked) cursor while the gate is off, or a
+    // two-part (chronological) cursor while it is on, belongs to the other order: continuing from it would skip rows
+    // the panel never got. Serve page 1 of the current order instead and say `restart: true`; the bell replaces its list.
+    const restart = Boolean(parsed) && (ranked !== (parsed.rank !== undefined));
+    const before = parsed && !restart ? parsed : null;
+    const offset = before || restart ? 0 : (page - 1) * limit;
     // fullAccess: an owner-only row (a Claude plan or copy) is listed for the owner login alone.
     const fullAccess = ibFullAccess(req);
     const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess, ...(ranked ? { ranked } : {}) });
@@ -151,11 +155,13 @@ router.get('/', async (req, res, next) => {
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
       // admin role while GATE_ALERT_EXPLAINER is on. `sendToClaude` marks a row the "Send to Claude" button may move,
       // for the admin role while GATE_ALERT_SEND_TO_CLAUDE is on (no explainer needed).
-      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
-      page, limit, hasMore: persisted.length > limit,
+      notifications: [...((page === 1 || restart) && !before ? liveCtx.live : []), ...rows],
+      page: restart ? 1 : page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? (ranked ? formatRankedCursor(lastServed) : formatCursor(lastServed)) : null,
       // The list is ranked (needs-you first, then newest first inside a rank): the bell keeps this order as served.
       ...(ranked ? { order: 'needs-you-first' } : {}),
+      // The cursor sent belonged to the other order: this is page 1 of the current one and replaces the panel's list.
+      ...(restart ? { restart: true } : {}),
     });
   } catch (err) { next(err); }
 });

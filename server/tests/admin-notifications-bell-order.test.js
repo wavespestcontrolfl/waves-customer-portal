@@ -98,11 +98,24 @@ describe('gate off', () => {
     expect(body.next.split('~')).toHaveLength(2);
   });
 
-  test('a three-part cursor is read by its timestamp and id alone, with no rank passed on', async () => {
+  test('a three-part (ranked) cursor belongs to the other order: page 1 of the chronological list, restart: true, no cursor passed on', async () => {
+    NotificationService.getAdminNotifications.mockResolvedValue(rows(3, () => ({ bell_rank: undefined })));
+    const body = await list({ before: `2~${AT}~${ID}`, page: '4', limit: '2' });
+    const [limit, offset, options] = NotificationService.getAdminNotifications.mock.calls[0];
+    expect([limit, offset]).toEqual([3, 0]);
+    expect(options.before).toBeNull();
+    expect(options).not.toHaveProperty('ranked');
+    expect(body.restart).toBe(true);
+    expect(body.page).toBe(1);
+    expect(body).not.toHaveProperty('order');
+    expect(body.next.split('~')).toHaveLength(2);
+  });
+
+  test('a two-part cursor with the gate off continues as before, with no restart', async () => {
     NotificationService.getAdminNotifications.mockResolvedValue([]);
-    await list({ before: `2~${AT}~${ID}` });
+    const body = await list({ before: `${AT}~${ID}` });
     expect(NotificationService.getAdminNotifications.mock.calls[0][2].before).toEqual({ at: AT, id: ID });
-    expect(NotificationService.getAdminNotifications.mock.calls[0][2]).not.toHaveProperty('ranked');
+    expect(body).not.toHaveProperty('restart');
   });
 
   test('anything but exactly "true" reads as off', async () => {
@@ -160,14 +173,25 @@ describe('gate on', () => {
     expect(body.notifications.map((n) => n.areaChip)).toEqual(AREAS);
   });
 
-  test('a three-part cursor reaches the service with its rank; a two-part cursor reaches it with none', async () => {
+  test('a three-part cursor reaches the service with its rank and no restart', async () => {
     NotificationService.getAdminNotifications.mockResolvedValue([]);
-    await list({ before: `1~${AT}~${ID}` });
-    await list({ before: `${AT}~${ID}` });
+    const body = await list({ before: `1~${AT}~${ID}` });
     expect(NotificationService.getAdminNotifications.mock.calls[0][2].before).toEqual({ at: AT, id: ID, rank: 1 });
-    expect(NotificationService.getAdminNotifications.mock.calls[1][2].before).toEqual({ at: AT, id: ID });
-    // a cursor continues from offset 0
     expect(NotificationService.getAdminNotifications.mock.calls[0][1]).toBe(0);
+    expect(body).not.toHaveProperty('restart');
+  });
+
+  test('a two-part (chronological) cursor belongs to the other order: page 1 of the ranked list, restart: true, no cursor passed on', async () => {
+    NotificationService.getAdminNotifications.mockResolvedValue(rows(3, (i) => ({ bell_rank: i === 2 ? 1 : 0 })));
+    const body = await list({ before: `${AT}~${ID}`, page: '3', limit: '2' });
+    const [limit, offset, options] = NotificationService.getAdminNotifications.mock.calls[0];
+    expect([limit, offset]).toEqual([3, 0]);
+    expect(options.before).toBeNull();
+    expect(options.ranked).toBe(true);
+    expect(body.restart).toBe(true);
+    expect(body.order).toBe('needs-you-first');
+    expect(body.page).toBe(1);
+    expect(body.next.split('~')).toHaveLength(3);
   });
 
   test('offset paging without a cursor keeps the offset and the ranked option', async () => {

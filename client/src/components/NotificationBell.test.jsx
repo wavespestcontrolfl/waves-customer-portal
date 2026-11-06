@@ -2184,6 +2184,40 @@ describe('NotificationBell admin — ranked list with an Area chip', () => {
     expect(screen.getAllByTestId('area-chip').map((c) => c.textContent)).toEqual(['Leads', 'Billing']);
   });
 
+  it.each([
+    ['ranked list, gate then off', true, false],
+    ['chronological list, gate then on', false, true],
+  ])('load more answering restart: true replaces the list and switches the layout (%s)', async (_label, startRanked, endRanked) => {
+    const chrono = [row('c1', 'Plain alert today', 0), row('c2', 'Old needs-you alert', 20, { areaChip: 'Billing' })];
+    const ranked = [row('k1', 'Ranked needs-you alert', 20, { areaChip: 'Comms' }), row('k2', 'Ranked plain alert', 0)];
+    const first = startRanked ? ranked : chrono;
+    const restarted = endRanked ? ranked : chrono;
+    const calls = [];
+    global.fetch = vi.fn(async (url, options) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 2 });
+      if (options?.method === 'PUT') return jsonResponse({ success: true });
+      calls.push(u);
+      if (u.includes('before=')) {
+        return jsonResponse({ notifications: restarted, hasMore: false, next: null, restart: true, page: 1, ...(endRanked ? { order: 'needs-you-first' } : {}) });
+      }
+      return jsonResponse({ notifications: first, hasMore: true, next: 'old-cursor', ...(startRanked ? { order: 'needs-you-first' } : {}) });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(calls.some((u) => u.includes('before=old-cursor'))).toBe(true));
+    await screen.findByText(restarted[0].title);
+    // replaced, not appended: only the served rows, each once
+    expect(titlesOnScreen()).toEqual(restarted.map((r) => r.title));
+    expect(screen.queryByText(first[0].title === restarted[0].title ? '__none__' : first[0].title)).toBeNull();
+    // layout follows the answer's order: day headings only for a chronological list
+    if (endRanked) for (const band of ['Today', 'Older']) expect(screen.queryByText(band)).toBeNull();
+    else { expect(screen.getByText('Today')).toBeInTheDocument(); expect(screen.getByText('Older')).toBeInTheDocument(); }
+    // the old cursor is gone and there is nothing more to load
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+  });
+
   it('gate off (no order field): day bands as before, and no chip when the server sends none', async () => {
     const plain = [row('p1', 'Plain alert today', 0), row('p2', 'Last month alert', 40)];
     serve({ ranked: false, pages: [plain] });

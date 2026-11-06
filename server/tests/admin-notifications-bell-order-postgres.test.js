@@ -2,8 +2,9 @@
  * GATE_ALERT_BELL_ORDER (owner 2026-11-05, admin-bell plan D1) against live Postgres, through the real service query and
  * the real GET /api/admin/notifications handler. Proves the SQL side: needs-you rows first, then rows with no severity
  * label, then the rest, newest first inside a rank; paging by the three-part cursor never skips or repeats a row (rows
- * that share a millisecond, and rows that share a timestamp exactly, included); offset paging gives the same order; an
- * old two-part cursor skips nothing; the gate off keeps the old order and the old cursor; a technician list is ordered the
+ * that share a millisecond, and rows that share a timestamp exactly, included); offset paging gives the same order; a
+ * cursor of the other order (the gate flipped under an open panel, either way) restarts at page 1 with restart: true and the
+ * panel's walk then covers every open row once; the gate off keeps the old order and the old cursor; a technician list is ordered the
  * same way. It reads the whole open admin feed, so it asserts on its own rows only (each carries metadata.beoRun).
  * It refuses any database but a private QA one or CI's.
  */
@@ -212,28 +213,6 @@ maybeDescribe('admin bell order (live Postgres)', () => {
       }
     });
 
-    test('an old two-part cursor skips no row (read as rank 0)', async () => {
-      process.env.GATE_ALERT_BELL_ORDER = 'true';
-      const timeRows = timeOrder(rows);
-      // A panel that paged by time before the flip: it holds the 6 newest rows by time and a two-part cursor after them.
-      const heldIds = timeRows.slice(0, 6);
-      const last = rows.find((r) => r.id === heldIds[5]);
-      const legacy = `${last.at}~${last.id}`;
-      const got = [];
-      let before = legacy;
-      while (before) {
-        const body = await list({ limit: '4', before });
-        got.push(...own(body.notifications).map((n) => n.id));
-        before = body.next;
-      }
-      // Nothing repeats inside the continued walk, and held + continued cover every row.
-      expect(new Set(got).size).toBe(got.length);
-      expect(new Set([...heldIds, ...got])).toEqual(new Set(rows.map((r) => r.id)));
-      // The older rank-0 rows come first, in newest-first order.
-      const firstKeys = got.slice(0, 2).map((id) => rows.find((r) => r.id === id).severity);
-      expect(firstKeys.every((s) => s === 'needs-you')).toBe(true);
-    });
-
     test('a technician list is ordered the same way', async () => {
       const tech = [];
       const trigger = 'appointment_reschedule_intent';
@@ -272,13 +251,82 @@ maybeDescribe('admin bell order (live Postgres)', () => {
       expect(seen.filter((id) => rows.some((r) => r.id === id))).toEqual(timeOrder(rows));
     });
 
-    test('a three-part cursor from a panel opened while the gate was on still pages by time', async () => {
+  });
+
+  // The bell as the panel behaves: a load-more answer with restart: true REPLACES the held list, anything else appends.
+  async function panelWalk({ startGate, pagesBeforeFlip, limit }) {
+    let held = [];
+    let next = null;
+    let restarts = 0;
+    const flip = () => { if (startGate) delete process.env.GATE_ALERT_BELL_ORDER; else process.env.GATE_ALERT_BELL_ORDER = 'true'; };
+    if (startGate) process.env.GATE_ALERT_BELL_ORDER = 'true'; else delete process.env.GATE_ALERT_BELL_ORDER;
+    let body = await list({ limit: String(limit) });
+    held = [...body.notifications];
+    next = body.next;
+    for (let i = 1; i < pagesBeforeFlip && next; i += 1) {
+      body = await list({ limit: String(limit), before: next });
+      held.push(...body.notifications);
+      next = body.next;
+    }
+    const heldBeforeFlip = [...held];
+    flip();
+    const flippedFrom = next;
+    for (let i = 0; i < 500 && next; i += 1) {
+      body = await list({ limit: String(limit), before: next });
+      if (body.restart === true) { held = [...body.notifications]; restarts += 1; } else held.push(...body.notifications);
+      next = body.next;
+    }
+    return { held, heldBeforeFlip, restarts, flippedFrom };
+  }
+  const coverage = (held) => {
+    const fixture = new Set(rows.map((r) => r.id));
+    const ids = own(held).map((n) => n.id).filter((id) => fixture.has(id));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set(ids)).toEqual(new Set(rows.map((r) => r.id)));
+    return ids;
+  };
+
+  describe('the gate flips while a panel is part way through its list', () => {
+    afterEach(() => { delete process.env.GATE_ALERT_BELL_ORDER; });
+
+    test.each([[2, 3], [1, 4], [3, 2]])('ranked list, gate unset after %i page(s) of %i rows: the old cursor restarts and every open row is covered, none skipped or repeated', async (pages, limit) => {
+      const { held, restarts, heldBeforeFlip } = await panelWalk({ startGate: true, pagesBeforeFlip: pages, limit });
+      expect(own(heldBeforeFlip).length).toBeLessThan(rows.length);
+      expect(restarts).toBe(1);
+      expect(coverage(held)).toEqual(timeOrder(rows));
+    });
+
+    test.each([[2, 3], [1, 4], [3, 2]])('chronological list, gate set after %i page(s) of %i rows: the old cursor restarts and every open row is covered, none skipped or repeated', async (pages, limit) => {
+      const { held, restarts, heldBeforeFlip } = await panelWalk({ startGate: false, pagesBeforeFlip: pages, limit });
+      expect(own(heldBeforeFlip).length).toBeLessThan(rows.length);
+      expect(restarts).toBe(1);
+      expect(coverage(held)).toEqual(expectedOrder(rows));
+    });
+
+    test('the restart answer is page 1 of the current order, flagged, with the order named', async () => {
       process.env.GATE_ALERT_BELL_ORDER = 'true';
       const ranked = await list({ limit: '3' });
       delete process.env.GATE_ALERT_BELL_ORDER;
-      const body = await list({ limit: '3', before: ranked.next });
-      expect(body).not.toHaveProperty('order');
-      expect(Array.isArray(body.notifications)).toBe(true);
+      const off = await list({ limit: '3', before: ranked.next });
+      expect(off.restart).toBe(true);
+      expect(off).not.toHaveProperty('order');
+      expect(off.page).toBe(1);
+      expect(off.notifications.map((n) => n.id)).toEqual((await list({ limit: '3' })).notifications.map((n) => n.id));
+      const chronoNext = off.next;
+      process.env.GATE_ALERT_BELL_ORDER = 'true';
+      const on = await list({ limit: '3', before: chronoNext });
+      expect(on.restart).toBe(true);
+      expect(on.order).toBe('needs-you-first');
+      expect(on.notifications.map((n) => n.id)).toEqual(ranked.notifications.map((n) => n.id));
+    });
+
+    test('a cursor of the current order never restarts', async () => {
+      process.env.GATE_ALERT_BELL_ORDER = 'true';
+      const first = await list({ limit: '3' });
+      expect(await list({ limit: '3', before: first.next })).not.toHaveProperty('restart');
+      delete process.env.GATE_ALERT_BELL_ORDER;
+      const chrono = await list({ limit: '3' });
+      expect(await list({ limit: '3', before: chrono.next })).not.toHaveProperty('restart');
     });
   });
 });

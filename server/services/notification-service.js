@@ -1028,9 +1028,8 @@ const NotificationService = {
   //
   // ranked (GATE_ALERT_BELL_ORDER, the route passes it): the feed order becomes BELL_RANK_SQL ASC, created_at DESC,
   // id DESC, and every row also selects its rank as bell_rank for the route's cursor. The cursor then carries
-  // `before.rank`: "strictly after" is a higher rank, or the same rank and an older (created_at, id). A cursor with
-  // no rank (one a panel got before the gate flipped) is read as rank 0, so no row is skipped; the client drops a
-  // row it already holds. Offset paging (no cursor) uses the same order.
+  // `before.rank`: "strictly after" is a higher rank, or the same rank and an older (created_at, id). The route only
+  // passes a cursor of the same order (a cursor of the other order restarts at page 1). Offset paging uses the same order.
   async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false, ranked = false } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
@@ -1038,7 +1037,7 @@ const NotificationService = {
     ));
     if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     if (before && ranked) {
-      const rank = before.rank ?? 0;
+      const { rank } = before;
       query.whereRaw(`(${BELL_RANK_SQL} > ? OR (${BELL_RANK_SQL} = ? AND (created_at, id) < (?::timestamptz, ?::uuid)))`,
         [rank, rank, before.at, before.id]);
     } else if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);

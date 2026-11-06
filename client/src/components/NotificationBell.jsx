@@ -570,7 +570,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   // between requests (Done, an auto-close), so paging never uses offsets.
   const [nextCursor, setNextCursor] = useState(null);
   // True while the server says the list is ranked (order: 'needs-you-first' on the first page): keep its order, no day groups.
-  // Load more appends in the server's order and never changes it.
+  // Load more appends in the server's order and never changes it, unless the server answers restart: true (see loadMore).
   const [serverRanked, setServerRanked] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -834,11 +834,20 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
       if (seq !== loadSeqRef.current) return;
       // New alerts can shift offset pages between requests. Keep each row
       // once while preserving the read state already confirmed in this panel.
-      setNotifications(current => {
-        const ids = new Set(current.map(n => n.id));
-        return [...current, ...(d.notifications || []).filter(n => !ids.has(n.id))];
-      });
-      setPage(page + 1);
+      if (d.restart === true) {
+        // GATE_ALERT_BELL_ORDER flipped under this panel: the cursor belonged to the other order, so the server served
+        // page 1 of the current one. Replace the list (an append would leave rows the panel never got) and take the
+        // layout from the answer.
+        setNotifications(d.notifications || []);
+        setServerRanked(d.order === 'needs-you-first');
+        setPage(1);
+      } else {
+        setNotifications(current => {
+          const ids = new Set(current.map(n => n.id));
+          return [...current, ...(d.notifications || []).filter(n => !ids.has(n.id))];
+        });
+        setPage(page + 1);
+      }
       setNextCursor(d.next || null);
       setHasMore(d.hasMore === true);
     } catch {

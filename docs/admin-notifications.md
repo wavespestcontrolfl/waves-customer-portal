@@ -487,8 +487,8 @@ Nothing here sends anything to a customer or makes a model call.
 The bell lists the alerts that need the owner first. Rank 0 is `metadata.severity` `needs-you`; rank 1 is a row with no
 severity label (an older alert stays above known FYI rows); rank 2 is any other severity. Inside a rank the order is newest
 first. Each row whose `metadata.area` is one of the nine Areas also shows one Area chip (`areaChip`). The list response says
-`order: 'needs-you-first'` and the bell keeps that order (no day groups). The paging cursor is `<rank>~<timestamp>~<id>`; an old
-two-part cursor reads as rank 0. The unread count and the Recently done list do not change. See `docs/gates-and-env.md`.
+`order: 'needs-you-first'` and the bell keeps that order (no day groups). The paging cursor is `<rank>~<timestamp>~<id>`. A cursor of
+the other order (the gate flipped under an open panel) restarts at page 1 with `restart: true`, and the bell replaces its list. The unread count and the Recently done list do not change. See `docs/gates-and-env.md`.
 
 ## 6. What is enforced today
 
