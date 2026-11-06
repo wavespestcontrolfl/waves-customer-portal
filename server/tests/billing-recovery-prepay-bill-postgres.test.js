@@ -3,9 +3,9 @@
 // its prepay bill is paid, so the Billing recovery list offered to bill a
 // visit that unpaid prepay bill already covered. Real-Postgres proof that the
 // list names that bill (admin-billing-recovery.js unpaidPrepayBillByVisit:
-// the term query, the canonical coverage rule coverageRowsForTerm, and the
-// Billed elsewhere step's refused statuses). Every fixture rolls back.
-// Synthetic names and numbers only.
+// the term query, the canonical rule termBoughtVisit on the window first
+// activation would give the term, and the Billed elsewhere step's refused
+// statuses). Every fixture rolls back. Synthetic names and numbers only.
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('node:crypto');
 
@@ -73,23 +73,22 @@ jest.setTimeout(30000);
   // A completed visit with no invoice, and a payment_pending annual term
   // whose prepay bill is out with the customer (the 11-06 shape: the term
   // links its visits only once that bill is paid).
-  async function fixture({ prepayStatus = 'sent' } = {}) {
-    const day = yesterday();
-    const prepayInvoiceId = await insertInvoice({ status: prepayStatus, due_date: day, total: 400, subtotal: 400 });
+  async function fixture({ prepayStatus = 'sent', termStart = yesterday(), visitDay = termStart } = {}) {
+    const prepayInvoiceId = await insertInvoice({ status: prepayStatus, due_date: termStart, total: 400, subtotal: 400 });
     const termId = randomUUID();
     await trx('annual_prepay_terms').insert({
       id: termId, customer_id: customerId, prepay_invoice_id: prepayInvoiceId, status: 'payment_pending',
-      term_start: day, term_end: addDays(day, 364), first_visit_date: day,
+      term_start: termStart, term_end: addDays(termStart, 364), first_visit_date: termStart,
       coverage_service_type: SERVICE, coverage_visit_count: 4, coverage_cadence: 'quarterly',
     });
     const visitId = randomUUID();
     await trx('scheduled_services').insert({
-      id: visitId, customer_id: customerId, scheduled_date: day, service_type: SERVICE, status: 'completed',
-      estimated_price: 117, completed_at: new Date(`${day}T17:00:00Z`),
+      id: visitId, customer_id: customerId, scheduled_date: visitDay, service_type: SERVICE, status: 'completed',
+      estimated_price: 117, completed_at: new Date(`${visitDay}T17:00:00Z`),
     });
     await trx('service_records').insert({
       id: randomUUID(), customer_id: customerId, scheduled_service_id: visitId,
-      service_date: day, service_type: SERVICE, status: 'completed',
+      service_date: visitDay, service_type: SERVICE, status: 'completed',
     });
     const prepayNumber = (await trx('invoices').where({ id: prepayInvoiceId }).first('invoice_number')).invoice_number;
     return { termId, visitId, prepayInvoiceId, prepayNumber };
@@ -117,6 +116,26 @@ jest.setTimeout(30000);
 
     await trx('invoices').where({ id: prepayInvoiceId }).update({ status: 'sent' });
     await trx('annual_prepay_terms').where({ id: termId }).update({ dispute_suspended_at: new Date() });
+    expect(await listed(visitId)).toMatchObject({ list: 'leaks', row: { prepay_invoice_number: null } });
+  });
+
+  test('a never-paid term names its bill only inside the window first activation would give it: a later term caps the slide', async () => {
+    // Minted 400 days ago and never paid: a payment today slides the window
+    // 400 days past its stored end (ensureCoverageRowsForTerm), so a visit
+    // done 10 days ago falls inside it and the bill covers that visit.
+    const today = etDateString();
+    const { visitId, prepayNumber } = await fixture({ termStart: addDays(today, -400), visitDay: addDays(today, -10) });
+    expect(await listed(visitId)).toMatchObject({ list: 'needs_review', row: { prepay_invoice_number: prepayNumber } });
+
+    // A later term for the customer starts 20 days ago. Activation stops the
+    // slide the day before it, whatever that term's state, so paying the old
+    // bill would not cover the visit: it names nothing. (This later term has
+    // no bill of its own, so it covers nothing and is never named itself.)
+    await trx('annual_prepay_terms').insert({
+      id: randomUUID(), customer_id: customerId, status: 'payment_pending',
+      term_start: addDays(today, -20), term_end: addDays(today, 344),
+      coverage_service_type: SERVICE, coverage_visit_count: 4, coverage_cadence: 'quarterly',
+    });
     expect(await listed(visitId)).toMatchObject({ list: 'leaks', row: { prepay_invoice_number: null } });
   });
 

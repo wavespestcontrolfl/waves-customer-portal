@@ -794,19 +794,19 @@ describe('admin billing-recovery routes', () => {
       return res.json();
     });
     const pairs = (list) => list.map((r) => [r.scheduled_service_id, r.prepay_invoice_number]);
-    let coverage;
-    afterEach(() => coverage?.mockRestore());
+    let bought;
+    afterEach(() => bought?.mockRestore());
 
-    test('names the bill that covers a visit and lists that visit for review, never as a one-click leak', async () => {
+    test('names the bill that bought a visit and lists that visit for review, never as a one-click leak', async () => {
       let termQuery;
       db.mockImplementation((arg) => {
         if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
         if (arg === 'annual_prepay_terms as t') { termQuery = makeQB({ rows: [neverPaid, relinked] }); return termQuery; }
         throw new Error(`unexpected table ${JSON.stringify(arg)}`);
       });
-      // ss-2 is past the term's sold count, so the term's own coverage leaves it out.
-      coverage = jest.spyOn(require('../services/annual-prepay-renewals'), 'coverageRowsForTerm')
-        .mockImplementation(async (term) => (term.id === 'term-1' ? [{ id: 'ss-1' }, { id: 'ss-later' }] : [{ id: 'ss-other' }]));
+      // ss-2 is past the term's sold count (or its window), so the term did not buy it.
+      bought = jest.spyOn(require('../services/annual-prepay-renewals'), 'termBoughtVisit')
+        .mockImplementation(async (term, visit) => term.id === 'term-1' && visit.id === 'ss-1');
 
       const body = await fetchLeaks();
 
@@ -818,9 +818,13 @@ describe('admin billing-recovery routes', () => {
       expect(termQuery.where).toHaveBeenCalledWith('t.status', 'payment_pending');
       expect(termQuery.whereNotIn).toHaveBeenCalledWith('inv.status', ['void', 'refunded', 'canceled', 'cancelled', 'draft']);
       expect(termQuery.whereNull).toHaveBeenCalledWith('t.dispute_suspended_at');
-      // a never-linked term counts on the window a payment today would give it; a linked one on its own
-      expect(coverage).toHaveBeenCalledWith(neverPaid, db, { projectFirstActivationOn: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) });
-      expect(coverage).toHaveBeenCalledWith(relinked, db, { projectFirstActivationOn: null });
+      // A never-linked term counts on the window first activation would give a payment today; a linked one on
+      // its own. Each term is asked only about its own customer's visits.
+      const day = expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/);
+      expect(bought).toHaveBeenCalledWith(neverPaid, { id: 'ss-1', customer_id: 'cust-1' }, db, { projectFirstActivationOn: day, activationWindow: true });
+      expect(bought).toHaveBeenCalledWith(neverPaid, { id: 'ss-2', customer_id: 'cust-1' }, db, { projectFirstActivationOn: day, activationWindow: true });
+      expect(bought).toHaveBeenCalledWith(relinked, { id: 'ss-3', customer_id: 'cust-2' }, db, {});
+      expect(bought).toHaveBeenCalledTimes(3);
     });
 
     test('a lookup that fails names no bill for those visits, and the list still loads', async () => {
@@ -830,10 +834,10 @@ describe('admin billing-recovery routes', () => {
         if (arg === 'annual_prepay_terms as t') return makeQB({ rows: [neverPaid, relinked] });
         throw new Error(`unexpected table ${JSON.stringify(arg)}`);
       });
-      coverage = jest.spyOn(require('../services/annual-prepay-renewals'), 'coverageRowsForTerm')
+      bought = jest.spyOn(require('../services/annual-prepay-renewals'), 'termBoughtVisit')
         .mockImplementation(async (term) => {
           if (term.id === 'term-1') throw new Error('coverage read failed');
-          return [{ id: 'ss-3' }];
+          return true;
         });
 
       const body = await fetchLeaks();
@@ -841,7 +845,7 @@ describe('admin billing-recovery routes', () => {
       // one term's coverage failed: its visits keep the plain wording; the other term still names its bill
       expect(pairs(body.leaks)).toEqual([['ss-1', null], ['ss-2', null]]);
       expect(pairs(body.needs_review)).toEqual([['ss-3', 'WPC-TEST-0647']]);
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('coverage of prepay term term-1 could not be read'));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('coverage of visit ss-1 by prepay term term-1 could not be read'));
 
       // the term read itself fails: no bill named anywhere
       db.mockImplementation((arg) => {

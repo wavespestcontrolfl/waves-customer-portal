@@ -2718,6 +2718,55 @@ describe('annual prepay renewal helpers', () => {
     expect(inserts[3].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-09-30' }));
   });
 
+  test('a late payment never slides the window into a later term: it stops the day before (firstActivationTermEnd)', async () => {
+    const logger = require('../services/logger');
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    const inserts = [
+      query({ returning: [{ id: 'svc-c1', scheduled_date: '2026-12-30' }] }),
+      query({ returning: [{ id: 'svc-c2', scheduled_date: '2027-03-30' }] }),
+      query({ returning: [{ id: 'svc-c3', scheduled_date: '2027-06-30' }] }),
+      query({ returning: [{ id: 'svc-c4', scheduled_date: '2027-09-30' }] }),
+    ];
+    const termColsQuery = query({ columnInfo: { term_end: {}, first_visit_date: {} } });
+    // The customer already bought the next year, starting 2027-10-15: inside the 2027-12-30 slide.
+    const successorQuery = query({ first: { term_start: '2027-10-15' } });
+    const termSlideUpdate = query({});
+    setDbQueues({
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined }), query({ rows: [] }), ...inserts],
+      annual_prepay_terms: [termColsQuery, successorQuery, termSlideUpdate, query({})],
+    });
+
+    const term = {
+      id: 'term-c',
+      customer_id: 'customer-c',
+      term_start: '2026-07-30',
+      term_end: '2027-07-30',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+      coverage_cadence: 'quarterly',
+    };
+    await expect(_private.ensureCoverageRowsForTerm(term, undefined, { today: '2026-12-30' }))
+      .resolves.toMatchObject({ createdCount: 4, targetDates: ['2026-12-30', '2027-03-30', '2027-06-30', '2027-09-30'] });
+
+    expect(successorQuery.whereNot).toHaveBeenCalledWith({ id: 'term-c' });
+    expect(successorQuery.where).toHaveBeenCalledWith('term_start', '>', '2027-07-30');
+    expect(termSlideUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ term_end: '2027-10-14' }));
+    expect(term.term_end).toBe('2027-10-14');
+    expect(logger.warn).toHaveBeenCalledWith('[annual-prepay] term term-c window slide capped at 2027-10-14 — successor term starts 2027-10-15');
+  });
+
   test('refreshing an already-activated term never slides the window again (idempotent)', async () => {
     const columnQuery = query({
       columnInfo: {

@@ -203,17 +203,19 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
 // own and lists here, and Bill would charge that visit a second time. The terms
 // are the schedule re-price guard's unpaid picks (admin-schedule.js
 // lockAndLoadHeldPrepayTerms: payment_pending, not dispute-suspended), kept to a
-// prepay invoice the Billed elsewhere step accepts (not a draft, not dead). The
-// visits are each term's own coverage (coverageRowsForTerm, on the window a
-// payment today would give a never-activated term), so a visit past the sold
-// count names no bill. A lookup that fails names nothing for those visits
-// (logged): they keep their plain wording. Read-only. Returns a Map of visit
-// id -> invoice number.
+// prepay invoice the Billed elsewhere step accepts (not a draft, not dead). A
+// visit is named only when its term bought it (annual-prepay-renewals.js
+// termBoughtVisit: the sold coverage first activation will stamp, minus a
+// payer-billed visit and one the stamp-time price check would hold). A
+// never-activated term counts on the window first activation would give a
+// payment today, capped the day before a later term (`activationWindow`), so
+// a visit past the sold count or past that window names no bill. A lookup that
+// fails names nothing for those visits (logged): they keep their plain
+// wording. Read-only. Returns a Map of visit id -> invoice number.
 async function unpaidPrepayBillByVisit(rows) {
   const byVisit = new Map();
   const customerIds = [...new Set(rows.map((r) => r.customer_id).filter(Boolean).map(String))];
   if (!customerIds.length) return byVisit;
-  const listed = new Set(rows.map((r) => String(r.scheduled_service_id)));
   let terms;
   try {
     const query = db('annual_prepay_terms as t')
@@ -231,19 +233,19 @@ async function unpaidPrepayBillByVisit(rows) {
     logger.warn(`[billing-recovery] unpaid prepay bills could not be read: ${err.message}`);
     return byVisit;
   }
-  const { coverageRowsForTerm } = require('../services/annual-prepay-renewals');
+  const { termBoughtVisit } = require('../services/annual-prepay-renewals');
   const today = etDateString();
   for (const term of terms) {
-    let covered;
-    try {
-      covered = await coverageRowsForTerm(term, db, { projectFirstActivationOn: term.has_linked_visit ? null : today });
-    } catch (err) {
-      logger.warn(`[billing-recovery] coverage of prepay term ${term.id} could not be read: ${err.message}`);
-      continue;
-    }
-    for (const row of covered) {
-      const id = String(row.id);
-      if (listed.has(id) && !byVisit.has(id)) byVisit.set(id, term.prepay_invoice_number);
+    const projection = term.has_linked_visit ? {} : { projectFirstActivationOn: today, activationWindow: true };
+    for (const row of rows) {
+      const id = String(row.scheduled_service_id);
+      if (byVisit.has(id) || String(row.customer_id) !== String(term.customer_id)) continue;
+      try {
+        const visit = { id: row.scheduled_service_id, customer_id: row.customer_id };
+        if (await termBoughtVisit(term, visit, db, projection)) byVisit.set(id, term.prepay_invoice_number);
+      } catch (err) {
+        logger.warn(`[billing-recovery] coverage of visit ${id} by prepay term ${term.id} could not be read: ${err.message}`);
+      }
     }
   }
   return byVisit;
