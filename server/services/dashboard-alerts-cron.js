@@ -88,7 +88,8 @@ async function runDashboardAlertsCheckInner() {
     // must see the current state, not the read-path's 30s memo.
     const result = await computeDashboardAlerts({ fresh: true });
     current = result.alerts || [];
-    failedIds = new Set((result.failures || []).map((f) => f.id));
+    // A generator that emits several alert ids lists them in alertIds.
+    failedIds = new Set((result.failures || []).flatMap((f) => f.alertIds || [f.id]));
   } catch (err) {
     logger.error(`[dashboard-alerts-cron] computeDashboardAlerts failed: ${err.message}`);
     return { fired: 0, cleared: 0, error: err.message };

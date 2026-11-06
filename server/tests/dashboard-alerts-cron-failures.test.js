@@ -5,6 +5,9 @@
  * the run reports failedIds, and the scheduler body throws after the state
  * write so job_health records the failure.
  */
+const fs = require('fs');
+const path = require('path');
+
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => undefined) }));
@@ -70,6 +73,20 @@ describe('failed alert reads', () => {
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
+  test('a grouped read that failed keeps the state row of every alert id it emits', async () => {
+    db.__state.rows = [row('admin_waveguard_inventory_forecast'), row('admin_lawn_pricing_invariant_sweep'), row('ar_overdue_60')];
+    computeDashboardAlerts.mockResolvedValue({
+      alerts: [],
+      failures: [{ id: 'persisted_admin_alerts', alertIds: ['admin_waveguard_inventory_forecast', 'admin_lawn_pricing_invariant_sweep'] }],
+    });
+
+    const result = await runDashboardAlertsCheck();
+
+    expect(db.__state.deleted).toEqual(['ar_overdue_60']);
+    expect(result.failedIds).toEqual(['admin_waveguard_inventory_forecast', 'admin_lawn_pricing_invariant_sweep']);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
   test('a clean tick reports no failedIds', async () => {
     computeDashboardAlerts.mockResolvedValue({ alerts: [], failures: [] });
     const result = await runDashboardAlertsCheck();
@@ -85,5 +102,21 @@ describe('failed alert reads', () => {
     expect(result.fired).toBe(1);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     expect(logger.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('every alert id the dashboard emits has a failure entry', () => {
+  // A generator whose failure names a different id (or none) loses its alerts'
+  // state rows on a failed read, and the next clean tick pushes them as new.
+  test('each emitted alert id is a failure id or listed in a failure\'s alertIds', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'dashboard-alerts.js'), 'utf8');
+    const emitted = new Set([...src.matchAll(/^\s+id: '([a-z0-9_]+)'/gm)].map((m) => m[1]));
+    const covered = new Set();
+    for (const m of src.matchAll(/failures\.push\(\{ id: '([a-z0-9_]+)'(?:, alertIds: \[([^\]]*)\])? \}\)/g)) {
+      covered.add(m[1]);
+      for (const a of (m[2] || '').matchAll(/'([a-z0-9_]+)'/g)) covered.add(a[1]);
+    }
+    expect(emitted.size).toBeGreaterThan(10);
+    expect([...emitted].filter((id) => !covered.has(id)).sort()).toEqual([]);
   });
 });
