@@ -6,9 +6,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import SlotPicker from './SlotPicker';
 import { setGlassDefault } from '../../lib/estimate-glass-copy';
 
-vi.mock('../booking/WavesAIScheduleSearch', () => ({
-  default: () => null,
-}));
+// A bare trigger for the date search: it hands the picker's onSearch a query.
+vi.mock('../booking/WavesAIScheduleSearch', async () => {
+  const { createElement } = await import('react');
+  return {
+    default: ({ onSearch }) => createElement('button', { type: 'button', onClick: () => onSearch('next week').catch(() => {}) }, 'run-date-search'),
+  };
+});
 
 function deferred() {
   let resolve;
@@ -345,7 +349,7 @@ describe('SlotPicker best times and the rain tier (GATE_CUSTOMER_RAIN_RANK)', ()
 
 describe('date availability failures', () => {
   it.each(['http', 'network'])('shows a retryable error instead of an empty day on %s failure', async (failure) => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [], expander: [] }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
     if (failure === 'http') fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
     else fetchMock.mockRejectedValueOnce(new Error('Connection lost'));
     fetchMock.mockResolvedValueOnce(jsonResponse({ primary: [slot('retried', '2099-06-11')], expander: [] }));
@@ -395,5 +399,238 @@ describe('SlotPicker (B18: an estimate parked for the office)', () => {
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }
+  });
+});
+
+// ── Look-ahead past the 14-day window ──────────────────────────────────────
+// A 4-service first visit needs one 240-minute block; the calendar can have
+// none for 14 days. The page used to dead-end ("No open slots…"), and so did
+// the date search and a picked date. Ids and dates here are synthetic (the
+// 2099 calendar matches 2026's weekdays).
+describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
+  const OPEN = (slotId, date, windowStart = '09:00') => slot(slotId, date, { windowStart, windowEnd: '13:00', routeOptimal: false });
+  const SLOT_NOV21 = OPEN('s-nov21', '2099-11-21');
+  const SLOT_NOV22 = OPEN('s-nov22', '2099-11-22', '11:00');
+  const SLOT_DEC06 = OPEN('s-dec06', '2099-12-06');
+  const SLOT_DEC13 = OPEN('s-dec13', '2099-12-13');
+  const SLOT_DEC20 = OPEN('s-dec20', '2099-12-20');
+  const EMPTY_14 = { primary: [], expander: [], nearby: false, metadata: { firstDayAvailability: null, windowDays: 14 } };
+  const NORMAL = { primary: [slot('s-now', '2099-06-01')], expander: [] };
+  const calls = (fetchMock, test) => fetchMock.mock.calls.filter(([url, init]) => test(String(url), init?.method || 'GET'));
+  const wideCalls = (fetchMock) => calls(fetchMock, (u, m) => m === 'GET' && u.includes('windowDays=90'));
+  const dateCalls = (fetchMock) => calls(fetchMock, (u, m) => m === 'GET' && u.includes('date='));
+  const postCalls = (fetchMock) => calls(fetchMock, (u, m) => m === 'POST' && u.includes('/find-slots'));
+
+  // Routes by request: the 14-day list, the 90-day read, ?date= reads, find-slots.
+  function stubFetch({ list = EMPTY_14, wide, byDate = {}, find } = {}) {
+    const fetchMock = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (init?.method === 'POST') return jsonResponse(find);
+      if (u.includes('windowDays=90')) {
+        if (wide instanceof Error) return { ok: false, status: 500 };
+        return jsonResponse(wide);
+      }
+      if (u.includes('windowDays=14')) return jsonResponse(list);
+      const date = new URLSearchParams(u.split('?')[1]).get('date');
+      return jsonResponse(byDate[date] || { primary: [], expander: [], metadata: { firstDayAvailability: null } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  const renderPicker = (props = {}) => render(
+    <SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} serviceMode="recurring" selectedFrequency="quarterly" {...props} />,
+  );
+  const pickChips = () => screen.getAllByRole('button', { name: /Pick/ }).map((b) => b.textContent);
+
+  it('an empty 14-day list reads the 90-day horizon once and shows the 3 earliest openings in date order', async () => {
+    // Route-optimal order, not date order: the earliest day is not first.
+    const fetchMock = stubFetch({
+      wide: {
+        primary: [SLOT_DEC06, SLOT_NOV22, SLOT_NOV21],
+        expander: [SLOT_DEC20, SLOT_DEC13],
+        metadata: { firstDayAvailability: { date: '2099-11-21', openCount: 1 } },
+      },
+    });
+    renderPicker();
+    expect(await screen.findByText('The next 2 weeks are full. Here are the first open times:')).toBeInTheDocument();
+    const chips = pickChips();
+    expect(chips).toHaveLength(3);
+    expect(chips[0]).toMatch(/Saturday, November 21 · 9:00 AM/);
+    expect(chips[1]).toMatch(/Sunday, November 22 · 11:00 AM/);
+    expect(chips[2]).toMatch(/Sunday, December 6 · 9:00 AM/);
+    expect(screen.queryByText(/No open slots in the next 14 days/)).not.toBeInTheDocument();
+    const wide = wideCalls(fetchMock);
+    expect(wide).toHaveLength(1);
+    expect(wide[0][0]).toContain('serviceMode=recurring');
+    expect(wide[0][0]).toContain('selectedFrequency=quarterly');
+    expect(dateCalls(fetchMock)).toHaveLength(0);
+    // The date search and the specific-date control stay under the list.
+    expect(screen.getByText(/pick one that works for you/i)).toBeInTheDocument();
+  });
+
+  it('says "Looking further ahead…" while the 90-day read runs', async () => {
+    const pending = deferred();
+    vi.stubGlobal('fetch', vi.fn((url) => (String(url).includes('windowDays=90') ? pending.promise : Promise.resolve(jsonResponse(EMPTY_14)))));
+    renderPicker();
+    expect(await screen.findByText('Looking further ahead…')).toBeInTheDocument();
+    await act(async () => { pending.resolve(jsonResponse({ primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } })); });
+    await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+    expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument();
+  });
+
+  it('adds the true first open day (one ?date= read) when the capped list misses it', async () => {
+    const fetchMock = stubFetch({
+      wide: {
+        primary: [SLOT_NOV22, SLOT_DEC06],
+        expander: [SLOT_DEC13],
+        metadata: { firstDayAvailability: { date: '2099-11-21', openCount: 1 } },
+      },
+      byDate: { '2099-11-21': { primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } } },
+    });
+    renderPicker();
+    await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+    const chips = pickChips();
+    expect(chips[0]).toMatch(/Saturday, November 21 · 9:00 AM/);
+    expect(chips[1]).toMatch(/November 22/);
+    expect(chips[2]).toMatch(/December 6/);
+    expect(dateCalls(fetchMock)).toHaveLength(1);
+    expect(dateCalls(fetchMock)[0][0]).toContain('date=2099-11-21');
+    expect(wideCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('picking a look-ahead slot goes through the same selection callbacks as a normal slot', async () => {
+    stubFetch({
+      wide: { primary: [SLOT_NOV21, SLOT_NOV22], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
+    });
+    const onSelect = vi.fn();
+    const onSelectMeta = vi.fn();
+    renderPicker({ onSelect, onSelectMeta });
+    await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+    fireEvent.click(screen.getAllByRole('button', { name: /Pick/ })[1]);
+    expect(onSelect).toHaveBeenLastCalledWith('s-nov22');
+    expect(onSelectMeta).toHaveBeenLastCalledWith(expect.objectContaining({ slotId: 's-nov22', date: '2099-11-22' }));
+    // The day's own time button picks the same way.
+    fireEvent.click(screen.getByRole('button', { name: /Choose 11:00 AM on Sunday, November 22/ }));
+    expect(onSelect).toHaveBeenLastCalledWith('s-nov22');
+  });
+
+  it('keeps a picked look-ahead slot selected (it is a visible slot, not dropped as unknown)', async () => {
+    setGlassDefault(true);
+    try {
+      stubFetch({
+        wide: { primary: [OPEN('s-far', '2099-11-21')], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
+      });
+      const onSelect = vi.fn();
+      renderPicker({ selectedSlotId: 's-far', onSelect });
+      await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+      expect(onSelect).not.toHaveBeenCalledWith(null);
+    } finally {
+      setGlassDefault(false);
+    }
+  });
+
+  it.each([
+    ['a 90-day answer with no slots', { wide: { primary: [], expander: [], metadata: { firstDayAvailability: null } } }],
+    ['a failed 90-day read', { wide: new Error('boom') }],
+  ])('keeps the old empty text for %s', async (_name, stub) => {
+    const fetchMock = stubFetch(stub);
+    renderPicker();
+    expect(await screen.findByText(/No open slots in the next 14 days/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Call (941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
+    expect(screen.queryByText(/The next 2 weeks are full/)).not.toBeInTheDocument();
+    expect(wideCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it.each([
+    ['a parked estimate', { primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true, reason: 'contact_review' }],
+    ['another review state', { primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true, reason: 'termite_trenching_review' }],
+    ['a commercial estimate', { primary: [], expander: [], availableSlots: [], summary: null, commercialManualScheduling: true }],
+    ['an invoice-only renewal', { primary: [], expander: [], availableSlots: [], summary: null, invoiceOnlyAcceptance: true }],
+  ])('does not look ahead for %s', async (_name, body) => {
+    const fetchMock = stubFetch({ list: body, wide: { primary: [SLOT_NOV21], expander: [] } });
+    renderPicker({ onContactReview: vi.fn() });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(wideCalls(fetchMock)).toHaveLength(0);
+    expect(screen.queryByText(/The next 2 weeks are full/)).not.toBeInTheDocument();
+  });
+
+  it('an empty date search shows the first later opening with one 90-day read and no second find-slots call', async () => {
+    const fetchMock = stubFetch({
+      list: NORMAL,
+      wide: { primary: [SLOT_NOV22, SLOT_NOV21], expander: [SLOT_DEC06], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
+      find: { summary: 'Nothing that week.', primary: [], expander: [], nearby: false, window: { date_from: '2099-11-17', date_to: '2099-11-19' } },
+    });
+    const onSelect = vi.fn();
+    renderPicker({ onSelect });
+    await screen.findByText('Monday, June 1');
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    expect(await screen.findByText('Nothing is open then. The first open time after that is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
+    expect(postCalls(fetchMock)).toHaveLength(1);
+    expect(wideCalls(fetchMock)).toHaveLength(1);
+    const button = screen.getByRole('button', { name: /Choose 9:00 AM on Saturday, November 21/ });
+    fireEvent.click(button);
+    expect(onSelect).toHaveBeenLastCalledWith('s-nov21');
+    // Searching again reuses the cached read.
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    await waitFor(() => expect(postCalls(fetchMock)).toHaveLength(2));
+    expect(wideCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('a date search that ends after every look-ahead slot falls back to the first one overall', async () => {
+    stubFetch({
+      list: NORMAL,
+      wide: { primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
+      find: { summary: 'x', primary: [], expander: [], window: { date_from: '2099-12-20', date_to: '2099-12-31' } },
+    });
+    renderPicker();
+    await screen.findByText('Monday, June 1');
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    expect(await screen.findByText('Nothing is open then. The first open time after that is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
+  });
+
+  it('an empty specific date shows the next opening after it as a slot button', async () => {
+    const fetchMock = stubFetch({
+      list: NORMAL,
+      wide: { primary: [OPEN('s-earlier', '2099-11-10'), SLOT_NOV21], expander: [SLOT_DEC06], metadata: { firstDayAvailability: { date: '2099-11-10' } } },
+    });
+    const onSelect = vi.fn();
+    renderPicker({ onSelect });
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: '2099-11-17' } });
+    expect(await screen.findByText('Nothing is open on Tue, Nov 17. The next open time is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
+    expect(wideCalls(fetchMock)).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: /Choose 9:00 AM on Saturday, November 21/ }));
+    expect(onSelect).toHaveBeenLastCalledWith('s-nov21');
+  });
+
+  it('keeps the old text for an empty specific date when nothing opens after it', async () => {
+    stubFetch({
+      list: NORMAL,
+      wide: { primary: [OPEN('s-earlier', '2099-11-10')], expander: [], metadata: { firstDayAvailability: { date: '2099-11-10' } } },
+    });
+    renderPicker();
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: '2099-11-17' } });
+    expect(await screen.findByText(/No open times then/)).toBeInTheDocument();
+  });
+
+  it('reads again for new params and ignores the answer for the old ones', async () => {
+    const oldRead = deferred();
+    const fetchMock = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('windowDays=90')) {
+        return u.includes('selectedFrequency=quarterly') ? oldRead.promise : Promise.resolve(jsonResponse({ primary: [SLOT_DEC06], expander: [], metadata: { firstDayAvailability: { date: '2099-12-06' } } }));
+      }
+      return Promise.resolve(jsonResponse(EMPTY_14));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { rerender } = renderPicker();
+    await screen.findByText('Looking further ahead…');
+    rerender(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} serviceMode="recurring" selectedFrequency="monthly" />);
+    await waitFor(() => expect(screen.getAllByText(/Sunday, December 6/).length).toBeGreaterThan(0));
+    await act(async () => { oldRead.resolve(jsonResponse({ primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } })); });
+    expect(screen.queryByText(/November 21/)).not.toBeInTheDocument();
+    expect(wideCalls(fetchMock)).toHaveLength(2);
   });
 });

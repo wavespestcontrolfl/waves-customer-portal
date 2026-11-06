@@ -25,6 +25,7 @@ import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/es
 import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
 import { W } from './tokens';
 import { GOLD_CTA } from '../../theme-brand';
+import { bodySlots, useSlotLookahead } from './slotLookahead';
 
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -145,6 +146,24 @@ export default function SlotPicker({
     onFirstSlotDate(firstOpen?.date || null);
   }, [data, onFirstSlotDate, glass, freshnessTick]);
 
+  // Past-14-days look-ahead: reads the 90-day horizon once when the answer on
+  // screen (list, date search or picked date) is a bookable one with no slots.
+  const view = useSlotLookahead({
+    apiBase: API_BASE,
+    token,
+    serviceMode,
+    selectedFrequency,
+    serviceCadences,
+    refreshSignal,
+    blocked: preview || loading || !!error,
+    data,
+    searchData,
+    pickedData,
+    pickedDate,
+    isStale: (slot) => glass && glassSlotIsStale(slot),
+    formatTime: (slot) => String(formatSlotDate(slot.date, slot.windowStart).window).split('–')[0],
+  });
+
   const selectSlot = (slot) => {
     onSelect(slot ? slot.slotId : null);
     if (onSelectMeta) onSelectMeta(slot ? glassSlotMeta(slot) : null);
@@ -155,6 +174,7 @@ export default function SlotPicker({
     ...(data ? [...(data.primary || []), ...(data.expander || [])] : []),
     ...(searchData ? [...(searchData.primary || []), ...(searchData.expander || [])] : []),
     ...(pickedData ? [...(pickedData.primary || []), ...(pickedData.expander || [])] : []),
+    ...view.all,
   ];
   const selectedSlot = selectedSlotId
     ? visibleSlots.find((s) => s.slotId === selectedSlotId) || null
@@ -177,7 +197,8 @@ export default function SlotPicker({
     // that intentionally preserves selectedSlotId), an empty list means
     // "unknown", not "gone" — clearing here would drop a valid selection and
     // hide the payment choices before the fetch repopulates the list.
-    if (loading || !data) return;
+    // The same holds while the look-ahead reads: the slot may be one of its.
+    if (loading || !data || view.loading) return;
     if (selectedSlot) {
       if (glassSlotIsStale(selectedSlot)) selectSlot(null);
       return;
@@ -186,7 +207,7 @@ export default function SlotPicker({
     // window is still bookable — reserve/accept revalidate server-side.
     if (!heldSelection || glassSlotIsStale(heldSelection)) selectSlot(null);
     // freshnessTick re-runs the check each minute while the page sits open.
-  }, [glass, selectedSlotId, selectedSlot, heldSelection, freshnessTick, loading, data]);
+  }, [glass, selectedSlotId, selectedSlot, heldSelection, freshnessTick, loading, data, view.loading]);
 
   useEffect(() => {
     if (preview) return undefined;
@@ -356,7 +377,7 @@ export default function SlotPicker({
   // window (same rule as before — the finder results owned the list).
   const activePayload = searchData || pickedData || null;
   const listSlots = (payload) => (payload ? [...(payload.primary || []), ...(payload.expander || [])] : []);
-  const shownSlots = (activePayload ? listSlots(activePayload) : listSlots(data))
+  const shownSlots = (view.slots || bodySlots(activePayload || data))
     .filter((slot) => !(glass && glassSlotIsStale(slot)));
   const availability = toAvailability(shownSlots);
   // The API lists are engine-ordered (soonest / route-optimal first) — the
@@ -364,8 +385,9 @@ export default function SlotPicker({
   // display_tier (GATE_CUSTOMER_RAIN_RANK): the server's rain tier for a slot
   // it moved behind drier ones; the strip sorts by it first, so its
   // nearby-first re-sort cannot lift a wet slot back up.
-  const rankedSlots = activePayload ? null : shownSlots.slice(0, 3).map((slot) => ({
-    slotId: slot.slotId, date: slot.date, start_time: slot.windowStart, display_tier: slot.display_tier,
+  // Look-ahead slots keep date order: the tier (the strip's first sort key) is their position.
+  const rankedSlots = activePayload ? null : shownSlots.slice(0, 3).map((slot, i) => ({
+    slotId: slot.slotId, date: slot.date, start_time: slot.windowStart, display_tier: view.ordered ? i : slot.display_tier,
   }));
   const pickerSelected = selectedSlot ? { ...selectedSlot, start_time: selectedSlot.windowStart } : null;
 
@@ -373,25 +395,30 @@ export default function SlotPicker({
     <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a>
   );
 
+  const emptyText = activePayload
+    ? <>No open times then. {callUs} and we&apos;ll fit you in.</>
+    : <>No open slots in the next 14 days — try searching a specific date below, or {callUs} and we&apos;ll fit you in.</>;
+
   const picker = (
-    <SchedulePicker
-      frame="inner"
-      availability={availability}
-      rankedSlots={rankedSlots}
-      selectedDate={pickedDay}
-      onSelectDay={(date) => { setPickedDay(date); selectSlot(null); }}
-      selectedSlot={pickerSelected}
-      onSelectSlot={(slot) => selectSlot(slot)}
-      intro="Tap a time — each shows the two-hour arrival window from its start."
-      slotDetail={(slot) => `Arrival window: ${formatSlotDate(slot.date, slot.windowStart).window}`}
-      empty={(
-        <div style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>
-          {activePayload
-            ? <>No open times then. {callUs} and we&apos;ll fit you in.</>
-            : <>No open slots in the next 14 days — try searching a specific date below, or {callUs} and we&apos;ll fit you in.</>}
-        </div>
-      )}
-    />
+    <>
+      {view.notice ? <div style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>{view.notice}</div> : null}
+      <SchedulePicker
+        frame="inner"
+        availability={availability}
+        rankedSlots={rankedSlots}
+        selectedDate={pickedDay}
+        onSelectDay={(date) => { setPickedDay(date); selectSlot(null); }}
+        selectedSlot={pickerSelected}
+        onSelectSlot={(slot) => selectSlot(slot)}
+        intro="Tap a time — each shows the two-hour arrival window from its start."
+        slotDetail={(slot) => `Arrival window: ${formatSlotDate(slot.date, slot.windowStart).window}`}
+        empty={(
+          <div style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>
+            {view.loading ? 'Looking further ahead…' : emptyText}
+          </div>
+        )}
+      />
+    </>
   );
 
   // Waves AI search sits above the picker; the 90-day date input below it
