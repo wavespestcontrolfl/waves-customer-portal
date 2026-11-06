@@ -1683,5 +1683,6 @@ module.exports = {
   parseMeta,
   judge,
   whereLiveBooking,
+  bookedVisitsByCustomer,
   CLASSES,
 };
