@@ -595,14 +595,19 @@ async function sweepOnSiteFollowUps({ limit = 25 } = {}) {
 // throws after the other ran, so job_health records the failure.
 async function runRecipientOptinSweeps() {
   const failedSteps = [];
+  const stepFailed = (step, err) => {
+    // Code only, as sweepReadFailed logs: a driver message can carry row values.
+    logger.error(`[recipient-optin] ${step} sweep failed (${err?.code || err?.name || 'error'})`);
+    failedSteps.push(step);
+  };
   try {
     await sweepUndispatchedOptins();
-  } catch { failedSteps.push('undispatched asks'); }
+  } catch (err) { stepFailed('undispatched asks', err); }
   // Caller demotion + booking-confirmation replays to on-site recipients that
   // were held or failed after their YES.
   try {
     await sweepOnSiteFollowUps();
-  } catch { failedSteps.push('on-site follow-ups'); }
+  } catch (err) { stepFailed('on-site follow-ups', err); }
   if (failedSteps.length > 0) {
     throw new Error(`recipient-optin-sweep: ${failedSteps.length} step(s) failed (${failedSteps.join(', ')})`);
   }
