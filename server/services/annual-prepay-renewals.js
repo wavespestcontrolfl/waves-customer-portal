@@ -10162,10 +10162,10 @@ function daysLeftToNoticeAnchor(term, anchorWindow, today) {
 }
 
 async function runGenericNoticeLadder(today, termiteReady) {
-  const lateDays = require('../config/feature-gates').moneyNoticeCatchupLive() ? NOTICE_CATCHUP_DAYS : 0;
+  const catchUpDays = require('../config/feature-gates').moneyNoticeCatchupLive() ? NOTICE_CATCHUP_DAYS : 0;
   let sent = 0;
   for (const daysOut of CUSTOMER_NOTICE_DAYS) {
-    const anchorWindow = { from: addDaysYmd(today, daysOut - lateDays), to: addDaysYmd(today, daysOut) };
+    const anchorWindow = { from: addDaysYmd(today, daysOut - catchUpDays), to: addDaysYmd(today, daysOut) };
     // Termite pass ran → it owns the termite 30; not ready → the termite 30
     // falls back here, with baseline columns only for every claim/stamp/
     // release (Codex #4921 r8 — a pre-000106 schema has no late columns).
@@ -10176,7 +10176,7 @@ async function runGenericNoticeLadder(today, termiteReady) {
       'reminder failed',
       async (term) => (await sendCustomerTermNotice(term, daysOut, {
         baseline: !termiteReady,
-        ...(lateDays ? { noticeDaysLeft: daysLeftToNoticeAnchor(term, anchorWindow, today) } : {}),
+        ...(catchUpDays ? { noticeDaysLeft: daysLeftToNoticeAnchor(term, anchorWindow, today) } : {}),
       })).sent,
     );
   }
