@@ -1065,43 +1065,51 @@ async function pruneOlderThan(db, table, days) {
   }
 }
 
-async function runLlmDispatchDigest() {
-  const db = require('../models/db');
+// Recorder health for one summarized day, judged from the heartbeats written during
+// it (see the long note in evaluateDigestDay). null when coverage is healthy.
+function recorderIssueFor(day, heartbeats, priorHeartbeats) {
+  if (heartbeats === 0 && priorHeartbeats > 0) {
+    return `no heartbeat rows were recorded during ${day}, though the recorder was writing earlier in the week — either it failed or the feature was disabled for that day. Recording status for ${day} is UNKNOWN; it cannot be read as a healthy quiet day.`;
+  }
+  if (heartbeats === 0 && priorHeartbeats === 0) {
+    return `no recorder heartbeats exist for ${day} or the 7 days before it. This is expected if GATE_LLM_DISPATCH_METRICS was enabled (or this feature deployed) within the last day — but if this message repeats tomorrow, the recorder has never successfully written and should be treated as down.`;
+  }
+  if (heartbeats < MIN_DAY_COVERAGE) {
+    return `only ${heartbeats} of ~24 hours of ${day} have recorder heartbeats — partial coverage (deploy gap, gate toggle, or a partial outage). Dispatches during the uncovered hours may be missing from these stats, so ${day} cannot be fully trusted.`;
+  }
+  return null;
+}
 
+/**
+ * Evaluate ONE ET day, `daysAgo` days back (1 = yesterday, the normal tick), on its
+ * own windows: that day's stats, the 7 days before it, and its recent-silence
+ * window. Returns { day, exceptions }. A stats-read failure alerts over SMTP and
+ * rethrows, as the single-day digest always did.
+ */
+async function evaluateDigestDay(db, daysAgo) {
   const { etDateString, addETDays } = require('../utils/datetime-et');
-  const day = etDateString(addETDays(new Date(), -1));
+  const day = etDateString(addETDays(new Date(), -daysAgo));
 
   // EVERY table read/write below can throw — a missing table or a dead DB
-  // takes out the retention DELETE and the stats SELECTs before any analysis
-  // runs. The alert must not depend on the thing it is alerting about, so a
-  // DB failure is caught here and emailed over SMTP, then rethrown so
-  // cron-lock job health records the failed run too. Without this, the single
-  // worst case (table gone) produced silence — the exact failure this whole
-  // lane exists to eliminate.
+  // takes out the stats SELECTs before any analysis runs. The alert must not
+  // depend on the thing it is alerting about, so a DB failure is caught here
+  // and emailed over SMTP, then rethrown so cron-lock job health records the
+  // failed run too. Without this, the single worst case (table gone) produced
+  // silence — the exact failure this whole lane exists to eliminate.
   let yesterdayStats;
   let priorWeekStats;
   let recentStats;
   let heartbeats = 0;
   let priorHeartbeats = 0;
-
-  // Retention pruning runs regardless of the gate (codex r2 P2: a kill-switch
-  // flip must not park rows forever). The prune FAILS INDEPENDENTLY (codex r7): a
-  // DELETE deadlock or lost DELETE grant says nothing about recorder health,
-  // and must not abort the digest or masquerade as an outage while INSERT and
-  // SELECT still work. Maintenance failure = log and carry on; a genuinely
-  // dead table fails the stats reads below, which DO alert.
-  const { pruned, error: pruneError } = await pruneOlderThan(db, 'llm_dispatch_log', RETENTION_DAYS);
-
-  if (!isEnabled()) return { skipped: 'gate_off', pruned, ...(pruneError ? { pruneError } : {}) };
-
   try {
-    const yesterday = etDayWindow(1);
-    const weekBefore = etDayWindow(8);
+    const yesterday = etDayWindow(daysAgo);
+    const weekBefore = etDayWindow(daysAgo + 7);
     // Recent window for the bursty-policy silence check: the last
-    // SILENT_CONSECUTIVE_DAYS full ET days, yesterday inclusive. A partial-
-    // coverage day inside it can only read as MORE silence (alarm-leaning),
-    // and such days already send their own partial-coverage notice.
-    const recent = etDayWindow(SILENT_CONSECUTIVE_DAYS);
+    // SILENT_CONSECUTIVE_DAYS full ET days, the summarized day inclusive. A
+    // partial-coverage day inside it can only read as MORE silence
+    // (alarm-leaning), and such days already send their own partial-coverage
+    // notice.
+    const recent = etDayWindow(daysAgo + SILENT_CONSECUTIVE_DAYS - 1);
     [yesterdayStats, priorWeekStats, recentStats, heartbeats, priorHeartbeats] = await Promise.all([
       loadStats(db, yesterday.start, yesterday.end),
       loadStats(db, weekBefore.start, yesterday.start),
@@ -1113,7 +1121,8 @@ async function runLlmDispatchDigest() {
     // Stats reads failing means the day genuinely cannot be analyzed — alert
     // over SMTP (which does not depend on the DB being reported on), then
     // rethrow so cron-lock job health records the failed run. The gate check
-    // above already returned, so a dark deployment cannot reach this email.
+    // in the caller already returned, so a dark deployment cannot reach this
+    // email.
     const reason = err.message || String(err);
     logger.error(`[llm-dispatch-metrics] digest could not read llm_dispatch_log: ${reason}`);
     const sent = await emailAlert(day, [{
@@ -1150,14 +1159,7 @@ async function runLlmDispatchDigest() {
   // outage older than the 7-day lookback) stayed silent FOREVER (codex r7).
   // The zero/zero notice self-qualifies: it is expected once on enablement
   // day, and its daily repetition is precisely the outage signal.
-  let recorderIssue = null;
-  if (heartbeats === 0 && priorHeartbeats > 0) {
-    recorderIssue = `no heartbeat rows were recorded during ${day}, though the recorder was writing earlier in the week — either it failed or the feature was disabled for that day. Recording status for ${day} is UNKNOWN; it cannot be read as a healthy quiet day.`;
-  } else if (heartbeats === 0 && priorHeartbeats === 0) {
-    recorderIssue = `no recorder heartbeats exist for ${day} or the 7 days before it. This is expected if GATE_LLM_DISPATCH_METRICS was enabled (or this feature deployed) within the last day — but if this message repeats tomorrow, the recorder has never successfully written and should be treated as down.`;
-  } else if (heartbeats < MIN_DAY_COVERAGE) {
-    recorderIssue = `only ${heartbeats} of ~24 hours of ${day} have recorder heartbeats — partial coverage (deploy gap, gate toggle, or a partial outage). Dispatches during the uncovered hours may be missing from these stats, so ${day} cannot be fully trusted.`;
-  }
+  const recorderIssue = recorderIssueFor(day, heartbeats, priorHeartbeats);
 
   // Absence checks need a day covered nearly end to end. On a partial day
   // (gate toggled, deploy gap) "policy X recorded nothing" is uninformative,
@@ -1166,12 +1168,54 @@ async function runLlmDispatchDigest() {
     yesterdayStats, priorWeekStats, recorderIssue, heartbeats >= MIN_DAY_COVERAGE,
     new Set(recentStats.map((s) => s.policy)),
   );
+  return { day, exceptions };
+}
+
+// One email (and one standing bell) for everything the run found. A single bad day
+// reads exactly as before. Several bad days in one backfill go out together, each
+// line led by its day, so a later day's bell rewrite cannot hide an earlier one.
+function digestEmailPayload(flaggedDays) {
+  if (flaggedDays.length === 1) return { day: flaggedDays[0].day, exceptions: flaggedDays[0].exceptions };
+  return {
+    day: `${flaggedDays[0].day} to ${flaggedDays[flaggedDays.length - 1].day}`,
+    exceptions: flaggedDays.flatMap((f) => f.exceptions.map((e) => ({ ...e, detail: `${f.day}: ${e.detail}` }))),
+  };
+}
+
+/**
+ * Daily digest tick. Aggregates each ET day in `days` (default: yesterday only),
+ * emails the company inbox ONLY when exceptions exist, then prunes rows past
+ * retention. `days` is a list of "days ago" numbers, oldest first; the catch-up
+ * wrapper below passes more than one after a lost tick.
+ */
+async function runLlmDispatchDigest({ days = [1] } = {}) {
+  const db = require('../models/db');
+
+  // Retention pruning runs regardless of the gate (codex r2 P2: a kill-switch
+  // flip must not park rows forever). The prune FAILS INDEPENDENTLY (codex r7): a
+  // DELETE deadlock or lost DELETE grant says nothing about recorder health,
+  // and must not abort the digest or masquerade as an outage while INSERT and
+  // SELECT still work. Maintenance failure = log and carry on; a genuinely
+  // dead table fails the stats reads below, which DO alert.
+  const { pruned, error: pruneError } = await pruneOlderThan(db, 'llm_dispatch_log', RETENTION_DAYS);
+
+  if (!isEnabled()) return { skipped: 'gate_off', pruned, ...(pruneError ? { pruneError } : {}) };
+
+  // Each day on its own windows. All of them are read before anything is sent, so
+  // a failing read leaves nothing half-reported and the caller's bookmark unmoved.
+  const evaluated = [];
+  for (const daysAgo of days) evaluated.push(await evaluateDigestDay(db, daysAgo));
+  const flaggedDays = evaluated.filter((e) => e.exceptions.length > 0);
+  const exceptions = flaggedDays.flatMap((e) => e.exceptions);
+
   let sendError = null;
-  if (exceptions.length) {
-    const sent = await emailExceptions(day, exceptions);
+  if (flaggedDays.length) {
+    const payload = digestEmailPayload(flaggedDays);
+    const sent = await emailExceptions(payload.day, payload.exceptions);
     if (!sent.ok) sendError = sent.error || 'unknown email error';
   } else {
-    // Fall-off (2026-09-11): a clean day retires the standing exception bell.
+    // Fall-off (2026-09-11): a clean run retires the standing exception bell. A
+    // backfill that found anything leaves the bell standing, whatever its later days read.
     await require('./ops-digest-fall-off').retireIfClean('llm-dispatch-exceptions', { lockKey: 'ops-digest:llm-dispatch-exceptions' });
   }
 
@@ -1184,8 +1228,89 @@ async function runLlmDispatchDigest() {
     throw new Error(`digest email failed with ${exceptions.length} undelivered exception(s): ${sendError}`);
   }
 
-  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s), emailed=${exceptions.length > 0}, pruned=${pruned}${pruneError ? ` pruneError=${pruneError}` : ''}`);
-  return { exceptions, emailed: exceptions.length > 0, pruned, ...(pruneError ? { pruneError } : {}) };
+  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s) over ${evaluated.length} day(s), emailed=${exceptions.length > 0}, pruned=${pruned}${pruneError ? ` pruneError=${pruneError}` : ''}`);
+  return {
+    exceptions,
+    emailed: exceptions.length > 0,
+    pruned,
+    ...(evaluated.length > 1 ? { days: evaluated.map((e) => e.day) } : {}),
+    ...(pruneError ? { pruneError } : {}),
+  };
+}
+
+// ---- missed-tick catch-up ---------------------------------------------------
+// The 6:25 tick can be lost (a deploy restart at that minute, or node-cron dropping
+// a tick while the event loop is busy). Without a bookmark the day it should have
+// digested is never looked at. The bookmark is one ops_email_send_state row; its
+// last_sent_at is the ET midnight that ENDS the last digested day, so the first
+// undigested day is simply the date of that instant. No new table.
+const DIGEST_BOOKMARK_KEY = 'llm-dispatch-digest-thru';
+const MAX_BACKFILL_DAYS = 7;
+
+async function readDigestBookmark(db) {
+  try {
+    const row = await db('ops_email_send_state').where({ email_key: DIGEST_BOOKMARK_KEY }).first('last_sent_at');
+    return row?.last_sent_at ? new Date(row.last_sent_at) : null;
+  } catch (err) {
+    // No bookmark = the old behavior (yesterday only). Never let it break the digest.
+    logger.warn(`[llm-dispatch-metrics] digest bookmark read failed (${err.code || err.name || 'error'}) — digesting yesterday only`);
+    return null;
+  }
+}
+
+/**
+ * "Days ago" numbers still to digest, oldest first. No bookmark = [1] (the normal
+ * tick). Bookmark at today's midnight = [] (yesterday is already done). A longer gap
+ * is capped at the newest MAX_BACKFILL_DAYS days.
+ */
+function missedDigestDays(bookmark, now = new Date()) {
+  if (!bookmark) return [1];
+  const { etDateString } = require('../utils/datetime-et');
+  const toUtcDay = (dateString) => new Date(`${dateString}T00:00:00Z`).getTime();
+  const gap = Math.round((toUtcDay(etDateString(now)) - toUtcDay(etDateString(bookmark))) / 86400000);
+  if (gap <= 0) return [];
+  if (gap > MAX_BACKFILL_DAYS) {
+    logger.warn(`[llm-dispatch-metrics] ${gap} days were not digested; backfilling only the newest ${MAX_BACKFILL_DAYS}`);
+  }
+  const count = Math.min(gap, MAX_BACKFILL_DAYS);
+  return Array.from({ length: count }, (_, i) => count - i);
+}
+
+async function stampDigestedThroughYesterday(db) {
+  try {
+    const now = new Date();
+    await db('ops_email_send_state')
+      .insert({ email_key: DIGEST_BOOKMARK_KEY, last_sent_at: etDayWindow(1).end, updated_at: now })
+      .onConflict('email_key')
+      .merge({ last_sent_at: etDayWindow(1).end, updated_at: now });
+  } catch (err) {
+    logger.warn(`[llm-dispatch-metrics] digest bookmark write failed (${err.code || err.name || 'error'}) — the next tick may repeat a day`);
+  }
+}
+
+/**
+ * True when a bookmark exists and says at least one finished day is undigested. The
+ * midday catch-up tick asks this before taking the lock; any doubt answers false.
+ */
+async function digestCatchUpNeeded() {
+  const bookmark = await readDigestBookmark(require('../models/db'));
+  return !!bookmark && missedDigestDays(bookmark).length > 0;
+}
+
+/**
+ * The scheduled entry point (both the 6:25 tick and the midday catch-up tick). It
+ * digests every day since the bookmark, then moves the bookmark to the end of
+ * yesterday. A run that throws leaves the bookmark where it was, so the next tick
+ * retries the same days. With the gate off the bookmark still moves: days the
+ * feature was off are not backfilled the day it is switched on.
+ */
+async function runLlmDispatchDigestWithCatchUp() {
+  const db = require('../models/db');
+  const days = missedDigestDays(await readDigestBookmark(db));
+  if (!days.length) return { skipped: 'already_digested' };
+  const out = await runLlmDispatchDigest({ days });
+  await stampDigestedThroughYesterday(db);
+  return out;
 }
 
 module.exports = {
@@ -1201,6 +1326,8 @@ module.exports = {
   extractUsage,
   anthropicServedModel,
   runLlmDispatchDigest,
+  runLlmDispatchDigestWithCatchUp,
+  digestCatchUpNeeded,
   alertRecorderUnreachable,
   detectExceptions,
   policyLabel,
@@ -1215,5 +1342,5 @@ module.exports = {
   RETIRED_POLICIES,
   BACKUP_ONLY_POLICIES,
   SILENT_CONSECUTIVE_DAYS,
-  _private: { emailExceptions },
+  _private: { emailExceptions, missedDigestDays, DIGEST_BOOKMARK_KEY, MAX_BACKFILL_DAYS },
 };

@@ -83,6 +83,36 @@ async function recordKpiSnapshot(snapshotDate, conn) {
 }
 
 /**
+ * True when `snapshotDate` (ET YYYY-MM-DD, default today ET) does not have its full
+ * set of rows yet. The 23:55 catch-up tick uses it: the 23:45 tick can be lost
+ * (deploy restart, dropped tick), and a partly written day (a restart mid-loop)
+ * counts as missing so the upsert fills it. A read failure answers false: the
+ * catch-up skips rather than guess.
+ */
+async function snapshotMissing(snapshotDate, conn) {
+  snapshotDate = snapshotDate || etDateString();
+  conn = conn || require('../models/db');
+  try {
+    const row = await conn('kpi_snapshots').where({ snapshot_date: snapshotDate }).count({ n: '*' }).first();
+    return Number(row?.n || 0) < SNAPSHOT_METRICS.length;
+  } catch (err) {
+    logger.warn(`[kpi-snapshot] catch-up check could not read kpi_snapshots: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Catch-up entry point: records the day's snapshot only when it is missing.
+ * Call it inside runExclusive('kpi-daily-snapshot'): it checks again under the lock,
+ * so a 23:45 run that finished while this one waited is not written twice.
+ */
+async function recordKpiSnapshotIfMissing(snapshotDate, conn) {
+  snapshotDate = snapshotDate || etDateString();
+  if (!(await snapshotMissing(snapshotDate, conn))) return { skipped: 'already_recorded', snapshot_date: snapshotDate };
+  return recordKpiSnapshot(snapshotDate, conn);
+}
+
+/**
  * Sparkline series for the dashboard KPI tiles: per-metric daily values from
  * kpi_snapshots over the trailing `days` ET window. Values are the cron's
  * month-to-date captures — the same basis the tiles' live numbers use.
@@ -123,4 +153,4 @@ async function getKpiHistory(days = 90, conn) {
   return { days: clamped, series };
 }
 
-module.exports = { recordKpiSnapshot, getKpiHistory, SNAPSHOT_METRICS, toFiniteOrNull };
+module.exports = { recordKpiSnapshot, recordKpiSnapshotIfMissing, snapshotMissing, getKpiHistory, SNAPSHOT_METRICS, toFiniteOrNull };
