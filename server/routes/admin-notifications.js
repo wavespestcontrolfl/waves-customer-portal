@@ -101,6 +101,15 @@ function withAreaChips(rows) {
   });
 }
 
+// Which cursor the list continues from. A cursor made in the other order (a ranked one while the gate is off, a
+// chronological one while it is on) is dropped and `restart` is true: the route serves page 1 of the current order.
+// `page` is the page number to serve and report: 1 on a restart.
+function resolveBellCursor(parsed, ranked, page) {
+  if (!parsed) return { restart: false, before: null, page };
+  const restart = ranked !== (parsed.rank !== undefined);
+  return { restart, before: restart ? null : parsed, page: restart ? 1 : page };
+}
+
 // GET /api/admin/notifications — list with pagination.
 // Live dashboard alerts are merged in front of the persisted feed on
 // page 1 only; subsequent pages serve persisted notifications without
@@ -109,7 +118,7 @@ function withAreaChips(rows) {
 // — escalation history (older counts) stays.
 router.get('/', async (req, res, next) => {
   try {
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const requestedPage = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
     // before: the `next` cursor a previous page returned. Rows leave the
     // feed between requests (Done here, another admin's Done, an auto-close),
@@ -121,8 +130,7 @@ router.get('/', async (req, res, next) => {
     // A cursor only continues the order it was made in. A three-part (ranked) cursor while the gate is off, or a
     // two-part (chronological) cursor while it is on, belongs to the other order: continuing from it would skip rows
     // the panel never got. Serve page 1 of the current order instead and say `restart: true`; the bell replaces its list.
-    const restart = Boolean(parsed) && (ranked !== (parsed.rank !== undefined));
-    const before = parsed && !restart ? parsed : null;
+    const { restart, before, page } = resolveBellCursor(parsed, ranked, requestedPage);
     const offset = before || restart ? 0 : (page - 1) * limit;
     // fullAccess: an owner-only row (a Claude plan or copy) is listed for the owner login alone.
     const fullAccess = ibFullAccess(req);
@@ -155,8 +163,8 @@ router.get('/', async (req, res, next) => {
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
       // admin role while GATE_ALERT_EXPLAINER is on. `sendToClaude` marks a row the "Send to Claude" button may move,
       // for the admin role while GATE_ALERT_SEND_TO_CLAUDE is on (no explainer needed).
-      notifications: [...((page === 1 || restart) && !before ? liveCtx.live : []), ...rows],
-      page: restart ? 1 : page, limit, hasMore: persisted.length > limit,
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
+      page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? (ranked ? formatRankedCursor(lastServed) : formatCursor(lastServed)) : null,
       // The list is ranked (needs-you first, then newest first inside a rank): the bell keeps this order as served.
       ...(ranked ? { order: 'needs-you-first' } : {}),
