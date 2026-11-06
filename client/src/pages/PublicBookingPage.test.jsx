@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PublicBookingPage from './PublicBookingPage';
 import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
+import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 
 vi.mock('../components/AddressAutocomplete', () => ({
   default: ({ value, onChange, onSelect, placeholder }) => (
@@ -246,6 +247,10 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
     await waitFor(() => expect(authState.sendCode).toHaveBeenCalledWith('+19415550101'));
 
     const codeInput = await screen.findByLabelText(/Enter the 6-digit code/);
+    // Shown before any failed verify, so a number with no account is not left waiting on a text.
+    expect(screen.getByText(/No code\? We text only numbers we have on file\. New here\?/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Get a free quote' })).toHaveAttribute('href', ESTIMATE_QUOTE_URL);
+    expect(screen.getByRole('link', { name: WAVES_SUPPORT_PHONE_DISPLAY })).toHaveAttribute('href', WAVES_SUPPORT_PHONE_TEL);
     fireEvent.change(codeInput, { target: { value: '123456' } });
     const verifyButton = screen.getByRole('button', { name: 'Verify & continue' });
 
@@ -256,7 +261,10 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
     fireEvent.click(verifyButton);
     await waitFor(() => expect(authState.verifyCode).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/may not be on file/)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
+    // Both the standing hint and the failed-verify hint carry the support number.
+    const phoneLinks = screen.getAllByRole('link', { name: '(941) 297-5749' });
+    expect(phoneLinks).toHaveLength(2);
+    phoneLinks.forEach((link) => expect(link).toHaveAttribute('href', 'tel:+19412975749'));
     // The quote path stays visible beside the failure.
     expect(screen.getByRole('link', { name: /Get your free quote/ })).toBeInTheDocument();
   });
