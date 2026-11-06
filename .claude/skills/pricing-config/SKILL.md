@@ -58,15 +58,21 @@ environment that carries the row (prod does), **editing
 
 ## Standing owner rulings (dated — don't relitigate)
 
-- **Pricing floors** (2026-07-17 disarmed every margin/program floor; owner
-  2026-10-09 re-armed one, for lawn): a residential recurring lawn plan
-  lists at cost / 0.55 with a $55-a-visit minimum, and WaveGuard tier and
-  manual discounts on the lawn line stop at a 35% collected margin
-  (`GATE_LAWN_COST_PLUS_LIST`, ON in production since 2026-10-26). The
-  owner ruled the same 35% floor for T&S; it is not built (it waits on the
-  T&S protocol). Every other margin/program floor stays disarmed and
-  report-only: do not flag "below floor" outside lawn, and do not add a
-  floor without an owner ruling. The owner-set one-time list minimums stay
+- **Pricing floors** (2026-07-17 disarmed every margin/program floor):
+  residential recurring lawn prices off the market table
+  (`GATE_LAWN_COST_PLUS_LIST` is OFF in production, owner 2026-11-06), and
+  the lawn 35% margin is a review line only: discounts apply in full (owner
+  2026-11-02). **Lawn $55 minimum after discounts** (owner 2026-11-06,
+  `lawn_pricing_v2.minimumPerVisitAfterDiscount`): every 9x/12x lawn
+  customer pays at least $55 an application after the WaveGuard tier % and a
+  typed percent discount; the LIST (crossed-out) price is raised to
+  $55 / (1 - discount) so the full discount still shows. New quotes only:
+  saved quotes replay with the stamped `pricingMetadata` value (0 when
+  unstamped). The cost-plus list-side $55 minimum is retired (0). The owner
+  ruled a 35% floor for T&S; it is not built (it waits on the T&S protocol).
+  Every other margin/program floor stays disarmed and report-only: do not
+  flag "below floor" outside lawn, and do not add a floor without an owner
+  ruling. The owner-set one-time list minimums stay
   live and re-apply after the 15% recurring-customer perk: one-time pest
   $199 (`ONE_TIME.pest.floor`) and one-time mosquito $199
   (`ONE_TIME.mosquito.floor`, owner 2026-10-25).

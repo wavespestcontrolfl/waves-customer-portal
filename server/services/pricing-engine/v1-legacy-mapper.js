@@ -611,6 +611,8 @@ function mapV1ToLegacyShape(v1Result) {
         costFloorAnnual: t.costFloorAnnual ?? null,
         programMinimumApplied: !!t.programMinimumApplied,
         programMinimumMonthly: t.programMinimumMonthly ?? null,
+        // Lawn $55-after-discount minimum raised this list price (owner 2026-11-06).
+        minimumAfterDiscountPerVisit: t.minimumAfterDiscountApplied ? t.minimumAfterDiscountPerVisit : null,
         bermudaSuppressionPerApp: t.bermudaSuppressionPerApp ?? null,
         margin: t.costFloorDetails && Number(t.annual) > 0
           ? Math.round((1 - (t.costFloorDetails.annualCost + (Number(t.bermudaRemovalAnnualCost) || 0)) / t.annual) * 1000) / 1000

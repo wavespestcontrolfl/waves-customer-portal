@@ -26,6 +26,9 @@ function lawnTiersAt(track, sqft) {
     propertyType: 'single_family',
     measuredTurfSf: sqft,
     services: { lawn: { track, lawnFreq: 9 } },
+    // These invariants pin the market TABLE; the $55-after-discount minimum
+    // (owner 2026-11-06) raises small lawns above it and is pinned elsewhere.
+    lawnMinimumPerVisitAfterDiscount: 0,
   });
   return est.lineItems.find((l) => l.service === 'lawn_care').tiers;
 }

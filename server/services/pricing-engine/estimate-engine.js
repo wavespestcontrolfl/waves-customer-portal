@@ -125,6 +125,54 @@ function lawnLineProtectedAnnual(item, { marginFloorArmed = false, programMinimu
     marginFloorBinding: marginFloorAnnual > programFloorAnnual,
   };
 }
+
+// Lawn minimum per visit AFTER discounts (owner 2026-11-06): a residential
+// recurring lawn customer never pays less than minPerVisit an application
+// once the WaveGuard tier % and a typed percent discount come off. The LIST
+// price (the crossed-out number) is raised instead of the discount shrinking,
+// so the customer still sees the full discount: list = minimum / (1 - discount).
+// Every sold cadence is raised with the same discount, so the public page,
+// which re-applies the discount to the stored list rows, shows the same $55.
+// keepFraction = the share of list the customer pays (0.9 for Silver).
+function raiseLawnListForMinimumAfterDiscount(item, keepFraction, minPerVisit) {
+  if (!(minPerVisit > 0) || !(keepFraction > 0) || keepFraction > 1) return;
+  const raise = (row) => {
+    const visits = Number(row.visits ?? row.freq);
+    const annual = Number(row.annual);
+    if (!(visits > 0) || !(annual > 0)) return false;
+    const target = roundMoney(minPerVisit * visits);
+    const paid = (list) => roundMoney(list * keepFraction);
+    if (paid(annual) >= target) return false;
+    let list = roundMoney(target / keepFraction);
+    while (paid(list) < target) list = roundMoney(list + 0.01);
+    row.annual = list;
+    row.monthly = roundMoney(list / 12);
+    row.perApp = roundMoney(list / visits);
+    row.minimumAfterDiscountApplied = true;
+    row.minimumAfterDiscountPerVisit = minPerVisit;
+    return true;
+  };
+  for (const tier of Array.isArray(item.tiers) ? item.tiers : []) raise(tier);
+  // item.selected / item.recommended are the same row objects as one of the
+  // tiers; the line's own annual/monthly/perApp mirror the selected row.
+  const selected = item.selected && typeof item.selected === 'object' ? item.selected : null;
+  if (selected && !(Array.isArray(item.tiers) && item.tiers.includes(selected))) raise(selected);
+  if (selected?.minimumAfterDiscountApplied) {
+    item.annual = selected.annual;
+    item.monthly = selected.monthly;
+    item.perApp = selected.perApp;
+    item.wgMonthly = selected.monthly;
+    item.minimumAfterDiscountApplied = true;
+    item.minimumAfterDiscountPerVisit = minPerVisit;
+    const cost = Number(item.costs?.total);
+    if (Number.isFinite(cost) && item.annual > 0) {
+      item.margin = Math.round(((item.annual - cost) / item.annual) * 1000) / 1000;
+      item.marginFloorOk = item.margin >= GLOBAL.MARGIN_FLOOR;
+    }
+  } else {
+    raise(item);
+  }
+}
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const { trustedUnitBand } = require('./unit-band-pricing');
@@ -795,6 +843,15 @@ function generateEstimate(input) {
   const pestProgramFloorArmed = typeof input.pestProgramFloorArmed === 'boolean'
     ? input.pestProgramFloorArmed
     : PEST.enforceFloorPostDiscount === true;
+  // Lawn minimum per visit after discounts (owner 2026-11-06). Replays thread
+  // the value the saved quote was priced with (0 for quotes priced before
+  // the rule), so only new quotes take it; otherwise the live DB-synced value.
+  const lawnMinimumPerVisitAfterDiscountResolved = (() => {
+    const override = Number(input.lawnMinimumPerVisitAfterDiscount);
+    if (input.lawnMinimumPerVisitAfterDiscount != null && Number.isFinite(override) && override >= 0) return override;
+    const n = Number(LAWN_PRICING_V2.minimumPerVisitAfterDiscount);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
   const pestProgramFloorPerVisitResolved = (() => {
     const override = Number(input.pestProgramFloorPerVisit);
     if (Number.isFinite(override) && override > 0) return override;
@@ -961,6 +1018,8 @@ function generateEstimate(input) {
     // threads them back into engine-input replays; pre-push codex P0s,
     // round 9).
     lawnProgramMinimumMonthly: lawnProgramMinimumMonthlyResolved,
+    // Same replay rule: a quote keeps the lawn minimum it was priced with.
+    lawnMinimumPerVisitAfterDiscount: lawnMinimumPerVisitAfterDiscountResolved,
     pestProgramFloorArmed,
     ...(pestProgramFloorPerVisitResolved != null
       ? { pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved }
@@ -2512,6 +2571,18 @@ function generateEstimate(input) {
     });
 
     item.discount = discount;
+
+    if (item.service === 'lawn_care' && item.annual) {
+      const md = input.manualDiscount;
+      const manualPct = md && md.type === 'PERCENT' && isManualRecurringDiscountEligible(item)
+        ? Number(md.value) / 100
+        : 0;
+      raiseLawnListForMinimumAfterDiscount(
+        item,
+        (1 - (discount.effectiveDiscount || 0)) * (1 - (Number.isFinite(manualPct) ? manualPct : 0)),
+        lawnMinimumPerVisitAfterDiscountResolved,
+      );
+    }
 
     if (item.annual) {
       item.annualBeforeDiscount = item.annual;

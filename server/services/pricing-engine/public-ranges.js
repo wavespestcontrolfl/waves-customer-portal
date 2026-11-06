@@ -501,7 +501,9 @@ function buildRows() {
         recurringLawnTracks().flatMap((track) =>
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
-      (r) => r.perApp),
+      // No lawn plan collects under the minimum after discounts (owner
+      // 2026-11-06), so no list price under it is advertised either.
+      (r) => Math.max(r.perApp, Number(constants.LAWN_PRICING_V2.minimumPerVisitAfterDiscount) || 0)),
     notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area — larger or more complex lawns price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
