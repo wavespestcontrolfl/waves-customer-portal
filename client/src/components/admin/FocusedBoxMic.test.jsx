@@ -181,4 +181,33 @@ describe("FocusedBoxMic", () => {
     expect(screen.queryByLabelText("notes")).toBeNull();
     expect(document.body.textContent).not.toContain("lost words");
   });
+
+  it("holds a Send button in the box's own dialog until the words land, but not Cancel", async () => {
+    stubServer({ available: true, everyBox: true });
+    const send = vi.fn();
+    const cancel = vi.fn();
+    await mount(
+      <div role="dialog" aria-label="Follow up">
+        <textarea aria-label="notes" defaultValue="Hello" />
+        <button type="button" onClick={send}>Send follow-up</button>
+        <button type="button" onClick={cancel}>Cancel</button>
+      </div>,
+    );
+    await focusBox();
+    screen.getByLabelText("notes").setSelectionRange(5, 5);
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: "Stop dictation" })); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
+
+    await act(async () => { fireEvent.click(screen.getByText("Send follow-up")); });
+    expect(send).not.toHaveBeenCalled();
+    expect(await screen.findByRole("status")).toHaveTextContent(/wait for the words/);
+    await act(async () => { fireEvent.click(screen.getByText("Cancel")); });
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    await act(async () => { resolveClip({ ok: true, json: async () => ({ text: "world" }) }); });
+    await waitFor(() => expect(screen.getByLabelText("notes")).toHaveValue("Hello world"));
+    await act(async () => { fireEvent.click(screen.getByText("Send follow-up")); });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
 });

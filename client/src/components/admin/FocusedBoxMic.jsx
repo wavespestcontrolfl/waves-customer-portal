@@ -23,7 +23,11 @@ const NOTICES = {
   gone: "Dictation: the text box was closed before the words came back, so they were not added.",
   locked: "Dictation: the text box is locked now, so the words were not added.",
   full: "Dictation: the text box is full, so the words were not added.",
+  wait: "Dictation: wait for the words to appear in the box, then press that button again.",
 };
+
+// Buttons that stay live while words are on the way: they leave the box, they do not read it.
+const SAFE_BUTTON = /\b(cancel|close|back|dismiss|discard|stop|no thanks)\b/i;
 
 /** Asks the server once per login whether the every-box mic is on. Nothing renders until it says yes. */
 function useEveryBox() {
@@ -119,6 +123,45 @@ function useBoxPlace(el) {
   return place;
 }
 
+// The box's own form, dialog or page area: what a Send / Save / Create button in it would read.
+function actionScope(box) {
+  return box.closest('[role="dialog"], [aria-modal="true"], form') || document.getElementById("admin-main") || document.body;
+}
+
+/**
+ * While words are on the way (recording or transcribing), a button in the
+ * box's own form, dialog or page area that would act on its text waits, and so
+ * does a form submit. Most Send / Ask buttons already read `useDictationPending`;
+ * this covers the boxes that gain the mic here without that wiring.
+ */
+function useHoldActions(box, active, onHeld) {
+  useEffect(() => {
+    if (!active || !box) return undefined;
+    const scope = actionScope(box);
+    const onClick = (event) => {
+      const button = event.target instanceof Element ? event.target.closest('button, [role="button"], input[type="submit"]') : null;
+      if (!button || !scope.contains(button) || button.closest("[data-focused-box-mic]")) return;
+      const label = button.getAttribute("aria-label") || button.textContent || button.title || "";
+      if (SAFE_BUTTON.test(label)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      onHeld();
+    };
+    const onSubmit = (event) => {
+      if (!scope.contains(event.target) && !event.target.contains?.(box)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      onHeld();
+    };
+    document.addEventListener("click", onClick, true);
+    document.addEventListener("submit", onSubmit, true);
+    return () => {
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("submit", onSubmit, true);
+    };
+  }, [box, active, onHeld]);
+}
+
 function Notice({ message }) {
   if (!message) return null;
   return createPortal(
@@ -210,6 +253,9 @@ function FocusedBoxMicInner() {
     const timer = setTimeout(() => setNotice(null), NOTICE_MS);
     return () => clearTimeout(timer);
   }, [notice]);
+
+  const holdNotice = useCallback(() => setNotice(NOTICES.wait), []);
+  useHoldActions(pinned, busy, holdNotice);
 
   const target = busy ? pinned : focused;
   const place = useBoxPlace(target);
