@@ -64,7 +64,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 const db = require('../models/db');
 const prepay = require('../services/annual-prepay-renewals');
 const {
-  REASONS, DISPOSITIONS, loadRetryContext, armedRetryQuery, classifyFailedPaymentRetry, _private,
+  REASONS, DISPOSITIONS, loadRetryContext, armedRetryQuery, classifyFailedPaymentRetry, findCollectedMonthlyPayment, _private,
 } = require('../services/retry-collectibility');
 
 const CUSTOMER = {
@@ -360,6 +360,30 @@ describe('armedRetryQuery', () => {
     ]));
     const horizon = armedRetryQuery(db, { dueBefore: 'MIDNIGHT', customerIds: ['a'] });
     expect(horizon._wheres).toEqual(expect.arrayContaining([['where', 'next_retry_at', '<', 'MIDNIGHT'], ['whereIn', 'customer_id', ['a']]]));
+  });
+});
+
+describe('findCollectedMonthlyPayment onOrAfter (monthly catch-up attempt fence)', () => {
+  const period = { monthKey: '2026-11', monthStart: '2026-11-01', monthEnd: '2026-11-30' };
+  const lastPaymentsQuery = () => db.mock.results.filter((r, i) => db.mock.calls[i][0] === 'payments').pop().value;
+
+  test('onOrAfter keeps only rows dated that ET day or later, under the asked statuses', async () => {
+    mockCollectedRow = { id: 'failed-today' };
+    const row = await findCollectedMonthlyPayment('cust-1', period, {
+      statuses: ['failed', 'refunded'], withDuesInvoice: false, onOrAfter: '2026-11-12',
+    });
+    expect(row).toEqual({ id: 'failed-today' });
+    expect(lastPaymentsQuery()._wheres).toEqual(expect.arrayContaining([
+      ['whereIn', 'status', ['failed', 'refunded']], ['where', 'payment_date', '>=', '2026-11-12'],
+    ]));
+  });
+
+  test('without onOrAfter the 8:00 run\'s collected check carries no date floor', async () => {
+    mockCollectedRow = null;
+    await findCollectedMonthlyPayment('cust-1', period);
+    const wheres = lastPaymentsQuery()._wheres;
+    expect(wheres).toEqual(expect.arrayContaining([['whereIn', 'status', ['paid', 'processing']]]));
+    expect(wheres.some(([m, col, op]) => m === 'where' && col === 'payment_date' && op === '>=')).toBe(false);
   });
 });
 

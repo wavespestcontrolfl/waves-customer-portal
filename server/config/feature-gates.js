@@ -270,6 +270,7 @@
  *   GATE_PHOTO_ID_V2=true (customer Photo ID PEST path calls the v2 species-catalog engine, identifyPestV2 — server/services/photo-id-v2/pest-engine.js — instead of v1's identifyPest; layered on GATE_CUSTOMER_PHOTO_ID, which must also be on. Response keeps every v1 field and ADDS `v2`; the customer v2 object is persisted with no migration, embedded in the existing report_contract jsonb column under a `v2` key. A v2 engine failure (ok:false) answers the SAME 503 the v1 path already does — never a silent fallback to v1. Stored v2 answers are served back (history headline, next step, detail `v2`) only while the gate is on. Dark = today's v1-only pest path, byte-identical, for new AND already-stored rows. Owner 2026-10-02: ON also sends lawn and tree_shrub (palm posts to tree_shrub with subject 'palm') through the plant engine's Gemini-only workup (identifyPlantV2, ladder 'gemini_only'), adding `v2` beside the still-computed v1 scores — lawn embeds it in report_contract.v2, tree_shrub in result_v2; OFF = both v1-only, byte-identical.)
  *   GATE_PHOTO_TRIAGE=true      (inbound photo texts that read like a lawn/plant/pest "what is this" run the admin photo assessment and park ONE pending reply draft for owner approval — never sends; paid vision capped by PHOTO_TRIAGE_DAILY_CAP per ET day, default 20, and the paid caption classifier by PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP, default = the vision cap; a triage candidate skips the legacy AI draft; read at call time; dark in dev AND prod)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
+ *   GATE_BILLING_MONTHLY_CATCHUP=true (owner 2026-11-06, O1 "bill each missed day of this month": a lost or killed 8:00 AM ET monthly dues run no longer leaves that day's billing_day cohort uncharged until next month. Catch-up ticks at 10:29 and 14:29 ET bill each ET date of the current month after the bookmark of the last finished run, through the same billing-monthly lock, cohort and charge path (services/billing-monthly-catchup.js). Charges cards, so the owner flips it. Strict 'true', read at call time via billingMonthlyCatchupLive(); off = the catch-up ticks read and charge nothing, and the 8:00 run only writes its bookmark. Kill switch: unset.)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
  *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
  *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
@@ -5414,6 +5415,12 @@ const gates = {
   // billingEmailDetailsLive().
   billingEmailDetails: process.env.GATE_BILLING_EMAIL_DETAILS === 'true',
 
+  // Monthly billing catch-up (owner 2026-11-06, O1): a lost 8:00 dues run is
+  // billed by the 10:29 / 14:29 ET catch-up ticks. Charges cards; ships DARK.
+  // This entry is for logGateStatus only: billing-monthly-catchup.js reads
+  // GATE_BILLING_MONTHLY_CATCHUP at call time via billingMonthlyCatchupLive().
+  billingMonthlyCatchup: process.env.GATE_BILLING_MONTHLY_CATCHUP === 'true',
+
   // Call-address on-file assist (owner-approved review items 3 and 4,
   // 2026-09-30): the caller's on-file address rescues a spoken one when the
   // HOUSE NUMBER matches — the on-file street joins street recovery as an
@@ -7915,6 +7922,14 @@ function billingEmailDetailsLive() {
   return process.env.GATE_BILLING_EMAIL_DETAILS === 'true';
 }
 
+// GATE_BILLING_MONTHLY_CATCHUP read at CALL time — ships DARK, off unless exactly 'true'
+// (owner 2026-11-06, O1 "bill each missed day of this month"). On, the 10:29 / 14:29 ET
+// catch-up ticks bill each missed ET date of this month after the billing-monthly bookmark
+// (services/billing-monthly-catchup.js). Off, the catch-up ticks read and charge nothing.
+function billingMonthlyCatchupLive() {
+  return process.env.GATE_BILLING_MONTHLY_CATCHUP === 'true';
+}
+
 // GATE_PAYER_INVOICE_SMS read at CALL time — ships DARK, off unless exactly 'true' (owner
 // 2026-11-01). On, a payer-billed invoice whose email the provider accepted for the payer's
 // AP inbox also texts the same pay link to that payer's ap_phone (services/payer-invoice-sms.js,
@@ -9517,6 +9532,7 @@ module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
+module.exports.billingMonthlyCatchupLive = billingMonthlyCatchupLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
 // GATE_ADS_CAPACITY_WORK_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.adsCapacityWorkDaysLive = adsCapacityWorkDaysLive;

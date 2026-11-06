@@ -166,12 +166,15 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
 // `statuses` narrows the payment statuses; `withDuesInvoice: false` leaves out
 // the completion-minted dues invoice fallback (it names no payment row);
 // `excludePaymentId` leaves out one row (a caller asking whether ANOTHER row
-// collected the month).
-async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true, excludePaymentId = null } = {}) {
+// collected the month). `onOrAfter` ('YYYY-MM-DD') keeps only rows dated that
+// ET day or later: the monthly catch-up asks it with the failed/refunded
+// statuses, "did a run on or after this billing date already try this month?".
+async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true, excludePaymentId = null, onOrAfter = null } = {}) {
   let query = conn('payments')
     .where({ customer_id: customerId })
     .whereIn('status', statuses);
   if (excludePaymentId) query = query.whereNot({ id: excludePaymentId });
+  if (onOrAfter) query = query.where('payment_date', '>=', onOrAfter);
   const payment = await query
     .where(function () {
       this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
