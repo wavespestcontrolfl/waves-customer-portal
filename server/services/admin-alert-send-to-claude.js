@@ -124,11 +124,12 @@ function sendToClaudeLive() {
   try { return require('../config/feature-gates').alertSendToClaudeLive?.() === true; } catch { return false; }
 }
 
-// The bell list's persisted rows, marked `sendToClaude: true` where the allow-list permits a send, for the admin role
-// while GATE_ALERT_SEND_TO_CLAUDE is on; otherwise the rows as they are. Never throws: a row whose check throws stays
-// unmarked.
-function withSendToClaudeFields(rows, { role } = {}) {
-  if (!Array.isArray(rows) || role !== 'admin' || !sendToClaudeLive()) return rows;
+// The bell list's persisted rows, marked `sendToClaude: true` where the allow-list permits a send, for the owner login
+// (`fullAccess`: ib-access ibFullAccess) while GATE_ALERT_SEND_TO_CLAUDE is on; otherwise the rows as they are. Owner only
+// (Codex security review on #7548): a send and its note go into a Claude terminal tab, and requireAdmin accepts every admin
+// account. Never throws: a row whose check throws stays unmarked.
+function withSendToClaudeFields(rows, { role, fullAccess = false } = {}) {
+  if (!Array.isArray(rows) || role !== 'admin' || fullAccess !== true || !sendToClaudeLive()) return rows;
   return rows.map((row) => {
     try { return sendRefusal(row) ? row : { ...row, sendToClaude: true }; } catch { return row; }
   });
@@ -139,15 +140,16 @@ function withSendToClaudeFields(rows, { role } = {}) {
 const NOTE_MAX = 500;
 // Cc except newline, Cf, and the tag block (some of it is unassigned, so it is named outright).
 const NOTE_STRIP_RE = /(?!\n)\p{Cc}|\p{Cf}|[\u{E0000}-\u{E007F}]/gu;
+const plainText = (raw) => raw
+  .replace(/\t/g, ' ')
+  .replace(/[\u2028\u2029]/g, '\n')
+  .replace(NOTE_STRIP_RE, '')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim();
 function cleanNote(raw) {
   if (raw === undefined || raw === null || raw === '') return { note: null };
   if (typeof raw !== 'string') return { error: 'invalid_note' };
-  const note = raw
-    .replace(/\t/g, ' ')
-    .replace(/[\u2028\u2029]/g, '\n')
-    .replace(NOTE_STRIP_RE, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const note = plainText(raw);
   if ([...note].length > NOTE_MAX) return { error: 'note_too_long' };
   return { note: note || null };
 }
@@ -245,6 +247,7 @@ async function unsendAdminAlertFromClaude(id, { at, by, role, technicianId = nul
 }
 
 module.exports = {
-  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendRefusal, sendToClaudeLive, sentPatch,
+  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, plainText, byStamp, uuidOrNull, UUID_RE,
+  sendRefusal, sendToClaudeLive, sentPatch,
   CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES,
 };

@@ -31,7 +31,7 @@ jest.mock('../models/db', () => {
   };
   const makeTrx = () => {
     const trx = jest.fn((table) => builder(table));
-    trx.raw = jest.fn(async () => {});
+    trx.raw = jest.fn((sql, bindings) => (String(sql).includes('jsonb_exists') ? bindings[0] : undefined));
     trx.fn = { now: () => new Date('2026-11-03T15:00:00Z') };
     return trx;
   };
@@ -243,5 +243,56 @@ describe('on the caller\'s transaction', () => {
     trx.commit();
     await flush();
     expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+});
+
+// New-lead email banner (GATE_RING_NEW_CONTACTS, owner 2026-11-04 "ring new"): the writer names the kind with
+// notifyAdmin's bannerKind option, so the row itself carries no triggerKey. Its own gate, any hour, once per email.
+describe('new-lead email banner (GATE_RING_NEW_CONTACTS)', () => {
+  const lead = (opts = {}) => NotificationService.notifyAdmin('new_lead', 'New lead from email: Jane Prospect', 'Prospect wants a pest control quote', {
+    icon: 'mail', link: '/admin/email', metadata: { emailId: 'e-1', leadId: 'l-1' },
+    dedupeKey: 'email-lead:lead:e-1', bannerKind: 'new_lead_email', ...opts,
+  });
+  beforeEach(() => {
+    delete process.env.GATE_BELL_BANNERS;
+    process.env.GATE_RING_NEW_CONTACTS = 'true';
+  });
+  afterEach(() => { delete process.env.GATE_RING_NEW_CONTACTS; });
+
+  test('one banner with the row\'s words, on its own gate, the kind never stored, and a retry sends no second', async () => {
+    const written = await lead();
+    await flush();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const [key, payload, opts] = triggerNotification.mock.calls[0];
+    expect(key).toBe('new_lead_email');
+    expect(payload).toMatchObject({ alertRowId: written.id, alertTitle: 'New lead from email: Jane Prospect', alertLink: '/admin/email' });
+    expect(opts.pushOnly).toBe(true);
+    // One bell row, with no triggerKey and no bannerKind on it.
+    expect(mockRows.notifications).toHaveLength(1);
+    expect(JSON.stringify(mockRows.notifications[0])).not.toContain('bannerKind');
+    expect(JSON.stringify(mockRows.notifications[0])).not.toContain('triggerKey');
+    // A re-sync or retry of the same email finds the row: no second row, no second banner.
+    triggerNotification.mockClear();
+    const again = await lead();
+    await flush();
+    expect(again.deduped).toBe(true);
+    expect(mockRows.notifications).toHaveLength(1);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('rings at night too (the kind keeps no quiet hours)', async () => {
+    jest.setSystemTime(new Date('2026-11-04T04:30:00Z')); // 11:30 PM Eastern
+    await lead();
+    await flush();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off: no banner and the row is the plain write', async () => {
+    delete process.env.GATE_RING_NEW_CONTACTS;
+    process.env.GATE_BELL_BANNERS = 'true'; // the other gate does not turn this kind on
+    await lead();
+    await flush();
+    expect(mockRows.notifications).toHaveLength(1);
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 });

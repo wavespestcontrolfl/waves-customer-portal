@@ -93,6 +93,8 @@ const campaign = (over = {}) => ({
   id: 'c-1',
   campaign_name: 'Waves Pest Control - GBP Search',
   platform: 'google_ads',
+  // The live row's type: the sync stores Google's SEARCH channel enum as text.
+  campaign_type: '2',
   platform_campaign_id: '1234567890',
   target_area: null,
   budget_mode: 'stop',

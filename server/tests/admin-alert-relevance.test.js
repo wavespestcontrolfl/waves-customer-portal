@@ -104,6 +104,10 @@ jest.mock('../models/db', () => {
             if (!v || typeof v !== 'object' || !v.__raw) return [col, v];
             const sql = String(v.__raw);
             if (/^COALESCE\(\w+, \?(::timestamptz)?\)$/.test(sql)) return [col, r[col] ?? v.bindings[0]];
+            // The takeover's resolution: a quiet fall-off close takes the new closer's words, any other keeps its own.
+            if (/^CASE WHEN done_by = 'quiet-72h' THEN \?::text ELSE COALESCE\(resolution, \?::text\) END$/.test(sql)) {
+              return [col, r.done_by === 'quiet-72h' ? v.bindings[0] : (r.resolution ?? v.bindings[1])];
+            }
             if (/^CASE WHEN read_at = \?::timestamptz THEN NULL ELSE read_at END$/.test(sql)) {
               return [col, r.read_at instanceof Date && r.read_at.getTime() === v.bindings[0].getTime() ? null : r.read_at];
             }
@@ -1292,6 +1296,14 @@ describe('customer-contact classes', () => {
       expect((await verdictFor(trackingText(), { pending: false, backAt: at(10) })).reason).toBe('Answered by a call');
       expect((await verdictFor(trackingText(), { pending: false })).reason).toBe('Answered, or no reply needed');
       expect((await verdictFor(trackingText(), { shared: true, pending: false })).reason).toBeNull();
+      // A text to a location or Google profile line rings the same row (GATE_RING_NEW_CONTACTS, owner 2026-11-04): the
+      // line only changes the payload's source, so it is the same class and closes by the same rule once answered.
+      const officeText = () => trackingText({ metadata: { triggerKey: 'new_lead', dedupeKey: 'sms-tracking-thread:0123456789abcdef0123456789abcdef',
+        payload: { twilioSid: SID, name: null, phone: '+12025550101', source: 'the Parrish (Pest) line', message: 'Do you treat for ants?' } } });
+      expect(classify(officeText()).key).toBe('tracking_text');
+      expect((await verdictFor(officeText(), { pending: true })).reason).toBeNull();
+      expect((await verdictFor(officeText(), { pending: false, textAt: at(10) })).reason).toBe('Answered by text');
+      expect((await verdictFor(officeText(), { pending: false, backAt: at(10) })).reason).toBe('Answered by a call');
     });
 
     test.each([['voicemail', voicemail]])('a %s: a person\'s call back, a call in a person answered, a person\'s text, a booked visit or a quote after the call closes it; nothing, or only earlier contact, keeps it', async (_name, make) => {

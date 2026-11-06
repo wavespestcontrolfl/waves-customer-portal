@@ -5,7 +5,7 @@
 // scheduled visit, and the server preview of the "Automatic" review send time.
 import { useEffect, useRef, useState } from 'react';
 import { adoptSeed, reentrySeedsFrom, stepReentry } from '../lib/fast-complete-wrap-up';
-import { firstReviewAskFrom, reviewPreviewSubmitVerdict, reviewSendPreviewPath } from '../lib/completion-review-timing';
+import { alreadyReviewedFrom, firstAskReasonsFrom, firstReviewAskFrom, reviewPreviewSubmitVerdict, reviewSendPreviewPath } from '../lib/completion-review-timing';
 
 const PREVIEW_POLL_MS = 60 * 1000;
 
@@ -58,17 +58,29 @@ export function useNextVisit({ enabled, customerId, requestRef }) {
 // `recheck(reviewTiming, { reportTextExpected })` is the submit-time read: it applies a fresh answer and returns the verdict
 // (null to go on, else { message }), per the full form's guards (codex #4140 r3, r13, r18).
 // `firstAskOpen`: the box is a choice (no suppression), so a first-ask verdict can matter while it is off.
+// `alreadyReviewed` (GATE_REVIEW_ALREADY_REVIEWED): the server's read that the customer is marked as already
+// reviewed ({ reviewedOn } or null). Once it says so, no review goes out, so the poll stops as for a box off.
 export function useReviewPreview({ enabled, willReview, firstAskOpen = true, serviceId, serviceType, requestRef }) {
   const [preview, setPreview] = useState(null);
   // GATE_REVIEW_FIRST_ASK_LOCK: the server's read that this customer was never asked. Kept when the
   // preview is cleared (box off), since the box still needs its label and its reason then.
   const [firstAsk, setFirstAsk] = useState(false);
+  // GATE_REVIEW_ALREADY_REVIEWED: the marked-reviewed read and the off reasons a first ask may carry, kept the same way.
+  const [alreadyReviewed, setAlreadyReviewed] = useState(null);
+  const [optOutReasons, setOptOutReasons] = useState(() => firstAskReasonsFrom(null));
+  const marked = !!alreadyReviewed;
+  // An answer (not a failed read) carries both; gate off, they read as not marked and the one reason.
+  const applyFacts = (data) => {
+    if (!data) return;
+    setAlreadyReviewed(alreadyReviewedFrom(data));
+    setOptOutReasons(firstAskReasonsFrom(data));
+  };
   const previewRef = useRef(null);
   previewRef.current = preview;
   const failureNoticedRef = useRef(false);
   const fetchPreview = () => requestRef.current(reviewSendPreviewPath(serviceType, serviceId)).catch(() => null);
   useEffect(() => {
-    if (!enabled || !willReview) {
+    if (!enabled || !willReview || marked) {
       setPreview(null);
       if (!enabled || !firstAskOpen) return undefined;
       // One read still names the first ask while the box is off (a failed first read, then the box
@@ -78,6 +90,7 @@ export function useReviewPreview({ enabled, willReview, firstAskOpen = true, ser
       fetchPreview().then((data) => {
         const verdict = firstReviewAskFrom(data);
         if (!gone && verdict !== null) setFirstAsk(verdict);
+        if (!gone) applyFacts(data);
       });
       return () => { gone = true; };
     }
@@ -87,6 +100,7 @@ export function useReviewPreview({ enabled, willReview, firstAskOpen = true, ser
       // then turns itself back on unless the one reason was confirmed.
       const verdict = firstReviewAskFrom(data);
       if (verdict !== null) setFirstAsk(verdict);
+      applyFacts(data);
       if (cancelled) return;
       setPreview(data);
       if (data) failureNoticedRef.current = false;
@@ -94,7 +108,7 @@ export function useReviewPreview({ enabled, willReview, firstAskOpen = true, ser
     load();
     const timer = setInterval(load, PREVIEW_POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [enabled, firstAskOpen, serviceId, serviceType, willReview, requestRef]);
+  }, [enabled, firstAskOpen, marked, serviceId, serviceType, willReview, requestRef]);
 
   const recheck = async (reviewTiming, { reportTextExpected = true } = {}) => {
     const fresh = await fetchPreview();
@@ -105,5 +119,5 @@ export function useReviewPreview({ enabled, willReview, firstAskOpen = true, ser
     if (verdict?.dropShown) setPreview(null);
     return verdict;
   };
-  return { preview, previewRef, recheck, firstAsk };
+  return { preview, previewRef, recheck, firstAsk, alreadyReviewed, optOutReasons };
 }

@@ -6,6 +6,7 @@
 const {
   decidePushRoute,
   PUSH_ROUTING_POLICY,
+  APP_FIRST_ANY_DEVICE_POLICY,
   _test,
 } = require('../services/messaging/push-channel-routing');
 
@@ -66,6 +67,92 @@ describe('decidePushRoute', () => {
   it('defaults every unlisted template to sms_only', () => {
     for (const t of ['manual', 'ai_assistant', 'review_request', 'payment_link', 'invoice', 'internal_alert', 'made_up_type', undefined]) {
       expect(decidePushRoute({ ...base, messageType: t })).toBe('sms_only');
+    }
+  });
+});
+
+describe('decidePushRoute with GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04)', () => {
+  const GATE = 'GATE_APP_FIRST_ANY_DEVICE';
+  const MOVED = [
+    'appointment_reminder', 'reminder_72h', 'tech_arrived', 'service_complete', 'service_complete_paid_receipt',
+    'service_complete_prepaid', 'service_complete_annual_prepay', 'service_complete_annual_prepay_after_first_visit',
+    'service_report_v1', 'lawn_watering_instruction',
+  ];
+  const ALREADY_PUSH_FIRST = ['tech_en_route', 'receipt', 'deposit_receipt'];
+  const BILLING = [
+    'billing_reminder', 'payment_failure', 'payment_failed', 'late_payment', 'payment_expiry', 'autopay',
+    'autopay_pre_charge', 'autopay_charge_failed', 'autopay_retry_failed', 'autopay_retry_final_failed',
+    'ach_retry_notice', 'ach_card_fallback', 'ach_suspended', 'bank_verification_incomplete', 'bank_verification_failed',
+  ];
+  const STAYS_TEXT = [
+    'service_complete_with_invoice', 'service_report_v1_with_invoice', 'review_request', 'invoice', 'payment_link',
+    'manual', 'ai_assistant', 'appointment_confirmation', 'appointment_cancelled', 'internal_alert',
+  ];
+  let saved;
+  beforeEach(() => { saved = process.env[GATE]; delete process.env[GATE]; });
+  afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
+
+  it('gate off: the moved types keep today policy (reminders both channels, the rest text only)', () => {
+    for (const t of MOVED) {
+      const expected = ['appointment_reminder', 'reminder_72h'].includes(t) ? 'push_and_sms' : 'sms_only';
+      expect(decidePushRoute({ ...base, messageType: t })).toBe(expected);
+    }
+  });
+
+  it('only exactly "true" turns the gate on', () => {
+    for (const v of ['1', 'on', 'TRUE', 'yes', '']) {
+      process.env[GATE] = v;
+      expect(decidePushRoute({ ...base, messageType: 'tech_arrived' })).toBe('sms_only');
+    }
+    process.env[GATE] = 'true';
+    expect(decidePushRoute({ ...base, messageType: 'tech_arrived' })).toBe('push_first');
+  });
+
+  it('gate on: every moved and every existing push-first type is push_first', () => {
+    process.env[GATE] = 'true';
+    for (const t of [...MOVED, ...ALREADY_PUSH_FIRST]) {
+      expect(decidePushRoute({ ...base, messageType: t })).toBe('push_first');
+    }
+  });
+
+  it('gate on: billing, payment-failure, autopay and ACH types stay push_and_sms', () => {
+    process.env[GATE] = 'true';
+    for (const t of BILLING) expect(decidePushRoute({ ...base, messageType: t })).toBe('push_and_sms');
+  });
+
+  it('gate on: invoice-carrying completions, review asks, links and staff helpers stay text only', () => {
+    process.env[GATE] = 'true';
+    for (const t of [...STAYS_TEXT, 'made_up_type', undefined]) {
+      expect(decidePushRoute({ ...base, messageType: t })).toBe('sms_only');
+    }
+  });
+
+  it('gate on: staff, human, media, bundled-review and missing-customer sends still go as text', () => {
+    process.env[GATE] = 'true';
+    for (const t of MOVED) {
+      const input = { ...base, messageType: t };
+      expect(decidePushRoute({ ...input, hasMedia: true })).toBe('sms_only');
+      expect(decidePushRoute({ ...input, humanAuthored: true })).toBe('sms_only');
+      expect(decidePushRoute({ ...input, operatorInitiated: true })).toBe('sms_only');
+      expect(decidePushRoute({ ...input, adminAttributed: true })).toBe('sms_only');
+      expect(decidePushRoute({ ...input, bundledReview: true })).toBe('sms_only');
+      expect(decidePushRoute({ ...input, customerId: null })).toBe('sms_only');
+      expect(decidePushRoute({ ...input, gateOn: false })).toBe('sms_only');
+    }
+  });
+
+  it('every gate-on type maps to a preference column (a saved Email / Both choice still vetoes) and has a real presentation', () => {
+    for (const type of Object.keys(APP_FIRST_ANY_DEVICE_POLICY)) {
+      expect(typeof _test.PREF_CHANNEL_COLUMN[type]).toBe('string');
+      expect(_test.pushPresentation(type).link.startsWith('/')).toBe(true);
+      expect(_test.pushPresentation(type).title).not.toBe('Waves Pest Control');
+    }
+    expect(Object.keys(APP_FIRST_ANY_DEVICE_POLICY).sort()).toEqual([...MOVED].sort());
+  });
+
+  it('never moves a type that carries a bill or a payment failure', () => {
+    for (const t of [...BILLING, 'service_complete_with_invoice', 'service_report_v1_with_invoice']) {
+      expect(APP_FIRST_ANY_DEVICE_POLICY[t]).toBeUndefined();
     }
   });
 });

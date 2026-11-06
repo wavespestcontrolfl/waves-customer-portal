@@ -248,7 +248,7 @@ const EMAIL_PDF_BUSY_DELAY_MS = 8000;
 
 function estimateEmailPdfEnabled() {
   const featureGates = require('../../config/feature-gates');
-  return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
+  return featureGates.isEnabled('estimateDocPdf');
 }
 
 // No customer name in the file name: the number the estimate page prints

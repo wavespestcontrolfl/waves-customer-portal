@@ -270,16 +270,19 @@ describe('the bell list marks a sendable row', () => {
   test('only the rows the allow-list permits, with no explainer gate (owner 2026-11-03)', () => {
     live();
     delete process.env.GATE_ALERT_EXPLAINER;
-    expect(withSendToClaudeFields(listRows(), { role: 'admin' }).map((r) => r.sendToClaude === true)).toEqual([true, false]);
+    expect(withSendToClaudeFields(listRows(), { role: 'admin', fullAccess: true }).map((r) => r.sendToClaude === true)).toEqual([true, false]);
   });
 
   test('only for the admin role and only while the send gate is on; otherwise the rows as they are', () => {
     live();
     const rows = listRows();
-    expect(withSendToClaudeFields(rows, { role: 'technician' })).toBe(rows);
-    expect(withSendToClaudeFields(rows, { role: undefined })).toBe(rows);
-    process.env.GATE_ALERT_SEND_TO_CLAUDE = 'false';
+    expect(withSendToClaudeFields(rows, { role: 'technician', fullAccess: true })).toBe(rows);
+    expect(withSendToClaudeFields(rows, { role: undefined, fullAccess: true })).toBe(rows);
+    // Owner login only (Codex security review on #7548): another admin, or a caller that does not say, gets no marks.
     expect(withSendToClaudeFields(rows, { role: 'admin' })).toBe(rows);
+    expect(withSendToClaudeFields(rows, { role: 'admin', fullAccess: false })).toBe(rows);
+    process.env.GATE_ALERT_SEND_TO_CLAUDE = 'false';
+    expect(withSendToClaudeFields(rows, { role: 'admin', fullAccess: true })).toBe(rows);
     expect(rows.some((r) => 'sendToClaude' in r)).toBe(false);
   });
 
@@ -287,10 +290,10 @@ describe('the bell list marks a sendable row', () => {
     live();
     const bad = {};
     Object.defineProperty(bad, 'metadata', { get() { throw new Error('boom'); } });
-    const out = withSendToClaudeFields([row(), bad], { role: 'admin' });
+    const out = withSendToClaudeFields([row(), bad], { role: 'admin', fullAccess: true });
     expect(out[0].sendToClaude).toBe(true);
     expect(out[1]).toBe(bad);
-    expect(withSendToClaudeFields(null, { role: 'admin' })).toBeNull();
+    expect(withSendToClaudeFields(null, { role: 'admin', fullAccess: true })).toBeNull();
   });
 });
 

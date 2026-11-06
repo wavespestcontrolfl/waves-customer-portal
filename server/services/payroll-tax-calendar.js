@@ -206,7 +206,8 @@ function digestOf(checks) {
 }
 const taxCents = (check) => TAX_COLUMNS.reduce((sum, col) => sum + num(check[col]), 0);
 
-const zeroTotals = (extra) => ({ tax: 0, futa: 0, checks: [], ...extra });
+// simple: the employee's SIMPLE IRA savings paid in the period; employer: Waves' 2% on that pay.
+const zeroTotals = (extra) => ({ tax: 0, futa: 0, simple: 0, employer: 0, checks: [], ...extra });
 
 // The periods (month 'YYYY-MM', quarter 'YYYY-Qn', year 'YYYY') of payroll rows
 // the owner already marked done, read from their source keys. New hire and FUTA
@@ -235,6 +236,8 @@ function totalsOf(checks, remembered) {
     t.checks.push(check);
     t.tax += taxCents(check);
     t.futa += num(check.futa_cents);
+    t.simple += num(check.simple_deferral_cents);
+    t.employer += num(check.simple_employer_cents);
     Object.assign(t, extra);
     map.set(key, t);
   };
@@ -270,6 +273,22 @@ function depositRow(t) {
     amount_due: dollars(t.tax),
     source_digest: digestOf(t.checks),
     notes: `Pay on EFTPS by 8 PM ET the day before the due date (or IRS Direct Pay: Reason for payment = Federal tax deposit; Apply payment to = 941; Tax period = Q${quarterOf(t.month)} ${t.year}). Withheld federal income tax plus both halves of Social Security and Medicare.`,
+  };
+}
+
+// a2. The employee's SIMPLE IRA savings from one month's pay go to Schwab as soon as they can reasonably be
+// separated from pay, and no later than 30 days after the end of the month the pay was due (DOL 29 CFR
+// 2510.3-102(a)(2); IRS Notice 98-4). The date is the legal limit, not a target, and does not roll.
+function simpleDepositRow(t) {
+  const label = `${MONTHS[t.month - 1]} ${t.year}`;
+  return {
+    source_key: `${SOURCE_PREFIX}simple_deposit:${t.year}-${pad(t.month)}`,
+    filing_type: 'payroll_simple_deposit',
+    title: `SIMPLE IRA savings to Schwab — ${label}`,
+    period_label: label,
+    due_date: addDays(ymd(t.year, t.month, lastDayOfMonth(t.year, t.month)), 30),
+    amount_due: dollars(t.simple),
+    notes: 'The employees\' own savings from this month\'s checks. Send them to Schwab as soon as you can; this date is the latest the law allows (30 days after the month ends). It is not a payroll tax.',
   };
 }
 
@@ -338,6 +357,19 @@ function yearRows(year, yearTotals, quarters) {
     break;
   }
   const jan31 = rollIrs(ymd(year + 1, 1, 31));
+  if (yearTotals.employer > 0) {
+    // Waves' 2% is due by the due date of its tax return for the year, extensions included. April 15 is the
+    // unextended date (an extension moves the limit to October 15); the sooner date is the safe one.
+    rows.push({
+      source_key: `${SOURCE_PREFIX}simple_employer:${year}`,
+      filing_type: 'payroll_simple_employer',
+      title: `SIMPLE IRA 2% from Waves — Tax Year ${year}`,
+      period_label: `Tax Year ${year}`,
+      due_date: rollIrs(ymd(year + 1, 4, 15)),
+      amount_due: dollars(yearTotals.employer),
+      notes: 'Waves pays 2% of each participant\'s pay (up to the yearly pay limit) into their SIMPLE IRA. It is not taken from pay. Send it to Schwab by the due date of the Waves tax return for the year, extensions included (April 15 unextended, October 15 extended).',
+    });
+  }
   rows.push({
     source_key: `${SOURCE_PREFIX}940:${year}`,
     filing_type: 'payroll_940',
@@ -385,6 +417,7 @@ function hireRow(hire) {
 function payrollObligations({ checks = [], hires = [], today, remembered = [] }) {
   const { months, quarters, years } = totalsOf(checks, rememberedPeriods(remembered));
   const rows = [...months.values()].map(depositRow);
+  rows.push(...[...months.values()].filter((t) => t.simple > 0).map(simpleDepositRow));
   if (quarters.size) {
     for (const [year, q] of quarterSpan(quarters, today)) {
       rows.push(...quarterRows(year, q, quarters.get(quarterKey(year, q)) || { tax: 0, checks: [] }));
@@ -484,7 +517,7 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
     await trx.raw("SELECT pg_advisory_xact_lock(hashtext('payroll-tax-calendar'))");
     const checks = await trx('payroll_checks').where({ status: 'finalized' }).select(
       'id', trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"), ...DIGEST_COLUMNS, 'calc_snapshot',
-      'unemployment_exempt', 'unemployment_wages_cents',
+      'unemployment_exempt', 'unemployment_wages_cents', 'simple_deferral_cents', 'simple_employer_cents',
     );
     const hires = await trx('technicians')
       .where({ employment_type: 'w2' })

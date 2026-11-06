@@ -111,6 +111,11 @@ function normalize(row, wageBaseCents) {
     // GATE_PAYROLL_PAY_LINES: the employer HSA money (not wages) and the qualified overtime
     // the check stored (null on a check made with the gate off).
     hsaEmployer: num(row.hsa_employer_cents),
+    // SIMPLE IRA savings: in Social Security, Medicare and FUTA wages (gross) but not in W-2 box 1 or Form 941
+    // line 2. Null columns (no election behind the check) read as 0 and not a participant.
+    simpleDeferral: num(row.simple_deferral_cents),
+    simpleParticipant: row.simple_election_id != null,
+    incomeTaxWages: gross - num(row.simple_deferral_cents),
     qualifiedOvertime: row.qualified_overtime_cents == null ? null : num(row.qualified_overtime_cents),
     ssWages: Math.min(gross, max0(wageBaseCents - ytd)),
     addlMedicareWages: max0(ytd + gross - threshold) - max0(ytd - threshold),
@@ -163,6 +168,7 @@ function monthlyLiabilityLines(line12Cents, monthCents) {
 // Lines 2 to 12 of Form 941 for one quarter's checks.
 function quarterTaxes(quarterChecks) {
   const wages = sum(quarterChecks, 'gross');
+  const line2 = sum(quarterChecks, 'incomeTaxWages');
   const fit = sum(quarterChecks, 'fit');
   const ssWages = sum(quarterChecks, 'ssWages');
   const addlWages = sum(quarterChecks, 'addlMedicareWages');
@@ -180,7 +186,7 @@ function quarterTaxes(quarterChecks) {
   const employeeShare = pct(ssWages, RATES.socialSecurityBp) + pct(wages, RATES.medicareBp) + addlTax;
   const line7 = withheld - employeeShare;
   const line10 = line6 + line7;
-  return { wages, fit, ssWages, addlWages, ssTax, medicareTax, addlTax, line5e, line6, line7, line10, line12: line10 };
+  return { wages, line2, fit, ssWages, addlWages, ssTax, medicareTax, addlTax, line5e, line6, line7, line10, line12: line10 };
 }
 
 /**
@@ -239,13 +245,15 @@ function depositSchedule({ year, quarter, line12, priorQuarterLine12, lookbackCe
 
 function form941(year, quarter, quarterChecks, depositsCents, history, periodChecks) {
   const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
-  const { wages, fit, ssWages, addlWages, ssTax, medicareTax, addlTax, line5e, line6, line7, line10, line12 } = quarterTaxes(quarterChecks);
+  const { wages, line2, fit, ssWages, addlWages, ssTax, medicareTax, addlTax, line5e, line6, line7, line10, line12 } = quarterTaxes(quarterChecks);
   const line14 = max0(line12 - depositsCents);
   const line15 = max0(depositsCents - line12);
 
   const rows = [
     count('1', 'Number of employees who received wages, tips, or other compensation for the pay period including March 12, June 12, September 12, or December 12', employeesOnTwelfth(periodChecks, year, months[2])),
-    cents('2', 'Wages, tips, and other compensation', wages),
+    cents('2', 'Wages, tips, and other compensation', line2, line2 === wages ? undefined : {
+      note: 'Gross pay less SIMPLE IRA savings. The savings are still Social Security and Medicare wages (lines 5a and 5c).',
+    }),
     cents('3', 'Federal income tax withheld from wages, tips, and other compensation', fit),
     cents('5a', 'Taxable social security wages (column 1) and tax (column 2)', ssWages, { rate: pctText(2 * RATES.socialSecurityBp), value2: ssTax }),
     cents('5b', 'Taxable social security tips', 0, { rate: pctText(2 * RATES.socialSecurityBp), value2: 0 }),
@@ -464,12 +472,14 @@ function w2Figures(yearChecks, addresses, flsaCovered = new Map()) {
     const tt = checks.reduce((total, c) => total + (c.qualifiedOvertime == null ? legacyPremium(c) : c.qualifiedOvertime), 0);
     // Code W: the employer HSA money the checks hold, also after the gate is turned off.
     const hsa = sum(checks, 'hsaEmployer');
+    // Code S: the employee's SIMPLE IRA savings. Box 13 "Retirement plan": a participant in Waves' SIMPLE IRA.
+    const simple = sum(checks, 'simpleDeferral');
     return {
       technicianId,
       name: latest.name,
       address: addresses.get(technicianId) || null,
       ssn: FROM_RECORDS,
-      box1: sum(checks, 'gross'),
+      box1: sum(checks, 'incomeTaxWages'),
       box2: sum(checks, 'fit'),
       box3: sum(checks, 'ssWages'),
       box4: sum(checks, 'ssEmployee'),
@@ -477,6 +487,8 @@ function w2Figures(yearChecks, addresses, flsaCovered = new Map()) {
       box6: sum(checks, 'medicareEmployee') + sum(checks, 'addlMedicare'),
       box12TT: tt > 0 ? tt : null,
       ...(withLines || hsa > 0 ? { box12W: hsa > 0 ? hsa : null } : {}),
+      ...(simple > 0 ? { box12S: simple } : {}),
+      ...(checks.some((c) => c.simpleParticipant) ? { box13RetirementPlan: true } : {}),
       state: 'Florida has no state income tax: boxes 15 to 17 stay empty.',
     };
   });
@@ -558,6 +570,7 @@ const CHECK_COLUMNS = [
   'technician_id', 'employee_name', 'gross_cents', 'overtime_premium_cents', 'federal_income_tax_cents',
   'social_security_cents', 'medicare_cents', 'additional_medicare_cents', 'employer_social_security_cents',
   'employer_medicare_cents', 'futa_cents', 'fl_reemployment_cents', 'ytd_gross_before_cents', 'calc_snapshot',
+  'simple_election_id', 'simple_deferral_cents',
 ];
 
 // Paid deposit rows of layer 2 for one kind and a set of periods. A balance row

@@ -121,6 +121,17 @@ async function getServiceDiscountRules() {
   }
 }
 
+// A requires_multi_home discount passes when the profile itself has 2+ premises
+// (customers.has_multi_home) OR staff linked it into a "Same family" with 2+
+// active profiles (owner 2026-11-04). The family table is asked only when the
+// flag is not already true, so unrelated callers never touch it. The module is
+// required lazily so suites that mock this engine's neighbors are unaffected.
+async function customerMeetsMultiHome(customer, database) {
+  if (customer?.has_multi_home) return true;
+  if (!customer?.id) return false;
+  return require('./multi-home-family').familyMultiHomeEligible(database, customer.id);
+}
+
 const DiscountEngine = {
 
   /**
@@ -139,7 +150,7 @@ const DiscountEngine = {
     const customerId = customer?.id || null;
     if (discount.requires_military && !customer?.is_military) failures.push('military status');
     if (discount.requires_senior && !customer?.is_senior) failures.push('senior status');
-    if (discount.requires_multi_home && !customer?.has_multi_home) failures.push('multi-home status');
+    if (discount.requires_multi_home && !(await customerMeetsMultiHome(customer, database))) failures.push('multi-home status');
 
     if (discount.requires_waveguard_tier) {
       const tierOrder = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -261,7 +272,12 @@ const DiscountEngine = {
       : 0;
     const isNewCustomer = completedServices === 0;
 
-    // Filter eligible discounts
+    // Filter eligible discounts. The family lookup runs at most once per call.
+    let multiHomeEligible = null;
+    const meetsMultiHome = async () => {
+      if (multiHomeEligible === null) multiHomeEligible = await customerMeetsMultiHome(customer, db);
+      return multiHomeEligible;
+    };
     const eligible = [];
     for (const disc of allDiscounts) {
       // Skip tier discounts here. Invoices only apply them when the operator
@@ -278,7 +294,7 @@ const DiscountEngine = {
       // Eligibility checks
       if (disc.requires_military && !customer?.is_military) continue;
       if (disc.requires_senior && !customer?.is_senior) continue;
-      if (disc.requires_multi_home && !customer?.has_multi_home) continue;
+      if (disc.requires_multi_home && !(await meetsMultiHome())) continue;
       if (disc.requires_new_customer && !isNewCustomer) continue;
       if (disc.requires_referral && !isAssigned) continue;
       if (disc.requires_prepayment && !isAssigned) continue;
@@ -500,5 +516,8 @@ const DiscountEngine = {
 // same reasoning as admin-schedule.js's `_test` / invoice.js's
 // `_internals` exports elsewhere in this codebase.
 DiscountEngine._internals = { applyDiscountArithmetic };
+
+// The multi-home rule itself, for readers (the Multi-Home Discount job) that must not restate it.
+DiscountEngine.customerMeetsMultiHome = customerMeetsMultiHome;
 
 module.exports = DiscountEngine;

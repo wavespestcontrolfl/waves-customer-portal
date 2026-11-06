@@ -116,15 +116,19 @@ function pickTechResponseFields(tech, fields) {
   return out;
 }
 
+// What a technician may read about a coworker: name, role, status, photo and
+// the capability counts the Team tab shows (not PII). No phone, email, tech
+// line number or dates (owner 2026-11-04, "Own number only").
+const COWORKER_ROSTER_FIELDS = [
+  'id', 'name', 'role', 'active', 'employment_status', 'field_dispatchable', 'avatar_url',
+  'capability_summary',
+];
+
 // A technician reads the roster for names and status only: a coworker's phone
 // and email are office-only (owner 2026-10-30); the caller's own row keeps them.
 function sanitizeTechForNonAdmin(tech, viewerId) {
-  const out = pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
-  if (out && out.id !== viewerId) {
-    delete out.phone;
-    delete out.email;
-  }
-  return out;
+  if (tech && tech.id !== viewerId) return pickTechResponseFields(tech, COWORKER_ROSTER_FIELDS);
+  return pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
 }
 
 function sanitizeTechForAdmin(tech) {
@@ -226,10 +230,15 @@ function techSafeDailySummary(row) {
 router.get('/', requireTechOrAdmin, async (req, res, next) => {
   try {
     const today = etDateString(new Date());
+    // A technician sees its own clock state and hours only: no coworker's
+    // status, job type or daily hours (owner 2026-11-04, "Own hours only").
+    const ownOnly = !isAdminCaller(req);
+    const ownId = req.technicianId;
 
     // Active shifts
-    const activeShifts = await db('time_entries')
-      .where({ entry_type: 'shift', status: 'active' })
+    let shiftQuery = db('time_entries').where({ entry_type: 'shift', status: 'active' });
+    if (ownOnly) shiftQuery = shiftQuery.where('time_entries.technician_id', ownId);
+    const activeShifts = await shiftQuery
       .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
       .select(
         'time_entries.*',
@@ -254,8 +263,9 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
     }));
 
     // Today's daily summaries
-    const todaySummaries = await db('time_entry_daily_summary')
-      .where({ work_date: today })
+    let todayQuery = db('time_entry_daily_summary').where({ work_date: today });
+    if (ownOnly) todayQuery = todayQuery.where('time_entry_daily_summary.technician_id', ownId);
+    const todaySummaries = await todayQuery
       .leftJoin('technicians', 'time_entry_daily_summary.technician_id', 'technicians.id')
       .select('time_entry_daily_summary.*', 'technicians.name as tech_name');
 
@@ -265,9 +275,11 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
     const weekStartStr = etDateString(addETDays(now, mondayOffset));
 
-    const weekDailies = await db('time_entry_daily_summary')
+    let weekQuery = db('time_entry_daily_summary')
       .where('work_date', '>=', weekStartStr)
-      .where('work_date', '<=', today)
+      .where('work_date', '<=', today);
+    if (ownOnly) weekQuery = weekQuery.where('time_entry_daily_summary.technician_id', ownId);
+    const weekDailies = await weekQuery
       .leftJoin('technicians', 'time_entry_daily_summary.technician_id', 'technicians.id')
       .select('time_entry_daily_summary.*', 'technicians.name as tech_name');
 
@@ -278,9 +290,9 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
     // pay_rate stripped so they never see coworker wages.
     const techCols = ['id', 'name', 'role'];
     if (isAdminCaller(req)) techCols.push('pay_rate');
-    const activeTechs = await db('technicians')
-      .where({ active: true })
-      .select(techCols);
+    let techQuery = db('technicians').where({ active: true });
+    if (ownOnly) techQuery = techQuery.where('id', ownId);
+    const activeTechs = await techQuery.select(techCols);
     // Pull rates for any inactive tech that still has activity in
     // todaySummaries / weekDailies / activeShifts so labor-cost
     // calculations don't silently fall back to the $35 default. A
@@ -822,7 +834,12 @@ async function listTechnicians(req, res, next) {
     // (or a technician caller) = the response is exactly what it was.
     const hiredPacket = callerIsAdmin && featureGates.hiredPacketLive();
     const now = new Date();
-    const enriched = await Promise.all(techs.map(async (t) => {
+    // A technician sees active coworkers only: no prospective hires, no staff
+    // who left. Its own row always stays.
+    const visible = callerIsAdmin
+      ? techs
+      : techs.filter((t) => t.id === req.technicianId || t.employment_status === 'active');
+    const enriched = await Promise.all(visible.map(async (t) => {
       const row = {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
@@ -1743,6 +1760,29 @@ router.get('/service-lines', requireAdmin, async (req, res, next) => {
   }
 });
 
+const COVER_LINE_LABELS = { general: 'General pest', mosquito: 'Mosquito', rodent: 'Rodent', termite: 'Termite / WDO' };
+
+// The card as it will read after this save (stored rows with the request's entries laid over), and the refusal
+// text when a territory technician (a technician who owns ZIPs) would have no cover on a territory line; null
+// when every one has a cover or nobody owns a ZIP (territory.lacksCoverLines). The error names the lines, not ids.
+async function territoryCoverRefusal(trx, entries, stored) {
+  const territory = require('../services/territory');
+  const owners = await territory.territoryTechnicianIds(trx);
+  if (!owners.length) return null;
+  const after = new Map(stored);
+  for (const entry of entries) after.set(entry.service_category, entry);
+  const rows = [...after.values()];
+  for (const ownerId of owners) {
+    const lacking = await territory.lacksCoverLines(trx, ownerId, rows);
+    if (!lacking.length) continue;
+    const owner = await trx('technicians').where({ id: ownerId }).first('name');
+    const lines = lacking.map((line) => COVER_LINE_LABELS[line] || line);
+    const list = lines.length > 1 ? `${lines.slice(0, -1).join(', ')} and ${lines[lines.length - 1]}` : lines[0];
+    return `${list} ${lines.length > 1 ? 'need' : 'needs'} a cover technician besides ${(owner && owner.name) || 'the territory technician'}: set a home or gap technician`;
+  }
+  return null;
+}
+
 router.put('/service-lines', requireAdmin, async (req, res, next) => {
   try {
     if (serviceLinesOff(res)) return undefined;
@@ -1768,6 +1808,9 @@ router.put('/service-lines', requireAdmin, async (req, res, next) => {
           if (tech.employment_status === 'inactive' && !unchanged) return { error: 'That technician is no longer active' };
         }
       }
+      // GATE_TERRITORY_ROUTING (owner 2026-10-30): a technician who owns ZIPs needs a cover on every territory line.
+      const coverError = await territoryCoverRefusal(trx, entries, stored);
+      if (coverError) return { error: coverError };
       for (const entry of entries) {
         await trx('service_line_techs')
           .insert({ ...entry, updated_by: req.technicianId || null, updated_at: trx.fn.now() })

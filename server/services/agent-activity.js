@@ -530,11 +530,16 @@ async function loadDigestRows(db, since, focusId) {
 // Rows routed to Claude's queue (metadata.claudeQueue). Same two windows as the digest rows: every open one
 // (not done, not resolved) however old, so a standing fault stays visible, plus the ones created, closed or
 // resolved inside the window. The focus id also loads one routed row whatever its age.
-async function loadClaudeQueueRows(db, since, focusId) {
-  const base = () => db('notifications')
-    .select(...DIGEST_COLUMNS, db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
-    .where({ recipient_type: 'admin' })
-    .whereRaw("COALESCE(metadata->>'claudeQueue', '') <> ''");
+async function loadClaudeQueueRows(db, since, focusId, fullAccess = false) {
+  // An owner-only row (an idea sent to Claude, metadata.ownerOnly) is left out of every read below, the focus read
+  // included, unless the caller is the owner login.
+  const base = () => {
+    const query = db('notifications')
+      .select(...DIGEST_COLUMNS, db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
+      .where({ recipient_type: 'admin' })
+      .whereRaw("COALESCE(metadata->>'claudeQueue', '') <> ''");
+    return fullAccess ? query : query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+  };
   const open = await base()
     .whereNull('done_at')
     .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
@@ -558,7 +563,7 @@ async function loadClaudeQueueRows(db, since, focusId) {
   return rows;
 }
 
-async function loadRows(windowHours, focusId) {
+async function loadRows(windowHours, focusId, fullAccess = false) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000);
   // Only a MISSING table (Postgres 42P01 — a ledger not yet migrated on
   // this deployment) degrades to an empty source, reported back as
@@ -621,7 +626,7 @@ async function loadRows(windowHours, focusId) {
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
     safe('notifications', () => loadDigestRows(db, since, focusId)),
-    safe('notifications', () => loadClaudeQueueRows(db, since, focusId)),
+    safe('notifications', () => loadClaudeQueueRows(db, since, focusId, fullAccess)),
   ]);
   // Approvals (any status — a terminal one tells us a pending-review run
   // was decided): every row on a loaded run, PLUS any still awaiting that
@@ -651,10 +656,10 @@ async function loadRows(windowHours, focusId) {
   return { runs: runs.concat(stragglers), approvals, drafts, jobs, digests, claudeQueue, unavailable };
 }
 
-async function getActivity({ windowHours, focus } = {}) {
+async function getActivity({ windowHours, focus, fullAccess = false } = {}) {
   if (gateEnvValue('GATE_AGENT_ACTIVITY') !== true) return { available: false, items: [], agents: [], summary: summarize([]) };
   const hours = clampWindowHours(windowHours);
-  const rows = await loadRows(hours, focus || null);
+  const rows = await loadRows(hours, focus || null, fullAccess === true);
   const feed = buildActivity(rows);
   return {
     available: true,

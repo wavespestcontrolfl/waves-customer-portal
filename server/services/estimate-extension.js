@@ -660,7 +660,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
           month: 'long', day: 'numeric', timeZone: 'America/New_York',
         });
-        // GATE_ESTIMATE_EMAIL_PDF: the PDF copy rides along (empty = as before).
+        // The PDF copy rides along (empty = as before).
         const pdfCopy = await require('./estimate-email-pdf').openEstimateEmailPdf({
           estimateId: estimate.id, templateKey: 'estimate.extended', validThrough: newExpiry, recipient: estimate.customer_email,
         });

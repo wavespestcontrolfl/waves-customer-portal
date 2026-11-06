@@ -22,6 +22,8 @@ jest.mock('../services/review-request', () => ({
   REVIEW_AFTER_REPORT_DELAY_MINUTES: 10,
   customerNeverAskedForReview: jest.fn(),
   firstAskLockVisit: jest.fn(),
+  alreadyReviewedForVisit: jest.fn(),
+  firstAskOptOutReasons: jest.fn(() => ['complaint_on_site', 'already_left_review']),
   __private: { reviewCadenceTickMinutes: () => [14, 44], LEGACY_REVIEW_TICK_MINUTES: [0, 15, 30, 45], calculateReviewSendPlan: jest.fn() },
 }));
 jest.mock('../services/google-business', () => ({}));
@@ -42,6 +44,7 @@ afterEach(() => { if (gateWas === undefined) delete process.env.GATE_REVIEW_FIRS
 beforeEach(() => {
   ReviewService.customerNeverAskedForReview.mockReset().mockResolvedValue(true);
   ReviewService.firstAskLockVisit.mockReset().mockResolvedValue({ customer_id: 'cust-1' });
+  ReviewService.alreadyReviewedForVisit.mockReset().mockResolvedValue(null);
 });
 
 async function preview(query) {
@@ -107,3 +110,41 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ASK_AT_VISIT', (
     expect((await preview({ serviceType: 'Pest' })).askAtVisit).toBe(true);
   });
 });
+
+// GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): with a visit named, the preview also says whether the customer is
+// marked as already reviewed and which off reasons a first ask may carry. Gate off, or no visit named: both keys absent.
+describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ALREADY_REVIEWED', () => {
+  const alreadyWas = process.env.GATE_REVIEW_ALREADY_REVIEWED;
+  afterEach(() => { if (alreadyWas === undefined) delete process.env.GATE_REVIEW_ALREADY_REVIEWED; else process.env.GATE_REVIEW_ALREADY_REVIEWED = alreadyWas; });
+
+  test('gate off: no alreadyReviewed or firstAskReasons key, and the reader is never asked', async () => {
+    delete process.env.GATE_REVIEW_ALREADY_REVIEWED;
+    const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
+    expect(out).not.toHaveProperty('alreadyReviewed');
+    expect(out).not.toHaveProperty('firstAskReasons');
+    expect(ReviewService.alreadyReviewedForVisit).not.toHaveBeenCalled();
+  });
+
+  test('gate on, no visit named: neither key', async () => {
+    process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
+    const out = await preview({ serviceType: 'Pest' });
+    expect(out).not.toHaveProperty('alreadyReviewed');
+    expect(out).not.toHaveProperty('firstAskReasons');
+  });
+
+  test('gate on, a marked customer: the mark with its date, and both off reasons', async () => {
+    process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
+    ReviewService.alreadyReviewedForVisit.mockResolvedValue({ reviewedOn: '2025-01-01' });
+    const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
+    expect(out.alreadyReviewed).toEqual({ reviewedOn: '2025-01-01' });
+    expect(out.firstAskReasons).toEqual(['complaint_on_site', 'already_left_review']);
+    expect(ReviewService.alreadyReviewedForVisit).toHaveBeenCalledWith('svc-1');
+  });
+
+  test('gate on, a customer not marked: alreadyReviewed null (the key is there)', async () => {
+    process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
+    const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
+    expect(out).toHaveProperty('alreadyReviewed', null);
+  });
+});
+

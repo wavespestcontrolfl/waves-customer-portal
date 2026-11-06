@@ -154,6 +154,14 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
+// Access codes and free-text access notes. The visit card (schedule feed) is the only place a technician sees
+// them (owner 2026-10-05, 2026-11-04); Customer 360 reaches any customer with a visit from 7 days back to any
+// future date, so it never carries them to a technician.
+const TECH_360_STRIPPED_PREFERENCE_FIELDS = [
+  'property_gate_code', 'neighborhood_gate_code', 'garage_code', 'lockbox_code',
+  'side_gate_access', 'parking_notes', 'access_notes',
+];
+
 // Technician Customer 360 is a field-context view, not a raw database-row
 // export. Keep the service-history fields its three live consumers render and
 // exclude report credentials plus the job-cost columns on service_records.
@@ -288,7 +296,10 @@ function techSafe360Payload(payload) {
   // Away Watch (GATE_AWAY_WATCH): the leave and back days say when a home stands empty. The assigned visit's job card
   // carries what the tech needs ("member away until ..."), so the 360 view never shows the window to a technician.
   delete out.awayWatchEnabled;
-  if (payload.preferences) out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
+  if (payload.preferences) {
+    out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
+    for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) delete out.preferences[field];
+  }
   out.services = (payload.services || []).map(techSafeServiceRecord);
   out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
   out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
@@ -3064,6 +3075,33 @@ router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, 
     // authoritative save waives).
     const keys = await loadExistingQualifyingServiceKeys(db, req.params.id, { strict: true, planGate: false });
     res.json({ keys: Array.isArray(keys) ? keys : [] });
+  } catch (err) { next(err); }
+});
+
+// "Same family" link (owner 2026-11-04): staff group customer profiles so the 10% Multi-Home Discount counts them as one
+// family. It never writes customers.has_multi_home, sends nothing and changes no price. Admin only.
+router.get('/:id/multi-home-family', requireAdmin, async (req, res, next) => {
+  try {
+    const family = require('../services/multi-home-family');
+    if (!family.isUuid(req.params.id)) return res.status(400).json({ error: 'Invalid customer id' });
+    return res.json(await family.familyMembers(db, req.params.id));
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/multi-home-family', requireAdmin, async (req, res, next) => {
+  try {
+    const family = require('../services/multi-home-family');
+    const otherCustomerId = req.body?.otherCustomerId;
+    if (!family.isUuid(req.params.id) || !family.isUuid(otherCustomerId)) return res.status(400).json({ error: 'otherCustomerId must be a customer id' });
+    return res.json(await family.linkFamily(db, { customerId: req.params.id, otherCustomerId, actorId: req.technicianId }));
+  } catch (err) { next(err); }
+});
+
+router.delete('/:id/multi-home-family', requireAdmin, async (req, res, next) => {
+  try {
+    const family = require('../services/multi-home-family');
+    if (!family.isUuid(req.params.id)) return res.status(400).json({ error: 'Invalid customer id' });
+    return res.json(await family.unlinkFamily(db, { customerId: req.params.id, actorId: req.technicianId }));
   } catch (err) { next(err); }
 });
 
@@ -7137,6 +7175,7 @@ router._private = {
   TECH_LIST_STRIPPED_FIELDS,
   TECH_360_STRIPPED_KEYS,
   TECH_360_STRIPPED_CUSTOMER_FIELDS,
+  TECH_360_STRIPPED_PREFERENCE_FIELDS,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,

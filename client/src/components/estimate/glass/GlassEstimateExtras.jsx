@@ -200,17 +200,18 @@ export function GlassStickyBookBar({ show = false, slotMeta, onApprove }) {
  * when, with the license line. Initials avatar (no committed headshot asset
  * yet — plan defers the real photo).
  */
-export function GlassTechChip({ slotMeta, techName = 'Adam', licenseNumber }) {
+export function GlassTechChip({ slotMeta, licenseNumber }) {
   if (!slotMeta) return null;
-  // The availability payload names the slot's real technician — the default
-  // only covers legacy slots with no tech attached.
-  const name = slotMeta.techFirstName || techName;
+  // The availability payload names the slot's real technician. A slot with no
+  // technician attached names no one: with two technicians a default name
+  // could be the wrong person.
+  const name = slotMeta.techFirstName || null;
   return (
     <div className="gc-tech-chip">
-      <span className="gc-tc-avatar" aria-hidden="true">{name.charAt(0)}</span>
+      {name ? <span className="gc-tc-avatar" aria-hidden="true">{name.charAt(0)}</span> : null}
       <span>
         <strong style={{ color: '#04395E' }}>
-          Your technician: {name} — {slotMeta.dow} {slotMeta.time}
+          {name ? `Your technician: ${name}` : 'Your technician'} — {slotMeta.dow} {slotMeta.time}
         </strong>
         {licenseNumber ? <> · Licensed &amp; insured, FL {licenseNumber}</> : null}
       </span>

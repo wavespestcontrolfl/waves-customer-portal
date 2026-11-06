@@ -9,7 +9,10 @@ const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), socketEvent: null }))
 vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mocks.socketEvent = callback; }, off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'pest-recap-v1', useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: ({ inlineScheduleChanges, placement }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement} /> }));
+vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: ({ inlineScheduleChanges, placement, onReplySending }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement}>
+  <button onClick={() => onReplySending(true)}>Card reply sending</button>
+  <button onClick={() => onReplySending(false)}>Card reply settled</button>
+</div> }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
     <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
@@ -35,6 +38,8 @@ vi.mock('./VisitBriefPanel', () => ({ default: ({ stop, detail, onRetry, onPhoto
   <button onClick={() => onPhotos(stop.primary)}>Service photos</button>
   <button onClick={() => onBusyChange(true)}>Start contact action</button>
 </div> }));
+vi.mock('../admin/SchedulePage', () => ({ ProtocolPanel: ({ service, onClose }) => <div data-testid="job-card-panel" data-service-id={service.id}><button onClick={onClose}>Close job card</button></div> }));
+vi.mock('../../components/admin/PushSettingsV2', () => ({ default: () => <div>Push settings fixture</div> }));
 import TechHomePage from './TechHomePage';
 
 const row = (id, overrides = {}) => ({ id, technicianId: 'tech-fixture', customerName: `Fixture ${id}`, address: '100 Example Lane', serviceType: 'Lawn care', scheduledDate: '2099-01-01', status: 'confirmed', windowStart: '09:00:00', windowEnd: '10:00:00', ...overrides });
@@ -110,6 +115,33 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(await screen.findByText('Call about service access')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Done', exact: true })).toBeInTheDocument();
     expect(await screen.findByText('Route connection unavailable')).toBeInTheDocument();
+  });
+
+  it('opens the job card for the selected visit from the Today visit, and closes it', async () => {
+    mount('/admin/today?visit=row%3Atwo');
+    expect(await screen.findByText('Property brief for two')).toBeInTheDocument();
+    expect(screen.queryByTestId('job-card-panel')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Job card' }));
+    expect(await screen.findByTestId('job-card-panel')).toHaveAttribute('data-service-id', 'two');
+    fireEvent.click(screen.getByRole('button', { name: 'Close job card' }));
+    expect(screen.queryByTestId('job-card-panel')).not.toBeInTheDocument();
+  });
+
+  it('keeps the alert settings closed on More until opened, and opens them at the bell link (#notifications)', async () => {
+    mount('/admin/today/more');
+    fireEvent.click(await screen.findByRole('button', { name: 'Alert settings' }));
+    expect(await screen.findByText('Push settings fixture')).toBeInTheDocument();
+    cleanup();
+    mount('/admin/today/more');
+    expect(screen.queryByText('Push settings fixture')).not.toBeInTheDocument();
+    cleanup();
+    window.location.hash = '#notifications';
+    try {
+      mount('/admin/today/more');
+      expect(await screen.findByText('Push settings fixture')).toBeInTheDocument();
+    } finally {
+      window.location.hash = '';
+    }
   });
 
   it('opens a selected stop and sends arrival and photos to that service, even when it is not first', async () => {
@@ -284,6 +316,16 @@ describe('Tech field workspace uses the existing route workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start contact action' }));
     expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true);
     expect(screen.getByRole('button', { name: 'Today' })).toBeDisabled();
+  });
+
+  // Codex #7611 r1: a Reply sending from a Today text card holds navigation like the visit's own text.
+  it('holds navigation while a text card Reply is sending', async () => {
+    mount();
+    expect(await screen.findByText('Fixture one')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Card reply sending' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Card reply settled' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(false));
   });
 
   it('uses the navigation lock while the create report has unpersisted photos', async () => {

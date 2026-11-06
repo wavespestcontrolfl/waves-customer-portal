@@ -12,6 +12,7 @@
  *                                  call/text from the line (routes/tech-line.js)
  *   - notifyTechLineText(...)    → tech-home card + one-line push for an
  *                                  inbound text on the line
+ *   - replyVisitFor(...)         → the visit the card's Reply texts through
  *
  * Gate: the registry answers `type: 'tech_line'` only while GATE_TECH_LINES is
  * on, and the webhooks key on that type, so this module re-reads the gate only
@@ -124,11 +125,56 @@ async function lineForTechnician(technicianId, { strict = false } = {}) {
   }
 }
 
+// GATE_TECH_LOGIN_PRIVACY: the card and the push name the matched customer only
+// when that customer is on the holder's own route (the same rule the
+// Communications routes use). Any other match shows the formatted number. The
+// text itself stays: the person texted this line. Gate off = today's behavior.
+// Fails closed: a failed lookup counts as "not on the route".
+async function customerForCard(tech, customer) {
+  if (!customer || !require('../config/feature-gates').techLoginPrivacyLive?.()) return customer;
+  try {
+    const { technicianServicesCustomer } = require('./technician-visit-scope');
+    return (await technicianServicesCustomer({ techRole: 'technician', technicianId: tech.id }, customer.id)) ? customer : null;
+  } catch (err) {
+    logger.warn(`[tech-line] route check failed for technician ${tech.id} (${errorTag(err)})`);
+    return null;
+  }
+}
+
+// The card's Reply (TechNoticeFeed) sends POST /api/tech/line/sms, which texts
+// the VISIT's customer at the phone on file. So the card names a visit only
+// when that phone is the one that texted (a Reply answers the sender) and the
+// visit is one of the holder's own, in the route's scope
+// (technicianCurrentVisitFilter): today's or the nearest one. A read error
+// gives no Reply; the card itself still shows.
+function phoneOnFileTexted(customer, from) {
+  const onFile = toE164(customer?.phone || '');
+  return isLikelyE164(onFile) && onFile === toE164(from || '');
+}
+
+async function replyVisitFor(technicianId, customer, from) {
+  if (!customer?.id || !phoneOnFileTexted(customer, from)) return null;
+  try {
+    const { technicianCurrentVisitFilter } = require('./technician-visit-scope');
+    const { etDateString } = require('../utils/datetime-et');
+    const visit = await technicianCurrentVisitFilter(
+      { techRole: 'technician', technicianId },
+      db('scheduled_services').where({ customer_id: customer.id }),
+    ).orderByRaw('ABS(scheduled_date - ?::date), scheduled_date', [etDateString()]).first('id');
+    return visit?.id || null;
+  } catch (err) {
+    logger.warn(`[tech-line] reply visit lookup failed for technician ${technicianId} (${errorTag(err)})`);
+    return null;
+  }
+}
+
 // One tech_notifications card (kept until the tech taps "Got it") + one
 // best-effort push. Returns true when the card was written.
-async function notifyTechLineText({ lineNumber, from, body, customer = null, mediaCount = 0 }) {
+async function notifyTechLineText({ lineNumber, from, body, customer: matchedCustomer = null, mediaCount = 0 }) {
   const tech = await technicianForLine(lineNumber);
   if (!tech) return false;
+  const customer = await customerForCard(tech, matchedCustomer);
+  const replyVisitId = await replyVisitFor(tech.id, customer, from);
   const senderName = customer
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || displayPhone(from)
     : displayPhone(from);
@@ -148,6 +194,7 @@ async function notifyTechLineText({ lineNumber, from, body, customer = null, med
         customer_name: senderName,
         body: text.slice(0, CARD_BODY_CHARS),
         media_count: mediaCount,
+        reply_visit_id: replyVisitId,
       }),
     });
   } catch (err) {
@@ -178,5 +225,7 @@ module.exports = {
   techLineContext,
   usableCell,
   notifyTechLineText,
+  phoneOnFileTexted,
+  replyVisitFor,
   _test: { displayPhone },
 };

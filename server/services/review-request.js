@@ -8414,7 +8414,7 @@ async function firstAskLockVisit(serviceId, database = db) {
 }
 
 // GATE_REVIEW_FIRST_ASK_LOCK, the rule for a saved review choice: with the gate on and a
-// never-asked customer, "no ask" is honored ONLY with the "Complaint on site" reason; any other
+// never-asked customer, "no ask" is honored ONLY with one of the off reasons below; any other
 // "no ask" stays an ask. Returns null when the lock does not apply (gate off, or the customer
 // was asked before, is marked reviewed or cannot be read): the caller's choice stands as it was.
 // Otherwise { requestReview, forcedOn, optOutReason }. The one place the rule lives: the
@@ -8422,12 +8422,50 @@ async function firstAskLockVisit(serviceId, database = db) {
 // PUT /admin/schedule/:id/status keeps the posted choice: no UI completes through it, and it
 // carries no reason and saves no review decision.
 const FIRST_ASK_OPT_OUT_REASON = "complaint_on_site";
+// GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): the second off reason. The completion that saves it
+// also marks the customer as reviewed, so no later visit asks again.
+const ALREADY_LEFT_REVIEW_REASON = "already_left_review";
+// The off reasons the lock honors now, in the order the completion panel offers them.
+function firstAskOptOutReasons() {
+  return require("../config/feature-gates").reviewAlreadyReviewedLive()
+    ? [FIRST_ASK_OPT_OUT_REASON, ALREADY_LEFT_REVIEW_REASON]
+    : [FIRST_ASK_OPT_OUT_REASON];
+}
 async function firstAskLockChoice({ customerId, requestReview, optOutReason }, database = db) {
   if (!require("../config/feature-gates").reviewFirstAskLockLive()) return null;
   if (!(await customerNeverAskedForReview(customerId, database))) return null;
   if (requestReview !== false) return { requestReview: true, forcedOn: false, optOutReason: null };
-  const reasoned = optOutReason === FIRST_ASK_OPT_OUT_REASON;
-  return { requestReview: !reasoned, forcedOn: !reasoned, optOutReason: reasoned ? FIRST_ASK_OPT_OUT_REASON : null };
+  const reasoned = firstAskOptOutReasons().includes(optOutReason);
+  return { requestReview: !reasoned, forcedOn: !reasoned, optOutReason: reasoned ? optOutReason : null };
+}
+
+// GATE_REVIEW_ALREADY_REVIEWED: the completion panel's "Already left a Google review" box. The visit's
+// customer is marked customers.has_left_google_review (the mark every review ask skips on, "already_reviewed"):
+// { reviewedOn } with the Eastern date of the newest linked live Google review, else the day the mark was set
+// (null when neither is known). null when the customer is not marked, the visit is unknown or a read fails:
+// the panel then shows today's box.
+async function alreadyReviewedForVisit(serviceId, database = db) {
+  if (!serviceId) return null;
+  try {
+    return await require("../utils/savepoint-read").savepointRead(database, async (conn) => {
+      const customer = await conn("scheduled_services as s")
+        .join("customers as c", "c.id", "s.customer_id")
+        .where("s.id", serviceId)
+        .first("c.id", "c.has_left_google_review", "c.review_marked_at");
+      if (!customer || customer.has_left_google_review !== true) return null;
+      const review = await conn("google_reviews")
+        .where({ customer_id: customer.id })
+        .whereNull("missing_since")
+        .whereNotNull("review_created_at")
+        .orderBy("review_created_at", "desc")
+        .first("review_created_at");
+      const at = review?.review_created_at || customer.review_marked_at || null;
+      return { reviewedOn: at ? etDateString(new Date(at)) : null };
+    });
+  } catch (err) {
+    logger.warn(`[review-request] already-reviewed read failed for ${serviceId}: ${err.message}`);
+    return null;
+  }
 }
 
 ReviewService.__private = {
@@ -8461,6 +8499,9 @@ ReviewService.customerNeverAskedForReview = customerNeverAskedForReview;
 ReviewService.firstAskLockVisit = firstAskLockVisit;
 ReviewService.firstAskLockChoice = firstAskLockChoice;
 ReviewService.FIRST_ASK_OPT_OUT_REASON = FIRST_ASK_OPT_OUT_REASON;
+ReviewService.ALREADY_LEFT_REVIEW_REASON = ALREADY_LEFT_REVIEW_REASON;
+ReviewService.firstAskOptOutReasons = firstAskOptOutReasons;
+ReviewService.alreadyReviewedForVisit = alreadyReviewedForVisit;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 
 // The review page reads the same delivered-ask evidence the sender trusts.

@@ -191,6 +191,18 @@ test('an ACCOUNT-WIDE push (Billing) for the current profile needs only the prof
   expect(document.body.textContent).not.toMatch(/no longer available/);
 });
 
+test('a Messages link (a portal reply push or email) for the current profile needs only the profile', async () => {
+  window.history.replaceState({}, '', '/?tab=messages&notificationProperty=property-1');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    properties: [{ id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false }],
+    propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  expect(await screen.findByText('Authorized property portal')).toBeInTheDocument();
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toMatch(/no longer available/);
+});
+
 test('a PROPERTY-scoped push (Visits) for the same profile with a retired primary still fails closed', async () => {
   window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1');
   state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },

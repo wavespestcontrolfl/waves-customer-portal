@@ -122,6 +122,32 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   };
 }
 
+// A technician's copy of a tech-visible alert whose trigger names `techOmit` payload keys (call content a technician
+// never sees): the trigger is built again from its payload without those keys. The push to a technician and the bell
+// list a technician reads both use it; an admin's copy is unchanged. Null = the trigger names no techOmit keys.
+function technicianCopy(triggerKey, payload) {
+  const trigger = TRIGGER_REGISTRY[triggerKey];
+  if (!trigger?.techOmit?.length) return null;
+  const techPayload = { ...(payload || {}) };
+  for (const key of trigger.techOmit) delete techPayload[key];
+  const built = sanitizeBuiltNotification(trigger.build(techPayload), trigger);
+  return { title: built.title, body: built.body, payload: techPayload };
+}
+
+// The stored bell row as a technician reads it (NotificationService.getAdminNotifications). A row whose trigger
+// names techOmit keys is rebuilt from its stored payload; one with no stored payload keeps its title and loses its
+// body (fail closed). Every other row is returned as stored.
+function technicianRowCopy(row) {
+  let meta = row?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  if (!TRIGGER_REGISTRY[meta?.triggerKey]?.techOmit?.length) return row;
+  if (!meta.payload) return { ...row, body: null };
+  const copy = technicianCopy(meta.triggerKey, meta.payload);
+  return { ...row, title: copy.title, body: copy.body, metadata: { ...meta, payload: copy.payload } };
+}
+
 // A call alert opens the call it is about: the Calls tab reads
 // #tab=calls&call=<call_log id> (CallLogTabV2 pins a call outside its loaded
 // window). No id in the payload keeps the bare tab.
@@ -476,6 +502,24 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=messenger',
     }),
   },
+  // The phone banner for a new-lead email (GATE_RING_NEW_CONTACTS, bell-banners.js kind new_lead_email, owner 2026-11-04
+  // "ring new"). The bell row is the plain 'new_lead' category row email-actions.js already writes, which carries no
+  // triggerKey of its own (the writer names this kind with notifyAdmin's bannerKind), so no sweep closes it and its
+  // rule is the retention expiry. `build` takes the written row's own words as alertTitle/alertBody/alertLink.
+  // Admin-only like the lead bell.
+  new_lead_email: {
+    label: 'New lead email banner',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'New lead from email',
+      body: p.alertBody || 'Open the email to read it and reply.',
+      link: p.alertLink || '/admin/email',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a
@@ -539,6 +583,9 @@ const TRIGGER_REGISTRY = {
   customer_voicemail_callback: {
     // Tech-visible: links to a day-to-day surface (comms) a field tech works in.
     techVisible: true,
+    // What the caller asked about is call content: a technician's copy leaves it out (owner 2026-11-04, technician
+    // visibility D1 A: no call words on technician screens). See technicianCopy.
+    techOmit: ['service'],
     label: 'Voicemail needs callback',
     category: 'voicemail_callback',
     priority: 'high',
@@ -792,7 +839,7 @@ const TRIGGER_REGISTRY = {
     rule: { area: 'System', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: 'Service report link unavailable — completion text withheld',
-      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the tech portal.`,
+      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the visit on Today.`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -812,7 +859,7 @@ const TRIGGER_REGISTRY = {
       title: 'Completion text not delivered',
       body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
         ? 'The closeout finalized without it; retrying the closeout will not re-send — fix the cause first (a bad number on file, an inactive template).'
-        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the tech portal.'}`,
+        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the visit on Today.'}`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -1207,14 +1254,33 @@ const TRIGGER_REGISTRY = {
     group: 'Alerts',
     rule: { area: 'System', severity: 'fyi', who: 'person', expiryDays: 7 },
     build: (p) => {
+      // count = unread waiting items (owner 2026-11-04 "fix count"); total = every waiting item, read or not.
       const count = Number(p.count) || 0;
+      const total = Number(p.total) || 0;
       const areas = (Array.isArray(p.areas) ? p.areas : []).slice(0, 3);
+      const parts = [...areas.map((a) => `${a.area} ${a.count}`), ...(total > count ? [`${total} open in all`] : [])];
       return {
         title: count === 1 ? '1 item waits for you' : `${count} items wait for you`,
-        body: areas.map((a) => `${a.area} ${a.count}`).join(' \u00b7 ') || null,
+        body: parts.join(' \u00b7 ') || null,
         link: '/admin/dashboard?bell=open',
       };
     },
+  },
+  // The owner's 7 PM open-visit nudge as a phone banner (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04 "banner"): the same words
+  // the text carries, a tap opens the tech close-out page. services/tech-open-visit-nudge.js sends it pushOnly to the owner's
+  // own admin user, so it writes no bell row (rule: fyi) and the owner can switch it off in Push Settings. p = { headline,
+  // lines: [visit line], day }; the nudge module builds the words (customer first name + last initial only).
+  open_visits_nudge: {
+    label: 'Evening nudge: visits still open',
+    category: 'alert',
+    priority: 'normal',
+    group: 'Alerts',
+    rule: { area: 'Schedule', severity: 'fyi', who: 'person', expiryDays: 7 },
+    build: (p) => ({
+      title: String(p.headline || 'Visits are still open'),
+      body: ['Tap to close out.', ...(Array.isArray(p.lines) ? p.lines : []).map(String)].join('\n'),
+      link: '/tech',
+    }),
   },
 };
 
@@ -1329,6 +1395,10 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'waiting_summary') {
     return `waves-waiting_summary-${payload.day || 'unknown-day'}`;
   }
+  // One nudge banner per technician-day claim: a repeat replaces the same day's banner, tomorrow's never replaces today's.
+  if (triggerKey === 'open_visits_nudge') {
+    return `waves-open_visits_nudge-${payload.day || 'unknown-day'}`;
+  }
   return `waves-${triggerKey}`;
 }
 
@@ -1358,7 +1428,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1406,11 +1476,19 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       // adminOnly: a caller that sends the owner a banner (bell-banners.js) skips technicians even for a techVisible type.
       if (!trigger.techVisible || adminOnly) recipientQuery = recipientQuery.where({ role: 'admin' });
       activeAdmins = await recipientQuery.select('id', 'role');
+      // onlyUserIds: a banner meant for named users (the owner's open-visit nudge) reaches only them; null = everyone.
+      if (Array.isArray(onlyUserIds)) {
+        const wanted = new Set(onlyUserIds.map(String));
+        activeAdmins = activeAdmins.filter((u) => wanted.has(String(u.id)));
+      }
       // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
       // for a customer on its own route (technicianServicesCustomer, the rule the
-      // Communications routes use). No customer on the event = today's routing.
+      // Communications routes use). An event with no customer is the office's
+      // (owner 2026-11-04; the bell's scopeAdminFeedToRole rule): no technician.
       const scopeCid = demoCid || payload?.scopeCustomerId;
-      if (require('../config/feature-gates').techLoginPrivacyLive?.() && scopeCid && activeAdmins.some((u) => u.role === 'technician')) {
+      if (require('../config/feature-gates').techLoginPrivacyLive?.() && !scopeCid) {
+        activeAdmins = activeAdmins.filter((u) => u.role !== 'technician');
+      } else if (require('../config/feature-gates').techLoginPrivacyLive?.() && activeAdmins.some((u) => u.role === 'technician')) {
         const { technicianServicesCustomer } = require('./technician-visit-scope');
         const own = await Promise.all(activeAdmins.map(async (u) => {
           if (u.role !== 'technician') return true;
@@ -1669,14 +1747,17 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           })
           : null;
         const adminRoleIds = new Set(activeAdmins.filter((u) => u.role === 'admin').map((u) => u.id));
+        const techCopy = technicianCopy(triggerKey, payload);
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
             const wantsSound = wantsSoundByUser.get(adminUserId);
             const badgeInfo = badgeByUser.get(adminUserId);
+            // A technician recipient gets its own copy when the trigger names techOmit keys.
+            const shown = techCopy && !adminRoleIds.has(adminUserId) ? techCopy : built;
             return {
-              title: built.title,
-              body: built.body,
+              title: shown.title,
+              body: shown.body,
               url: built.link || '/admin',
               // promise_chaser: the push tag IS the bell's own dedupeKey
               // (already 'waves-promise_chaser-<commitment>-<ET day>') so a
@@ -1736,6 +1817,8 @@ module.exports = {
   listTriggers,
   defaultPreference,
   TRIGGER_REGISTRY,
+  technicianCopy,
+  technicianRowCopy,
   __private: {
     maskEmail,
     maskPhone,

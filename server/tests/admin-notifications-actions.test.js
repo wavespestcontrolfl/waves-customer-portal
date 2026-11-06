@@ -7,6 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   getAdminNotifications: jest.fn(async () => [{ id: '00000000-0000-4000-8000-0000000000a1', title: 'Customers — confirm Ames Fenn\'s referrer', created_at: '2026-10-29T12:00:00Z' }]),
+  isAdminOwnerOnly: jest.fn(async () => false),
 }));
 jest.mock('../services/push-notifications', () => ({ status: jest.fn(() => ({ available: true, configured: true })) }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn(async () => ({ alerts: [] })) }));

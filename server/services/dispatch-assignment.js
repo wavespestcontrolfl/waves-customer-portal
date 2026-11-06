@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const { getIo } = require('../sockets');
+const { pingTechnicianRooms } = require('../sockets/tech-rooms');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
@@ -104,7 +105,12 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
   };
 }
 
-async function emitDispatchJobUpdate({ jobId, actorId, previousDate, qualityDates = null }) {
+// `previousTechnicianId`: the technician who held the visit before this change
+// (null = it was unassigned). A caller that reassigns passes it so the old
+// technician's own screen hears the stop left. Left out (undefined), the emit
+// point cannot tell, so with GATE_TECH_LOGIN_PRIVACY on every other connected
+// technician room gets a ping with no payload (sockets/tech-rooms.js).
+async function emitDispatchJobUpdate({ jobId, actorId, previousDate, previousTechnicianId, qualityDates = null }) {
   const payload = await buildDispatchJobUpdatePayload(jobId, actorId);
   if (!payload) return null;
 
@@ -113,6 +119,13 @@ async function emitDispatchJobUpdate({ jobId, actorId, previousDate, qualityDate
     logger.warn('[dispatch-assignment] io not initialized; skipping dispatch:job_update');
   } else {
     io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
+    // GATE_TECH_LOGIN_PRIVACY: ADMIN_ROOM is office-only with the gate on. The
+    // technician(s) on the visit get ids and status only, no customer data.
+    pingTechnicianRooms(io, ADMIN_EVENT, {
+      payload: { job_id: payload.job_id, status: payload.status, tech_id: payload.tech_id || null },
+      techIds: [payload.tech_id, previousTechnicianId],
+      pingOthers: previousTechnicianId === undefined,
+    });
   }
   // Publish the job payload before doing additional reads so measurement
   // latency cannot delay an older board update behind a newer one.
@@ -323,7 +336,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   });
 
   if (emit) {
-    const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId })
+    const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId, previousTechnicianId: fromTechId })
       .catch((err) => logger.error(`[dispatch-assignment] broadcast failed for ${jobId}: ${err.message}`));
     // Hooks wait for the OUTERMOST commit — a savepoint's own promise
     // resolves at savepoint release (codex #3590 r14).

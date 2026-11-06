@@ -492,8 +492,9 @@ const KnowledgeBaseService = {
     return true;
   },
 
-  async list({ category, status, confidence, limit = 50, offset = 0, sort = 'updated_at', order = 'desc' } = {}) {
+  async list({ category, categories, status, confidence, limit = 50, offset = 0, sort = 'updated_at', order = 'desc' } = {}) {
     let query = db('knowledge_base');
+    if (categories) query = query.whereIn('category', categories);
     if (category) query = query.where({ category });
     if (status) query = query.where({ status });
     if (confidence) query = query.where({ confidence });
@@ -502,6 +503,7 @@ const KnowledgeBaseService = {
     const entries = await query;
 
     let countQuery = db('knowledge_base');
+    if (categories) countQuery = countQuery.whereIn('category', categories);
     if (category) countQuery = countQuery.where({ category });
     if (status) countQuery = countQuery.where({ status });
     if (confidence) countQuery = countQuery.where({ confidence });
@@ -511,7 +513,7 @@ const KnowledgeBaseService = {
   },
 
   // ── Full-Text Search ──
-  async search(query, { category, limit = 20 } = {}) {
+  async search(query, { category, categories, limit = 20 } = {}) {
     let q = db('knowledge_base')
       .select('*', db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [query]))
       .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [query])
@@ -519,6 +521,7 @@ const KnowledgeBaseService = {
       // An admin's active=false (status left 'active') hides the row too;
       // a NULL flag on an old row still counts as on.
       .whereRaw('active IS NOT FALSE');
+    if (categories) q = q.whereIn('category', categories);
     if (category) q = q.where({ category });
     q = q.orderBy('rank', 'desc').limit(limit);
     return q;
@@ -904,7 +907,6 @@ const KnowledgeBaseService = {
         if (p.formulation) lines.push(`Formulation: ${p.formulation}`);
         if (p.container_size) lines.push(`Container: ${p.container_size}`);
         if (p.default_rate) lines.push(`Default Rate: ${p.default_rate} ${p.default_unit || ''}`);
-        if (p.best_price) lines.push(`Best Price: $${parseFloat(p.best_price).toFixed(2)} (${p.best_vendor || 'unknown'})`);
         if (p.signal_word) lines.push(`Signal Word: ${p.signal_word}`);
         if (p.rei_hours) lines.push(`REI: ${p.rei_hours} hours`);
         if (p.rain_free_hours) lines.push(`Rain-Free: ${p.rain_free_hours} hours`);

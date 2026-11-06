@@ -103,3 +103,6 @@ function storedManualDiscountForReplay(estData = {}, { requireReplayable = false
 }
 
 module.exports = { storedManualDiscountForReplay };
+// Every place a stored manual discount can sit (read-only readers that need the raw object, e.g. the Multi-Home
+// Discount application job, which keys on presetKey).
+module.exports.storedManualDiscountCandidates = candidateList;

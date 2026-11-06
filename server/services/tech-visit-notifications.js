@@ -1165,6 +1165,285 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
   return row ? { technicianId, visitId, pushTitle, cardId: (row && typeof row === 'object' ? row.id : row) || null } : null;
 }
 
+// ---------------------------------------------------------------------------
+// Open cards read against the visit as it is now (owner 2026-11-04). A card's
+// text is written once, when its change happens, and several later moves
+// write no card: office scripts (suppressTechNotice), the tech's own moves,
+// plan moves (rescheduleSeries) and the day re-plan. Old cards then showed
+// old times (5 of 9 on the owner's Today page). Both feeds now:
+//   - hide a card when a newer open card for the same visit exists, when the
+//     visit's day is before today, or when the visit is on the tech's route
+//     and the tech already arrived at it or it ended;
+//   - re-read the rest from the visit row: its day and time now, who moved it
+//     last (reschedule_log), a visit that left this tech, came back or was
+//     cancelled, and how a new visit came in.
+// Nothing is written; Got it / Clear all stay the only things that dismiss.
+// ---------------------------------------------------------------------------
+const VISIT_CARD_TYPES = Object.freeze(Object.values(TYPE_BY_KIND));
+const VISIT_ID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+// Statuses after which a new-visit or moved card has nothing left to say to
+// the tech who holds the visit (an arrival is the other end: arrived_at).
+const DONE_FOR_HOLDER = Object.freeze(['on_site', 'completed', 'skipped', 'no_show']);
+// A new-visit card written this close to the visit row's insert is the
+// booking itself, so the visit's own source says how it came in.
+const BOOKED_WITH_CARD_MS = 15 * 60 * 1000;
+const AI_CALL_SOURCES = new Set(['ai_call_pipeline', 'ai_call_pipeline_followup']);
+
+// The visit row's uuid from a card alias's payload; a malformed id joins
+// nothing instead of failing the read.
+function cardVisitIdSql(alias) {
+  return `CASE WHEN ${alias}.payload->>'visit_id' ~* '${VISIT_ID_PATTERN}' THEN (${alias}.payload->>'visit_id')::uuid END`;
+}
+
+const VISIT_TYPES_SQL = VISIT_CARD_TYPES.map((type) => `'${type}'`).join(', ');
+// The key that groups a tech's open cards by visit (a card with no visit id
+// is its own group).
+const CARD_VISIT_KEY_SQL = (alias) => `COALESCE(${alias}.payload->>'visit_id', ${alias}.id::text)`;
+
+// SQL that is true for a visit card whose visit no longer leaves it anything
+// to say, for a query over tech_notifications under `alias`: on this tech's
+// route, the visit's day has passed or the tech already arrived or it ended
+// (a cancellation card stays until its visit is back and reached); on
+// another route, the card's own day has passed. `today` is the ET date the
+// read is judged against. Other card types never match it.
+function staleVisitCardSql(alias, today) {
+  const holderDone = DONE_FOR_HOLDER.map((status) => `'${status}'`).join(', ');
+  const visitId = cardVisitIdSql(alias);
+  return {
+    sql: `(${alias}.type IN (${VISIT_TYPES_SQL}) AND (`
+      + ` EXISTS (SELECT 1 FROM scheduled_services hv WHERE hv.id = ${visitId} AND (`
+      // On this tech's route: the visit's day passed (a customer-pick
+      // hand-off keeps a placeholder day until the customer picks, so it
+      // never counts), or the tech reached it or it ended. A cancellation
+      // card is the notice of that end (a plan pause skips the visit and
+      // writes one, holds.js applyHoldSkips), so it goes only once the visit
+      // is back and reached.
+      + ` (hv.technician_id = ${alias}.technician_id AND (`
+      + ` (hv.scheduled_date < ?::date AND NOT (hv.customer_pick_by IS NOT NULL AND hv.window_start IS NULL))`
+      + ` OR (${alias}.type <> 'visit_cancelled' AND (hv.arrived_at IS NOT NULL OR hv.status IN (${holderDone})))`
+      + ` OR (${alias}.type = 'visit_cancelled' AND hv.status IN ('on_site', 'completed'))))`
+      // On another route (or none): the card's own day decides; a former
+      // holder reads nothing of the visit's new schedule.
+      + ` OR (hv.technician_id IS DISTINCT FROM ${alias}.technician_id AND ${alias}.payload->>'date' < ?)))`
+      // No visit row left to read: the card's own day decides.
+      + ` OR (${alias}.payload->>'date' < ? AND NOT EXISTS (SELECT 1 FROM scheduled_services gone WHERE gone.id = ${visitId}))`
+      + '))',
+    bindings: [today, today, today],
+  };
+}
+
+// The stale rule plus one card per visit (the newest open one speaks for
+// it), as one predicate for a query that is not ranked by visit (the main
+// feed, which stops at 20 rows).
+function hiddenVisitCardSql(alias, today) {
+  const stale = staleVisitCardSql(alias, today);
+  return {
+    sql: `(${stale.sql} OR (${alias}.type IN (${VISIT_TYPES_SQL})`
+      + ` AND EXISTS (SELECT 1 FROM tech_notifications newer WHERE newer.technician_id = ${alias}.technician_id`
+      + ` AND newer.dismissed_at IS NULL AND newer.type IN (${VISIT_TYPES_SQL})`
+      + ` AND ${CARD_VISIT_KEY_SQL('newer')} = ${CARD_VISIT_KEY_SQL(alias)}`
+      + ` AND (newer.created_at, newer.id) > (${alias}.created_at, ${alias}.id))))`,
+    bindings: stale.bindings,
+  };
+}
+
+// One tech's open visit cards, each ranked within its visit, newest first
+// (`visit_rank` 1 speaks for the visit): the Today read takes rank 1 in one
+// pass instead of a per-card lookup (45 ms -> 10 ms on a 290-card account).
+// `days` = [today, tomorrow] (ET) of the read. Every card also carries what
+// the visit's OTHER open cards say about those days, so the card that speaks
+// for the visit keeps an older card's news: `visit_touches_soon` (any card of
+// the visit was on, or moved onto, today or tomorrow) and `visit_soon_when`
+// (the newest such card's today/tomorrow slot, for the "Was" line).
+function rankedVisitCards(conn, technicianId, days) {
+  const [today, tomorrow] = days;
+  const visit = `PARTITION BY ${CARD_VISIT_KEY_SQL('tn')}`;
+  const touches = "(tn.payload->>'date' IN (?, ?) OR tn.payload->>'previous_date' IN (?, ?))";
+  return conn('tech_notifications as tn')
+    .where('tn.technician_id', technicianId)
+    .whereNull('tn.dismissed_at')
+    .whereIn('tn.type', VISIT_CARD_TYPES)
+    .select(
+      'tn.*',
+      conn.raw(`row_number() OVER (${visit} ORDER BY tn.created_at DESC, tn.id DESC) AS visit_rank`),
+      // prior_day_unknown: an old assignment card that never recorded the
+      // slot it left (backfill 20261003150000) — kept on top, as before.
+      conn.raw(`bool_or(${touches} OR tn.payload->>'prior_day_unknown' = 'true') OVER (${visit}) AS visit_touches_soon`, [today, tomorrow, today, tomorrow]),
+      // A card's own day first (its newer slot), else the day it left.
+      conn.raw(`(array_agg(CASE WHEN tn.payload->>'date' IN (?, ?) THEN tn.payload->>'when' ELSE tn.payload->>'previous_when' END)`
+        + ` FILTER (WHERE ${touches}) OVER (${visit} ORDER BY tn.created_at DESC, tn.id DESC`
+        + ' ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING))[1] AS visit_soon_when',
+      [today, tomorrow, today, tomorrow, today, tomorrow]),
+    );
+}
+
+// Who made a move, from reschedule_log.initiated_by (a label, never a staff
+// id: the tech-facing "by Virginia" is not recoverable here).
+function moverText(initiatedBy) {
+  const label = String(initiatedBy || '');
+  if (label === 'auto_dispatch') return AUTO_DISPATCH_ACTOR_TEXT;
+  if (label === 'day_replan') return 'by the route re-plan';
+  if (label === 'weather_auto' || label.startsWith('rain')) return 'by the rain-out sweep';
+  if (label === 'system' || label === 'machine') return 'automatically';
+  if (label === 'tech') return 'by the technician';
+  if (label.startsWith('customer')) return 'by the customer';
+  return 'by the office';
+}
+
+// How a new visit came in, for a card written with the booking itself. Only a
+// generic actor is replaced; a named staff member stays as written.
+function bookedLine(card, live) {
+  if (card.type !== 'visit_assigned' || !live.created_at || !card.created_at) return null;
+  if (Math.abs(new Date(card.created_at).getTime() - new Date(live.created_at).getTime()) > BOOKED_WITH_CARD_MS) return null;
+  const actor = card.payload?.actor;
+  if (actor === 'by the customer online') {
+    if (live.source_estimate_id) return 'Customer accepted the estimate online';
+    if (live.self_booking_id) return 'Customer booked online';
+  }
+  if (actor === 'by the office') {
+    if (AI_CALL_SOURCES.has(live.source_action)) return 'Booked from a phone call (AI)';
+    if (live.source_action === 'package_followup_auto') return 'Booked as a follow-up visit';
+  }
+  return null;
+}
+
+// The newest move of the visit logged after the card, as the card names it
+// (who, and when), or nothing.
+function moveSince(row, mover) {
+  if (!mover || !row.created_at || new Date(mover.created_at) <= new Date(row.created_at)) return { actor: null, changedAt: null };
+  return { actor: moverText(mover.initiated_by), changedAt: new Date(mover.created_at).toISOString() };
+}
+
+// The visit sits on another route now (or on none). The former holder reads
+// nothing of it as it is now (Codex security review, #7569): no new time, no
+// later mover, no new holder's name. A moved-off card stays as written while
+// what it recorded still holds (the same holder, or the same end: "Now
+// cancelled"); otherwise the card says only that the visit left, with its
+// own time.
+function movedOffCard(row, live) {
+  const payload = row.payload || {};
+  // The writer names the holder by technicians.name (composeCard now_with),
+  // and an ended visit by ENDED_LABELS (cardStands).
+  const holder = live.technician_id ? (live.holder_name || null) : null;
+  const status = String(live.status);
+  const ended = TERMINAL_VISIT_STATUSES.has(status) ? (ENDED_LABELS[status] || status.replace(/_/g, ' ')) : null;
+  const asWritten = payload.ended ? payload.ended === ended : (payload.now_with || null) === holder;
+  if (row.type === 'visit_unassigned' && asWritten) return row;
+  return {
+    ...row,
+    type: 'visit_unassigned',
+    payload: {
+      ...payload, headline: 'Moved off your route', previous_when: null, actor: null, changed_at: null,
+      now_with: null, ended: null, now_elsewhere: Boolean(live.technician_id),
+    },
+  };
+}
+
+// The visit was cancelled on the tech's own route, or skipped by a plan
+// pause (which notifies it as a cancellation, holds.js applyHoldSkips). A
+// card that already said so keeps its own headline and "Cancelled by …".
+function cancelledCard(row, live, view) {
+  const payload = row.payload || {};
+  const own = row.type === 'visit_cancelled';
+  return {
+    ...row,
+    type: 'visit_cancelled',
+    payload: {
+      ...payload, headline: (own && payload.headline) || 'Visit cancelled', when: view.when, date: view.date,
+      actor: own ? payload.actor : null,
+      changed_at: own || !live.cancelled_at ? null : new Date(live.cancelled_at).toISOString(),
+    },
+  };
+}
+
+// A visit this card said had left the route (moved off, or cancelled) is on
+// it again, with no card of its own.
+function backOnRouteCard(row, view) {
+  return {
+    ...row,
+    type: 'visit_assigned',
+    payload: {
+      ...(row.payload || {}), headline: 'Back on your route', when: view.when, date: view.date,
+      actor: view.actor, changed_at: view.changedAt, changed_again: true, now_with: null, ended: null,
+    },
+  };
+}
+
+// A new-visit or moved card whose visit is still open on the tech's route.
+// `soonWhen` is the today/tomorrow slot an older open card of the same visit
+// named (rankedVisitCards).
+function onRouteCard(row, live, view, soonWhen) {
+  const payload = row.payload || {};
+  if (view.when !== payload.when) {
+    // "Was" is the today/tomorrow slot the visit's cards named, when there is
+    // one (why the card is on top), else what this card last told the tech;
+    // "Now" is the visit today.
+    const was = soonWhen || payload.when || null;
+    return {
+      ...row,
+      type: 'visit_rescheduled',
+      payload: {
+        ...payload, previous_when: was, previous_date: was === payload.when ? (payload.date || null) : null,
+        when: view.when, date: view.date, actor: view.actor, changed_at: view.changedAt, changed_again: true,
+      },
+    };
+  }
+  // Unchanged since this card, but an older card put the visit on (or took
+  // it off) today or tomorrow: that slot is the "Was" the tech needs.
+  if (soonWhen && soonWhen !== payload.when && soonWhen !== payload.previous_when) {
+    return { ...row, type: 'visit_rescheduled', payload: { ...payload, previous_when: soonWhen, previous_date: null } };
+  }
+  const line = bookedLine(row, live);
+  return line ? { ...row, payload: { ...payload, actor_line: line } } : row;
+}
+
+// One card against its visit row as it is now: where the visit sits (this
+// tech's route, another route, cancelled) decides the card. `mover` is the
+// newest reschedule_log move of the visit. Pure: returns a new row, never
+// the input.
+function liveCard(row, live, mover, soonWhen = null) {
+  if (!live || !VISIT_CARD_TYPES.includes(row.type)) return row;
+  if (String(live.technician_id || '') !== String(row.technician_id)) return movedOffCard(row, live);
+  const view = { when: visitWhen(live), date: dateOnly(live.scheduled_date), ...moveSince(row, mover) };
+  if (['cancelled', 'skipped'].includes(String(live.status))) return cancelledCard(row, live, view);
+  if (row.type === 'visit_unassigned' || row.type === 'visit_cancelled') return backOnRouteCard(row, view);
+  return onRouteCard(row, live, view, soonWhen);
+}
+
+/**
+ * Re-read the visit cards among feed rows (each with `type`, `payload`,
+ * `technician_id`, `created_at`) from their visits as they are now. Other
+ * rows pass through untouched; order is kept. Two reads, whatever the count.
+ */
+async function refreshVisitCards(rows, conn = db) {
+  const ids = [...new Set(rows
+    .filter((row) => VISIT_CARD_TYPES.includes(row.type) && UUID_RE.test(String(row.payload?.visit_id || '')))
+    .map((row) => String(row.payload.visit_id)))];
+  if (!ids.length) return rows;
+  const [visits, moves] = await Promise.all([
+    conn('scheduled_services as s')
+      .leftJoin('technicians as t', 't.id', 's.technician_id')
+      .whereIn('s.id', ids)
+      .select('s.id', 's.scheduled_date', 's.window_start', 's.window_end', 's.status', 's.technician_id',
+        's.customer_pick_by', 's.cancelled_at', 's.created_at', 's.source_action', 's.source_estimate_id',
+        's.self_booking_id', 't.name as holder_name'),
+    // A move has a new day; the no-show sweep's rows (new_date NULL) are not moves.
+    conn('reschedule_log')
+      .distinctOn('scheduled_service_id')
+      .whereIn('scheduled_service_id', ids)
+      .whereNotNull('new_date')
+      .orderBy([{ column: 'scheduled_service_id' }, { column: 'created_at', order: 'desc' }])
+      .select('scheduled_service_id', 'initiated_by', 'created_at'),
+  ]);
+  const visitById = new Map(visits.map((visit) => [String(visit.id), visit]));
+  const moveById = new Map(moves.map((move) => [String(move.scheduled_service_id), move]));
+  return rows.map(({ visit_soon_when: soonWhen = null, ...row }) => {
+    const id = String(row.payload?.visit_id || '');
+    if (!VISIT_CARD_TYPES.includes(row.type) || !visitById.has(id)) return row;
+    return liveCard(row, visitById.get(id), moveById.get(id) || null, soonWhen);
+  });
+}
+
 module.exports = {
   // The per-visit ordering chain, shared with visit-prep-tech-alert.js so a
   // photo alert and a move/cancel notice for the same visit deliver in
@@ -1199,5 +1478,11 @@ module.exports = {
   BUNDLE_MAX_WAIT_MS,
   BUNDLE_GIVE_UP_MS,
   BUNDLE_CLAIM_LEASE_MS,
-  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
+  // The feeds' read-time view of open cards (routes/tech-notifications.js).
+  VISIT_CARD_TYPES,
+  hiddenVisitCardSql,
+  staleVisitCardSql,
+  rankedVisitCards,
+  refreshVisitCards,
+  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists, liveCard, moverText },
 };

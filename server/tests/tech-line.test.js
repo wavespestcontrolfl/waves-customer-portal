@@ -14,7 +14,7 @@ const HOLDER = { id: 'tech-1', name: 'Tech One', phone: '941-555-0101', employme
 
 function chain({ first = undefined, inserted = [] } = {}) {
   const c = {};
-  for (const m of ['where', 'whereNot', 'select']) c[m] = jest.fn(() => c);
+  for (const m of ['where', 'whereNot', 'whereNotIn', 'orderByRaw', 'select']) c[m] = jest.fn(() => c);
   c.first = jest.fn(async () => first);
   c.insert = jest.fn(async (row) => { inserted.push(row); return [1]; });
   return c;
@@ -112,6 +112,96 @@ describe('notifyTechLineText', () => {
     await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: '', customer: null, mediaCount: 2 });
     expect(inserted[0].message).toBe('Text from (941) 555-0199: 2 photos');
     expect(JSON.parse(inserted[0].payload).customer_name).toBe('(941) 555-0199');
+  });
+
+  describe('GATE_TECH_LOGIN_PRIVACY: a matched customer is named only when on the holder\'s route', () => {
+    const scope = require('../services/technician-visit-scope');
+    const OFF_ROUTE = { id: 'c-off', first_name: 'Test', last_name: 'Caller' };
+
+    beforeEach(() => { jest.spyOn(scope, 'technicianServicesCustomer'); });
+    afterEach(() => { jest.restoreAllMocks(); delete process.env.GATE_TECH_LOGIN_PRIVACY; });
+
+    test('gate on, customer off the route: the card and the push show the formatted number, not the name', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      scope.technicianServicesCustomer.mockResolvedValue(false);
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'Is anyone coming?', customer: OFF_ROUTE });
+      expect(scope.technicianServicesCustomer).toHaveBeenCalledWith({ techRole: 'technician', technicianId: 'tech-1' }, 'c-off');
+      expect(inserted[0].message).toBe('Text from (941) 555-0199: Is anyone coming?');
+      expect(JSON.parse(inserted[0].payload)).toMatchObject({ customer_id: null, customer_name: '(941) 555-0199' });
+      expect(PushService.sendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'Text from (941) 555-0199' }));
+    });
+
+    test('gate on, customer on the route: the name stays', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      scope.technicianServicesCustomer.mockResolvedValue(true);
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'On my way out', customer: OFF_ROUTE });
+      expect(inserted[0].message).toBe('Text from Test Caller: On my way out');
+    });
+
+    test('gate on, route check fails: counts as off the route (fail closed)', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      scope.technicianServicesCustomer.mockRejectedValue(new Error('db down'));
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'hello', customer: OFF_ROUTE });
+      expect(inserted[0].message).toBe('Text from (941) 555-0199: hello');
+    });
+
+    test('gate off: the name shows with no route lookup, as before', async () => {
+      const inserted = [];
+      db.mockImplementation((table) => (table === 'tech_notifications' ? chain({ inserted }) : chain({ first: HOLDER })));
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'hello', customer: OFF_ROUTE });
+      expect(inserted[0].message).toBe('Text from Test Caller: hello');
+      expect(scope.technicianServicesCustomer).not.toHaveBeenCalled();
+    });
+  });
+
+  // The card's Reply (TechNoticeFeed) texts the visit's customer at the phone on file
+  // (POST /api/tech/line/sms), so the card names a visit only when that phone texted.
+  describe('reply_visit_id', () => {
+    const ON_FILE = { id: 'c1', first_name: 'Pat', last_name: 'Example', phone: '941-555-0199' };
+    function mockTables({ visit = { id: 'svc-1' }, visitError = null } = {}) {
+      const inserted = [];
+      const visitChain = chain({ first: visit });
+      if (visitError) visitChain.first = jest.fn(async () => { throw visitError; });
+      db.mockImplementation((table) => {
+        if (table === 'tech_notifications') return chain({ inserted });
+        if (table === 'scheduled_services') return visitChain;
+        return chain({ first: HOLDER });
+      });
+      return { inserted, visitChain };
+    }
+
+    test('a text from the phone on file names the holder\'s own visit of that customer', async () => {
+      const { inserted, visitChain } = mockTables();
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'Running late?', customer: ON_FILE });
+      expect(JSON.parse(inserted[0].payload).reply_visit_id).toBe('svc-1');
+      expect(visitChain.where).toHaveBeenCalledWith({ customer_id: 'c1' });
+      expect(visitChain.where).toHaveBeenCalledWith('scheduled_services.technician_id', 'tech-1');
+    });
+
+    test.each([
+      ['another phone texted (a service contact or a shared number)', { ...ON_FILE, phone: '941-555-0123' }],
+      ['no customer matched', null],
+    ])('%s: no Reply, and no visit lookup', async (_label, customer) => {
+      const { inserted } = mockTables();
+      await techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'hello', customer });
+      expect(JSON.parse(inserted[0].payload).reply_visit_id).toBeNull();
+      expect(db).not.toHaveBeenCalledWith('scheduled_services');
+    });
+
+    test.each([
+      ['no own visit of that customer in scope', { visit: null }],
+      ['the visit lookup fails', { visitError: new Error('db down') }],
+    ])('%s: no Reply; the card is still written', async (_label, opts) => {
+      const { inserted } = mockTables(opts);
+      await expect(techLine.notifyTechLineText({ lineNumber: LINE, from: '+19415550199', body: 'hello', customer: ON_FILE })).resolves.toBe(true);
+      expect(JSON.parse(inserted[0].payload).reply_visit_id).toBeNull();
+    });
   });
 
   test('no assignable holder → nothing written, nothing pushed', async () => {

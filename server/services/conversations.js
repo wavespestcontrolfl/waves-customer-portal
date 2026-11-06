@@ -470,7 +470,8 @@ async function appendMessage(opts) {
     return msg;
   };
 
-  if (!opts.twilioSid) return appendWith(db);
+  // opts.conn: a caller's open transaction (a portal message is saved with the item it answers).
+  if (!opts.twilioSid) return appendWith(opts.conn || db);
 
   return await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`message:${opts.channel}:${opts.twilioSid}`]);
@@ -575,6 +576,7 @@ async function updateByTwilioSid(twilioSid, patch) {
 
 module.exports = {
   findOrCreateThread,
+  findOrCreateThreadWith,
   appendMessage,
   recordTouchpoint,
   updateByTwilioSid,

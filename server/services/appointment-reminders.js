@@ -44,7 +44,7 @@ function appointmentTimeParts(value) {
 }
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
-const { buildRescheduleLink } = require('./reschedule-link');
+const { buildRescheduleLink, rescheduledTextLine } = require('./reschedule-link');
 const { buildAppointmentLink } = require('./appointment-link');
 // Canonical service_type normalization — the estimate-backed label recovery
 // compares stored fall-through values against this exact transform; reusing
@@ -5481,6 +5481,7 @@ const AppointmentReminders = {
           const time = formatTime(newApptTime);
 
           const serviceLabel = smsServiceLabelStored(record.service_type);
+          const differentTimeLine = await rescheduledTextLine(scheduledServiceId, { customerId: record.customer_id });
           noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
             return renderRequiredTemplate('appointment_rescheduled', {
@@ -5490,6 +5491,7 @@ const AppointmentReminders = {
               date,
               time,
               window: rescheduleWindowPhrase(resolved, newApptTime),
+              different_time_line: differentTimeLine,
             }, {
               workflow: 'appointment_rescheduled',
               entity_type: 'scheduled_service',

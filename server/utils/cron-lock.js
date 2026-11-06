@@ -323,7 +323,14 @@ function releaseLockSlot() {
 // let a burst of request locks pin the half of the pool reserved for job
 // bodies and web routes. No slot → no_connection, the same skip every
 // caller already maps to "retry in a moment".
-async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = isScheduledTick() } = {}) {
+//
+// waitForLockMs (opt-in, default 0 = off, behavior unchanged): when the
+// advisory lock is busy, retry the try-lock every LOCK_WAIT_POLL_MS until
+// this many ms have passed instead of skipping at once. Still a try-lock on
+// the same held session (never a blocking pg_advisory_lock), so the lease,
+// health and cleanup paths are untouched; on timeout the result is the same
+// { skipped: true, reason: 'lease_held' } as an immediate skip.
+async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = isScheduledTick(), waitForLockMs = 0 } = {}) {
   const lockKey = `cron:${jobName}`;
   // Reentrant path: already inside a held slot (nested runExclusive) —
   // no second slot AND no second connection. The nested advisory lock is
@@ -332,7 +339,7 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = is
   // connection here would recreate the deadlock at DB_POOL_MAX=2.
   const nested = lockSlotContext.getStore();
   if (nested) {
-    return runExclusiveLocked(jobName, lockKey, fn, recordHealth, nested.conn);
+    return runExclusiveLocked(jobName, lockKey, fn, recordHealth, nested.conn, undefined, waitForLockMs);
   }
   if (!waitForSlot) {
     if (!tryAcquireLockSlot()) {
@@ -340,7 +347,7 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = is
       return { skipped: true, reason: 'no_connection' };
     }
     try {
-      return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+      return await runExclusiveLocked(jobName, lockKey, fn, recordHealth, undefined, undefined, waitForLockMs);
     } finally {
       releaseLockSlot();
     }
@@ -349,7 +356,7 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = is
   // coalesced retry: a retry is still this tick, so its health record and
   // its cutoff are measured from when it arrived, not from when it retried.
   const arrivedAtMs = Date.now();
-  return runScheduled(jobName, lockKey, fn, recordHealth, tickDeadline(arrivedAtMs), arrivedAtMs);
+  return runScheduled(jobName, lockKey, fn, recordHealth, tickDeadline(arrivedAtMs), arrivedAtMs, waitForLockMs);
 }
 
 // A tick may wait at most SLOT_WAIT_MAX_MS — and never into the next ET
@@ -362,7 +369,7 @@ function tickDeadline(now = Date.now()) {
   return Math.min(now + SLOT_WAIT_MAX_MS, nextEtMidnight);
 }
 
-async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tickStartedAtMs) {
+async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tickStartedAtMs, waitForLockMs = 0) {
   // Coalesce behind an in-flight (waiting or running) tick of this job
   // rather than queueing a replay — but only until that run's LEASE
   // outcome is known, never until it finishes: a hung body would otherwise
@@ -377,7 +384,7 @@ async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tick
   if (prior) {
     const decision = await prior;
     if (!decision.held && decision.reason === 'no_connection') {
-      return runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tickStartedAtMs);
+      return runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tickStartedAtMs, waitForLockMs);
     }
     logger.info(`[cron-lock] ${jobName}: covered by a concurrent run — skipping tick`);
     return { skipped: true, reason: 'lease_held' };
@@ -400,7 +407,7 @@ async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tick
       return { skipped: true, reason: 'no_connection' };
     }
     try {
-      return await runExclusiveLocked(jobName, lockKey, fn, recordHealth, null, lease);
+      return await runExclusiveLocked(jobName, lockKey, fn, recordHealth, null, lease, waitForLockMs);
     } finally {
       releaseLockSlot();
     }
@@ -420,7 +427,40 @@ async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tick
   }
 }
 
-async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, lease) {
+const LOCK_WAIT_POLL_MS = 15 * 1000;
+
+async function tryAdvisoryLock(conn, lockKey) {
+  const res = await conn.query({
+    text: 'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+    values: [lockKey],
+  });
+  return !!res?.rows?.[0]?.locked;
+}
+
+// One try-lock; when it is busy and the caller opted in (waitForLockMs > 0),
+// keep retrying on the SAME session every LOCK_WAIT_POLL_MS until
+// waitForLockMs have passed. Resolves true once the lock is held.
+async function acquireAdvisoryLock(jobName, conn, lockKey, waitForLockMs) {
+  if (await tryAdvisoryLock(conn, lockKey)) return true;
+  if (!(waitForLockMs > 0)) return false;
+  const startedAtMs = Date.now();
+  const deadlineAtMs = startedAtMs + waitForLockMs;
+  logger.info(`[cron-lock] ${jobName}: lease busy — waiting up to ${Math.round(waitForLockMs / 1000)}s for it`);
+  while (Date.now() < deadlineAtMs) {
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, Math.min(LOCK_WAIT_POLL_MS, deadlineAtMs - Date.now()));
+      timer.unref?.();
+    });
+    if (await tryAdvisoryLock(conn, lockKey)) {
+      logger.info(`[cron-lock] ${jobName}: lease acquired after waiting ${Math.round((Date.now() - startedAtMs) / 1000)}s`);
+      return true;
+    }
+  }
+  logger.warn(`[cron-lock] ${jobName}: gave up waiting for the lease after ${Math.round((Date.now() - startedAtMs) / 1000)}s`);
+  return false;
+}
+
+async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, lease, waitForLockMs) {
   let conn = heldConn;
   if (!conn) {
     try {
@@ -433,11 +473,7 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, 
 
   let locked = false;
   try {
-    const res = await conn.query({
-      text: 'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-      values: [lockKey],
-    });
-    locked = !!res?.rows?.[0]?.locked;
+    locked = await acquireAdvisoryLock(jobName, conn, lockKey, waitForLockMs);
     if (!locked) {
       logger.info(`[cron-lock] ${jobName}: lease held elsewhere (overlapping instance or prior tick) — skipping`);
       return { skipped: true, reason: 'lease_held' };

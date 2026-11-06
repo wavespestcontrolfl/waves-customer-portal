@@ -313,6 +313,46 @@ describe('Finalized run', () => {
     print.mockRestore();
   });
 
+  it('shows the SIMPLE IRA line on the stub so gross less taxes less the line equals net pay, and the year to date after savings end', async () => {
+    const saved = { ...STUB };
+    Object.assign(STUB, {
+      preTaxDeductions: { simpleIraCents: 2838 },
+      netCents: 81263 - 2838,
+      ytd: { ...STUB.ytd, simpleIraCents: 5676, netCents: 162526 - 5676 },
+    });
+    try {
+      const detail = await openFinal();
+      fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+      const stub = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+      const table = within(stub).getByRole('table', { name: 'Pay stub amounts' });
+      expect(within(table).getByText('SIMPLE IRA (pre-tax)').closest('tr')).toHaveTextContent('$28.38$56.76');
+      expect(within(table).getByText('Net pay').closest('tr')).toHaveTextContent('$784.25$1,568.50');
+      // $946.00 - $133.37 taxes - $28.38 = $784.25: the printed lines add up.
+      expect(94600 - 13337 - 2838).toBe(78425);
+    } finally {
+      for (const key of Object.keys(STUB)) delete STUB[key];
+      Object.assign(STUB, saved);
+    }
+  });
+
+  it('a later check with no savings shows only the year to date on the SIMPLE IRA line; no savings at all shows no line', async () => {
+    const saved = { ...STUB };
+    STUB.ytd = { ...STUB.ytd, simpleIraCents: 5676 };
+    try {
+      const detail = await openFinal();
+      fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+      const stub = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+      expect(within(stub).getByText('SIMPLE IRA (pre-tax)').closest('tr')).toHaveTextContent('$0.00$56.76');
+    } finally {
+      for (const key of Object.keys(STUB)) delete STUB[key];
+      Object.assign(STUB, saved);
+    }
+    cleanup();
+    const detail = await openFinal();
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    expect(await within(await screen.findByRole('dialog')).findByLabelText('Pay stub')).not.toHaveTextContent('SIMPLE IRA');
+  });
+
   it('says so on a check drafted with no W-4 on file (the IRS default)', async () => {
     const detail = await startRun({ checks: [check({ w4Default: true }), check({ id: 'check-b', name: 'Sample Beta' })] });
     const rows = within(detail).getByRole('table', { name: 'Paychecks' }).querySelectorAll('tbody tr');

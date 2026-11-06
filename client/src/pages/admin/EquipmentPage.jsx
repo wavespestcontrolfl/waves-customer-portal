@@ -278,11 +278,13 @@ const ASSET_DETAIL_CELLS = [{
   color: "#09090B"
 }, {
   label: "Cost:",
+  money: true,
   show: e => e.purchase_price > 0,
   value: e => fmt(e.purchase_price),
   color: "#18181B"
 }, {
   label: "Book:",
+  money: true,
   show: e => e.book_value > 0,
   value: e => fmt(e.book_value)
 }, {
@@ -547,7 +549,7 @@ function EquipmentTab({
             gap: 4,
             fontSize: 14
           }}>
-                {ASSET_DETAIL_CELLS.filter(cell => cell.show(e)).map(cell => <div key={cell.label}>
+                {ASSET_DETAIL_CELLS.filter(cell => (canEdit || !cell.money) && cell.show(e)).map(cell => <div key={cell.label}>
                     <span style={{
                 color: "#71717A"
               }}>
@@ -781,7 +783,7 @@ function TankMixTab({
       fontSize: 14
     }} className="p-4 mb-3">
           Could not load tank mixes.
-          {mixes.length > 0 && " Showing previously loaded mixes; costs may be out of date."}
+          {mixes.length > 0 && (canEdit ? " Showing previously loaded mixes; costs may be out of date." : " Showing previously loaded mixes.")}
           <Button onClick={loadMixes} aria-label="Retry tank mixes" style={{
         marginLeft: 12
       }} type="button" variant="primary" className="min-w-11" disabled={!!pendingAction}>
@@ -834,7 +836,7 @@ function TankMixTab({
             alignItems: "center"
           }}>
                     {" "}
-                    <div style={{
+                    {canEdit && <div style={{
               textAlign: "right"
             }}>
                       {" "}
@@ -857,7 +859,7 @@ function TankMixTab({
               }}>
                           incomplete — unpriced component excluded
                         </div>}{" "}
-                    </div>{" "}
+                    </div>}{" "}
                     {canEdit && <Button onClick={() => recalculate(m.id)} type="button" variant="secondary" className="min-w-11" disabled={!!pendingAction} loading={pendingAction === m.id}>
                       Recalc
                     </Button>}{" "}
@@ -873,7 +875,7 @@ function TankMixTab({
           }}>
                     <THead>
                       <TR>
-                        {["Product", "Rate/1000sf", "Oz/Tank", "Cost"].map(h => <TH key={h} style={{
+                        {["Product", "Rate/1000sf", "Oz/Tank", ...(canEdit ? ["Cost"] : [])].map(h => <TH key={h} style={{
                   color: "#71717A",
                   textAlign: "left"
                 }}>
@@ -892,11 +894,11 @@ function TankMixTab({
                             {p.rate_per_1000sf} {p.rate_unit}
                           </TD>
                           <TD nums>{p.oz_per_tank}</TD>
-                          <TD style={{
+                          {canEdit && <TD style={{
                   color: "#18181B"
                 }} nums>
                             {fmt(p.cost)}
-                          </TD>
+                          </TD>}
                         </TR>)}
                     </TBody>
                   </Table>{" "}

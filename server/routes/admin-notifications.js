@@ -12,12 +12,23 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 // app-icon badge in notification-triggers so the two counts can't drift.
 const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 const { withAlertButtons, runAlertButton } = require('../services/admin-alert-buttons');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const { explainAdminAlert, explainerLive, withExplainerFields } = require('../services/admin-alert-explainer');
 const {
   sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendToClaudeLive,
 } = require('../services/admin-alert-send-to-claude');
+const {
+  copyLive, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy,
+} = require('../services/admin-alert-copy-to-claude');
 
 router.use(adminAuthenticate);
+
+// An owner-only row (metadata.ownerOnly: an idea sent to Claude, Codex security review round 4) answers any login that is not
+// the owner exactly as an unknown row does, so Done and Reopen reveal nothing. Only a UUID can name such a row.
+async function hiddenFromLogin(req, id) {
+  if (ibFullAccess(req) || !UUID_RE.test(id)) return false;
+  return NotificationService.isAdminOwnerOnly(id, { role: req.techRole, technicianId: req.technicianId });
+}
 
 function parseMetadata(value) {
   if (!value) return {};
@@ -78,7 +89,9 @@ router.get('/', async (req, res, next) => {
     const before = parseCursor(req.query.before);
     if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
     const offset = before ? 0 : (page - 1) * limit;
-    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before });
+    // fullAccess: an owner-only row (a Claude plan or copy) is listed for the owner login alone.
+    const fullAccess = ibFullAccess(req);
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
@@ -95,7 +108,10 @@ router.get('/', async (req, res, next) => {
     // An SMS review bell's source text rides as `source_text`, read now and never stored on the row. Added last:
     // the explainer reads the stored row by id, never this.
     const { withTextNoteSources } = require('../services/sms-operational-actions');
-    const marked = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }), { role: req.techRole });
+    const sendable = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }),
+      { role: req.techRole, fullAccess });
+    // `sendCopyToClaude` marks a row step 1 refuses (customer contact, words our code did not write), owner login only.
+    const marked = withSendCopyToClaudeFields(sendable, { role: req.techRole, fullAccess });
     const rows = await withTextNoteSources(marked, { role: req.techRole });
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
@@ -116,7 +132,7 @@ router.get('/done', requireAdmin, async (req, res, next) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
     const before = parseCursor(req.query.before);
     if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
-    const rows = await NotificationService.getAdminDoneNotifications({ role: req.techRole, technicianId: req.technicianId, limit: limit + 1, before });
+    const rows = await NotificationService.getAdminDoneNotifications({ role: req.techRole, technicianId: req.technicianId, limit: limit + 1, before, fullAccess: ibFullAccess(req) });
     const page = rows.slice(0, limit);
     res.json({
       notifications: page,
@@ -304,7 +320,7 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
 // zero (was lingering because live alerts have no persisted read_at).
 router.put('/read-all', async (req, res, next) => {
   try {
-    await NotificationService.markAllReadAdmin({ role: req.techRole, technicianId: req.technicianId });
+    await NotificationService.markAllReadAdmin({ role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) });
     // Live-alert dismissal is admin-only: the overlay never renders for
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
@@ -438,7 +454,7 @@ router.put('/:id/read', async (req, res, next) => {
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
-    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole, technicianId: req.technicianId });
+    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) });
     // No badge-ordering stamp — see /read-all.
     res.json({ success: true, updated });
   } catch (err) { next(err); }
@@ -462,6 +478,7 @@ router.put('/:id/done', async (req, res, next) => {
     if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
       return res.status(400).json({ error: 'version is required' });
     }
+    if (await hiddenFromLogin(req, id)) return res.status(404).json({ error: 'not_found' });
     const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution : null;
     const updated = await NotificationService.markAdminDone([id], { by: String(req.technicianId), resolution, role: req.techRole, technicianId: req.technicianId, expectedVersion: version.toLowerCase() });
     if (!updated) {
@@ -487,6 +504,8 @@ router.post('/:id/actions/:actionId', requireAdmin, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    // An owner-only row answers any other login as an unknown row does.
+    if (await hiddenFromLogin(req, id)) return res.status(404).json({ error: 'not_found' });
     const version = req.body?.version;
     if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
       return res.status(400).json({ error: 'version is required' });
@@ -514,8 +533,8 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/notifications/:id/send-to-claude — the bell's "Send to Claude" button (GATE_ALERT_SEND_TO_CLAUDE, admin
-// only; no explainer gate, owner 2026-11-03). `version` (required): the content version the bell served for the row.
+// POST /api/admin/notifications/:id/send-to-claude — the bell's "Send to Claude" button (GATE_ALERT_SEND_TO_CLAUDE, owner
+// login only; no explainer gate, owner 2026-11-03). `version` (required): the content version the bell served for the row.
 // `note` (optional text, 500 characters): the admin's own words for the Claude tab. Moves the row out of the bell into
 // Claude's queue, where the Mac launcher opens a Claude tab for it (services/admin-alert-send-to-claude.js). The answer
 // carries `at`, the send's time, for the undo. 422 for customer contact, a row our code did not write, a done row or a
@@ -524,6 +543,8 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
 router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
   try {
     if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
+    // Owner login only (Codex security review on #7548): a send and its note go into a Claude terminal tab.
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
     const version = req.body?.version;
@@ -540,12 +561,14 @@ router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/notifications/:id/unsend-from-claude — the 10-second Undo after a send (GATE_ALERT_SEND_TO_CLAUDE,
-// admin only). `at` (required): the time the send answered with. Puts the row back in the bell while it is open, still
+// owner login only). `at` (required): the time the send answered with. Puts the row back in the bell while it is open, still
 // carries that send and no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Sends nothing to
 // anyone. Gate off: 404, the same as an unknown route.
 router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
   try {
     if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
+    // Owner login only (Codex security review on #7548): a send and its note go into a Claude terminal tab.
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
     const at = req.body?.at;
@@ -553,6 +576,45 @@ router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
     const { status, body } = await unsendAdminAlertFromClaude(id, {
       at, by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
     });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/send-copy-to-claude — the bell's "Send a copy to Claude (read-only)" button for a row
+// "Send to Claude" refuses (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3). `version` (required): the content
+// version the bell served for the row. `note` (optional text, 500 characters). Writes ONE new owner-only row into Claude's
+// queue that names the alert by id and holds no customer words; the alert itself stays in the bell
+// (services/admin-alert-copy-to-claude.js). The answer carries the copy's `id` and `at`, for the undo. 409 when the row
+// changed since the bell read it or cannot be copied. Sends nothing to anyone. Gate off: 404, the same as an unknown route.
+router.post('/:id/send-copy-to-claude', requireAdmin, async (req, res, next) => {
+  try {
+    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });
+    const version = req.body?.version;
+    if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
+      return res.status(400).json({ error: 'version is required' });
+    }
+    const { status, body } = await sendAlertCopyToClaude(id, {
+      version: version.toLowerCase(), note: req.body?.note, by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
+    });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/cancel-copy — the 10-second Undo after a copy, on the COPY's id (GATE_ALERT_SEND_TO_CLAUDE_COPY,
+// owner login only). `at` (required): the time the send answered with. Closes the copy while it is open, still that send and
+// no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Gate off: 404.
+router.post('/:id/cancel-copy', requireAdmin, async (req, res, next) => {
+  try {
+    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });
+    const at = req.body?.at;
+    if (typeof at !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(at)) return res.status(400).json({ error: 'at is required' });
+    const { status, body } = await cancelAlertCopy(id, { at, by: req.technicianId, role: req.techRole, technicianId: req.technicianId });
     res.status(status).json(body);
   } catch (err) { next(err); }
 });
@@ -568,6 +630,7 @@ router.put('/:id/reopen', requireAdmin, async (req, res, next) => {
     if (typeof doneAt !== 'string' || !TIMESTAMP_TEXT_RE.test(doneAt) || Number.isNaN(new Date(doneAt).getTime())) {
       return res.status(400).json({ error: 'doneAt is required' });
     }
+    if (await hiddenFromLogin(req, String(req.params.id))) return res.status(404).json({ error: 'not_found' });
     const result = await NotificationService.reopenAdminDone(String(req.params.id), { expectedDoneAt: doneAt });
     if (result === 'changed') return res.status(409).json({ error: 'changed' });
     if (result === 'not_reopenable') return res.status(409).json({ error: 'not_reopenable' });

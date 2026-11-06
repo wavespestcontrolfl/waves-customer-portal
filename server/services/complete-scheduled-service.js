@@ -3292,8 +3292,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // completion profile and both dark gates are known.
       customerRecapMode,
       requestReview: requestReviewPosted,
-      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK): the one reason a never-asked customer's review ask
-      // may be turned off. Read only below, through ReviewService.firstAskLockChoice.
+      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK), or "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED):
+      // the reasons a never-asked customer's review ask may be turned off. Read only below, through
+      // ReviewService.firstAskLockChoice.
       reviewOptOutReason,
       // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
       // honored below unless the fixed text was asked for and not honored. Absent on the full form.
@@ -3399,7 +3400,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       stationRosterSeen,
     } = completionInput.body;
     // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
-    // WITHOUT the "Complaint on site" reason stays on. Only a tech's explicit requestReview:false on a real,
+    // WITHOUT an off reason ("Complaint on site"; "Already left a review" under GATE_REVIEW_ALREADY_REVIEWED) stays on. Only a tech's explicit requestReview:false on a real,
     // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
     // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior. Gate
     // off: no read at all, requestReview is the posted value.
@@ -8319,6 +8320,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+        // "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED): the tech's off reason for a first review ask
+        // marks the customer as reviewed in this transaction, beside the record that says why, so every later
+        // ask skips them (already_reviewed). An existing mark keeps its own date.
+        if (reviewFirstAskLock?.optOutReason
+          && reviewFirstAskLock.optOutReason === require('./review-request').ALREADY_LEFT_REVIEW_REASON) {
+          await trx('customers')
+            .where({ id: svc.customer_id })
+            .where((q) => q.whereNull('has_left_google_review').orWhere('has_left_google_review', false))
+            .update({ has_left_google_review: true, review_marked_at: new Date(), updated_at: new Date() });
+        }
         // The station sheet's checks, in this transaction under the roster lock
         // (visit-station-facts.js); the full form's sync stays post-commit.
         await require('./visit-station-facts').writeSheetStationChecksInCompletion(trx, {
@@ -14229,8 +14240,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
     // Digital business card: mint the customer's card off their first
     // completed visit, tied to the tech on record (services/customer-card.js).
-    // Fire-and-forget — a mint failure never blocks the completion, and the
-    // card.issued email inside is dark behind GATE_DIGITAL_BUSINESS_CARD.
+    // Fire-and-forget — a mint failure never blocks the completion.
     // Internal-only completion profiles (e.g. Waves Assessment) suppress all
     // customer comms/public tokens above, so they must not mint a
     // customer-facing card either (Codex P1 on PR #2588). Non-performed
@@ -14239,14 +14249,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // return early in this handler — it records the alert and continues — so
     // it belongs here too, matching the referral-credit non-performed guard
     // (Codex P2 #2588 r2 + r5).
-    // Backfill closeouts stay on the quiet path here too: the mint still runs
-    // (pure data setup — card row / promoter enroll / short link), but
-    // suppressIssuedEmail keeps the card.issued email from firing off a
-    // days-old visit; it sends on the next real completion instead.
+    // Backfill closeouts still mint (pure data setup — card row / promoter
+    // enroll / short link; no customer contact).
     // An issued-invoice closeout borrows the internal-only DELIVERY posture
     // (no report, no customer comms) but the service itself was performed
     // (GitHub r12 P2 #4127): it takes the silent backfill mint path — card
-    // row / promoter enroll / short link, issued email suppressed, first
+    // row / promoter enroll / short link, first
     // visit dated to the record's service day — so a first visit closed out
     // this way still anchors the customer's card.
     const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
@@ -14257,7 +14265,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
-          suppressIssuedEmail: isBackfillCompletion,
           // The card's public "First visit" date must show the day the visit
           // happened — for a backfill or a late form that's the backdated
           // service day the record already carries, not the closeout instant.

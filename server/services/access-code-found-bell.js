@@ -18,7 +18,7 @@
 const db = require('../models/db');
 const { accessCodesFoundBellLive, alertEpisodesLive } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
-const { fitAction, shortDateET, tidyName } = require('./admin-alert-names');
+const { fitAction, shortDateET, tidyName, listWords } = require('./admin-alert-names');
 
 const CATEGORY = 'access_codes';
 const DEDUPE_KEY = 'access-codes-found';
@@ -56,13 +56,6 @@ function senderName(item) {
 }
 
 const dayOf = (item) => shortDateET(item.sourceAt || item.createdAt);
-
-// "A", "A and B", "A, B and C", "A, B and 2 more".
-function listWords(names, more) {
-  const parts = more > 0 ? [...names, `${more} more`] : names;
-  if (parts.length <= 1) return parts.join('');
-  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
-}
 
 function oneAction(item) {
   const kind = kindWord(item.kind);

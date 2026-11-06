@@ -3,6 +3,7 @@ jest.mock('express', () => ({
     use: jest.fn(),
     get: jest.fn(),
     put: jest.fn(),
+    post: jest.fn(),
   }),
 }));
 jest.mock('joi', () => ({}));
@@ -156,8 +157,13 @@ describe('notification preference updates', () => {
       // deliberate delivery-method selection, Text included.
       service_reminder_72h_channel_explicit: true,
       service_reminder_24h_channel: 'sms',
+      // Explicit-Text markers for the other routed notices (GATE_APP_FIRST_ANY_DEVICE,
+      // owner 2026-11-04): a customer write stamps the marker, Text included.
+      service_reminder_24h_channel_explicit: true,
       en_route_channel: 'email',
+      en_route_channel_explicit: true,
       tech_arrived_channel: 'both',
+      tech_arrived_channel_explicit: true,
     });
   });
 
@@ -181,8 +187,11 @@ describe('notification preference updates', () => {
 
     expect(updates).toEqual({
       service_reminder_24h_channel: 'sms',
+      service_reminder_24h_channel_explicit: true,
       en_route_channel: 'sms',
+      en_route_channel_explicit: true,
       tech_arrived_channel: 'sms',
+      tech_arrived_channel_explicit: true,
     });
   });
 
@@ -283,9 +292,15 @@ describe('account-level channel routing', () => {
       // owner-resolved row (pre-push #3588 P1).
       'service_reminder_72h_channel_explicit',
       'service_reminder_24h_channel',
+      // Explicit-Text markers for the routed notices travel with their channel
+      // (GATE_APP_FIRST_ANY_DEVICE); the receipt marker is per charged row.
+      'service_reminder_24h_channel_explicit',
       'en_route_channel',
+      'en_route_channel_explicit',
       'tech_arrived_channel',
+      'tech_arrived_channel_explicit',
       'service_complete_channel',
+      'service_complete_channel_explicit',
       'push_enabled',
     ]);
   });

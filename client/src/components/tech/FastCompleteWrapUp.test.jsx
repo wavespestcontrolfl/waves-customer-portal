@@ -291,6 +291,52 @@ describe('first review ask (GATE_REVIEW_FIRST_ASK_LOCK)', () => {
   });
 });
 
+describe('a customer already marked as reviewed and the second off reason (GATE_REVIEW_ALREADY_REVIEWED)', () => {
+  const BOTH = ['complaint_on_site', 'already_left_review'];
+
+  test('a marked customer sees "Already left a Google review" with the date, off and greyed; it posts no ask and the poll stops', async () => {
+    const request = makeRequest({ previews: [{ ...PREVIEW, firstReviewAsk: false, alreadyReviewed: { reviewedOn: '2025-10-28' }, firstAskReasons: BOTH }] });
+    render(<Harness request={request} />);
+    const box = await screen.findByRole('checkbox', { name: 'Already left a Google review (Oct 28, 2025)' });
+    expect(box.disabled).toBe(true);
+    expect(box.checked).toBe(false);
+    expect(screen.queryByLabelText('Review request timing')).toBeNull();
+    expect(wrapUp.fields().requestReview).toBe(false);
+    expect(wrapUp.fields()).not.toHaveProperty('reviewOptOutReason');
+    let ok;
+    await act(async () => { ok = await wrapUp.check(); });
+    expect(ok).toBe(true);
+  });
+
+  test('a first ask turned off asks "already reviewed" first; OK posts that reason', async () => {
+    render(<Harness request={makeRequest({ previews: [{ ...PREVIEW, firstReviewAsk: true, alreadyReviewed: null, firstAskReasons: BOTH }] })} />);
+    const box = await screen.findByRole('checkbox', { name: 'First review ask' });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fireEvent.click(box);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toMatch(/already leave a Google review/);
+    expect(wrapUp.fields()).toMatchObject({ requestReview: false, reviewOptOutReason: 'already_left_review' });
+  });
+
+  test('Cancel on "already reviewed", then OK on the complaint, posts the complaint', async () => {
+    render(<Harness request={makeRequest({ previews: [{ ...PREVIEW, firstReviewAsk: true, alreadyReviewed: null, firstAskReasons: BOTH }] })} />);
+    const box = await screen.findByRole('checkbox', { name: 'First review ask' });
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+    fireEvent.click(box);
+    expect(wrapUp.fields()).toMatchObject({ requestReview: false, reviewOptOutReason: 'complaint_on_site' });
+  });
+
+  test('gate off (no keys): today\'s box and today\'s one question', async () => {
+    render(<Harness request={makeRequest({ previews: [{ ...PREVIEW, firstReviewAsk: true }] })} />);
+    const box = await screen.findByRole('checkbox', { name: 'First review ask' });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fireEvent.click(box);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toMatch(/The only reason to skip it is: Complaint on site/);
+    expect(wrapUp.fields()).toMatchObject({ requestReview: false, reviewOptOutReason: 'complaint_on_site' });
+  });
+});
+
 describe('custom review time', () => {
   const future = () => {
     const d = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);

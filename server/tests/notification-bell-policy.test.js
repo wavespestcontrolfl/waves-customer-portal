@@ -16,6 +16,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   customerAlertsRingLive: jest.fn(() => false),
   morningBannerLive: jest.fn(() => false),
+  ownerNudgeBannerLive: jest.fn(() => false),
 }));
 jest.mock('../services/internal-test-customers', () => ({
   isInternalTestCustomerId: jest.fn(() => false),
@@ -49,7 +50,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled, customerAlertsRingLive, morningBannerLive } = require('../config/feature-gates');
+const { isEnabled, customerAlertsRingLive, morningBannerLive, ownerNudgeBannerLive } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const NotificationService = require('../services/notification-service');
 const bellPolicy = require('../services/notification-bell-policy');
@@ -84,6 +85,7 @@ beforeEach(() => {
   gateOff();
   customerAlertsRingLive.mockReturnValue(false);
   morningBannerLive.mockReturnValue(false);
+  ownerNudgeBannerLive.mockReturnValue(false);
   bellPolicy.clearOverrideCache();
 });
 
@@ -610,6 +612,24 @@ describe('bellAllowed decision order', () => {
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 
+  test('GATE_OWNER_NUDGE_BANNER: the open_visits_nudge banner passes the policy only while its own gate is on, even with the alert category silenced', async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:alert', bell_enabled: false }]) });
+    const nudge = { category: 'alert', triggerKey: 'open_visits_nudge' };
+    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(false);
+    // The morning banner's gate does not open it.
+    morningBannerLive.mockReturnValue(true);
+    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(false);
+    morningBannerLive.mockReturnValue(false);
+    ownerNudgeBannerLive.mockReturnValue(true);
+    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(true);
+    // And its gate does not open the morning banner or any other alert-category event.
+    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'waiting_summary' })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'dashboard_alert' })).resolves.toBe(false);
+    expect([...bellPolicy._private.OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['open_visits_nudge']);
+    expect([...bellPolicy._private.MORNING_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['waiting_summary']);
+    expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
+  });
+
   test('repeat_caller is retired from the bell even though its missed_call category is allowlisted (owner ruling 2026-09-11)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
     await expect(bellPolicy.bellAllowed({ category: 'missed_call', triggerKey: 'repeat_caller' })).resolves.toBe(false);
@@ -895,7 +915,7 @@ describe('voicemail supersedes a missed-call bell for the same call (hook P1)', 
     expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
     // done_by names the latest closer (a system close owns a person-done row: no reopen).
     expect(patch.done_by).toBe('supersede');
-    expect(patch.resolution.sql).toBe('COALESCE(resolution, ?)');
+    expect(patch.resolution.sql).toBe("CASE WHEN done_by = 'quiet-72h' THEN ?::text ELSE COALESCE(resolution, ?::text) END");
     // An unread row is read at the done instant; a person's own read stands.
     expect(patch.read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');
     expect(patch.read_at.bindings).toEqual(patch.done_at.bindings);

@@ -3548,6 +3548,7 @@ module.exports = {
   previewMovedSms,
   checkTarget,
   checkSlots,
+  SLOT_CHECK_TARGET_CAP,
   // Tech-blind occupancy guard, consumed by the find-time hint path —
   // the slot engine walks per-technician routes, so technician-null rows
   // are invisible to it and only this predicate can veto those hours.
