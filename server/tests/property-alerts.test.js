@@ -295,6 +295,39 @@ describe('sweep gate', () => {
     expect(knex.__inserts).toHaveLength(0);
   });
 
+  test('a failed rule read still delivers the other rules, then fails the sweep (job_health sees it)', async () => {
+    process.env.GATE_PROPERTY_ALERTS = 'true';
+    const knex = knexFor({
+      'service_records as sr': [{ service_record_id: 'sr-1', customer_id: 'cust-1', service_type: 'Lawn Care Program', service_date: '2026-07-06' }],
+      service_findings: [{ service_record_id: 'sr-1', category: 'no_activity', severity: 'info' }],
+      customer_alerts: [],
+      // The rain rule's first read fails.
+      get lawn_water_areas() { throw new Error('connection lost'); },
+    });
+    await expect(runPropertyAlertsSweep({ now: JULY_NOW, knex })).rejects.toThrow('property-alerts sweep: 1 rule(s) failed (rainRuleCandidates)');
+    expect(NotificationService.notifyCustomer).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyCustomer.mock.calls[0][4].dedupeKey).toBe('lawn_inspection_reassurance:sr-1');
+  });
+
+  test('gate off: a failed rule read also fails the sweep, with nothing delivered', async () => {
+    const knex = knexFor({ get lawn_water_areas() { throw new Error('connection lost'); } });
+    await expect(runPropertyAlertsSweep({ now: JAN_NOW, knex })).rejects.toThrow('property-alerts sweep: 1 rule(s) failed (rainRuleCandidates)');
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+  });
+
+  test("one candidate's failed delivery is counted as skipped and does not fail the sweep", async () => {
+    process.env.GATE_PROPERTY_ALERTS = 'true';
+    const knex = knexFor({
+      lawn_water_areas: [{ id: 'area-1', rain_adjustment_factor: 1 }],
+      'customers as c': [{ id: 'cust-1', lawn_water_area_id: 'area-1' }],
+      'service_records as sr': [],
+      customer_alerts: [],
+    });
+    getAreaRainfall.mockImplementation(async () => 3.0);
+    NotificationService.notifyCustomer.mockRejectedValue(new Error('push down'));
+    await expect(runPropertyAlertsSweep({ now: JAN_NOW, knex })).resolves.toMatchObject({ delivered: 0, skipped: 1 });
+  });
+
   test('gate on: candidates flow through caps to delivery', async () => {
     process.env.GATE_PROPERTY_ALERTS = 'true';
     const knex = knexFor({
@@ -439,9 +472,9 @@ describe('saved weekly watering plan delivery', () => {
     expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
   });
 
-  test('a failed plan reader suppresses the legacy irrigation alert', async () => {
+  test('a failed plan reader suppresses the legacy irrigation alert, then fails the sweep', async () => {
     loadCustomerWateringPlan.mockRejectedValue(new Error('snapshot unavailable'));
-    expect((await runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).delivered).toBe(0);
+    await expect(runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).rejects.toThrow('property-alerts sweep: 1 rule(s) failed (weeklyPlanCandidates)');
     expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
   });
 

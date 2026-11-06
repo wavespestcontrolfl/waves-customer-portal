@@ -573,17 +573,24 @@ async function runAcceptanceOwnershipSweep() {
 // P1): a persistent bond-sync failure must not silently stall the acceptance
 // copy promise, and vice versa.
 async function runDailySweeps() {
+  const failed = [];
   const attempt = async (name, fn, empty) => {
     try {
       return await fn();
     } catch (err) {
       logger.error(`[lifecycle-sweeps] ${name} failed: ${err.message}`);
+      failed.push(name);
       return empty;
     }
   };
   const bond = await attempt('bond renewal', runBondRenewalSweep, { sent: 0 });
   const ownership = await attempt('acceptance ownership', runAcceptanceOwnershipSweep, { attached: 0, checked: 0 });
   const acceptanceCopies = await attempt('acceptance copies', runAcceptanceCopySweep, { sent: 0, checked: 0, escalated: 0 });
+  // All three have run. Throw so job_health records the failure (the cron's
+  // runExclusive records one only when the body throws).
+  if (failed.length > 0) {
+    throw new Error(`lifecycle-email-sweeps: ${failed.length} of 3 sweep(s) failed (${failed.join(', ')})`);
+  }
   return { bondRenewalsSent: bond.sent, acceptanceOwnershipAttached: ownership.attached, acceptanceCopiesSent: acceptanceCopies.sent };
 }
 

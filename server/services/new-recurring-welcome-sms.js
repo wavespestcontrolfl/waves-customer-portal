@@ -636,6 +636,8 @@ async function processDueWelcomes() {
     }
   } catch (err) {
     logger.error(`[new-recurring-welcome] queue scan failed: ${err.message}`);
+    // Rethrow so job_health records the failed scan; per-sequence catches above stay.
+    throw err;
   }
   return results;
 }

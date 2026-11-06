@@ -92,7 +92,7 @@ function stageOf(calls) {
 function makeBuilder(table) {
   const calls = [];
   const b = {};
-  for (const m of ['join', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereNot', 'where', 'whereBetween', 'select', 'groupBy', 'max', 'as', 'orderBy', 'orWhereNull', 'andWhere', 'whereNotExists', 'whereRaw']) {
+  for (const m of ['join', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereNot', 'where', 'whereBetween', 'select', 'groupBy', 'max', 'as', 'orderBy', 'orWhereNull', 'andWhere', 'whereNotExists', 'whereRaw', 'distinctOn']) {
     b[m] = jest.fn((...args) => { calls.push([m, ...args]); return b; });
   }
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
