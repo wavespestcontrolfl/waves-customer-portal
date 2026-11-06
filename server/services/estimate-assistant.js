@@ -1944,7 +1944,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
     ].filter(Boolean).join('\n');
   }
 
-  if (/\b(price|cost|billing|bill|pay|payment|charge|quarter|month|annual|year|setup|fee|discount)\b/.test(q)) {
+  if (/\b(prices?|costs?|bill(?:s|ed|ing)?|pay(?:s|ing|ments?)?|paid|charg\w*|quarter|month|annual|year|setup|fees?|discounts?)\b/.test(q)) {
     if (context.billing?.quoteRequired) {
       return `This estimate needs an inspection before final pricing or online acceptance. Call or text Waves at ${phone} and the team can finish the quote.`;
     }

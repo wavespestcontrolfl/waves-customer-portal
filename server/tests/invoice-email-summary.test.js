@@ -270,6 +270,16 @@ describe('sendInvoiceEmail service summary', () => {
     expect(args.payload.invoice_summary).toBe(invoice.notes);
   });
 
+  test('leaves the accepted-estimate machine note out of the invoice_summary variable', async () => {
+    mockDb(invoiceRow({ notes: 'Auto-generated from accepted estimate #11111111-2222-3333-4444-555555555555. Customer selected pay per application — first application only.' }));
+
+    const result = await sendInvoiceEmail('inv-1');
+
+    expect(result.ok).toBe(true);
+    const args = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(args.payload.invoice_summary).toBe('');
+  });
+
   test('a deduped template Email returns and repairs only its stored acceptance time', async () => {
     const originalAt = new Date('2026-08-20T14:00:00Z');
     mockDb(invoiceRow({ status: 'sending', send_claim_token: 'original' }));
