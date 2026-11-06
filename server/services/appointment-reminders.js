@@ -6853,6 +6853,9 @@ AppointmentReminders.visitPrefsRow = visitPrefsRow;
 // channel recheck closed, so exporting that name would change which deferred
 // texts replay. That is its own change.
 AppointmentReminders.readReminderPrefs = getReminderPrefs;
+// The 72-hour reminder's effective channel (email-first for one-time visits
+// under GATE_REMINDER_72H_EMAIL_FIRST), for the same check.
+AppointmentReminders.resolve72hChannel = resolve72hChannel;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({

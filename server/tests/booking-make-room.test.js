@@ -42,7 +42,12 @@ function countBy(rows, key) {
   return counts;
 }
 
-function makeDeps({ rows = exampleDay(), told = ['visit-e'], prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true } = {}) {
+const TEXTS = { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: true, reminder72hChannel: 'sms', reminder24hChannel: 'sms' };
+
+function makeDeps({
+  rows = exampleDay(), told = ['visit-e'], prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
+  channel72 = {}, assignable = [TECH], absent = [], blackout = [],
+} = {}) {
   const evaluated = [];
   return {
     evaluated,
@@ -65,7 +70,12 @@ function makeDeps({ rows = exampleDay(), told = ['visit-e'], prefs = {}, pref = 
       return feasible ? { feasible: true } : { feasible: false, reason: 'arrival_window' };
     }),
     arrivalWindowsOn: () => true,
-    getReminderPrefs: jest.fn(async (customerId) => prefs[customerId] || { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: true }),
+    getReminderPrefs: jest.fn(async (customerId) => prefs[customerId] || TEXTS),
+    // The sender's 72-hour channel: the stored one, unless a test promotes a visit (email-first one-time visits).
+    resolve72hChannel: jest.fn(async (stored, visitId) => channel72[visitId] || stored),
+    assignableTechIds: jest.fn(async () => assignable),
+    absentTechDays: jest.fn(async () => new Set(absent)),
+    getBlackoutDates: jest.fn(async () => new Set(blackout)),
     techBlind: () => techBlind,
     closeMin: 17 * 60,
     ownHoldIds: jest.fn(async () => new Set(holdIds)),
@@ -149,6 +159,22 @@ describe('the rules a moved customer adds', () => {
     expect(report.byReason.reminders_off).toBeGreaterThanOrEqual(1);
   });
 
+  test.each([
+    ['a 72-hour reminder the sender sends by email (an email-first one-time visit)', { channel72: { 'visit-c': 'email' } }],
+    ['a 24-hour reminder sent only in the app', { prefs: { 'cust-c': { ...TEXTS, reminder24hChannel: 'push' } } }],
+  ])('%s never moves', async (_label, opts) => {
+    const { report } = await check({ deps: makeDeps(opts) });
+    expect(starts(report)).not.toContain('09:00');
+    expect(report.byReason.reminders_not_text).toBeGreaterThanOrEqual(1);
+  });
+
+  test('reminders by text and email count as text, and the 72-hour channel is resolved the way the sender does', async () => {
+    const prefs = { 'cust-c': { ...TEXTS, reminder72hChannel: 'both', reminder24hChannel: 'both', reminder72hChannelExplicit: true, emailEnabled: true } };
+    const { report, deps } = await check({ deps: makeDeps({ prefs }) });
+    expect(starts(report)).toContain('09:00');
+    expect(deps.resolve72hChannel).toHaveBeenCalledWith('both', 'visit-c', { prefsUnavailable: undefined, explicitChoice: true, emailEnabled: true });
+  });
+
   test('a time preference that does not allow the new hour stops the chain', async () => {
     const { report } = await check({ deps: makeDeps({ pref: { 'visit-c': { startMin: 9 * 60, endMin: 11 * 60 } } }) });
     expect(starts(report)).not.toContain('09:00');
@@ -157,6 +183,26 @@ describe('the rules a moved customer adds', () => {
 });
 
 describe('the day and the route', () => {
+  test.each([
+    ['a blackout date', { blackout: [DAY] }],
+    ['an absent or off technician-day', { absent: [`${TECH}:${DAY}`] }],
+    ['a technician the page cannot assign', { assignable: [] }],
+  ])('%s is never a candidate', async (_label, opts) => {
+    const { report } = await check({ deps: makeDeps(opts) });
+    expect(report.passed).toEqual([]);
+    expect(report.candidates).toBe(0);
+    expect(report.byReason.tech_day_closed).toBe(1);
+  });
+
+  test('the blackout list is read strictly: an unreadable one stops the check', async () => {
+    const deps = makeDeps();
+    deps.getBlackoutDates.mockRejectedValue(new Error('settings down'));
+    const { report } = await check({ deps });
+    expect(deps.getBlackoutDates).toHaveBeenCalledWith(DAY, DAY, expect.anything(), { strict: true });
+    expect(report.passed).toEqual([]);
+    expect(report.error).toBe('settings down');
+  });
+
   test('the route must keep every arrival window on the moved day', async () => {
     const { report, inserted } = await check({ deps: makeDeps({ feasible: false }) });
     expect(report.passed).toEqual([]);
@@ -282,7 +328,9 @@ describe('the default reads', () => {
     const notFunctions = Object.entries(deps).filter(([name, value]) => name !== 'closeMin' && typeof value !== 'function').map(([name]) => name);
     expect(notFunctions).toEqual([]);
     expect(Number.isFinite(deps.closeMin)).toBe(true);
-    expect(deps.getReminderPrefs).toBe(require('../services/appointment-reminders')._test.getReminderPrefs);
+    const reminders = require('../services/appointment-reminders');
+    expect(deps.getReminderPrefs).toBe(reminders._test.getReminderPrefs);
+    expect(deps.resolve72hChannel).toBe(reminders._test.resolve72hChannel);
     expect(typeof deps.techBlind()).toBe('boolean');
   });
 });

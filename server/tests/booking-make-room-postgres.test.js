@@ -49,7 +49,9 @@ jest.setTimeout(180000);
 const NOW = new Date('2097-06-09T05:00:00Z'); // 01:00 ET on Monday
 const DAY = '2097-06-10';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS'];
+// GATE_REMINDER_72H_EMAIL_FIRST is cleared too: these fixture visits are one-time, and under it their 72-hour reminder
+// goes by email, so they would never move.
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST'];
 
 maybeDescribe('make-room check on real PostgreSQL', () => {
   let database;
@@ -155,6 +157,16 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     expect(JSON.stringify(rows[0].report)).not.toMatch(/Fixturezq|Room Test Lane|27\.43/);
     expect(await starts()).toEqual(before);
     expect(await mockConn('reschedule_log').whereIn('scheduled_service_id', visits.map((v) => v.id))).toHaveLength(0);
+    expect(sentAnything()).toEqual([]);
+  });
+
+  test('the technician marked out that day is never a candidate (the free-slot finder\'s own absence rule)', async () => {
+    await mockConn('technician_absences').insert({ technician_id: techId, absence_date: DAY, reason: 'synthetic test absence' });
+    const report = await run();
+    expect(report.error).toBeNull();
+    expect(report.candidates).toBe(0);
+    expect(report.passed).toEqual([]);
+    expect(report.byReason.tech_day_closed).toBe(1);
     expect(sentAnything()).toEqual([]);
   });
 

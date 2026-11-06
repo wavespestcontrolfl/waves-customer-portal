@@ -8,11 +8,13 @@
  *
  * An hour counts only when every rule holds:
  *   1. The estimate page could offer it (the caller's `admit`: the customer grid and close, the request's dates,
- *      weekends, zone days, time of day, notice and season) and it starts where a stop starts.
+ *      weekends, zone days, time of day, notice and season) and it starts where a stop starts, on a day the free-slot
+ *      finder would use: an assignable technician, no absent or off tech-day, no blackout date (find-time's rules).
  *   2. Every stop in the chain may move under the 4:40 re-plan's own rules: day-replan fixedReason, read again with
  *      the day's full facts (status, hold, staff lock, office review, group, same customer twice, the 24-hour lock,
  *      the 24-hour text and, with GATE_NIGHT_TOLD_LOCK, confirmed, first or one-time, person-placed and told
- *      visits). Its customer also gets the 72-hour and 24-hour reminder texts, so the new time reaches them. Its time
+ *      visits). Its customer also gets the 72-hour and 24-hour reminders BY TEXT (the sender's own channel rules), so
+ *      the new time reaches them. Its time
  *      preference (the re-plan's loadPref) allows the new hour, and it still ends by the night tools' day close.
  *   3. Nothing else holds the new minutes: no unassigned visit, no other technician's visit while the occupancy
  *      check is technician-blind (the re-plan's blockedHoursFor rule), no schedule block.
@@ -258,6 +260,19 @@ function remindersOn(prefs) {
     && prefs.serviceReminder72h !== false && prefs.serviceReminder24h !== false;
 }
 
+const TEXT_CHANNELS = new Set(['sms', 'both']);
+
+// ...and both go out by text: the channels the reminder sender itself uses (resolve72hChannel for the 72-hour leg,
+// which can promote a one-time visit to email; the stored 24-hour channel). Email or app only never moves.
+async function remindersByText(prefs, row, env) {
+  const channel72 = await env.resolve72hChannel(prefs.reminder72hChannel, row.id, {
+    prefsUnavailable: prefs.unavailable,
+    explicitChoice: prefs.reminder72hChannelExplicit,
+    emailEnabled: prefs.emailEnabled,
+  });
+  return TEXT_CHANNELS.has(channel72) && TEXT_CHANNELS.has(prefs.reminder24hChannel);
+}
+
 // Why one moved stop may not move after all, from the day's full facts, or null.
 async function moveBlockedReason(move, { conn, env, day, techId }) {
   const row = (day?.allRows || []).find((r) => String(r.id) === String(move.row.id));
@@ -269,6 +284,7 @@ async function moveBlockedReason(move, { conn, env, day, techId }) {
   try {
     prefs = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id });
     if (!remindersOn(prefs)) return 'reminders_off';
+    if (!(await remindersByText(prefs, row, env))) return 'reminders_not_text';
     pref = await env.loadPref(conn, row);
   } catch {
     return 'prefs_unreadable';
@@ -327,6 +343,19 @@ async function loadDays(conn, env, { dates, holdIds, deadline, report }) {
   return days;
 }
 
+// The free-slot finder's own day and technician rules (find-time loadFindTimeContext): assignable technicians only,
+// no absent or off tech-day, no blackout date (strict: an unreadable list stops the check). A stop left on such a
+// day is never a place to book, so it is never a candidate.
+async function loadOpenTechDays(conn, env, dates) {
+  const dateFrom = dates[0];
+  const dateTo = dates[dates.length - 1];
+  const techIds = (await env.assignableTechIds(conn)).map(String);
+  const blackout = await env.getBlackoutDates(dateFrom, dateTo, conn, { strict: true });
+  const absent = techIds.length ? await env.absentTechDays(conn, { dateFrom, dateTo, technicianIds: techIds }) : new Set();
+  const assignable = new Set(techIds);
+  return (dateStr, techId) => assignable.has(String(techId)) && !blackout.has(dateStr) && !absent.has(`${techId}:${dateStr}`);
+}
+
 async function ownHoldIds(conn, estimateId) {
   if (!estimateId) return new Set();
   const rows = await conn('scheduled_services').where({ source_estimate_id: estimateId })
@@ -339,6 +368,8 @@ function defaultDeps() {
   const arrivalRoute = require('./arrival-route');
   const startPoints = require('./tech-start-point');
   const occupancy = require('./occupancy');
+  const eligibility = require('../technician-eligibility');
+  const reminders = require('../appointment-reminders');
   return {
     loadDayStops: (conn, dateStr) => replan.loadDayStops(conn, dateStr, false),
     loadDayContext: replan.loadDayContext,
@@ -352,7 +383,11 @@ function defaultDeps() {
     loadArrivalRouteContext: arrivalRoute.loadArrivalRouteContext,
     evaluateArrivalPlacement: arrivalRoute.evaluateArrivalPlacement,
     arrivalWindowsOn: arrivalRoute.arrivalWindowRoutingEnabled,
-    getReminderPrefs: require('../appointment-reminders').readReminderPrefs,
+    getReminderPrefs: reminders.readReminderPrefs,
+    resolve72hChannel: reminders.resolve72hChannel,
+    assignableTechIds: async (conn) => (await eligibility.applyAssignable(conn('technicians')).select('technicians.id')).map((row) => row.id),
+    absentTechDays: eligibility.absentTechDays,
+    getBlackoutDates: require('./blackout-dates').getBlackoutDates,
     techBlind: () => !occupancy.techScopedConfirmActive(),
     closeMin: require('../auto-dispatch/candidate-slots').DAY_CLOSE,
     ownHoldIds,
@@ -399,9 +434,17 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
   report.free = { count: pool.length, best: bestFree };
   const request = { point, durationMin, admit, now, bestFree, estimateId };
+  const open = await raceBudget(loadOpenTechDays(conn, env, dates), deadline);
+  if (open === TIMED_OUT) {
+    report.timedOut = true;
+    return;
+  }
   const candidates = [];
   for (const [dateStr, rows] of dayRows) {
-    for (const techId of techIdsOf(rows)) candidates.push(...dayCandidates({ dateStr, rows, techId, env, request, report }));
+    for (const techId of techIdsOf(rows)) {
+      if (open(dateStr, techId)) candidates.push(...dayCandidates({ dateStr, rows, techId, env, request, report }));
+      else tally(report, 'tech_day_closed');
+    }
   }
   report.candidates = candidates.length;
   await checkCandidates(candidates, { conn, env, request, deadline, report });
@@ -477,5 +520,5 @@ async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = nu
 module.exports = {
   bookingMakeRoomMode,
   recordMakeRoomCheck,
-  _internals: { buildChain, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, moveBlockedReason, datesFor, bySaving, defaultDeps, MIN_SAVING_MIN, MAX_FULL_CHECKS },
+  _internals: { buildChain, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, MIN_SAVING_MIN, MAX_FULL_CHECKS },
 };
