@@ -1294,7 +1294,7 @@ describe('fulfillment proof', () => {
     expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('"witness_refs":["visit:v-1"]');
     expect(verdict.event_only).toBe(true);
     // The instructions admit the same accepted-push proof admissibleWitness does (#4816 r41 pre-push).
-    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('except an App push the provider accepted');
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].system).toContain('except an App push the provider accepted');
     // The window check and the after-deadline check never share a cached verdict.
     expect(fulfillmentFingerprint(callback, evidence, { eventOnly: true }).evidenceHash)
       .not.toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
@@ -1624,19 +1624,6 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     expect(JSON.parse(first.text).obligation.description).toBe('Did my payment go through?');
   });
 
-  test('an obligation\'s extra rule (GATE_PROMISE_RECORD_EVIDENCE) leads the user message; the cached rules do not change', async () => {
-    const { withExtendedEvidence } = require('../services/sms-commitment-fulfillment');
-    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const promise = { kind: 'other', description: 'We will send the annual plan invoice', sms_context: { ...ctx, basis: 'promise' } };
-    await verifySmsFulfillment(promise, { records: [invoicePaid], failures: [] });
-    await verifySmsFulfillment(withExtendedEvidence(promise), { records: [invoicePaid], failures: [] });
-    const [plain, extended] = dispatchWithFallback.mock.calls.map(([, request]) => request);
-    expect(extended.system).toBe(plain.system);
-    expect(plain.text.startsWith('{')).toBe(true);
-    expect(extended.text).toMatch(/^For this promise Waves made, an invoice record \(type invoice, listed in witness_refs\)/);
-    const [, evidenceJson] = extended.text.split('\n');
-    expect(JSON.parse(evidenceJson).obligation.description).toBe('We will send the annual plan invoice');
-  });
 
   test('owner ruling 2026-09-28: the extraction no longer judges whether a reply could answer an ask', () => {
     const { buildPrompt, SCHEMA } = require('../services/sms-operational-extractor');
@@ -1684,7 +1671,7 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     expect(await verifySmsFulfillment(promise, { records: [reply('bare2', '2040-03-11T15:00:00Z', 'Thanks!', { operator_sent: false })], failures: [] }))
       .toMatchObject({ verdict: 'open' });
     // The check is told a promise is kept only by doing it, on the day it named.
-    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('A promise Waves made (sms_context.basis promise) is fulfilled only by a record of Waves doing what it promised');
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].system).toContain('A promise Waves made (sms_context.basis promise) is fulfilled only by a record of Waves doing what it promised');
     // No basis recorded (intake always stamps one): it fails toward the model, never the shortcut.
     const { basis: _basis, ...noBasis } = ask.sms_context;
     await verifySmsFulfillment({ ...ask, sms_context: noBasis }, { records: [first], failures: [] });
@@ -2042,19 +2029,26 @@ describe('GATE_PROMISE_RECORD_EVIDENCE (owner 2026-10-29, fix F4): records the o
   });
 
   test('the model is told about the new records only when the gate is true (or the shadow run)', async () => {
+    let system;
     const prompt = async (commitment) => {
       dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
       await verifySmsFulfillment(commitment, { records: [invoice, estimate()], failures: [] }, { now: new Date('2040-03-13T00:00:00Z') });
+      ({ system } = dispatchWithFallback.mock.calls[0][1]);
       return dispatchWithFallback.mock.calls[0][1].text;
     };
     const { withExtendedEvidence } = require('../services/sms-commitment-fulfillment');
     const off = await prompt(staff);
+    const offSystem = system;
     expect(off).not.toContain('Waves sent the customer after the promise');
     expect(off).toContain('"witness_refs":[]');
     process.env.GATE_PROMISE_RECORD_EVIDENCE = 'shadow';
     expect(await prompt(staff)).toBe(off);
     const shadowRun = await prompt(withExtendedEvidence(staff));
     expect(shadowRun).toContain('Waves sent the customer after the promise');
+    // The extra rule rides in the user message, ahead of the evidence, so the
+    // cached system rules stay one entry for every obligation.
+    expect(shadowRun.startsWith('For this promise Waves made')).toBe(true);
+    expect(system).toBe(offSystem);
     expect(shadowRun).toContain('"witness_refs":["invoice:inv-1"]');
     process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
     expect(await prompt(estimateRequest)).toContain('accepted after the request');
