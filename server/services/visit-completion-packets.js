@@ -1044,7 +1044,7 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
   // A visit-scoped change reaches no invoice that rides no visit, so only the visit-linked rules apply to it.
   if (scheduledServiceId) return linkedFence();
   const standalone = database('invoices').whereNull('payer_id').whereNull('visit_completion_packet_id')
-    .where({ status: 'sending' }).where('updated_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+    .where({ status: 'sending' }).where('updated_at', '>', new Date(Date.now() - require('./visit-linked-invoice-withdrawal').SEND_CLAIM_STALE_MS))
     .whereNotExists(database('annual_prepay_terms as renewal').whereRaw('renewal.prepay_invoice_id = invoices.id'))
     // An invoice that rides a visit (a direct link, or a record link whose record names a visit) is judged below by the
     // effective-owner rules, which count it only when this Bill-To change would move its owner: a visit pinned self-pay,
