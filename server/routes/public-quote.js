@@ -30,6 +30,29 @@ function duplicateOfFromExtracted(extractedData) {
   return parseExtracted(extractedData)?.duplicate_of_lead_id || null;
 }
 
+// Free-text values are cut to the leads column they land in before any write:
+// a 300-character first name overflowed leads.first_name (varchar 255) and the
+// whole quote answered 500 (2026-11-05 new-customer walk). Sizes come from the
+// leads migrations (initial table: plain strings = 255; service_key 80).
+const LEAD_TEXT_LIMITS = {
+  first_name: 255,
+  last_name: 255,
+  email: 255,
+  phone: 255,
+  address: 255,
+  city: 255,
+  zip: 255,
+  service_interest: 255,
+  service_key: 80,
+};
+function clampLeadText(fields) {
+  const out = { ...fields };
+  for (const [key, max] of Object.entries(LEAD_TEXT_LIMITS)) {
+    if (typeof out[key] === 'string' && out[key].length > max) out[key] = out[key].slice(0, max);
+  }
+  return out;
+}
+
 // `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
 // property-lookup stage already minted) — a row is never its own prior.
 // `onlyLeadId` re-validates ONE already-chosen target against the exact same
@@ -2264,7 +2287,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // guessed/known id for someone else's lead matches zero rows and falls
       // through to creating a fresh lead below. /calculate already requires
       // contactEmail above, so a legitimate visitor's own row always matches.
-      const updateFields = {
+      const updateFields = clampLeadText({
         first_name: contactFirstName,
         last_name: contactLastName,
         email: contactEmail,
@@ -2295,7 +2318,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           [extractedData, extractedData]
         ),
         updated_at: new Date(),
-      };
+      });
       if (gclid) updateFields.gclid = gclid;
       if (wbraid) updateFields.wbraid = wbraid;
       if (gbraid) updateFields.gbraid = gbraid;
@@ -2443,7 +2466,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       duplicateOfLeadId = dedupeOn ? await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest }) : null;
     }
     if (!lead) {
-      const rows = await db('leads').insert({
+      const rows = await db('leads').insert(clampLeadText({
         first_name: contactFirstName,
         last_name: contactLastName,
         email: contactEmail,
@@ -2470,7 +2493,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         extracted_data: duplicateOfLeadId
           ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
           : extractedData,
-      }).returning(['id']);
+      })).returning(['id']);
       lead = rows[0];
     }
     // The label was computed from a read of the target; if the office closed
@@ -4460,6 +4483,8 @@ module.exports._internals = {
   trustedTreeShrubFootprintSqFt,
   deriveAddressUnverified,
   findPriorOpenWizardLeadId,
+  clampLeadText,
+  LEAD_TEXT_LIMITS,
   duplicateOfFromExtracted,
   WIZARD_LEAD_REUSE_DAYS,
   isPublicCommercialQuote,
