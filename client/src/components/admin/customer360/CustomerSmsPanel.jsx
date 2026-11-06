@@ -478,7 +478,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
               className="text-16"
               disabled={sending}
             />
-            <GreetingNameNote check={nameCheck} />
+            <GreetingNameNote check={nameCheck} disabled={sending} />
             <div className="flex items-center justify-between gap-3 mt-2">
               <div className="min-w-0 text-14" aria-live="polite">
                 {sendError ? <span className="text-alert-fg">{sendError}</span> : null}

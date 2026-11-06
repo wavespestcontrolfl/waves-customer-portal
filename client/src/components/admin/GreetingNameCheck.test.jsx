@@ -10,13 +10,13 @@ vi.mock("../../utils/admin-fetch", () => ({ adminFetch: vi.fn() }));
 
 const CUSTOMER = "11111111-1111-4111-8111-111111111111";
 
-function Harness({ customerId = CUSTOMER, initial = "" }) {
+function Harness({ customerId = CUSTOMER, initial = "", locked = false }) {
   const [text, setText] = useState(initial);
   const check = useGreetingNameCheck({ customerId, text, setText });
   return (
     <div>
       <textarea aria-label="body" value={text} onChange={(e) => setText(e.target.value)} />
-      <GreetingNameNote check={check} />
+      <GreetingNameNote check={check} disabled={locked} />
       <button type="button">Send</button>
     </div>
   );
@@ -133,5 +133,15 @@ describe("greeting name check", () => {
     await settle();
     expect(screen.queryByTestId("greeting-name-note")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+  });
+
+  it("disables the fix button while the box is locked", async () => {
+    adminFetch.mockImplementation(async (_path, opts) => fixFor(JSON.parse(opts.body).text));
+    const { rerender } = render(<Harness />);
+    type("Hi Sarah,");
+    await settle();
+    rerender(<Harness locked />);
+    expect(screen.getByRole("button", { name: "Change to Sara" })).toBeDisabled();
+    expect(screen.getByLabelText("body")).toHaveValue("Hi Sarah,");
   });
 });

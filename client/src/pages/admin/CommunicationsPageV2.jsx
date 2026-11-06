@@ -3803,7 +3803,7 @@ export function SmsTab({
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           />
           </Field>
-          <GreetingNameNote check={nameCheck} />
+          <GreetingNameNote check={nameCheck} disabled={rewritingSms || sending} />
           <div className="mt-2 flex items-center gap-2">
             <Button
               variant="secondary"

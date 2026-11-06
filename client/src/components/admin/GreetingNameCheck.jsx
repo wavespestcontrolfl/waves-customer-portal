@@ -65,7 +65,8 @@ export function useGreetingNameCheck({ customerId, text, setText }) {
   return { fix: current, applyFix };
 }
 
-export default function GreetingNameNote({ check }) {
+// disabled: the box is locked (sending, rewriting), so the fix must not edit the text under it.
+export default function GreetingNameNote({ check, disabled = false }) {
   const fix = check?.fix;
   if (!fix) return null;
   const spelled = [...new Set(fix.fixes.map((f) => f.spelled))].join(" and ");
@@ -77,7 +78,7 @@ export default function GreetingNameNote({ check }) {
       className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 px-3 py-2 text-14 text-zinc-900"
     >
       <span>Record says {spelled}</span>
-      <Button size="sm" variant="secondary" onClick={check.applyFix}>Change to {spelled}</Button>
+      <Button size="sm" variant="secondary" onClick={check.applyFix} disabled={disabled}>Change to {spelled}</Button>
     </div>
   );
 }
