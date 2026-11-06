@@ -74,9 +74,11 @@ change, or the lesson says `no check yet: <reason>`. Pick the home:
 1. **A portal check** — the default for a mistake in portal behavior. A job in
    `server/services/`, registered in `server/services/scheduler.js` inside
    `runExclusive`, that raises one admin bell row per problem and closes the
-   row when the problem is gone. Add it in the SAME PR as the fix, dark
-   behind a `GATE_*` (the PR template's Kill switch line). Use the existing
-   self-closing helpers; do not hand-roll a close:
+   row when the problem is gone. Add it in the SAME PR as the fix. A
+   read-only check needs no `GATE_*`: it texts no one, moves no money and
+   spends nothing, so it ships live (owner 2026-11-05: a change gets a gate
+   only when it needs one). Use the existing self-closing helpers; do not
+   hand-roll a close:
    - A bell for the owner: `raiseAdminAlert` (`admin-alert-compose.js`) to
      raise it, `closeAdminAlertKeys` and `openAdminAlertKeys`
      (`admin-alert-episodes.js`) to close it. `caller-callback-bell.js` is
