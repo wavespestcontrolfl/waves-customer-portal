@@ -1500,8 +1500,12 @@ export function EntriesTab({ showToast }) {
   const [addOpen, setAddOpen] = useState(false);
   const [techs, setTechs] = useState([]);
   const LIMIT = 30;
+  // Only the newest request may write rows or clear "Loading...", so a slow
+  // response for an earlier filter cannot replace the current results.
+  const loadSequence = useRef(0);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -1516,9 +1520,11 @@ export function EntriesTab({ showToast }) {
       const res = await adminFetch(
         `/admin/timetracking/entries?${params.toString()}`,
       );
+      if (sequence !== loadSequence.current) return;
       setEntries(res.entries || []);
       setTotal(res.total || 0);
     } catch (e) {
+      if (sequence !== loadSequence.current) return;
       showToast("Failed to load entries");
     }
     setLoading(false);

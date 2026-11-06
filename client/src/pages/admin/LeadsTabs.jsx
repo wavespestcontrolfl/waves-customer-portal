@@ -78,6 +78,20 @@ function contactEvidenceDetails(activity) {
   return { label, reference };
 }
 
+// New Lead form notes live only in the "created" activity's metadata.
+function createdActivityNotes(activity) {
+  if (activity?.activity_type !== "created" || !activity.metadata) return "";
+  try {
+    const metadata =
+      typeof activity.metadata === "string"
+        ? JSON.parse(activity.metadata)
+        : activity.metadata;
+    return typeof metadata?.notes === "string" ? metadata.notes.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 function ContactEvidenceExplanation({ activity }) {
   const details = contactEvidenceDetails(activity);
   if (!details) return null;
@@ -2527,6 +2541,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             <ContactEvidenceExplanation
                                               activity={a}
                                             />
+                                          )}
+                                          {createdActivityNotes(a) && (
+                                            <div className="mt-[2px] text-zinc-900 whitespace-pre-wrap break-words">
+                                              Notes: {createdActivityNotes(a)}
+                                            </div>
                                           )}
                                           {(() => {
                                             if (
