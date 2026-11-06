@@ -530,7 +530,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return { ok: false, held: true, reason: 'move_hold' };
     }
     if (kind === 'confirmation') {
-      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl, idempotencyKey: emailIdempotencyKey || undefined });
     }
     if (kind === '72h' || kind === '24h') {
       return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined });
@@ -2665,6 +2665,22 @@ async function coalesceRescheduleNotice(record, newApptTime, options) {
   }
 }
 
+// A lapsed move_hold_until with no token: the mark coalesceRescheduleNotice leaves (every
+// grouped-move hold stamps both).
+function isCoalescedNoticeRow(record) {
+  return !!record.move_hold_until && !record.move_hold_token;
+}
+
+// The email key of a deferred confirmation. The ordinary key (visit + slot) would dedupe a
+// move back to a slot that already got a confirmation (A, B, then A again within the
+// window) against that older email, leaving B as the customer's latest notice. The hold
+// stamp is one per burst and stays on the row until the send is marked, so a retry of the
+// same deferred notice keeps its key. Null for every other confirmation (default key).
+function coalescedNoticeEmailKey(record, scheduledServiceId, apptTime) {
+  if (!isCoalescedNoticeRow(record)) return null;
+  return `appointment.confirmation:${scheduledServiceId || record.customer_id}:${apptTime.getTime()}:coalesced:${new Date(record.move_hold_until).getTime()}`;
+}
+
 // The extra columns a delivered confirmation writes when it IS the deferred notice
 // of a coalesced reschedule (coalesceRescheduleNotice: a lapsed move_hold_until that
 // carries no token; every grouped-move hold stamps both). It stands in for the
@@ -2673,7 +2689,7 @@ async function coalesceRescheduleNotice(record, newApptTime, options) {
 // applies), and it clears the spent hold so a later confirmation reads as ordinary.
 // Nothing for any other confirmation.
 function coalescedNoticeCover(record, apptTime, sent) {
-  if (!record.move_hold_until || record.move_hold_token) return {};
+  if (!isCoalescedNoticeRow(record)) return {};
   const covered = sent ? reminderFlagsCoveredByNotice(apptTime) : {};
   return {
     move_hold_until: null,
@@ -2819,6 +2835,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         serviceLabel,
         rescheduleUrl: reschedule.url,
         smsOutcome,
+        emailIdempotencyKey: coalescedNoticeEmailKey(record, scheduledServiceId, apptTime),
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           const ladder = {};

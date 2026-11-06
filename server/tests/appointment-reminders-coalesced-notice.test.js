@@ -38,6 +38,10 @@ jest.mock('../services/estimate-card-holds', () => ({
 jest.mock('../services/reschedule-link', () => ({
   buildRescheduleLink: jest.fn(async () => ({ url: null, line: '' })),
 }));
+jest.mock('../services/appointment-email', () => ({
+  sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
+  sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })),
+}));
 // A visit with no live move hold of its own and an open service.
 jest.mock('../services/visit-groups', () => ({
   ...jest.requireActual('../services/visit-groups'),
@@ -46,6 +50,7 @@ jest.mock('../services/visit-groups', () => ({
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const AppointmentEmail = require('../services/appointment-email');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 const HOUR = 3600000;
@@ -55,6 +60,7 @@ const CUSTOMER = { id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', phone
 const NOW = new Date('2026-11-10T14:00:00.000Z');
 
 let row;
+let prefsRow = null;
 
 // The one reminder row. Object wheres are matched against it; function wheres (the scan's
 // flag and hold predicates) are not evaluated: the loop re-checks the flags itself.
@@ -116,6 +122,7 @@ function reminderRow(hoursOut, overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  prefsRow = null;
   jest.useFakeTimers().setSystemTime(NOW);
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
@@ -124,6 +131,7 @@ beforeEach(() => {
     if (table === 'appointment_reminders') return reminderTable();
     if (table === 'scheduled_services') return plainTable({ customer_id: 'cust-1', status: 'confirmed', tech_name: null, visit_id: null });
     if (table === 'customers') return plainTable(CUSTOMER);
+    if (table === 'notification_prefs') return plainTable(prefsRow);
     return plainTable(null);
   });
   jest.spyOn(AppointmentReminders, 'selfHealMissingReminderRows').mockResolvedValue({ healed: 0 });
@@ -186,5 +194,38 @@ describe('a deferred confirmation of a coalesced reschedule', () => {
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(row).toMatchObject({ reminder_72h_sent: true, reminder_24h_sent: true });
+  });
+
+  describe('email-only customer', () => {
+    const emailKeys = () => AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls.map(([args]) => args.idempotencyKey);
+    beforeEach(() => { prefsRow = { appointment_confirmation_channel: 'email', appointment_confirmation_channel_explicit: true }; });
+
+    test('the deferred email has its own key: moving A, B, then back to A inside the window does not dedupe against the first A email', async () => {
+      // First confirmation of slot A, sent as an ordinary one days ago: no coalesced hold on the row.
+      row = reminderRow(96, { move_hold_until: null });
+      await AppointmentReminders.checkAndSendReminders();
+      // The customer moves to B and back to A inside the window: the burst re-arms the same slot A.
+      const slotA = row.appointment_time;
+      row = reminderRow(96, { appointment_time: slotA, move_hold_until: new Date(NOW.getTime() - 60 * 1000) });
+      await AppointmentReminders.checkAndSendReminders();
+
+      const [ordinary, deferred] = emailKeys();
+      expect(ordinary).toBeUndefined(); // the default visit + slot key, as before the gate
+      expect(deferred).toMatch(/^appointment\.confirmation:svc-1:\d+:coalesced:\d+$/);
+    });
+
+    test('a retry of the same deferred notice keeps its key, a later burst gets another', async () => {
+      const hold = new Date(NOW.getTime() - 60 * 1000);
+      row = reminderRow(96, { move_hold_until: hold });
+      await AppointmentReminders.checkAndSendReminders();
+      row = reminderRow(96, { move_hold_until: hold });
+      await AppointmentReminders.checkAndSendReminders();
+      row = reminderRow(96, { move_hold_until: new Date(NOW.getTime() - 2 * 60 * 1000) });
+      await AppointmentReminders.checkAndSendReminders();
+
+      const [first, retry, laterBurst] = emailKeys();
+      expect(retry).toBe(first);
+      expect(laterBurst).not.toBe(first);
+    });
   });
 });
