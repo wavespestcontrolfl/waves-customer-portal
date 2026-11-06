@@ -357,6 +357,23 @@ describe('the booking confirmation', () => {
     expect(AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls[0][0]).not.toHaveProperty('dayOnly');
   });
 
+  test('one story: when the day TEXT was delivered, the email leg is strict (no window-email fallback if the day email cannot render); when the text was not, it may fall back', async () => {
+    prefsRow = { sms_enabled: true, email_enabled: true, appointment_confirmation_channel: 'both' };
+    await run(150);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true, dayOnlyStrict: true });
+
+    jest.clearAllMocks();
+    smsTemplates.getTemplate.mockImplementation(async (key) => (enabled.has(key) ? `rendered:${key}` : null));
+    buildRescheduleLink.mockResolvedValue({ url: LINK, line: `Reschedule here: ${LINK}\n\n` });
+    timePromise.dayOnlySendDecision.mockResolvedValue(DAY_YES);
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE_SMS_RECIPIENT', deliveryOutcome: 'not_sent' });
+    await run(150);
+    const call = AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls[0][0];
+    expect(call).toMatchObject({ dayOnly: true });
+    expect(call).not.toHaveProperty('dayOnlyStrict');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
   test('the stranded-confirmation sweep goes through the same decision (a resend is day-only too)', async () => {
     row = visit(150, { confirmation_sent: false });
     await AppointmentReminders.checkAndSendReminders();

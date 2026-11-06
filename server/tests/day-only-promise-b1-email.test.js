@@ -115,10 +115,10 @@ describe('the day-only confirmation email', () => {
   });
 
   test.each([
-    ['missing', Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' })],
-    ['disabled', Object.assign(new Error('email template is disabled'), { code: 'EMAIL_TEMPLATE_DISABLED' })],
-  ])('a %s day template sends today\'s window email instead', async (_label, error) => {
-    EmailTemplates.sendTemplate.mockRejectedValueOnce(error);
+    ['missing', undefined],
+    ['disabled', { template_key: 'appointment.confirmation_day', status: 'disabled' }],
+  ])('a %s day template (the library\'s own tagged refusal) sends today\'s window email instead', async (_label, template) => {
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(await libraryRefusal(template));
     const result = await send({ dayOnly: true });
     expect(result.ok).toBe(true);
     const calls = sent();
@@ -128,11 +128,64 @@ describe('the day-only confirmation email', () => {
     expect(logger().warn).toHaveBeenCalledWith(expect.stringContaining('appointment.confirmation_day'));
   });
 
-  test('any other failure is returned, not retried as a window email', async () => {
-    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('provider down'), { code: 'PROVIDER_DOWN' }));
+  test('a provider failure is returned, not retried as a window email (the retry rails own it; never two emails)', async () => {
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('provider down'), { status: 502, code: 'PROVIDER_DOWN' }));
+    const result = await send({ dayOnly: true });
+    expect(result.ok).toBe(false);
+    expect(result.refusal).toBeUndefined();
+    expect(sent()).toHaveLength(1);
+  });
+
+  test('the classification is the library\'s tag, not an error code or message: an untagged error that merely carries a template code is not a fallback', async () => {
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
     const result = await send({ dayOnly: true });
     expect(result.ok).toBe(false);
     expect(sent()).toHaveLength(1);
+  });
+
+  test('the day text of the same send was delivered (dayOnlyStrict): the day email that cannot render is NOT replaced by a window email', async () => {
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(await libraryRefusal(undefined));
+    const result = await send({ dayOnly: true, dayOnlyStrict: true });
+    expect(result.ok).toBe(false);
+    expect(result.refusal).toBe(true);
+    expect(sent().map((c) => c.templateKey)).toEqual(['appointment.confirmation_day']);
+  });
+
+  describe('an administrator adds appointment_time to the day template\'s required variables (real library, real render)', () => {
+    const actualLib = jest.requireActual('../services/email-template-library');
+    const { emailTemplateRow, EMAIL_TEMPLATES } = migration._test;
+    const dayTemplate = EMAIL_TEMPLATES.find((t) => t.key === 'appointment.confirmation_day');
+    const stored = (required) => ({
+      ...emailTemplateRow({ ...dayTemplate, required: [...dayTemplate.required, ...required] }), id: 'tpl-day', active_version_id: 'ver-day',
+    });
+    const version = { id: 'ver-day', template_id: 'tpl-day', subject: dayTemplate.subject, preview_text: dayTemplate.preview, blocks: JSON.stringify(dayTemplate.blocks), text_body: null };
+
+    function realLibraryForDayTemplateOnly(required) {
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const rows = { email_templates: stored(required), email_template_versions: version };
+        if (table in rows) { const q = {}; q.where = () => q; q.first = async () => rows[table]; return q; }
+        if (table === 'email_messages') { const q = {}; q.where = () => q; q.first = async () => undefined; return q; }
+        return base(table);
+      });
+      EmailTemplates.sendTemplate.mockImplementation((args) => (args.templateKey === 'appointment.confirmation_day'
+        ? actualLib.sendTemplate(args)
+        : Promise.resolve({ sent: true, message: { id: 'em-2', provider_message_id: 'sg-2', sent_at: '2026-11-10T14:00:00.000Z' } })));
+    }
+
+    test('the day render is refused before dispatch and the WINDOW email goes, with window metadata and key', async () => {
+      realLibraryForDayTemplateOnly(['appointment_time']);
+      const result = await send({ dayOnly: true });
+      expect(result.ok).toBe(true);
+      const calls = sent();
+      expect(calls.map((c) => c.templateKey)).toEqual(['appointment.confirmation_day', 'appointment.confirmation']);
+      expect(calls[1].payload.appointment_time).toBe('9:00 AM');
+      expect(calls[1].idempotencyKey).toMatch(new RegExp(`^appointment\\.confirmation:ss1:${Date.parse(WHEN)}:`));
+      // The reader records the window, not a day promise: the logged attempt of the window email has its slot and no marker.
+      const windowAttempt = logged().filter((m) => m.template_key === 'appointment.confirmation').pop();
+      expect(windowAttempt).toMatchObject({ rendered_slot_ms: Date.parse(WHEN) });
+      expect(windowAttempt).not.toHaveProperty('promise_level');
+    });
   });
 });
 
@@ -170,7 +223,7 @@ describe('the day-only 72-hour reminder email', () => {
   });
 
   test('a missing day template sends today\'s window reminder', async () => {
-    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(await libraryRefusal(undefined));
     await send({ dayOnly: true });
     expect(sent().map((c) => c.templateKey)).toEqual(['appointment.reminder_72h_day', 'appointment.reminder_72h']);
     expect(sent()[1].payload.appointment_time).toBe('9:00 AM');
@@ -228,6 +281,19 @@ describe('the migration\'s email rows', () => {
 });
 
 function logger() { return require('../services/logger'); }
+
+// A deterministic pre-dispatch refusal exactly as the library raises it (its own private tag), obtained from its real
+// template resolution: a missing template (undefined) or a disabled one.
+async function libraryRefusal(template) {
+  const actualLib = jest.requireActual('../services/email-template-library');
+  const database = () => ({ where: () => ({ first: async () => template }) });
+  try {
+    await actualLib.resolveTemplateForSend({ templateKey: 'appointment.confirmation_day', database });
+  } catch (err) {
+    return err;
+  }
+  throw new Error('the library did not refuse');
+}
 
 // A knex-shaped fake for the no-show reader: messaging rows and email interaction rows; every other read is empty.
 function fakeReaderConn({ messages = [], emails = [] } = {}) {

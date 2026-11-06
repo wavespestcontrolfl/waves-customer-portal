@@ -500,7 +500,7 @@ async function callbackNumberHoldConfirmedForVisit(idsOrScheduledServiceId) {
 // `emailIdempotencyKey` (grouped reminders): the visit-scoped key the
 // claim owner sends under — see visitReminderEmailKey. Null keeps the
 // per-service key.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms', dayOnly }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms', dayOnly, dayOnlyStrict }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
     // App backups, including the terminal quiet-hour email, share one
@@ -530,10 +530,10 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return { ok: false, held: true, reason: 'move_hold' };
     }
     if (kind === 'confirmation') {
-      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl, idempotencyKey: emailIdempotencyKey || undefined, ...dayOnlyArg(dayOnly) });
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl, idempotencyKey: emailIdempotencyKey || undefined, ...dayOnlyArg(dayOnly, dayOnlyStrict) });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined, ...dayOnlyArg(dayOnly) });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined, ...dayOnlyArg(dayOnly, dayOnlyStrict) });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -852,7 +852,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   // Read when each email leg runs, not when this function starts. No dayState (every other caller) adds no key.
   const emailArgsNow = () => ({
     kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey,
-    ...(dayState?.dayOnly === true ? { dayOnly: true } : {}),
+    ...dayOnlyArg(dayState?.dayOnly, dayState?.smsDelivered),
   });
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
@@ -911,6 +911,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
 
   if (ch === 'both') {
     const smsOk = await runSms();
+    noteSmsDelivered(dayState, smsOk);
     if (!smsOk && smsHeld()) {
       // The SMS leg defers to the window; the EMAIL leg is not subject to
       // it and goes out NOW. Returning false still leaves the caller's row
@@ -1267,8 +1268,15 @@ function isDayPromise(metadata) {
   return metadata?.promise_level === 'day';
 }
 
-function dayOnlyArg(dayOnly) {
-  return dayOnly === true ? { dayOnly: true } : {};
+function dayOnlyArg(dayOnly, strict) {
+  if (dayOnly !== true) return {};
+  return strict === true ? { dayOnly: true, dayOnlyStrict: true } : { dayOnly: true };
+}
+
+/** Records that the day TEXT of a send was delivered, so its email leg never falls back to a window email (that would
+ *  contradict the text: appointment-email.js windowFallbackAllowed). */
+function noteSmsDelivered(dayState, smsOk) {
+  if (dayState && smsOk) dayState.smsDelivered = true;
 }
 
 /** Does this delivered confirmation stand in for the 24-hour text? A visit that is already tomorrow (or today) yes, unless

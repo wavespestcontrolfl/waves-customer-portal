@@ -460,7 +460,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
     } catch (err) {
       // Keep the library's error code (e.g. EMAIL_TEMPLATE_DISABLED) so a
       // caller can tell a deterministic refusal from a transient failure.
-      outcomes.push({ error: err.message, code: err.code || null });
+      outcomes.push({ error: err.message, code: err.code || null, ...refusalFlag(err) });
       await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'failed', failureReason: err.message, metadata });
       logger.error(`[appointment-email] ${eventType} failed for ${customer.id}: ${err.message}`);
     }
@@ -475,7 +475,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
   if (outcomes.some((o) => o?.blocked)) {
     return { ok: false, blocked: true, reason: 'suppressed', ...(errored ? { error: errored.error, ...(errored.code ? { code: errored.code } : {}) } : {}) };
   }
-  if (errored) return { ok: false, error: errored.error, ...(errored.code ? { code: errored.code } : {}) };
+  if (errored) return { ok: false, error: errored.error, ...(errored.code ? { code: errored.code } : {}), ...refusalFlag(errored) };
   return { ok: false, reason: outcomes.find((o) => o?.reason)?.reason || 'email_not_sent' };
 }
 
@@ -531,11 +531,26 @@ function hourPayload(apptTime, dayOnly) {
   return dayOnly ? {} : { appointment_time: apptTime ? formatETTime(apptTime) : '' };
 }
 
-// A day template that is missing, disabled or unusable answers with one of these codes. The caller then sends today's
-// window email instead: a customer always gets the notice, and the window copy is the safe side.
-const DAY_TEMPLATE_UNAVAILABLE_CODES = new Set(['EMAIL_TEMPLATE_UNAVAILABLE', 'EMAIL_TEMPLATE_DISABLED']);
-function dayTemplateUnavailable(result) {
-  return !result?.ok && DAY_TEMPLATE_UNAVAILABLE_CODES.has(result?.code);
+// A day template that cannot be sent as asked: the library's deterministic PRE-DISPATCH refusals (isSendRefusal: the
+// template is missing or disabled, or the payload/render step refused, e.g. an administrator made appointment_time a required
+// variable of the day template, which the day payload deliberately omits). The provider was never called, so the caller sends
+// today's window email instead: a customer always gets the notice, and the window copy is the safe side. A provider or
+// dispatch failure carries no refusal tag and is NOT a fallback case (the retry rails own it; never two emails).
+function dayTemplateRefused(result) {
+  return !result?.ok && result?.refusal === true;
+}
+
+// `{ refusal: true }` for a deterministic pre-dispatch refusal: an error the library tagged (isSendRefusal), or an outcome
+// already carrying the flag. Classified on the library's tag, never on message text.
+function refusalFlag(errOrOutcome) {
+  const tagged = typeof EmailTemplateLibrary.isSendRefusal === 'function' && EmailTemplateLibrary.isSendRefusal(errOrOutcome);
+  return tagged || errOrOutcome?.refusal === true ? { refusal: true } : {};
+}
+
+// Fall back to the window email? Not when the day TEXT of this same send was already delivered (dayOnlyStrict): that
+// customer was told the day, and an email quoting an hour now would contradict it and freeze the visit as told-an-hour.
+function windowFallbackAllowed(result, args) {
+  return dayTemplateRefused(result) && args.dayOnlyStrict !== true;
 }
 
 async function sendConfirmationVariant({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null, dayOnly = false } = {}) {
@@ -574,8 +589,8 @@ async function sendConfirmationVariant({ customerId, scheduledServiceId, appoint
 async function sendAppointmentConfirmationEmail(args = {}) {
   if (args.dayOnly === true) {
     const result = await sendConfirmationVariant(args);
-    if (!dayTemplateUnavailable(result)) return result;
-    logger.warn('[appointment-email] appointment.confirmation_day is missing or disabled - sending the window email');
+    if (!windowFallbackAllowed(result, args)) return result;
+    logger.warn('[appointment-email] appointment.confirmation_day could not be sent (template missing, disabled or refused) - sending the window email');
   }
   return sendConfirmationVariant({ ...args, dayOnly: false });
 }
@@ -673,8 +688,8 @@ async function sendReminderVariant({ customerId, scheduledServiceId, appointment
 async function sendAppointmentReminderEmail(args = {}) {
   if (args.dayOnly === true && String(args.kind) === '72h') {
     const result = await sendReminderVariant(args);
-    if (!dayTemplateUnavailable(result)) return result;
-    logger.warn('[appointment-email] appointment.reminder_72h_day is missing or disabled - sending the window email');
+    if (!windowFallbackAllowed(result, args)) return result;
+    logger.warn('[appointment-email] appointment.reminder_72h_day could not be sent (template missing, disabled or refused) - sending the window email');
   }
   return sendReminderVariant({ ...args, dayOnly: false });
 }
