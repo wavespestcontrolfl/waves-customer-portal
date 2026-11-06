@@ -37,7 +37,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, voicemailTextCallerOnlyLive } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
@@ -77,6 +77,92 @@ function capitalizeName(name) {
   const trimmed = String(name || '').trim();
   if (!trimmed) return '';
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+}
+
+// ── GATE_VOICEMAIL_TEXT_CALLER_ONLY (security audit run 3, fix C2) ──────────
+// The text answers a call, so it goes to the number that called. A callback
+// number the caller SAYS on the recording is unverified (anyone can speak
+// any number), and the "they called us" consent basis and the any-hour send
+// window both rest on the recipient being the caller. The spoken number stays
+// on the lead for staff; it is never texted. The name and service words come
+// from our own data, never from what the model copied out of the recording.
+
+// The inbound leg's own caller ID (ANI), or null when this call cannot be
+// answered by text: an outbound row, a withheld or malformed caller ID, or one
+// of our own / a staff forward number (a forwarding artifact, never a prospect).
+function callerOnlyRecipient(call = {}) {
+  if (String(call.direction || '').toLowerCase().startsWith('outbound')) return null;
+  const phone = normalizePhoneE164(call.from_phone);
+  if (!phone || !/^\+1[2-9]\d{2}[2-9]\d{6}$/.test(phone)) return null;
+  if (TWILIO_NUMBERS.isInternalNumber(phone)) return null;
+  return phone;
+}
+
+function sameLast10(a, b) {
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  return !!last10(a) && last10(a) === last10(b);
+}
+
+// A plain first name: letters, spaces, apostrophes or hyphens, 30 characters at
+// most. Anything else (digits, URLs, punctuation, a sentence) gets the
+// template's no-name greeting.
+function plainFirstName(raw) {
+  const value = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!value || value.length > 30) return '';
+  if (!/^[\p{L}][\p{L}\p{M} '\u2019-]*$/u.test(value)) return '';
+  return capitalizeName(value);
+}
+
+// Waves service names for the text, chosen by keyword so the caller's own words
+// never reach the body. Same names as the booking-abandon text
+// (booking-abandon-recovery.js SERVICE_LABELS).
+const VOICEMAIL_SERVICE_LABELS = [
+  [/\btermites?\b|\bwdo\b|wood destroying|\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/i, 'Termite Inspection'],
+  [/\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/i, 'Rodent Control'],
+  [/\bmosquito/i, 'Mosquito Control'],
+  [/\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b/i, 'Tree & Shrub'],
+  [/\blawns?\b|\bturf\b|\bgrass\b|\bweeds?\b|\bfertili[sz]/i, 'Lawn Care'],
+  [/\bpest|\bbugs?\b|\binsects?\b|\broach|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\bfleas?\b|\bticks?\b|\bbed\s*bugs?\b/i, 'Pest Control'],
+];
+
+function allowListedServiceLabel(extracted = {}) {
+  for (const field of [extracted.matched_service, extracted.requested_service]) {
+    const text = String(field || '');
+    if (!text) continue;
+    const hit = VOICEMAIL_SERVICE_LABELS.find(([re]) => re.test(text));
+    if (hit) return hit[1];
+  }
+  return null;
+}
+
+// The number this text goes to. Gate off: the resolved contact number (the
+// spoken callback number wins over the caller ID). Gate on: the caller ID only;
+// a different number spoken on the recording stays on the lead for staff, with
+// a timeline note, and is never texted.
+async function resolveRecipient({ leadId, call, rawPhone, callerOnly }) {
+  if (!callerOnly) return normalizePhoneE164(rawPhone);
+  const phone = normalizePhoneE164(callerOnlyRecipient(call));
+  if (leadId && phone && rawPhone && !sameLast10(rawPhone, phone)) {
+    await logActivity(leadId, 'note', `Quote-link text goes only to the number that called (${maskPhone(phone)}); the callback number said on the recording (${maskPhone(rawPhone)}) was not texted`, {
+      message_type: MESSAGE_TYPE,
+      reason: 'spoken_number_not_caller',
+    });
+  }
+  return phone;
+}
+
+// The name and service words for the text. Gate on: our own data only.
+function quoteTextWords(extracted, callerOnly) {
+  if (!callerOnly) {
+    return {
+      firstName: capitalizeName(extracted.first_name),
+      serviceLabel: String(extracted.matched_service || extracted.requested_service || '').trim() || 'pest control',
+    };
+  }
+  return {
+    firstName: plainFirstName(extracted.first_name),
+    serviceLabel: allowListedServiceLabel(extracted) || 'pest control',
+  };
 }
 
 // Stamp the one-shot status onto the lead's extracted_data jsonb. Best-effort
@@ -183,8 +269,11 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
     logger.info(`[voicemail-sms] Gate off — text-back skipped for lead ${leadId || 'unknown'}`);
     return { sent: false, skipped: 'gate_off' };
   }
-  const phone = normalizePhoneE164(rawPhone);
-  if (!leadId || !phone) return { sent: false, skipped: 'missing_input' };
+  const callerOnly = voicemailTextCallerOnlyLive();
+  const phone = await resolveRecipient({ leadId, call, rawPhone, callerOnly });
+  if (!leadId || !phone) {
+    return { sent: false, skipped: callerOnly && leadId ? 'no_caller_number' : 'missing_input' };
+  }
 
   // Belt-and-suspenders history check: pre-claim-table sends (or hand-sent
   // rows tagged with the message_type) also consume the one-shot. Advisory
@@ -249,7 +338,7 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
   }
 
   try {
-    return await sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone });
+    return await sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone, callerOnly });
   } catch (err) {
     // An unexpected throw never consumed the one-shot — release BOTH claims
     // so a later voicemail can retry — then rethrow into the caller's
@@ -262,7 +351,7 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
 
 // Runs with the per-phone claim held. Every return path must either keep the
 // claim (one-shot consumed) or release it (config/transient failure).
-async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone }) {
+async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone, callerOnly = false }) {
   // Atomic per-lead claim: same-lead idempotency (re-processing, admin
   // Reprocess). Losing it means THIS lead already ran; keep the phone claim.
   const claimed = await db('leads')
@@ -353,9 +442,7 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     return { sent: false, skipped: 'short_link_failed' };
   }
 
-  const firstName = capitalizeName(extracted.first_name);
-  const serviceLabel = String(extracted.matched_service || extracted.requested_service || '').trim()
-    || 'pest control';
+  const { firstName, serviceLabel } = quoteTextWords(extracted, callerOnly);
   const body = await renderSmsTemplate(MESSAGE_TYPE, {
     first_name: firstName || 'there',
     service_label: serviceLabel,
@@ -460,6 +547,9 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
           // repeat caller can re-arm. The phone already lives in the
           // row's to_phone column — this copy just reaches the hooks.
           voicemail_phone: phone,
+          // Queued by the caller-only sender (GATE_VOICEMAIL_TEXT_CALLER_ONLY):
+          // the replay refuses rows queued while the gate was off.
+          caller_only: callerOnly === true,
           call_sid: call.twilio_call_sid || null,
           // The originating call, for the replay's hold recheck: read by id
           // (the text may go to a spoken callback number its row does not
