@@ -1531,6 +1531,19 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
   }
 }
 
+// True when this customer's email for the week already reached the provider (any
+// recipient, any template: trigger_event_id is the customer-week). Every later step
+// of the sweep would end in "deduped" for that customer, after paying for the weather
+// and forecast calls. Stamps the plan row the delivery record names, exactly as the
+// plan path's own dedupe does. An unreadable record reads as 'pending' (false here),
+// so the customer takes the normal path and its own checks.
+async function weekEmailAlreadyDelivered(customerId, weekEnding) {
+  const prior = await weekPlanDeliveryState({ triggerEventId: `irrigation.weekly:${customerId}:${weekEnding}` });
+  if (prior.state !== 'sent') return false;
+  if (prior.decisionHash) await markWeekPlanSent({ customerId, weekEnding, decisionHash: prior.decisionHash });
+  return true;
+}
+
 /**
  * The Monday sweep. Gated: with GATE_IRRIGATION_WEEKLY_EMAIL off it only
  * shadow-logs the candidate count (no weather fetches, no sends) so the
@@ -1543,6 +1556,9 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  */
 async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN, inProgressRetryMs = IN_PROGRESS_RETRY_MS,
   customerIds = null,
+  // The Monday catch-up run (irrigation-weekly-catchup.js) sets this: a customer whose
+  // week email already went out is skipped before the weather and forecast calls.
+  skipDeliveredBeforeFetch = false,
   // One Open-Meteo second-try budget for the whole run (open-meteo-retry.js).
   openMeteoRetry = createOpenMeteoRetry(),
 } = {}) {
@@ -1959,6 +1975,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // email attempt consumes those inputs, after validating current settings.
       if (saved && (!weekPlanEnabled || !replayWeekPlanForCustomer(saved, customer))) {
         summary.plan.unavailable += 1;
+        continue;
+      }
+      if (skipDeliveredBeforeFetch && !saved && await weekEmailAlreadyDelivered(customer.id, weekEnding)) {
+        summary.deduped += 1;
         continue;
       }
       const frozen = saved?.decisionInputs;
