@@ -265,10 +265,21 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
     default_products: jsonForEdit(svc?.default_products),
   });
   const [closeoutTouched, setCloseoutTouched] = useState(false);
+  const activeEdited = useRef(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const set = (key, value) =>
     setForm((current) => ({ ...current, [key]: value }));
+  // The header toggle and Restore change the service outside this form:
+  // adopt the new status unless the operator edited the checkbox here.
+  useEffect(() => {
+    if (isNew || activeEdited.current) return;
+    setForm((current) =>
+      current.is_active === svc.is_active
+        ? current
+        : { ...current, is_active: svc.is_active },
+    );
+  }, [isNew, svc?.is_active]);
   const setCloseout = (key, value) => {
     setCloseoutTouched(true);
     setForm((current) => ({
@@ -291,7 +302,13 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
         : omitUnchangedDurationFields(form, originalService.current);
       if (isNew && !closeoutTouched)
         CLOSEOUT_REQUIREMENT_FIELDS.forEach((key) => delete payload[key]);
+      if (!isNew) {
+        // Status is owned by the header controls; send it only when edited here.
+        delete payload.is_archived;
+        if (!activeEdited.current) delete payload.is_active;
+      }
       await onSave(payload);
+      activeEdited.current = false;
     } catch (saveError) {
       setError(saveError.message || "Save failed");
     } finally {
@@ -339,7 +356,10 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
       name={key}
       label={label}
       checked={!!form[key]}
-      onChange={(event) => set(key, event.target.checked)}
+      onChange={(event) => {
+        if (key === "is_active") activeEdited.current = true;
+        set(key, event.target.checked);
+      }}
     />
   );
   const closeoutChoice = (key, label) => (
