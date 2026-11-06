@@ -18,9 +18,10 @@ npm run dev:doctor -- --frontend
 npm run dev:managed-client
 ```
 
-The file selects a major line, not an exact patch; Node 20.9 is the minimum.
-Doctor reports the actual Node version and rejects a different major or an older
-20.x runtime with instructions to switch and reinstall dependencies. Worktree
+The file selects a major line, not an exact patch; Node 24.22.1 is the minimum
+(the October 21, 2026 security release; deploy/portal.Dockerfile runs the same
+check). Doctor reports the actual Node version and rejects a different major or
+an older 24.x runtime with instructions to switch and reinstall dependencies. Worktree
 setup and creation use the same check; creation checks before fetching or
 creating the checkout and again against the new checkout before `npm ci`.
 Status and stop remain usable after changing Node versions.

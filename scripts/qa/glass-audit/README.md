@@ -9,7 +9,7 @@ external origin is blocked.
 ## Run
 
 ```sh
-export PATH=/opt/homebrew/opt/node@20/bin:$PATH        # repo pins Node 20
+export PATH=/opt/homebrew/opt/node@24/bin:$PATH        # repo pins Node 24
 node scripts/qa/glass-audit/render-server-html.cjs   # optional: run.cjs renders client/glass-audit-html/ (gitignored) on demand
 npm run qa:glass -- --only <id>[,<id>] --run <name>  # alias for the line below
 node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http://127.0.0.1:23817] [--extra] [--engine webkit]
