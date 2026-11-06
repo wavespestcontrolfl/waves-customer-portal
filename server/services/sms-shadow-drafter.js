@@ -5421,7 +5421,8 @@ function buildFactsBlock(context, extras = {}) {
     ? upcoming
         .map((s) => {
           const parts = [`${s.type}${s.isToday ? ' TODAY' : ''} on ${formatEtDate(s.date)}`];
-          parts.push(s.window ? `window ${s.window}` : 'no arrival window set');
+          // GATE_DAY_ONLY_PROMISE (part D): a day-only visit carries the plain "do not state an hour" note, not a window.
+          parts.push(s.windowDayOnly ? `arrival window: ${s.window}` : (s.window ? `window ${s.window}` : 'no arrival window set'));
           parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
           const liveState = (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.trackState) ? s.trackState : s.status;
           if (s.isToday && liveState === 'en_route') {

@@ -13,6 +13,8 @@ const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 const { listPortalPayments } = require('../portal-payment-history');
 const { listPortalServiceHistory } = require('../portal-service-history');
 const portalOpen = require('./portal-open');
+const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('../day-only-ai-context');
+const { dayOnlyPromiseOn } = require('../time-promise');
 const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
 
 // Tool definitions in Anthropic format
@@ -286,17 +288,29 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
   }
 }
 
+// GATE_DAY_ONLY_PROMISE (part D): which of these visit rows (id, scheduled_date, window_start) must be stated as the day
+// only? One bulk read inside the turn's transaction when there is one (so a cancelled turn stops here, not after).
+async function dayOnlyCheck(rows, turn) {
+  if (!dayOnlyPromiseOn()) return () => false; // gate off: no transaction, no read
+  return turn
+    ? turn.transaction('day-only promise', (database) => loadDayOnlyCheck(database, rows))
+    : loadDayOnlyCheck(db, rows);
+}
+
 async function getUpcomingServices(customerId, turn) {
   if (!customerId) return { services: [] };
   const query = db('scheduled_services')
     .where('customer_id', customerId)
     .where('scheduled_date', '>=', etDateString())
     .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-    .select('scheduled_services.scheduled_date', 'scheduled_services.service_type',
+    .select('scheduled_services.id', 'scheduled_services.scheduled_date', 'scheduled_services.service_type',
       'scheduled_services.window_start', 'scheduled_services.status')
     .orderBy('scheduled_date')
     .limit(5);
   const services = await runQuery(query, turn, 'upcoming services');
+  // GATE_DAY_ONLY_PROMISE (part D): one bulk read; a visit whose customer was told only the day gets the date and a plain
+  // instruction instead of an hour. Gate off: no read, today's result.
+  const isDayOnly = await dayOnlyCheck(services, turn);
 
   return {
     services: services.map(s => ({
@@ -305,7 +319,7 @@ async function getUpcomingServices(customerId, turn) {
       // window_end is the internal job-duration block, not the promised
       // customer arrival window. Derive the same start + 2h window used by
       // customer SMS and the portal tracker.
-      window: arrivalWindowRange(String(s.window_start || '')) || 'TBD',
+      window: isDayOnly(s) ? DAY_ONLY_ARRIVAL_NOTE : (arrivalWindowRange(String(s.window_start || '')) || 'TBD'),
       status: s.status,
     })),
   };
@@ -383,6 +397,7 @@ async function offerRescheduleLink(customerId, actions, turn) {
   // goes on the server-built label only: the tool result below is sent to
   // the model, which is given no account data.
   const multiProperty = new Set(movable.map((m) => m.property)).size > 1;
+  const isDayOnly = await dayOnlyCheck(movable.map((m) => m.row), turn);
   turn?.assertActive('reschedule buttons');
   const visits = movable.map(({ row, property }) => {
     const dateKey = dateKeyOf(row.scheduled_date);
@@ -393,7 +408,7 @@ async function offerRescheduleLink(customerId, actions, turn) {
       label: `Reschedule ${type}, ${shortDateLabel(dateKey)}${where}`.slice(0, 80),
       href: `/reschedule/${row.reschedule_token}`,
     });
-    return { date: dateKey, type, window: arrivalWindowRange(String(row.window_start || '')) || 'TBD' };
+    return { date: dateKey, type, window: isDayOnly(row) ? DAY_ONLY_ARRIVAL_NOTE : (arrivalWindowRange(String(row.window_start || '')) || 'TBD') };
   });
   return {
     available: true,
@@ -574,12 +589,15 @@ async function bookedReserviceResult(customerId, line, booked, database = db) {
   // The reschedule route's own token format: any other token is a 404 there.
   const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
   const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
-  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false) };
+  // Without a readable visit id the gate-on answer is the day only (nothing to judge the hour by).
+  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false, dayOnlyPromiseOn()) };
   // The button is optional: a failed lookup keeps the booked visit's facts.
   const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
   const movable = Boolean(row && await movableVisit(row.id, database));
+  const visit = row ? bookedVisitRow(row.id, booked) : null;
+  const dayOnly = visit ? (await loadDayOnlyCheck(database, [visit]))(visit) : dayOnlyPromiseOn();
   return {
-    result: bookedReserviceFacts(line, booked, movable),
+    result: bookedReserviceFacts(line, booked, movable, dayOnly),
     action: movable ? {
       type: 'link',
       label: `Reschedule ${booked.serviceType}, ${shortDateLabel(booked.date)}`.slice(0, 80),
@@ -588,10 +606,15 @@ async function bookedReserviceResult(customerId, line, booked, database = db) {
   };
 }
 
-function bookedReserviceFacts(line, booked, movable) {
+// The booked re-service as a visit row for the day-only read (window_start is 'HH:MM' on the booked entry).
+function bookedVisitRow(id, booked) {
+  return { id, scheduled_date: booked.date, window_start: booked.windowStart ? `${booked.windowStart}:00`.slice(0, 8) : null };
+}
+
+function bookedReserviceFacts(line, booked, movable, dayOnly = false) {
   return {
     offered: false,
-    already_booked: { date: longDateLabel(booked.date), window: arrivalWindowRange(String(booked.windowStart || '')) || 'TBD' },
+    already_booked: { date: longDateLabel(booked.date), window: dayOnly ? DAY_ONLY_ARRIVAL_NOTE : (arrivalWindowRange(String(booked.windowStart || '')) || 'TBD') },
     instruction: `A free ${RESERVICE_LINE_WORDS[line]} re-service is already on the schedule (date and window above). Do not offer another one or a paid visit. Acknowledge what the customer is seeing and refer to that visit${movable ? '; a button to move it is shown under your reply' : ''}.`,
   };
 }
@@ -665,7 +688,7 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
     } catch (err) {
       if (isToolCancellation(err)) throw err;
       logger.warn(`[ai-assistant] booked re-service move read failed, no button: ${err.message}`);
-      decision = { result: bookedReserviceFacts(line, decision.booked, false) };
+      decision = { result: bookedReserviceFacts(line, decision.booked, false, dayOnlyPromiseOn()) };
     }
   }
   if (decision.action) {
