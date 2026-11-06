@@ -1,4 +1,5 @@
-# Docker build context for deploy/portal.Dockerfile (COPY . .).
+# Docker build context for deploy/portal.Dockerfile and
+# deploy/seo-worker.Dockerfile (both COPY . .).
 # Excludes only what the build and runtime never read. The image reinstalls
 # dependencies with npm ci and rebuilds the client, so local copies of those
 # are dead weight. Production variables come from Railway at run time, never
