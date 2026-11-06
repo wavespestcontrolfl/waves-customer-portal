@@ -12,8 +12,11 @@ jest.mock('../services/auto-dispatch/route-tiers', () => ({
   loadReminderFreeze: jest.fn(),
 }));
 
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn() }));
+
 const routeTiers = require('../services/auto-dispatch/route-tiers');
-const { checkFlexSiblingBounds, checkTiersSiblingBounds } = require('../services/auto-dispatch/apply');
+const toldVisits = require('../services/auto-dispatch/told-visits');
+const { checkFlexSiblingBounds, checkTiersSiblingBounds, assertNotToldOnMove } = require('../services/auto-dispatch/apply');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const TODAY = etDateString(new Date());
@@ -63,5 +66,37 @@ describe('checkFlexSiblingBounds', () => {
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true });
     await expect(checkFlexSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, [])).rejects.toBeTruthy();
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 73);
+  });
+});
+
+// The moving visit's OWN told-time check inside its move transaction (pre-push P1: a promise delivered while the run
+// scored the move, after the pass-1 re-check, must still stop it; makeMemberGuard covers siblings only).
+describe('assertNotToldOnMove (the primary visit, on the move transaction)', () => {
+  const both = { nightLock24h: true, nightToldLock: true };
+  const row = { id: 'v1' };
+
+  test('told-lock on: a visit told its time meanwhile is refused', async () => {
+    toldVisits.loadToldVisitIds.mockResolvedValue(new Set(['v1']));
+    const trx = jest.fn();
+    await expect(assertNotToldOnMove(trx, row, both, refuse))
+      .rejects.toMatchObject({ id: 'v1', why: 'has a time the customer was already told (frozen)' });
+    expect(toldVisits.loadToldVisitIds).toHaveBeenCalledWith(trx, ['v1'], expect.any(Date));
+  });
+
+  test('told-lock on: no promise with a known slot lets the move go on', async () => {
+    toldVisits.loadToldVisitIds.mockResolvedValue(new Set());
+    await expect(assertNotToldOnMove(jest.fn(), row, both, refuse)).resolves.toBeUndefined();
+  });
+
+  test('told-lock on: a failed promise read throws, so nothing moves (fail closed)', async () => {
+    toldVisits.loadToldVisitIds.mockRejectedValue(new Error('read failed'));
+    await expect(assertNotToldOnMove(jest.fn(), row, both, refuse)).rejects.toThrow('read failed');
+  });
+
+  test('gate off, or the 24-hour lock off: no promise read at all (today)', async () => {
+    await assertNotToldOnMove(jest.fn(), row, { nightLock24h: true, nightToldLock: false }, refuse);
+    await assertNotToldOnMove(jest.fn(), row, { nightLock24h: false, nightToldLock: true }, refuse);
+    await assertNotToldOnMove(jest.fn(), row, {}, refuse);
+    expect(toldVisits.loadToldVisitIds).not.toHaveBeenCalled();
   });
 });

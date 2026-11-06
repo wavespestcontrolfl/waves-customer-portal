@@ -380,7 +380,19 @@ function makeMoveGuard({ service, best, config = {} }) {
     const placed = await isPersonPlacedVisit(row, trx, { refresh: true });
     if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
     if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
+    // GATE_NIGHT_TOLD_LOCK: a promise delivered after the pass-1 re-check (scoring can take minutes) still stops the
+    // move. Read on the move transaction; a failed read throws, so nothing moves (fail closed).
+    await assertNotToldOnMove(trx, row, config, refuse);
   };
+}
+
+// GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
+// transaction (makeMemberGuard covers the siblings, never the primary). Only with lock24h + toldLock (toldLockOf).
+async function assertNotToldOnMove(trx, row, config, refuse) {
+  if (!toldLockOf(config)) return;
+  const { loadToldVisitIds } = require('./told-visits');
+  const told = await loadToldVisitIds(trx, [row.id], new Date());
+  if (told.has(String(row.id)) || told.has(row.id)) throw refuse(row.id, 'has a time the customer was already told (frozen)');
 }
 
 // makeMemberGuard's own status/preferred-time pre-checks, extracted (Codex
@@ -1231,6 +1243,8 @@ module.exports = {
   // guard closures.
   checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds,
 };
+// Own line: the primary visit's told-time check (GATE_NIGHT_TOLD_LOCK), exported for its unit tests.
+module.exports.assertNotToldOnMove = assertNotToldOnMove;
 // Own lines: the day re-plan writer (services/day-replan/apply.js) runs the same silent reminder sync and pins the same fields.
 module.exports.syncMovedReminders = syncMovedReminders;
 module.exports.LOCATION_FIELDS = LOCATION_FIELDS;
