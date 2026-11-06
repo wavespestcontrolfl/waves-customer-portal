@@ -391,25 +391,22 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(inserted[0].scheduled_date).toBe('2098-08-26');
   });
 
-  test('gate on: a completion-time extend on a taken hour hands off — cadence date, no time, windowless reminder', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    try {
-      const { conn, inserted } = ongoingScenario({
-        upcomingCount: 1,
-        sibling: undefined,
-        clashDates: '*',
-        colsOverrides: { window_start: {}, window_end: {}, time_window: {}, window_display: {}, route_order: {}, recurring_dispatch_due_date: {} },
-      });
-      await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
-      expect(inserted).toHaveLength(1);
-      expect(inserted[0]).toMatchObject({
-        scheduled_date: '2098-10-15', window_start: null, window_end: null, time_window: null, recurring_dispatch_due_date: '2098-10-15',
-      });
-      expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
-        901, 5, '2098-10-15T08:00', 'Quarterly Pest Control',
-        'recurring_auto_extend', { sendConfirmation: false, closeReminderWindows: true, fromCommittedRow: true },
-      );
-    } finally { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; }
+  test('a completion-time extend on a taken hour hands off — cadence date, no time, windowless reminder', async () => {
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      clashDates: '*',
+      colsOverrides: { window_start: {}, window_end: {}, time_window: {}, window_display: {}, route_order: {}, recurring_dispatch_due_date: {} },
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]).toMatchObject({
+      scheduled_date: '2098-10-15', window_start: null, window_end: null, time_window: null, recurring_dispatch_due_date: '2098-10-15',
+    });
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      901, 5, '2098-10-15T08:00', 'Quarterly Pest Control',
+      'recurring_auto_extend', { sendConfirmation: false, closeReminderWindows: true, fromCommittedRow: true },
+    );
   });
 
   test('falls back to the parent template when no sibling carries the flag', async () => {
@@ -1315,30 +1312,27 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     for (const v of state.insertedVisits) expect(v.window_start).toBe('08:00');
   });
 
-  test('gate on: the alert-route extension hands a taken hour off and registers the windowless reminder, not the plan hour', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    try {
-      const { state, handler } = alertActionScenario({
-        seriesRows: [
-          { scheduled_date: '2098-01-15', status: 'completed' },
-          { scheduled_date: '2098-04-15', status: 'completed' },
-          { scheduled_date: '2098-07-15', status: 'completed' },
-        ],
-        alertRow: { id: 64, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
-        clashDates: '*',
-        colsOverrides: { window_start: {}, window_end: {}, time_window: {}, window_display: {}, route_order: {}, recurring_dispatch_due_date: {} },
-      });
-      const out = await runRecurringAlertAction(makeConn(handler), { idParam: '64', action: 'extend', count: 1, adminUserId: null });
-      expect(out.status).toBe(200);
-      expect(state.insertedVisits).toHaveLength(1);
-      expect(state.insertedVisits[0]).toMatchObject({
-        scheduled_date: '2098-10-15', window_start: null, window_end: null, time_window: null, recurring_dispatch_due_date: '2098-10-15',
-      });
-      expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
-        900, 5, '2098-10-15T08:00', expect.any(String),
-        'recurring_alert_action', { sendConfirmation: false, closeReminderWindows: true, fromCommittedRow: true },
-      );
-    } finally { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; }
+  test('the alert-route extension hands a taken hour off and registers the windowless reminder, not the plan hour', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [
+        { scheduled_date: '2098-01-15', status: 'completed' },
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-07-15', status: 'completed' },
+      ],
+      alertRow: { id: 64, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+      clashDates: '*',
+      colsOverrides: { window_start: {}, window_end: {}, time_window: {}, window_display: {}, route_order: {}, recurring_dispatch_due_date: {} },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '64', action: 'extend', count: 1, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.insertedVisits).toHaveLength(1);
+    expect(state.insertedVisits[0]).toMatchObject({
+      scheduled_date: '2098-10-15', window_start: null, window_end: null, time_window: null, recurring_dispatch_due_date: '2098-10-15',
+    });
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      900, 5, '2098-10-15T08:00', expect.any(String),
+      'recurring_alert_action', { sendConfirmation: false, closeReminderWindows: true, fromCommittedRow: true },
+    );
   });
 
   test('P0: a PARTIAL extension throws (all-or-nothing) — the alert stays unresolved and no shortfall can overbook a retry', async () => {

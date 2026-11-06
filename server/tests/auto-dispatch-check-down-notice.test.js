@@ -25,9 +25,7 @@ const tally = (over = {}) => ({ calls: 17, allowed: 0, held: 0, unsure: 17, brok
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_AUTO_DISPATCH_CHECK_DOWN_NOTICE = 'true';
 });
-afterAll(() => { delete process.env.GATE_AUTO_DISPATCH_CHECK_DOWN_NOTICE; });
 
 test('every check broke: one System notice that names the cause, through the shared reopen helper (Codex #6465 r1)', async () => {
   const deps = depsOf();
@@ -86,14 +84,6 @@ test('a night that asked nothing changes nothing', async () => {
   expect(await checkDown.noteRun(tally({ calls: 0, unsure: 0, broke: 0, brokeCause: null }), { nowDate: NOW, deps })).toEqual({ action: 'none' });
   expect(raised(deps)).toHaveLength(0);
   expect(deps.episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-});
-
-test('gate off: a standing notice closes (a rollback leaves none) and nothing is raised', async () => {
-  delete process.env.GATE_AUTO_DISPATCH_CHECK_DOWN_NOTICE;
-  const deps = depsOf();
-  expect(await checkDown.noteRun(tally(), { nowDate: NOW, deps })).toEqual({ action: 'off' });
-  expect(deps.episodes.closeAdminAlertKeys).toHaveBeenCalledWith(deps.db, [KEY], 'gate_off', expect.objectContaining({ now: NOW }));
-  expect(raised(deps)).toHaveLength(0);
 });
 
 test('the check itself off: the notice closes, nothing is raised', async () => {

@@ -58,7 +58,6 @@ describe('seriesCandidateDateClashRows', () => {
 
 describe('plan-taken-hour', () => {
   afterEach(() => {
-    delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
     findConflictingVisits.mockReset().mockImplementation(async () => []);
   });
   const row = { customer_id: 'c1', technician_id: 't1', window_start: '09:00', window_end: '10:00' };
@@ -70,14 +69,13 @@ describe('plan-taken-hour', () => {
     });
   });
 
-  test('gate off: never taken, nothing read', async () => {
+  test('a row with no window is never taken, nothing read', async () => {
     findConflictingVisits.mockResolvedValue([{ id: 'x' }]);
-    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(30) })).toBe(false);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, window_start: null, scheduled_date: day(30) })).toBe(false);
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
 
-  test('gate on: taken from four days out, through the tech-blind probe with the night tool\'s statuses', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+  test('taken from four days out, through the tech-blind probe with the night tool\'s statuses', async () => {
     findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2' }]);
     expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(3) })).toBe(false);
     expect(findConflictingVisits).not.toHaveBeenCalled();
@@ -93,7 +91,6 @@ describe('plan-taken-hour', () => {
   });
 
   test('once the schedule is technician-scoped: only the visit\'s own technician\'s stops and unassigned ones count (isOtherStop)', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     techScopedConfirmActive.mockReturnValue(true);
     try {
       const at = { ...row, scheduled_date: day(30) };
@@ -112,7 +109,6 @@ describe('plan-taken-hour', () => {
   });
 
   test('an interview in the hour (no customer) is taken', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockResolvedValue([{ id: 'interview:app-1', customer_id: null, conflict_reason: 'interview' }]);
     expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(30) })).toBe(true);
   });
@@ -129,8 +125,7 @@ describe('plan-taken-hour', () => {
     };
     const at = (fields) => ({ ...row, scheduled_date: day(30), ...fields });
     beforeEach(() => {
-      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
+        findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
     });
 
     test('at the same property: one stop, not taken', async () => {
@@ -169,17 +164,16 @@ describe('plan-taken-hour', () => {
   });
 
   test('handOffTakenHours hands off the taken rows and keeps the input array', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockImplementation(async ({ date }) => (date === day(40) ? [{ id: 'x', customer_id: 'c2' }] : []));
     const rows = [{ ...row, scheduled_date: day(20) }, { ...row, scheduled_date: day(40) }];
     const out = await planTakenHour.handOffTakenHours('conn', rows);
     expect(out[0]).toBe(rows[0]);
     expect(out[1]).toMatchObject({ window_start: null, recurring_dispatch_due_date: day(40) });
     expect(rows[1].window_start).toBe('09:00');
-    // Gate off: the same array back, nothing read.
-    delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
+    // No rows: the same array back, nothing read.
     findConflictingVisits.mockClear();
-    expect(await planTakenHour.handOffTakenHours('conn', rows)).toBe(rows);
+    const none = [];
+    expect(await planTakenHour.handOffTakenHours('conn', none)).toBe(none);
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
 
@@ -189,7 +183,7 @@ describe('plan-taken-hour', () => {
   });
 });
 
-// CALL FOLLOW-UP FREE HOUR (GATE_CALL_FOLLOWUP_FREE_HOUR; owner 2026-10-22,
+// CALL FOLLOW-UP FREE HOUR (owner 2026-10-22,
 // "fix", after a call follow-up landed on another customer's 10 AM): visit 2
 // of a call keeps a copied hour only while that hour is free on its date.
 describe('callFollowUpWindow', () => {
@@ -200,9 +194,7 @@ describe('callFollowUpWindow', () => {
   // Another customer's stop holds the hours in `taken` on visit 2's date.
   const holdHours = (taken) => findConflictingVisits.mockImplementation(async ({ windowStart }) => (
     taken.includes(windowStart) ? [{ id: `other-${windowStart}`, customer_id: 'c2' }] : []));
-  beforeEach(() => { process.env.GATE_CALL_FOLLOWUP_FREE_HOUR = 'true'; });
   afterEach(() => {
-    delete process.env.GATE_CALL_FOLLOWUP_FREE_HOUR;
     findConflictingVisits.mockReset().mockImplementation(async () => []);
   });
 
@@ -264,12 +256,10 @@ describe('callFollowUpWindow', () => {
     expect(await planTakenHour.callFollowUpWindow(placeConn, args, planned)).toBe(planned);
   });
 
-  test('a time the call set, a package visit 2, and the gate off keep the planned window, unread', async () => {
+  test('a time the call set and a package visit 2 keep the planned window, unread', async () => {
     holdHours(['10:00']);
     expect(await planTakenHour.callFollowUpWindow(conn, args, planned, { hourStated: true })).toBe(planned);
     expect(await planTakenHour.callFollowUpWindow(conn, args, planned, { packageVisit: true })).toBe(planned);
-    delete process.env.GATE_CALL_FOLLOWUP_FREE_HOUR;
-    expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
 
