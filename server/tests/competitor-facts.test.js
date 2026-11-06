@@ -134,8 +134,9 @@ describe('competitor-facts', () => {
     expect(orkin.attributes.reach.as_of).toBeTruthy();
   });
 
-  test('owner autopublish list: the eight approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28, Aptive + Truly Nolen added 2026-09-28)', () => {
-    for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen', 'Aptive', 'Aptive Environmental', 'Aptive Pest Control', 'goaptive', 'Truly Nolen']) {
+  test('owner autopublish list: the nine approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28, Aptive + Truly Nolen added 2026-09-28, All U Need added 2026-11-05)', () => {
+    for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen', 'Aptive', 'Aptive Environmental', 'Aptive Pest Control', 'goaptive', 'Truly Nolen',
+      'All U Need Pest Control', 'All "U" Need Pest Control', 'All “U” Need Pest Control', 'All U Need Pest', 'All U Need', 'All U Need Pest Control, LLC']) {
       expect(cf.isOwnerApprovedForAutopublish(name)).toBe(true);
     }
     for (const name of ['Keller\'s Pest Control', 'Hughes Exterminators', 'Hulett', 'Hawx']) {
@@ -145,6 +146,11 @@ describe('competitor-facts', () => {
     // Lowercase "hometeam" / "home team" / "turner" stay ordinary prose.
     expect(cf.findBusinessMentions('Cheer for the home team; hometeam spirit; a pancake turner.')).toEqual([]);
     expect(cf.findBusinessMentions('Turner runs its plan under TurnerGuard.').map((m) => m.name)).toEqual(['Turner Pest Control']);
+    // All U Need (owner 2026-11-05): bare brand is case-sensitive prose only.
+    expect(cf.findBusinessMentions('All U Need offers recurring plans.').map((m) => m.name)).toEqual(['All U Need Pest Control']);
+    expect(cf.findBusinessMentions('Everything all u need to know about ants.')).toEqual([]);
+    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).toHaveLength(9);
+    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).toContain('all-u-need-pest');
   });
 
   test('Aptive has a curated record sourced from its own site (aptivepestcontrol.com — aptive.com is an unrelated company)', () => {
