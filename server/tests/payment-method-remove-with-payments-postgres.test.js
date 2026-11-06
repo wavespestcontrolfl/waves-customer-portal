@@ -141,6 +141,56 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     }
   });
 
+  test('a card the account updater replaced keeps its old number on earlier payments (card details sync, #7672 r2 P2)', async () => {
+    // Stripe replaced the saved card's number. The refresh fills the snapshot of a payment that never took one, then
+    // changes the saved card; history reads each payment's snapshot first, so both earlier payments keep the old card.
+    const { applyStripeCardDetails } = require('../services/card-details-sync');
+    const [customer] = await db('customers')
+      .insert({ first_name: 'FkProbe', last_name: 'Renewed', phone: '+15550001238' })
+      .returning('id');
+    const customerId = customer.id ?? customer;
+    const pmId = `pm_card_sync_probe_${Date.now()}`;
+    let methodId = null;
+    try {
+      const [method] = await db('payment_methods')
+        .insert({
+          customer_id: customerId, processor: 'stripe', method_type: 'card', stripe_payment_method_id: pmId,
+          card_brand: 'VISA', last_four: '4242', exp_month: '11', exp_year: '2026',
+        })
+        .returning('id');
+      methodId = method.id ?? method;
+      await db('payments').insert([
+        {
+          customer_id: customerId, payment_method_id: methodId, payment_date: '2026-09-03', amount: '50.00',
+          status: 'paid', card_brand: 'VISA', card_last_four: '4242',
+        },
+        // A writer that never took a snapshot.
+        { customer_id: customerId, payment_method_id: methodId, payment_date: '2026-10-03', amount: '60.00', status: 'paid' },
+      ]);
+
+      const out = await applyStripeCardDetails({
+        id: pmId, type: 'card', customer: 'cus_card_sync_probe',
+        card: { brand: 'mastercard', last4: '5555', exp_month: 11, exp_year: 2029, funding: 'credit' },
+      }, { source: 'test', database: db });
+      expect(out).toEqual({ updated: 1 });
+
+      const saved = await db('payment_methods').where({ id: methodId }).first();
+      expect(saved).toMatchObject({ card_brand: 'MASTERCARD', last_four: '5555', exp_month: '11', exp_year: '2029' });
+      const history = await StripeService.getPaymentHistory(customerId);
+      expect(history.map((p) => [p.amount, p.card_brand, p.last_four])).toEqual([
+        ['60.00', 'VISA', '4242'],
+        ['50.00', 'VISA', '4242'],
+      ]);
+    } finally {
+      if (methodId) {
+        await db('audit_log').where({ resource_type: 'payment_method', resource_id: String(methodId) }).del().catch(() => {});
+      }
+      await db('payments').where({ customer_id: customerId }).del();
+      await db('payment_methods').where({ customer_id: customerId }).del();
+      await db('customers').where({ id: customerId }).del();
+    }
+  });
+
   test('snapshot backfill fills a NULL card_last_four from the linked method and never overwrites (GH codex r2 P2)', async () => {
     const migration = require('../models/migrations/20260924000031_payments_card_snapshot_backfill');
     const ROLLBACK = new Error('rollback-sentinel');

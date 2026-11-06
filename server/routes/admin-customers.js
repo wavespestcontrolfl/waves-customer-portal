@@ -3662,7 +3662,9 @@ router.get('/:id', async (req, res, next) => {
         ? db('estimates').where({ customer_id: c.id })
         : require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), c)
       ).orderBy('created_at', 'desc'),
-      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
+      // Each payment's own brand/last-four snapshot first (as getPaymentHistory): a card the
+      // account updater replaced keeps its old number on earlier payments.
+      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payments.card_brand, payment_methods.card_brand) as card_brand'), db.raw('COALESCE(payments.card_last_four, payment_methods.last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       lifetimeRevenueFor(db, c.id).then(net => ({ net })).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
       // Upcoming, active-only — drives Customer 360's next appointment.

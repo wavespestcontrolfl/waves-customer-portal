@@ -13,10 +13,30 @@ const stripe = require('../services/stripe');
 const gatesModule = require('../config/feature-gates');
 const { applyStripeCardDetails, syncNearExpiryCards } = require('../services/card-details-sync');
 
-// Minimal in-memory knex for the payment_methods table.
+// Minimal in-memory knex: payment_methods reads and updates, plus the fill-only payments snapshot write.
+// `writes` records the order of the two tables' updates.
 function fakeKnex(rows) {
   const updates = [];
+  const paymentFills = [];
+  const writes = [];
   const knex = (table) => {
+    if (table === 'payments') {
+      const call = { filter: null, guard: null };
+      const q = {
+        where(f) {
+          if (typeof f !== 'function') { call.filter = f; return q; }
+          call.guard = [];
+          const b = {
+            whereNull(col) { call.guard.push(['null', col]); return b; },
+            orWhereNull(col) { call.guard.push(['orNull', col]); return b; },
+          };
+          f(b);
+          return q;
+        },
+        update(fill) { paymentFills.push({ ...call, fill }); writes.push('payments'); return Promise.resolve(1); },
+      };
+      return q;
+    }
     if (table !== 'payment_methods') throw new Error(`unexpected table ${table}`);
     let filter = {};
     let needNotNull = null;
@@ -31,12 +51,16 @@ function fakeKnex(rows) {
         const hit = rows.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v));
         hit.forEach((r) => Object.assign(r, patch));
         updates.push({ filter, patch });
+        writes.push('payment_methods');
         return Promise.resolve(hit.length);
       },
     };
     return q;
   };
+  knex.raw = (sql, bindings) => ({ sql, bindings });
   knex.updates = updates;
+  knex.paymentFills = paymentFills;
+  knex.writes = writes;
   return knex;
 }
 
@@ -72,6 +96,34 @@ describe('applyStripeCardDetails', () => {
     });
     expect(audit.changed_fields).toEqual(expect.arrayContaining(['expiry', 'last_four']));
     expect(JSON.stringify(audit)).not.toContain('1111');
+    // A replaced number: before the saved card changes, its earlier payments with no snapshot get the card they
+    // were made with (fill-only), so payment history still shows the old last four on them.
+    expect(knex.writes).toEqual(['payments', 'payment_methods']);
+    expect(knex.paymentFills).toEqual([{
+      filter: { payment_method_id: 'row-1' },
+      guard: [['null', 'card_last_four'], ['orNull', 'card_brand']],
+      fill: {
+        card_last_four: { sql: 'COALESCE(card_last_four, ?)', bindings: ['4242'] },
+        card_brand: { sql: 'COALESCE(card_brand, ?)', bindings: ['VISA'] },
+      },
+    }]);
+  });
+
+  test('an expiry-only renewal writes no payment snapshot', async () => {
+    const rows = [card()];
+    const knex = fakeKnex(rows);
+    expect(await applyStripeCardDetails(stripeCard(), { database: knex })).toEqual({ updated: 1 });
+    expect(rows[0]).toMatchObject({ exp_year: '2029', last_four: '4242', card_brand: 'VISA' });
+    expect(knex.writes).toEqual(['payment_methods']);
+    expect(knex.paymentFills).toEqual([]);
+  });
+
+  test('a saved card with no stored brand or last four has nothing to preserve', async () => {
+    const rows = [card({ last_four: null, card_brand: null })];
+    const knex = fakeKnex(rows);
+    expect(await applyStripeCardDetails(stripeCard(), { database: knex })).toEqual({ updated: 1 });
+    expect(rows[0]).toMatchObject({ last_four: '4242', card_brand: 'VISA' });
+    expect(knex.paymentFills).toEqual([]);
   });
 
   test('values equal after normalization are a no-op', async () => {

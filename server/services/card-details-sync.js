@@ -77,6 +77,21 @@ function cardPatch(pm, row) {
   return { patch, fields, stored, next };
 }
 
+// The account updater can replace the card NUMBER. Payment history shows each payment's own brand and last-four
+// snapshot first (StripeService.getPaymentHistory, Customer 360), so before a saved card's brand or last four changes,
+// a linked payment that never got a snapshot is given the details it was made with. Fill-only, like the payment_methods
+// delete trigger (migration 20260924000032, payments_snapshot_removed_method): a value a payment carries stays.
+async function preservePaymentSnapshots(knex, row) {
+  const fill = {};
+  if (row.last_four) fill.card_last_four = knex.raw('COALESCE(card_last_four, ?)', [row.last_four]);
+  if (row.card_brand) fill.card_brand = knex.raw('COALESCE(card_brand, ?)', [row.card_brand]);
+  if (!Object.keys(fill).length) return;
+  await knex('payments')
+    .where({ payment_method_id: row.id })
+    .where((q) => q.whereNull('card_last_four').orWhereNull('card_brand'))
+    .update(fill);
+}
+
 async function applyStripeCardDetails(pm, { source = 'webhook', database } = {}) {
   if (!pm || pm.type !== 'card' || !pm.card || !pm.id) return { updated: 0 };
   const knex = database || defaultDb;
@@ -91,6 +106,7 @@ async function applyStripeCardDetails(pm, { source = 'webhook', database } = {})
     // updated_at stays as it is: the Auto Pay fallback walk (stripe.js, autopay-eligibility.js) orders duplicate
     // default cards by it, and the unanswered-reply check reads it as an account change. A detail refresh must not
     // move either; the audit row records when it ran.
+    if (patch.last_four || patch.card_brand) await preservePaymentSnapshots(knex, row);
     const count = await knex('payment_methods')
       .where({ id: row.id, stripe_payment_method_id: pm.id })
       .update(patch);
