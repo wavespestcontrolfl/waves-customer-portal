@@ -281,11 +281,17 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         let q = db('customer_insight_clusters').orderBy('total_count', 'desc').limit(limit);
         if (city) q = q.where('city', city);
         if (service) q = q.where('service', service);
-        const rows = await q.select(
+        // GATE_CONTENT_PII_ALL_LANES: hand the writer the topic, not a
+        // customer's own (regex-redacted) words.
+        const columns = [
           'topic', 'normalized_question', 'city', 'service',
           'total_count', 'source_counts',
-          'funnel_stage', 'urgency', 'example_phrasing_anonymized', 'redaction_confidence'
-        );
+          'funnel_stage', 'urgency',
+        ];
+        if (!require('../../../config/feature-gates').contentPiiAllLanesLive()) {
+          columns.push('example_phrasing_anonymized', 'redaction_confidence');
+        }
+        const rows = await q.select(columns);
         return { city, service, clusters: rows.map((r) => parseJsonbColumns(r, ['source_counts'])) };
       } catch (err) {
         return { error: `customer_insight_clusters read failed: ${err.message}` };

@@ -19,9 +19,11 @@
  *     customer-question   answer_in_first_paragraph,
  *                         source_internal_link, redaction_passed,
  *                         (FAQPage schema NOT required — deprecated May 7 2026)
- *     refresh             improvement_over_prior
+ *     refresh             improvement_over_prior,
+ *                         redaction_passed (GATE_CONTENT_PII_ALL_LANES)
  *     supporting-blog     hub_link_present, 2+ city mentions,
- *                         FAQ section, voice-match score
+ *                         FAQ section, voice-match score,
+ *                         redaction_passed (GATE_CONTENT_PII_ALL_LANES)
  *     metadata-rewrite    length bounds, primary keyword in title,
  *                         no duplicate title across site
  *
@@ -163,6 +165,11 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // GATE_CONTENT_PII_ALL_LANES (security audit run 3, fix E): a refresh
+    // body (including model-researched web text) got no deterministic
+    // phone/email/name/address scan. Weight 0 so the threshold above is
+    // unchanged; a no-op while the gate is dark.
+    { name: 'redaction_passed', weight: 0, isHard: true, evaluate: checkRedactionPassedAllLanes },
     // Citability backfill only (isCitabilityBackfillBrief): every planned
     // gap must clear and no trait the live page already had may be lost
     // before the refresh may publish and complete its row. Weight-0 hard,
@@ -182,6 +189,10 @@ const PAGE_TYPE_CHECKS = {
     // them. As a 6-pt soft miss, a hubless draft scores 51 >= 42 and
     // auto-publishes — the exact A1 first-batch failure shape.
     { name: 'hub_link_present', weight: 6, isHard: true, evaluate: checkHubLinkPresent },
+    // GATE_CONTENT_PII_ALL_LANES (security audit run 3, fix E): the blog body
+    // only got a phone/email scan (seo-completion-gate), never names or street
+    // addresses. Weight 0 keeps the 51 threshold; a no-op while the gate is dark.
+    { name: 'redaction_passed', weight: 0, isHard: true, evaluate: checkRedactionPassedAllLanes },
     // Tip seeder topics (tips with facts, owner 2026-10-24, decision 2): the
     // general post for a town-titled pairing must come back general. A title
     // naming one town fails hard, so the row gets its one feedback redraft,
@@ -1118,6 +1129,17 @@ function checkNextStepsRedacted(draft, brief) {
   } catch (err) {
     return { ok: false, reason: `pii_scan_unavailable:${err.message}` };
   }
+}
+
+// The body privacy check for the lanes that did not carry it before
+// (supporting-blog, refresh). Dark until GATE_CONTENT_PII_ALL_LANES is
+// 'true', read at call time. A failure is a hard failure, so the draft
+// parks for review through the existing path and never publishes.
+function checkRedactionPassedAllLanes(draft) {
+  if (!require('../../config/feature-gates').contentPiiAllLanesLive()) {
+    return { ok: true, reason: 'content_pii_all_lanes_gate_dark' };
+  }
+  return checkRedactionPassed(draft);
 }
 
 function checkRedactionPassed(draft) {
@@ -2390,7 +2412,7 @@ module.exports._internals = {
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
   checkServiceMenu, checkFaqFromCustomer, checkLocalBusinessServiceSchema,
-  checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
+  checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed, checkRedactionPassedAllLanes,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
