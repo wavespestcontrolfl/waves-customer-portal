@@ -48,6 +48,8 @@ const estimate = {
   lastViewedAt: now,
   viewCount: 2,
   monthlyTotal: 89,
+  // A long phone-row price ("$267 per application · 4 a year · $89/mo avg").
+  perApplication: [{ label: "Pest Control", amount: 267, visitsPerYear: 4 }],
   oneTimeTotal: 149,
   serviceInterest: "General Pest",
   serviceLines: [],
@@ -528,6 +530,16 @@ async function main() {
           }).map((child) => child.textContent.trim());
         });
         assert.deepEqual(clipped, [], 'Mobile estimate content stays inside its row');
+        // The fixture's long per-application price must not push the status
+        // label past the end of its line (the line clips what overflows).
+        const statusInside = await row
+          .getByText("Viewed", { exact: true })
+          .evaluate((node) => {
+            const line = node.parentElement.getBoundingClientRect();
+            const box = node.getBoundingClientRect();
+            return box.width > 0 && box.left >= line.left - 1 && box.right <= line.right + 1;
+          });
+        assert.ok(statusInside, `Mobile estimate status stays visible beside a long price at ${width}`);
         const rowShot = path.join(output, `estimate-row-${width}.png`);
         await row.screenshot({ path: rowShot });
         report.screenshots.push(rowShot);

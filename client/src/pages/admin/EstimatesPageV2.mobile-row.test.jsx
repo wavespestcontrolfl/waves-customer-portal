@@ -96,6 +96,23 @@ describe("MobileEstimateRow per-application price and view actions", () => {
     expect(screen.getByText("$94 per application · 4 a year · $31/mo avg")).toBeInTheDocument();
   });
 
+  it("lets a long per-application price shorten before the status label does", () => {
+    const text = "$184 per application · 9 a year · $138/mo avg";
+    renderRow({
+      estimate: { ...ESTIMATE, status: "accepted", monthlyTotal: 138, perApplication: [{ label: "Lawn Care", amount: 184, visitsPerYear: 9 }] },
+    });
+    // jsdom has no layout, so this pins which item gives way on a narrow phone
+    // row; scripts/qa/admin-pipeline-foundation.cjs checks the real layout.
+    const price = screen.getByText(text);
+    const status = screen.getByText("Accepted");
+    expect(status.parentElement).toBe(price.parentElement);
+    expect(price.parentElement).toHaveClass("flex", "overflow-hidden");
+    expect(price).toHaveClass("min-w-0", "truncate");
+    expect(price).toHaveAttribute("title", text);
+    expect(status).toHaveClass("shrink-0");
+    expect(status.nextElementSibling).toHaveClass("min-w-0", "flex-1", "truncate");
+  });
+
   it("keeps cents on a non-whole per-application price", () => {
     renderRow({
       estimate: { ...ESTIMATE, monthlyTotal: 42.3, perApplication: [{ label: "Lawn Care", amount: 56.4, visitsPerYear: 9 }] },
