@@ -11,7 +11,7 @@
  *  - sms_templates appointment_rescheduled_day_v1: the reschedule text (appointment_rescheduled's day twin).
  *  - sms_templates rain_out_moved_day_v1: the short rain-out moved text (rain_out_moved_v3's day twin).
  *  - sms_templates appointment_series_rescheduled_day_v1 and appointment_recurring_placement_confirmed_day_v1: the two
- *    series notices, each saying "We'll text each arrival window the day before."
+ *    series notices, each saying "We'll text the arrival window the day before each visit."
  *  - email template appointment.rescheduled_day: the same words by email (no hour anywhere). The send still records the
  *    event type appointment.rescheduled, which the no-show detector reads.
  * None of the bodies carries {window} or {time}: a day row that quoted an hour would break the promise it exists for.
@@ -48,7 +48,7 @@ const SMS_TEMPLATES = [
     name: 'Series Rescheduled - Day Only',
     baseKeys: ['appointment_series_rescheduled'],
     category: 'service',
-    body: "Hi {first_name}, your recurring Waves visits now start {start_date}.\n\nWe'll text each arrival window the day before.",
+    body: "Hi {first_name}, your recurring Waves visits now start {start_date}.\n\nWe'll text the arrival window the day before each visit.",
     variables: ['first_name', 'start_date'],
   },
   {
@@ -56,7 +56,7 @@ const SMS_TEMPLATES = [
     name: 'Recurring Placement Confirmed - Day Only',
     baseKeys: ['appointment_recurring_placement_confirmed'],
     category: 'service',
-    body: "Hi {first_name}, your next Waves {service_name} is {start_date}.\n\nWe'll text each arrival window the day before.",
+    body: "Hi {first_name}, your next Waves {service_name} is {start_date}.\n\nWe'll text the arrival window the day before each visit.",
     variables: ['first_name', 'service_name', 'start_date'],
   },
 ];

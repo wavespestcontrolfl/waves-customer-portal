@@ -1,5 +1,5 @@
 // GATE_DAY_ONLY_PROMISE part B2: series moves. A staff series move whose children are system-placed promises only the first
-// date ("We'll text each arrival window the day before"), and the no-show reader then yields level 'day' for the moved
+// date ("We'll text the arrival window the day before each visit"), and the no-show reader then yields level 'day' for the moved
 // children (real reader functions over fakes); unmarked series rows read exactly as before. Synthetic ids only.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

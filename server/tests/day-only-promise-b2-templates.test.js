@@ -35,8 +35,8 @@ describe('the day-only move rows', () => {
     expect(render(byKey.appointment_rescheduled_day_v1.body, VARS)).toBe(
       "Hi Maria, your Waves Quarterly Pest Control Service is now Monday, November 9. We'll text your arrival window the day before.\n\nNeed a different day or a set time? portal.wavespestcontrol.com/l/k3j9m2x7qp",
     );
-    expect(byKey.appointment_series_rescheduled_day_v1.body).toContain("We'll text each arrival window the day before.");
-    expect(byKey.appointment_recurring_placement_confirmed_day_v1.body).toContain("We'll text each arrival window the day before.");
+    expect(byKey.appointment_series_rescheduled_day_v1.body).toContain("We'll text the arrival window the day before each visit.");
+    expect(byKey.appointment_recurring_placement_confirmed_day_v1.body).toContain("We'll text the arrival window the day before each visit.");
   });
 
   test.each(SMS_TEMPLATES.map((t) => [t.key, t]))('%s: no hour var, GSM-7, "Waves" never "Waves Pest Control", declared variables cover the body, at most 2 segments', (_key, t) => {
