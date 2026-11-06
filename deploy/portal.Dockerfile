@@ -38,6 +38,12 @@ RUN apt-get update \
 WORKDIR /app
 COPY . .
 
+# Node floor: node:24-bookworm is a moving tag, so a stale cached base image
+# could hold a Node 24 release older than 24.22.1, the October 21, 2026
+# security fix (CVE-2026-111497). scripts/dev/runtime.js holds the floor and
+# .nvmrc the major; the build stops here, before npm ci, on any older Node.
+RUN node -e "console.log('node', require('./scripts/dev/runtime').checkRuntime('/app'))"
+
 # --include=dev: with NODE_ENV=production npm would skip the dev dependencies
 # that the client build and the prebuild checks need (Nixpacks set
 # NPM_CONFIG_PRODUCTION=false for the same reason).

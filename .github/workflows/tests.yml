@@ -109,6 +109,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - parallel:
@@ -678,6 +679,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - parallel:
@@ -739,6 +741,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - name: Server tests (no DB — golden masters keep in-memory semantics)
@@ -757,6 +760,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - name: Worktree and managed startup checks
@@ -789,6 +793,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - name: Client tests (vitest)
@@ -806,6 +811,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium webkit
@@ -859,6 +865,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
@@ -908,6 +915,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
@@ -937,6 +945,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - name: Verify pinned iOS toolchain
         run: |
@@ -1011,6 +1020,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
       - name: Blog schema vendor check
