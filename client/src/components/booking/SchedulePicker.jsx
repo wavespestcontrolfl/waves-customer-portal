@@ -175,13 +175,19 @@ export function rankBestTimes(slots, days) {
 // Route-ranked top picks. The ranked list is already sorted by the slot
 // engine's score (detour minutes + days-out) — surfacing it is the whole
 // point. Copy stays privacy-safe: never another customer's name or address.
-export function PickerBestTimes({ slots, days, onPick, frame }) {
+// `title` / `intro` default to the route-fit copy; null hides one (the
+// estimate look-ahead shows the soonest times, which are not route picks).
+export function PickerBestTimes({
+  slots, days, onPick, frame,
+  title = 'Our best times for you',
+  intro = 'These fit our route near you best — easiest for everyone.',
+}) {
   const picks = rankBestTimes(slots, days).slice(0, 3);
   if (!picks.length) return null;
   return (
     <Section frame={frame}>
-      <SectionTitle>Our best times for you</SectionTitle>
-      <div className="wpk-intro">These fit our route near you best — easiest for everyone.</div>
+      {title ? <SectionTitle>{title}</SectionTitle> : null}
+      {intro ? <div className="wpk-intro">{intro}</div> : null}
       <div className="wpk-best-row">
         {picks.map(({ s: slot, day, nearby }) => (
           <button
@@ -432,6 +438,8 @@ export function SchedulePickerStyles() {
  * - `empty`  node rendered instead of the times panel when there are no days
  * - `frame`  'card' (glass card sections) | 'inner' (white inner boxes — the
  *   estimate's own card grammar)
+ * - `bestTitle` / `bestIntro`  the strip's heading and intro; null hides one
+ *   (left out: the route-fit copy)
  */
 export default function SchedulePicker({
   availability,
@@ -448,6 +456,8 @@ export default function SchedulePicker({
   slotDetail = null,
   empty = null,
   frame = 'card',
+  bestTitle,
+  bestIntro,
 }) {
   const days = availability?.days || [];
   const byDate = new Map(days.map((d) => [d.date, d]));
@@ -460,6 +470,8 @@ export default function SchedulePicker({
           frame={frame}
           slots={rankedSlots}
           days={days}
+          title={bestTitle}
+          intro={bestIntro}
           onPick={(slot, day) => {
             // slot is the day panel's own row (no date/fullDate fields of
             // its own) — stamp them from the day so the page's confirm and

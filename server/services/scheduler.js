@@ -7762,6 +7762,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 HOURS at :20 — Ads health alerts (owner 2026-11-05, "ALERT"). One
+  // standing Leads bell for a person while an enabled Google Ads campaign cannot
+  // serve or an enabled ad is disapproved, and one engineering row in Claude's
+  // queue while ad conversion uploads fail. Each clears itself. Dark behind
+  // GATE_ADS_HEALTH_ALERTS (off = no query; shadow = audit_log only). runExclusive
+  // records job_health and keeps a deploy overlap from running two; a source that
+  // cannot be read fails the tick. See server/services/ads/ads-health-alerts.js.
+  // =========================================================================
+  cron.schedule('20 */2 * * *', async () => {
+    try {
+      await runExclusive('ads-health-alerts', () => require('./ads/ads-health-alerts').runAdsHealthAlerts());
+    } catch (err) {
+      logger.error(`Ads health alerts failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // NIGHTLY 3AM — Customer Intelligence Pipeline
   // =========================================================================
   cron.schedule('0 3 * * *', async () => {
