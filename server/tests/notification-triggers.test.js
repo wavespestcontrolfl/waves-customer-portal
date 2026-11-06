@@ -480,6 +480,18 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  // GATE_ALERT_RING_BUDGET (services/alert-ring-budget.js): a row the daily budget held is Activity-only, so no phone push follows it.
+  test('a bell row the daily ring budget held sends no phone push; a row that rang still does', async () => {
+    const PushService = require('../services/push-notifications');
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'held-1', metadata: { feed: 'activity', quiet: true, ringBudgetHeld: '2026-11-05' } });
+    const held = await triggerNotification('dashboard_alert', { title: 'Synthetic', message: 'Synthetic held alert' });
+    expect(held).toMatchObject({ bellWritten: true, push: { sent: 0, skipped: 'ring_budget' }, ringBudgetHeld: true });
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'rang-1', metadata: { ringBudgetDay: '2026-11-05' } });
+    await triggerNotification('dashboard_alert', { title: 'Synthetic', message: 'Synthetic ringing alert' });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+  });
+
   // GATE_BELL_BANNERS: a banner for a bell row its writer rang under bell: true keeps that authorization, so it does
   // not depend on GATE_CUSTOMER_ALERTS_RING (real policy on, that gate off).
   test.each(['call_commitment_overdue', 'sms_operational_followup', 'messenger_reply'])(

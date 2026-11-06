@@ -20,6 +20,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { rescueClaudeFault } = require('./admin-alert-routing');
 const PushService = require('./push-notifications');
+const ringBudget = require('./alert-ring-budget');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stripEmoji } = require('../utils/strip-emoji');
 const { agentName } = require('./voice-agent/relay-protocol');
@@ -1615,6 +1616,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     let bellRowId = null;
+    // The daily ring budget held this row (alert-ring-budget.js): written Activity-only, so no phone push follows.
+    let ringHeld = false;
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
@@ -1630,6 +1633,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           const created = await writeBell(bellMetadata);
           if (created && !created.suppressed) bellWritten = true;
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
+          if (ringBudget.isHeld(created)) ringHeld = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
           if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
@@ -1645,6 +1649,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     };
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
+    if (ringHeld) return { ...stats, push: { sent: 0, skipped: 'ring_budget' }, ringBudgetHeld: true };
     if (dedupedNoPush) return { ...stats, deduped: true };
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate

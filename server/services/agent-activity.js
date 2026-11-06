@@ -10,7 +10,9 @@
 //   notifications            → ops_digest rows (services/ops-digest.js, the
 //                              in-app form of the owner FIX:/ACT: emails),
 //                              and the rows routed to Claude's queue
-//                              (metadata.claudeQueue, GATE_ALERT_CLAUDE_QUEUE)
+//                              (metadata.claudeQueue, GATE_ALERT_CLAUDE_QUEUE), and the
+//                              alerts the daily ring budget held
+//                              (metadata.ringBudgetHeld, GATE_ALERT_RING_BUDGET)
 //
 // Read-only. Behind GATE_AGENT_ACTIVITY (feature-gates.js `agentActivity`):
 // the route answers { available: false } while the gate is off.
@@ -44,6 +46,7 @@ const SYSTEM_AGENT = 'System';
 const OPS_AGENT = 'Waves Ops';
 const DIGEST_CATEGORY = 'ops_digest'; // written by services/ops-digest.js
 const CLAUDE_QUEUE_AGENT = "Claude's queue"; // rows services/admin-alert-routing.js sends off the bell
+const HELD_AGENT = 'Held alerts'; // rows services/alert-ring-budget.js wrote Activity-only past the daily ring limit
 
 // Stage order of the autonomous content runner; the *_ms columns are null
 // for stages a run never reached.
@@ -390,6 +393,27 @@ function claudeQueueItem(row) {
   };
 }
 
+// An alert the daily ring budget held (services/alert-ring-budget.js, GATE_ALERT_RING_BUDGET): written Activity-only, so this
+// feed is where it shows. Rendered as a digest item like a Claude's-queue row (same Review / Done handling). Its stamped
+// severity sets the status the way a routed row's does; a row with none reads FYI.
+function heldItem(row) {
+  const meta = parseJson(row.metadata, {}) || {};
+  const item = digestItem(row);
+  const done = Boolean(row.done_at);
+  const closed = done || meta.resolved === true;
+  const status = closed ? 'completed' : meta.severity === 'broken' ? 'failed' : meta.severity === 'needs-you' ? 'awaiting_review' : 'completed';
+  const state = done ? 'done' : closed ? 'cleared' : meta.severity === 'broken' ? 'needs a fix' : meta.severity === 'needs-you' ? 'needs you' : 'FYI';
+  return {
+    ...item,
+    title: String(row.title || ''),
+    agent: HELD_AGENT,
+    subtitle: ['held past the daily limit', state].join(' \u00b7 '),
+    status,
+    finishedAt: closed ? item.finishedAt : status === 'completed' && row.read_at ? iso(row.read_at) : null,
+    stepsDone: status === 'completed' ? 1 : 0,
+  };
+}
+
 function summarize(items, healthyJobs = 0) {
   const summary = { total: items.length, healthyJobs };
   for (const s of STATUSES) summary[s] = 0;
@@ -405,7 +429,7 @@ function jobIsException(job) {
 }
 
 // Pure: rows in → feed out. The route loads the rows; tests feed fixtures.
-function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], digests = [], claudeQueue = [] }) {
+function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], digests = [], claudeQueue = [], held = [] }) {
   // ONE newest approval per run (by created_at, never input order), then
   // classify that row: a run can be re-requested, and only its latest
   // request says whether the owner still owes a reply or already decided.
@@ -434,6 +458,7 @@ function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], dige
     .concat(drafts.map(smsDraftItem))
     .concat(digests.map(digestItem))
     .concat(claudeQueue.map(claudeQueueItem))
+    .concat(held.map(heldItem))
     .concat(exceptionJobs.map(jobItem))
     .sort((a, b) => String(b.eventAt || b.startedAt || '').localeCompare(String(a.eventAt || a.startedAt || '')));
   const agents = Array.from(new Set(items.map((i) => i.agent))).sort();
@@ -563,6 +588,35 @@ async function loadClaudeQueueRows(db, since, focusId, fullAccess = false) {
   return rows;
 }
 
+// Alerts the daily ring budget held (metadata.ringBudgetHeld): the ones created, closed or resolved inside the window, plus the
+// focus id whatever its age. An ops_digest row stays under its own loader and a routed row under Claude's queue, so no row
+// shows twice. An owner-only row is left out unless the caller is the owner login.
+async function loadHeldRows(db, since, focusId, fullAccess = false) {
+  const base = () => {
+    const query = db('notifications')
+      .select(...DIGEST_COLUMNS, db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
+      .where({ recipient_type: 'admin' })
+      .whereRaw("COALESCE(metadata->>'ringBudgetHeld', '') <> ''")
+      .whereRaw("COALESCE(metadata->>'claudeQueue', '') = ''")
+      .whereRaw('category <> ?', [DIGEST_CATEGORY]);
+    return fullAccess ? query : query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
+  };
+  const windowed = await base()
+    .where((w) => w.where('created_at', '>=', since).orWhere('done_at', '>=', since))
+    .orderBy('created_at', 'desc')
+    .limit(MAX_ITEMS);
+  const focused = focusId ? await base().where('id', focusId).limit(1) : [];
+  const seen = new Set();
+  const rows = [];
+  for (const row of [].concat(windowed || [], focused || [])) {
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    rows.push(row);
+  }
+  return rows;
+}
+
 async function loadRows(windowHours, focusId, fullAccess = false) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000);
   // Only a MISSING table (Postgres 42P01 — a ledger not yet migrated on
@@ -594,7 +648,7 @@ async function loadRows(windowHours, focusId, fullAccess = false) {
           'publish_ms', 'index_submit_ms', 'link_plan_ms',
           'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result',
         );
-  const [runs, drafts, jobs, digests, claudeQueue] = await Promise.all([
+  const [runs, drafts, jobs, digests, claudeQueue, held] = await Promise.all([
     safe('autonomous_runs', () =>
       runQuery()
         .where('created_at', '>=', since)
@@ -627,6 +681,7 @@ async function loadRows(windowHours, focusId, fullAccess = false) {
         .limit(MAX_ITEMS)),
     safe('notifications', () => loadDigestRows(db, since, focusId)),
     safe('notifications', () => loadClaudeQueueRows(db, since, focusId, fullAccess)),
+    safe('notifications', () => loadHeldRows(db, since, focusId, fullAccess)),
   ]);
   // Approvals (any status — a terminal one tells us a pending-review run
   // was decided): every row on a loaded run, PLUS any still awaiting that
@@ -653,7 +708,7 @@ async function loadRows(windowHours, focusId, fullAccess = false) {
   const stragglers = missingRunIds.length
     ? await safe('autonomous_runs', () => runQuery().whereIn('id', missingRunIds))
     : [];
-  return { runs: runs.concat(stragglers), approvals, drafts, jobs, digests, claudeQueue, unavailable };
+  return { runs: runs.concat(stragglers), approvals, drafts, jobs, digests, claudeQueue, held, unavailable };
 }
 
 async function getActivity({ windowHours, focus, fullAccess = false } = {}) {
@@ -671,5 +726,5 @@ async function getActivity({ windowHours, focus, fullAccess = false } = {}) {
 }
 
 module.exports = { getActivity, buildActivity, legacyKindFromTitle, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
-  _private: { loadDigestRows, loadClaudeQueueRows },
+  _private: { loadDigestRows, loadClaudeQueueRows, loadHeldRows },
 };

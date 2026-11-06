@@ -303,6 +303,11 @@ customer's message by this rule.
    re-opened. The sweep never contacts a customer.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
    day in total. A class that would push past that becomes a standing count.
+   Built now (owner 2026-11-05, `GATE_ALERT_RING_BUDGET`, `server/services/alert-ring-budget.js`):
+   after 10 such rows ring in one Eastern day, each later one is written to the Activity feed
+   ("Held alerts") with no ring and no phone banner, and one `fyi` count row in the bell
+   ("System — N more alerts held today") lists them. A customer reaching out, a promise owed to a
+   customer and an auto-dispatch notice always ring and are not counted.
    Exception (owner ruling 2026-10-01): time-critical field work, a visit due today or
    tomorrow with no time or technician (`server/services/combined-booking-check.js`), always
    rings; tomorrow it may be too late to act.
