@@ -50,7 +50,9 @@
 }
 [data-glass-theme] .gc-freq-rec {
   position: absolute;
-  top: -10px;
+  /* Sits on the pill's top edge with ~9px clear above the label (it touched
+     the label at -10px). */
+  top: -16px;
   left: 50%;
   transform: translateX(-50%);
   font-size: 14px;
@@ -377,6 +379,13 @@
   box-shadow: 0 14px 32px rgba(180, 110, 0, 0.3), 0 0 22px rgba(240, 165, 0, 0.26),
     inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -2px 8px rgba(180, 110, 0, 0.2) !important;
 }
+/* Section intro lines (schedule, Waves AI, reviews) read as body prose:
+   16px per owner D1 2026-09-05 ("body prose is 16 on customer surfaces").
+   Inline 14px stays the non-glass value. */
+[data-glass-theme] .gc-lead {
+  font-size: 16px !important;
+}
+
 /* Long section CTA labels wrap evenly instead of leaving the arrow alone. */
 [data-glass-theme] .gc-section-cta {
   text-wrap: balance;

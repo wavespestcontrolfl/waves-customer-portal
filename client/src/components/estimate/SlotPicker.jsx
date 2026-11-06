@@ -553,7 +553,7 @@ export default function SlotPicker({
       }}>
         {glassHeading || 'Search by date or time \u2014 no calling, no hold music, no back-and-forth'}
       </h2>
-      <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginBottom: 16 }}>
+      <div className="gc-lead" style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginBottom: 16 }}>
         {glass
           ? GLASS_COPY.schedExcerpt
           : 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.'}

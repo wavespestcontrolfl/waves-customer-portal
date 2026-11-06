@@ -946,7 +946,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         </h2>
       </div>
 
-      <p style={{
+      <p className="gc-lead" style={{
         margin: satelliteUrl || showMisting || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
