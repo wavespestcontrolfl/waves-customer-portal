@@ -128,4 +128,36 @@ describe("ServiceLibraryPage status sync", () => {
     const payload = await renameAndSave();
     expect(payload.is_active).toBe(true);
   });
+
+  it("keeps a checkbox change made while an earlier save is still running", async () => {
+    stubCatalog(base);
+    const catalogFetch = fetch;
+    let releaseFirstPut;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, options) => {
+        if (options?.method === "PUT" && !releaseFirstPut) {
+          await new Promise((resolve) => {
+            releaseFirstPut = resolve;
+          });
+        }
+        return catalogFetch(url, options);
+      }),
+    );
+    await openService();
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+      target: { value: "Renamed Service" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(releaseFirstPut).toBeTypeOf("function"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Active" }));
+    releaseFirstPut();
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).not.toHaveProperty("is_active");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(puts).toHaveLength(2));
+    expect(puts[1].is_active).toBe(false);
+    expect(rows[0].is_active).toBe(false);
+  });
 });
