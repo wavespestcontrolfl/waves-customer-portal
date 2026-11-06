@@ -4,6 +4,8 @@ const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('../staff-contact');
+const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { isV2Extraction } = require('../../utils/extraction-compat');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { nanpNationalDigits } = require('../../utils/phone');
@@ -275,6 +277,92 @@ function normalizeFollowUpTask(task) {
     if (hours === null || hours <= 0 || hours > 168) return undefined;
   }
   return { ...task, type, recommended_action: action, deadline_hours: hours };
+}
+
+// What closes a follow-up task (owner 2026-11-05, "fix 2"): the action the
+// task asked for, or a visit the customer booked. The hourly check used to
+// close a task on ANY later outbound text (a reminder, a receipt), any call
+// log row (the customer phoning in again) or any note, so a task nobody
+// worked could still count as done (audit 2026-11-05).
+// Each fact is the repo's shared witness, read the way the admin-bell
+// witnesses read it (admin-alert-contact-witnesses.js), never re-derived here:
+//   text     a text a person sent that reached the customer (operatorReplySql
+//            + smsDeliveredSql, staff-contact.js), not a proactive draft;
+//   call     a call a person placed and spoke on (personCallBackSql);
+//   quote    an estimate handed off to the customer (handedOffWithin +
+//            whereEstimateCustomerOwnership, call-commitments.js), never sent_at;
+//   booking  a visit someone booked that is still on the books (bookedVisit,
+//            call-commitments.js).
+// A callback PROMISE in the call-promise ledger has its own owner rule
+// (2026-10-05): a booking never keeps one. A follow-up task is a coaching
+// item, and a booking settles it. A type with no row here (none can be
+// created: normalizeFollowUpTask) closes only on a booking.
+const FOLLOW_UP_PROOF_KINDS = {
+  call_back: ['call'],
+  send_sms: ['text'],
+  send_estimate: ['quote'],
+  schedule_inspection: [],
+  escalate_to_adam: ['call', 'text'],
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Each returns { method, at } for the earliest proof after `after`, or null.
+const FOLLOW_UP_PROOFS = {
+  async text(conn, customerId, after) {
+    // An unresolved review-ask / reply reservation is a 'sending' placeholder
+    // the provider may never have received; the shared exclusion keeps it
+    // from reading as a sent text (Codex #4331 P2).
+    const { withoutProactiveDraft } = require('../call-commitments');
+    const row = await excludeUnresolvedSendReservations(conn('sms_log as os').where('os.direction', 'outbound'), 'os')
+      .where('os.customer_id', customerId)
+      .where('os.created_at', '>', after)
+      .whereRaw(operatorReplySql('os'))
+      .whereRaw(smsDeliveredSql('os'))
+      .modify(withoutProactiveDraft)
+      .min('os.created_at as at')
+      .first();
+    return row?.at ? { method: 'sms_log_match', at: row.at } : null;
+  },
+  async call(conn, customerId, after) {
+    // A call is judged by when it ENDED (callEndedAtSql, the Messages
+    // reader's definition); the created_at bound is only an index prefilter.
+    const { callEndedAtSql } = require('../sms-pending-conversations');
+    const endedAt = callEndedAtSql('cl');
+    const row = await conn('call_log as cl')
+      .where('cl.direction', 'outbound')
+      .where('cl.status', 'completed')
+      .modify((q) => whereNotSandboxCall(q, 'cl.source'))
+      .where('cl.customer_id', customerId)
+      .where('cl.created_at', '>', new Date(after.getTime() - DAY_MS))
+      .whereRaw(`${endedAt} > ?`, [after])
+      .whereRaw(personCallBackSql('cl'))
+      .first(conn.raw(`MIN(${endedAt}) as at`));
+    return row?.at ? { method: 'call_log_match', at: row.at } : null;
+  },
+  async quote(conn, customerId, after) {
+    const { handedOffWithin, whereEstimateCustomerOwnership, HANDOFF_COLS, witnessAt } = require('../call-commitments');
+    const rows = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), after), customerId)
+      .select(...HANDOFF_COLS(conn));
+    const times = rows.map((row) => witnessAt(row, after)).filter(Boolean).map(Number);
+    return times.length ? { method: 'estimate_match', at: new Date(Math.min(...times)) } : null;
+  },
+  async booking(conn, customerId, after) {
+    const { bookedVisit } = require('../call-commitments');
+    const visit = await bookedVisit(conn, { after, until: new Date(), customerId });
+    return visit ? { method: 'visit_match', at: visit.at } : null;
+  },
+};
+
+// The earliest proof that a linked task was done, or null.
+async function followUpProof(conn, task) {
+  const after = new Date(task.created_at);
+  let best = null;
+  for (const kind of [...(FOLLOW_UP_PROOF_KINDS[task.task_type] || []), 'booking']) {
+    const proof = await FOLLOW_UP_PROOFS[kind](conn, task.customer_id, after);
+    if (proof && (!best || new Date(proof.at) < new Date(best.at))) best = proof;
+  }
+  return best;
 }
 
 // The rubric's sixteen 0/1 points. All eleven core points always apply, so each
@@ -686,7 +774,8 @@ Return JSON:
   }
 
   /**
-   * Verify pending follow-up tasks against SMS/call logs.
+   * Close past-deadline follow-up tasks: verified when the task's own action,
+   * or a booking, came after it (followUpProof), else expired.
    */
   async verifyFollowUps() {
     const pending = await db('ai_follow_up_tasks')
@@ -696,53 +785,33 @@ Return JSON:
     let verified = 0, expired = 0;
 
     for (const task of pending) {
-      if (!task.customer_id) {
+      // An unlinked task has no customer to judge, so it expires.
+      const proof = task.customer_id ? await followUpProof(db, task) : null;
+      if (!proof) {
         await db('ai_follow_up_tasks').where('id', task.id).update({ status: 'expired', action_verified: false });
         expired++;
         continue;
       }
 
-      // Check for outbound SMS. An unresolved review-ask / reply reservation
-      // is a 'sending' placeholder the provider may never have received — it
-      // must not read as staff having completed this follow-up (Codex #4331
-      // P2); the shared exclusion keeps that rule in one place.
-      const matchingSms = await excludeUnresolvedSendReservations(db('sms_log'))
+      await db('ai_follow_up_tasks').where('id', task.id).update({
+        status: 'verified',
+        action_verified: true,
+        verification_method: proof.method,
+        completed_at: proof.at,
+      });
+
+      // Check if a job was booked from this follow-up
+      const booked = await db('estimates')
         .where('customer_id', task.customer_id)
-        .where('direction', 'outbound')
+        .where('status', 'accepted')
         .where('created_at', '>', task.created_at)
         .first();
 
-      // Check for outbound call/interaction
-      const matchingCall = await db('customer_interactions')
-        .where('customer_id', task.customer_id)
-        .whereIn('interaction_type', ['call_outbound', 'call', 'note'])
-        .where('created_at', '>', task.created_at)
-        .first();
-
-      if (matchingSms || matchingCall) {
-        await db('ai_follow_up_tasks').where('id', task.id).update({
-          status: 'verified',
-          action_verified: true,
-          verification_method: matchingSms ? 'sms_log_match' : 'call_log_match',
-          completed_at: matchingSms?.created_at || matchingCall?.created_at,
-        });
-
-        // Check if a job was booked from this follow-up
-        const booked = await db('estimates')
-          .where('customer_id', task.customer_id)
-          .where('status', 'accepted')
-          .where('created_at', '>', task.created_at)
-          .first();
-
-        if (booked) {
-          await db('ai_follow_up_tasks').where('id', task.id).update({ job_booked_from_followup: true });
-        }
-
-        verified++;
-      } else {
-        await db('ai_follow_up_tasks').where('id', task.id).update({ status: 'expired', action_verified: false });
-        expired++;
+      if (booked) {
+        await db('ai_follow_up_tasks').where('id', task.id).update({ job_booked_from_followup: true });
       }
+
+      verified++;
     }
 
     logger.info(`Follow-up verification: ${verified} verified, ${expired} expired`);
