@@ -40,7 +40,8 @@
 //     rule and would let a link alternate two times all day.
 //  6. Notice coalescing. A customer move of a visit that already had another
 //     customer move in the last CORRECTION_MINUTES sends no notice of its own
-//     (repeatMoveInWindow); the confirmation sweep sends one with the latest time.
+//     (repeatMoveInWindow); once the visit has been quiet that long, the
+//     confirmation sweep sends one with the latest time.
 //
 // Fail open: an unreadable history applies no limit. A limit only hands the
 // customer to the office, so a missed limit costs less than a wrong refusal.

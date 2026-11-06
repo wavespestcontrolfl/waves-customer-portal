@@ -251,7 +251,7 @@ describe('notice coalescing after the commit', () => {
     wireDb({ log: [pick(minutesAgo(5)), pick(new Date())] });
     await postCommit();
     expect(mockHandleReschedule).toHaveBeenCalledTimes(1);
-    expect(mockHandleReschedule.mock.calls[0][2]).toEqual({ deferNoticeToSweep: true });
+    expect(mockHandleReschedule.mock.calls[0][2]).toEqual({ deferNoticeMinutes: 15 });
   });
 
   test('gate on, earlier move 20 minutes back: the notice goes out as before', async () => {
@@ -338,6 +338,12 @@ describe('geocode once for an unpinned visit', () => {
       expect(mockPersistServicePin.mock.calls[0][1]).toMatchObject({ id: 'svc-1' });
       expect(mockPersistServicePin.mock.calls[0][2]).toEqual({ lat: 27.3, lng: -82.5 });
       expect(mockEmitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'svc-1' });
+    });
+
+    test('a pin saved while the geocode was in flight stands: only an unpinned row is written', async () => {
+      wireDb({ svc: stamped({ lat: 27.1, lng: -82.1 }) });
+      await build(unpinned());
+      expect(mockPersistServicePin).not.toHaveBeenCalled();
     });
 
     test('a visit with no stamped address of its own is not pinned (the customer pin is the sweep\'s)', async () => {

@@ -1037,8 +1037,8 @@ Reschedule link caps (security audit run 3, owner 2026-11-05; `GATE_RESCHEDULE_C
 the fourth answers `409 { code: 'MOVE_LIMIT' }` (after the idempotent replay, and again on the locked visit row inside the
 commit), `find-slots` answers the same `409 MOVE_LIMIT`, and `GET` answers `state: 'not_reschedulable'`,
 `reason: 'move_limit'`. No new payload field, no new route; the existing text-or-call card shows. A single-visit move made
-within 15 minutes of another customer move of the visit sends no `appointment_rescheduled` text; the confirmation sweep
-sends one text with the latest time. The page's pin lookup for a visit with no pin of its own uses the memoized
+within 15 minutes of another customer move of the visit sends no `appointment_rescheduled` text; once the visit has been
+quiet for 15 minutes the confirmation sweep sends one text with the latest time. The page's pin lookup for a visit with no pin of its own uses the memoized
 `services/geocoder.js` and saves the pin through `persistServicePin`, so a page view makes no repeat Google request.
 
 Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,

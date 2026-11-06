@@ -2632,19 +2632,29 @@ async function renderConfirmationBody({ scheduledServiceId, customerId, firstNam
 }
 
 // A visit moved again within minutes of an earlier customer move sends no
-// notice of its own. The confirmation is re-armed, the same re-arm the
-// send-window hold takes in handleReschedule, so the 15-minute
-// stranded-confirmation sweep sends ONE text with the latest time however many
-// moves came before it. A windowless placeholder or a sibling-suppressed row
-// keeps the normal path: the sweep skips the first and the slot owner carries
-// the second. True only when asked (options.deferNoticeToSweep) and the row was
-// re-armed; any miss sends as before.
+// notice of its own (options.deferNoticeMinutes, the public reschedule page's
+// repeat moves). The row takes the same hold a grouped unit move takes
+// (move_hold_until: every confirmation, 72h and 24h text of the visit waits, flags
+// unmarked) for that many minutes from THIS move, so each further move pushes the
+// deadline out, and the confirmation is re-armed, the same re-arm the send-window
+// hold takes in handleReschedule. The 15-minute stranded-confirmation sweep then
+// sends ONE text with the latest time once the visit has been quiet that long. No
+// token is stamped: the grouped-move release only frees holds that carry one, so
+// this hold simply lapses. A windowless placeholder or a sibling-suppressed row keeps
+// the normal path: the sweep skips the first and the slot owner carries the second.
+// True only when asked and the row was re-armed; any miss sends as before.
 async function coalesceRescheduleNotice(record, newApptTime, options) {
-  if (options.deferNoticeToSweep !== true || record.windows_preclosed || record.suppressed_by_sibling) return false;
+  const minutes = Number(options.deferNoticeMinutes);
+  if (!(minutes > 0) || record.windows_preclosed || record.suppressed_by_sibling) return false;
   try {
     const rearmed = await db('appointment_reminders')
       .where({ id: record.id, appointment_time: newApptTime, suppressed_by_sibling: false, cancelled: false })
-      .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+      .update({
+        confirmation_sent: false,
+        confirmation_sent_at: null,
+        move_hold_until: new Date(Date.now() + minutes * 60 * 1000),
+        updated_at: new Date(),
+      });
     return rearmed > 0;
   } catch (rearmErr) {
     logger.error(`[appt-remind] confirmation re-arm for coalesced reschedule notice failed: ${rearmErr.message}`);
@@ -5485,7 +5495,7 @@ const AppointmentReminders = {
         return record;
       }
 
-      // Coalesced notice (options.deferNoticeToSweep; GATE_RESCHEDULE_CAP_ALL,
+      // Coalesced notice (options.deferNoticeMinutes; GATE_RESCHEDULE_CAP_ALL,
       // the public reschedule page's repeat moves): see coalesceRescheduleNotice.
       if (await coalesceRescheduleNotice(record, newApptTime, options)) {
         logger.info(`[appt-remind] Reschedule notice for ${scheduledServiceId} coalesced — the confirmation sweep sends the latest time`);

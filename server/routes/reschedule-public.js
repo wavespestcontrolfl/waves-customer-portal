@@ -311,11 +311,14 @@ async function assertMoveLimitAllows(svc, elig, range, config, date) {
 }
 
 // GATE_RESCHEDULE_CAP_ALL: a repeat move inside the correction window sends no
-// notice of its own; the confirmation sweep sends one with the latest time.
-// handleReschedule's options argument, as a spread: none when the move sends its
-// notice as before (gate off, a first move, an unreadable history).
+// notice of its own; once the visit has been quiet that long the confirmation
+// sweep sends one with the latest time. handleReschedule's options argument, as
+// a spread: none when the move sends its notice as before (gate off, a first
+// move, an unreadable history).
 async function rescheduleNoticeOptions(svc) {
-  return await moveLimits.repeatMoveInWindow(svc, { database: db }) ? [{ deferNoticeToSweep: true }] : [];
+  return await moveLimits.repeatMoveInWindow(svc, { database: db })
+    ? [{ deferNoticeMinutes: moveLimits.CORRECTION_MINUTES }]
+    : [];
 }
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
@@ -826,6 +829,10 @@ async function resolveVisitPin(svc, address, resolveBookingCoords) {
   return resolveBookingCoords({ address: address || null, city: svc.city || null });
 }
 
+function visitHasPin(row) {
+  return [row.lat, row.lng].every((value) => value != null && Number.isFinite(Number(value)) && Number(value) !== 0);
+}
+
 // Save the pin a view geocoded through persistServicePin, the service-location
 // backstop's own write (the technician-day lock, the staff-review recheck and a
 // write only to the visit exactly as read; it needs GATE_ROUTE_REORDER and
@@ -838,9 +845,11 @@ async function saveVisitPin(svc, location, address) {
     const locations = require('../services/geocoder-service-locations');
     if (!locations.serviceRepairEnabled()) return;
     const snapshot = await db('scheduled_services').where({ id: svc.id }).first(locations.SNAPSHOT_COLUMNS);
-    const stamp = snapshot && [snapshot.service_address_line1, snapshot.service_address_city, snapshot.service_address_state, snapshot.service_address_zip]
+    // A pin saved while the geocode was in flight (staff correction, the backstop) stands: only an unpinned row is written.
+    if (!snapshot || visitHasPin(snapshot)) return;
+    const stamp = [snapshot.service_address_line1, snapshot.service_address_city, snapshot.service_address_state, snapshot.service_address_zip]
       .map((part) => String(part || '').trim());
-    if (!stamp || stamp.some((part) => !part) || stamp.join(', ') !== address) return;
+    if (stamp.some((part) => !part) || stamp.join(', ') !== address) return;
     if (await locations.persistServicePin(db, snapshot, location)) {
       await require('../services/dispatch-assignment').emitDispatchJobUpdate({ jobId: svc.id });
     }
