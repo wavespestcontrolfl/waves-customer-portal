@@ -10312,8 +10312,8 @@ async function scheduleCreateHandler(req, res, next) {
       if (newApptStopOrderLive()) {
         await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true, lateDays: true });
       }
-      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-      // when off): AFTER the stop-order placement above (the check reads the
+      // Route check (owner 2026-10-29; a no-op when arrival-window routing is
+      // off): AFTER the stop-order placement above (the check reads the
       // visit where it is saved, so it must see the placed order), the booked
       // visit gets the same arrival-window check Edit's save runs, on the road
       // times the pickers already bought. WARN ONLY, in its own savepoint: it
@@ -11167,7 +11167,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // slot (owner ruling 2026-08-25 — staff-side saves never block on
     // schedule conflicts): { id, warning } per stacked row.
     const overlapWarnings = [];
-    // Route-check notes (GATE_ROUTE_CHECK_STAFF_SAVES): the arrival-window check's own
+    // Route-check notes: the arrival-window check's own
     // warning text per visit, kept apart from the true overlaps above.
     const routeWarnings = [];
     // Single-visit cancels whose series may need a visit added back
@@ -11208,7 +11208,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
         let pendingOverlapWarning = null;
         // The bulk overlap probe's window, kept for the committed-route recheck.
         let bulkProbedSlot = null;
-        // Route-check notes (GATE_ROUTE_CHECK_STAFF_SAVES): held and released the same way.
+        // Route-check notes: held and released the same way.
         let pendingRouteWarnings = [];
         switch (action) {
           case 'reassign': {
@@ -11583,8 +11583,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   });
                   pendingOverlapWarning = again.length ? { id, warning: slotOverlapWarning(bulkTargetDate) } : null;
                 }
-                // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a
-                // no-op when off): a row whose slot moved has its technician's
+                // Route check (owner 2026-10-29; a no-op when arrival-window
+                // routing is off): a row whose slot moved has its technician's
                 // day numbered first in the order the arrival-window check
                 // certifies (inside this transaction; needs
                 // GATE_STAFF_ROUTE_INSERTION too), THEN gets the check Edit's
@@ -11953,9 +11953,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       // Advisory occupancy-overlap notes — rows that committed onto an
       // occupied slot (gated probe; empty while the gate is off).
       overlapWarnings,
-      // Route results of the arrival-window check (GATE_ROUTE_CHECK_STAFF_SAVES),
-      // [{ id, warning }] with the checker's own text. Present only when the
-      // gate is on; never mixed into overlapWarnings.
+      // Route results of the arrival-window check,
+      // [{ id, warning }] with the checker's own text. Present only when
+      // arrival-window routing is on; never mixed into overlapWarnings.
       ...(require('../services/scheduling/staff-save-route-check').routeCheckLive() ? { routeWarnings } : {}),
     });
   } catch (err) { next(err); }

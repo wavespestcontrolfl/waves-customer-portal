@@ -4082,8 +4082,8 @@ async function createAppointment(input, actionContext = {}) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
-    // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-    // when off): the booked visit's technician day is numbered first in the
+    // Route check (owner 2026-10-29; a no-op when arrival-window routing is
+    // off): the booked visit's technician day is numbered first in the
     // order the arrival-window check certifies (inside this transaction; needs
     // GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check Edit's
     // save runs, on the road times the pickers already bought. Placement
@@ -4632,8 +4632,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
         });
         overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
       }
-      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-      // when off): the moved visit's technician day is numbered first in the
+      // Route check (owner 2026-10-29; a no-op when arrival-window routing is
+      // off): the moved visit's technician day is numbered first in the
       // order the arrival-window check certifies (inside this transaction;
       // needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check
       // Edit's save runs, on the road times the pickers already bought.

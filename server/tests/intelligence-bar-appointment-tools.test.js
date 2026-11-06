@@ -2556,11 +2556,11 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
   });
 });
 
-// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): the
+// Route check on saves (owner 2026-10-29, Route Check Everywhere 2a): the
 // create and reschedule saves also run the arrival-window route check on the
 // saved visit, as a SECOND advisory probe. The real-overlap probe above stays
 // as it was, so a pinned "no overlap" card refuses a real new overlap only.
-describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create and reschedule saves', () => {
+describe('advisory route check on the create and reschedule saves', () => {
   const occupancy = require('../services/scheduling/occupancy');
   const arrivalRoute = require('../services/scheduling/arrival-route');
   const actualOccupancy = jest.requireActual('../services/scheduling/occupancy');
@@ -2575,13 +2575,11 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
     placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(null);
   });
   afterEach(() => {
-    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
     delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     placeSpy.mockRestore();
     occupancy.findConflictingVisits.mockImplementation((...args) => actualOccupancy.findConflictingVisits(...args));
   });
   const gateOn = () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
   };
 
@@ -2600,7 +2598,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM', ...extra,
     });
 
-    test('gate off: no route check and no route number, the result is as before', async () => {
+    test('arrival-window routing off: no route check and no route number, the result is as before', async () => {
       wire(chain());
       const result = await bookAt();
       expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
@@ -2609,7 +2607,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(placeSpy).not.toHaveBeenCalled();
     });
 
-    test('gate on: the saved visit is checked on cached road times, the warning shows, and its day is numbered in the transaction', async () => {
+    test('the saved visit is checked on cached road times, the warning shows, and its day is numbered in the transaction', async () => {
       gateOn();
       wire(chain());
       const result = await bookAt();
@@ -2625,7 +2623,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(typeof placeSpy.mock.calls[0][0]).toBe('function'); // the booking transaction, not the root connection
     });
 
-    test('gate on, the card pinned no overlap, only the route fails: books with the warning, never refuses', async () => {
+    test('the card pinned no overlap, only the route fails: books with the warning, never refuses', async () => {
       gateOn();
       const insertChain = wire(chain());
       const result = await bookAt({ _booking_overlap: false });
@@ -2633,7 +2631,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(insertChain.insert).toHaveBeenCalled();
     });
 
-    test('gate on, the card pinned no overlap and a REAL overlap appeared: still refused, nothing booked, no route check', async () => {
+    test('the card pinned no overlap and a REAL overlap appeared: still refused, nothing booked, no route check', async () => {
       gateOn();
       const insertChain = wire(realOverlap());
       const result = await bookAt({ _booking_overlap: false });
@@ -2643,7 +2641,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(placeSpy).not.toHaveBeenCalled();
     });
 
-    test('gate on, a real overlap and a failing route both warn (one result.warning), the visit books', async () => {
+    test('a real overlap and a failing route both warn (one result.warning), the visit books', async () => {
       gateOn();
       wire(realOverlap());
       const result = await bookAt();
@@ -2652,7 +2650,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(result.warning).toContain(ROUTE_WARNING);
     });
 
-    test('gate on, an unassigned visit is not route-checked', async () => {
+    test('an unassigned visit is not route-checked', async () => {
       gateOn();
       const insertChain = chain({ returning: jest.fn().mockResolvedValue([{ ...created, technician_id: null }]) });
       wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [chain(), insertChain] });
@@ -2678,7 +2676,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
     };
     const move = () => executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00 AM' });
 
-    test('gate off: no route check and no route number', async () => {
+    test('arrival-window routing off: no route check and no route number', async () => {
       wire();
       const result = await move();
       expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
@@ -2687,7 +2685,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(placeSpy).not.toHaveBeenCalled();
     });
 
-    test('gate on: the moved visit is checked on cached road times, the warning shows, the move commits and is numbered in the transaction', async () => {
+    test('the moved visit is checked on cached road times, the warning shows, the move commits and is numbered in the transaction', async () => {
       gateOn();
       const updateChain = wire();
       const result = await move();
@@ -2702,7 +2700,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — advisory route check on the create an
       expect(placeSpy.mock.calls[0][1]).toEqual({ serviceId: 'svc-1', staffSave: true, lateDays: true, source: 'intelligence_bar' });
     });
 
-    test('gate on: a move whose compare-and-swap missed is not route-checked or numbered', async () => {
+    test('a move whose compare-and-swap missed is not route-checked or numbered', async () => {
       gateOn();
       wire(chain({ update: jest.fn().mockImplementation(() => ({
         then: (res) => Promise.resolve(0).then(res), catch: () => {}, returning: jest.fn().mockResolvedValue([]),
