@@ -1,9 +1,9 @@
 /**
  * The lead call-back reminder against live Postgres, the SQL as the sweep runs it (GATE_LEAD_CALL_REMINDER): an open
  * "Missed call request" or night call-back bell one business hour old, with nobody reaching the lead since, is stamped
- * once and sends one banner; the next sweep sends nothing. A person's text after the bell, a young bell, an old bell,
- * a closed bell and another kind of lead bell send nothing, and a row changed since it was read is not stamped. The
- * rules themselves are covered by lead-call-reminder.test.js.
+ * once and sends one banner; the next sweep sends nothing. A person's text or Gmail send after the bell, a young bell,
+ * an old bell, a closed bell and another kind of lead bell send nothing, and a row changed since it was read is not
+ * stamped. The rules themselves are covered by lead-call-reminder.test.js.
  */
 const crypto = require('crypto');
 
@@ -21,7 +21,7 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   let reminder;
   let relevance;
   let triggerNotification;
-  const made = { notifications: [], sms_log: [], leads: [], customers: [] };
+  const made = { notifications: [], sms_log: [], emails: [], leads: [], customers: [] };
   const BIZ = '+15555559300';
   let n = 0;
   let phoneN = 9300;
@@ -40,7 +40,7 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   });
   afterEach(() => { delete process.env.GATE_LEAD_CALL_REMINDER; });
   afterAll(async () => {
-    for (const table of ['notifications', 'sms_log', 'leads', 'customers']) {
+    for (const table of ['notifications', 'sms_log', 'emails', 'leads', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
     }
     await db.destroy();
@@ -63,6 +63,11 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   });
   const staffText = (customer, at, over = {}) => insert('sms_log', { direction: 'outbound', from_phone: BIZ, to_phone: customer.phone, customer_id: customer.id,
     message_body: 'Hi, this is Waves returning your call request.', message_type: 'manual', status: 'delivered', twilio_sid: sid('SMO'), metadata: JSON.stringify({ human_authored: true }), created_at: at, ...over });
+  // A Gmail send by a person (label SENT, not INBOX) to the customer's own address, in a thread of its own.
+  const sentEmail = (customer, at) => insert('emails', {
+    gmail_id: sid('GM'), gmail_thread_id: sid('TH'), from_address: 'office@example.invalid', to_address: `Lead Sample <${customer.email}>`,
+    cc_address: '', bcc_address: '', subject: 'Your call request', label_ids: JSON.stringify(['SENT']), received_at: at,
+  });
   const get = (id) => db('notifications').where({ id }).first();
   const metaOf = (row) => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {});
   const bannersFor = (id) => triggerNotification.mock.calls.filter(([key, payload]) => key === 'lead_call_reminder' && payload.alertRowId === id);
@@ -107,6 +112,19 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
     expect(bannersFor(textedRow.id)).toHaveLength(0);
     expect(metaOf(await get(textedRow.id)).leadCallReminderAt).toBeUndefined();
     expect(bannersFor(automatedRow.id)).toHaveLength(1);
+  });
+
+  test('a person\'s Gmail send to the lead\'s customer after the bell is contact (the real witness loader); one before the bell is not', async () => {
+    const emailed = await leadAndCustomer();
+    const emailedRow = await bell({ ...emailed, at: mins(-80) });
+    await sentEmail(emailed.customer, mins(-50));
+    const early = await leadAndCustomer();
+    const earlyRow = await bell({ ...early, at: mins(-80) });
+    await sentEmail(early.customer, mins(-100));
+    await run();
+    expect(bannersFor(emailedRow.id)).toHaveLength(0);
+    expect(metaOf(await get(emailedRow.id)).leadCallReminderAt).toBeUndefined();
+    expect(bannersFor(earlyRow.id)).toHaveLength(1);
   });
 
   test('a young bell, an old bell, a closed bell, a closed lead and another kind of lead bell send nothing', async () => {

@@ -20,10 +20,10 @@
  * - Banners go out only between 8 AM and 8 PM ET, judged when the sweep runs; the stamp is written only then.
  * - Only bells of the last 24 hours, so turning the gate on cannot burst old bells.
  * - "Reached" is the shared contact witnesses (admin-alert-contact-witnesses.js) after the bell's latest event: a
- *   person's text, a call a person placed and spoke on, an inbound call a person answered, a person's Gmail send in
- *   the lead's thread, or a visit booked for the lead's customer; or an estimate handed off to that customer
- *   (call-commitments.js handedOffWithin). A deleted lead, or one a person closed (won, lost, and so on), sends
- *   nothing. Judged here whatever the close gates say. A witness read that fails is no verdict: nothing is sent.
+ *   person's text, a call a person placed and spoke on, an inbound call a person answered, a person's Gmail send to
+ *   the lead's customer's own address, or a visit booked for that customer; or an estimate handed off to that
+ *   customer (call-commitments.js handedOffWithin). A deleted lead, or one a person closed (won, lost, and so on),
+ *   sends nothing. Judged here whatever the close gates say. A witness read that fails is no verdict: nothing is sent.
  * - The banner is sent without waiting for it, so a slow push provider cannot hold the sweep. Stamp first, then send:
  *   a send that fails after the stamp is lost, never repeated.
  * - Sends nothing to a lead or a customer. Never throws into the sweep.
@@ -150,8 +150,10 @@ async function stillWaiting(items) {
   const open = await openLeadItems(items);
   if (!open.length) return [];
   const { loadContactBundles } = require('./admin-alert-contact-witnesses');
+  // Kind 'customer', not 'lead': both read the same texts, calls and visits for the customer and phone, and only
+  // 'customer' also reads a person's Gmail send to the customer's own address (attachCustomerEmailSends).
   const bundles = await loadContactBundles(
-    open.map(({ row, askedAt, customerId, phone }) => ({ id: row.id, kind: 'lead', bellAt: askedAt, refs: { customerId, phone } })),
+    open.map(({ row, askedAt, customerId, phone }) => ({ id: row.id, kind: 'customer', bellAt: askedAt, refs: { customerId, phone } })),
     { conn: db, bookedVisits: (ids) => relevance().bookedVisitsByCustomer(db, ids) },
   );
   const waiting = [];

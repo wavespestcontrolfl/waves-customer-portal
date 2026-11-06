@@ -173,7 +173,8 @@ describe('the banner', () => {
     });
     expect(opts).toMatchObject({ pushOnly: true, adminOnly: true, bellAuthorized: true });
     // The witnesses read the lead's own customer and phone, from the bell's event.
-    expect(loadContactBundles.mock.calls[0][0]).toEqual([{ id: 'n-1', kind: 'lead', bellAt: est('05', '13:30'), refs: { customerId: CUST, phone: '+19415550100' } }]);
+    // Kind customer: the lead kind reads no Gmail sends.
+    expect(loadContactBundles.mock.calls[0][0]).toEqual([{ id: 'n-1', kind: 'customer', bellAt: est('05', '13:30'), refs: { customerId: CUST, phone: '+19415550100' } }]);
   });
 
   test('the night call-back bell (lead-call-text-followup) is covered too', async () => {
