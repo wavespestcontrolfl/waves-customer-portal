@@ -80,10 +80,14 @@ const SKIP = !process.env.DATABASE_URL;
     expect((await keys()).sort()).toEqual(['9415550202', '9415550303']);
   });
 
-  test('rows with no list, or no preferences at all, are left alone', async () => {
-    await setRow({ service_preferences: null, service_contact_phone: null });
+  test('rows with no list are left alone', async () => {
+    // service_preferences is NOT NULL with a default object (20260423000007), so "no list" is an
+    // object without login_attested_phone_keys: a slot change leaves it exactly as stored.
+    const defaults = { interior_spray: true, exterior_sweep: true };
+    await setRow({ service_preferences: JSON.stringify(defaults), service_contact_phone: null });
     const row = await db('customers').where({ id: customerId }).first('service_preferences');
-    expect(row.service_preferences).toBeNull();
+    const prefs = typeof row.service_preferences === 'string' ? JSON.parse(row.service_preferences) : row.service_preferences;
+    expect(prefs).toEqual(defaults);
     await setRow({ service_preferences: JSON.stringify({ unconsented_slot_phone_keys: ['9415550999'] }), service_contact2_phone: null });
     expect(await keys()).toBeUndefined();
   });
