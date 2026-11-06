@@ -6,15 +6,17 @@ GitHub bot, the `claude-review` GitHub Action, and ultrareview. Every rule
 names the failure it prevents and the file it protects. Codex invocations
 return JSON matching `.github/codex-review-schema.json`; every reviewer
 cites `file:line` for every finding.
-Other tasks use the user's format; coding agents follow the invariants and
-Implementation defaults below.
+Other tasks use the user's requested format; coding agents follow the
+invariants and Implementation defaults below.
 The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by
 `npm prepare`) blocks a push on any P0 and warns on P1.
 
 **Budget: this file stays under 30 KB** — `npm run check:domain-rules`
-fails when it grows past that (Codex truncates at 32 KiB). Repo orientation lives in `CLAUDE.md`, procedures live
+fails when it grows past that; Codex truncates the loaded instruction
+chain at 32 KiB. Repo orientation lives in `CLAUDE.md`, procedures live
 in `.claude/skills/*`, and the per-route security contracts live in
-`docs/public-route-contracts.md`. Point at them; do not duplicate.
+`docs/public-route-contracts.md`. Do not duplicate them here; point at
+them.
 
 For coding work read `CLAUDE.md` first and load only the relevant skills
 and reference sections. For an audit, read rules as evidence; do not
@@ -242,7 +244,7 @@ execute the workflows they describe.
   `ANTHROPIC_API_KEY` to api.anthropic.com — none of these may be
   pre-approved. Prefer exact forms; note a trailing `:*` enforces a
   word boundary, so colon-named scripts need exact entries. Accepted
-  residual risk (owner ruling): local read/stage prefix rules
+  residual risk (owner ruling, #2768): local read/stage prefix rules
   (`git status/diff/log/show/add/commit:*`) stay — damage is local and
   visible before the always-prompting `git push`. Flag any new prefix rule
   whose abuse is remote, irreversible, or invisible.
@@ -259,7 +261,8 @@ execute the workflows they describe.
   documented supported grammar, not against every English phrasing: it
   merges on green CI with no P0, and a phrasing it does not yet recognize is
   a backlog item in the module doc's known-limitations list (P2), never a
-  P1 blocker. Over-flagging is acceptable; a miss is never a send.
+  P1 blocker. Over-flagging is acceptable; a miss is never a send. Owner
+  ruling 2026-09-20 (#4614).
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
   "$X/yr") appear on any customer-facing estimate surface. Owner exception
@@ -323,7 +326,8 @@ execute the workflows they describe.
   additive-only (both schema JSONs + normalizer + persisted enum +
   `SCHEMA_VERSION` bump, never in `required`, new fields join the replay
   `FIELD_GROUPS`; a prompt/schema/catalog change bumps the
-  `ai_extraction_prompt_version` hash, resetting the promotion cohort; downstream composers read v2 + raw
+  `ai_extraction_prompt_version` hash, resetting the promotion cohort so
+  older shadow rows never count; downstream composers read v2 + raw
   transcript, never v1); AV counts only `hasReplacedComponents` as a
   correction, accepts only `inServiceArea === true`, holds when unreachable,
   treats a `PREMISE` missing only `subpremise` as a building without its
@@ -343,12 +347,11 @@ execute the workflows they describe.
   authorized, never treatment (2026-09-26)), inserts keep idempotency keys,
   TCPA consent precedes any SMS; hard-bounced call-captured emails are
   re-verified against the recording and surfaced for owner read-back, never
-  auto-corrected or resent — the exception (owner 2026-11-05): an address
-  the spelled letters settled between the two extraction passes
-  (`email_spelling_settled`) that hard-bounces is resent once, automatically,
-  to the other pass's spelling for the same customer, behind
-  `GATE_CALL_BOUNCE_OTHER_SPELLING`; the profile takes it only after the
-  resend is delivered; no read-back card on that path.
+  auto-corrected or resent (one exception, owner 2026-11-05: a spelling the
+  caller's letters settled, `email_spelling_settled`, is resent once to the
+  other pass's spelling for the same customer behind
+  `GATE_CALL_BOUNCE_OTHER_SPELLING`; the profile takes it only on delivery;
+  no card).
 - **Estimator engine authority.** `generateEstimate` is the sole dollar
   authority — LLM output proposes intent only and never reaches
   proposal/price fields; engine drafts never auto-send; existing customers
@@ -444,10 +447,11 @@ severity noted.
   `SESSION-*-AUDIT.md`, `TODO.md`, `errors.log`.
 - `docs/design/DECISIONS.md` — append-only log; new entries at the bottom.
 - Cross-timezone concerns. The portal is Eastern-only.
-- Style-of-existing-code refactors: match the file; no Tailwind rewrites of
-  legacy inline styles.
-- Settled owner rulings: the one-time completion gate stays removed;
-  `ESTIMATE_DEPOSIT_REQUIRED` stays off; lawn IS WaveGuard-tier-discountable; `deposit_credit` ledger credits face value;
+- Style-of-existing-code refactors. Match the file; don't rewrite legacy
+  inline styles to Tailwind in a non-redesign PR.
+- Settled owner rulings: the one-time completion gate stays removed
+  (#3013); `ESTIMATE_DEPOSIT_REQUIRED` stays off; lawn IS
+  WaveGuard-tier-discountable; `deposit_credit` ledger credits face value;
   missed surcharges are forward-only (no clawback).
 
 ## Maintaining this file
