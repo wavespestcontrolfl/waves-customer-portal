@@ -157,6 +157,8 @@ const TYPE_LABELS = {
 const WDO_TYPE = "wdo_inspection";
 const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
 const OFFICIAL_TERMITE_DOCUMENT_TYPES = new Set([WDO_TYPE, CERTIFICATE_TYPE]);
+const UNSAVED_CAPTION_MESSAGE =
+  "Save or cancel the photo caption you are editing first. The report and its PDF use saved captions only.";
 const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
@@ -1896,6 +1898,7 @@ export function ProjectDetail({
       setError("Admin access required to send project reports.");
       return;
     }
+    if (blockedByUnsavedCaption()) return;
     const readiness = evaluateProjectReadiness({
       project: { ...project, title: editTitle },
       typeCfg,
@@ -1999,12 +2002,22 @@ export function ProjectDetail({
     }
   }
 
+  // Send and PDF render from SAVED captions, so an open caption draft would be
+  // left out. Block instead of auto-saving (a caption save re-flags a signed WDO).
+  function blockedByUnsavedCaption() {
+    if (dirtyPhotoIds.size === 0) return false;
+    setNotice("");
+    setError(UNSAVED_CAPTION_MESSAGE);
+    return true;
+  }
+
   // Open the filled FDACS-13645 exactly as it will be filed, so the operator can
   // verify the official form is populated before sending. The endpoint is
   // admin-only (bearer auth), so fetch it with adminFetch and open the PDF as an
   // object URL — a plain link navigation drops the auth header and 401s.
   async function viewFilledFdacsPdf() {
     if (!projectId) return;
+    if (blockedByUnsavedCaption()) return;
     setError("");
     // Open the tab synchronously inside the click gesture; Safari/iOS and strict
     // popup blockers reject window.open that happens only after an await. We set
@@ -2035,6 +2048,7 @@ export function ProjectDetail({
       setError("Admin access required to send project reports.");
       return;
     }
+    if (blockedByUnsavedCaption()) return;
     const readiness = evaluateProjectReadiness({
       project: { ...project, title: editTitle },
       typeCfg,

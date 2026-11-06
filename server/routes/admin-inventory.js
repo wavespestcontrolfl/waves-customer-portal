@@ -242,6 +242,25 @@ function assertSupportedInventoryUnit(unit, field = 'Inventory unit') {
   }
 }
 
+// The Products table's inline editor fills its stock box from the list as it
+// loaded. A visit closeout, receipt or count can move the live count after
+// that, and writing the typed count over it would undo the movement (and read
+// as a fresh shelf count to the count guard). So a stock change names the
+// count it started from, and a start that no longer matches the live count is
+// refused (daily-work audit 11-05).
+function assertStockEditStart(body, stockBefore) {
+  if (body.inventoryOnHandBefore === undefined) {
+    const err = new Error('inventoryOnHandBefore (the count the edit started from) is required to change stock');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (numberOrNull(body.inventoryOnHandBefore) !== stockBefore) {
+    const err = new Error('Stock changed after this product was opened; reload and enter the count again');
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 function unitReviewReasons(product = {}) {
   const reasons = [];
   const stock = numberOrNull(product.inventory_on_hand);
@@ -3801,6 +3820,7 @@ router.put('/:id', async (req, res, next) => {
       }
 
       if (stockChanged) {
+        assertStockEditStart(req.body, stockBefore);
         upd.inventory_on_hand = nextStock;
         upd.inventory_unit = nextUnit;
       }

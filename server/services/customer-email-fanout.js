@@ -373,7 +373,7 @@ async function propagateCustomerEmailChange({
     counts.automations += await conn('automation_enrollments')
       .where({ customer_id: customerId, status: 'active' })
       .whereRaw('LOWER(email) = ?', [oldEmail])
-      .update({ email: newEmail, updated_at: now });
+      .update({ email: newEmail, metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) - 'spelling_retry_email'"), updated_at: now });
 
     // Queued/delayed email-template automation runs deliver to the stored
     // recipient_email at claim time (email-template-automation-executor).
@@ -824,7 +824,7 @@ async function propagateCustomerEmailChange({
           this.orWhereRaw('LOWER(email) = ?', [target]);
         }
       })
-      .update({ email: newEmail, updated_at: now });
+      .update({ email: newEmail, metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) - 'spelling_retry_email'"), updated_at: now });
     let reviewedCallsQuery = conn('triage_items')
       .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
       .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }));
@@ -954,7 +954,7 @@ async function propagateCustomerEmailChange({
             this.orWhereRaw('LOWER(email) = ?', [target]);
           }
         })
-        .update({ email: newEmail, updated_at: now });
+        .update({ email: newEmail, metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) - 'spelling_retry_email'"), updated_at: now });
     }
 
     // A correction is itself the ANSWER to a dismissed read-back card
