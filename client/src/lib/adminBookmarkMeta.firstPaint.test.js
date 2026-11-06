@@ -29,3 +29,19 @@ describe("Safari admin bookmark first paint", () => {
     expect(html).not.toMatch(/classList\.add/);
   });
 });
+
+describe("First-load mark inside #root (owner 2026-11-06)", () => {
+  const root = html.match(/<div id="root">([\s\S]*?<\/div>)<\/div>/)?.[1] ?? "";
+
+  it("holds one CSS-only status mark with no visible text, image or script", () => {
+    expect(root).toMatch(/<div class="waves-boot-mark" role="status" aria-label="Loading"><\/div>/);
+    expect(root.replace(/<[^>]*>/g, "").trim()).toBe("");
+    expect(root).not.toMatch(/<(img|script|svg|picture|video)\b/i);
+  });
+
+  it("stops spinning under prefers-reduced-motion", () => {
+    expect(html).toMatch(
+      /@media \(prefers-reduced-motion: reduce\) \{ \.waves-boot-mark \{ animation: none; \} \}/,
+    );
+  });
+});

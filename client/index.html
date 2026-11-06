@@ -54,10 +54,21 @@
       :where(html:not(.admin-app)) h2, :where(html:not(.admin-app)) h3, :where(html:not(.admin-app)) h4 { font-family: 'Montserrat', 'Inter', sans-serif; }
       h5, h6 { font-family: 'Inter', system-ui, sans-serif; }
       input::placeholder, textarea::placeholder { color: #64748B; }
+      /* Boot mark: shown inside #root until React's first render replaces it
+         (owner 2026-11-06). CSS only: no text, no image, no script. Slate
+         ring so it reads on the white page the browser paints before the CSS
+         bundle loads and on dark admin surfaces. */
+      .waves-boot-mark {
+        position: fixed; top: 50%; left: 50%; width: 28px; height: 28px; margin: -14px 0 0 -14px;
+        border: 3px solid rgba(100, 116, 139, 0.3); border-top-color: #64748B; border-radius: 50%;
+        animation: waves-boot-spin 0.9s linear infinite;
+      }
+      @keyframes waves-boot-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .waves-boot-mark { animation: none; } }
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="waves-boot-mark" role="status" aria-label="Loading"></div></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
