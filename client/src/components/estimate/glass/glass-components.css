@@ -439,6 +439,14 @@
   }
 }
 
+/* The plan's terms line under the main CTA (cancel anytime, callbacks,
+   guarantee) is a trust point, not fine print: body size in ink navy. */
+[data-glass-theme] .gc-cta-micro {
+  font-size: 16px !important;
+  font-weight: 500 !important;
+  color: var(--text, #04395e) !important;
+}
+
 @media (max-width: 640px) {
   /* Card-wide on phones; 16px keeps the label on one line at 390px. */
   [data-glass-theme] .gc-main-cta[data-glass-accent] {

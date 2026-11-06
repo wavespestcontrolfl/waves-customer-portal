@@ -268,7 +268,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
           tone; the demotion logic in glassCtaMicroForKeys already keeps
           them truthful per category. */}
       {showGuaranteeMicro ? (
-        <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
+        <div className="gc-cta-micro" style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {microText || GLASS_COPY.ctaMicro}
         </div>
       ) : null}
