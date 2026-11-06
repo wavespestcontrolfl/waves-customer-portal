@@ -1,9 +1,9 @@
 /**
  * IB create_invoice (owner ruling 2026-10-12, Stage 3 cards): the Invoices page "Create invoice" handler run in
- * process behind a card, dark behind GATE_IB_CREATE_INVOICE (needs GATE_IB_PLATFORM). What the card shows (customer
+ * process behind a card, on the platform path (needs GATE_IB_PLATFORM). What the card shows (customer
  * and city, every line, tax, total, due date, linked visit, that the draft is not sent), the refusals (no customer,
  * amounts at or below 0, no lines, too many lines, a visit that is not the customer's, a payer-billed customer, a
- * retention offer), pin drift, gate off, admin only, and that the commit runs the page's handler once with the card's
+ * retention offer), pin drift, platform off, admin only, and that the commit runs the page's handler once with the card's
  * body and total. The handlers are mocked here; admin-invoices-create-handler-replay.test.js covers the real ones.
  * Nothing here reaches a provider. Synthetic names only.
  */
@@ -84,8 +84,8 @@ function makeDb() {
 }
 
 function envGate(on) {
-  if (on) { process.env.GATE_IB_CREATE_INVOICE = 'true'; process.env.GATE_IB_PLATFORM = 'true'; }
-  else { delete process.env.GATE_IB_CREATE_INVOICE; delete process.env.GATE_IB_PLATFORM; }
+  if (on) process.env.GATE_IB_PLATFORM = 'true';
+  else delete process.env.GATE_IB_PLATFORM;
 }
 
 const LINES = [
@@ -134,7 +134,7 @@ describe('registration', () => {
     expect(CREATE_INVOICE_TOOLS[0].description).toMatch(/send_invoice/);
   });
 
-  test('gate off: not discoverable; the platform gate is needed; a technician never gets it', () => {
+  test('platform off: not discoverable; a technician never gets it', () => {
     delete process.env.GATE_IB_PLATFORM;
     expect(registry.allowed(registry.actions.get('create_invoice'), { role: 'admin', context: 'customers' })).toBe(false);
     envGate(false);
@@ -145,22 +145,14 @@ describe('registration', () => {
   });
 });
 
-describe('gate and login', () => {
-  test('gate off: every call refuses with gate_off and nothing runs', async () => {
+describe('platform and login', () => {
+  test('platform off: every call refuses with gate_off and nothing runs', async () => {
     envGate(false);
     expect(await preview()).toMatchObject({ code: 'gate_off' });
     expect(await executeCreateInvoiceTool('create_invoice', { ...lineInput(), confirmed: true, _verified_invoice_create_version: {} }, ADMIN)).toMatchObject({ code: 'gate_off' });
     expect(Invoices.createInvoiceFromBar).not.toHaveBeenCalled();
     expect(Invoices.createInvoiceFromServiceFromBar).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
-  });
-
-  test('the strict value is required, and the platform gate alone or the create gate alone is not enough', async () => {
-    process.env.GATE_IB_CREATE_INVOICE = '1';
-    expect(await preview()).toMatchObject({ code: 'gate_off' });
-    process.env.GATE_IB_CREATE_INVOICE = 'true';
-    delete process.env.GATE_IB_PLATFORM;
-    expect(await preview()).toMatchObject({ code: 'gate_off' });
   });
 
   test('a non-admin is refused, and a confirmed run needs a positive admin flag', async () => {

@@ -1,6 +1,6 @@
 'use strict';
 
-// Sound-alike rows for the admin customer pickers (GATE_CUSTOMER_SEARCH_FUZZY).
+// Sound-alike rows for the admin customer pickers.
 //
 // The exact picker search (customer-list-search.js) is an ILIKE "contains", so
 // a misspelled or sound-alike name ("Orlan damp" for "Orlan Stompf") finds
@@ -9,7 +9,7 @@
 // name matcher the Intelligence Bar uses and returns up to 8 approximate
 // matches for the route to append AFTER the exact rows.
 //
-// It never reads the gate: the caller decides. It reads nothing but customer
+// The caller decides whether to ask for it. It reads nothing but customer
 // ids and names (one shared, cached index of every live customer; see
 // intelligence-bar/name-match.js) and asks the database which of the few
 // survivors the caller's own filtered, scoped query allows, so a technician's
@@ -105,7 +105,7 @@ async function rescoreCurrentNames(knex, scopeQuery, search, ranked, context) {
   const rows = await base.clone().clearSelect().clearOrder()
     .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
     .whereIn('customers.id', ranked.map((entry) => entry.id));
-  return rankNameMatches(search, rows, { v2: true, limit: rows.length || 1, context });
+  return rankNameMatches(search, rows, { limit: rows.length || 1, context });
 }
 
 // Returns [{ id, score, reasons? }] best first, at most `limit` (8), never one
@@ -123,7 +123,7 @@ async function findSoundAlikeCustomers(knex, search, {
     // Extra slots: an exact row may rank among the matches and is dropped, and a
     // customer renamed since the index was built may fail the rescore below.
     const ranked = rankNameMatches(search, survivors, {
-      v2: true, limit: (cap + skip.size) * 2, context, prefiltered: true,
+      limit: (cap + skip.size) * 2, context, prefiltered: true,
     });
     const current = await rescoreCurrentNames(knex, scopeQuery, search, ranked, context);
     return current.filter((entry) => !skip.has(entry.id)).slice(0, cap);

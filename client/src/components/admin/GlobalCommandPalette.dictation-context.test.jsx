@@ -8,7 +8,7 @@ import GlobalCommandPalette from './GlobalCommandPalette';
 import useIsMobile from '../../hooks/useIsMobile';
 import { IntelligenceBarPageDataProvider, usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 
-// Server dictation (GATE_SERVER_DICTATION, GATE_DICTATION_CUSTOMER_NAMES) spells the customer on
+// Server dictation (GATE_SERVER_DICTATION) spells the customer on
 // screen right when the Intelligence Bar mic sends that customer's id. The bar must forward the
 // page's customer id, on the desktop bar and on the phone sheet, and nothing when none is on screen.
 const micProps = vi.hoisted(() => []);
@@ -112,7 +112,7 @@ describe('Intelligence Bar dictation flag', () => {
   });
 });
 
-// GATE_IB_TARGET_RULES_V2: text pasted or dropped into the message (a customer's email or text)
+// Text pasted or dropped into the message (a customer's email or text)
 // is not all the operator's own words, so the bar says so (pasted_text) and the server shows a
 // card for every write. The flag goes with the message it was pasted into, not the next one.
 describe('Intelligence Bar pasted-text flag', () => {

@@ -11040,15 +11040,14 @@ router.get('/list', async (req, res, next) => {
       .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
     const exactServices = await byDate(listColumns(q)).limit(limit).offset(offset);
 
-    // Sound-alike appointments (GATE_CUSTOMER_SEARCH_FUZZY): when the exact search found
+    // Sound-alike appointments: when the exact search found
     // fewer than 3 appointments and reads as a name, the upcoming appointments of customers
     // with a similar name follow the exact rows on page 1. `total` and the paging stay exact;
     // `approximateCount` says how many rows at the end carry `approximate: true`. Only customers
     // with a matching appointment under the same filters (and a technician's own assignments)
     // are considered, so the scope never widens.
-    // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
     // Opt-in per caller (`suggest=1`): the schedule list view's bulk actions never see suggestions.
-    const customerSearchFuzzy = require('../config/feature-gates').customerSearchFuzzyLive() && req.query.suggest === '1';
+    const customerSearchFuzzy = req.query.suggest === '1';
     let approximateServices = [];
     // All exact rows on this page, so no exact match also comes back as a suggestion (Codex r3).
     if (customerSearchFuzzy && page === 1 && exactServices.length >= total && shouldSearchSoundAlike(search, total, exactServices)) {

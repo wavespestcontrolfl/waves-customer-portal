@@ -1,4 +1,4 @@
-/** GATE_IB_MULTI_CARD against real Postgres + real bearer auth + the real card
+/** Several confirm cards in one answer against real Postgres + real bearer auth + the real card
  * store. Only the model adapter is scripted. Run with IB_TEST_DATABASE_URL
  * naming an isolated waves_ib_platform_* database (CI: waves_test).
  */
@@ -11,7 +11,7 @@ jest.mock('../services/email/gmail-client', () => ({ ...jest.requireActual('../s
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
 
-suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)', () => {
+suite('several confirm cards in one answer (scripted model)', () => {
   let db, server, origin, ownerToken, owner, suiteStartedAt;
   const customers = [];
   const originalEnv = { ...process.env };
@@ -48,7 +48,6 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     process.env.GATE_IB_THREADS = 'false';
     process.env.GATE_IB_WRITES_DISABLED = 'false';
     process.env.GATE_IB_OWNER_DIRECT = 'true';
-    delete process.env.GATE_IB_MULTI_CARD;
     db = require('../models/db');
     suiteStartedAt = (await db.raw('SELECT now() AS t')).rows[0].t;
     if (!(await db.schema.hasTable('ib_tasks'))) throw new Error('Apply the IB task migration to the isolated database first');
@@ -73,7 +72,6 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
   }, 30000);
   beforeEach(async () => {
     mockModel.mockReset();
-    delete process.env.GATE_IB_MULTI_CARD;
     for (const [i, id] of customers.entries()) await db('customers').where('id', id).update({ crm_notes: `Original note ${i}` });
   });
   afterAll(async () => {
@@ -86,17 +84,7 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     Object.assign(process.env, originalEnv);
   });
 
-  test('gate off: the second card in a request is refused with dependency_unresolved, as before', async () => {
-    script(edit(customers[0], 'First'), edit(customers[1], 'Second'));
-    const result = await api('/query', request());
-    expect(result.status).toBe(200);
-    expect(result.body.pendingActions).toHaveLength(1);
-    expect(toolResults()).toContain('dependency_unresolved');
-    expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '1' });
-  }, 30000);
-
-  test('gate on: two independent cards are minted in one answer, each with its own contract and expiry', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('two independent cards are minted in one answer, each with its own contract and expiry', async () => {
     script(edit(customers[0], 'First'), edit(customers[1], 'Second'));
     const result = await api('/query', request());
     expect(result.status).toBe(200);
@@ -119,14 +107,7 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     expect(await notesOf(customers[1])).toBe('Original note 1');
   }, 30000);
 
-  test('gate off: the prompt has no multi-card section', async () => {
-    script(edit(customers[0], 'First'));
-    await api('/query', request());
-    expect(JSON.stringify(mockModel.mock.calls[1][0].system)).not.toContain('SEVERAL CARDS IN ONE ANSWER');
-  }, 30000);
-
-  test('gate on: confirming one card leaves the other pending and valid, and each saves only its own customer', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('confirming one card leaves the other pending and valid, and each saves only its own customer', async () => {
     script(edit(customers[0], 'First saved'), edit(customers[1], 'Second saved'));
     const result = await api('/query', request());
     const [first, second] = result.body.pendingActions;
@@ -147,8 +128,7 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     expect(await notesOf(customers[0])).toBe('First saved');
   }, 30000);
 
-  test('gate on: a second card keeps its own frozen precondition; drift on one customer refuses only that card', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('a second card keeps its own frozen precondition; drift on one customer refuses only that card', async () => {
     script(edit(customers[0], 'Fresh A'), edit(customers[1], 'Fresh B'));
     const result = await api('/query', request());
     const [first, second] = result.body.pendingActions;
@@ -161,8 +141,7 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     expect(await notesOf(customers[1])).toBe('Fresh B');
   }, 30000);
 
-  test('gate on: a second proposal for the same customer is blocked, through any tool', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('a second proposal for the same customer is blocked, through any tool', async () => {
     script(edit(customers[0], 'First'), { type: 'tool_use', name: 'send_sms', input: { customer_id: customers[0], message: 'Your note changed.' }, id: 'sms' },
       edit(customers[0], 'Again', 'again'));
     const result = await api('/query', request());
@@ -171,16 +150,14 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '1' });
   }, 30000);
 
-  test('gate on: a proposal that uses an earlier card\'s record id stays dependency_unresolved', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('a proposal that uses an earlier card\'s record id stays dependency_unresolved', async () => {
     script(edit(customers[0], 'First'), edit(customers[1], `Same as ${customers[0]}`));
     const result = await api('/query', request());
     expect(result.body.pendingActions).toHaveLength(1);
     expect(toolResults()).toContain('dependency_unresolved');
   }, 30000);
 
-  test('gate on: closed actions never join a set, before or after an open card', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('closed actions never join a set, before or after an open card', async () => {
     // A price/rate change after an open card is refused...
     script(edit(customers[0], 'First'), { type: 'tool_use', name: 'update_customer', input: { customer_id: customers[1], updates: { monthly_rate: 99 } }, id: 'rate' });
     const priced = await api('/query', request());
@@ -197,8 +174,7 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     expect(await notesOf(customers[3])).toBe('Original note 3');
   }, 30000);
 
-  test('gate on: at most five cards in one request', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('at most five cards in one request', async () => {
     script(...customers.map((id, i) => edit(id, `Note ${i}`)));
     const result = await api('/query', request());
     expect(result.body.pendingActions).toHaveLength(5);
@@ -206,8 +182,7 @@ suite('several confirm cards in one answer (GATE_IB_MULTI_CARD, scripted model)'
     expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '5' });
   }, 30000);
 
-  test('gate on: cards from separate calls in one request join the same task, and a later request does not inherit the room', async () => {
-    process.env.GATE_IB_MULTI_CARD = 'true';
+  test('cards from separate calls in one request join the same task, and a later request does not inherit the room', async () => {
     // Two model rounds: one card each.
     mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer' }, 'discover'))
       .mockResolvedValueOnce({ content: [edit(customers[0], 'Round one')], usage: {} })
