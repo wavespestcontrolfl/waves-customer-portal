@@ -1060,4 +1060,54 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'stale' });
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
   });
+
+  // ── An archived or merged-away customer is rejected at the commit (P1-N) ─────────────────────────────────────────────────
+  test.each([
+    ['archived', async (id) => { await db('customers').where({ id }).update({ deleted_at: new Date(), active: false }); }],
+    ['merged away', async (id) => { // how customer-dedupe retires a merge loser
+      await db('customers').where({ id }).update({ phone: `merged-${id.slice(0, 8)}`, email: null, active: false, deleted_at: new Date() });
+    }],
+  ])('delivery after the customer was %s: nothing is written, the claim is skipped as customer_gone, the enrollments are released', async (_label, retire) => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await db('estimates').insert({ customer_id: ctx.customerId, customer_email: BOUNCED });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'gone-1');
+    await retire(ctx.customerId);
+    const before = await db('customers').where({ id: ctx.customerId }).first();
+
+    await delivered('gone-1');
+
+    const after = await db('customers').where({ id: ctx.customerId }).first();
+    expect(after.email).toBe(before.email); // not replaced by the retry address
+    expect(after.email).not.toBe(OTHER);
+    expect((await db('estimates').where({ customer_id: ctx.customerId }).first()).customer_email).toBe(BOUNCED); // no fanout
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'customer_gone' });
+    expect(await db('audit_log').where({ resource_id: ctx.customerId, action: 'customer.email_replaced_after_bounce_retry' })).toEqual([]);
+    for (const id of [ctx.enrollment.id, sibling.enrollment.id]) {
+      expect(await enrollmentRow(id)).toMatchObject({ status: 'cancelled' });
+      await noProvenance(id);
+    }
+  });
+
+  test('a customer archived before the queued retry step: the verdict stops the send and the claim is skipped', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await db('customers').where({ id: ctx.customerId }).update({ deleted_at: new Date(), active: false });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect((await ledger(ctx.customerId))[0].status).toBe('skipped');
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
+  });
+
+  test('an archived customer is never a retry candidate', async () => {
+    ctx = await setup({ sent: 1 });
+    await db('customers').where({ id: ctx.customerId }).update({ deleted_at: new Date(), active: false });
+    jest.clearAllMocks();
+    await webhook.handleEvent(bounce(ctx.send));
+    await flush();
+    expect(await ledger(ctx.customerId)).toEqual([]);
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
+  });
 });

@@ -49,6 +49,16 @@ const RETRY_PROVENANCE_KEY = 'spelling_retry_email';
 
 const norm = (value) => String(value || '').trim().toLowerCase();
 
+/**
+ * THE read of a customer row in this service: a LIVE customer, i.e. not soft-deleted. The codebase retires an archived customer and a
+ * merge loser alike by setting `deleted_at` (customer-dedupe.js retires the loser with deleted_at, email null, active false), and
+ * every reader that must not match them filters `deleted_at IS NULL`. Candidate selection, the send verdict, the release/retarget
+ * and the commit (under its row lock) all read and write customers only through this, so a customer archived or merged away
+ * between the retry send and its delivery is rejected the same way it would be at the start. A query builder: chain .first(),
+ * .forUpdate(), .update().
+ */
+const liveCustomer = (client, customerId) => client('customers').where({ id: customerId }).whereNull('deleted_at');
+
 function enrollmentRole(enrollment) {
   const meta = enrollment?.metadata;
   if (meta && typeof meta === 'object') return meta.recipient_role || null;
@@ -140,7 +150,7 @@ async function clearRetryProvenance({ customerId, retryEmail }, client = db) {
 async function releaseRetryEnrollments({ customerId, retryEmail, reason }, client = db) {
   let current = null;
   if (reason === 'email_changed') {
-    const customer = await client('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+    const customer = await liveCustomer(client, customerId).first('email');
     const email = norm(customer?.email);
     if (EMAIL_SHAPE_RE.test(email)) current = email;
   }
@@ -236,7 +246,7 @@ async function eligibleOtherSpelling({ enrollment, bounced }, client) {
   const template = await client('automation_templates').where({ key: enrollment.template_key }).first('asm_group');
   // Marketing-stream bounces belong to the suppression ledger and never rewrite a contact's email.
   if (!template || String(template.asm_group || 'service').trim().toLowerCase() === 'newsletter') return null;
-  const customer = await client('customers').where({ id: enrollment.customer_id }).whereNull('deleted_at').first('id', 'email');
+  const customer = await liveCustomer(client, enrollment.customer_id).first('id', 'email');
   if (!customer || norm(customer.email) !== bounced) return null;
 
   const { findSourceCall } = require('./email-bounce-reverify');
@@ -269,7 +279,7 @@ async function retryAddressProblem(address, customerId, client) {
  */
 async function verdictFor({ claim, customerId, retryEmail }, client) {
   const address = norm(retryEmail);
-  const customer = await client('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+  const customer = await liveCustomer(client, customerId).first('email');
   if (claim && claim.status === 'committed' && customer && norm(customer.email) === address) return null;
   if (!gateLive()) return 'gate_off';
   if (!claim || claim.status !== 'resending') return 'claim_settled';
@@ -491,7 +501,7 @@ async function onAutomationDelivered({ sendRow }, client = db) {
   if (!row || norm(row.retry_email) !== address) return { committed: false };
 
   const settle = (status, reason) => applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status, reason }, client);
-  const before = await client('customers').where({ id: row.customer_id }).forUpdate().first();
+  const before = await liveCustomer(client, row.customer_id).forUpdate().first();
   if (!before) { await settle('skipped', 'customer_gone'); return { committed: false }; }
   const { lockCustomerEmail } = require('../utils/customer-comms-lock');
   await lockCustomerEmail(client, address);
@@ -500,7 +510,7 @@ async function onAutomationDelivered({ sendRow }, client = db) {
     await settle('skipped', 'owned_by_other');
     return { committed: false };
   }
-  const updated = await client('customers').where({ id: row.customer_id }).whereRaw('LOWER(email) = ?', [norm(row.bounced_email)])
+  const updated = await liveCustomer(client, row.customer_id).whereRaw('LOWER(email) = ?', [norm(row.bounced_email)])
     .update({ email: address, updated_at: new Date() });
   if (Number(updated) !== 1) { await settle('skipped', 'email_changed'); return { committed: false }; }
 

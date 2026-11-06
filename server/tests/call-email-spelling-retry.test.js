@@ -52,3 +52,20 @@ describe('email_spelling_settled: what the call pipeline writes is what the drip
     expect(retry.settledOtherSpelling(aiExtraction, 'jondoe@gmail.com')).toBeNull();
   });
 });
+
+// Every customer read or write in the retry service goes through liveCustomer (deleted_at IS NULL): an archived or merged-away
+// customer is rejected at candidate selection, in the send verdict, in the release/retarget and at the commit under its row lock.
+describe('liveCustomer is the only way the retry service touches customers', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../services/call-email-spelling-retry.js'), 'utf8');
+
+  test('exactly one direct customers() query exists: the helper itself', () => {
+    expect(source.match(/\('customers'\)/g)).toHaveLength(1);
+    expect(source).toContain("client('customers').where({ id: customerId }).whereNull('deleted_at')");
+  });
+
+  test('the helper has a call site for each use: candidate, verdict, release, commit lock, commit write', () => {
+    expect(source.match(/liveCustomer\(client, /g).length).toBeGreaterThanOrEqual(5);
+  });
+});
