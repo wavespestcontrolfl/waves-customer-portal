@@ -13,6 +13,9 @@ jest.mock('../services/email-template-library', () => ({
   redactEmailAddresses: jest.fn((value) => String(value).replace(/\b[^\s@]+@[^\s@]+\b/g, '[redacted-email]')),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+// The delayed-send chokepoint a stored DAY-ONLY email is revalidated through (GATE_DAY_ONLY_PROMISE); its rules are pinned in
+// day-only-promise-b1-replay.test.js.
+jest.mock('../services/appointment-reminders', () => ({ revalidateDelayedDaySend: jest.fn(async () => 'day') }));
 jest.mock('../services/visit-completion-summary', () => ({
   retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { await dispatch(); return { ok: true }; }),
   reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
@@ -168,6 +171,62 @@ describe('transactional email provider retry classification', () => {
 
     test('the category the rail reads is the one both senders stamp', () => {
       expect(require('../constants/email-replay-exclusions').MOVE_NOTICE_CATEGORY).toBe('appointment_move_notice');
+    });
+  });
+
+  describe('a stored DAY-ONLY appointment email is revalidated before any retry (GATE_DAY_ONLY_PROMISE)', () => {
+    const { revalidateDelayedDaySend } = require('../services/appointment-reminders');
+    const dayMessage = (over = {}) => message({
+      template_key: 'appointment.reminder_72h_day', recipient_id: 'cust-1', trigger_event_id: 'appointment.reminder_72h:svc-9',
+      categories: ['appointment', 'appointment_reminder_72h'], send_attempt_token: 'attempt-2', ...over,
+    });
+    const settlingChain = () => {
+      const chain = {};
+      chain.where = jest.fn(() => chain);
+      chain.update = jest.fn(() => chain);
+      chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+      db.mockReturnValue(chain);
+      return chain;
+    };
+    beforeEach(() => revalidateDelayedDaySend.mockReset().mockResolvedValue('day'));
+
+    test.each(['suppress', 'window'])('the chokepoint says %s: settled as not sent, no provider call, and sent_at is never written', async (verdict) => {
+      revalidateDelayedDaySend.mockResolvedValue(verdict);
+      const chain = settlingChain();
+      const result = await retry.retryOne(dayMessage());
+      expect(result).toMatchObject({ sent: false, stopped: true });
+      expect(revalidateDelayedDaySend).toHaveBeenCalledWith({ customerId: 'cust-1', scheduledServiceId: 'svc-9' });
+      const patch = chain.update.mock.calls[0][0];
+      expect(patch).toMatchObject({ status: 'failed', provider_retry_next_at: null });
+      expect(patch.error_message).toMatch(/day-only promise/);
+      // The stop happens before any send or timestamp refresh: a stale day email can never look newer than a window promise.
+      expect(patch).not.toHaveProperty('sent_at');
+      expect(patch.status).not.toBe('delivered');
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
+    });
+
+    test('an unreadable promise stops the retry too (fail closed)', async () => {
+      revalidateDelayedDaySend.mockRejectedValue(new Error('read failed'));
+      settlingChain();
+      expect(await retry.retryOne(dayMessage())).toMatchObject({ sent: false, stopped: true });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test('the chokepoint says day: the retry carries on to the ordinary checks (not stopped for being day-only)', async () => {
+      emailTemplates.activeSuppressionFor.mockResolvedValue({ suppression_type: 'hard_bounce' });
+      emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'appointment.reminder_72h_day' } });
+      settlingChain();
+      const result = await retry.retryOne(dayMessage());
+      expect(revalidateDelayedDaySend).toHaveBeenCalledTimes(1);
+      expect(result.reason).toMatch(/Suppressed before retry|Suppression check failed|hard_bounce/i);
+    });
+
+    test('a window appointment email never asks the chokepoint and retries byte-for-byte as before', async () => {
+      emailTemplates.activeSuppressionFor.mockResolvedValue({ suppression_type: 'hard_bounce' });
+      settlingChain();
+      await retry.retryOne(dayMessage({ template_key: 'appointment.reminder_72h' }));
+      expect(revalidateDelayedDaySend).not.toHaveBeenCalled();
     });
   });
 

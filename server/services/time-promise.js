@@ -50,6 +50,37 @@ function withPromiseMeta(meta, saved) {
   return { ...meta, ...promiseMetaOf(saved) };
 }
 
+// The email templates a day-only send uses (services/appointment-email.js; seeded by the B1 migration). A stored copy of
+// one of these is a DAY promise that was true when it was written.
+const DAY_EMAIL_TEMPLATE_KEYS = Object.freeze(['appointment.confirmation_day', 'appointment.reminder_72h_day']);
+
+/** Is this stored email message a day-only appointment email? (Both stored-copy email rails ask this before a re-send.) */
+function isDayOnlyEmail(message) {
+  return DAY_EMAIL_TEMPLATE_KEYS.includes(String(message?.template_key || ''));
+}
+
+/**
+ * Must a stored day-only email NOT be re-sent from its stored copy? The email twin of the text replay: both email replay
+ * boundaries (transactional-email-provider-retry.js retryOne, email-bounce-recovery.js runRecoveryFlow) ask this before
+ * any re-send or update, and a day-only copy goes only when the delayed-send chokepoint (appointment-reminders.js
+ * revalidateDelayedDaySend) still says 'day'. Otherwise (a newer promise such as the delivered 24-hour window, the gate
+ * rolled back, the 24-hour reminder switched off, inside the cutoff, or anything unreadable) the stored HTML is not sent: it
+ * cannot be re-rendered safely from a stored copy, and the 24-hour reminder still gives the window to every customer who will
+ * get it. A window email (any other template) is never affected: false, no read.
+ */
+async function dayOnlyStoredCopyStale(message) {
+  if (!isDayOnlyEmail(message)) return false;
+  try {
+    const scheduledServiceId = String(message.trigger_event_id || '').split(':')[1] || null;
+    const customerId = message.recipient_type === 'customer' ? message.recipient_id || null : null;
+    if (!customerId || !scheduledServiceId) return true; // nothing to prove the promise against
+    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId });
+    return verdict !== 'day';
+  } catch {
+    return true;
+  }
+}
+
 /** Safe, call-time read of GATE_DAY_ONLY_PROMISE (strict 'true'). An unreadable gate is off. */
 function dayOnlyPromiseOn() {
   try {
@@ -275,6 +306,9 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
 }
 
 module.exports = {
+  DAY_EMAIL_TEMPLATE_KEYS,
+  isDayOnlyEmail,
+  dayOnlyStoredCopyStale,
   PROMISE_META_KEYS,
   promiseMetaOf,
   withPromiseMeta,

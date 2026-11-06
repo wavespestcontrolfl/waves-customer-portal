@@ -175,3 +175,40 @@ describe('the morning replay of a queued day-only body', () => {
     expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
   });
 });
+
+describe('a stored day-only EMAIL goes through the same chokepoint (dayOnlyStoredCopyStale)', () => {
+  const stale = (over = {}) => timePromise.dayOnlyStoredCopyStale({
+    template_key: 'appointment.reminder_72h_day', trigger_event_id: 'appointment.reminder_72h:ss-1', recipient_type: 'customer', recipient_id: 'c1', ...over,
+  });
+
+  test('still valid: not stale, the stored copy may go', async () => {
+    expect(await stale()).toBe(false);
+    expect(timePromise.dayOnlySendDecision.mock.calls[0][1]).toMatchObject({ id: 'ss-1', reminder24hEnabled: true });
+  });
+
+  test('after the 24-hour text delivered the window: stale', async () => {
+    timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss-1', 'hour']]));
+    expect(await stale()).toBe(true);
+  });
+
+  test('gate off, 24-hour reminder off, or inside the cutoff: stale', async () => {
+    delete process.env.GATE_DAY_ONLY_PROMISE;
+    expect(await stale()).toBe(true);
+    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+    prefsRow = { sms_enabled: true, service_reminder_24h: false };
+    expect(await stale()).toBe(true);
+    prefsRow = { sms_enabled: true, service_reminder_24h: true };
+    jest.setSystemTime(new Date('2026-06-21T20:00:00.000Z'));
+    expect(await stale()).toBe(true);
+  });
+
+  test('a message with no usable customer or visit is stale (fail closed)', async () => {
+    expect(await stale({ recipient_id: null })).toBe(true);
+    expect(await stale({ trigger_event_id: null })).toBe(true);
+  });
+
+  test('a window email is never stale for being a window email: no read at all', async () => {
+    expect(await stale({ template_key: 'appointment.reminder_72h' })).toBe(false);
+    expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
+  });
+});

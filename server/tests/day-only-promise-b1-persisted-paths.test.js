@@ -256,6 +256,35 @@ describe('persist and replay paths are accounted for', () => {
     expect(registry).not.toMatch(/dayOnlyNow|dayOnlySendDecision/);
   });
 
+  // The email twin: every rail that can re-send a STORED email copy (the files that read the shared no-replay list) must also
+  // ask dayOnlyStoredCopyStale before a re-send, so a stored day-only email cannot go after the cutoff, a gate rollback or a
+  // delivered 24-hour reminder.
+  test('every stored-copy email replay rail revalidates a day-only email', () => {
+    const rails = files(SERVER)
+      .filter((f) => !f.endsWith(path.join('constants', 'email-replay-exclusions.js')))
+      .filter((f) => /\bstaleStoredCopyReason\(|\bNO_STORED_COPY_REPLAY\b/.test(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.relative(SERVER, f));
+    expect(rails.sort()).toEqual(['services/email-bounce-recovery.js', 'services/transactional-email-provider-retry.js']);
+    for (const rail of rails) expect(read(rail)).toMatch(/dayOnlyStoredCopyStale\(/);
+  });
+
+  test('isDayOnlyEmail knows exactly the two day templates', () => {
+    const { isDayOnlyEmail, DAY_EMAIL_TEMPLATE_KEYS } = require('../services/time-promise');
+    expect(DAY_EMAIL_TEMPLATE_KEYS).toEqual(['appointment.confirmation_day', 'appointment.reminder_72h_day']);
+    expect(isDayOnlyEmail({ template_key: 'appointment.confirmation_day' })).toBe(true);
+    expect(isDayOnlyEmail({ template_key: 'appointment.reminder_72h_day' })).toBe(true);
+    for (const key of ['appointment.confirmation', 'appointment.reminder_72h', 'appointment.reminder_24h', '', null, undefined]) {
+      expect(isDayOnlyEmail({ template_key: key })).toBe(false);
+    }
+    expect(isDayOnlyEmail(null)).toBe(false);
+  });
+
+  test('the email templates the day senders use are exactly the ones the guard knows', () => {
+    const email = read('services/appointment-email.js');
+    expect(email).toMatch(/dayTemplateKey\('appointment\.confirmation', true, dayOnly\)/);
+    expect(email).toMatch(/\$\{eventKey\}_day/);
+  });
+
   test('no other file carries or recognises a stored day-only body without being decided here', () => {
     const DECIDED = new Set([
       'services/time-promise.js', // defines promiseMetaOf
