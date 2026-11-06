@@ -11,6 +11,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Building2 } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Button,
@@ -84,6 +85,7 @@ export default function PayersPage() {
   const [detailPayer, setDetailPayer] = useState(null); // open the statements/AR sheet
   const [arOpen, setArOpen] = useState(false); // cross-payer AR aging dialog
   const arTriggerRef = useRef(null);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const load = useCallback(async () => {
     const version = ++loadVersion.current;
@@ -152,6 +154,20 @@ export default function PayersPage() {
       setDetailError("Could not open payer details. Try selecting the payer again.");
     }
   }
+
+  // Deep link from an invoice row: /admin/payers?payer=<id> opens that payer's
+  // sheet once, then drops the param so refresh or Back does not reopen it.
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    deepLinkHandled.current = true;
+    const id = searchParams.get("payer");
+    if (!id) return;
+    openDetailById(id);
+    const next = new URLSearchParams(searchParams);
+    next.delete("payer");
+    setSearchParams(next, { replace: true });
+  }, []);
 
   async function save() {
     if (savingRef.current) return;

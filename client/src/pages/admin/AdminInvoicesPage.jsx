@@ -81,7 +81,7 @@ import {
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
 import InvoiceAddressDialog from "../../components/admin/InvoiceAddressDialog";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { registerLeaveGuard } from "../../lib/navigation-guard";
 import {
   ExternalLink,
@@ -207,6 +207,26 @@ async function adminUpload(path, formData) {
   }
   return r.json();
 }
+// Mirrors the server's payer rules so the row only offers what the server
+// accepts: payer invoices refuse card, credit, plan and Tap to Pay; an
+// invoice on a payer statement refuses manual payment (it is paid on the
+// statement); a "withdrawn to payer" invoice refuses every collection path.
+function invoicePayerActions(inv = {}, canCollect = false) {
+  const withdrawnToPayer = /^payer_billed:/.test(
+    String(inv.scheduled_send_error || ""),
+  );
+  const payerBilled = !!inv.payer_id || withdrawnToPayer;
+  const onPayerStatement = !!inv.payer_statement_id;
+  return {
+    payerBilled,
+    tapToPay: canCollect && !payerBilled,
+    applyCredit: canCollect && !payerBilled,
+    paymentPlan: canCollect && !payerBilled,
+    addPayment: canCollect && !onPayerStatement && !withdrawnToPayer,
+    statementLink: canCollect && onPayerStatement && !!inv.payer_id,
+  };
+}
+
 function annualPrepayInvoiceLabel(inv = {}) {
   const status = String(inv.annual_prepay_status || "").toLowerCase();
   if (!status) return null;
@@ -2678,6 +2698,7 @@ function InvoiceList({
                   inv.status,
                 );
                 const depositApplied = invoiceDepositCreditTotal(lineItems);
+                const payerActions = invoicePayerActions(inv, canCollect);
                 return (
                   <div
                     key={inv.id}
@@ -2963,7 +2984,7 @@ function InvoiceList({
                               Copy link
                             </Button>
                           )}
-                          {canCollect && (
+                          {payerActions.tapToPay && (
                             <Button
                               onClick={async () => {
                                 try {
@@ -3010,7 +3031,7 @@ function InvoiceList({
                           {isAdminUser &&
                             canCollect &&
                             cardOnFile &&
-                            !inv.payer_id && (
+                            !payerActions.payerBilled && (
                               <Button
                                 onClick={() => setCardOnFileInvoice(inv)}
                                 title="Charge the customer's saved card or bank on file — collects now, no send needed"
@@ -3025,7 +3046,26 @@ function InvoiceList({
                                 Charge card on file
                               </Button>
                             )}
-                          {canCollect && (
+                          {payerActions.statementLink && (
+                            <Link
+                              to={`/admin/payers?payer=${encodeURIComponent(inv.payer_id)}`}
+                              title="Billed on the payer's monthly statement — record the payment there"
+                              style={{
+                                textDecoration: "none",
+                                display: "inline-flex",
+                                alignItems: "center",
+                              }}
+                              className={cn(
+                                buttonStyles({
+                                  variant: "secondary",
+                                  density: "comfortable",
+                                }),
+                              )}
+                            >
+                              Record payment on the payer statement
+                            </Link>
+                          )}
+                          {payerActions.addPayment && (
                             <Button
                               onClick={() => setPaymentModalInvoice(inv)}
                               title="Record cash, check, Zelle, Venmo, or PayPal payment and close the invoice"
@@ -3040,7 +3080,7 @@ function InvoiceList({
                               Add payment
                             </Button>
                           )}
-                          {canCollect && (
+                          {payerActions.applyCredit && (
                             <Button
                               onClick={() => setApplyCreditInvoice(inv)}
                               title="Apply the customer's account credit — covers the invoice and marks it prepaid"
@@ -3055,7 +3095,8 @@ function InvoiceList({
                               Apply credit
                             </Button>
                           )}
-                          {canCollect && !inv.active_payment_plan && (
+                          {payerActions.paymentPlan &&
+                            !inv.active_payment_plan && (
                             <Button
                               onClick={() => setPaymentPlanModalInvoice(inv)}
                               title="Create a payment plan and send the confirmation email"
