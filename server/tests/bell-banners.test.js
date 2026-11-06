@@ -68,19 +68,21 @@ describe('isNightQuiet', () => {
   });
 });
 
-test('the banner kinds: two reminders that keep the night quiet, and Facebook messages and new-lead emails that do not', () => {
+test('the banner kinds: two reminders and the stuck-booking alert keep the night quiet; Facebook messages and new-lead emails do not', () => {
   expect(BELL_BANNER_KINDS).toEqual({
     sms_operational_followup: { nightQuiet: true },
     call_commitment_overdue: { nightQuiet: true },
     messenger_reply: { nightQuiet: false },
     // GATE_RING_NEW_CONTACTS, not GATE_BELL_BANNERS (owner 2026-11-04).
     new_lead_email: { nightQuiet: false, gate: 'ringNewContactsLive' },
+    // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05).
+    estimate_stuck: { nightQuiet: true },
   });
   expect(Object.isFrozen(BELL_BANNER_KINDS)).toBe(true);
 });
 
 describe('bannerAfterWrite: which writes send a banner', () => {
-  test.each(['sms_operational_followup', 'call_commitment_overdue', 'messenger_reply'])('a fresh unread %s row sends one pushOnly banner with the row\'s own words', async (kind) => {
+  test.each(['sms_operational_followup', 'call_commitment_overdue', 'messenger_reply', 'estimate_stuck'])('a fresh unread %s row sends one pushOnly banner with the row\'s own words', async (kind) => {
     const written = row({ id: 'n-77', title: 'Pat S. wrote on Facebook', body: 'Can you call me?', link: '/admin/communications#tab=messenger&thread=t-1' });
     await bannerAfterWrite(written, { metadata: meta(kind) });
     expect(triggerNotification).toHaveBeenCalledTimes(1);
@@ -145,7 +147,7 @@ describe('bannerAfterWrite: which writes send a banner', () => {
 describe('bannerAfterWrite: the night', () => {
   const at = (iso) => jest.setSystemTime(new Date(iso));
 
-  test.each(['sms_operational_followup', 'call_commitment_overdue'])('%s sends no banner at night and one at 7:00 AM sharp', async (kind) => {
+  test.each(['sms_operational_followup', 'call_commitment_overdue', 'estimate_stuck'])('%s sends no banner at night and one at 7:00 AM sharp', async (kind) => {
     at('2026-07-15T02:00:00Z'); // 10:00 PM ET
     await bannerAfterWrite(row(), { metadata: meta(kind) });
     at('2026-07-15T10:59:00Z'); // 6:59 AM ET

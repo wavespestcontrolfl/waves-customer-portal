@@ -44,6 +44,8 @@ const StripeService = require('../services/stripe');
 const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
+// Office alert when a customer gets stuck booking, plus the search and hold records (fire-and-forget, never throws).
+const stuckAlert = require('../services/estimate-stuck-alert');
 const { isCommercialAutoAcceptEstimate } = require('../services/estimate-commercial-identity');
 const {
   annualPrepayEligibleForEstimateData,
@@ -478,6 +480,8 @@ router.get('/:token/available-slots', async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
+  // The estimate a failure below is about, for the office's stuck alert.
+  let listed = null;
   try {
     const estimate = await db('estimates')
       .where({ token })
@@ -485,6 +489,7 @@ router.get('/:token/available-slots', async (req, res) => {
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
+    listed = estimate;
     const refusal = await slotBrowseRefusal(estimate);
     if (refusal) return res.status(refusal.status).json(refusal.body);
 
@@ -547,6 +552,7 @@ router.get('/:token/available-slots', async (req, res) => {
       // Offer list: the route check applies (GATE_CUSTOMER_ROUTE_CHECK). The reserve
       // refresh and the text-offer reads below omit `offer` and see the unfiltered list.
       const result = await getAvailableSlots(estimate.id, { ...opts, offer: true });
+      stuckAlert.noteSlotAnswer(req, estimate, { windowDays: opts.windowDays, date: opts.dateFrom }, result);
       return res.json(result);
     } catch (svcErr) {
       if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
@@ -558,6 +564,7 @@ router.get('/:token/available-slots', async (req, res) => {
       throw svcErr;
     }
   } catch (err) {
+    stuckAlert.noteSlotListFailed(req, listed, err);
     if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
@@ -674,6 +681,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       const result = await findEstimateSlots(estimate.id, {
         query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offer: true,
       });
+      stuckAlert.noteSlotAnswer(req, estimate, { search: 'ai' }, result);
       return res.json(result);
     } catch (svcErr) {
       if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
@@ -783,6 +791,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
             || lockedAreaAddOnLimitRefusal(row, trx, date);
         },
       });
+      stuckAlert.noteHoldStarted(req, estimate, { scheduledServiceId, expiresAt });
       return res.status(201).json({
         scheduledServiceId,
         expiresAt,
@@ -1168,6 +1177,7 @@ router.delete('/:token/reserve/:scheduledServiceId', async (req, res) => {
       scheduledServiceId,
       estimateId: estimate.id,
     });
+    stuckAlert.noteHoldReleased(req, estimate, { scheduledServiceId, released: result.released });
     return res.json({ ok: true, released: result.released });
   } catch (err) {
     logger.error(`[estimate-slots-public:release] ${err.message}`, { stack: err.stack });

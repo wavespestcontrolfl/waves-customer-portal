@@ -6,8 +6,10 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/estimate-stuck-alert', () => ({ noteAcceptRefused: jest.fn(async () => null) }));
 
 const logger = require('../services/logger');
+const { noteAcceptRefused } = require('../services/estimate-stuck-alert');
 const { logAcceptRefusals } = require('../routes/estimate-public');
 
 function fakeRes() {
@@ -25,7 +27,7 @@ function hooked() {
   return res;
 }
 
-beforeEach(() => logger.info.mockClear());
+beforeEach(() => { logger.info.mockClear(); noteAcceptRefused.mockClear(); });
 
 describe('logAcceptRefusals', () => {
   it('logs a refusal with its status, code, estimate id and reason, and still sends it', () => {
@@ -58,6 +60,18 @@ describe('logAcceptRefusals', () => {
     const failed = hooked();
     failed.status(500).json({ error: 'Internal server error' });
     expect(logger.info).not.toHaveBeenCalled();
+    expect(noteAcceptRefused).not.toHaveBeenCalled();
+  });
+
+  it('hands every refusal to the office stuck alert, which decides whether it is one the page recovers from', () => {
+    const req = { headers: { 'user-agent': 'Mozilla/5.0 (iPhone)' } };
+    const res = fakeRes();
+    logAcceptRefusals(req, res, jest.fn());
+    res.locals.acceptEstimateId = 'est-1';
+    const body = { error: 'We could not confirm this plan’s pricing online.', code: 'PER_APPLICATION_ADD_ON_UNPRICED' };
+    res.status(409).json(body);
+    expect(noteAcceptRefused).toHaveBeenCalledWith(req, 'est-1', 409, body);
+    expect(res.sent).toEqual([body]);
   });
 
   it('caps a long reason at 160 characters', () => {

@@ -655,6 +655,29 @@ async function auditEstimateExpiredOpen({ estimateId, expiresAt = null, extensio
 }
 
 /**
+ * A booking step a customer took on an estimate page (owner 2026-11-05, "1, 2 and 3", estimate page audit fix 3),
+ * written by services/estimate-stuck-alert.js. Fire-and-forget like the rest of this file. Same audit_log home as
+ * estimate_expired_open, for the same reason (customer follow-up jobs read the estimate event tables unfiltered).
+ *
+ *   estimate_slot_search   { via: 'date' | 'ai', date, empty }   a date browse or a Waves AI search and its answer
+ *   estimate_hold_started  { scheduled_service_id, date, window_start, expires_at }
+ *   estimate_hold_ended    { scheduled_service_id, how: 'released' | 'expired', date, window_start }
+ */
+const ESTIMATE_BOOKING_STEPS = Object.freeze(['estimate_slot_search', 'estimate_hold_started', 'estimate_hold_ended']);
+
+async function auditEstimateBookingStep({ action, estimateId, customerId = null, metadata = {} }) {
+  if (!ESTIMATE_BOOKING_STEPS.includes(action)) return null;
+  return recordAuditEvent({
+    actor_type: 'customer',
+    actor_id: customerId,
+    action,
+    resource_type: 'estimate',
+    resource_id: estimateId,
+    metadata,
+  });
+}
+
+/**
  * A saved card's expiry, brand, last four or funding was refreshed from
  * Stripe (services/card-details-sync.js; Stripe's card account updater
  * renews cards without telling us). Fire-and-forget: the payment_methods row
@@ -675,6 +698,7 @@ async function auditCardDetailsSynced({ payment_method_row_id, source, changed_f
 module.exports = {
   recordAuditEvent,
   auditEstimateExpiredOpen,
+  auditEstimateBookingStep,
   auditCardDetailsSynced,
   auditLawnSqftFromEstimate,
   auditVendorOrder,

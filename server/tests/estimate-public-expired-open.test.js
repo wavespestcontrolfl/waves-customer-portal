@@ -42,6 +42,7 @@ jest.mock('../services/audit-log', () => ({
   ...jest.requireActual('../services/audit-log'),
   auditEstimateExpiredOpen: jest.fn().mockResolvedValue(undefined),
 }));
+jest.mock('../services/estimate-stuck-alert', () => ({ noteExpiredReturn: jest.fn(async () => null) }));
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
@@ -50,6 +51,7 @@ const db = require('../models/db');
 const featureGates = require('../config/feature-gates');
 const estimatePublicRouter = require('../routes/estimate-public');
 const { auditEstimateExpiredOpen } = require('../services/audit-log');
+const { noteExpiredReturn } = require('../services/estimate-stuck-alert');
 
 const BARE = { error: 'Estimate not found' };
 const SENT = '2026-10-28T15:00:00.000Z';
@@ -108,6 +110,7 @@ async function get(row, headers = {}) {
 beforeEach(() => {
   dbRows = {};
   auditEstimateExpiredOpen.mockClear();
+  noteExpiredReturn.mockClear();
   featureGates.isEnabled.mockImplementation(() => true);
 });
 
@@ -213,6 +216,29 @@ describe('GET /:token/data — recording that a customer opened an expired estim
       ipAddress: '198.51.100.20',
       userAgent: CUSTOMER_UA,
     });
+  });
+
+  test('tells the office the customer came back, with what the page offered them', async () => {
+    await get(expiredRow(), { headers: { 'x-forwarded-for': '198.51.100.20' } });
+    expect(noteExpiredReturn).toHaveBeenCalledTimes(1);
+    expect(noteExpiredReturn).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-expired-1' }), { offered: true, selfServe: true });
+    noteExpiredReturn.mockClear();
+    await get(expiredRow({ extension_auto_granted_at: '2026-10-31T12:00:00.000Z' }));
+    expect(noteExpiredReturn).toHaveBeenCalledWith(expect.anything(), { offered: true, selfServe: false });
+    noteExpiredReturn.mockClear();
+    featureGates.isEnabled.mockImplementation(() => false);
+    await get(expiredRow());
+    expect(noteExpiredReturn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ offered: false }));
+  });
+
+  test('a staff browser, a bot, an admin IP, a PDF render or the page refresh tells the office nothing', async () => {
+    const marker = jwt.sign({ kind: 'admin_marker' }, config.jwt.secret);
+    await get(expiredRow(), { headers: { cookie: `waves_admin=${marker}` } });
+    await get(expiredRow(), { headers: { 'user-agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' } });
+    await get(expiredRow(), { headers: { 'x-forwarded-for': '203.0.113.9' } });
+    await get(expiredRow(), { query: '?mode=pdf' });
+    await get(expiredRow({ viewed_at: SENT }), { query: '?refresh=1' });
+    expect(noteExpiredReturn).not.toHaveBeenCalled();
   });
 
   test('does not record a bot user agent', async () => {
