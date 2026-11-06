@@ -76,7 +76,7 @@ describe('PUT /:id inline stock edit and the pest stock shortfall alert', () => 
   test('a count edited from below zero to zero or above closes the alert, on the edit\'s own transaction', async () => {
     const { writes, trx } = wire('-6.0000');
     await withServer(async (base) => {
-      const res = await put(base, { inventoryOnHand: 12 });
+      const res = await put(base, { inventoryOnHand: 12, inventoryOnHandBefore: -6 });
       expect(res.status).toBe(200);
     });
     expect(writes).toEqual(expect.arrayContaining([
@@ -93,5 +93,43 @@ describe('PUT /:id inline stock edit and the pest stock shortfall alert', () => 
       expect(res.status).toBe(200);
     });
     expect(clearStockShortfallAlert).not.toHaveBeenCalled();
+  });
+});
+
+// The inline editor fills its stock box from the list as it loaded; a visit
+// closeout since then moved the live count (daily-work audit 11-05).
+describe('PUT /:id refuses a stock count typed over a stale start', () => {
+  test('a start that no longer matches the live count is refused with no write', async () => {
+    const { writes } = wire('7.0000');
+    let res;
+    await withServer(async (base) => {
+      res = await put(base, { name: 'Taurus SC 2', inventoryOnHand: 10, inventoryOnHandBefore: 10 });
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/Stock changed after this product was opened/);
+    expect(writes).toEqual([]);
+    expect(clearStockShortfallAlert).not.toHaveBeenCalled();
+  });
+
+  test('a stock change without its start count is refused', async () => {
+    const { writes } = wire('7.0000');
+    let res;
+    await withServer(async (base) => {
+      res = await put(base, { inventoryOnHand: 10 });
+    });
+    expect(res.status).toBe(400);
+    expect(writes).toEqual([]);
+  });
+
+  test('a start that matches the live count writes the new count', async () => {
+    const { writes } = wire('7.0000');
+    await withServer(async (base) => {
+      const res = await put(base, { inventoryOnHand: 10, inventoryOnHandBefore: 7 });
+      expect(res.status).toBe(200);
+    });
+    expect(writes).toEqual(expect.arrayContaining([
+      { table: 'products_catalog', update: expect.objectContaining({ inventory_on_hand: 10 }) },
+      { table: 'product_inventory_movements', insert: expect.objectContaining({ stock_before: 7, stock_after: 10 }) },
+    ]));
   });
 });

@@ -2294,6 +2294,8 @@ export function ProductsTab({
   const loadSequence = useRef(0);
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({});
+  // The values the open edit row started from (saveEdit sends only changes).
+  const editStart = useRef({});
   const [vendors, setVendors] = useState([]);
   const [newProduct, setNewProduct] = useState({
     name: "",
@@ -2378,8 +2380,7 @@ export function ProductsTab({
   };
   const startEdit = (p, e) => {
     e && e.stopPropagation();
-    setEditing(p.id);
-    setEditForm({
+    const form = {
       name: p.name || "",
       category: p.category || "",
       activeIngredient: p.activeIngredient || "",
@@ -2390,19 +2391,47 @@ export function ProductsTab({
       inventoryOnHand: p.inventoryOnHand ?? "",
       inventoryUnit: p.inventoryUnit || "",
       lowStockThreshold: p.lowStockThreshold ?? "",
-    });
+    };
+    editStart.current = form;
+    setEditing(p.id);
+    setEditForm(form);
   };
   const saveEdit = async (id) => {
+    // The row was filled from the list as it loaded, and a visit closeout
+    // since then may have used stock, so an untouched count sent back would
+    // undo that usage. Send only what changed; a changed count names the
+    // count it started from, and the server refuses it (409) if stock moved.
+    const start = editStart.current;
+    const changes = Object.fromEntries(
+      Object.entries(editForm).filter(
+        ([field, value]) => String(value ?? "") !== String(start[field] ?? ""),
+      ),
+    );
+    if (Object.keys(changes).length === 0) {
+      setEditing(null);
+      return;
+    }
+    if ("inventoryOnHand" in changes)
+      changes.inventoryOnHandBefore = start.inventoryOnHand;
     try {
       await adminFetch(`/admin/inventory/${id}`, {
         method: "PUT",
-        body: JSON.stringify(editForm),
+        body: JSON.stringify(changes),
       });
       showToast("Product updated");
       setEditing(null);
       load();
     } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      const stockMoved = e.message === "HTTP 409";
+      showToast(
+        stockMoved
+          ? "Stock changed after you opened this product. Edit it again to see the current count."
+          : `Failed: ${e.message}`,
+      );
+      if (stockMoved) {
+        setEditing(null);
+        load();
+      }
     }
   };
   if (loadError)
