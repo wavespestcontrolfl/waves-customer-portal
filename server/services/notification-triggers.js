@@ -20,6 +20,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { rescueClaudeFault } = require('./admin-alert-routing');
 const PushService = require('./push-notifications');
+const ringBudget = require('./alert-ring-budget');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stripEmoji } = require('../utils/strip-emoji');
 const { agentName } = require('./voice-agent/relay-protocol');
@@ -1478,6 +1479,23 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
+// A dedupe hit (no refresh) on a keyed row of a type whose first ring already delivered its push: no second push. The bell
+// loop and the push-only budget path read it the same way.
+function dedupeHitSkipsPush(created, { dedupeKey, triggerKey, refreshOnDedupe }) {
+  return Boolean(created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser'
+    || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead'
+    || (triggerKey === 'new_lead' && refreshOnDedupe)));
+}
+
+// No bell row because every admin turned bell entries off, but a phone push is going: that push takes the daily ring budget too
+// (alert-ring-budget.js budgetPushOnly). `held`: the budget held it; `deduped`: its record was a dedupe hit whose push already
+// went (dedupeHitSkipsPush). Either way the caller sends no push.
+async function pushOnlyBudget({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell, dedupe }) {
+  if (bellWritten || anyBellEnabled || pushOnly || relayFailureCall || pushEnabledIds.length === 0 || !ringBudget.enabled()) return { held: false, deduped: false };
+  const { held, created } = await ringBudget.budgetPushOnly({ connection: db, category: trigger.category, metadata: bellMetadata, write: writeBell });
+  return { held, deduped: !held && dedupeHitSkipsPush(created, dedupe) };
+}
+
 async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
@@ -1665,6 +1683,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     let bellRowId = null;
+    // The daily ring budget held this row (alert-ring-budget.js): written Activity-only, so no phone push follows.
+    let ringHeld = false;
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
@@ -1680,9 +1700,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           const created = await writeBell(bellMetadata);
           if (created && !created.suppressed) bellWritten = true;
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
+          if (ringBudget.isHeld(created)) ringHeld = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
+          if (dedupeHitSkipsPush(created, { dedupeKey, triggerKey, refreshOnDedupe })) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -1690,11 +1711,16 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     }
 
+    const pushOnlyVerdict = await pushOnlyBudget({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell,
+      dedupe: { dedupeKey, triggerKey, refreshOnDedupe } });
+    ringHeld = ringHeld || pushOnlyVerdict.held;
+    dedupedNoPush = dedupedNoPush || pushOnlyVerdict.deduped;
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
+    if (ringHeld) return { ...stats, push: { sent: 0, skipped: 'ring_budget' }, ringBudgetHeld: true };
     if (dedupedNoPush) return { ...stats, deduped: true };
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate

@@ -5162,6 +5162,9 @@ const gates = {
   // alertCatalogMode() at CALL time. 'watch' records muted alerts, no refusal. Kill switch: unset.
   alertCatalog: String(process.env.GATE_ALERT_CATALOG || '').trim().toLowerCase() === 'watch',
 
+  // Admin bell daily ring budget (owner 2026-11-05, D2). Registered for logGateStatus only; NotificationService.create reads
+  // alertRingBudgetLive() at CALL time. Kill switch: unset.
+  alertRingBudget: process.env.GATE_ALERT_RING_BUDGET === 'true',
   // Registry bell rows store their declared labels (owner 2026-11-05, admin-alert plan S1). Registered for logGateStatus
   // only; notification-triggers.js reads alertRegistryLabelsLive() at CALL time. Kill switch: unset.
   alertRegistryLabels: process.env.GATE_ALERT_REGISTRY_LABELS === 'true',
@@ -10850,6 +10853,17 @@ function claudeInputGuardLive() {
 }
 // GATE_CLAUDE_INPUT_GUARD reader, on its own line so gate PRs never conflict.
 module.exports.claudeInputGuardLive = claudeInputGuardLive;
+
+// GATE_ALERT_RING_BUDGET read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-05 ("go" on the admin-bell plan, decision D2; carries out the 2026-09-30 rule "at most 10 non-customer-contact
+// rings a day"). On, after 10 non-customer alerts ring in one Eastern day, each later one is written Activity-only (no ring, no
+// phone banner) and ONE count row in the bell says how many were held (services/alert-ring-budget.js). Customer contact,
+// promises owed to a customer and auto-dispatch notices always ring. Off = every alert lands as before, byte for byte.
+function alertRingBudgetLive() {
+  return process.env.GATE_ALERT_RING_BUDGET === 'true';
+}
+// GATE_ALERT_RING_BUDGET reader, on its own line so gate PRs never conflict.
+module.exports.alertRingBudgetLive = alertRingBudgetLive;
 
 // GATE_MONDAY_FELL_OFF_LINE read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-05, "go" on the admin-bell plan, decision D3: the Monday review bell's first list becomes the customer

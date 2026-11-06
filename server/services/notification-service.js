@@ -13,6 +13,7 @@ function safeErrorSummary(err) {
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stampClaudeQueue, rescueClaudeFault, keepSentToClaude, SENT_TO_CLAUDE_CLASS } = require('./admin-alert-routing');
+const ringBudget = require('./alert-ring-budget');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
   'appointment_confirmation',
@@ -384,9 +385,15 @@ const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys', 'itemSetHash'];
 
 // Did this emission change anything a standing keyed row shows, routes by,
 // or rings on?
-function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged }) {
-  return versionChanged || existing.title !== nextTitle || existing.body !== nextBody
+function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, promoted = false }) {
+  return versionChanged || promoted || existing.title !== nextTitle || existing.body !== nextBody
     || existing.link !== nextLink || detailChanged || routingChanged || ringMetadataChanged;
+}
+
+// A refresh the emission itself marks quiet, or one of a row the daily ring budget held today (alert-ring-budget.js): the
+// words update, nothing rings.
+function refreshStaysQuiet(adjusted, existingMeta, incoming) {
+  return Boolean(adjusted?.quiet) || ringBudget.heldToday(existingMeta, incoming);
 }
 
 // notifyAdmin's refreshOnDedupe branch (admin-alerts-ring scope 2026-09-28):
@@ -455,7 +462,8 @@ function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
     // retirement stamp on the row is stale: dropped, or the sweep would never
     // judge this row again (admin-alert-relevance.js candidateQuery).
     // The same for the quiet fall-off's Reopen hold (rungAt, stamped below, now says when the row last had news).
-    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, ...standing } = existingMeta;
+    // A row the daily ring budget held (alert-ring-budget.js) that rings again is in the bell now: its held stamp goes.
+    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, [ringBudget.HELD_KEY]: _held, ...standing } = existingMeta;
     const merged = { ...standing, ...metadata, rungAt: new Date().toISOString() };
     // A DEFINED non-owner audience only — a caller outside ops-digest.js
     // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
@@ -476,6 +484,14 @@ function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
   if (audienceFlipped) return { ...existingMeta, ...metadataNoRungAt };
   const { feed: _feed, quiet: _quiet, ...rest } = metadataNoRungAt;
   return { ...existingMeta, ...rest };
+}
+
+// create()'s daily ring budget step (GATE_ALERT_RING_BUDGET, alert-ring-budget.js): the metadata to insert, and the Eastern day
+// when the budget held the row. Gate off, or not an admin row: the metadata comes back unchanged.
+async function budgetAdminRow({ isAdmin, connection, category, metadata }) {
+  if (!isAdmin || !ringBudget.enabled()) return { metadata, heldDay: null };
+  const verdict = await ringBudget.applyBudget({ connection, category, metadata });
+  return { metadata: verdict.metadata, heldDay: verdict.outcome === 'hold' ? verdict.day : null };
 }
 
 // create()'s bell-policy drop (GATE_ADMIN_BELL_POLICY): no row, one log line and the muted record. Pulled out of
@@ -617,6 +633,11 @@ const NotificationService = {
           return { id: null, suppressed: true, reason: 'pre_send_check_blocked' };
         }
       }
+      // Daily ring budget (GATE_ALERT_RING_BUDGET, alert-ring-budget.js): the verdict is read before the insert, so a held
+      // row is written Activity-only. Gate off: nothing here runs.
+      const budgeted = await budgetAdminRow({ isAdmin, connection, category, metadata: rowMetadata });
+      rowMetadata = budgeted.metadata;
+      const { heldDay } = budgeted;
       const [notif] = await connection('notifications').insert({
         recipient_type: recipientType,
         recipient_id: recipientId || null,
@@ -630,6 +651,8 @@ const NotificationService = {
         link: link || null,
         metadata: rowMetadata ? JSON.stringify(rowMetadata) : null,
       }).returning('*');
+      // The held row is written; the day's one count row in the bell says how many were held (never throws).
+      if (heldDay) await ringBudget.afterHeldInsert(connection, heldDay);
       return notif;
     } catch (err) {
       logger.error(`[notifications] Create failed: ${safeErrorSummary(err)}`);
@@ -729,13 +752,14 @@ const NotificationService = {
           const existingMeta = typeof existing.metadata === 'string'
             ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
             : (existing.metadata || {});
-          // standingRefresh runs HERE, inside the key's lock, against the row as it
+          // standingRefresh(existing, existingMeta, trx) runs HERE, inside the key's lock and on this transaction `trx` (a callback that
+          // reads more rows must use it, not the pool), against the row as it
           // stands now: a caller that must compare this emission with what the row
           // already holds (a count, which of two concurrent messages is newer) cannot
           // do it before the lock. Returns null (no change) or the content this
           // refresh should write; `quiet` writes it without ringing or bumping.
           const adjusted = refreshOnDedupe && typeof standingRefresh === 'function'
-            ? await standingRefresh(existing, existingMeta) : null;
+            ? await standingRefresh(existing, existingMeta, trx) : null;
           // A row the owner sent to Claude (GATE_ALERT_SEND_TO_CLAUDE) stays in Claude's queue while it is open: this
           // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
           const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);
@@ -783,7 +807,9 @@ const NotificationService = {
           // Compared by JSON so an itemKeys array compares by value.
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
+          // A held row refreshed by a time-critical emission (alert-ring-budget.js) is news whatever else changed.
+          const promoted = ringBudget.promotesHeld(existingMeta, useMeta);
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, promoted })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
@@ -791,7 +817,9 @@ const NotificationService = {
             // Likewise a row that leaves Claude's queue for the bell is news to the owner: it rings back in,
             // unless the emission itself asked for a quiet refresh.
             const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
-            const shouldRing = adjusted?.quiet ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+            // A row the daily ring budget held today (alert-ring-budget.js) refreshes its words in Activity; it does not ring past the budget.
+            const shouldRing = promoted || (!refreshStaysQuiet(adjusted, existingMeta, { category, metadata: useMeta })
+              && (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta)));
             const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
