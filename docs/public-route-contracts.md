@@ -5664,7 +5664,9 @@ canonical FDACS / license / insurance numbers — no auth, no token, public
 business credentials).
 `/api/public/automation-preview/:stepId/:token` (read-only; renders an
 automation step's HTML body with SAMPLE merge values only — no real customer
-data — for operator preview/share. Token in path, `noindex`).
+data — for operator preview/share. Token in path, `noindex`. Every status
+sends `Content-Security-Policy: sandbox` (no allow-* tokens), so stored HTML
+cannot run script on the portal origin).
 `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
 target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
