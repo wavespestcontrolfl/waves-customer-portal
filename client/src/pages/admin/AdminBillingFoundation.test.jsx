@@ -45,7 +45,7 @@ describe("Admin billing failure and draft boundaries", () => {
     const pending = new Promise((resolve) => { release = resolve; });
     const fetch = vi.fn(async (_url, options) => options?.method === "POST" ? pending : response({ payers: [] }));
     vi.stubGlobal("fetch", fetch);
-    render(<PayersPage />);
+    render(<MemoryRouter><PayersPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("button", { name: "New payer" }));
     const dialog = within(screen.getByRole("dialog", { name: "New payer" }));
     fireEvent.change(dialog.getByLabelText(/Payer name/), { target: { value: "Example payer" } });
@@ -154,7 +154,7 @@ describe("Admin billing failure and draft boundaries", () => {
   it("distinguishes payer read failures from an empty directory and retries only the read", async () => {
     const fetch = vi.fn().mockResolvedValueOnce(response({ error: "Directory unavailable" }, 503)).mockResolvedValue(response({ payers: [payer] }));
     vi.stubGlobal("fetch", fetch);
-    render(<PayersPage />);
+    render(<MemoryRouter><PayersPage /></MemoryRouter>);
     await screen.findByText("Directory unavailable");
     expect(screen.queryByText(/No payers yet/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
