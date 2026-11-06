@@ -317,10 +317,11 @@ describe('codex r1 follow-ups', () => {
     expect(ctx.toolFailed).toBe(true);
   });
 
-  test('the no-context bell is registered as a TECH-VISIBLE trigger key and written deduped per CallSid', () => {
+  // Technicians get no calls (owner 2026-10-02): the bell links to the admin-only Calls tab (audit C19).
+  test('the no-context bell is a registered trigger key the office alone sees', () => {
     const { listTriggers, TRIGGER_REGISTRY } = require('../services/notification-triggers');
     expect(listTriggers().some((t) => t.key === 'sandy_transfer_no_context')).toBe(true);
-    expect((TRIGGER_REGISTRY || {}).sandy_transfer_no_context?.techVisible).toBe(true);
+    expect((TRIGGER_REGISTRY || {}).sandy_transfer_no_context?.techVisible).toBeFalsy();
   });
 });
 
