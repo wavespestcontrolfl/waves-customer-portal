@@ -78,10 +78,12 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
   });
   beforeEach(async () => {
     process.env.GATE_ALERT_RING_BUDGET = 'true';
+    process.env.GATE_AGENT_ACTIVITY = 'true';
     await clearOwn();
   });
   afterAll(async () => {
     delete process.env.GATE_ALERT_RING_BUDGET;
+    delete process.env.GATE_AGENT_ACTIVITY;
     if (db) {
       await clearOwn();
       await db.destroy();

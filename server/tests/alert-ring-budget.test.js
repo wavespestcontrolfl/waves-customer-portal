@@ -70,12 +70,17 @@ const metaOfRow = (conn, i = conn.inserted.length - 1) => JSON.parse(conn.insert
 
 beforeEach(() => {
   process.env.GATE_ALERT_RING_BUDGET = 'true';
+  process.env.GATE_AGENT_ACTIVITY = 'true';
   jest.clearAllMocks();
   mockState.conn = makeConn();
 });
-afterAll(() => { delete process.env.GATE_ALERT_RING_BUDGET; });
+afterAll(() => { delete process.env.GATE_ALERT_RING_BUDGET; delete process.env.GATE_AGENT_ACTIVITY; });
 
 describe('exemption predicate', () => {
+  test.each(require('../services/admin-alert-retention').KEEP_UNTIL_SETTLED_CATEGORIES)('money category %s is exempt (always rings, never held)', (category) => {
+    expect(budget.exemptReason({ category, metadata: {} })).toBe('money');
+  });
+
   test.each(budget.CUSTOMER_CATEGORIES)('customer category %s is exempt', (category) => {
     expect(budget.exemptReason({ category, metadata: {} })).toBe('customer_contact');
   });
@@ -211,7 +216,9 @@ describe('exemption predicate', () => {
   test('the count row is exempt; an ordinary non-customer row and a bell:true row are budgeted', () => {
     expect(budget.exemptReason({ category: 'system', metadata: { ringBudget: 'count' } })).toBe('count_row');
     expect(budget.exemptReason({ category: 'inventory', metadata: {} })).toBeNull();
-    expect(budget.exemptReason({ category: 'billing', metadata: { triggerKey: 'invoice_overdue_digest' } })).toBeNull();
+    // A money category always rings (Codex security review on #7691): a billing digest is exempt as money, not budgeted.
+    expect(budget.exemptReason({ category: 'billing', metadata: { triggerKey: 'invoice_overdue_digest' } })).toBe('money');
+    expect(budget.exemptReason({ category: 'inventory', metadata: { triggerKey: 'invoice_overdue_digest', bell: true } })).toBeNull();
     // A watchdog page and the combined-booking check are not auto-dispatch notices: budgeted.
     expect(budget.exemptReason({ category: 'alert', metadata: { dedupeKey: 'unpriced-series:abc' } })).toBeNull();
   });
@@ -242,6 +249,14 @@ describe('budget decision', () => {
     const out = await budget.applyBudget({ connection: conn, category: 'inventory', metadata: { a: 1, ringBudgetDay: 'old' }, now: at('2026-11-05T15:00:00Z') });
     expect(out.outcome).toBe('hold');
     expect(out.metadata).toEqual({ a: 1, feed: 'activity', quiet: true, ringBudgetHeld: DAY });
+  });
+
+  test('with the Activity feed off (GATE_AGENT_ACTIVITY), nothing is held: the 11th rings into the bell, stamped', async () => {
+    delete process.env.GATE_AGENT_ACTIVITY;
+    const conn = makeConn(stamped(10));
+    const out = await budget.applyBudget({ connection: conn, category: 'inventory', metadata: { a: 1 }, now: at('2026-11-05T15:00:00Z') });
+    expect(out.outcome).toBe('ring');
+    expect(out.metadata).toEqual({ a: 1, ringBudgetDay: DAY });
   });
 
   test('another day\'s stamps do not count', async () => {

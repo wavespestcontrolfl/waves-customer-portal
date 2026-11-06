@@ -20,7 +20,10 @@
 //   - an ops digest (category ops_digest: the Mac checks' ACT/FIX findings). Owner ruling 2026-09-11: ACT/FIX findings stay
 //     in the bell. Each digest also supersedes its older copies by key (ops-digest.js supersedeOlderDigests), which reads a
 //     quiet row as an unchanged repeat, so a held digest would close the newest finding and keep the stale one;
+//   - a money alert (category in admin-alert-retention.js KEEP_UNTIL_SETTLED_CATEGORIES: billing, payment, dispute, refund,
+//     tax, payout, payroll, llm_cost), so other alerts can never push a deadline about money out of the bell;
 //   - the count row itself.
+// And nothing is held while the Activity feed is off (GATE_AGENT_ACTIVITY): a held row would have nowhere to show.
 // A `bell: true` site tag is NOT an exemption: those rows are budgeted unless they are one of the above (a tag only says
 // "this belongs in the bell", not "this is a customer").
 //
@@ -110,12 +113,26 @@ function registryTrigger(triggerKey) {
 
 const isOwnerOnly = (meta) => meta.ownerOnly === true || meta.ownerOnly === 'true';
 
+// A held row lives only in the Activity feed ("Held alerts"), so the budget holds nothing while that feed is off
+// (GATE_AGENT_ACTIVITY, read the way agent-activity.js reads it): the row rings into the bell instead.
+function activityAvailable() {
+  try { return require('../config/feature-gates').gateEnvValue('GATE_AGENT_ACTIVITY') === true; } catch { return false; }
+}
+
+// Money categories (admin-alert-retention.js KEEP_UNTIL_SETTLED_CATEGORIES: billing, a failed payment, a dispute with its
+// evidence deadline, a refund to reconcile, tax, a payout, payroll, AI spend). One list for "keep until settled" and "always
+// ring", so a flood of other alerts (a public form, say) can never push a dispute deadline out of the bell.
+function moneyCategory(category) {
+  try { return require('./admin-alert-retention').KEEP_UNTIL_SETTLED_CATEGORIES.includes(category); } catch { return false; }
+}
+
 // Why a row is exempt from the budget, or null when it is budgeted. Pure apart from the registry read.
 function exemptReason({ category, metadata, dedupeKey } = {}) {
   const meta = metaOf(metadata);
   if (meta[MARK_KEY] === COUNT_MARK) return 'count_row';
   if (isOwnerOnly(meta)) return 'owner_only';
   if (category === 'ops_digest') return 'ops_digest';
+  if (moneyCategory(category)) return 'money';
   const triggerKey = meta.triggerKey || null;
   const trigger = registryTrigger(triggerKey);
   const rule = trigger?.rule;
@@ -183,7 +200,7 @@ async function applyBudget({ connection, category, metadata, now = new Date() } 
       // Ring as before, but stamp the day so this ring still counts for the rows after it.
       logger.warn(`[ring-budget] count unreadable, ringing as before: ${err?.code || err?.name || 'error'}`);
     }
-    if (used >= DAILY_BUDGET) {
+    if (used >= DAILY_BUDGET && activityAvailable()) {
       const { [DAY_KEY]: _day, ...rest } = meta;
       return { outcome: 'hold', day, metadata: { ...rest, feed: 'activity', quiet: true, [HELD_KEY]: day } };
     }
