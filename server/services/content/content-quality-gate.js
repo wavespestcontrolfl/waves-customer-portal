@@ -1145,17 +1145,21 @@ function checkRedactionPassedAllLanes(draft) {
 // Editorial lanes name public entities the customer-text name heuristic reads
 // as people: owner-approved competitors ("Truly Nolen") and cited public
 // bodies ("National Pest Management Association") — Codex #7646 r1. Replace
-// exactly those spans with an allowlisted stand-in before the scan. Narrow on purpose: competitors only
-// when every alias resolves to an OWNER_APPROVED_AUTOPUBLISH_IDS record (the
-// competitor gate still owns every other business name), and organizations
-// only as a Title Case run that ENDS in an organization word, so "John Smith"
-// next to "Homeowners Association" still fails on John Smith.
-const PUBLIC_ORG_WORDS = 'Association|Society|Institute|University|Extension|Agency|Administration|Commission|Department|Foundation|Council|Bureau|Centers|Center|Centre|College';
-const PUBLIC_ORG_RE = new RegExp(
-  `\\b(?:[A-Z][\\w&/.'-]*\\s+){0,5}(?:${PUBLIC_ORG_WORDS})\\b(?:\\s+(?:of|for|and)\\s+(?:the\\s+)?[A-Z][\\w&/.'-]*(?:\\s+(?:and\\s+)?[A-Z][\\w&/.'-]*){0,3})?`,
-  'g',
-);
-const PUBLIC_ORG_EXACT = ['UF/IFAS', 'IFAS', 'NPMA', 'FDACS', 'EPA', 'USDA', 'CDC'];
+// exactly those names with an allowlisted stand-in before the scan. Exact
+// names only, never a Title Case pattern: a pattern swallowed the customer
+// name in "Homeowners Association and John Smith" (pre-push audit r2). The
+// competitor gate still owns every other business name; a public body not on
+// this list holds the draft for review, which is the safe failure.
+const PUBLIC_BODIES = [
+  'National Pest Management Association', 'Florida Pest Management Association', 'NPMA',
+  'University of Florida IFAS Extension', 'UF/IFAS Extension', 'UF IFAS Extension', 'University of Florida', 'UF/IFAS', 'IFAS',
+  'Florida Department of Agriculture and Consumer Services', 'FDACS', 'Florida Department of Health',
+  'U.S. Environmental Protection Agency', 'Environmental Protection Agency', 'EPA',
+  'Centers for Disease Control and Prevention', 'CDC',
+  'United States Department of Agriculture', 'U.S. Department of Agriculture', 'USDA',
+  'American Mosquito Control Association', 'Entomological Society of America', 'National Pesticide Information Center',
+  'Florida Fish and Wildlife Conservation Commission', 'Florida Medical Entomology Laboratory', 'National Weather Service',
+];
 
 // A one-word alias is exempt only when it is a brand, never a common surname:
 // the approved list's bare 'massey' would otherwise clear "John Massey".
@@ -1176,10 +1180,11 @@ function blankApprovedPublicEntities(text) {
   // and connector words stay, so the text keeps its capitalization: the
   // redactor's pii_confidence_low test reads the case ratio, and blanking
   // the only capitalized words of a sentence tripped it.
-  const standIn = (span) => span.split(/(\s+)/).map((w) => (/^[A-Z]/.test(w) ? 'Waves' : w)).join('');
-  let out = String(text).replace(PUBLIC_ORG_RE, standIn);
-  for (const name of [...approvedCompetitorNames(), ...PUBLIC_ORG_EXACT]) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const standIn = (span) => span.split(/( +)/).map((w) => (/^[A-Z]/.test(w) ? 'Waves' : w)).join('');
+  const names = [...approvedCompetitorNames(), ...PUBLIC_BODIES].sort((a, b) => b.length - a.length);
+  let out = String(text);
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, ' +');
     out = out.replace(new RegExp(`(^|[^\\w])(${escaped})(?![\\w])`, 'gi'), (m, pre, hit) => pre + standIn(hit));
   }
   return out;
