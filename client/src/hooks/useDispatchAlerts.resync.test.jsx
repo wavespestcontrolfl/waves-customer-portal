@@ -264,9 +264,6 @@ describe('cleanup', () => {
 
 describe('mergeHydration changedSinceRead predicate', () => {
   const prev = [A, B];
-  it('omitted keeps every local card (today)', () => {
-    expect(mergeHydration(prev, [C]).map((a) => a.id)).toEqual(['c', 'b', 'a']);
-  });
   it('drops local cards not changed since the read and absent from the fetch', () => {
     expect(mergeHydration(prev, [C], null, () => false).map((a) => a.id)).toEqual(['c']);
   });
@@ -280,9 +277,9 @@ describe('mergeHydration changedSinceRead predicate', () => {
     expect(out.find((x) => x.id === 'a').payload).toEqual({ live: true });
     expect(out.find((x) => x.id === 'b').payload).toEqual({ fresh: true });
   });
-  it('tombstones win over a fetched row, with or without the predicate', () => {
+  it('tombstones win over a fetched row, whether or not the local card changed', () => {
     const out = mergeHydration([B], [A, C], new Set(['a', 'c']), () => false);
     expect(out.map((x) => x.id)).toEqual([]);
-    expect(mergeHydration([B], [A, C], new Set(['a'])).map((x) => x.id)).toEqual(['c', 'b']);
+    expect(mergeHydration([B], [A, C], new Set(['a']), () => true).map((x) => x.id)).toEqual(['c', 'b']);
   });
 });

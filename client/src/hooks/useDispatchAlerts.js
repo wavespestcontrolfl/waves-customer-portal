@@ -83,19 +83,18 @@ function relayTechOutAlertChange(alert) {
 // dispatch:alert for an unknown id prepends a new card; for a card already on
 // screen it is an update, merged over the existing card so hydrated join
 // fields (customer / tech names) survive.
-// Initial GET merged with live rows. The fetched row supplies enriched
-// fields (tech_name, customer, address); a live row that arrived while the
-// GET was in flight is newer and its own fields win; a card that resolved
-// meanwhile is not resurrected. Newest first; a tech-out batch shares one
-// created_at (one transaction), so its cards fall back to bump_order.
-export function mergeHydration(prev, fetched, resolvedIds = null, changedSinceRead = null) {
+// A queue read reconciled with the cards on screen. changedSinceRead(id) is
+// true for a card a broadcast added or changed after the read began (the read
+// cannot know about it): only those local cards survive, and their live fields
+// win over the fetched row. Every other card comes from the fetched rows, which
+// supply the enriched fields (tech_name, customer, address), so a card closed
+// elsewhere is dropped. A card that resolved meanwhile is not resurrected.
+// Newest first; a tech-out batch shares one created_at (one transaction), so
+// its cards fall back to bump_order.
+export function mergeHydration(prev, fetched, resolvedIds, changedSinceRead) {
   const byId = new Map();
-  // With a changedSinceRead predicate the read RECONCILES: only a local card
-  // a broadcast added or changed after the read began (it cannot know about
-  // it) survives; every other card comes from the fetched rows, so a card
-  // closed elsewhere is dropped. Without it, every local card is kept.
   for (const a of prev) {
-    if (!changedSinceRead || changedSinceRead(a.id)) byId.set(a.id, a);
+    if (changedSinceRead(a.id)) byId.set(a.id, a);
   }
   for (const a of fetched) {
     if (resolvedIds && resolvedIds.has(a.id)) continue;

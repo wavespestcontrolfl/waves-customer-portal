@@ -50,12 +50,13 @@ describe('mergeHydration', () => {
   it('keeps a live update that raced the initial GET, layered over the enriched snapshot', () => {
     const live = [{ id: 'a', created_at: '2026-09-24T12:00:00Z', payload: { auto_attempt: { reason: 'window_occupied' } } }];
     const fetched = [{ id: 'a', created_at: '2026-09-24T12:00:00Z', tech_name: 'Tech One', payload: {} }];
-    const [row] = mergeHydration(live, fetched);
+    // the live update arrived after the read began
+    const [row] = mergeHydration(live, fetched, null, () => true);
     expect(row.tech_name).toBe('Tech One');
     expect(row.payload.auto_attempt.reason).toBe('window_occupied');
   });
 
   it('does not resurrect a card that resolved while the GET was in flight', () => {
-    expect(mergeHydration([], [{ id: 'a', created_at: '2026-09-24T12:00:00Z' }], new Set(['a']))).toEqual([]);
+    expect(mergeHydration([], [{ id: 'a', created_at: '2026-09-24T12:00:00Z' }], new Set(['a']), () => false)).toEqual([]);
   });
 });
