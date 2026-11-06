@@ -25,6 +25,9 @@ describe('live words spend from the same bucket', () => {
     const key = 'tech:budget-test:v1';
     for (let i = 0; i < 20; i += 1) expect(await takeLiveSessionBudget(key)).toBe(true);
     expect(await takeLiveSessionBudget(key)).toBe(false);
+    // concurrent starts cannot all pass against an empty bucket
+    const burst = await Promise.all(Array.from({ length: 100 }, () => takeLiveSessionBudget('tech:burst-test:v1')));
+    expect(burst.filter(Boolean)).toHaveLength(20);
     // the clip route still has its other half: the limiter's own store holds the same count
     expect(await takeLiveSessionBudget('tech:other:v1')).toBe(true);
   });

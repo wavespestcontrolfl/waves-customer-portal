@@ -72,11 +72,18 @@ const dictationLimiter = require('express-rate-limit')({
 // session may start only while at most half the budget is used, so previews can never use up the clips that
 // make the final words. Returns false (no session) when the bucket is too full.
 const LIVE_SESSION_SHARE = DICTATION_MAX_CLIPS / 2;
-async function takeLiveSessionBudget(key) {
+// Admissions run one at a time: a read followed by a write would let concurrent starts all see an empty bucket.
+let liveAdmissions = Promise.resolve();
+async function admitLiveSession(key) {
   const used = await dictationStore.get(key);
   if ((used?.totalHits || 0) >= LIVE_SESSION_SHARE) return false;
   await dictationStore.increment(key);
   return true;
+}
+function takeLiveSessionBudget(key) {
+  const admitted = liveAdmissions.then(() => admitLiveSession(key));
+  liveAdmissions = admitted.catch(() => {});
+  return admitted;
 }
 
 module.exports = {
