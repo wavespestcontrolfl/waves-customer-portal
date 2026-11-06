@@ -238,6 +238,24 @@ postgres('moving: the app-sent new-home estimate (live Postgres)', () => {
     expect(officeItems()).toHaveLength(1);
   });
 
+  test.each([
+    ['an address check', { addressUnverified: true }],
+    ['a re-price', { estimatorEngine: { reprice_pending_at: new Date().toISOString() } }],
+  ])('a draft under %s waits outside the batch, and goes once the hold clears', async (_name, hold) => {
+    const { estimateId: heldId } = await draftFor();
+    const data = parsed((await estimate(heldId)).estimate_data);
+    await trx('estimates').where({ id: heldId }).update({ estimate_data: JSON.stringify({ ...data, ...hold }) });
+    const { estimateId: nextId } = await draftFor({ customer: { phone: '+19415550199', email: 'lee@example.invalid' } });
+    // Never read, so never "skipped": a held draft cannot fill the batch ahead of the next one.
+    expect(await Send.runMoveAutoSendJob({ now: at('10:00') })).toMatchObject({ sent: 1, skipped: 0, office: 0 });
+    expect((await estimate(nextId)).status).toBe('sent');
+    expect((await estimate(heldId)).status).toBe('draft');
+    expect(await state(heldId)).toBeNull();
+    await trx('estimates').where({ id: heldId }).update({ estimate_data: JSON.stringify(data) });
+    expect(await Send.runMoveAutoSendJob({ now: at('10:15') })).toMatchObject({ sent: 1 });
+    expect((await estimate(heldId)).status).toBe('sent');
+  });
+
   test('a move the customer changed or closed is not sent and rings no one', async () => {
     const { move, estimateId } = await draftFor();
     await trx('customer_moves').where({ id: move.id }).update({ auto_estimate_state: null, auto_estimate_at: null });

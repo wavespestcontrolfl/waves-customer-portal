@@ -17,7 +17,8 @@
  * draft still holds the price the app made. A draft the office changed, one
  * made before this job, or a customer with no email and no phone rings one
  * office item instead, and so does a send that reached no one or stopped part
- * way: the estimate stays for the office to send. The state lives on the
+ * way: the estimate stays for the office to send. A draft under a hold the
+ * office send also refuses waits until the hold clears. The state lives on the
  * estimate (estimate_data.automation.moveAutoSend). Logs carry ids and
  * outcomes only.
  */
@@ -74,18 +75,24 @@ async function moveWaitsOn(trx, moveId, estimateId) {
   return !!move && move.status === 'submitted' && move.auto_estimate_state === 'drafted' && String(move.estimate_id) === String(estimateId);
 }
 
+// The holds the office send also refuses (routes/admin-estimates.js POST
+// /:id/send): an address check, a re-price, another send's live claim. The
+// candidate reads skip a held row before the batch limit, so it never takes
+// a place in the batch, and it is a candidate again once the hold clears.
+const withoutHolds = (q) => q
+  .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
+  .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+  .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
+
 // The estimate row a send may claim: one estimate at the server's price, with
-// no hold the office send also refuses (routes/admin-estimates.js POST /:id/send).
+// no hold.
 function claimable(trx, id, status) {
-  return trx('estimates').where({ id, status })
+  return withoutHolds(trx('estimates').where({ id, status })
     .whereNull('archived_at')
     .whereNull('price_locked_at')
     .whereNull('estimate_group_id')
     .whereRaw("UPPER(pricing_authority) = 'SERVER'")
-    .whereRaw("estimate_data->'proposal' IS NULL")
-    .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
-    .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-    .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
+    .whereRaw("estimate_data->'proposal' IS NULL"));
 }
 
 // Why the app must not send this draft, or null. It sends only the price it
@@ -364,8 +371,14 @@ async function runMoveAutoSendJob({ now = new Date(), sendEstimateNow = null } =
     .orderBy('e.id').limit(CANDIDATE_LIMIT).select('e.*');
   for (const row of stale) await attempt('stale', row, () => settleStale(row, now));
   if (isWithinSendWindowET(now)) {
-    const owed = await appEstimates()
+    // Only a row the text claim can take: an estimate the office changed
+    // since the email keeps its text owed and never fills the batch.
+    const owed = await withoutHolds(appEstimates())
       .where('e.status', 'sent')
+      .whereNull('e.price_locked_at')
+      .whereNull('e.estimate_group_id')
+      .whereRaw("UPPER(e.pricing_authority) = 'SERVER'")
+      .whereRaw("e.estimate_data->'proposal' IS NULL")
       .whereRaw("e.estimate_data->'automation'->'moveAutoSend'->>'textOwed' = 'true'")
       .whereRaw("e.estimate_data->'automation'->'moveAutoSend'->>'textClaimedAt' IS NULL")
       .whereRaw("e.estimate_data->'automation'->'moveAutoSend'->>'textAttemptedAt' IS NULL")
@@ -373,7 +386,9 @@ async function runMoveAutoSendJob({ now = new Date(), sendEstimateNow = null } =
       .select('e.*', 'm.id as move_id');
     for (const row of owed) await attempt('text', row, () => sendMorningText(row, { now, sender }));
   }
-  const drafts = await appEstimates()
+  // A draft the office changed is stamped with an item (sendRefusal); a held
+  // one waits outside the batch.
+  const drafts = await withoutHolds(appEstimates())
     .where('e.status', 'draft')
     .whereRaw("e.estimate_data->'automation'->'moveAutoSend' IS NULL")
     // At night only a draft with an email can go: one waiting for the
