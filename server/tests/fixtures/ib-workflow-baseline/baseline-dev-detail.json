@@ -236,33 +236,112 @@
       "contract_calls": 0
     },
     "W3-dev-01": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"6d152c72-2745-431d-89dc-9c3cf702eed7\",\"lead_name\":\"Murphy\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Jay\"}},\"_customer_id\":null,\"note\":\"Proposed — await"
+        },
+        {
+          "point": "read_back",
+          "code": "first_name_not_saved",
+          "detail": "lead 6d152c72 first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "lead_activities has no single Intelligence Bar entry for the edit"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 42
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 33
       },
       "notes": [],
       "strength": null,
       "contract_calls": 1
     },
     "W3-dev-02": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"1408b86d-513a-41c7-8de3-4f066f41ac4c\",\"lead_name\":\"Murphy\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Jay\"}},\"linked_customer_unchanged\":true,\"_customer_"
+        },
+        {
+          "point": "read_back",
+          "code": "first_name_not_saved",
+          "detail": "lead 1408b86d first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "lead_activities has no single Intelligence Bar entry for the edit"
+        },
+        {
+          "point": "side_effect",
+          "code": "first_change_not_left_in_place",
+          "detail": "lead 4 first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "each lead should carry one Intelligence Bar entry for its own edit"
+        }
+      ],
       "timings": {
         "first_tool_result_ms": 8,
-        "verified_completion_ms": 26
+        "verified_completion_ms": 25
       },
       "notes": [],
       "strength": null,
       "contract_calls": 2
     },
     "W3-dev-03": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"6daf9a7a-c0de-41a9-a79c-fe62ebad97e2\",\"lead_name\":\"Murphy\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Jay\"}},\"_customer_id\":null,\"note\":\"Proposed — await"
+        },
+        {
+          "point": "read_back",
+          "code": "first_name_not_saved",
+          "detail": "lead 6daf9a7a first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "lead_activities has no single Intelligence Bar entry for the edit"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 39
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 26
       },
       "notes": [],
       "strength": null,
@@ -320,11 +399,34 @@
       "contract_calls": 2
     },
     "W3-dev-07": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"dc0c5328-290c-4791-877d-2703bb08aaf8\",\"lead_name\":\"Ostrander\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Pat\"}},\"_customer_id\":null,\"note\":\"Proposed — aw"
+        },
+        {
+          "point": "read_back",
+          "code": "lead_row_wrong",
+          "detail": "{\"first_name\":null,\"last_name\":\"Ostrander\",\"phone\":\"+19415550401\"}"
+        },
+        {
+          "point": "recovery",
+          "code": "double_submit_wrote_twice",
+          "detail": "the lead was written more than once"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 5,
-        "verified_completion_ms": 19
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 25
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -748,7 +850,7 @@
         "verified_completion_ms": 28
       },
       "notes": [
-        "reschedule_appointment: error: This appointment is grouped with another service at the same stop \u2014 move the stop from the schedule (the whole visit moves together), or sep",
+        "reschedule_appointment: error: This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or sep",
         "undeclared reschedule_appointment allowed: the naive move of one row of a grouped stop, which the tool must refuse"
       ],
       "strength": null,
@@ -1384,7 +1486,7 @@
         "verified_completion_ms": 38
       },
       "notes": [
-        "adjust_stock: product_ambiguous: Multiple products match \"sample granule\" \u2014 retry with product_id",
+        "adjust_stock: product_ambiguous: Multiple products match \"sample granule\" — retry with product_id",
         "undeclared adjust_stock allowed: the naive restock by an ambiguous product name, which the writer must refuse"
       ],
       "strength": null,

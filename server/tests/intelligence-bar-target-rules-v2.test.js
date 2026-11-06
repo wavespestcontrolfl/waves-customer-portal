@@ -1604,19 +1604,33 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
     expect(failed.untrustedRead).toBe(false);
   });
 
-  test('gate off: lead reads do not taint (today)', () => {
-    const taint = OwnerDirect.newRequestTaint([]);
-    OwnerDirect.noteUntrustedRead(taint, 'query_leads', leadRows);
-    OwnerDirect.noteUntrustedRead(taint, 'search_messages', leadRows);
-    expect(taint.untrustedRead).toBe(false);
+  test('gate off: lead, call, message and email reads still taint, and a later owner-direct write shows its card (audit run 3)', () => {
+    const edit = { customer_id: id(101), updates: { last_name: 'Sample' } };
+    for (const tool of ['query_leads', 'search_messages', 'get_stale_leads', 'get_call_log', 'search_call_research', 'get_open_commitments']) {
+      const taint = OwnerDirect.newRequestTaint([]);
+      expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, null)).toBe(true);
+      OwnerDirect.noteUntrustedRead(taint, tool, leadRows);
+      expect(taint).toMatchObject({ untrustedRead: true, untrustedV2: true, untrustedGeneral: false });
+      expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, null)).toBe(false);
+    }
+    // Trusted aggregates and failed reads still do not taint with the gate off.
+    const clean = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteUntrustedRead(clean, 'get_revenue_overview', leadRows);
+    OwnerDirect.noteUntrustedRead(clean, 'query_leads', { error: 'boom' });
+    expect(clean.untrustedRead).toBe(false);
+    // Gate-on-only sources stay gated: pasted text and a write result that shows prior text.
+    const pasted = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.notePastedText(pasted);
+    OwnerDirect.noteUntrustedRead(pasted, 'update_customer', { preview: { notes_replaced: { before: 'planted text' } } });
+    expect(pasted.untrustedRead).toBe(false);
   });
 
-  test('gate on: a resumed history holding a lead read keeps the taint; gate off it does not', () => {
+  test('a resumed history holding a lead read keeps the taint, gate on or off (audit run 3)', () => {
     const history = [
       { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'query_leads', input: {} }] },
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: JSON.stringify(leadRows) }] },
     ];
-    expect(OwnerDirect.untrustedReadInHistory(history)).toBe(false);
+    expect(OwnerDirect.untrustedReadInHistory(history)).toBe(true);
     process.env[ON] = 'true';
     expect(OwnerDirect.untrustedReadInHistory(history)).toBe(true);
     const trusted = [{ role: 'assistant', content: [{ type: 'tool_use', id: 'tu_2', name: 'get_revenue_overview', input: {} }] }];
@@ -1656,15 +1670,15 @@ describe('v2 untrusted-read marker (Codex #6369 r19)', () => {
     expect(general).toMatchObject({ untrustedRead: true, untrustedGeneral: true, untrustedV2: false });
   });
 
-  test('a thread with the v2 marker is carded while the gate is on and direct again once it is off', async () => {
+  test('a thread with the v2 marker is carded whatever the gate says, so a rollback does not reopen card-free edits (audit run 3)', async () => {
     process.env[ON] = 'true';
     const withGate = await loadWith([IbThreads.UNTRUSTED_READ_V2_MARKER]);
     expect(withGate).toMatchObject({ untrustedRead: true, untrustedV2: true, untrustedGeneral: false });
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, withGate, grounding())).toBe(false);
     delete process.env[ON];
     const rolledBack = await loadWith([IbThreads.UNTRUSTED_READ_V2_MARKER]);
-    expect(rolledBack.untrustedRead).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, rolledBack, null)).toBe(true);
+    expect(rolledBack).toMatchObject({ untrustedRead: true, untrustedV2: true, untrustedGeneral: false });
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, rolledBack, null)).toBe(false);
   });
 
   test('a thread with the old marker (read_admin_data) is carded whatever the gate says', async () => {

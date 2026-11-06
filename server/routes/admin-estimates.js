@@ -46,6 +46,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
+const updatedWording = require('../services/estimate-updated-wording');
 const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
@@ -267,7 +268,7 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
-const REVIEW_STALE_MESSAGE = 'The saved offer, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.';
+const REVIEW_STALE_MESSAGE = 'The saved offer, its wording, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.';
 
 function moneySummary(estimate = {}, { allowTotals = false, average = null } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
@@ -283,7 +284,7 @@ function moneySummary(estimate = {}, { allowTotals = false, average = null } = {
         ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
         : `$${monthlyTotal.toFixed(2)}/mo`;
     }
-    // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): `average` is the
+    // Monthly average (owner 2026-10-20): `average` is the
     // resolved {priceLine, note} for a plan whose per-application lines
     // reconcile to the stored monthly total; absent = the line as before.
     if (average?.priceLine) return average.priceLine;
@@ -324,7 +325,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
       : (priceLine || moneySummary(estimate, { allowTotals: proposalMode })),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
-    // GATE_ESTIMATE_MONTHLY_AVERAGE: the "Averaged over the year ..." line rides
+    // Monthly average: the "Averaged over the year ..." line rides
     // in front of the next-step paragraph (the template has no block for it, and
     // a template publish is not needed). Absent average = the sentence as before.
     next_step_summary: proposalMode
@@ -832,15 +833,25 @@ function assertEstimateManagerApprovalResolved(estimate) {
 // property or the lookup fails (the scope then stands on its address
 // column alone — a street-only column fails the locality rule downstream,
 // which is the fail-closed side).
-async function pricedPropertyAddress(propertyId) {
+// rethrow: the updated-wording check must never read a failed lookup as a moved property (a changed quote).
+async function pricedPropertyAddress(propertyId, { rethrow = false } = {}) {
   if (!propertyId) return {};
   try {
     const p = await db('customer_properties').where({ id: propertyId }).first('address_line1', 'address_line2', 'city', 'zip');
     return p ? { property_address_line1: p.address_line1, property_address_line2: p.address_line2, property_city: p.city, property_zip: p.zip } : {};
   } catch (err) {
+    if (rethrow) throw err;
     logger.warn(`[admin-estimates] send scope property lookup failed for property ${propertyId}: ${err.message}`);
     return {};
   }
+}
+
+// The scope a send of this row delivers: the one buildEstimateSendSnapshot stamps (the row without its own
+// sendSnapshot), so the updated-wording check compares a live quote with its last stamp like for like.
+async function deliveryScopeOf(estimate, { rethrow = false } = {}) {
+  const estimateData = { ...(parseEstimateData(estimate.estimate_data) || {}) };
+  delete estimateData.sendSnapshot;
+  return deliveredEstimateScope({ ...estimate, estimate_data: estimateData, ...(await pricedPropertyAddress(estimate.property_id, { rethrow })) });
 }
 
 // delivered: false = this attempt handed nothing to the customer (a
@@ -885,7 +896,12 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // undelivered content under the old witness (pre-push hook P1).
   // Independent of the bundle build below — it is content, not pricing.
   if (delivered) {
-    Object.assign(sendSnapshot, scopeRevision(sendSnapshot, deliveredEstimateScope({ ...estimate, estimate_data: estimateDataForBundle, ...(await pricedPropertyAddress(estimate.property_id)) }), deliveredAt || snapshotAt));
+    Object.assign(sendSnapshot, scopeRevision(sendSnapshot, await deliveryScopeOf(estimate), deliveredAt || snapshotAt));
+    // The prices this delivery carried (the totals and a digest of every line's price), beside its scope:
+    // GATE_ESTIMATE_UPDATED_WORDING's witness that a later send with other prices is a corrected quote. Stamped on
+    // every delivery, gate on or off, so a quote delivered before the flip still counts; a suppressed attempt carries
+    // the prior stamp forward like the scope.
+    sendSnapshot.priced = updatedWording.pricedContent(estimate);
   }
 
   try {
@@ -920,15 +936,21 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
 const PROPOSAL_FALLBACK_NOTE = `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 const proposalFallbackIntro = (firstName) => `Hi ${firstName}, thank you for calling Waves Pest Control. Your proposal is attached as a PDF, and you can also open it online.`;
 
-function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode }) {
-  const heading = proposalMode ? 'Your Waves proposal is ready' : 'Your Waves estimate is ready';
+// updated (GATE_ESTIMATE_UPDATED_WORDING): the same email for a corrected estimate, saying it is the updated one.
+// A proposal never takes it (it keeps its own copy).
+function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode, updated = false }) {
+  const isUpdated = updated === true && !proposalMode;
+  const ready = isUpdated ? 'Your updated Waves estimate is ready' : 'Your Waves estimate is ready';
+  const heading = proposalMode ? 'Your Waves proposal is ready' : ready;
   const intro = proposalMode
     ? `${proposalFallbackIntro(firstName)} ${PROPOSAL_NEXT_STEP_SUMMARY}`
-    : `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
+    : (isUpdated
+      ? `Hi ${firstName}, your updated service estimate is ready for review. It replaces the one we sent before. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`
+      : `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`);
   const html = wrapEmail({
     preheader: proposalMode
       ? 'Your proposal is attached. Here is how to get started.'
-      : (priceLine && priceLine.startsWith('$') ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
+      : (priceLine && priceLine.startsWith('$') ? `${ready} — ${priceLine}.` : `${ready} to review.`),
     heading,
     intro,
     ctaHref: viewUrl,
@@ -947,14 +969,16 @@ function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode }) {
   ] : [
     `Hi ${firstName},`,
     '',
-    'Your customized service estimate is ready for review.',
+    isUpdated ? 'Your updated service estimate is ready for review. It replaces the one we sent before.' : 'Your customized service estimate is ready for review.',
     '',
     `View your estimate: ${viewUrl}`,
     '',
     `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     '- Waves Pest Control',
   ]);
-  return { subject: proposalMode ? 'Your pest control proposal from Waves' : 'Your Waves Pest Control Estimate is Ready', html, text };
+  const subject = proposalMode ? 'Your pest control proposal from Waves'
+    : (isUpdated ? 'Your Updated Waves Pest Control Estimate is Ready' : 'Your Waves Pest Control Estimate is Ready');
+  return { subject, html, text };
 }
 
 // The amount the customer's link shows. The public page reconciles a frozen
@@ -1021,22 +1045,83 @@ function estimateSmsTemplate(estimate) {
   return { key: 'estimate_sent', vars: {} };
 }
 
+// GATE_ESTIMATE_UPDATED_WORDING: true when this send re-delivers an estimate whose priced lines, address or prices
+// changed since the customer last received it (services/estimate-updated-wording.js). A grouped send judges the row
+// it is called with (no live group sends since September). Any failure reads as the normal wording.
+async function updatedWordingFor(estimate, proposalMode) {
+  if (proposalMode || !updatedWording.updatedWordingLive()) return false;
+  try {
+    const sendSnapshot = (parseEstimateData(estimate.estimate_data) || {}).sendSnapshot;
+    return updatedWording.offerChangedSinceDelivery(sendSnapshot, await deliveryScopeOf(estimate, { rethrow: true }), updatedWording.pricedContent(estimate));
+  } catch (err) {
+    logger.warn(`[admin-estimates] updated-wording check failed for estimate ${estimate?.id}: ${err.message}`);
+    return false;
+  }
+}
+
+// The delivery email template key: the proposal's, the updated one for an update, else estimate.delivery.
+function deliveryTemplateKey(proposalMode, updated) {
+  if (proposalMode) return 'estimate.proposal_delivery';
+  return updated === true ? updatedWording.UPDATED_EMAIL_TEMPLATE_KEY : 'estimate.delivery';
+}
+
+// The delivery email template for a SendGrid send: the updated one when the send is an update and that template can
+// send, else the normal one. `updated` is true only when the updated template is the one returned. No SendGrid = no
+// library (the SMTP copy).
+async function deliveryEmailLibrary(proposalMode, updated) {
+  if (!sendgrid.isConfigured()) return { library: null, updated: false };
+  if (updated && !proposalMode) {
+    const library = await EmailTemplateLibrary.loadTemplateByKey(updatedWording.UPDATED_EMAIL_TEMPLATE_KEY);
+    if (updatedWording.updatedEmailTemplateUsable(library)) return { library, updated: true };
+  }
+  return { library: await EmailTemplateLibrary.loadTemplateByKey(deliveryTemplateKey(proposalMode, false)), updated: false };
+}
+
+// The estimate text for a send: estimate_updated for an update while that template is on, else the estimate's own
+// text (`own` = estimateSmsTemplate: estimate_sent, or estimate_sent_move for an app-made move estimate). `key` is the
+// template that rendered `body`. `marker` rides in a review's messages ({ smsTemplate } only for the updated text, so
+// a normal review is unchanged): the send then checks that template is still on (its off switch), as it does for
+// the estimate's own text.
+async function deliverySms(updated, own, vars, context = {}, opts = {}) {
+  const updatedBody = updated ? await smsTemplatesRouter.getTemplate(updatedWording.UPDATED_SMS_TEMPLATE_KEY, vars, context, opts) : null;
+  if (updatedBody) {
+    return { key: updatedWording.UPDATED_SMS_TEMPLATE_KEY, body: updatedBody, marker: { smsTemplate: updatedWording.UPDATED_SMS_TEMPLATE_KEY } };
+  }
+  return { key: own.key, body: await smsTemplatesRouter.getTemplate(own.key, { ...vars, ...own.vars }, context, opts), marker: {} };
+}
+
+// GATE_ESTIMATE_UPDATED_WORDING: a review that chose the updated wording needs it still allowed at dispatch: the gate
+// on, and each updated template it used still on (estimate_updated active; estimate.updated_delivery sendable). Else
+// the whole send is refused before any channel and the office reviews again (a gate flip after a review is stale,
+// like the PDF and monthly-average decisions). The SMTP copy is code, so it cannot be turned off.
+async function reviewedUpdatedWordingStale(reviewedMessages, sendMethod) {
+  const smsUpdated = sendMethod !== 'email' && reviewedMessages?.smsTemplate === updatedWording.UPDATED_SMS_TEMPLATE_KEY;
+  const emailUpdated = sendMethod !== 'sms' && reviewedMessages?.email?.updated === true;
+  if (!smsUpdated && !emailUpdated) return false;
+  if (!updatedWording.updatedWordingLive()) return true;
+  if (smsUpdated && !(await smsTemplatesRouter.getTemplate(updatedWording.UPDATED_SMS_TEMPLATE_KEY, { first_name: 'there', estimate_url: 'portal.wavespestcontrol.com' }, {}, { noVariants: true, audit: false }))) return true;
+  return emailUpdated && reviewedMessages.email.provider === 'sendgrid'
+    && !updatedWording.updatedEmailTemplateUsable(await EmailTemplateLibrary.loadTemplateByKey(updatedWording.UPDATED_EMAIL_TEMPLATE_KEY));
+}
+
 async function buildEstimateSendPreview(estimate) {
   const firstName = await estimateGreetingFirstName(db, estimate);
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const proposalMode = normalizeProposal(estimate).enabled;
   const priceLine = await currentEstimateEmailPriceLine(estimate);
-  // GATE_ESTIMATE_MONTHLY_AVERAGE: null with the gate off, so the email is unchanged.
+  // Null when no average applies, so the email is unchanged.
   const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
   // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
   const averageText = require('../services/estimate-monthly-average').averageText(average);
-  const smsTemplate = estimateSmsTemplate(estimate);
-  const sms = await smsTemplatesRouter.getTemplate(smsTemplate.key, {
-    first_name: firstName, estimate_url: viewUrl, ...smsTemplate.vars,
-  }, {}, { noVariants: true, audit: false });
+  // GATE_ESTIMATE_UPDATED_WORDING: a corrected estimate's text and email say "updated". Each channel falls back to its
+  // normal template when the updated one is off or missing, and the email carries `updated` only when it used the
+  // updated template, so the send loads that same template. Gate off = the same template reads as before.
+  const updated = await updatedWordingFor(estimate, proposalMode);
+  const smsChoice = await deliverySms(updated, estimateSmsTemplate(estimate), { first_name: firstName, estimate_url: viewUrl }, {}, { noVariants: true, audit: false });
   let email = null;
-  const library = sendgrid.isConfigured() ? await EmailTemplateLibrary.loadTemplateByKey(proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery') : null;
+  const delivery = await deliveryEmailLibrary(proposalMode, updated);
+  const library = delivery.library;
   // The reviewed PDF decision, recorded on SendGrid AND SMTP-fallback previews
   // (the SMTP email has no note line, but the file rides along the same way): a
   // review or schedule without it means "no PDF" at send time.
@@ -1056,13 +1141,13 @@ async function buildEstimateSendPreview(estimate) {
     // schedule built from it). Present only when true, so a send with no PDF
     // keeps its review byte-identical to before; a review without it means "no
     // PDF" (sendEstimateNowInner).
-    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}) };
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}), ...(delivery.updated ? { updated: true } : {}) };
   } else if (smtpFallbackAllowed()) {
-    const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
+    const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode, updated });
     // The content hash is of the SMTP content alone (no note), so it is unchanged.
-    email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex'), ...(pdfCopy ? { pdfCopy: true } : {}) };
+    email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex'), ...(pdfCopy ? { pdfCopy: true } : {}), ...(updated ? { updated: true } : {}) };
   }
-  const messages = { sms: sms || null, email };
+  const messages = { sms: smsChoice.body || null, email, ...smsChoice.marker };
   const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
   const uncertain = (Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result);
   return {
@@ -1082,19 +1167,23 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null, average = null }) {
+// updated (GATE_ESTIMATE_UPDATED_WORDING): send the updated-estimate email (template estimate.updated_delivery, or the
+// SMTP copy that says "updated"). The caller sets it only when that template can send, or from the review.
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null, average = null, updated = false }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
+  const templateKey = deliveryTemplateKey(proposalMode, updated);
+  const isUpdated = templateKey === updatedWording.UPDATED_EMAIL_TEMPLATE_KEY;
   // The delivery PDF copy's note, fence and veto handling (estimate-email-pdf.js).
   const pdfPieces = emailPdfCopy().deliverySendPieces(pdf);
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
-    const content = estimateSmtpContent({ firstName, viewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`, priceLine, proposalMode });
+    const content = estimateSmtpContent({ firstName, viewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`, priceLine, proposalMode, updated: isUpdated });
     if (crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex') !== expectedContentHash) return { ok: false, error: 'The reviewed email content changed. Review the message again before sending.' };
   }
   if (provider === 'sendgrid') {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
-        templateKey: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery',
+        templateKey,
         ...(versionId ? { versionId } : {}),
         ...(expectedContentHash ? { expectedContentHash } : {}),
         to: estimate.customer_email,
@@ -1112,14 +1201,14 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         ...(estimateIds ? { estimateIds } : {}),
       });
       if (result.blocked) {
-        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: templateKey };
       }
-      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' , ...pdfPieces.resultExtras(result) };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: templateKey , ...pdfPieces.resultExtras(result) };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
       }
-      logger.warn(`[admin-estimates] estimate.delivery template unavailable; falling back to SMTP for estimate ${estimate.id}: ${err.message}`);
+      logger.warn(`[admin-estimates] ${templateKey} template unavailable; falling back to SMTP for estimate ${estimate.id}: ${err.message}`);
     }
   }
 
@@ -1146,7 +1235,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       pass: process.env.GOOGLE_SMTP_PASSWORD,
     },
   });
-  const { html, text } = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
+  const { html, text, subject: smtpSubject } = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode, updated: isUpdated });
   // Convert SendGrid-shaped attachments ({ content: base64, type }) to
   // nodemailer's shape ({ content: Buffer, contentType }) for the SMTP path.
   const smtpAttachments = (Array.isArray(attachments) ? attachments : []).map((a) => ({
@@ -1180,7 +1269,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
     to: estimate.customer_email,
-    subject: 'Your Waves Pest Control Estimate is Ready',
+    subject: isUpdated ? smtpSubject : 'Your Waves Pest Control Estimate is Ready',
     html,
     text,
     ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
@@ -2896,9 +2985,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // (deliveryClaimFresh in admin-estimate-persistence.js), so no marker
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
-    // GATE_ESTIMATE_MONTHLY_AVERAGE: the reviewed average copy must still be what this send would carry
-    // (a gate flip or a price edit since the review or schedule). Resolved BEFORE the claim transaction because
+    // Monthly average: the reviewed average copy must still be what this send would carry
+    // (a price edit since the review or schedule). Resolved BEFORE the claim transaction because
     // it reads billing state on other connections; a mismatch refuses the whole send below, before any channel.
+    const reviewedWordingStale = await reviewedUpdatedWordingStale(options.reviewedMessages, sendMethod);
     const reviewedAverageStale = sendMethod !== 'sms'
       && await require('../services/estimate-monthly-average').reviewedAverageStale(
         options.reviewedMessages,
@@ -2925,7 +3015,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // joining a group, since the review or schedule): never silently add or
       // drop the file. Reviews that carry no decision mean "no PDF" and are not
       // stale (codex #6343 r6).
-      if (reviewedAverageStale) return 'saved_offer_changed';
+      if (reviewedAverageStale || reviewedWordingStale) return 'saved_offer_changed';
       if (sendMethod !== 'sms' && emailPdfCopy().reviewedPdfDecisionStale(options.reviewedMessages, await emailPdfCopy().deliveryPdfCopyDecision(verdictRow, trx))) {
         return 'saved_offer_changed';
       }
@@ -3098,6 +3188,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // Commercial proposals rebuild their own totals line below (freshPriceLine).
   // The amount is the one the link shows (current membership), not the stored one.
   const priceLine = await currentQuoteMoneySummary(estimate);
+  // GATE_ESTIMATE_UPDATED_WORDING: a reviewed send delivers what was reviewed (its text body, and its email's
+  // `updated` flag picks the template the review rendered). An unreviewed send (auto-send, a schedule built without
+  // a review) decides here, from the row it delivers, before this delivery restamps the scope.
+  const updatedSend = options.reviewedMessages ? false : await updatedWordingFor(estimate, normalizeProposal(estimate).enabled);
 
   // Commercial proposal PDF — attached to the delivery email only when the
   // operator has authored a multi-building proposal (proposal.enabled). A
@@ -3131,13 +3225,24 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         channels.sms = { ok: false, error: nanpPhoneProblem(estimate.customer_phone) || `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
+          const smsContext = { workflow: 'admin_estimate_send', entity_type: 'estimate', entity_id: estimate.id };
+          const smsVars = { first_name: firstName, estimate_url: smsViewUrl };
+          // The estimate's own text: estimate_sent, or estimate_sent_move for an app-made move estimate (GATE_MOVING_AUTO_SEND).
           const smsTemplate = estimateSmsTemplate(estimate);
-          const currentSmsBody = await smsTemplatesRouter.getTemplate(smsTemplate.key, { first_name: firstName, estimate_url: smsViewUrl, ...smsTemplate.vars }, {
-            workflow: 'admin_estimate_send',
-            entity_type: 'estimate',
-            entity_id: estimate.id,
-          }, { noVariants: !!options.reviewedMessages });
-          if (!currentSmsBody) throw new Error(`SMS template ${smsTemplate.key} is missing or inactive`);
+          // The template this text uses must be on. A reviewed send delivers the reviewed body: a review of the
+          // estimate's own text needs that template on; an updated one had estimate_updated checked before the claim.
+          // An unreviewed update takes estimate_updated while it is on, else the estimate's own text
+          // (GATE_ESTIMATE_UPDATED_WORDING).
+          const reviewedUpdatedText = options.reviewedMessages?.smsTemplate === updatedWording.UPDATED_SMS_TEMPLATE_KEY;
+          const unreviewedSms = options.reviewedMessages ? null : await deliverySms(updatedSend, smsTemplate, smsVars, smsContext, { noVariants: false });
+          const currentSmsBody = reviewedUpdatedText ? null : (options.reviewedMessages
+            ? await smsTemplatesRouter.getTemplate(smsTemplate.key, { ...smsVars, ...smsTemplate.vars }, smsContext, { noVariants: true })
+            : unreviewedSms.body);
+          // The template that rendered this body: the provider's per-template kill switch (services/twilio.js
+          // isTemplateActive) reads it as the messageType, so each text is held to its own template's switch
+          // (estimate_updated, estimate_sent_move or estimate_sent), never to another template's.
+          const smsTemplateKey = reviewedUpdatedText ? updatedWording.UPDATED_SMS_TEMPLATE_KEY : (unreviewedSms?.key || smsTemplate.key);
+          if (!reviewedUpdatedText && !currentSmsBody) throw new Error(`SMS template ${smsTemplateKey} is missing or inactive`);
           const smsBody = options.reviewedMessages
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
@@ -3171,7 +3276,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // inside 8 AM to 8 PM ET (validators/send-window.js).
             ...(options.movingAutoSend === true ? { entryPoint: 'moving_auto_send' } : {}),
             metadata: {
-              original_message_type: 'estimate_sent',
+              original_message_type: smsTemplateKey,
             },
           });
           if (!result.sent) {
@@ -3273,11 +3378,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
-          // GATE_ESTIMATE_MONTHLY_AVERAGE: resolved from the row read just
+          // Monthly average: resolved from the row read just
           // before this send (freshEstimate), not the row the request started
           // with, so a price edit that landed during the send never ships a
           // stale average. The review preview resolves from the row it read.
-          // Null with the gate off or for a commercial proposal.
+          // Null for a commercial proposal.
           const averageService = require('../services/estimate-monthly-average');
           const average = proposalMode ? null : await averageService.emailAverageParts(freshEstimate);
           // The early check (before the claim) stops the text too; this one covers an edit that landed between
@@ -3286,6 +3391,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           if (averageService.averageDiffersFromReview(options.reviewedMessages, average)) {
             throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
           }
+          // The updated email: the reviewed choice, or for an unreviewed update the updated template when it can send
+          // (the SMTP copy always can). A proposal never takes it.
+          const emailUpdated = options.reviewedMessages
+            ? options.reviewedMessages.email?.updated === true
+            : (updatedSend && !proposalMode && (!sendgrid.isConfigured() || (await deliveryEmailLibrary(proposalMode, true)).updated));
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
@@ -3301,6 +3411,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             reviewedProvider: options.reviewedMessages?.email?.provider || null,
             onDispatch: () => { emailDispatchStarted = true; },
             estimateIds: deliveryEstimateIds,
+            updated: emailUpdated,
           });
           channels.email = result.ok
             ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }

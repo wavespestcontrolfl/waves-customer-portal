@@ -55,10 +55,13 @@ const DAILY_LIMIT_MESSAGE = { error: 'Daily limit reached — call (941) 297-574
 // { allowed } — false only when the gate is on (or the budget is failClosed)
 // and the day's shared count is over the cap, or when a failClosed budget's
 // counter is unavailable. Never throws.
-async function consumeSharedDailyCap({ bucket, envVar, defaultMax, failClosed = false }) {
+async function consumeSharedDailyCap({ bucket, envVar, defaultMax, failClosed = false, gate = null }) {
   if (!failClosed) {
     try {
-      if (!require('../config/feature-gates').publicLlmSharedCapLive()) return { allowed: true };
+      // `gate` lets a route with its own gate (portal chat, per customer) reuse
+      // this counter without riding on GATE_PUBLIC_LLM_SHARED_CAP.
+      const live = gate || require('../config/feature-gates').publicLlmSharedCapLive;
+      if (!live()) return { allowed: true };
     } catch (err) {
       warnOncePerMinute(err, bucket);
       return { allowed: true };

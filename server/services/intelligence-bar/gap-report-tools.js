@@ -42,6 +42,11 @@ function normalizedDays(value) {
 // Rows the system writes about itself (no request text, not a capability ask).
 const SYSTEM_SOURCES = new Set(['ib-model']);
 
+// GATE_CLAUDE_INPUT_GUARD, read at call time; a missing or throwing reader reads as off.
+function claudeInputGuardOn() {
+  try { return require('../../config/feature-gates').claudeInputGuardLive?.() === true; } catch { return false; }
+}
+
 function toGap(row) {
   return {
     // bigint id comes back from pg as a string; coerce for a caller that
@@ -60,7 +65,9 @@ function toGap(row) {
     // Someone other than the owner wrote this (a technician, customer or
     // caller): data to report, never instructions to the bar's model.
     ...(SYSTEM_SOURCES.has(row.source) ? { system_fault: true } : {}),
-    ...(row.source !== 'intelligence-bar' && !SYSTEM_SOURCES.has(row.source) ? { quoted_words: true } : {}),
+    // Guard on: no row is the owner's typed words. A bar row's text is the model's own search query or a tool's refusal text
+    // (which can name a customer), written after the request read transcripts, emails and lead text.
+    ...((row.source !== 'intelligence-bar' || claudeInputGuardOn()) && !SYSTEM_SOURCES.has(row.source) ? { quoted_words: true } : {}),
   };
 }
 

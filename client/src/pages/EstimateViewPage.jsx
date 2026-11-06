@@ -2391,7 +2391,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
   );
 }
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20, option A): the per-service
+// Monthly average (owner 2026-10-20, option A): the per-service
 // "$X a month" lines and the plan average for a multi-service plan, so the
 // customer can see the arithmetic. The per-application prices on the cards stay
 // the prices; this is an average of the year ("$X/mo" as THE price stays
@@ -5391,9 +5391,9 @@ export function ServiceSection({
   // a current monthly member whose accept preserves membership billing. Either
   // way the bundle card keeps its combined total (codex #3128 r6).
   billsMonthly = false,
-  // GATE_ESTIMATE_MONTHLY_AVERAGE: the "$X a month" line for this
+  // Monthly average: the "$X a month" line for this
   // service (and the one-time context sentence on a single-service page).
-  // Null with the gate off, so the card is unchanged.
+  // Null when the plan has no average, so the card is unchanged.
   monthlyAverageLine = null,
   monthlyAverageContext = null,
   waveGuardDiscountPct = null,
@@ -9380,14 +9380,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // billedPerApplication flags); absent → false → today's behavior.
   const billsMonthly = isCommercialEstimate || cta?.monthlyBilled === true;
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
-  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the monthly average beside
-  // the per-application prices. Server switch (absent with the gate off) AND an
-  // open, recurring, per-application plan: not commercial, not billed monthly,
+  // Monthly average (owner 2026-10-20): the monthly average beside
+  // the per-application prices, for an open, recurring, per-application plan: not commercial, not billed monthly,
   // not the annual-prepay choice, not a one-time pick. pageMonthlyAverage
   // returns null whenever the per-service averages cannot be made to add up to
   // the plan's own monthly, and the page then shows nothing new.
   const monthlyAverage = resolvePageMonthlyAverage({
-    data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
+    serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
     services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
   }, manualDiscountMonthlyAmount);
   // Application months: computed once, whenever the monthly average applies. When the plan
@@ -9428,7 +9427,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         : null
     );
     // Charges that sit beside the plan and never enter the monthly average
-    // (GATE_ESTIMATE_MONTHLY_AVERAGE): a setup / first-visit fee, or an ADDITIVE
+    // (monthly average): a setup / first-visit fee, or an ADDITIVE
     // one-time breakdown row (a flea treatment). When the estimate offers a
     // one-time option, the breakdown rows are the either/or alternative to the
     // plan, not an extra charge, so they do not count.
@@ -10163,7 +10162,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
-                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </>
           ) : null}
@@ -10562,7 +10560,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
-                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </div>
           ) : null

@@ -504,12 +504,13 @@ async function loadForecastInput({
   readStripeBalance = StripeBanking.getBalance,
 } = {}) {
   const d = windowFor(now);
-  const [cash, stripeBalance, payouts, settings, items] = await Promise.all([
+  const [cash, stripeBalance, payouts, settings, items, marks] = await Promise.all([
     readCash(readCashBalances),
     readStripe(readStripeBalance),
     readInTransit(database),
     inputs.getSettings(database),
     inputs.listItems(database),
+    inputs.listMarks(database),
   ]);
   const pool = poolFrom(cash);
   const [visitRows, sent, open, drafts, dues, prepaySalesUsd3m, bankLines, offFeed, payroll, overduePay, taxRows] = await Promise.all([
@@ -519,8 +520,13 @@ async function loadForecastInput({
     readDrafts(database),
     readDues(database, { today: d.today, to: d.windowEnd }),
     readPrepaySales(database, { from: engine.addDays(d.today, -91), to: d.yesterday }),
-    // 10 days either side so a transfer or card payment pair at the window's edge still matches.
-    readBankLines(database, { labels: [...pool.poolAccounts, ...pool.feedCards], from: engine.addDays(d.trailingFrom, -10), to: engine.addDays(d.trailingTo, 10) }),
+    // The repeating-bill finder's look-back (FINDER_DAYS) or the trailing window less 10 days, whichever is
+    // earlier; 10 days past the window so a transfer or card payment pair at its edge still matches.
+    readBankLines(database, {
+      labels: [...pool.poolAccounts, ...pool.feedCards],
+      from: [engine.addDays(d.trailingFrom, -10), engine.addDays(d.today, -engine.FINDER_DAYS)].sort()[0],
+      to: engine.addDays(d.trailingTo, 10),
+    }),
     readCardsOffFeed(database, { feedLabels: pool.feedCards, since: engine.addDays(d.today, -120) }),
     readPayroll(database, { from: engine.addDays(d.today, -35), to: d.windowEnd }),
     readOverduePaychecks(database, { today: d.today }),
@@ -561,6 +567,7 @@ async function loadForecastInput({
       .map((t) => ({ dueDay: t.due_day < d.today ? d.today : t.due_day, amountUsd: Math.max(0, usd(t.amount_due) - usd(t.amount_paid)) })),
     items,
     settings,
+    marks,
     missing: loaderFacts({ pool, visits, unbilled, drafts, taxRows, offFeed, stripeOk: stripeBalance.ok }),
   };
 }

@@ -266,7 +266,7 @@ execute the workflows they describe.
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
   "$X/yr") appear on any customer-facing estimate surface. Owner exception
-  2026-10-20 (`GATE_ESTIMATE_MONTHLY_AVERAGE`): the per-application price
+  2026-10-20 (always on since 2026-10-22): the per-application price
   stays the price; a smaller "$X a month" average (plus a plan average
   for 2+ services, = stored monthly total) may sit beneath it; "$X/mo" as
   the price stays banned. Exempt: prepay previews (12-month LIST

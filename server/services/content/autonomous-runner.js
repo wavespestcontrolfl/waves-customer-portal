@@ -4599,7 +4599,7 @@ class AutonomousRunner {
         }
       }
     }
-    return out;
+    return require('./agents/brief-driven-tools').stripCustomerWords(out);
   }
 
   async _publishAndDistribute(draft, brief, run, { humanApproved = false } = {}) {

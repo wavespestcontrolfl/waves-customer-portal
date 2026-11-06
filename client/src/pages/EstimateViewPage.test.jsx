@@ -2737,10 +2737,9 @@ describe('OneTimePriceCard fallback (pre-push P0 on #3521)', () => {
   });
 });
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the page prints "$X a
+// Monthly average (owner 2026-10-20): the page prints "$X a
 // month" under each per-application price, one plan line for several services,
-// and the context line once. /data carries monthlyAverageEnabled only with the
-// gate on; without it the page is as before.
+// and the context line once. /data needs no switch field.
 describe('monthly average beside per-application prices', () => {
   const cents = (text) => Math.round(parseFloat(text.match(/\$([\d.,]+)/)[1].replace(/,/g, '')) * 100);
   const base = {
@@ -2773,17 +2772,15 @@ describe('monthly average beside per-application prices', () => {
     }],
   });
   const stub = (payload) => vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => payload })));
-  const single = (enabled) => ({
+  const single = () => ({
     ...base,
-    ...(enabled ? { monthlyAverageEnabled: true } : {}),
     pricing: {
       services: [pestSection(94, 4, 31.33)], renderFlags: {}, waveGuardTier: 'Bronze', askChips: [],
       oneTimeBreakdown: { total: 0, items: [] }, defaultServiceMode: 'recurring',
     },
   });
-  const multi = (enabled) => ({
+  const multi = () => ({
     ...base,
-    ...(enabled ? { monthlyAverageEnabled: true } : {}),
     pricing: {
       services: [pestSection(90, 4, 30), lawnSection(56.4, 9, 42.3)],
       frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 72.3, annual: 867.6 }],
@@ -2795,8 +2792,8 @@ describe('monthly average beside per-application prices', () => {
     },
   });
 
-  it('single service, gate on: the per-application price stays the price, the average hangs under it', async () => {
-    stub(single(true));
+  it('single service: the per-application price stays the price, the average hangs under it', async () => {
+    stub(single());
     const { container } = render(<EstimateViewPage />);
     const line = await waitFor(() => {
       const el = container.querySelector('[data-monthly-average-line]');
@@ -2809,8 +2806,8 @@ describe('monthly average beside per-application prices', () => {
     expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
   });
 
-  it('multi service, gate on: service lines add up to the plan line, which equals the stored monthly total', async () => {
-    stub(multi(true));
+  it('multi service: service lines add up to the plan line, which equals the stored monthly total', async () => {
+    stub(multi());
     const { container } = render(<EstimateViewPage />);
     const summary = await waitFor(() => {
       const el = container.querySelector('[data-monthly-average-summary]');
@@ -2847,7 +2844,6 @@ describe('monthly average beside per-application prices', () => {
     };
     const payload = {
       ...base,
-      monthlyAverageEnabled: true,
       pricing: {
         services: [pestSection(115.2, 4, 38.4), mosquito],
         frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 113.1, annual: 1357.2 }],
@@ -2871,7 +2867,7 @@ describe('monthly average beside per-application prices', () => {
   });
 
   it('single service with a positive one-time fee: the context sentence says one-time charges are not in the average', async () => {
-    const payload = single(true);
+    const payload = single();
     payload.pricing.setupFee = { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true };
     payload.pricing.renderFlags = { showWaveGuardSetupFee: true };
     stub(payload);
@@ -2886,7 +2882,7 @@ describe('monthly average beside per-application prices', () => {
     const notice = 'One-time charges are not in the average.';
 
     it('single service: an additive row (flea) triggers it', async () => {
-      const payload = single(true);
+      const payload = single();
       payload.pricing.oneTimeBreakdown = { total: 150, items: [flea] };
       stub(payload);
       const { container } = render(<EstimateViewPage />);
@@ -2895,7 +2891,7 @@ describe('monthly average beside per-application prices', () => {
     });
 
     it('multi service summary: the same rule', async () => {
-      const payload = multi(true);
+      const payload = multi();
       payload.pricing.setupFee = null;
       payload.pricing.oneTimeBreakdown = { total: 150, items: [flea] };
       stub(payload);
@@ -2909,7 +2905,7 @@ describe('monthly average beside per-application prices', () => {
     });
 
     it('an either/or one-time option (showOneTimeOption) does not trigger it', async () => {
-      const payload = single(true);
+      const payload = single();
       payload.estimate.showOneTimeOption = true;
       payload.pricing.oneTimeBreakdown = { total: 250, items: [{ service: 'pest_control', label: 'One-Time Pest Control', amount: 250, kind: 'charge' }] };
       stub(payload);
@@ -2919,7 +2915,7 @@ describe('monthly average beside per-application prices', () => {
     });
 
     it('no one-time rows, no notice', async () => {
-      stub(single(true));
+      stub(single());
       const { container } = render(<EstimateViewPage />);
       await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
       expect(container.textContent).not.toContain(notice);
@@ -2928,7 +2924,7 @@ describe('monthly average beside per-application prices', () => {
 
   describe('plan credit comes from the SELECTED cadence combo', () => {
     const comboPayload = ({ comboCredit, comboSuppressed = false, baseCredit = null }) => {
-      const payload = multi(true);
+      const payload = multi();
       payload.pricing.frequencies = [{ key: 'quarterly', label: 'Quarterly', monthly: 72.3, annual: 867.6, ...(baseCredit ? { manualDiscount: baseCredit } : {}) }];
       payload.pricing.serviceCadenceCombos = [{
         selection: { pest_control: 'quarterly', lawn_care: 'standard' },
@@ -2962,17 +2958,8 @@ describe('monthly average beside per-application prices', () => {
     });
   });
 
-  it('gate off: no average line, no summary, no context sentence', async () => {
-    stub(multi(false));
-    const { container } = render(<EstimateViewPage />);
-    await screen.findAllByText('Pest Control');
-    expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
-    expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
-    expect(container.textContent).not.toMatch(/a month|Averaged over the year|Your plan averages/);
-  });
-
   it('a plan whose cards do not add up to the stored monthly shows no average', async () => {
-    const payload = multi(true);
+    const payload = multi();
     payload.pricing.frequencies = [{ key: 'quarterly', label: 'Quarterly', monthly: 99, annual: 1188 }];
     payload.pricing.combinedRecurring = { ...payload.pricing.combinedRecurring, monthlySubtotal: 99 };
     stub(payload);

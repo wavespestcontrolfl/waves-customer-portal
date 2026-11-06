@@ -29,7 +29,7 @@ const logger = require('./logger');
 const { bridgeLeadsFunnelStage } = require('./lead-funnel-bridge');
 const { DISPOSITIONS } = require('./estimate-disposition');
 const { leadNoResponseReasonLive } = require('../config/feature-gates');
-const { openChatScope, openRequestScope, openBookingScope } = require('./portal-inbox');
+const { openChatScope, openRequestScope, openBookingScope, openMessageScope } = require('./portal-inbox');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { personSentFilter } = require('./email/email-customer-link');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -179,13 +179,14 @@ function staleLeadScope(builder, { now, cutoff, excludeSoftDeleted = false }) {
     .modify((builder) => whereCustomerAskUnanswered(builder, { now }));
 }
 
-// Four NOT EXISTS clauses, all correlated on leads.customer_id:
+// Five NOT EXISTS clauses, all correlated on leads.customer_id:
 //  1. an open Portal chat hand-off, 2. an open customer service request,
 //  3. an open "Booking not finished" bell (they left the card step of an
-//     estimate our office sent): the Portal tab's own definitions
-//     (portal-inbox.js openChatScope / openRequestScope / openBookingScope),
-//     so "open" means the same thing there and here;
-//  4. an inbound text from the last UNANSWERED_TEXT_DAYS days that is not an
+//     estimate our office sent), 4. an unanswered message in their portal
+//     thread (GATE_PORTAL_MESSAGES): the Portal tab's own definitions
+//     (portal-inbox.js openChatScope / openRequestScope / openBookingScope /
+//     openMessageScope), so "open" means the same thing there and here;
+//  5. an inbound text from the last UNANSWERED_TEXT_DAYS days that is not an
 //     opt-out and has no person contact after it.
 function whereCustomerAskUnanswered(builder, { now }) {
   const since = new Date(now.getTime() - UNANSWERED_TEXT_DAYS * 24 * 60 * 60 * 1000);
@@ -201,6 +202,10 @@ function whereCustomerAskUnanswered(builder, { now }) {
     .whereNotExists(function () {
       openBookingScope(this.select(1).from('notifications as n'))
         .whereRaw("n.metadata->>'customerId' = leads.customer_id::text");
+    })
+    .whereNotExists(function () {
+      openMessageScope(this.select(1).from('conversations as cv'))
+        .whereRaw('cv.customer_id = leads.customer_id');
     })
     .whereNotExists(function () {
       this.select(1).from('sms_log as inb')
