@@ -112,16 +112,30 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       await bell('sms-unknown-sender', 'sms_reply', { payload: { threadId: null, twilioSid: 'SM-fixture' } });
       await bell('sandy-no-context', 'sandy_transfer_no_context', { callSid: 'CA-fixture' });
       await bell('payment-admin-only', 'payment_failed', { payload: { customerId: customer.b } });
+      // Alerts with no customer: the follow-up pager's list names several customers' promises; a promise to a
+      // caller with no record, or a text follow-up for an unknown sender.
+      await bell('missed-list', 'call_commitment_overdue', { dedupeKey: 'followup-sla-rolling:fixture', missed_commitment_ids: ['fixture-promise'] });
+      await bell('promise-unknown', 'call_commitment_overdue', { commitment_id: 'fixture-promise', customer_id: null });
+      await bell('followup-unknown', 'sms_operational_followup', { payload: { threadId: null } });
     });
 
-    test('gate on: a technician sees own-customer rows and customer-less rows, not another technician\'s customer', async () => {
+    // An alert with no customer is the office's (owner 2026-11-04): neither technician sees sandy-no-context,
+    // sms-unknown-sender, missed-list, promise-unknown or followup-unknown.
+    test('gate on: a technician sees only its own customers\' rows; a row with no customer is the office\'s', async () => {
       process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
       expect(await titles({ role: 'technician', technicianId: ids.techA })).toEqual([
-        'followup-own', 'reschedule-own', 'sandy-no-context', 'sms-own', 'sms-unknown-sender',
+        'followup-own', 'reschedule-own', 'sms-own',
       ]);
       expect(await titles({ role: 'technician', technicianId: ids.techB })).toEqual([
-        'followup-other', 'promise-other', 'reschedule-other', 'sandy-no-context', 'sms-other', 'sms-unknown-sender', 'report-other',
+        'followup-other', 'promise-other', 'reschedule-other', 'sms-other', 'report-other',
       ].sort());
+    });
+
+    test('gate on: a caller that names no technician still never gets an alert with no customer (key-only scope otherwise)', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      const seen = await titles({ role: 'technician' });
+      for (const hidden of ['missed-list', 'promise-unknown', 'followup-unknown', 'sandy-no-context', 'sms-unknown-sender']) expect(seen).not.toContain(hidden);
+      expect(seen).toEqual(expect.arrayContaining(['sms-other', 'promise-other']));
     });
 
     test('gate on: an admin sees every row', async () => {
@@ -132,7 +146,7 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
     test('gate off: a technician sees every tech-visible row, as before', async () => {
       delete process.env.GATE_TECH_LOGIN_PRIVACY;
       const seen = await titles({ role: 'technician', technicianId: ids.techA });
-      expect(seen).toEqual(expect.arrayContaining(['sms-other', 'reschedule-other', 'followup-other', 'promise-other', 'report-other']));
+      expect(seen).toEqual(expect.arrayContaining(['sms-other', 'reschedule-other', 'followup-other', 'promise-other', 'report-other', 'missed-list', 'promise-unknown', 'followup-unknown']));
       expect(seen).not.toContain('payment-admin-only');
     });
 
@@ -144,12 +158,24 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       const all = await total({ role: 'technician' }); // no technicianId: key-only scope
       expect(all).toBeGreaterThan(before);
       expect(await NotificationService.markReadAdmin(rows['sms-other'], tech)).toBe(false);
+      expect(await NotificationService.markReadAdmin(rows['missed-list'], tech)).toBe(false);
       expect(await NotificationService.markReadAdmin(rows['sms-own'], tech)).toBe(true);
       expect(await NotificationService.markAdminDone([rows['reschedule-other']], { by: ids.techA, ...tech })).toBe(0);
       expect(await NotificationService.markAdminDone([rows['reschedule-own']], { by: ids.techA, ...tech })).toBe(1);
       expect(await NotificationService.getAdminNotificationState(rows['sms-other'], tech)).toBeNull();
       const state = await NotificationService.getAdminNotificationState(rows['reschedule-own'], tech);
       expect(state).toMatchObject({ done: true });
+    });
+
+    test('gate on: needs-me gives a technician the bell\'s scope, the Activity-only overdue summary included', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      await bell('overdue-summary', 'call_commitment_overdue', { overdue_commitment_ids: ['fixture-promise'], feed: 'activity' });
+      const { listNeedsMe } = require('../services/needs-me');
+      const listed = async (opts) => (await listNeedsMe({ limit: 500, ...opts })).items.map((i) => i.id);
+      const seen = await listed({ role: 'technician', technicianId: ids.techA });
+      expect(seen).toEqual(expect.arrayContaining([rows['sms-own'], rows['followup-own']]));
+      for (const hidden of ['overdue-summary', 'missed-list', 'promise-unknown', 'followup-unknown', 'sandy-no-context', 'sms-other']) expect(seen).not.toContain(rows[hidden]);
+      expect(await listed({ role: 'admin' })).toEqual(expect.arrayContaining([rows['overdue-summary'], rows['missed-list'], rows['promise-unknown']]));
     });
   });
 

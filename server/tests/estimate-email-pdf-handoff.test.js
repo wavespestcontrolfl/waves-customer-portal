@@ -1,4 +1,4 @@
-// GATE_ESTIMATE_EMAIL_PDF, codex #6343 round 1: the permanent PDF copy needs
+// Estimate email PDF copy, codex #6343 round 1: the permanent PDF copy needs
 // (a) a final fence at the provider boundary, (b) a provider retry that
 // is out of scope (PDF rows are not on the retry rail), (c) no PDF note in admin test sends.
 jest.mock('../models/db', () => {
@@ -54,7 +54,7 @@ const readsRow = (...rows) => {
     return b;
   });
 };
-const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && (name === 'estimateEmailPdf' || name === 'estimateDocPdf'));
+const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && name === 'estimateDocPdf');
 
 describe('the provider-boundary fence on a PDF-bearing send', () => {
   let build;

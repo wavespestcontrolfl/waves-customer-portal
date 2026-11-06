@@ -113,7 +113,8 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect(back.read_at).toBeNull();
     // A put-back returns the row to the bell: the done fields clear with the read.
     expect([back.done_at, back.done_by, back.resolution]).toEqual([null, null, null]);
-    expect(back.metadata).toEqual({ dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id });
+    // The put-back also stamps the quiet fall-off's hold (it is news: 72 quiet hours from now).
+    expect(back.metadata).toEqual({ dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id, quietHoldFrom: expect.any(String) });
     const kept = await get(final.id);
     expect(kept.read_at).toEqual(old);
     expect(kept.done_at).toEqual(old);

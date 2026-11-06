@@ -15,6 +15,10 @@
  * holds {run, rule, at} so one run can be undone (server/scripts/
  * undo-admin-alert-retention.js).
  *
+ * A second policy, the quiet one (runAdminAlertQuietPolicy, below the undo section), shares this module's
+ * candidates, stamps, registry, writer and cursors: an open bell alert with no new activity for 72 hours is
+ * marked done every 10 minutes (own gate GATE_ALERT_QUIET_FALL_OFF, own cron, own cursor key).
+ *
  * Gate GATE_ALERT_RETENTION, three states (alertRetentionMode):
  *   unset / anything else = off, no query
  *   shadow                = judge every candidate and record what WOULD expire
@@ -29,8 +33,10 @@
  *     with bumpOnRefresh);
  *   - an ops-crons digest repeat stamps metadata.observedAt;
  *   - the Intelligence Bar model-failure bell stamps metadata.lastFailureAt on
- *     every failure.
- * Last activity = the latest of created_at and those three stamps (a stamp that
+ *     every failure;
+ *   - a Reopen of a done row stamps metadata.quietHoldFrom (notification-service
+ *     reopenAdminDone), so the row is not expired again by the next nightly sweep.
+ * Last activity = the latest of created_at and those four stamps (a stamp that
  * does not parse, or lies more than a day ahead, is ignored). NO signal exists
  * for a refresh that does not ring: a quiet refresh (ringOnRefresh false) or a
  * repeat with identical content writes nothing, and a plain deduped repeat
@@ -73,7 +79,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { alertRetentionMode } = require('../config/feature-gates');
+const { alertRetentionMode, alertQuietFallOffMode } = require('../config/feature-gates');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AGE_DAYS = 30;
@@ -87,11 +93,36 @@ const RING_RISK_CAP = 10;
 const LOCK_TIMEOUT_MS = 2000;
 const STATEMENT_TIMEOUT_MS = 20000;
 const FUTURE_SLACK_MS = DAY_MS;
-const ACTIVITY_STAMP_KEYS = ['rungAt', 'observedAt', 'lastFailureAt'];
+// The one list of what counts as a sign of life, for both policies (the nightly one and the quiet one below).
+// quietHoldFrom is a Reopen's stamp (notification-service QUIET_HOLD_KEY): a reopened row is news, so neither
+// policy may close it again at once.
+const ACTIVITY_STAMP_KEYS = ['rungAt', 'observedAt', 'lastFailureAt', 'quietHoldFrom'];
 const RESOLUTIONS = {
   age30: 'Expired: no action in 30 days',
   fyi7: 'FYI expired after 7 days',
 };
+const HOUR_MS = 60 * 60 * 1000;
+const QUIET_HOURS = 72;
+const QUIET_TICK_CAP = 200;
+// Must equal notification-service QUIET_FALL_OFF_DONE_BY (a test pins it).
+const QUIET_BY = 'quiet-72h';
+const QUIET_RESOLUTION = 'No new activity for 3 days';
+// Money alerts stay until a person marks them done (owner ruling 2026-11-05, "A": money alerts stay until
+// settled). Nothing here closes them on a settlement event: a dispute alert stays until a person marks it done, which
+// covers "until the dispute closes". One entry per line, so a category leaves the list with a one-line change.
+const KEEP_UNTIL_SETTLED_CATEGORIES = [
+  'billing', // money owed: invoice and billing alerts
+  'payment', // money owed: failed payments (payment_failed) and bill payment errors (bill_payment_error)
+  'dispute', // money at risk: a chargeback with an evidence deadline that Stripe's handler states in the alert
+  'refund', // money at risk: refunds on combined charges that need a manual reconcile (stripe-webhook.js)
+  'tax', // money owed: tax deadlines and filings
+  'payout', // money at risk: a Stripe payout that failed or was held
+  'payroll', // money at risk: a failed Mercury paycheck (payroll-mercury-alerts.js)
+  'llm_cost', // spend: an AI spend spike must reach the owner
+];
+// Who closes, and in what words, by rule: expireBatch is the one writer for both policies.
+const DONE_BY = { age30: RETENTION_BY, fyi7: RETENTION_BY, quiet72: QUIET_BY };
+const RESOLUTION_OF = { ...RESOLUTIONS, quiet72: QUIET_RESOLUTION };
 
 // Every emitter that passes dedupeOpenOnly: true, with the decision. `files` are
 // the sources the pin test reads; `prefixes` are dedupeKey prefixes.
@@ -125,6 +156,8 @@ const RERING = [
     decision: 'expire: only the owner sending the same idea again raises it again (an idea row is Activity-only, so the sweep never reaches it before Claude closes it)' },
   { emitter: 'dead-number', files: ['services/dead-number-alert.js'], prefixes: ['dead-number:'], kind: 'event',
     decision: 'expire: only a failed text (30003 or 30005) to the same number sent after the row\'s newest failure (metadata.lastFailureAt) raises it again; a retried or late callback does not' },
+  { emitter: 'claude-copy', files: ['services/admin-alert-copy-to-claude.js'], prefixes: ['claude-copy:'], kind: 'event',
+    decision: 'expire: only the owner sending a copy of the same alert again raises it again (a copy row is Activity-only, so the sweep never reaches it before Claude closes it)' },
   // The send key first: 'payroll-mercury-key' is a prefix of its key too, and the first match wins.
   { emitter: 'payroll-mercury-key-send', files: ['services/payroll-mercury-alerts.js'], prefixes: ['payroll-mercury-key-send'], kind: 'event',
     decision: 'expire: only a new Send to Mercury that Mercury refuses for the key raises it again' },
@@ -232,14 +265,11 @@ const FYI_SQL = "(metadata->>'severity' = 'fyi' OR (category = 'ops_digest' AND 
 // non-FYI Activity-feed row). Rows kept only for now (a recent stamp, a held
 // promise, a capped periodic row) are returned; the continuation cursor
 // (below) keeps them from starving the rows behind them.
-async function loadPage(conn, { now, cursor, limit, scope = null }) {
+// The one candidate page for both policies: open admin rows `narrow` keeps, oldest first, keyset on (created_at, id).
+function pageQuery(conn, { cursor, limit, scope = null }, narrow) {
   const { NOTIFICATION_VERSION_SQL } = require('./notification-service')._private;
-  const ageCutoff = new Date(now.getTime() - AGE_DAYS * DAY_MS);
-  const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
-  const query = conn('notifications')
-    .where({ recipient_type: 'admin' }).whereNull('done_at')
-    .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL))
-      .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL)));
+  const query = conn('notifications').where({ recipient_type: 'admin' }).whereNull('done_at');
+  narrow(query);
   if (cursor) query.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]);
   if (scope) scope(query);
   return query
@@ -247,6 +277,14 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
       conn.raw(`${NOTIFICATION_VERSION_SQL} AS version`), conn.raw('created_at::text AS created_at_cursor'))
     .orderByRaw('created_at ASC, id ASC')
     .limit(limit);
+}
+
+async function loadPage(conn, { now, cursor, limit, scope = null }) {
+  const ageCutoff = new Date(now.getTime() - AGE_DAYS * DAY_MS);
+  const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
+  return pageQuery(conn, { cursor, limit, scope }, (query) => query
+    .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL))
+      .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL))));
 }
 
 // Continuation cursor (the payment_failed_alert_sweep_cursor pattern): a run that
@@ -265,9 +303,9 @@ function parseCursor(value) {
   } catch { return null; }
 }
 
-async function readCursor(conn, mode) {
+async function readCursorAt(conn, key) {
   try {
-    const row = await conn('system_settings').where({ key: CURSOR_KEY(mode) }).first('value');
+    const row = await conn('system_settings').where({ key }).first('value');
     return row?.value ? parseCursor(row.value) : null;
   } catch (err) {
     logger.warn(`[alert-retention] cursor not read, starting from the oldest row: ${err.message}`);
@@ -275,15 +313,18 @@ async function readCursor(conn, mode) {
   }
 }
 
-async function writeCursor(conn, mode, cursor) {
+async function writeCursorAt(conn, key, cursor) {
   const value = cursor ? JSON.stringify({ at: cursor.at, id: cursor.id }) : null;
   try {
-    await conn('system_settings').insert({ key: CURSOR_KEY(mode), value, category: 'notifications' })
+    await conn('system_settings').insert({ key, value, category: 'notifications' })
       .onConflict('key').merge({ value, updated_at: conn.fn.now() });
   } catch (err) {
     logger.warn(`[alert-retention] cursor not saved, the next run starts from the oldest row: ${err.message}`);
   }
 }
+
+const readCursor = (conn, mode) => readCursorAt(conn, CURSOR_KEY(mode));
+const writeCursor = (conn, mode, cursor) => writeCursorAt(conn, CURSOR_KEY(mode), cursor);
 
 // Bell rows in the Activity feed that are older than 30 days and not FYI: not
 // touched (no bell to leave). Counted in shadow so the owner can see the pile.
@@ -312,7 +353,7 @@ async function expireBatch(conn, rows, rule, { runId, now }) {
         .where({ recipient_type: 'admin' }).whereNull('done_at')
         .whereRaw(`(id::text || ':' || ${NOTIFICATION_VERSION_SQL}) = ANY(?::text[])`, [rows.map((r) => `${r.id}:${r.version}`)])
         .update({
-          ...doneColumns({ by: RETENTION_BY, resolution: RESOLUTIONS[rule], at: now, conn: trx }),
+          ...doneColumns({ by: DONE_BY[rule], resolution: RESOLUTION_OF[rule], at: now, conn: trx }),
           metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]),
         });
     });
@@ -325,15 +366,12 @@ async function expireBatch(conn, rows, rule, { runId, now }) {
   }
 }
 
-async function recordSummary(summary) {
+async function recordAudit(action, summary) {
   const { recordAuditEvent } = require('./audit-log');
-  await recordAuditEvent({
-    actor_type: 'system',
-    action: summary.mode === 'true' ? 'admin_alert_retention.expire' : 'admin_alert_retention.shadow',
-    resource_type: 'notifications',
-    metadata: summary,
-  });
+  await recordAuditEvent({ actor_type: 'system', action, resource_type: 'notifications', metadata: summary });
 }
+
+const recordSummary = (summary) => recordAudit(summary.mode === 'true' ? 'admin_alert_retention.expire' : 'admin_alert_retention.shadow', summary);
 
 const bump = (map, key, by = 1) => { map[key] = (map[key] || 0) + by; };
 
@@ -521,12 +559,168 @@ async function undoRetentionRun({ run, execute = false, conn = db, now = new Dat
   return { run, found, reopened, execute: true };
 }
 
+// ---------------------------------------------------------------------------
+// Quiet policy: an open bell alert with no new activity for 72 hours is marked done (owner ruling 2026-11-04,
+// verbatim: "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF"; money alerts stay, owner ruling 2026-11-05 "A").
+// A second policy of this module, not a second sweep: it reads the same candidates (pageQuery), judges with the same
+// lastActivityMs and ringRiskFor, writes through the same expireBatch (version fence, lock and statement timeouts),
+// keeps its place with the same cursor helpers, and records and undoes like a retention run. What differs is the
+// cadence (its own cron, every 10 minutes, its own runExclusive key and gate GATE_ALERT_QUIET_FALL_OFF:
+// off / shadow / true) and the rules below.
+//   - Bell rows only (NOT_ACTIVITY_SQL), never Claude's queue (metadata.claudeQueue / sentToClaude), never a
+//     KEEP_UNTIL_SETTLED_CATEGORIES row.
+//   - Idle more than 72 hours by lastActivityMs: created_at, rungAt, observedAt, lastFailureAt and a Reopen's
+//     quietHoldFrom (ACTIVITY_STAMP_KEYS, one list for both policies; junk and impossible times are ignored, so a
+//     Reopen or a re-arm gives the row 72 more hours).
+//   - A row whose FIRST RERING match is 'periodic' is HELD, never closed: its emitter would raise a fresh row (and
+//     ring, or text) the minute it closed. The nightly policy caps those; this one cannot, it runs 144 times a day.
+//   - done_by 'quiet-72h' (reopenable and takeable: notification-service REOPENABLE_DONE_BY_SQL), resolution "No
+//     new activity for 3 days", read state untouched like every retention close. At most QUIET_TICK_CAP closes a
+//     tick. shadow counts and logs, writes nothing.
+//   - A run is recorded (audit_log admin_alert_quiet_fall_off.close, and the metadata.retention stamp on each row)
+//     only when it closed at least one row, so undo works by run or by time (reopenQuietFallOff) and the log does
+//     not fill with 144 empty runs a day.
+// ---------------------------------------------------------------------------
+
+
+const QUIET_CURSOR_KEY = (mode) => `admin_alert_quiet_cursor_${mode}`;
+
+// Candidates for the quiet policy: created_at alone is past the cutoff (last activity is never earlier than created_at).
+const quietNarrow = (cutoff) => (query) => query.where('created_at', '<', cutoff)
+  .whereRaw(NOT_ACTIVITY_SQL)
+  .whereRaw("metadata->'claudeQueue' IS NULL")
+  .whereRaw("metadata->'sentToClaude' IS NULL")
+  .whereRaw("NOT (COALESCE(category, '') = ANY(?::text[]))", [KEEP_UNTIL_SETTLED_CATEGORIES]);
+
+// Judge one page: tally the summary and return the rows to close. A row with a recent sign of life is kept for now,
+// a row of a periodic emitter is held.
+function planQuietPage(rows, now, summary) {
+  const nowMs = now.getTime();
+  const due = [];
+  for (const row of rows) {
+    if (nowMs - lastActivityMs(row, parseMeta(row.metadata), nowMs) <= QUIET_HOURS * HOUR_MS) summary.kept.refreshed += 1;
+    else if (ringRiskFor(row)?.kind === 'periodic') summary.held.periodic += 1;
+    else due.push(row);
+  }
+  due.forEach((row) => bump(summary.expire.byCategory, row.category || 'unknown'));
+  return due;
+}
+
+// `scope` (tests only): a function that narrows the candidate query to a fixture's rows.
+const defaultQuietIo = (conn, scope = null) => ({
+  page: ({ cutoff, ...args }) => pageQuery(conn, { ...args, scope }, quietNarrow(cutoff)),
+  expire: (rows, ctx) => expireBatch(conn, rows, 'quiet72', ctx),
+  loadCursor: (mode) => readCursorAt(conn, QUIET_CURSOR_KEY(mode)),
+  saveCursor: (mode, cursor) => writeCursorAt(conn, QUIET_CURSOR_KEY(mode), cursor),
+  record: (summary) => recordAudit('admin_alert_quiet_fall_off.close', summary),
+});
+
+// Per mode: what the pass does with the rows it judged due, its budget for them, and where it keeps its place. The
+// per-tick cap bounds real closes only: a preview (shadow, the dry-run script) counts every due row it reads, up to
+// maxBatches pages. Shadow writes nothing, not even a cursor: each shadow pass starts again at the oldest row.
+const NO_PLACE = { load: async () => null, save: async () => {} };
+const QUIET_MODES = {
+  shadow: { verb: 'would close', budget: () => Infinity, place: () => NO_PLACE, act: async (_io, due) => due.length },
+  true: {
+    verb: 'closed', budget: (cap) => cap, act: (io, due, ctx) => io.expire(due, ctx),
+    place: (io) => ({ load: (mode) => io.loadCursor(mode), save: (mode, cursor) => io.saveCursor(mode, cursor) }),
+  },
+};
+
+/**
+ * One pass of the quiet policy. Returns { skipped: true, reason: 'gate_off' } or the summary.
+ * `io` swaps the database edges (tests and the dry-run script).
+ */
+async function runAdminAlertQuietPolicy({
+  now = new Date(), mode = alertQuietFallOffMode(), conn = db, scope = null, io = defaultQuietIo(conn, scope),
+  batchSize = BATCH_SIZE, maxBatches = MAX_BATCHES, cap = QUIET_TICK_CAP,
+} = {}) {
+  const handler = QUIET_MODES[mode];
+  if (!handler) return { skipped: true, reason: 'gate_off' };
+  const runId = now.toISOString();
+  const budget = handler.budget(cap);
+  const summary = {
+    mode, runId, scanned: 0, written: 0, batches: 0,
+    expire: { total: 0, byCategory: {} }, kept: { refreshed: 0 }, held: { periodic: 0 },
+  };
+  const cutoff = new Date(now.getTime() - QUIET_HOURS * HOUR_MS);
+  const place = handler.place(io);
+  let cursor = await place.load(mode);
+  let reachedEnd = false;
+  for (let batch = 0; batch < maxBatches; batch += 1) {
+    // Never read more rows than the tick may still close, so every row read is judged.
+    const limit = Math.min(batchSize, budget - summary.written);
+    const rows = limit > 0 ? await io.page({ cutoff, cursor, limit }) : [];
+    reachedEnd = limit > 0 && rows.length < limit;
+    if (!rows.length) break;
+    summary.batches += 1;
+    summary.scanned += rows.length;
+    cursor = { at: rows[rows.length - 1].created_at_cursor, id: rows[rows.length - 1].id };
+    const due = planQuietPage(rows, now, summary);
+    summary.expire.total += due.length;
+    summary.written += await handler.act(io, due, { runId, now });
+    if (reachedEnd) break;
+  }
+  await place.save(mode, reachedEnd ? null : cursor);
+  // false: the pass stopped on its cap or its page limit with rows left, so a preview's count is a floor.
+  summary.complete = reachedEnd;
+  logger.info(`[alert-quiet-fall-off] ${mode}: scanned ${summary.scanned}, ${handler.verb} ${summary.written}, held ${summary.held.periodic}, kept ${summary.kept.refreshed}, by category ${JSON.stringify(summary.expire.byCategory)}, complete ${summary.complete}`);
+  if (mode === 'true' && summary.written > 0) await io.record(summary);
+  return summary;
+}
+
+/**
+ * Undo: reopens the rows the quiet policy closed since `since` (done_by 'quiet-72h' only: a row a later closer took, or
+ * a person reopened and closed again, no longer matches), or the rows of one run (`run`, the metadata.retention
+ * stamp). Dry run by default. Stamps quietHoldFrom like a Reopen, so the policy waits 72 more hours. Returns
+ * { found, reopened, byCategory }. Counts only; never reads or returns row text.
+ */
+async function reopenQuietFallOff({ since = null, run = null, apply = false, now = new Date(), conn = db, scope = null } = {}) {
+  const sinceDate = since == null ? null : new Date(since);
+  if (!run && !(sinceDate && Number.isFinite(sinceDate.getTime()))) throw new Error('reopenQuietFallOff needs a since time or a run');
+  const { DONE_CLEARED } = require('./notification-service')._private;
+  const match = (query) => {
+    query.where({ recipient_type: 'admin', done_by: QUIET_BY }).whereNotNull('done_at');
+    if (run) query.whereRaw(`metadata->'${STAMP_KEY}'->>'run' = ?`, [run]);
+    else query.where('done_at', '>=', sinceDate);
+    return scope ? scope(query) : query;
+  };
+  const rows = await match(conn('notifications')).select('category').count('* as n').groupBy('category');
+  const byCategory = Object.fromEntries(rows.map((r) => [r.category || 'unknown', Number(r.n)]));
+  const found = Object.values(byCategory).reduce((a, b) => a + b, 0);
+  if (!apply || !found) return { found, reopened: 0, byCategory };
+  const stamp = JSON.stringify({ quietHoldFrom: now.toISOString() });
+  let reopened = 0;
+  for (;;) {
+    const ids = await match(conn('notifications')).orderBy('id').limit(BATCH_SIZE).pluck('id');
+    if (!ids.length) break;
+    const n = await conn.transaction(async (trx) => {
+      await trx.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
+      return match(trx('notifications').whereIn('id', ids))
+        .update({ ...DONE_CLEARED, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) });
+    });
+    reopened += n;
+    if (!n) break;
+  }
+  return { found, reopened, byCategory };
+}
+
 module.exports = {
   runAdminAlertRetention,
+  runAdminAlertQuietPolicy,
+  reopenQuietFallOff,
+  defaultQuietIo,
+  planQuietPage,
+  KEEP_UNTIL_SETTLED_CATEGORIES,
+  QUIET_HOURS,
+  QUIET_RESOLUTION,
+  QUIET_BY,
+  QUIET_TICK_CAP,
   undoRetentionRun,
   listRetentionRuns,
   judgeRow,
   lastActivityMs,
+  ACTIVITY_STAMP_KEYS,
   ringRiskFor,
   expireBatch,
   loadPage,

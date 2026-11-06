@@ -5,6 +5,8 @@
 // new technician (second-tech plan, build 6; owner 2026-10-25: "move every pest,
 // rodent and mosquito series to the new tech the weekend before the first solo
 // week ... skip lawn, the termite-bait customers and any old grouped visits").
+// Owner 2026-10-30 (corrected the same day): "termite and WDO follow the territory",
+// so a --zips (territory) run also moves termite and WDO series; see --lines.
 //
 // WITHOUT `--execute` THIS SCRIPT ONLY PLANS. This file has no write path: every
 // query here is a SELECT inside a read-only transaction on a read-only session. The
@@ -15,7 +17,7 @@
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/second-tech-handover.js \
 //     --from <technician uuid> [--to <technician uuid>] [--start YYYY-MM-DD] \
-//     [--lines general,rodent,mosquito] [--zips 34293,34285] [--list] [--json]
+//     [--lines general,rodent,mosquito[,termite]] [--zips 34293,34285] [--weekend-move] [--list] [--json]
 //   node ops/agents/second-tech-handover.js --list-techs     # id, role, work days only
 //   ... --to <hire> --start <day> --lines <...> --execute --plan <PLAN ID from the dry run>
 //   ... --rollback <file the execute wrote> [--out-dir <dir>]
@@ -26,12 +28,29 @@
 //   --start  first solo day (default: next Monday, Eastern time). Visits dated
 //            before it are never touched.
 //   --lines  subset of general,rodent,mosquito (default all three). Lawn / tree &
-//            shrub and termite / WDO are never movable here.
+//            shrub are never movable here. `termite` (termite and WDO series: the
+//            catalog category first, then the name, serviceLineFor) is movable ONLY in a
+//            --zips run, where the default is general,rodent,mosquito,termite
+//            (services/territory.js TERRITORY_LINES). Naming termite without --zips is
+//            refused; a run without --zips is exactly what it was. Termite BAIT customers
+//            stay with the owner in every run (the owner has not ruled whether bait follows
+//            the territory; the dry run prints their count). One-time visits (a WDO
+//            inspection booked once) are not series and stay as booked: new bookings
+//            already route by territory.
+//            Capability: when --to's technician_capabilities row for a line that has a
+//            series to move reads Off (technician-capabilities stateOf), the run is refused
+//            (TARGET_CAPABILITY_OFF) before any write, for every line alike.
 //   --zips   territories by ZIP (owner 2026-10-30, build 6): only series whose service ZIP
 //            (the parent row's service_address_zip, else the customer's zip) is listed move,
 //            and --execute also makes --to the territory technician of every listed ZIP
 //            (territory_zips.technician_id), in the same transaction, with its own undo in
 //            the rollback file. Each ZIP must be a territory_zips row. Without --zips: today's run.
+//   --weekend-move  the DAY-60 second run (owner 2026-10-28, question 1 = C): the weekend customers the first run kept
+//            with the owner move to --to, and each of their live visits dated >= --start that sits on a --to day off
+//            moves to a --to work day on or after --start (±5 days, the flex tier's bound; the time and window stay), with no customer
+//            message. Needs --to; --start must be at least 4 days after today (START_TOO_SOON). The rules, the
+//            re-anchor of month-based series (so top-up keeps the new weekday) and the "kept whole" reasons are in
+//            the header of second-tech-handover-weekend.js. Without it, a weekend customer stays whole as before.
 //   --list   adds the series ids and visit ids that would change. Ids only.
 //   --json   machine-readable output (includes planId).
 //   --execute  write the plan the dry run printed (needs --to and --plan).
@@ -102,8 +121,9 @@
 //            counted its 80 weekend pest customers over. That customer stays WHOLE with
 //            --from: no series of theirs changes template and none of their visits move
 //            (skipped as off_day_customer). Any later visit on a target day off also stays
-//            with --from (stays_off_day). The second run must move those dates to a
-//            target work day as well, which this planner does not do.
+//            with --from (stays_off_day). The second run (--weekend-move, ~day 60) plans these
+//            customers instead of skipping them: it moves their dates to a target work day (header
+//            of second-tech-handover-weekend.js) and re-anchors their month-based series.
 //
 // Output carries counts, technician ids the operator typed, series ids and visit
 // ids only — no customer names, addresses, phones or emails are selected.
@@ -121,8 +141,12 @@ const { overlayRecurringTemplateOverrides } = require(path.join(root, 'services'
 const { isEnabled } = require(path.join(root, 'config', 'feature-gates'));
 const { whereVisitRowLive } = require(path.join(root, 'services', 'customer-lifecycle-guard'));
 const { normalizeZip } = require(path.join(root, 'services', 'territory'));
+const { stateOf } = require(path.join(root, 'services', 'technician-capabilities'));
+const weekendMoves = require('./second-tech-handover-weekend');
 
 const MOVABLE_LINES = ['general', 'rodent', 'mosquito'];
+// A --zips run also moves termite / WDO series (owner 2026-10-30); the same four lines as services/territory.js TERRITORY_LINES.
+const TERRITORY_MOVABLE_LINES = [...MOVABLE_LINES, 'termite'];
 const OPEN_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 const STOPPED_TRACK_STATES = ['en_route', 'on_property', 'complete', 'cancelled'];
 const ASSUMED_WORK_DAYS = [1, 2, 3, 4];
@@ -139,6 +163,16 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** A refusal the planner raises for a flag combination or target it cannot plan; the writer turns it into a Refusal. */
+class PlanError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'PlanError';
+    this.code = code;
+  }
+}
+
+const { changeLabel } = weekendMoves;
 const dayOf = (value) => (value == null ? null : String(value).slice(0, 10));
 // Owner 2026-10-28, question 1 = C (header, OFF DAY): a target-day-off visit within 13 weeks of --start keeps its customer
 // with --from, whole.
@@ -151,12 +185,15 @@ function defaultStart(now = new Date()) {
   return etDateString(addETDays(parseETDateTime(`${etWeekStart(now)}T12:00:00`), 7));
 }
 
-const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito] [--list] [--json]\n'
-  + '       node ops/agents/second-tech-handover.js --from <uuid> --to <uuid> [--start ...] [--lines ...] --execute --plan <PLAN ID> [--out-dir <dir>]\n'
+const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito[,termite: with --zips only]] [--zips 34293,34285] [--weekend-move] [--list] [--json]\n'
+  + '       node ops/agents/second-tech-handover.js --from <uuid> --to <uuid> [--start ...] [--lines ...] [--zips ...] --execute --plan <PLAN ID> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --rollback <rollback file> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --list-techs';
-const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json', '--execute': 'execute' };
+const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json', '--execute': 'execute', '--weekend-move': 'weekendMove' };
 const PLAN_ID = /^[0-9a-f]{64}$/;
+// termite / WDO are movable only by territory (owner 2026-10-30): no --zips, no termite.
+const LINES_NEED_ZIPS = '--lines termite needs --zips: termite and WDO series move only in a territory run';
+const linesNeedZips = (lines, zips) => !zips && Array.isArray(lines) && lines.includes('termite');
 const technicianFlag = (name) => (v) => (UUID.test(v)
   ? { [name]: v.toLowerCase() }
   : `--${name} needs a technician uuid, got ${JSON.stringify(v)}`);
@@ -167,8 +204,8 @@ const VALUE_FLAGS = {
   '--start': (v) => (validCalendarDate(v) ? { start: v } : `--start needs a real YYYY-MM-DD calendar date, got ${JSON.stringify(v)}`),
   '--lines': (v) => {
     const lines = [...new Set(v.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean))];
-    const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
-    return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn and termite are never handed over), got ${JSON.stringify(v)}`;
+    const ok = lines.length && lines.every((l) => TERRITORY_MOVABLE_LINES.includes(l));
+    return ok ? { lines, linesGiven: true } : `--lines takes ${TERRITORY_MOVABLE_LINES.join(', ')} only (lawn is never handed over; termite needs --zips), got ${JSON.stringify(v)}`;
   },
   '--zips': (v) => {
     const zips = [...new Set(v.split(',').map((x) => x.trim()).filter(Boolean))].sort();
@@ -184,15 +221,18 @@ const ARG_RULES = [
   [(a) => a.rollback && (a.execute || a.plan), '--rollback stands alone: do not combine it with --execute or --plan'],
   [(a) => !a.listTechs && !a.rollback && !a.from, '--from <technician uuid> is required (use --list-techs to see ids)'],
   [(a) => a.from && a.to && a.from === a.to, '--from and --to are the same technician'],
+  [(a) => linesNeedZips(a.lines, a.zips), LINES_NEED_ZIPS],
   [(a) => a.execute && !a.to, '--execute needs --to <the hire\'s technician uuid>'],
   [(a) => a.execute && !a.plan, '--execute needs --plan <PLAN ID>: run the dry run first and pass the id it printed'],
   [(a) => a.plan && !a.execute, '--plan only goes with --execute'],
+  [(a) => a.weekendMove && !a.to, '--weekend-move needs --to <the hire\'s technician uuid>'],
+  [(a) => a.weekendMove && a.rollback, '--rollback stands alone: do not combine it with --weekend-move'],
 ];
 
 function parseArgs(argv) {
   const args = {
-    from: null, to: null, start: null, lines: [...MOVABLE_LINES], zips: null, list: false, listTechs: false, json: false,
-    execute: false, plan: null, rollback: null, outDir: null,
+    from: null, to: null, start: null, lines: [...MOVABLE_LINES], linesGiven: false, zips: null, list: false, listTechs: false, json: false,
+    execute: false, weekendMove: false, plan: null, rollback: null, outDir: null,
   };
   const fail = (msg) => { console.error(msg); process.exit(2); };
   for (let i = 0; i < argv.length; i += 1) {
@@ -209,6 +249,8 @@ function parseArgs(argv) {
     if (typeof out === 'string') fail(out);
     Object.assign(args, out);
   }
+  // A territory run also hands over termite and WDO unless --lines narrows it.
+  if (args.zips && !args.linesGiven) args.lines = [...TERRITORY_MOVABLE_LINES];
   const broken = ARG_RULES.find(([bad]) => bad(args));
   if (broken) fail(broken[1]);
   return args;
@@ -267,16 +309,72 @@ function targetWorkDays(to) {
  * visit that moves (series id, visit id, visit date, from technician). Same plan, same
  * id; a different visit, date, target, start or line set gives a different one.
  */
-function planIdOf({ from, to, start, lines, retemplate, moves, zips = null, territory = [] }) {
+function planIdOf({ from, to, start, lines, retemplate, moves, zips = null, territory = [], anchors = [], weekendMove = false }) {
   const rows = [
     ...retemplate.map((seriesId) => [seriesId, '', '', from]),
-    ...moves.map((m) => [m.series_id, m.visit_id, m.date, from]),
+    // A date move names both dates; a technician-only move is the row it always was.
+    ...moves.map((m) => [m.series_id, m.visit_id, m.to_date ? `${m.date}>${m.to_date}` : m.date, from]),
+    // --weekend-move: each parent anchor stamp (new and old nth / weekday).
+    ...anchors.map((a) => [`anchor:${a.series_id}`, `${a.nth}/${a.weekday}`, `${a.old_nth}/${a.old_weekday}`, from]),
     // --zips: each listed ZIP and the territory technician it has now (a change since the dry run changes the id).
     ...territory.map((t) => [`zip:${t.zip}`, '', '', t.technician_id || '']),
   ].map((r) => JSON.stringify(r)).sort();
   // Without --zips the body is the same as before build 6, so a plan's id does not change.
-  const body = JSON.stringify({ v: 1, from, to: to || null, start, lines: [...lines].sort(), rows, ...(zips ? { zips: [...zips].sort() } : {}) });
+  const body = JSON.stringify({ v: 1, from, to: to || null, start, lines: [...lines].sort(), rows, ...(zips ? { zips: [...zips].sort() } : {}), ...(weekendMove ? { weekend: true } : {}) });
   return crypto.createHash('sha256').update(body).digest('hex');
+}
+
+// ---- --weekend-move helpers (pure) ------------------------------------------
+
+/** Why a series of a weekend customer stays with --from, or null (it is planned). Without --weekend-move it is the first run's rule. */
+function weekendStayReason({ weekendMove, weekend, customerId, isWeekend }) {
+  if (!isWeekend) return null;
+  if (!weekendMove) return 'off_day_customer';
+  const why = weekend && weekend.kept.get(customerId);
+  return why ? `weekend_kept_${why}` : null;
+}
+
+/**
+ * What one in-scope visit does: 'stay_off' (kept with --from on a day off), 'skip', 'tech' (technician only) or 'date'
+ * (new date + technician; its date is null in the first read, before the decisions).
+ */
+function visitKind({ weekendMove, weekend, v, outcome }) {
+  if (weekend && weekend.newDates.has(v.id)) return 'date';
+  if (outcome === 'off_day') return weekendMove && !weekend ? 'date' : 'stay_off';
+  return outcome === 'move' ? 'tech' : 'skip';
+}
+
+/** The weekend customers a first read found, with their in-scope series. */
+function noteCandidate(byCustomer, p, isCandidate) {
+  if (!isCandidate) return;
+  const entry = byCustomer.get(p.customer_id) || { customer_id: p.customer_id, series_ids: [] };
+  entry.series_ids.push(p.id);
+  byCustomer.set(p.customer_id, entry);
+}
+
+/** One visit the run changes: counted by weekday and line, listed in the moves (a date move also names the new day). */
+function recordMove(plan, p, v, kind, { weekend, dateMoveCustomers }) {
+  plan.would_change.visits += 1;
+  bump(plan.would_change.by_weekday, WEEKDAYS[dayOfWeekOfDate(v.scheduled_date)]);
+  const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
+  byLine.visits += 1;
+  plan.ids.visits.push(v.id);
+  const move = { series_id: p.id, visit_id: v.id, date: v.scheduled_date };
+  if (kind === 'date') {
+    move.to_date = weekend ? weekend.newDates.get(v.id) : null;
+    plan.date_changes.visits += 1;
+    dateMoveCustomers.add(p.customer_id);
+    if (move.to_date) bump(plan.date_changes.by_change, changeLabel(v.scheduled_date, move.to_date));
+  }
+  plan.ids.moves.push(move);
+}
+
+/** The decisions of the second read: the parent anchors to stamp and the customers kept whole (ids and reasons). */
+function recordWeekendDecisions(plan, weekend) {
+  if (!weekend) return;
+  plan.ids.anchors = weekend.anchors.filter((a) => plan.ids.retemplate.includes(a.series_id));
+  plan.ids.kept = [...weekend.kept].map(([customerId, reason]) => ({ customer_id: customerId, reason }))
+    .sort((a, b) => (a.customer_id < b.customer_id ? -1 : 1));
 }
 
 /**
@@ -300,7 +398,10 @@ const zipFields = (zips, territory) => (zips
   : { zips: null, territory: [] });
 const outsideZips = (zips) => (p) => Array.isArray(zips) && !zips.includes(p.zip);
 
-function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds, zips, territory }) {
+function buildPlan({
+  from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds, zips, territory,
+  weekendMove, weekend,
+}) {
   const bySeries = new Map();
   for (const v of visits) {
     if (!bySeries.has(v.series_id)) bySeries.set(v.series_id, []);
@@ -327,11 +428,14 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     off_day_policy: 'weekend_customer_stays_whole',
     off_day_customer_until: etDateString(addETDays(parseETDateTime(`${start}T12:00:00`), OFF_DAY_CUSTOMER_DAYS)),
     series: { active: active.length, on_from: 0, in_lines: 0, retemplate: 0, with_visits_to_move: 0 },
+    retemplate_by_line: {},
     would_change: { series: 0, visits: 0, by_line: {}, by_weekday: {} },
     stays_off_day: { visits: 0, by_weekday: {} },
+    weekend_move: weekendMove === true,
+    date_changes: { visits: 0, customers: 0, by_change: {} },
     skipped: {},
     notices_to_suppress: 0,
-    ids: { retemplate: [], series: [], visits: [], moves: [] },
+    ids: { retemplate: [], series: [], visits: [], moves: [], anchors: [], kept: [] },
   };
   const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set(), _customers: new Set() });
   // One visit stays: its series counts once per reason.
@@ -387,31 +491,33 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
   plan.series.in_lines = plan.series.on_from - lineSkipped;
   // Weekend customers (owner 2026-10-28, question 1 = C): an off-day visit inside the window, in any in-scope series.
   const weekendCustomers = new Set(inScope
-    .filter(({ outcomes }) => outcomes.some(({ v, outcome }) => outcome === 'off_day' && v.scheduled_date < plan.off_day_customer_until))
+    .filter(({ outcomes }) => outcomes.some(({ v, outcome }) => outcome === 'off_day' && (weekendMove || v.scheduled_date < plan.off_day_customer_until)))
     .map(({ p }) => p.customer_id));
+  // --weekend-move (the day-60 run): weekend customers are planned, not skipped. A first read (no decisions yet) lists them;
+  // the decisions then keep some customers whole and give every other change its new date (second-tech-handover-weekend.js).
+  const dateMoveCustomers = new Set();
+  const candidatesByCustomer = new Map();
 
   // Pass 2: every series of a weekend customer stays; any other series changes template and moves its work-day visits.
   for (const { p, candidates, outcomes } of inScope) {
-    if (weekendCustomers.has(p.customer_id)) { seriesSkip('off_day_customer', p, candidates); continue; }
+    const stayReason = weekendStayReason({ weekendMove, weekend, customerId: p.customer_id, isWeekend: weekendCustomers.has(p.customer_id) });
+    if (stayReason) { seriesSkip(stayReason, p, candidates); continue; }
+    noteCandidate(candidatesByCustomer, p, weekendMove && weekendCustomers.has(p.customer_id));
     plan.series.retemplate += 1;
+    bump(plan.retemplate_by_line, p.line);
     plan.ids.retemplate.push(p.id);
 
     let moved = 0;
     for (const { v, outcome } of outcomes) {
-      const dow = dayOfWeekOfDate(v.scheduled_date);
-      if (outcome === 'off_day') {
+      const kind = visitKind({ weekendMove, weekend, v, outcome });
+      if (kind === 'stay_off') {
         plan.stays_off_day.visits += 1;
-        bump(plan.stays_off_day.by_weekday, WEEKDAYS[dow]);
-      } else if (outcome !== 'move') {
+        bump(plan.stays_off_day.by_weekday, WEEKDAYS[dayOfWeekOfDate(v.scheduled_date)]);
+      } else if (kind === 'skip') {
         skip(outcome, p.id);
       } else {
         moved += 1;
-        plan.would_change.visits += 1;
-        bump(plan.would_change.by_weekday, WEEKDAYS[dow]);
-        const byLine = plan.would_change.by_line[p.line] || (plan.would_change.by_line[p.line] = { series: 0, visits: 0 });
-        byLine.visits += 1;
-        plan.ids.visits.push(v.id);
-        plan.ids.moves.push({ series_id: p.id, visit_id: v.id, date: v.scheduled_date });
+        recordMove(plan, p, v, kind, { weekend, dateMoveCustomers });
       }
     }
     if (moved) {
@@ -422,14 +528,18 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     }
   }
   for (const [reason, s] of Object.entries(plan.skipped)) {
-    if (CUSTOMER_SKIPS.has(reason)) s.customers = s._customers.size;
+    if (CUSTOMER_SKIPS.has(reason) || reason.startsWith('weekend_kept_')) s.customers = s._customers.size;
     delete s._ids;
     delete s._customers;
   }
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
+  plan.date_changes.customers = dateMoveCustomers.size;
+  plan.weekend_candidates = [...candidatesByCustomer.values()].sort((a, b) => (a.customer_id < b.customer_id ? -1 : 1));
+  recordWeekendDecisions(plan, weekend);
   plan.planId = planIdOf({
     from, to: to ? to.id : null, start, lines, retemplate: plan.ids.retemplate, moves: plan.ids.moves, zips: plan.zips, territory: plan.territory,
+    anchors: plan.ids.anchors, weekendMove,
   });
   plan.series_note = 'retemplate = series whose technician template moves (future visits seed to the target); with_visits_to_move = series with at least one visit that changes now';
   return plan;
@@ -450,9 +560,13 @@ async function loadParents(db) {
   const rows = await db('scheduled_services')
     .where({ is_recurring: true })
     .whereNull('recurring_parent_id')
+    // scheduled_date: a month walk with no stored recurring_weekday lands on the parent's own weekday (--weekend-move).
     .select('id', 'status', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'technician_id',
+      db.raw('scheduled_date::text as scheduled_date'),
       'recurring_technician_id', 'recurring_technician_override', 'recurring_ongoing',
       ...(cols.service_address_zip ? ['service_address_zip'] : []),
+      ...['recurring_pattern', 'recurring_nth', 'recurring_weekday', 'recurring_interval_days', 'skip_weekends', 'weekend_shift']
+        .filter((c) => cols[c]),
       ...(cols.recurring_template_overrides ? ['recurring_template_overrides'] : []));
   return rows.map((p) => overlayRecurringTemplateOverrides(p, cols));
 }
@@ -465,7 +579,11 @@ async function loadVisits(db, parentIds, today) {
       .where(function inSeries() { this.whereIn('ss.recurring_parent_id', ids).orWhereIn('ss.id', ids); })
       .where(function aheadOrWaiting() { this.where('ss.scheduled_date', '>=', today).orWhere('ss.status', 'rescheduled'); })
       .select('ss.id', 'ss.recurring_parent_id', db.raw('ss.scheduled_date::text as scheduled_date'), 'ss.status',
-        'ss.track_state', 'ss.technician_id', 'ss.visit_id', 'sv.status as group_status');
+        'ss.track_state', 'ss.technician_id', 'ss.visit_id', 'sv.status as group_status',
+        // --weekend-move: what the day-60 run needs to move a date (second-tech-handover-weekend.js).
+        'ss.is_recurring', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.customer_confirmed',
+        'ss.auto_dispatch_locked', 'ss.auto_dispatch_excluded', 'ss.date_exception', 'ss.recurring_dispatch_due_date', 'ss.auto_dispatch_change_count',
+        db.raw('ss.date_exception_cadence_date::text as date_exception_cadence_date'));
     for (const r of rows) out.push({ ...r, series_id: r.recurring_parent_id || r.id });
   }
   return out;
@@ -519,7 +637,50 @@ async function loadZipScope(db, zips, parents) {
   return territory;
 }
 
-async function planHandover(db, { from, to = null, start, today = etDateString(), lines = MOVABLE_LINES, zips }) {
+/**
+ * The lines among `lines` that `toId` is set Off for (technician_capabilities, the editor's Off state: a hard
+ * drop in auto-dispatch). One rule for every line; a line with no row reads 'unset' and is allowed.
+ */
+async function offCapabilityLines(db, toId, lines) {
+  if (!toId || !lines.length) return [];
+  const rows = await db('technician_capabilities').where({ technician_id: toId }).whereIn('service_category', lines)
+    .select('service_category', 'capability_level', 'active');
+  return rows.filter((r) => stateOf(r) === 'off').map((r) => r.service_category).sort();
+}
+
+/** Refuse when the hire is set to Off for a line that has a series to move (a line with nothing to move does not count). */
+async function assertTargetTakesLines(db, toId, plan) {
+  const off = await offCapabilityLines(db, toId, Object.keys(plan.retemplate_by_line));
+  if (off.length) {
+    throw new PlanError('TARGET_CAPABILITY_OFF', `--to is set to Off for ${off.join(', ')} (Team tab, capabilities): turn it on, or leave the line out with --lines. Nothing was changed.`);
+  }
+}
+
+/** Flag combinations the planner cannot plan, refused before any read. */
+function assertRunFlags({ lines, zips, weekendMove, start, today }) {
+  if (linesNeedZips(lines, zips)) throw new PlanError('LINES_NEED_ZIPS', LINES_NEED_ZIPS);
+  // The day-60 run moves dates, so every new date must clear the 73 h reminder freeze: --start is at least 4 days out.
+  if (weekendMove && start < etDateString(addETDays(parseETDateTime(`${today}T12:00:00`), weekendMoves.MIN_DAYS_OUT))) {
+    throw new PlanError('START_TOO_SOON', `--weekend-move moves dates: --start must be at least ${weekendMoves.MIN_DAYS_OUT} days after today (${today}), outside the 73 h freeze`);
+  }
+}
+
+/** buildPlan, and for --weekend-move the second pass that gives each weekend customer its new dates (or keeps it whole). */
+async function planWithWeekend(db, input, { weekendMove, now, lockNeighbors }) {
+  const plan = buildPlan({ ...input, weekendMove });
+  if (!weekendMove) return plan;
+  const toId = input.to.id;
+  const decisions = await weekendMoves.decideWeekend(db, {
+    plan, parents: input.parents, visits: input.visits, from: input.from, to: toId, workDays: targetWorkDays(input.to).workDays,
+    start: input.start, today: input.today, now, lockNeighbors,
+  });
+  return buildPlan({ ...input, weekendMove, weekend: decisions });
+}
+
+async function planHandover(db, {
+  from, to = null, start, today = etDateString(), lines = MOVABLE_LINES, zips, weekendMove, now, lockNeighbors,
+}) {
+  assertRunFlags({ lines, zips, weekendMove, start, today });
   const fromRow = await loadTechnician(db, from);
   if (!fromRow) throw new Error('--from: no technician row with that id');
   let toRow = null;
@@ -549,10 +710,12 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
   const visits = await loadVisits(db, parentIds, today);
   const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
   const baitAddonSeriesIds = await loadBaitAddonSeriesIds(db, parentIds);
-  const plan = buildPlan({
+  const plan = await planWithWeekend(db, {
     from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits,
     liveSeriesIds, baitAddonSeriesIds, zips, territory,
-  });
+  }, { weekendMove, now, lockNeighbors });
+  // A line the hire is Off for cannot be handed to the hire.
+  await assertTargetTakesLines(db, to, plan);
   // The overlay follows GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, as in the app.
   plan.template_overrides = isEnabled('editApptPriceServiceScope') ? 'applied' : 'not_applied_gate_off';
   return plan;
@@ -563,6 +726,18 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
 function weekdayLine(map) {
   const parts = WEEKDAY_ORDER.filter((d) => map[WEEKDAYS[d]]).map((d) => `${WEEKDAYS[d]} ${map[WEEKDAYS[d]]}`);
   return parts.length ? parts.join(', ') : 'none';
+}
+
+// --weekend-move: the date changes by weekday, the customers moved, the customers kept whole by reason. Counts only.
+function printWeekendMove(plan, out) {
+  const d = plan.date_changes;
+  out.push(`DAY-60 RUN (--weekend-move): ${d.visits} visits of ${d.customers} customers change day; ${plan.ids.anchors.length} series get a new parent anchor (recurring_nth / recurring_weekday)`);
+  for (const [label, n] of Object.entries(d.by_change).sort()) out.push(`  ${label}: ${n} visits`);
+  const kept = Object.entries(plan.skipped).filter(([reason]) => reason.startsWith('weekend_kept_'));
+  out.push(`Customers kept whole with the owner (no legal clean move): ${plan.ids.kept.length}`);
+  for (const [reason, s] of kept) out.push(`  ${reason.slice('weekend_kept_'.length)}: ${s.customers} customers, ${s.series} series, ${s.visits} visits`);
+  out.push('  (a date change sends no customer message; the reminder row follows the new date and the normal reminders run for it)');
+  out.push('');
 }
 
 function printPlan(plan, { list }) {
@@ -595,15 +770,18 @@ function printPlan(plan, { list }) {
   for (const [line, c] of Object.entries(plan.would_change.by_line)) out.push(`  ${line}: ${c.series} series, ${c.visits} visits`);
   out.push(`  by weekday: ${weekdayLine(plan.would_change.by_weekday)}`);
   out.push('');
+  if (plan.weekend_move) printWeekendMove(plan, out);
   const weekend = plan.skipped.off_day_customer;
   out.push(`Weekend customers kept whole with the owner until ${plan.off_day_customer_until} (question 1 = C): `
     + `${weekend ? `${weekend.customers} customers, ${weekend.series} series, ${weekend.visits} visits` : 'none'}`);
+  const bait = plan.skipped.termite_bait_customer;
+  out.push(`Termite bait customers kept with the owner in every run (owner has not ruled on bait): ${bait ? `${bait.customers} customers, ${bait.series} series, ${bait.visits} visits` : 'none'}`);
   out.push(`Later visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
   out.push(`  by weekday: ${weekdayLine(plan.stays_off_day.by_weekday)}`);
-  out.push('  (a second handover run moves these customers and their dates; it is not built here.)');
+  out.push('  (the second handover run, --weekend-move, moves these customers and their dates)');
   out.push('');
   out.push('Skipped, by reason (series / visits):');
-  const reasons = ['other_line', 'no_line', 'outside_zips', 'termite_bait_customer', 'off_day_customer', 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
+  const reasons = ['other_line', 'no_line', 'outside_zips', 'termite_bait_customer', 'off_day_customer', ...Object.keys(plan.skipped).filter((r) => r.startsWith('weekend_kept_')), 'grouped', 'not_open', 'before_start', 'other_technician', 'unassigned_left', 'bad_date'];
   let any = false;
   for (const r of reasons) {
     const s = plan.skipped[r];
@@ -623,6 +801,14 @@ function printPlan(plan, { list }) {
     for (const id of plan.ids.series) out.push(`    ${id}`);
     out.push(`Visit ids (${plan.ids.visits.length}):`);
     for (const id of plan.ids.visits) out.push(`  ${id}`);
+    if (plan.weekend_move) {
+      out.push(`Date changes (${plan.date_changes.visits}): visit id, old date -> new date`);
+      for (const m of plan.ids.moves.filter((x) => x.to_date)) out.push(`  ${m.visit_id}  ${m.date} -> ${m.to_date}`);
+      out.push(`Parent anchors (${plan.ids.anchors.length}): series id, nth / weekday (old -> new)`);
+      for (const a of plan.ids.anchors) out.push(`  ${a.series_id}  ${a.old_nth}/${a.old_weekday} -> ${a.nth}/${a.weekday}`);
+      out.push(`Customers kept whole (${plan.ids.kept.length}): customer id, reason`);
+      for (const k of plan.ids.kept) out.push(`  ${k.customer_id}  ${k.reason}`);
+    }
   }
   console.log(out.join('\n'));
 }
@@ -726,7 +912,7 @@ async function main() {
       }
       const today = etDateString();
       const start = args.start || defaultStart();
-      const plan = await planHandover(trx, { from: args.from, to: args.to, start, today, lines: args.lines, zips: args.zips });
+      const plan = await planHandover(trx, { from: args.from, to: args.to, start, today, lines: args.lines, zips: args.zips, weekendMove: args.weekendMove });
       if (args.json) {
         const copy = { ...plan, ids: args.list ? plan.ids : undefined };
         console.log(JSON.stringify(copy, null, 2));
@@ -738,7 +924,7 @@ async function main() {
 }
 
 module.exports = {
-  MOVABLE_LINES, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
+  assertRunFlags, MOVABLE_LINES, TERRITORY_MOVABLE_LINES, PlanError, offCapabilityLines, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
   parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
   buildPlan, planIdOf, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
 };

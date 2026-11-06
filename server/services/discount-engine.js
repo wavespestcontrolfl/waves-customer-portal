@@ -517,4 +517,7 @@ const DiscountEngine = {
 // `_internals` exports elsewhere in this codebase.
 DiscountEngine._internals = { applyDiscountArithmetic };
 
+// The multi-home rule itself, for readers (the Multi-Home Discount job) that must not restate it.
+DiscountEngine.customerMeetsMultiHome = customerMeetsMultiHome;
+
 module.exports = DiscountEngine;

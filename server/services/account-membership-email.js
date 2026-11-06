@@ -7,6 +7,7 @@ const { getPrimaryContact } = require('./customer-contact');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
 const { billingEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure } = require('./billing-email-sender');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
+const { qualifyNotificationLink } = require('./notification-links');
 const { formatDisplayDate } = require('../utils/date-only');
 const { propertyDisplayLabel } = require('../utils/property-display');
 const { currency } = require('./email-template');
@@ -935,6 +936,24 @@ async function sendMovingLink({ customerId, moveId, movingUrl, actorId = null, n
   });
 }
 
+// GATE_PORTAL_MESSAGES: the office's answer from the Portal tab, by email, for a customer whose Waves app
+// did not take the push (services/portal-messages.js). A staff member pressed Send on this exact text; the
+// email carries the whole answer and a link to the portal's Messages page. One email per answer.
+async function sendPortalReply({ customerId, messageId, body } = {}) {
+  if (!messageId || !clean(body)) return { ok: false, skipped: true, reason: 'missing_message' };
+  return sendTemplate({
+    customerId,
+    templateKey: 'portal_reply',
+    eventType: 'portal.reply',
+    // The link names the customer row the thread belongs to, so an account with several profiles opens this one
+    // (App.jsx resolveNotificationTarget reads the same hint a push link carries).
+    payload: { reply_body: clean(body), messages_url: buildPortalUrl(qualifyNotificationLink('/?tab=messages', customerId)) },
+    idempotencyKey: `portal_reply:${messageId}`,
+    categories: ['portal_reply'],
+    metadata: { portal_message_id: messageId },
+  });
+}
+
 // The rate-change sentence for every case EXCEPT "billed monthly before and
 // after": it never states a previous monthly figure, and off the monthly lane
 // it states no monthly figure at all. Shared by membership.updated and
@@ -1364,6 +1383,7 @@ module.exports = {
   buildMembershipStartedSection,
   sendAppIntro,
   sendMovingLink,
+  sendPortalReply,
   sendMembershipUpdated,
   sendMembershipTierUpgraded,
   sendMembershipRenewalReminder,

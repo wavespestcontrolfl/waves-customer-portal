@@ -713,7 +713,7 @@ async function sendDualChannel(est, { sms, email }) {
       return false;
     }
   }
-  // GATE_ESTIMATE_EMAIL_PDF: a PDF-bearing email row (has_attachments) is NOT on
+  // A PDF-bearing email row (has_attachments) is NOT on
   // the provider-retry rail, as on main. That is safe here because a failed email
   // leg (SendGrid rejection, a thrown error, or the PDF fence aborting before the
   // request) leaves `attempted` false when no text went out, so every caller
@@ -735,8 +735,8 @@ async function sendDualChannel(est, { sms, email }) {
     const idempotencyKey = `estimate_followup_${email.stage}:${est.id}`
       + (email.idempotencySuffix ? `:${email.idempotencySuffix}` : "");
     try {
-      // GATE_ESTIMATE_EMAIL_PDF: an allowlisted open-estimate email also
-      // carries the PDF copy plus its one-line note. Empty (gate off, other
+      // An allowlisted open-estimate email also
+      // carries the PDF copy plus its one-line note. Empty (document gate off, other
       // template, estimate no longer open, render failed) = sent as before.
       const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
       const result = await EmailTemplateLibrary.sendTemplate({

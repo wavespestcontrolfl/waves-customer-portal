@@ -140,6 +140,7 @@ describe('llm call-ledger coverage', () => {
 // `await ledgerCall('anthropic', model, () => client.messages.create({...}),
 // { laneId: '<lane>' })`, then set the lane's policy to ledger: 'call').
 const KNOWN_UNWRAPPED = {
+  'services/intelligence-bar/fast-mode.js': [3, 'the IB call helper: admin-intelligence-bar.js wraps createIbMessage in ledgerCall (ib_admin / ib_tech), which records usage.speed as served_model -fast'],
   'services/llm/call.js': [2, 'the adapter itself — records each leg through recordCall'],
   'services/voice-agent/relay-conversation.js': [1, 'voice_relay streams; each finished round is recorded through recordStreamedMessage'],
   'services/collections/outbound-voice/collections-conversation.js': [1, 'voice_relay_collections streams'],

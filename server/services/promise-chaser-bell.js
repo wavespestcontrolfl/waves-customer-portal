@@ -187,7 +187,7 @@ async function findPromiseToRing(call, now) {
   // An existing customer's callback isn't lost: the recording pipeline
   // links the call within minutes, and a later tick inside the 30-minute
   // window re-reads the link and rings then.
-  const rows = (await commitments.listOpenCommitments(db, {
+  const rows = commitments.pagerRows(await commitments.listOpenCommitments(db, {
     // kinds pushes the SLA_KINDS filter into the QUERY itself (Codex #5019
     // r10 P2): filtering client-side AFTER a LIMIT 200 page let a shared
     // or long-lived number's unrelated commitments (customer-party rows,

@@ -1036,6 +1036,40 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN at :05 — the Multi-Home Discount on every home of a family (owner ruling 2026-08-06; family PR 2,
+  // 2026-11-04). When a home's recurring plan starts with the Multi-Home Discount, the family's OTHER homes' upcoming
+  // visits get the same discount through the Edit appointment "This and following" helpers (services/
+  // multi-home-discount-apply.js). Dark behind GATE_MULTI_HOME_ALL_HOMES — read per tick BEFORE the cron lock, so off
+  // is silent and a flip needs no restart. It changes prices (the owner flips the gate); it sends a customer nothing.
+  cron.schedule('5,20,35,50 * * * *', async () => {
+    const gates = require('../config/feature-gates');
+    if (!(typeof gates.multiHomeAllHomesLive === 'function' && gates.multiHomeAllHomesLive())) return;
+    try {
+      await runExclusive('multi-home-all-homes', async () => {
+        const result = await require('./multi-home-discount-apply').runMultiHomeAllHomes();
+        if (result.applied || result.held || result.already || result.dropped) {
+          logger.info(`[multi-home-all-homes] tick: ${result.applied} applied, ${result.already} already discounted, ${result.held} held, ${result.dropped} no longer a target`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[multi-home-all-homes] tick failed: ${err.message}`);
+    }
+    // Family PR 3: right after the discount job, the "Your Multi-Home Discount is on" email (services/
+    // multi-home-discount-email.js). Dark behind GATE_MULTI_HOME_DISCOUNT_EMAIL, read per tick BEFORE the cron lock;
+    // off = no query, no send. Its own lock so a slow email run never holds up the next discount tick's lock.
+    if (!(typeof gates.multiHomeDiscountEmailLive === 'function' && gates.multiHomeDiscountEmailLive())) return;
+    try {
+      await runExclusive('multi-home-discount-email', async () => {
+        const result = await require('./multi-home-discount-email').runMultiHomeDiscountEmail();
+        if (result.sent || result.failed || result.blocked) {
+          logger.info(`[multi-home-discount-email] tick: ${result.sent} sent, ${result.deduped} already sent, ${result.blocked} blocked, ${result.failed} failed`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[multi-home-discount-email] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // HOURLY 8 AM-8 PM ET at :41 — the office check after a "report only, no
   // pay link" completion (owner 2026-10-30): a bill still open the next ET day
   // raises one needs-you Billing alert; a settled bill closes it. Gate read per
@@ -1222,6 +1256,19 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[messenger-inbox] poll failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 10 MIN — portal answers whose customer notice never finished (GATE_PORTAL_MESSAGES, read in the
+  // sweep): an answer a staff member sent is saved with its notice pending; a process that stopped before the
+  // push or email leaves it pending, and this finishes it (5 minutes to 1 day old). Exclusive; gate off = nothing.
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('portal-reply-notices', async () => {
+        await require('./portal-messages').resumePendingNotices();
+      });
+    } catch (err) {
+      logger.error(`[portal-messages] pending notice sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2006,6 +2053,26 @@ function initScheduledJobs() {
         require('./lead-repeat-sweep').runLeadRepeatSweep());
     } catch (err) {
       logger.error(`Lead repeat sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 10 MIN — Lead contact sync (owner 2026-11-04, "WHY ARENT THESE
+  // UPDATED ... FOR ALL COMUNNICATION LINES"). Moves a 'new' lead to
+  // 'contacted' once a person reached it after its first contact: a delivered
+  // staff text, a connected call, a staff email or a visit booked for its
+  // customer. Lead status and history only; sends nothing. Gate
+  // GATE_LEAD_STATUS_FOLLOWS_CONTACT (off / shadow / true) is read at call
+  // time and checked before the lock, so an off gate leaves no job_health row;
+  // kill = unset. runExclusive: an overlapping tick must not judge a stale read.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    if (require('../config/feature-gates').leadStatusFollowsContactMode() === 'off') return;
+    try {
+      await runExclusive('lead-contact-sync', () =>
+        require('./lead-contact-sync').runLeadContactSync());
+    } catch (err) {
+      logger.error(`Lead contact sync failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4134,6 +4201,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY SUN 4:55AM ET — Correction-loop fix proposals for email labels
+  // (owner 2026-11-04, email learning loop), same rules as calls. No model
+  // call. Gate read inside the job (GATE_EMAIL_RECLASSIFY_PICK).
+  // =========================================================================
+  cron.schedule('55 4 * * 0', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeEmailFixes } = require('./email/email-reclassify-incident');
+      await runExclusive('email-fix-proposals', () => proposeEmailFixes());
+    } catch (err) {
+      logger.error(`Email fix proposals failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
   // cell with enough DISTINCT confirmed ai_incidents on the live prompt
   // version gets one pending ai_fix_proposals row with its dev/holdout
@@ -4848,6 +4930,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // EVERY 10 MIN (offset 6) — Admin alert quiet fall-off (owner 2026-11-04: "IF THE ALERT IS OVER 3 DAYS
+  // OLD,, IT SHOULD FALL OFF"). Marks done, never deletes, an open admin bell row with no new activity for
+  // 72 hours (the quiet policy of admin-alert-retention.js). GATE_ALERT_QUIET_FALL_OFF: unset = no query, `shadow` = count and
+  // log, write nothing, `true` = close. runExclusive: a deploy overlap must not run two passes over the same page.
+  // =========================================================================
+  cron.schedule('6,16,26,36,46,56 * * * *', async () => {
+    try {
+      if (require('../config/feature-gates').alertQuietFallOffMode() === 'off') return;
+      await runExclusive('admin-alert-quiet-fall-off', () => require('./admin-alert-retention').runAdminAlertQuietPolicy());
+    } catch (err) {
+      logger.error(`[alert-quiet-fall-off] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 10 MIN (offset 8) — GATE_TECH_STAFF_GUARDS: close the "review this booking" notices whose
   // visit no longer waits for office review (confirmed, cancelled, skipped, completed or gone), by
   // whatever path. The emitter's own retire; gate off = no query. runExclusive: one sweep at a time.
@@ -5389,6 +5486,26 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Invoice not on Spark failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 7:43AM — Cash forecast low week (GATE_CASH_FORECAST; returns before any
+  // read when off). Owner 2026-11-04 D4 A: one standing owner-only bell when a week
+  // of the next 13 ends below the owner's floor on the expected line. Rings only when
+  // a low week first appears and closes itself when no week is below the floor.
+  // Reads the forecast (Plaid's free /accounts/get, Stripe's balance, the portal's
+  // own data); sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('43 7 * * *', async () => {
+    if (!require('../config/feature-gates').cashForecastLive()) return;
+    try {
+      await runExclusive('cash-forecast-low-week', async () => {
+        const result = await require('./cash-forecast/low-week-bell').runCashForecastLowWeek();
+        logger.info(`Cash forecast low week: ${result.count ?? 0} weeks below the floor (${result.outcome || result.skipped}${result.reason ? `: ${result.reason}` : ''})`);
+      });
+    } catch (err) {
+      logger.error(`Cash forecast low week failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -9352,6 +9469,43 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[moving-pause] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — The app-made new-home estimate (owner 2026-11-04 option A):
+  // a submitted in-area move with no estimate gets the office's own estimate,
+  // priced by the server, once, as a draft; a move the app cannot price rings
+  // the office. Gate read per tick (GATE_MOVING_AUTO_ESTIMATE).
+  // =========================================================================
+  cron.schedule('3,18,33,48 * * * *', async () => {
+    if (!require('../config/feature-gates').movingAutoEstimateLive()) return;
+    try {
+      await runExclusive('moving-auto-estimate', async () => {
+        const result = await require('./moving-auto-estimate').runMoveAutoEstimateJob();
+        if (result.drafted || result.office || result.failed) logger.info(`[moving-auto-estimate] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-auto-estimate] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Apply on accept (owner 2026-11-04 option A): a move whose
+  // new-home estimate the customer accepted is applied through Apply move's
+  // own preview and confirm, with no office click; a refusal rings the office
+  // once. Gate read per tick (GATE_MOVING_AUTO_APPLY), so a flip needs no restart.
+  // =========================================================================
+  // Off the quarter hours the other 15-minute jobs share.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').movingAutoApplyLive()) return;
+    try {
+      await runExclusive('moving-auto-apply', async () => {
+        const result = await require('./customer-moves').autoApplyAcceptedMoves();
+        if (result.applied || result.office || result.failed) logger.info(`[moving-auto-apply] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-auto-apply] run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

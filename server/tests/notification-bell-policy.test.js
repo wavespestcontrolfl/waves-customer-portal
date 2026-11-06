@@ -915,7 +915,7 @@ describe('voicemail supersedes a missed-call bell for the same call (hook P1)', 
     expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
     // done_by names the latest closer (a system close owns a person-done row: no reopen).
     expect(patch.done_by).toBe('supersede');
-    expect(patch.resolution.sql).toBe('COALESCE(resolution, ?)');
+    expect(patch.resolution.sql).toBe("CASE WHEN done_by = 'quiet-72h' THEN ?::text ELSE COALESCE(resolution, ?::text) END");
     // An unread row is read at the done instant; a person's own read stands.
     expect(patch.read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');
     expect(patch.read_at.bindings).toEqual(patch.done_at.bindings);

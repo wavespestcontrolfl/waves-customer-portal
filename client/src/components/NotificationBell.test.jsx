@@ -1847,6 +1847,138 @@ describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', 
   });
 });
 
+describe('NotificationBell admin "Send a copy to Claude (read-only)" (GATE_ALERT_SEND_TO_CLAUDE_COPY)', () => {
+  const AT = '2026-11-04T15:00:00.000Z';
+  const COPY_ID = 'copy-1';
+  const rows = () => ([
+    // Step 1 refuses this one (customer contact): the server marks it for a copy.
+    { id: 'c1', category: 'inbound_sms', title: 'Text from a fixture sender', body: 'A fixture message.',
+      sendCopyToClaude: true, version: 'a'.repeat(32), created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
+    { id: 'c2', category: 'system', title: 'Inventory sync is behind', body: 'The sync has not run today.', detail: 'Last run was yesterday.',
+      sendToClaude: true, version: 'b'.repeat(32), created_at: new Date().toISOString(), read_at: null, link: '/admin/inventory' },
+    // A row marked both: step 1 wins, the copy button never shows.
+    { id: 'c3', category: 'system', title: 'Marked for both', body: 'Both marks.', detail: 'More.',
+      sendToClaude: true, sendCopyToClaude: true, version: 'c'.repeat(32), created_at: new Date().toISOString(), read_at: null, link: '/admin/system' },
+    { id: 'c4', category: 'system', title: 'Backup check passed', body: 'All good.', version: 'd'.repeat(32),
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/system' },
+  ]);
+  const setup = ({ send = () => jsonResponse({ sent: true, id: COPY_ID, at: AT, message: 'Copy sent to Claude.' }), cancel = () => jsonResponse({ cancelled: true }) } = {}) => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 4 });
+      if (String(url).includes('/cancel-copy')) return cancel();
+      if (String(url).includes('/send-copy-to-claude')) return send();
+      return jsonResponse({ notifications: rows() });
+    });
+  };
+  const open = () => fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+  const sendCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/send-copy-to-claude'));
+  const cancelCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/cancel-copy'));
+  const listCalls = () => global.fetch.mock.calls.filter(([url]) => /\/admin\/notifications\?/.test(String(url)));
+  const COPY = 'Send a copy to Claude (read-only)';
+  const openCopyPanel = async () => fireEvent.click(await screen.findByRole('button', { name: COPY }));
+
+  it('shows the copy button only on a row marked sendCopyToClaude that step 1 did not mark; step 1 keeps its own button', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    expect(await screen.findAllByRole('button', { name: COPY })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Send to Claude' })).toHaveLength(2);
+  });
+
+  it('a tap opens the same note panel with the read-only hint; Cancel sends nothing', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    expect(screen.getByLabelText('Note for Claude (optional)')).toBeInTheDocument();
+    expect(screen.getByText(/Your alert stays in your bell\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('Note for Claude (optional)')).toBeNull();
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it('Send posts the version and note to the copy route; the alert STAYS in the list and Undo shows', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.change(screen.getByLabelText('Note for Claude (optional)'), { target: { value: '  Read the thread  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText(/Copy sent to Claude\./)).toBeInTheDocument();
+    expect(sendCalls()).toHaveLength(1);
+    expect(sendCalls()[0][0]).toContain('/admin/notifications/c1/send-copy-to-claude');
+    expect(sendCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ version: 'a'.repeat(32), note: 'Read the thread' }) }));
+    expect(screen.getByText('Text from a fixture sender')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
+  });
+
+  it('Undo posts the COPY\'s id and the send\'s time, reads the list again and says the copy is cancelled', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    const undo = await screen.findByRole('button', { name: 'Undo' });
+    const before = listCalls().length;
+    fireEvent.click(undo);
+    expect(await screen.findByText('Copy cancelled.')).toBeInTheDocument();
+    expect(cancelCalls()).toHaveLength(1);
+    expect(cancelCalls()[0][0]).toContain(`/admin/notifications/${COPY_ID}/cancel-copy`);
+    expect(cancelCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ at: AT }) }));
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+  });
+
+  it('Undo after Claude started says so; another undo failure says it stays with Claude', async () => {
+    setup({ cancel: () => ({ ok: false, status: 409, json: async () => ({ error: 'started' }) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Claude already started on it.')).toBeInTheDocument();
+    cleanup();
+    setup({ cancel: () => ({ ok: false, status: 500, json: async () => ({}) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText("Couldn't undo. It stays with Claude.")).toBeInTheDocument();
+  });
+
+  it('a copy already with Claude says so and offers no Undo', async () => {
+    setup({ send: () => jsonResponse({ duplicate: true, id: COPY_ID }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('A copy of this alert is already with Claude.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+    expect(screen.getByText('Text from a fixture sender')).toBeInTheDocument();
+  });
+
+  it('a changed alert re-reads the list with a note; any other failure keeps the panel with an error', async () => {
+    setup({ send: () => ({ ok: false, status: 409, json: async () => ({ error: 'changed' }) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    const before = listCalls().length;
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('That alert changed \u2014 the list was refreshed.')).toBeInTheDocument();
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
+    cleanup();
+    setup({ send: () => ({ ok: false, status: 500, json: async () => ({}) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.change(screen.getByLabelText('Note for Claude (optional)'), { target: { value: 'keep me' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText("Couldn't send it. Try again.")).toBeInTheDocument();
+    expect(screen.getByLabelText('Note for Claude (optional)')).toHaveValue('keep me');
+  });
+});
+
 // Owner 2026-11-04: "for voicemails, can we have a button where we can click on the voicemail and listen to it
 // within the admin section". The voicemail row plays its call's recording in the bell (AuthenticatedCallAudio).
 describe('NotificationBell voicemail Listen', () => {

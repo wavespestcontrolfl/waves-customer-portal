@@ -1,0 +1,443 @@
+/**
+ * The quiet policy of admin-alert-retention.js against live Postgres: what falls off, what stays, the gate states,
+ * the fenced write, Reopen and its 72-hour hold (also across a concurrent quiet refresh), a ring bringing a fallen-off
+ * alert back, both policies together, the relevance sweep and the undo function. Synthetic data only; every fixture row carries the title
+ * below and the pass is scoped to it, so it never touches another suite's rows.
+ */
+const SKIP = !process.env.DATABASE_URL;
+const maybeDescribe = SKIP ? describe.skip : describe;
+
+const HOUR = 60 * 60 * 1000;
+const TITLE = 'Quiet fall-off fixture alert';
+
+maybeDescribe('admin alert quiet policy (live Postgres)', () => {
+  let db;
+  let retention;
+  let NotificationService;
+  const made = [];
+  const fixtures = { customers: [], scheduled_services: [] };
+  const now = new Date();
+  const ago = (hours, from = now) => new Date(from.getTime() - hours * HOUR);
+  const scope = (q) => q.where('title', TITLE);
+  const runIds = [];
+
+  beforeAll(() => {
+    db = require('../models/db');
+    retention = require('../services/admin-alert-retention');
+    NotificationService = require('../services/notification-service');
+  });
+  afterAll(async () => {
+    await db('notifications').where({ title: TITLE }).del();
+    await clearCursors();
+    if (runIds.length) await db('audit_log').whereRaw("metadata->>'runId' = ANY(?::text[])", [runIds]).del();
+    for (const table of ['scheduled_services', 'customers']) {
+      if (fixtures[table].length) await db(table).whereIn('id', fixtures[table]).del();
+    }
+    await db.destroy();
+  });
+  const clearCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_shadow', 'admin_alert_retention_cursor_true', 'admin_alert_quiet_cursor_shadow', 'admin_alert_quiet_cursor_true']).del();
+  beforeEach(async () => { await db('notifications').where({ title: TITLE }).del(); await clearCursors(); });
+
+  const bell = async (row) => {
+    const [r] = await db('notifications').insert({
+      recipient_type: 'admin', category: 'alert', title: TITLE, body: 'Fixture body.', created_at: ago(100), ...row,
+      metadata: JSON.stringify(row.metadata || {}),
+    }).returning('*');
+    made.push(r.id);
+    return r;
+  };
+  const get = (id) => db('notifications').where({ id }).first();
+  const meta = (r) => (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata);
+  const run = (mode, extra = {}) => {
+    runIds.push((extra.now || now).toISOString());
+    return retention.runAdminAlertQuietPolicy({ now, mode, scope, ...extra });
+  };
+
+  test('a quiet row closes: who, why; read state untouched; nothing deleted', async () => {
+    const quiet = await bell({});
+    const out = await run('true');
+    expect(out).toMatchObject({ written: 1 });
+    const row = await get(quiet.id);
+    expect([row.done_by, row.resolution, row.done_at.getTime()]).toEqual(['quiet-72h', 'No new activity for 3 days', now.getTime()]);
+    expect(row.read_at).toBeNull();
+    expect(meta(row).retention).toMatchObject({ run: now.toISOString(), rule: 'quiet72' });
+  });
+
+  test('a person\'s earlier read stands', async () => {
+    const readAt = ago(90);
+    const read = await bell({ read_at: readAt });
+    await run('true');
+    expect((await get(read.id)).read_at.getTime()).toBe(readAt.getTime());
+  });
+
+  test('an ISO-shaped impossible time in a stamp is ignored: the tick does not throw and the row is judged by its other stamps', async () => {
+    const BAD = '2026-13-99T15:00:00Z';
+    const badRung = await bell({ metadata: { rungAt: BAD } });
+    const badRungFresh = await bell({ metadata: { rungAt: BAD, observedAt: ago(10).toISOString() } });
+    const badHold = await bell({ metadata: { quietHoldFrom: BAD } });
+    const badHoldFresh = await bell({ metadata: { quietHoldFrom: BAD, lastFailureAt: ago(10).toISOString() } });
+    const out = await run('true');
+    expect(out.written).toBe(2);
+    for (const r of [badRung, badHold]) expect((await get(r.id)).done_by).toBe('quiet-72h');
+    for (const r of [badRungFresh, badHoldFresh]) expect((await get(r.id)).done_at).toBeNull();
+    // 'now' and 'infinity' parse in Postgres but are not stamps this code writes: they never keep a row alive.
+    const words = await bell({ metadata: { rungAt: 'now', observedAt: 'infinity' } });
+    expect((await run('true')).written).toBe(1);
+    expect((await get(words.id)).done_by).toBe('quiet-72h');
+  });
+
+  test('a recently rung row, a recently bumped created_at, a fresh observedAt and a fresh lastFailureAt stay', async () => {
+    const rung = await bell({ metadata: { rungAt: ago(10).toISOString() } });
+    const bumped = await bell({ created_at: ago(10) });
+    const observed = await bell({ metadata: { observedAt: ago(10).toISOString() } });
+    const failed = await bell({ metadata: { lastFailureAt: ago(10).toISOString() } });
+    const justUnder = await bell({ metadata: { rungAt: ago(71.9).toISOString() } });
+    expect((await run('true')).written).toBe(0);
+    for (const r of [rung, bumped, observed, failed, justUnder]) expect((await get(r.id)).done_at).toBeNull();
+  });
+
+  test('an old rungAt does not keep a row; junk and far-future stamps are ignored and never throw', async () => {
+    const oldRung = await bell({ metadata: { rungAt: ago(80).toISOString() } });
+    const junk = await bell({ metadata: { rungAt: 'not a time', observedAt: '2026-13-99', lastFailureAt: 12 } });
+    const future = await bell({ metadata: { rungAt: new Date(now.getTime() + 400 * HOUR).toISOString() } });
+    expect((await run('true')).written).toBe(3);
+    for (const r of [oldRung, junk, future]) expect((await get(r.id)).done_by).toBe('quiet-72h');
+  });
+
+  test('an Activity-only row and a Claude-queue row are untouched', async () => {
+    const activity = await bell({ metadata: { feed: 'activity' } });
+    const queued = await bell({ metadata: { claudeQueue: 'idea', who: 'claude', feed: 'activity' } });
+    const sentOnly = await bell({ metadata: { sentToClaude: { at: ago(90).toISOString() } } });
+    expect((await run('true')).written).toBe(0);
+    for (const r of [activity, queued, sentOnly]) expect((await get(r.id)).done_at).toBeNull();
+  });
+
+  test('every money category stays open after 4 quiet days while a system row closes in the same pass', async () => {
+    const kept = {};
+    for (const category of retention.KEEP_UNTIL_SETTLED_CATEGORIES) kept[category] = await bell({ category });
+    const system = await bell({ category: 'system' });
+    expect(Object.keys(kept)).toEqual(['billing', 'payment', 'dispute', 'refund', 'tax', 'payout', 'payroll', 'llm_cost']);
+    expect((await run('true')).written).toBe(1);
+    for (const [category, row] of Object.entries(kept)) expect([category, (await get(row.id)).done_at]).toEqual([category, null]);
+    expect((await get(system.id)).done_by).toBe('quiet-72h');
+  });
+
+  test('billing and payment alerts stay until settled; another category falls', async () => {
+    const billing = await bell({ category: 'billing' });
+    const payment = await bell({ category: 'payment' });
+    const other = await bell({ category: 'schedule' });
+    expect((await run('true')).written).toBe(1);
+    expect((await get(billing.id)).done_at).toBeNull();
+    expect((await get(payment.id)).done_at).toBeNull();
+    expect((await get(other.id)).done_by).toBe('quiet-72h');
+  });
+
+  test('a row an emitter re-raises by itself stays; one raised only by a new event falls', async () => {
+    const periodic = await bell({ metadata: { dedupeKey: 'sms-draft-canary:fixture' } });
+    const event = await bell({ metadata: { dedupeKey: 'stock-shortfall:fixture' } });
+    await run('true');
+    expect((await get(periodic.id)).done_at).toBeNull();
+    expect((await get(event.id)).done_by).toBe('quiet-72h');
+  });
+
+  test('payroll-mercury-key-send (an event entry listed first) falls off; payroll-mercury-key (periodic) stays', async () => {
+    const send = await bell({ metadata: { dedupeKey: 'payroll-mercury-key-send:fixture' } });
+    const poll = await bell({ metadata: { dedupeKey: 'payroll-mercury-key:fixture' } });
+    expect((await run('true')).written).toBe(1);
+    expect((await get(send.id)).done_by).toBe('quiet-72h');
+    expect((await get(poll.id)).done_at).toBeNull();
+  });
+
+  test('for every registry prefix the policy holds a row exactly when retention\'s own matcher calls it periodic', async () => {
+    const made = [];
+    for (const entry of retention.RERING) {
+      for (const prefix of entry.prefixes) {
+        const dedupeKey = `${prefix}fixture`;
+        made.push({ dedupeKey, row: await bell({ metadata: { dedupeKey } }) });
+      }
+    }
+    await run('true');
+    for (const { dedupeKey, row } of made) {
+      const held = retention.ringRiskFor({ metadata: { dedupeKey } })?.kind === 'periodic';
+      expect([dedupeKey, (await get(row.id)).done_at === null]).toEqual([dedupeKey, held]);
+    }
+  });
+
+  test('a row that is already done, and a customer row, are untouched', async () => {
+    const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+    const done = await bell({ done_at: ago(2), done_by: person, resolution: 'Called them' });
+    const customer = await bell({ recipient_type: 'customer' });
+    expect((await run('true')).written).toBe(0);
+    expect((await get(done.id)).done_by).toBe(person);
+    expect((await get(customer.id)).done_at).toBeNull();
+  });
+
+  test('gate off and gate shadow write nothing; shadow counts', async () => {
+    const quiet = await bell({});
+    expect(await run('off')).toEqual({ skipped: true, reason: 'gate_off' });
+    expect(await run('shadow')).toMatchObject({ mode: 'shadow', expire: { total: 1, byCategory: { alert: 1 } } });
+    expect((await get(quiet.id)).done_at).toBeNull();
+    expect((await get(quiet.id)).read_at).toBeNull();
+    // Shadow writes nothing at all, not even its cursor.
+    expect(await db('system_settings').where({ key: 'admin_alert_quiet_cursor_shadow' }).first()).toBeUndefined();
+  });
+
+  test('the cap per tick leaves the rest for the next tick', async () => {
+    for (let i = 0; i < 5; i += 1) await bell({});
+    expect((await run('true', { batchSize: 2, cap: 3 })).written).toBe(3);
+    // The capped tick saved its place under the quiet policy's own cursor key, never the nightly one.
+    const keys = (await db('system_settings').whereIn('key', ['admin_alert_quiet_cursor_true', 'admin_alert_retention_cursor_true']).select('key', 'value')).filter((r) => r.value);
+    expect(keys.map((r) => r.key)).toEqual(['admin_alert_quiet_cursor_true']);
+    expect((await run('true', { batchSize: 2, cap: 3 })).written).toBe(2);
+    const cleared = await db('system_settings').where({ key: 'admin_alert_quiet_cursor_true' }).first('value');
+    expect(cleared?.value ?? null).toBeNull();
+  });
+
+  test('the fenced write does not close a row that was rung after the read', async () => {
+    const rang = await bell({});
+    const quiet = await bell({});
+    const io = retention.defaultQuietIo(db, scope);
+    const rows = await io.page({ cutoff: ago(72), cursor: null, limit: 10 });
+    expect(rows.map((r) => r.id).sort()).toEqual([rang.id, quiet.id].sort());
+    await db('notifications').where({ id: rang.id }).update({ metadata: JSON.stringify({ rungAt: ago(0.01).toISOString() }) });
+    expect(await io.expire(rows, { runId: 'fence-test', now })).toBe(1);
+    expect((await get(rang.id)).done_at).toBeNull();
+    expect((await get(quiet.id)).done_by).toBe('quiet-72h');
+  });
+
+  test('a run is recorded only when it closed a row, and one run can be undone by its id', async () => {
+    const quiet = await bell({});
+    const later = ago(-1, now);
+    // Earlier tests share this suite's `now` as their run id; start from a clean log.
+    await db('audit_log').where({ action: 'admin_alert_quiet_fall_off.close' }).whereRaw("metadata->>'runId' = ANY(?::text[])", [[now.toISOString(), later.toISOString()]]).del();
+    expect((await run('true')).written).toBe(1);
+    expect((await run('true', { now: later })).written).toBe(0);
+    const audited = await db('audit_log').where({ action: 'admin_alert_quiet_fall_off.close' }).whereRaw("metadata->>'runId' = ANY(?::text[])", [[now.toISOString(), later.toISOString()]]).select(db.raw("metadata->>'runId' AS run"));
+    expect(audited.map((r) => r.run)).toEqual([now.toISOString()]);
+    expect(await retention.reopenQuietFallOff({ run: later.toISOString(), scope })).toMatchObject({ found: 0 });
+    expect(await retention.reopenQuietFallOff({ run: now.toISOString(), apply: true, now, scope })).toMatchObject({ found: 1, reopened: 1 });
+    expect((await get(quiet.id)).done_at).toBeNull();
+  });
+
+  describe('Reopen', () => {
+    const reopen = async (id, at = now) => {
+      const { t } = await db('notifications').where({ id }).first(db.raw('done_at::text AS t'));
+      return NotificationService.reopenAdminDone(id, { expectedDoneAt: t, now: at });
+    };
+
+    test('a quiet-72h row is listed reopenable and a Reopen re-opens it; the rule then waits 72 hours from the Reopen', async () => {
+      const quiet = await bell({});
+      await run('true');
+      const listed = (await NotificationService.getAdminDoneNotifications({ role: 'admin', limit: 200 })).find((r) => r.id === quiet.id);
+      expect(listed).toMatchObject({ done_by: 'quiet-72h', reopenable: true });
+
+      expect(await reopen(quiet.id)).toBe('reopened');
+      const reopened = await get(quiet.id);
+      expect([reopened.done_at, reopened.done_by, reopened.resolution]).toEqual([null, null, null]);
+      expect(meta(reopened).quietHoldFrom).toBe(now.toISOString());
+
+      expect((await run('true', { now: ago(-71, now) })).written).toBe(0);
+      expect((await get(quiet.id)).done_at).toBeNull();
+      expect((await run('true', { now: ago(-73, now) })).written).toBe(1);
+      expect((await get(quiet.id)).done_by).toBe('quiet-72h');
+    });
+
+    test('a 31-day-old row that is reopened survives both the nightly retention pass and the fall-off pass, then falls only after the hold', async () => {
+      const retention = require('../services/admin-alert-retention');
+      const old = await bell({ created_at: ago(31 * 24) });
+      await run('true');
+      expect((await get(old.id)).done_by).toBe('quiet-72h');
+      expect(await reopen(old.id)).toBe('reopened');
+
+      const retained = await retention.runAdminAlertRetention({ now, mode: 'true', scope });
+      runIds.push(retained.runId);
+      expect(retained.expire.total).toBe(0);
+      expect((await run('true')).written).toBe(0);
+      expect((await get(old.id)).done_at).toBeNull();
+
+      // 73 hours on: the fall-off closes it again; retention still sees a 3-day-old sign of life and does not.
+      const later = ago(-73, now);
+      const retainedLater = await retention.runAdminAlertRetention({ now: later, mode: 'true', scope });
+      runIds.push(retainedLater.runId);
+      expect(retainedLater.expire.total).toBe(0);
+      expect((await run('true', { now: later })).written).toBe(1);
+      expect((await get(old.id)).done_by).toBe('quiet-72h');
+    });
+
+    test('a system close other than quiet-72h still has no Reopen', async () => {
+      const relevance = await bell({ done_at: ago(1), done_by: 'relevance', resolution: 'Moved on' });
+      const listed = (await NotificationService.getAdminDoneNotifications({ role: 'admin', limit: 200 })).find((r) => r.id === relevance.id);
+      expect(listed.reopenable).toBe(false);
+      const token = (await db('notifications').where({ id: relevance.id }).first(db.raw('done_at::text AS t'))).t;
+      expect(await NotificationService.reopenAdminDone(relevance.id, { expectedDoneAt: token })).toBe('not_reopenable');
+    });
+
+    test('a real close of the subject takes a quiet-72h row over', async () => {
+      const quiet = await bell({});
+      await run('true');
+      const taken = await NotificationService._private.openToCloser(db('notifications').where({ id: quiet.id }), 'dispatch')
+        .update(NotificationService._private.doneColumns({ by: 'dispatch', resolution: 'Visit moved', keepExisting: true }));
+      expect(taken).toBe(1);
+      const row = await get(quiet.id);
+      expect([row.done_by, row.resolution]).toEqual(['dispatch', 'Visit moved']);
+    });
+
+    test('the undo function reopens only quiet-72h rows closed since the time given, and stamps the hold', async () => {
+      const a = await bell({});
+      const other = await bell({ done_at: ago(1), done_by: 'relevance', resolution: 'Moved on' });
+      await run('true');
+      const before = await retention.reopenQuietFallOff({ since: ago(1).toISOString(), scope });
+      expect(before).toEqual({ found: 1, reopened: 0, byCategory: { alert: 1 } });
+      expect((await get(a.id)).done_by).toBe('quiet-72h');
+      const late = await retention.reopenQuietFallOff({ since: ago(-1).toISOString(), apply: true, scope });
+      expect(late.found).toBe(0);
+      const applied = await retention.reopenQuietFallOff({ since: ago(1).toISOString(), apply: true, now, scope });
+      expect(applied).toMatchObject({ found: 1, reopened: 1 });
+      expect((await get(a.id)).done_at).toBeNull();
+      expect(meta(await get(a.id)).quietHoldFrom).toBe(now.toISOString());
+      expect((await get(other.id)).done_by).toBe('relevance');
+    });
+  });
+
+  describe('a new emission rings a fallen-off alert back', () => {
+    const key = 'quiet-fall-off-fixture:a';
+    const emit = (body, opts = {}) => NotificationService.notifyAdmin('alert', TITLE, body, {
+      dedupeKey: key, refreshOnDedupe: true, ringOnRefresh: () => true, ...opts,
+    });
+
+    test('changed content reopens the same row, rings it, and clears the hold stamp', async () => {
+      const first = await emit('First text.');
+      expect(first?.id).toBeTruthy();
+      made.push(first.id);
+      await db('notifications').where({ id: first.id }).update({ created_at: ago(100) });
+      await run('true');
+      expect((await get(first.id)).done_by).toBe('quiet-72h');
+
+      // A Reopen stamps the hold; the alert falls again after another 72 quiet hours.
+      const token = (await db('notifications').where({ id: first.id }).first(db.raw('done_at::text AS t'))).t;
+      await NotificationService.reopenAdminDone(first.id, { expectedDoneAt: token, now: ago(80) });
+      expect(meta(await get(first.id)).quietHoldFrom).toBeTruthy();
+      await run('true');
+      expect((await get(first.id)).done_by).toBe('quiet-72h');
+
+      const again = await emit('Second text, changed.');
+      expect(again).toMatchObject({ id: first.id, refreshed: true, rung: true });
+      const row = await get(first.id);
+      expect([row.done_at, row.done_by, row.read_at]).toEqual([null, null, null]);
+      expect(meta(row).rungAt).toBeTruthy();
+      expect(meta(row).quietHoldFrom).toBeUndefined();
+      // And the freshly rung row survives the next pass.
+      expect((await run('true')).written).toBe(0);
+    });
+
+    test('a dedupeOpenOnly emitter raises a fresh row once the old one fell off', async () => {
+      const first = await emit('Open-only text.', { dedupeOpenOnly: true });
+      made.push(first.id);
+      await db('notifications').where({ id: first.id }).update({ created_at: ago(100) });
+      await run('true');
+      const second = await emit('Open-only text.', { dedupeOpenOnly: true });
+      expect(second.id).not.toBe(first.id);
+      expect((await get(second.id)).done_at).toBeNull();
+    });
+  });
+
+  test('a relevance put-back is news: the row older than 72 hours is not closed again until 72 hours after the put-back', async () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const relevance = require('../services/admin-alert-relevance');
+    const [customer] = await db('customers').insert({ first_name: 'Putback', phone: '+15555557011' }).returning('id');
+    fixtures.customers.push(customer.id);
+    const [visit] = await db('scheduled_services').insert({
+      customer_id: customer.id, scheduled_date: etDateString(ago(72)), service_type: 'General Pest Control', status: 'on_site',
+    }).returning('id');
+    fixtures.scheduled_services.push(visit.id);
+    const retiredAt = ago(1);
+    // As the relevance sweep wrote it an hour ago; the alert itself is 4 days old and the visit is stuck again.
+    const bellRow = await bell({
+      read_at: retiredAt, done_at: retiredAt, done_by: 'relevance', resolution: 'Visit is no longer in progress',
+      metadata: {
+        dedupeKey: `stale-visit:${visit.id}:putback`, scheduled_service_id: visit.id,
+        retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: retiredAt.toISOString() },
+      },
+    });
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    const back = await get(bellRow.id);
+    expect([back.done_at, back.done_by]).toEqual([null, null]);
+    expect(meta(back).retired).toBeUndefined();
+    expect(meta(back).quietHoldFrom).toEqual(expect.any(String));
+
+    expect((await run('true', { now: ago(-71, now) })).written).toBe(0);
+    expect((await get(bellRow.id)).done_at).toBeNull();
+    expect((await run('true', { now: ago(-73, now) })).written).toBe(1);
+    expect((await get(bellRow.id)).done_by).toBe('quiet-72h');
+  });
+
+  describe('a quiet refresh that read the row before the hold was stamped keeps the hold', () => {
+    const key = 'quiet-hold-race:1';
+    const emit = (body, standingRefresh) => NotificationService.notifyAdmin('alert', TITLE, body, {
+      dedupeKey: key, refreshOnDedupe: true, ringOnRefresh: () => false, standingRefresh,
+    });
+    // The emitter reads the done row and calls standingRefresh inside its keyed lock; whatever it does there commits
+    // before the emitter's own quiet UPDATE, which is the interleaving of a Reopen between the read and the write.
+    const closedStandingRow = async () => {
+      const first = await emit('First text.');
+      made.push(first.id);
+      await db('notifications').where({ id: first.id }).update({ created_at: ago(100) });
+      expect((await run('true')).written).toBe(1);
+      return first;
+    };
+
+    test('a Reopen between the read and the write: quietHoldFrom stays, the Reopen stands, and the next tick does not close the row', async () => {
+      const first = await closedStandingRow();
+      const { t } = await db('notifications').where({ id: first.id }).first(db.raw('done_at::text AS t'));
+      const reopenMidRefresh = async () => {
+        expect(await NotificationService.reopenAdminDone(first.id, { expectedDoneAt: t, now })).toBe('reopened');
+        return { quiet: true, body: 'Second text, changed.' };
+      };
+      const out = await emit('Second text, changed.', reopenMidRefresh);
+      expect(out).toMatchObject({ id: first.id, refreshed: true, rung: false });
+      const row = await get(first.id);
+      expect(row.body).toBe('Second text, changed.');
+      expect(row.done_at).toBeNull();
+      expect(meta(row).quietHoldFrom).toBe(now.toISOString());
+      expect((await run('true', { now: ago(-1, now) })).written).toBe(0);
+      expect((await get(first.id)).done_at).toBeNull();
+    });
+
+    test('a relevance re-arm between the read and the write: the same', async () => {
+      const { etDateString } = require('../utils/datetime-et');
+      const relevance = require('../services/admin-alert-relevance');
+      const [customer] = await db('customers').insert({ first_name: 'Race', phone: '+15555557012' }).returning('id');
+      fixtures.customers.push(customer.id);
+      const [visit] = await db('scheduled_services').insert({
+        customer_id: customer.id, scheduled_date: etDateString(ago(72)), service_type: 'General Pest Control', status: 'on_site',
+      }).returning('id');
+      fixtures.scheduled_services.push(visit.id);
+      const retiredAt = ago(1);
+      const dedupeKey = `stale-visit:${visit.id}:race`;
+      const standing = await bell({
+        read_at: retiredAt, done_at: retiredAt, done_by: 'relevance', resolution: 'Visit is no longer in progress',
+        metadata: { dedupeKey, scheduled_service_id: visit.id, retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: retiredAt.toISOString() } },
+      });
+      const rearmMidRefresh = async () => {
+        await relevance.runAdminAlertRelevanceSweep({ now });
+        return { quiet: true, body: 'Second text, changed.' };
+      };
+      await NotificationService.notifyAdmin('alert', TITLE, 'Second text, changed.', { dedupeKey, refreshOnDedupe: true, ringOnRefresh: () => false, standingRefresh: rearmMidRefresh });
+      const row = await get(standing.id);
+      expect(row.done_at).toBeNull();
+      expect(meta(row).quietHoldFrom).toEqual(expect.any(String));
+      expect((await run('true', { now: ago(-1, now) })).written).toBe(0);
+      expect((await get(standing.id)).done_at).toBeNull();
+    });
+  });
+
+  test('the relevance sweep does not re-arm or re-judge a quiet-72h row, and the row carries no retired stamp', async () => {
+    const quiet = await bell({});
+    await run('true');
+    const relevance = require('../services/admin-alert-relevance');
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    const row = await get(quiet.id);
+    expect([row.done_by, row.resolution]).toEqual(['quiet-72h', 'No new activity for 3 days']);
+    expect(meta(row).retired).toBeUndefined();
+  });
+});
