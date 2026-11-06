@@ -434,7 +434,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     const original = await seedBouncedMessage(ctx.customerId);
     const res = await bounceRecovery.attemptRecovery(original, hardBounce);
 
-    expect(res).toEqual({ skipped: 'other_spelling_already_tried' });
+    expect(res).toEqual({ skipped: 'other_spelling_already_tried', retryOwned: true });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(await db('email_messages').where({ recipient_email_snapshot: OTHER, recipient_id: ctx.customerId })).toEqual([]);
     expect((await recoveryRows(original.id))[0]).toMatchObject({ status: 'other_spelling_already_tried', correction_rule: 'call_other_spelling' });
@@ -466,7 +466,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     await webhook.handleEvent(bounce(ctx.send));
     await db('call_email_spelling_retries').where({ customer_id: ctx.customerId }).update({ status: 'failed', reason: 'retry_address_bounced' });
     const original = await seedBouncedMessage(ctx.customerId);
-    expect(await bounceRecovery.attemptRecovery(original, hardBounce)).toEqual({ skipped: 'other_spelling_already_tried' });
+    expect(await bounceRecovery.attemptRecovery(original, hardBounce)).toEqual({ skipped: 'other_spelling_already_tried', retryOwned: true });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
@@ -705,7 +705,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     });
     jest.clearAllMocks();
     const res = await bounceRecovery.attemptRecovery(original, hardBounce);
-    expect(res).toEqual({ skipped: 'gate_off' });
+    expect(res).toEqual({ skipped: 'gate_off', retryOwned: true });
     const [rec] = await recoveryRows(original.id);
     expect(rec.status).toBe('other_spelling_not_sent');
     const staged = await db('email_messages').where({ id: rec.recovery_message_id }).first();
@@ -965,12 +965,295 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     });
     jest.clearAllMocks();
     const res = await bounceRecovery.attemptRecovery(original, hardBounce);
-    expect(res).toEqual({ skipped: reason });
+    expect(res).toEqual({ skipped: reason, retryOwned: true });
     const [rec] = await recoveryRows(original.id);
     expect(rec.status).toBe('other_spelling_not_sent');
     expect(await db('email_messages').where({ id: rec.recovery_message_id }).first()).toMatchObject({ status: 'blocked', error_message: reason });
     expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'skipped', reason });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
+
+  // ── The retry owns its outcomes: through handleEvent, no fallback may act behind it (P1-H) ─────────────────────────────
+  const settleTicks = (ms = 350) => new Promise((resolve) => setTimeout(resolve, ms));
+  const sleepMs = settleTicks;
+  async function trackedBounceEvent(original, over = {}) {
+    const providerId = `orig-pm-${randomUUID()}`;
+    await db('email_messages').where({ id: original.id }).update({ provider_message_id: providerId, status: 'sent' });
+    return { event: 'bounce', type: 'bounce', email: BOUNCED, reason: '550 5.1.1 user unknown', sg_event_id: `ev-${randomUUID()}`, sg_message_id: `${providerId}.f`, ...over };
+  }
+  const recoveryMessageOf = async (original) => {
+    const [rec] = await recoveryRows(original.id);
+    const message = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+    await db('email_messages').where({ id: message.id }).update({ provider_message_id: `rec-pm-${message.id}`, status: 'sent' });
+    return { ...message, provider_message_id: `rec-pm-${message.id}`, status: 'sent' };
+  };
+  const nothingBehindTheRetry = () => {
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  };
+
+  test('outcome table, tracked: the claim was lost to an earlier try (either path): the webhook raises no rescue, no card, no alert', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send)); // the automation path takes the claim
+    const original = await seedBouncedMessage(ctx.customerId);
+    jest.clearAllMocks();
+    await webhook.handleEvent(await trackedBounceEvent(original));
+    await sleepMs();
+    expect((await recoveryRows(original.id))[0].status).toBe('other_spelling_already_tried');
+    nothingBehindTheRetry();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('outcome table, tracked: stopped at the provider boundary (primary email changed by hand): no rescue, no card, no alert', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    const event = await trackedBounceEvent(original);
+    jest.clearAllMocks();
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      await db('customers').where({ id: customerId }).update({ email: 'jonny.doe@example.com' });
+      await args.providerBoundaryCheck({ database: undefined });
+      return { messageId: 'must-not-send' };
+    });
+    await webhook.handleEvent(event);
+    await sleepMs();
+    expect((await recoveryRows(original.id))[0].status).toBe('other_spelling_not_sent');
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'skipped', reason: 'email_changed' });
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('outcome table, tracked: the other-spelling resend re-bounces: the claim fails, the one existing alert, no rescue, no card', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    await bounceRecovery.attemptRecovery(original, hardBounce);
+    const recoveryMessage = await recoveryMessageOf(original);
+    jest.clearAllMocks();
+    await webhook.handleEvent({ event: 'bounce', type: 'bounce', email: OTHER, reason: '550 5.1.1 user unknown', sg_event_id: `ev-${randomUUID()}`, sg_message_id: `${recoveryMessage.provider_message_id}.f` });
+    await sleepMs();
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
+
+  test('outcome table, tracked: a dead-domain "blocked" event on the resend message fails the claim, one alert, no recording re-check card', async () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    try {
+      const customerId = await seedCustomer(BOUNCED);
+      await seedCall(customerId);
+      const original = await seedBouncedMessage(customerId);
+      await bounceRecovery.attemptRecovery(original, hardBounce);
+      const recoveryMessage = await recoveryMessageOf(original);
+      jest.clearAllMocks();
+      await webhook.handleEvent({ event: 'blocked', email: OTHER, reason: 'unable to get mx info: no such domain', sg_event_id: `ev-${randomUUID()}`, sg_message_id: `${recoveryMessage.provider_message_id}.f` });
+      await sleepMs();
+      expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+      expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_CALL_EMAIL_CHECKS;
+    }
+  });
+
+  test('outcome table control: a dead-domain event on an ordinary tracked message still raises the alert and the card', async () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    try {
+      const customerId = await seedCustomer(BOUNCED);
+      const original = await seedBouncedMessage(customerId);
+      const event = { ...(await trackedBounceEvent(original)), event: 'blocked', type: undefined, reason: 'unable to get mx info: no such domain' };
+      jest.clearAllMocks();
+      await webhook.handleEvent(event);
+      await sleepMs();
+      expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
+      expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.GATE_CALL_EMAIL_CHECKS;
+    }
+  });
+
+  test('outcome table control: nothing was tried (the other spelling is suppressed): today\'s alert, card and rescue all stay', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    await db('email_suppressions').insert({ email: OTHER, status: 'active', suppression_type: 'bounce', source: 'test', suppressed_at: new Date() });
+    const original = await seedBouncedMessage(customerId);
+    const event = await trackedBounceEvent(original);
+    jest.clearAllMocks();
+    await webhook.handleEvent(event);
+    await sleepMs();
+    expect(await trackedClaim(customerId)).toEqual([]);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
+    expect(bounceRescue.rescueBouncedAddress).toHaveBeenCalledTimes(1);
+  });
+
+  test('outcome table, automation: a dead-domain "blocked" event on the BOUND retry send fails the claim, releases the enrollments, one alert, no card, no rescue', async () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    try {
+      ctx = await setup({ sent: 1 });
+      const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+      await webhook.handleEvent(bounce(ctx.send));
+      await runner.sendStep(ctx.enrollment.id);
+      await retrySendOf(ctx.enrollment.id, 'dead-domain-1');
+      jest.clearAllMocks();
+      await webhook.handleEvent({ event: 'blocked', email: OTHER, reason: 'unable to get mx info: no such domain', sg_event_id: `ev-${randomUUID()}`, sg_message_id: 'dead-domain-1.f' });
+      await sleepMs();
+      expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_no_mail_server' });
+      expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'cancelled' });
+      expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
+      expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledWith(BOUNCED, expect.anything());
+      expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+      expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_CALL_EMAIL_CHECKS;
+    }
+  });
+
+  test('outcome table, automation: a dead-domain event on a send that is NOT the bound retry send keeps the alert and card (the claim is untouched)', async () => {
+    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+    try {
+      ctx = await setup({ sent: 1 });
+      await webhook.handleEvent(bounce(ctx.send));
+      await runner.sendStep(ctx.enrollment.id);
+      const stray = await strayAutomationSend(ctx.enrollment.id, ctx.last.id, 'dead-domain-2');
+      jest.clearAllMocks();
+      await webhook.handleEvent({ event: 'blocked', email: OTHER, reason: 'unable to get mx info: no such domain', sg_event_id: `ev-${randomUUID()}`, sg_message_id: `${stray.sendgrid_message_id}.f` });
+      await sleepMs();
+      expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+      expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.GATE_CALL_EMAIL_CHECKS;
+    }
+  });
+
+  // ── Provenance never outlives its claim, in any enrollment status (P1-I) ─────────────────────────────────────────────────
+  test('a final-step retry completes its enrollment before the delivery: the commit still clears the provenance, and a later re-enrollment sends normally', async () => {
+    ctx = await setup({ sent: 2 }); // both steps sent: step 2 (the last) is the one that bounced
+    await db('automation_step_sends').where({ id: ctx.send.id }).update({ step_id: ctx.steps[1].id, step_order: 2 });
+    await webhook.handleEvent(bounce(ctx.send));
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'active', email: OTHER });
+    await runner.sendStep(ctx.enrollment.id); // the retry of the final step completes the enrollment
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'completed' });
+    await retrySendOf(ctx.enrollment.id, 'final-step-1');
+
+    await delivered('final-step-1');
+
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    const done = await enrollmentRow(ctx.enrollment.id);
+    expect(done).toMatchObject({ status: 'completed', email: OTHER });
+    expect(done.metadata.spelling_retry_email).toBeUndefined();
+
+    // A later legitimate enrollment of the same template reuses the row and sends to the profile email.
+    const template = await db('automation_templates').where({ key: ctx.key }).first();
+    expect(template.enabled).toBe(true);
+    const customer = await db('customers').where({ id: ctx.customerId }).first();
+    const result = await runner.enrollCustomer({ templateKey: ctx.key, customer });
+    expect(result.enrolled).toBe(true);
+    jest.clearAllMocks();
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ next_send_at: new Date(Date.now() - 1000) });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenLastCalledWith(expect.objectContaining({ to: OTHER, subject: 'Step 1' }));
+  });
+
+  test('re-enrolling a terminal enrollment drops any retry provenance it carried (the new episode starts clean)', async () => {
+    ctx = await setup({ sent: 2 });
+    await db('call_email_spelling_retries').insert({ customer_id: ctx.customerId, bounced_email: BOUNCED, retry_email: OTHER, channel: 'automation', status: 'committed' });
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spelling_retry_email: OTHER })]),
+    });
+    const customer = await db('customers').where({ id: ctx.customerId }).first();
+    await runner.enrollCustomer({ templateKey: ctx.key, customer: { ...customer, email: OTHER } });
+    const row = await enrollmentRow(ctx.enrollment.id);
+    expect(row).toMatchObject({ status: 'active', email: OTHER });
+    expect(row.metadata.spelling_retry_email).toBeUndefined();
+  });
+
+  test('a claim that does not commit clears the provenance from completed and failed enrollments too, and cancels only the active ones', async () => {
+    ctx = await setup({ sent: 1 });
+    const completed = await seedEnrollment({ customerId: ctx.customerId, sent: 2 });
+    const failed = await seedEnrollment({ customerId: ctx.customerId, sent: 1, status: 'failed' });
+    await webhook.handleEvent(bounce(ctx.send));
+    const mark = (id) => db('automation_enrollments').where({ id }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spelling_retry_email: OTHER })]),
+    });
+    await mark(completed.enrollment.id);
+    await mark(failed.enrollment.id);
+    await require('../services/call-email-spelling-retry').stopRetry({ customerId: ctx.customerId, retryEmail: OTHER, reason: 'owned_by_other' });
+    for (const id of [completed.enrollment.id, failed.enrollment.id, ctx.enrollment.id]) await noProvenance(id);
+    expect(await enrollmentRow(completed.enrollment.id)).toMatchObject({ status: 'completed' });
+    expect(await enrollmentRow(failed.enrollment.id)).toMatchObject({ status: 'failed' });
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
+  });
+
+  test('the email fanout moving an enrollment off the retry address drops its provenance', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    expect((await enrollmentRow(ctx.enrollment.id)).metadata.spelling_retry_email).toBe(OTHER);
+    await db('customers').where({ id: ctx.customerId }).update({ email: OTHER });
+    await require('../services/customer-email-fanout').propagateCustomerEmailChange({
+      before: { id: ctx.customerId, email: OTHER }, after: { id: ctx.customerId, email: 'jonny.doe@example.com' }, source: 'test',
+    });
+    const row = await enrollmentRow(ctx.enrollment.id);
+    expect(row.email).toBe('jonny.doe@example.com');
+    expect(row.metadata.spelling_retry_email).toBeUndefined();
+  });
+
+  // ── Claim locked and re-checked in the transaction of its effect (P1-J) ──────────────────────────────────────────────────
+  async function holdCustomerRow(customerId) {
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let locked;
+    const lockedP = new Promise((resolve) => { locked = resolve; });
+    const holder = db.transaction(async (trx) => {
+      await trx('customers').where({ id: customerId }).forUpdate().first();
+      locked();
+      await held;
+    });
+    await lockedP;
+    return { release, done: holder };
+  }
+
+  test('race, tracked: a re-bounce settling the claim while the commit waits on the customer row cannot leave the email replaced and the claim failed', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    await bounceRecovery.attemptRecovery(original, hardBounce);
+    const recoveryMessage = await recoveryMessageOf(original);
+    const holder = await holdCustomerRow(customerId); // another writer holds the customer row
+
+    const commit = bounceRecovery.commitRecoveryOnDelivery(recoveryMessage); // locks the claim, then waits for the customer row
+    await sleepMs(500);
+    const rebounce = bounceRecovery.handleRecoveryBounce(recoveryMessage, { event: 'bounce', type: 'bounce' }); // must wait for the claim
+    await sleepMs(400);
+    holder.release();
+    await Promise.all([holder.done, commit, rebounce]);
+
+    expect((await db('customers').where({ id: customerId }).first()).email).toBe(OTHER);
+    expect((await trackedClaim(customerId))[0].status).toBe('committed');
+  });
+
+  test('race, automation: a gate-off stop settling the claim while the delivery commit waits on the customer row cannot leave the email replaced and the claim skipped', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'race-1');
+    const holder = await holdCustomerRow(ctx.customerId);
+
+    const commit = delivered('race-1'); // locks the claim row, then waits for the customer row
+    await sleepMs(500);
+    const stop = require('../services/call-email-spelling-retry').stopRetry({ customerId: ctx.customerId, retryEmail: OTHER, reason: 'gate_off' });
+    await sleepMs(400);
+    holder.release();
+    await Promise.all([holder.done, commit, stop]);
+
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(OTHER);
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    expect((await enrollmentRow(ctx.enrollment.id)).metadata.spelling_retry_email).toBeUndefined();
   });
 });

@@ -336,6 +336,8 @@ async function repointPaymentFailedEnrollment({ enrollment, sendId, current, ema
   });
   await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
     email,
+    // The address moved on its own: any call-spelling retry provenance for the old one is stale.
+    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'spelling_retry_email'"),
     ...(parts.length ? { first_name: parts[0], last_name: parts.slice(1).join(' ') || null } : {}),
     updated_at: new Date(),
   });
@@ -610,7 +612,7 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
     ...(estimateId ? { estimate_id: estimateId } : {}),
   };
   reactivatePayload.metadata = dbh.raw(
-    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id' - 'passed_step_order' - 'passed_step_id' - 'passed_step_ids') || ?::jsonb",
+    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id' - 'passed_step_order' - 'passed_step_id' - 'passed_step_ids' - 'spelling_retry_email') || ?::jsonb",
     [JSON.stringify(stamps)],
   );
   if (existing) {

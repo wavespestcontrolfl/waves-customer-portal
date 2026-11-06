@@ -206,6 +206,17 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
 });
 
 /**
+ * A dead-domain "blocked" event on a tracked message. The other-spelling recovery message is owned by its retry claim:
+ * handleRecoveryBounce fails the claim and raises the one existing alert (no read-back card). Anything else keeps the
+ * alert plus recording re-check card.
+ */
+function routeDeadDomain(emailMessage, ev, alertAndCard) {
+  bounceRecovery.isOtherSpellingRecoveryMessage(emailMessage)
+    .then((owned) => (owned ? bounceRecovery.handleRecoveryBounce(emailMessage, ev) : alertAndCard()))
+    .catch((err) => logger.error(`[sendgrid-webhook] dead-domain routing failed: ${err.message}`));
+}
+
+/**
  * GATE_CALL_BOUNCE_OTHER_SPELLING (owner 2026-11-05), the route side of an automation hard bounce. True = the other-spelling
  * retry owns this bounce and nothing else is raised for it (no untracked alert, no transcript rescue, no read-back card):
  * the bounced step was re-queued to the call's other spelling, or that other spelling bounced too, in which case the
@@ -457,7 +468,8 @@ async function handleEvent(ev) {
         // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people
         // (the alert and the recording re-check card), never to
         // attemptRecovery, which can repair a domain and resend on its own.
-        alertUntrackedHardBounce();
+        // The other-spelling resend is the exception: its claim fails, the one existing alert is raised, no card.
+        routeDeadDomain(emailMessage, ev, alertUntrackedHardBounce);
       } else if (bounceRecovery.isHardBounceEvent(ev) && !isRateReview) {
         // A rate review letter is reconciled on its notice above, with its own alert that a
         // delivered re-send closes: the generic recovery (and its "needs a correct address"
@@ -471,6 +483,9 @@ async function handleEvent(ev) {
             // transcript rescue, except streams rescue must never touch.
             if (result?.resent || result?.status === 'resent') return null;
             if (['marketing_stream', 'test_message'].includes(result?.skipped)) return null;
+            // The other-spelling retry owns the outcome (lost claim, stopped before the send, its resend failed or re-bounced):
+            // no transcript rescue, which could send a suggestion or apply another correction behind it.
+            if (result?.retryOwned) return null;
             return bounceRescue.rescueBouncedAddress(email, { appliedBy: 'webhook' });
           })
           .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery/rescue failed for ${messageId}: ${err.message}`));
@@ -1137,7 +1152,8 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
         await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' }, client);
         return spelling;
       }
-      break;
+      // A dead-domain "blocked" event for the BOUND retry send fails the claim like a hard bounce would (alert only, no card).
+      return require('../services/call-email-spelling-retry').onAutomationDeadDomain({ ev, sendRow }, client);
     }
 
     case 'spamreport':

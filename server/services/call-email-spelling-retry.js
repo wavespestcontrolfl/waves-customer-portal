@@ -103,32 +103,47 @@ async function applySettlement(query, { status, reason = null }, client = db, ch
     await query.update(patch);
     return [];
   }
-  const rows = await query.update(patch).returning('*');
-  for (const row of rows) {
-    if (status === 'committed') await clearRetryProvenance({ customerId: row.customer_id, retryEmail: row.retry_email }, client);
-    else await releaseRetryEnrollments({ customerId: row.customer_id, retryEmail: row.retry_email, reason }, client);
-  }
-  return rows;
+  // The claim row is updated (and so locked) and its enrollments are dealt with in ONE transaction; with a root connection that
+  // is a transaction of its own, with a transaction it is a savepoint of the caller's.
+  return client.transaction(async (trx) => {
+    const rows = await query.clone().transacting(trx).update(patch).returning('*');
+    for (const row of rows) {
+      if (status === 'committed') await clearRetryProvenance({ customerId: row.customer_id, retryEmail: row.retry_email }, trx);
+      else await releaseRetryEnrollments({ customerId: row.customer_id, retryEmail: row.retry_email, reason }, trx);
+    }
+    return rows;
+  });
 }
 
-// The customer's ACTIVE enrollments carrying retry provenance for this address.
-function provenanceEnrollments(client, customerId, retryEmail) {
-  return client('automation_enrollments')
-    .where({ customer_id: customerId, status: 'active' })
+// The customer's enrollments carrying retry provenance for this address: the ACTIVE ones (still able to send) or every OTHER
+// status (completed, cancelled, failed: they cannot send, but they must not carry the marker into a later episode).
+function provenanceEnrollments(client, customerId, retryEmail, { active = true } = {}) {
+  const query = client('automation_enrollments')
+    .where({ customer_id: customerId })
     .whereRaw(`LOWER(COALESCE(metadata->>'${RETRY_PROVENANCE_KEY}', '')) = ?`, [norm(retryEmail)]);
+  return active ? query.where({ status: 'active' }) : query.whereNot({ status: 'active' });
 }
 
-/** A commit: the retry address is now the profile email; the enrollments keep it and lose the provenance. */
+const DROP_PROVENANCE_SQL = `COALESCE(metadata, '{}'::jsonb) - '${RETRY_PROVENANCE_KEY}'`;
+
+/**
+ * The claim settled, whatever the outcome: no enrollment of the customer keeps retry provenance for this address, in ANY status.
+ * A final-step retry completes its enrollment before delivery arrives, and a completed enrollment is reactivated later with its
+ * metadata; a stale marker would then meet a settled claim and cancel a legitimate send.
+ */
 async function clearRetryProvenance({ customerId, retryEmail }, client = db) {
-  await provenanceEnrollments(client, customerId, retryEmail)
-    .update({ metadata: client.raw(`COALESCE(metadata, '{}'::jsonb) - '${RETRY_PROVENANCE_KEY}'`), updated_at: new Date() });
+  for (const active of [true, false]) {
+    await provenanceEnrollments(client, customerId, retryEmail, { active })
+      .update({ metadata: client.raw(DROP_PROVENANCE_SQL), updated_at: new Date() });
+  }
 }
 
 /**
  * The claim did NOT commit: end what it started for this customer's provenance enrollments (still active, still mailing the
  * retry address). Staff set a different valid primary email by hand (`email_changed`): retarget them to it, which is what the
  * customer-email fanout would have done had they still pointed at the old address (it matches only the previous primary).
- * Otherwise cancel them the way today's hard bounce does (cancel_reason hard_bounce). The provenance goes either way.
+ * Otherwise cancel them the way today's hard bounce does (cancel_reason hard_bounce). The provenance goes either way, from
+ * the terminal enrollments too.
  */
 async function releaseRetryEnrollments({ customerId, retryEmail, reason }, client = db) {
   let current = null;
@@ -139,14 +154,16 @@ async function releaseRetryEnrollments({ customerId, retryEmail, reason }, clien
   }
   const query = provenanceEnrollments(client, customerId, retryEmail);
   if (current) {
-    await query.update({ email: current, metadata: client.raw(`COALESCE(metadata, '{}'::jsonb) - '${RETRY_PROVENANCE_KEY}'`), updated_at: new Date() });
-    return;
+    await query.update({ email: current, metadata: client.raw(DROP_PROVENANCE_SQL), updated_at: new Date() });
+  } else {
+    await query.update({
+      status: 'cancelled', next_send_at: null, completed_at: new Date(),
+      metadata: client.raw(`jsonb_set(${DROP_PROVENANCE_SQL}, '{cancel_reason}', ?::jsonb, true)`, [JSON.stringify('hard_bounce')]),
+      updated_at: new Date(),
+    });
   }
-  await query.update({
-    status: 'cancelled', next_send_at: null, completed_at: new Date(),
-    metadata: client.raw(`jsonb_set(COALESCE(metadata,'{}'::jsonb) - '${RETRY_PROVENANCE_KEY}', '{cancel_reason}', ?::jsonb, true)`, [JSON.stringify('hard_bounce')]),
-    updated_at: new Date(),
-  });
+  await provenanceEnrollments(client, customerId, retryEmail, { active: false })
+    .update({ metadata: client.raw(DROP_PROVENANCE_SQL), updated_at: new Date() });
 }
 
 /**
@@ -265,17 +282,21 @@ async function retrySendVerdict({ customerId, retryEmail, channel = CHANNEL }, c
  * the customer's provenance enrollments; a claim already settled only has its leftover enrollments released.
  */
 async function stopRetry({ customerId, retryEmail, reason }, client = db) {
-  const claim = await client(TABLE).where({ customer_id: customerId, retry_email: norm(retryEmail), channel: CHANNEL }).orderBy('created_at', 'desc').first();
-  if (claim && claim.status === 'resending') {
-    // A queued row the claim was bound to but never dispatched (reason not_bound) is closed with it.
-    if (reason === 'not_bound' && claim.retry_send_id) {
-      await client('automation_step_sends').where({ id: claim.retry_send_id, status: 'queued' })
-        .update({ status: 'blocked', failure_reason: 'The retry send was never dispatched', updated_at: new Date() });
+  // LOCK ORDER: the claim row first (FOR UPDATE, to the end of this transaction), then the enrollments it releases.
+  return client.transaction(async (trx) => {
+    const claim = await trx(TABLE).where({ customer_id: customerId, retry_email: norm(retryEmail), channel: CHANNEL })
+      .orderBy('created_at', 'desc').forUpdate().first();
+    if (claim && claim.status === 'resending') {
+      // A queued row the claim was bound to but never dispatched (reason not_bound) is closed with it.
+      if (reason === 'not_bound' && claim.retry_send_id) {
+        await trx('automation_step_sends').where({ id: claim.retry_send_id, status: 'queued' })
+          .update({ status: 'blocked', failure_reason: 'The retry send was never dispatched', updated_at: new Date() });
+      }
+      await applySettlement(trx(TABLE).where({ id: claim.id, status: 'resending' }), { status: 'skipped', reason }, trx);
+      return;
     }
-    await applySettlement(client(TABLE).where({ id: claim.id, status: 'resending' }), { status: 'skipped', reason }, client);
-    return;
-  }
-  await releaseRetryEnrollments({ customerId, retryEmail, reason }, client);
+    await releaseRetryEnrollments({ customerId, retryEmail, reason }, trx);
+  });
 }
 
 const PREP_LOCK_WAIT_MS = 5000;
@@ -309,15 +330,23 @@ async function startRetry({ sendRow, bounced }, client) {
     logger.warn('[call-email-spelling-retry] prep-send lock busy: no retry, the bounce is handled as before');
     return NO_RETRY;
   }
-  const enrollment = await client('automation_enrollments').where({ id: sendRow.enrollment_id }).forUpdate().first();
-  if (!enrollment) return NO_RETRY;
-  const found = await eligibleOtherSpelling({ enrollment, bounced }, client);
+  const seen = await client('automation_enrollments').where({ id: sendRow.enrollment_id }).first();
+  if (!seen) return NO_RETRY;
+  const found = await eligibleOtherSpelling({ enrollment: seen, bounced }, client);
   if (!found) return NO_RETRY;
 
   const row = await claimRetry({
     customerId: found.customerId, sourceCallId: found.sourceCallId, bouncedEmail: bounced, retryEmail: found.other, channel: CHANNEL, originId: sendRow.id,
   }, client);
   if (!row.claimed) return NO_RETRY; // tried before for this customer + address, by either path: never twice
+
+  // The claim row now exists in this transaction: the enrollment row is locked AFTER it (claim first, then enrollments, like every
+  // settlement), and re-read under the lock so the rewind sees the cursor as it is now.
+  const enrollment = await client('automation_enrollments').where({ id: sendRow.enrollment_id }).forUpdate().first();
+  if (!enrollment || norm(enrollment.email) !== bounced || !['active', 'completed'].includes(enrollment.status)) {
+    await applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status: 'skipped', reason: 'enrollment_changed' }, client);
+    return NO_RETRY;
+  }
 
   const { rewindEnrollmentToStep } = require('./automation-runner');
   // spelling_retry_email is the retry provenance the runner's send boundary reads (kill switch): see retrySendVerdict.
@@ -345,10 +374,10 @@ async function startRetry({ sendRow, bounced }, client) {
 }
 
 /** The retry send itself hard-bounced: its (bound) claim fails. Returns { retryFailed, bouncedEmail } or null. */
-async function settleRetryBounce({ sendRow, customerId }, client) {
+async function settleRetryBounce({ sendRow, customerId, reason = 'retry_address_bounced' }, client) {
   const row = await claimForSend({ channel: CHANNEL, sendId: sendRow.id, customerId }, client);
   if (!row) return null;
-  await applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status: 'failed', reason: 'retry_address_bounced' }, client);
+  await applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status: 'failed', reason }, client);
   return { retryFailed: true, bouncedEmail: row.bounced_email };
 }
 
@@ -377,6 +406,36 @@ async function onAutomationHardBounce({ ev, sendRow }, client = db) {
     logger.warn(`[call-email-spelling-retry] failed closed: ${err.code || err.name}`);
     return NO_RETRY;
   }
+}
+
+/**
+ * A "blocked" event whose reason is a domain with no mail server (GATE_CALL_EMAIL_CHECKS) for the BOUND retry send: the retry
+ * address is dead, exactly as if it had hard-bounced. The claim fails and the provenance enrollments are released; the
+ * webhook raises the one existing alert and no read-back card. Any other blocked / dropped event, and any send that is not the
+ * bound retry send, is left to the webhook as before.
+ */
+async function onAutomationDeadDomain({ ev, sendRow }, client = db) {
+  if (!gateLive() || !sendRow?.enrollment_id) return NO_RETRY;
+  if (!require('./email-bounce-recovery').isNoMailServerEvent(ev)) return NO_RETRY;
+  try {
+    return await client.transaction(async (sp) => (
+      await settleRetryBounce({ sendRow, customerId: await enrollmentCustomerId(sendRow, sp), reason: 'retry_address_no_mail_server' }, sp) || NO_RETRY
+    ));
+  } catch (err) {
+    logger.warn(`[call-email-spelling-retry] dead-domain settle failed closed: ${err.code || err.name}`);
+    return NO_RETRY;
+  }
+}
+
+/**
+ * The tracked flow threw after taking its claim and before staging the message (nothing was sent): fail the still-unbound claim
+ * this original message took, so it never sits `resending` for good. True when a claim was failed.
+ */
+async function failUnboundClaim({ originId }, client = db) {
+  const rows = await client(TABLE)
+    .where({ channel: EMAIL_CHANNEL, origin_send_id: originId, status: 'resending' }).whereNull('retry_send_id')
+    .update({ status: 'failed', reason: 'recovery_error', updated_at: new Date() }).returning('id');
+  return rows.length > 0;
 }
 
 /**
@@ -432,5 +491,5 @@ async function onAutomationDelivered({ sendRow }, client = db) {
 
 module.exports = {
   onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, bindTrackedRetrySend, gateLive,
-  retrySendVerdict, stopRetry, releaseRetryEnrollments, lockPrepSend, CHANNEL, EMAIL_CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+  retrySendVerdict, stopRetry, releaseRetryEnrollments, onAutomationDeadDomain, failUnboundClaim, lockPrepSend, CHANNEL, EMAIL_CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
 };

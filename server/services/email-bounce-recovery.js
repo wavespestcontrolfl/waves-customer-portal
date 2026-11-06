@@ -128,6 +128,20 @@ function parseJsonArray(value) {
 }
 
 /** True when an email_messages row is itself a recovery re-send (loop guard). */
+// THE contract with the webhook fallbacks (routes/webhooks-sendgrid.js): a result carrying `retryOwned: true` belongs to the
+// other-spelling retry (its claim decides the outcome), so the transcript rescue, the recording re-check card and any ACT
+// suggestion are skipped for it. The outcome table:
+//   resent                                             -> own delivery/bounce feedback decides (rescue skipped, as before)
+//   skipped other_spelling_already_tried               -> retryOwned (claim lost to an earlier try, either path)
+//   skipped other_spelling_not_sent                    -> retryOwned (claim not bindable)
+//   skipped <verdict> (gate_off, claim_settled, email_changed, suppressed, owned_by_other) at the provider boundary -> retryOwned
+//   deferred collection_hold / error (send failed) of an other-spelling resend -> retryOwned
+//   recovery_message_rebounced of an other-spelling resend -> retryOwned (claim failed, the one existing alert, no card)
+//   dead-domain blocked event on the resend message    -> handleRecoveryBounce via routeDeadDomain (same as a rebounce)
+//   skipped no_candidate / corrected_suppressed / corrected_owned_by_other / ... BEFORE any claim -> nothing was tried: today's alert, card and rescue
+const retryOwned = (result) => ({ ...result, retryOwned: true });
+const retryOwnedIf = (flag, result) => (flag ? retryOwned(result) : result);
+
 function isRecoveryMessage(message) {
   return parseJsonArray(message?.categories).includes(RECOVERY_CATEGORY);
 }
@@ -925,13 +939,15 @@ async function claimOtherSpellingSend(decision, candidate, match, bouncedMessage
 
 // Why a delivered other-spelling recovery must NOT commit the customer record, or null when it may: the gate is off, or the
 // delivered message is not the send its claim is bound to (still resending).
-async function otherSpellingCommitSkip(rec, recoveryMessage) {
+async function otherSpellingCommitSkip(rec, recoveryMessage, conn) {
   if (!callBounceOtherSpellingLive()) return 'gate_off';
   // Only the customer's PRIMARY email is ever overwritten by this rule (a contact or billing field keeps the manual path).
   if (rec.customer_email_field !== 'email') return 'not_primary_email';
+  // LOCK ORDER: the claim row FIRST (FOR UPDATE, held to the end of `conn`, the commit transaction), then the customer row.
+  // A concurrent settlement of the claim (a re-bounce, a gate-off stop) waits for this transaction and then finds it settled.
   const claim = await require('./call-email-spelling-retry').claimForSend({
     channel: 'email_message', sendId: recoveryMessage.id, customerId: rec.customer_id,
-  }, db);
+  }, conn);
   return claim ? null : 'claim_not_bound';
 }
 
@@ -946,12 +962,12 @@ function refusalStatus({ reason, retryStopped }) {
  * it (`outcome.sendId`, or `rec.retry_message_id` once staged), else, before anything was staged, by the original message
  * whose flow took it. Best-effort, never throws.
  */
-function settleOtherSpellingClaim(rec, { sendId = null, ...outcome }) {
+function settleOtherSpellingClaim(rec, { sendId = null, ...outcome }, conn = db) {
   if (rec?.correction_rule !== OTHER_SPELLING_RULE || !rec.customer_id) return Promise.resolve();
   const bound = sendId || rec.retry_message_id || null;
   return require('./call-email-spelling-retry').settleClaim({
     customerId: rec.customer_id, bouncedEmail: rec.bounced_email, sendId: bound, originId: bound ? null : rec.original_message_id,
-  }, outcome, db);
+  }, outcome, conn);
 }
 
 /**
@@ -1036,7 +1052,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
       }
     }
     logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
-    return { skipped: decision.status };
+    return retryOwnedIf(decision.status === OTHER_SPELLING_CLAIMED_STATUS, { skipped: decision.status });
   }
 
   // The ledger-shaped handle the other-spelling claim is settled by (customer + bounced address).
@@ -1052,7 +1068,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
       // The claim was settled elsewhere or the gate went off while staging: nothing was staged or sent, and nobody is told.
       await db('email_bounce_recoveries').where({ id: recoveryId }).update({ ...baseUpdate, status: OTHER_SPELLING_NOT_SENT_STATUS });
       await settleOtherSpellingClaim(claimRec, { status: 'skipped', reason: 'not_bound' });
-      return { skipped: OTHER_SPELLING_NOT_SENT_STATUS };
+      return retryOwned({ skipped: OTHER_SPELLING_NOT_SENT_STATUS });
     }
     await db('email_bounce_recoveries').where({ id: recoveryId }).update({
       ...baseUpdate,
@@ -1062,7 +1078,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     await settleOtherSpellingClaim(claimRec, { status: 'failed', reason: 'send_failed' });
     await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
     logger.warn(`[bounce-recovery] could not stage resend for ${redactEmail(candidate.corrected)}: ${err.message}`);
-    return { error: String(err.message || err) };
+    return retryOwnedIf(otherSpelling, { error: String(err.message || err) });
   }
 
   claimRec.retry_message_id = built.message.id;
@@ -1101,7 +1117,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
       }),
     });
     logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} deferred: collections dispute hold`);
-    return { deferred: 'collection_hold', corrected: candidate.corrected };
+    return retryOwnedIf(otherSpelling, { deferred: 'collection_hold', corrected: candidate.corrected });
   }
   if (sendResult.suppressed) {
     await db('email_bounce_recoveries').where({ id: recoveryId }).update({
@@ -1116,7 +1132,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
           ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });
     }
     logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} suppressed: ${sendResult.reason}`);
-    return { skipped: sendResult.reason };
+    return retryOwnedIf(sendResult.retryStopped, { skipped: sendResult.reason });
   }
   if (!sendResult.ok) {
     await db('email_bounce_recoveries').where({ id: recoveryId }).update({
@@ -1127,7 +1143,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     await settleOtherSpellingClaim(claimRec, { status: 'failed', reason: 'send_failed' });
     await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
     logger.warn(`[bounce-recovery] resend failed for ${redactEmail(candidate.corrected)}: ${sendResult.error}`);
-    return { error: sendResult.error };
+    return retryOwnedIf(otherSpelling, { error: sendResult.error });
   }
 
   logger.info(`[bounce-recovery] re-sent ${bouncedMessage.template_key || 'email'} ${redactEmail(bouncedEmail)} → ${redactEmail(candidate.corrected)} (${candidate.rule}/${candidate.confidence})`);
@@ -1387,7 +1403,10 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     } catch (cleanupErr) {
       logger.error(`[bounce-recovery] failed to clear stuck recovery: ${cleanupErr.message}`);
     }
-    return { error: err.message };
+    // An other-spelling claim this flow took but never bound to a message must not sit `resending` for good.
+    const claimFailed = await require('./call-email-spelling-retry').failUnboundClaim({ originId: bouncedMessage?.id })
+      .catch(() => false);
+    return retryOwnedIf(claimFailed, { error: err.message });
   }
 }
 
@@ -1424,17 +1443,9 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       .update({ updated_at: new Date(), metadata: jsonbMerge({ delivery_confirmed_at: new Date().toISOString() }) });
     await retireResendUncertainAlertOrRecordObligation(rec.id);
     if (rec.record_updated || rec.status === 'committed') return; // already done
-    // Kill switch (P1, pre-push audit): GATE_CALL_BOUNCE_OTHER_SPELLING off between the resend and its delivery means the
-    // customer record is NOT overwritten and no fanout runs. The mail already went; the ledger and the claim say why.
-    // And only a delivery of the send the claim is BOUND to may commit it (an unbound or already-settled claim commits nothing).
-    const commitSkip = rec.correction_rule === OTHER_SPELLING_RULE ? await otherSpellingCommitSkip(rec, recoveryMessage) : null;
-    if (commitSkip) {
-      await db('email_bounce_recoveries').where({ id: rec.id }).update({
-        status: 'delivered', updated_at: new Date(), metadata: jsonbMerge({ commit_skipped: commitSkip }),
-      });
-      await settleOtherSpellingClaim(rec, { status: 'skipped', reason: commitSkip, sendId: recoveryMessage.id });
-      return;
-    }
+    // The kill switch, the primary-email rule and the claim binding are judged INSIDE the commit transaction below (claim row
+    // locked first), together with the customer update, the fanout and the claim settlement.
+    const otherRule = rec.correction_rule === OTHER_SPELLING_RULE;
 
     const correctedEmail = String(rec.corrected_email || recoveryMessage.recipient_email_snapshot || '').trim().toLowerCase();
     const bouncedEmail = String(rec.bounced_email || '').trim().toLowerCase();
@@ -1458,10 +1469,20 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     // preference writer takes its row before the address key): the
     // applicable row is held first, then the key, then the recheck under both.
     const commit = await db.transaction(async (trx) => {
+      if (otherRule) {
+        const skip = await otherSpellingCommitSkip(rec, recoveryMessage, trx);
+        if (skip) {
+          await settleOtherSpellingClaim(rec, { status: 'skipped', reason: skip, sendId: recoveryMessage.id }, trx);
+          return { skip };
+        }
+      }
       const before = customerField ? await trx('customers').where({ id: rec.customer_id }).forUpdate().first() : null;
       if (billingField) await trx('notification_prefs').where({ customer_id: rec.customer_id }).forUpdate().first('customer_id');
       if (correctedEmail) await require('../utils/customer-comms-lock').lockCustomerEmail(trx, correctedEmail);
-      if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id, trx)) return { ownedByOther: true };
+      if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id, trx)) {
+        if (otherRule) await settleOtherSpellingClaim(rec, { status: 'skipped', reason: 'owned_by_other', sendId: recoveryMessage.id }, trx);
+        return { ownedByOther: true };
+      }
       const fields = [];
       // 1. Customer record (primary email or service-contact column), when the
       //    bounce resolved to a customer. Only overwrite if the column STILL
@@ -1496,8 +1517,19 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
           .update({ billing_email: correctedEmail, updated_at: new Date() });
         if (Number(affected) > 0) fields.push('notification_prefs.billing_email');
       }
+      if (otherRule) {
+        await settleOtherSpellingClaim(rec, fields.length
+          ? { status: 'committed', sendId: recoveryMessage.id }
+          : { status: 'skipped', reason: 'email_changed', sendId: recoveryMessage.id }, trx);
+      }
       return { fields };
     });
+    if (commit.skip) {
+      await db('email_bounce_recoveries').where({ id: rec.id }).update({
+        status: 'delivered', updated_at: new Date(), metadata: jsonbMerge({ commit_skipped: commit.skip }),
+      });
+      return;
+    }
     // A failed write (a lost lock contest, a transient error) must not be
     // recorded as committed: the throw leaves the recovery uncommitted for
     // the next delivery event to retry.
@@ -1507,7 +1539,6 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         updated_at: new Date(),
         metadata: jsonbMerge({ commit_skipped: 'corrected_owned_by_other' }),
       });
-      await settleOtherSpellingClaim(rec, { status: 'skipped', reason: 'owned_by_other', sendId: recoveryMessage.id });
       await alertEmailCollision({ recovery: rec, correctedEmail });
       return;
     }
@@ -1579,9 +1610,6 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       metadata: jsonbMerge({ committed_field: updatedField }),
     });
 
-    await settleOtherSpellingClaim(rec, recordUpdated
-      ? { status: 'committed', sendId: recoveryMessage.id }
-      : { status: 'skipped', reason: 'email_changed', sendId: recoveryMessage.id });
     await notifyRecoverySuccess({ recovery: rec, bouncedEmail, correctedEmail, recordUpdated, field: updatedField });
     logger.info(`[bounce-recovery] committed ${redactEmail(bouncedEmail)} → ${redactEmail(correctedEmail)} (record_updated=${recordUpdated})`);
   } catch (err) {
@@ -1611,8 +1639,10 @@ function reverifyAfterRebounce(recoveryMessage, rec) {
 
 /** The recovery re-send itself hard-bounced — record it and alert a human. */
 async function handleRecoveryBounce(recoveryMessage, ev) {
+  let rebounceOwned = false;
   try {
     const rec = await db('email_bounce_recoveries').where({ recovery_message_id: recoveryMessage.id }).first().catch(() => null);
+    rebounceOwned = rec?.correction_rule === OTHER_SPELLING_RULE;
     if (rec && rec.status !== 'redelivered_bounced') {
       await db('email_bounce_recoveries').where({ id: rec.id }).update({
         status: 'redelivered_bounced',
@@ -1631,10 +1661,17 @@ async function handleRecoveryBounce(recoveryMessage, ev) {
   } catch (err) {
     logger.error(`[bounce-recovery] handleRecoveryBounce failed: ${err.message}`);
   }
-  return { skipped: 'recovery_message_rebounced' };
+  return retryOwnedIf(rebounceOwned, { skipped: 'recovery_message_rebounced' });
 }
 
 // --- admin notifications (deduped) ---------------------------------------
+
+/** Does the other-spelling retry own this tracked message (a recovery message whose ledger rule is call_other_spelling)? */
+async function isOtherSpellingRecoveryMessage(message) {
+  if (!isRecoveryMessage(message) || !message?.id) return false;
+  const rec = await db('email_bounce_recoveries').where({ recovery_message_id: message.id }).first('correction_rule').catch(() => null);
+  return rec?.correction_rule === OTHER_SPELLING_RULE;
+}
 
 async function adminAlertDeduped({ dedupeKey, windowHours = 168, category = 'alert', title, body, link, metadata = {} }) {
   try {
@@ -1914,6 +1951,7 @@ module.exports = {
   isHardBounceEvent,
   isNoMailServerEvent,
   isRecoveryMessage,
+  isOtherSpellingRecoveryMessage,
   decideRecoveryAction,
   asmGroupIdForStream,
   attemptRecovery,
