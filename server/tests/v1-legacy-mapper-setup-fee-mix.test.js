@@ -26,6 +26,31 @@ describe('v1 legacy mapper setup fee by plan mix', () => {
     expect(bundle.totals.year1).toBe(Math.round((bundle.totals.year2 + bundle.oneTime.total) * 100) / 100);
   });
 
+  test('a solo mosquito plan stores the setup fee the page shows and accept bills', () => {
+    const converter = require('../services/estimate-converter');
+    const { PEST } = require('../services/pricing-engine/constants');
+    const solo = mapV1ToLegacyShape(generateEstimate({ ...property, services: { mosquito: { tier: 'monthly' } } }));
+    const estimateData = { result: solo };
+    const recurringServices = converter.recurringServicesFromEstimateData(estimateData);
+    expect(recurringServices.map(converter.recurringServiceKey)).toEqual(['mosquito']);
+    expect(converter.shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices, estimateData })).toBe(true);
+    expect(PEST.initialFee).toBeGreaterThan(0);
+    expect(solo.oneTime.membershipFee).toBe(PEST.initialFee);
+    expect(solo.oneTime.membershipFee).toBe(converter.frozenSetupFeeAmount(estimateData));
+    expect(solo.oneTime.total).toBeGreaterThanOrEqual(solo.oneTime.membershipFee);
+    expect(solo.totals.year1).toBe(Math.round((solo.totals.year2 + solo.oneTime.total) * 100) / 100);
+  });
+
+  test('a mosquito bundle still caches no setup fee', () => {
+    const bundle = mapV1ToLegacyShape(generateEstimate({
+      ...property,
+      services: { mosquito: { tier: 'monthly' }, lawn: { track: 'st_augustine', tier: 'standard' } },
+    }));
+    expect(bundle.recurring.services.length).toBeGreaterThan(1);
+    expect(bundle.recurring.services.every((s) => !s.quoteRequired)).toBe(true);
+    expect(bundle.oneTime.membershipFee).toBe(0);
+  });
+
   test('pest + palm injection is a multi-service plan: no cached setup fee (codex #6438 r7)', () => {
     const mapped = mapV1ToLegacyShape(generateEstimate({
       ...property,

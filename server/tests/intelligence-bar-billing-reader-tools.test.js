@@ -6,10 +6,12 @@
 process.env.JWT_SECRET = 'synthetic-ib-test';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/prepaid-pi-guard', () => ({ ...jest.requireActual('../services/prepaid-pi-guard'), neutralizeOpenPaymentIntent: jest.fn() }));
 
 const registry = require('../services/intelligence-bar/action-registry');
 const gates = require('../services/intelligence-bar/write-gates');
-const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/intelligence-bar/billing-reader-tools');
+const { BILLING_READER_TOOLS, executeBillingReaderTool, _private: { intentInspector } } = require('../services/intelligence-bar/billing-reader-tools');
+const guard = require('../services/prepaid-pi-guard');
 
 const NAMES = ['get_customer_invoices', 'get_invoice_detail'];
 const CUSTOMER = '10000000-0000-4000-8000-0000000000aa';
@@ -126,5 +128,44 @@ describe('executor guards (no database reached)', () => {
 
   test('an unknown tool name is an error, not a read', async () => {
     expect(await executeBillingReaderTool('refund_invoice', { invoice_id: INVOICE }, {})).toMatchObject({ error: expect.stringContaining('Unknown tool') });
+  });
+});
+
+// An attached PaymentIntent is asked of Stripe through one inspector per tool call (its snapshot). Ask once per
+// intent, share one time budget, and past the budget hold the balance without asking.
+describe('the per-call Stripe inspector for an attached PaymentIntent', () => {
+  let clock;
+  beforeEach(() => {
+    clock = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    guard.neutralizeOpenPaymentIntent.mockReset();
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('each intent is asked once per call, through the read-only check, and only an ok answer is inert', async () => {
+    guard.neutralizeOpenPaymentIntent.mockImplementation(async (piId) => (piId === 'pi_inert' ? { ok: true, piStatus: 'requires_payment_method' } : { ok: false, reason: 'payment_in_flight' }));
+    const inspect = intentInspector();
+    expect(await inspect('pi_inert')).toBe(true);
+    expect(await inspect('pi_inert')).toBe(true);
+    expect(await inspect('pi_moving')).toBe(false);
+    expect(guard.neutralizeOpenPaymentIntent.mock.calls).toEqual([['pi_inert', { inspectOnly: true }], ['pi_moving', { inspectOnly: true }]]);
+    // A new call has its own inspector and asks again.
+    expect(await intentInspector()('pi_inert')).toBe(true);
+    expect(guard.neutralizeOpenPaymentIntent).toHaveBeenCalledTimes(3);
+  });
+
+  test('once the call has spent its time budget, a new intent holds the balance without asking Stripe', async () => {
+    guard.neutralizeOpenPaymentIntent.mockImplementation(async () => { clock += 5000; return { ok: true, piStatus: 'requires_payment_method' }; });
+    const inspect = intentInspector();
+    expect(await inspect('pi_slow')).toBe(true);
+    expect(await inspect('pi_next')).toBe(false);
+    // An answer already given stands.
+    expect(await inspect('pi_slow')).toBe(true);
+    expect(guard.neutralizeOpenPaymentIntent).toHaveBeenCalledTimes(1);
+  });
+
+  test('a read that fails is not inert (the guard answers unverifiable)', async () => {
+    guard.neutralizeOpenPaymentIntent.mockResolvedValue({ ok: false, reason: 'payment_session_unverifiable' });
+    expect(await intentInspector()('pi_unknown')).toBe(false);
   });
 });

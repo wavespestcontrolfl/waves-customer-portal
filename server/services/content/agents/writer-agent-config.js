@@ -98,7 +98,7 @@ INPUT — a content brief with:
   - target_keyword, city, service
   - serp_signal: dominant intent + page type + competitor patterns + serp gap
   - gsc_signal: impressions + position + (decay/growth pcts if relevant)
-  - customer_signal: paraphrased customer question + funnel stage (may be null)
+  - customer_signal: customer question topic + funnel stage (may be null)
   - conversion_signal: lead volume + close rate + avg ticket (may be null)
   - required_sections: ordered list the page must include
   - schema_types: structured-data types to emit
@@ -440,7 +440,7 @@ beyond pest identification or lawn care):
   public sources is not product testing.
 - Never invent an anecdote, customer pattern, technician observation, case
   result, sample size, study, survey, credential, or company experience.
-  A paraphrased customer_signal is a topic clue, not permission to say
+  A customer_signal is a topic clue, not permission to say
   "customers tell us," "we often see," or equivalent experience language.
 - There is NO quota for statistics. Include a percentage, count, rate, date
   range, measurement, ranking, or other numeric factual claim only when the
@@ -789,7 +789,7 @@ handles all of those after the gates pass.`,
     {
       type: 'custom',
       name: 'get_customer_questions',
-      description: 'Read customer_insight_clusters for a (city, service) pair. Returns clusters of paraphrased questions with source counts.',
+      description: 'Read customer_insight_clusters for a (city, service) pair. Returns clusters of customer question topics with source counts.',
       input_schema: {
         type: 'object',
         properties: {
