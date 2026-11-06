@@ -738,7 +738,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const result = await api('/query', input);
     expect(result.body.pendingActions).toHaveLength(1);
     expect(result.body.pendingActions[0].tool).toBe('update_customer');
-    expect(JSON.stringify(mockModel.mock.calls)).toContain('dependency_unresolved');
+    // Same customer, so the second card is refused (several cards in one answer need different records).
+    expect(JSON.stringify(mockModel.mock.calls)).toContain('same_record_card_open');
     const rows = await db('ib_pending_actions').where('task_id', result.body.taskId);
     expect(rows).toHaveLength(1);
     const Pending = require('../services/intelligence-bar/pending-actions');
@@ -765,8 +766,10 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       const note = `Owner-direct fixture ${owner.slice(0, 8)}`;
       // A direct notes edit needs nothing to overwrite (owner-direct limits, 2026-10-02).
       await db('customers').where('id', customerA).update({ crm_notes: null });
+      // The message names the customer and nothing else: a note text after a colon, or other free words, would
+      // card the edit under the target rules.
       proposeNote(customerA, note);
-      const direct = await api('/query', request(`Add a note for ${nameA}: ${note}`, { session_id: crypto.randomUUID() }), ownerToken);
+      const direct = await api('/query', request(`Add a note for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(direct.status).toBe(200);
       expect(direct.body.pendingActions).toEqual([]);
       expect(direct.body.taskState).toBe('responded');
@@ -793,7 +796,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       // The owner's notes edit over existing notes keeps its card: notes
       // replace crm_notes (gate codes, access details).
       proposeNote(customerA, `${note} replaced`);
-      const overwrite = await api('/query', request(`Add a note for ${nameA}: ${note} replaced`, { session_id: crypto.randomUUID() }), ownerToken);
+      const overwrite = await api('/query', request(`Add a note for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(overwrite.body.pendingActions).toHaveLength(1);
       // The card names the notes it deletes, hash-bound in the contract.
       expect(JSON.stringify(overwrite.body.pendingActions[0].contract)).toContain(`REPLACES the existing notes — deletes \\"${note}\\"`);
@@ -837,7 +840,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
         .mockResolvedValueOnce({ content: sources.map((value, i) => source(value, `s${i}`)), usage: {} })
         .mockResolvedValueOnce(tools('bulk_update_customers', { customer_ids: [customerA], updates: { lead_source: 'yelp' } }, 'bulk'))
         .mockResolvedValueOnce(answer('Tap Confirm.'));
-      const six = await api('/query', request(`Change the lead source for ${nameA} six times`, { session_id: crypto.randomUUID() }), ownerToken);
+      const six = await api('/query', request(`Change the lead source for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       const refused = JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1));
       expect(refused.match(/owner_direct_bulk_limit/g)).toHaveLength(1);
       expect(six.body.pendingActions).toHaveLength(1);

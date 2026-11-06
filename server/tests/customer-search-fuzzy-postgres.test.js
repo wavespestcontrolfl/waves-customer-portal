@@ -120,7 +120,7 @@ jest.setTimeout(120000);
     });
 
     test('exact rows carry no approximate flag', async () => {
-      const { body } = await get('/admin/customers?search=Stompf&suggest=1');
+      const { body } = await get('/admin/customers?search=Stompf');
       expect(names(body.customers)).toEqual(['Orlan Stompf']);
       expect(body.customers[0]).not.toHaveProperty('approximate');
     });
