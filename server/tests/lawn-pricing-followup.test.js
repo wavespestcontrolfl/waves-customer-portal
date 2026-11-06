@@ -1471,6 +1471,17 @@ describe('lawn $55 minimum per visit after discounts (owner 2026-11-06, GATE_LAW
     expect(solo.summary.manualDiscount.amount).toBe(50);
     expect(solo.summary.recurringAnnualAfterDiscount).toBe(495);
 
+    // The selected cadence can clear the minimum while the other does not:
+    // 2,870 sq ft, $10 off. Every 6 weeks stays $516 ($56.22 after); monthly
+    // ($660 list) would be $650 after the $10, so it lists at $670 (codex #7709 P1).
+    const mixed = generateEstimate(baseInput({
+      measuredTurfSf: 2870,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+      manualDiscount: { type: 'FIXED', value: 10 },
+    }));
+    expect(lawnOf(mixed).tiers.map((t) => [t.visits, t.annual])).toEqual([[9, 516], [12, 670]]);
+    expect(mixed.summary.recurringAnnualAfterDiscount).toBe(506);
+
     // Bundle: the $50 is spread by price, and the lawn's share still leaves $495.
     const bundle = silverQuote({ measuredTurfSf: 1450, manualDiscount: { type: 'FIXED', value: 50 } });
     const lawn = lawnOf(bundle);

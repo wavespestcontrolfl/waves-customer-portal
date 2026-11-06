@@ -230,11 +230,14 @@ function raiseLawnListForFixedDiscount(item, fixedAmount, otherDiscountable, min
   for (let i = 0; i < 25 && roundMoney(paid - shareAt(paid)) < target; i += 1) {
     paid = roundMoney(target + shareAt(paid) + (i > 10 ? 0.01 * (i - 10) : 0));
   }
-  if (!(paid > paidNow)) return 0;
   // A flat credit already taken off this line comes off the raised list too.
   const credit = Math.max(0, roundMoney(roundMoney(Number(item.annual) * keep) - paidNow));
+  // Every cadence is checked even when the selected one already clears the
+  // minimum: the public page takes the same dollar slice off whichever
+  // cadence the customer picks (codex #7709 P1).
+  const listBefore = Number(item.annual);
   raiseLawnListForMinimumAfterDiscount(item, keep, minPerVisit, roundMoney(shareAt(paid) + credit));
-  if (!item.minimumAfterDiscountApplied) return 0;
+  if (Number(item.annual) === listBefore) return 0;
   item.annualBeforeDiscount = item.annual;
   const newPaid = roundMoney(roundMoney(item.annual * keep) - credit);
   const delta = roundMoney(newPaid - paidNow);
