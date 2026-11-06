@@ -56,6 +56,11 @@ const {
   billVisit, dueDateFromVisit, siblingCoverageStatus, INVOICE_BACKED_DISPOSITIONS, deadInvoiceStatuses, claimDispositionSlot,
   loadBillingMode,
 } = require('../services/billing-recovery-bill');
+const { etDateString } = require('../utils/datetime-et');
+
+// An invoice the Billed elsewhere step refuses as the covering bill, besides a
+// dead one (void / refunded / cancelled): a draft was never presented.
+const BILLED_ELSEWHERE_REFUSED_STATUSES = ['draft'];
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
@@ -192,6 +197,58 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
   return q;
 }
 
+// The unpaid annual prepay bill that covers each listed visit (owner
+// 2026-11-06, "fix"). A payment_pending term stamps its visits only once its
+// prepay invoice is paid, so a completed visit it covers has no invoice of its
+// own and lists here, and Bill would charge that visit a second time. The terms
+// are the schedule re-price guard's unpaid picks (admin-schedule.js
+// lockAndLoadHeldPrepayTerms: payment_pending, not dispute-suspended), kept to a
+// prepay invoice the Billed elsewhere step accepts (not a draft, not dead). The
+// visits are each term's own coverage (coverageRowsForTerm, on the window a
+// payment today would give a never-activated term), so a visit past the sold
+// count names no bill. A lookup that fails names nothing for those visits
+// (logged): they keep their plain wording. Read-only. Returns a Map of visit
+// id -> invoice number.
+async function unpaidPrepayBillByVisit(rows) {
+  const byVisit = new Map();
+  const customerIds = [...new Set(rows.map((r) => r.customer_id).filter(Boolean).map(String))];
+  if (!customerIds.length) return byVisit;
+  const listed = new Set(rows.map((r) => String(r.scheduled_service_id)));
+  let terms;
+  try {
+    const query = db('annual_prepay_terms as t')
+      .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
+      .whereIn('t.customer_id', customerIds)
+      .where('t.status', 'payment_pending')
+      .whereNotIn('inv.status', [...deadInvoiceStatuses(), ...BILLED_ELSEWHERE_REFUSED_STATUSES]);
+    if (await db.schema.hasColumn('annual_prepay_terms', 'dispute_suspended_at')) query.whereNull('t.dispute_suspended_at');
+    terms = await query
+      .orderBy([{ column: 't.term_start' }, { column: 't.id' }])
+      .select('t.*', 'inv.invoice_number as prepay_invoice_number', db.raw(
+        'EXISTS (SELECT 1 FROM scheduled_services ss_link WHERE ss_link.annual_prepay_term_id = t.id) AS has_linked_visit',
+      ));
+  } catch (err) {
+    logger.warn(`[billing-recovery] unpaid prepay bills could not be read: ${err.message}`);
+    return byVisit;
+  }
+  const { coverageRowsForTerm } = require('../services/annual-prepay-renewals');
+  const today = etDateString();
+  for (const term of terms) {
+    let covered;
+    try {
+      covered = await coverageRowsForTerm(term, db, { projectFirstActivationOn: term.has_linked_visit ? null : today });
+    } catch (err) {
+      logger.warn(`[billing-recovery] coverage of prepay term ${term.id} could not be read: ${err.message}`);
+      continue;
+    }
+    for (const row of covered) {
+      const id = String(row.id);
+      if (listed.has(id) && !byVisit.has(id)) byVisit.set(id, term.prepay_invoice_number);
+    }
+  }
+  return byVisit;
+}
+
 /**
  * The Billing recovery list: completed-but-uninvoiced visits from the last
  * `days` days, split into one-click-billable leaks (monthly_rate = 0,
@@ -266,6 +323,7 @@ async function listUninvoicedLeaks(days) {
     prepayActiveRows.map((r) => siblingCoverageStatus(r, db, { trustRowStamp: true })),
   );
   const activeRows = prepayActiveRows.filter((_, i) => siblingStatuses[i] !== 'covered');
+  const prepayBillByVisit = await unpaidPrepayBillByVisit(activeRows);
 
   const shape = (r) => ({
     scheduled_service_id: r.scheduled_service_id,
@@ -290,17 +348,21 @@ async function listUninvoicedLeaks(days) {
     // has since died (void / refunded / cancelled).
     billed_elsewhere_invoice_number: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_number || null) : null,
     billed_elsewhere_invoice_status: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_status || null) : null,
+    // The unpaid annual prepay bill that covers this visit: record the visit
+    // on it (Billed elsewhere), never Bill it.
+    prepay_invoice_number: prepayBillByVisit.get(String(r.scheduled_service_id)) || null,
   });
 
   // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type
-  // (inspection/rodent — could be paid or free), or per-application
+  // (inspection/rodent — could be paid or free), per-application
   // (autopay-active by design — a human confirms completion billing really
-  // did miss it before re-billing) visits need a human eye before billing —
-  // they aren't safe one-click leaks.
+  // did miss it before re-billing), or unpaid-prepay-covered visits need a
+  // human eye before billing — they aren't safe one-click leaks.
   const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0
     || parseFloat(r.prepaid_amount || 0) > 0
     || r.billing_mode === 'per_application'
-    || isReviewServiceType(r.service_type);
+    || isReviewServiceType(r.service_type)
+    || prepayBillByVisit.has(String(r.scheduled_service_id));
   const leaks = activeRows.filter((r) => !isReview(r)).map(shape);
   const needsReview = activeRows.filter(isReview).map(shape);
   const sum = (arr) => Math.round(arr.reduce((s, r) => s + r.price, 0) * 100) / 100;
@@ -572,7 +634,6 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
  * 'intentionally_free'). The visit leaves the queue while the covering invoice
  * is live and returns if that invoice is later voided, refunded or cancelled.
  */
-const BILLED_ELSEWHERE_REFUSED_STATUSES = ['draft'];
 router.post('/:scheduledServiceId/billed-elsewhere', requireAdmin, async (req, res) => {
   const { scheduledServiceId } = req.params;
   const invoiceNumber = String(req.body?.invoiceNumber || '').trim().slice(0, 60);
