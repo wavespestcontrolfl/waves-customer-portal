@@ -9,7 +9,10 @@ const {
   resolveEstimateQuoteRequirement,
   buildRenderFlags,
   sectionTierEligibleFromKeys,
+  buildPricingBundle,
 } = require('../routes/estimate-public');
+const { generateEstimate } = require('../services/pricing-engine');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
 const { resolveAnnualPrepayInvoiceTotal } = require('../services/estimate-converter');
 
@@ -1275,5 +1278,46 @@ describe('sectionTierEligibleFromKeys — per-section badge (single source of tr
 
   test('one-time (non-recurring) sections never badge', () => {
     expect(sectionTierEligibleFromKeys(false, ['lawn_care'])).toBe(false);
+  });
+});
+
+describe('lawn $55 minimum after discounts renders the full discount on the price card (owner 2026-11-06)', () => {
+  // The customer price card (client PriceCard.jsx) strikes through
+  // frequency.perVisit, else monthlyBase x 12 / visits, and labels the gap
+  // "WaveGuard <tier> Discount" only when the gap equals the tier % of that
+  // crossed-out price. So the raised list must reach the card, not just the
+  // paid price. crossedOut mirrors that PriceCard anchor.
+  async function lawnCards(services) {
+    const input = {
+      homeSqFt: 1800, lotSqFt: 6000, measuredTurfSf: 1450, propertyType: 'single_family',
+      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' }, services,
+    };
+    const r = generateEstimate(input);
+    const bundle = await buildPricingBundle({
+      id: `lawn-min-${Object.keys(services).join('-')}`,
+      status: 'sent',
+      estimate_data: { engineInputs: input, engineResult: r, result: mapV1ToLegacyShape(r) },
+    });
+    return bundle.services.find((svc) => svc.key === 'lawn_care').frequencies
+      .map((f) => [
+        f.key,
+        Number(f.perVisit) > 0 ? f.perVisit : Math.round((f.monthlyBase * 12 / f.visitsPerYear) * 100) / 100,
+        f.perServiceTreatments[0].displayPrice,
+      ]);
+  }
+  const lawn = { track: 'st_augustine', lawnFreq: 9 };
+
+  test('Silver: $61.11 crossed out, $55 paid, on both cadences (10% of the crossed-out price)', async () => {
+    expect(await lawnCards({ pest: { frequency: 'quarterly' }, lawn })).toEqual([
+      ['enhanced', 61.11, 55],
+      ['premium', 61.11, 55],
+    ]);
+  });
+
+  test('Gold: $64.71 crossed out, $55 paid (15%)', async () => {
+    expect(await lawnCards({ pest: { frequency: 'quarterly' }, lawn, mosquito: { tier: 'seasonal9' } })).toEqual([
+      ['enhanced', 64.71, 55],
+      ['premium', 64.71, 55],
+    ]);
   });
 });
