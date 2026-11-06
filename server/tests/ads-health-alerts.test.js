@@ -96,19 +96,23 @@ test('off: reads nothing and writes nothing', async () => {
   expect(db).not.toHaveBeenCalled();
 });
 
-test('only an enabled campaign Google says cannot serve counts; a pause or an end date never does', () => {
+test('only an enabled campaign Google says cannot serve for a reason nobody chose counts; a pause or an end date never does', () => {
   const problems = googleProblems({
     serving: { campaigns: [
       campaign({ id: '1', name: 'Not Eligible One', primaryStatus: 'NOT_ELIGIBLE', reasons: ['HAS_ADS_DISAPPROVED'] }),
       campaign({ id: '2', name: 'Misconfigured One', primaryStatus: 'MISCONFIGURED' }),
-      campaign({ id: '3', name: 'Ad Groups Paused', primaryStatus: 'PAUSED', reasons: ['AD_GROUPS_PAUSED'] }),
-      campaign({ id: '4', name: 'Ended One', primaryStatus: 'ENDED' }),
-      campaign({ id: '5', name: 'Owner Paused', status: 'PAUSED', primaryStatus: 'PAUSED', reasons: ['CAMPAIGN_PAUSED'] }),
-      campaign({ id: '6', name: 'Limited One', primaryStatus: 'LIMITED', reasons: ['BUDGET_CONSTRAINED'] }),
+      // Every ad group or ad paused: Google can say Not eligible, but the pause is someone's choice.
+      campaign({ id: '3', name: 'Ad Groups Paused', primaryStatus: 'NOT_ELIGIBLE', reasons: ['AD_GROUPS_PAUSED'] }),
+      campaign({ id: '4', name: 'Ads Paused', primaryStatus: 'NOT_ELIGIBLE', reasons: ['AD_GROUP_ADS_PAUSED', 'KEYWORDS_PAUSED'] }),
+      // A real fault beside a pause still counts.
+      campaign({ id: '5', name: 'Paused And Disapproved', primaryStatus: 'NOT_ELIGIBLE', reasons: ['AD_GROUPS_PAUSED', 'HAS_ADS_DISAPPROVED'] }),
+      campaign({ id: '6', name: 'Ended One', primaryStatus: 'ENDED', reasons: ['CAMPAIGN_ENDED'] }),
+      campaign({ id: '7', name: 'Owner Paused', status: 'PAUSED', primaryStatus: 'PAUSED', reasons: ['CAMPAIGN_PAUSED'] }),
+      campaign({ id: '8', name: 'Limited One', primaryStatus: 'LIMITED', reasons: ['BUDGET_CONSTRAINED'] }),
     ] },
     disapproved: { ads: [], capped: false },
   });
-  expect(problems.campaigns.map((c) => c.id)).toEqual(['1', '2']);
+  expect(problems.campaigns.map((c) => c.id)).toEqual(['1', '2', '5']);
 });
 
 test('Google is asked for exactly the disapproved ads that would serve: ad, ad group and campaign enabled, campaign not ended', async () => {

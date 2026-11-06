@@ -42,6 +42,10 @@ const SHADOW_ACTION = 'ads_health_alert.shadow';
 const LINK = '/admin/ppc'; // Ads -> Dashboard, where the Ad health card shows the same facts
 const UPLOAD_WINDOW_HOURS = 48; // the uploads run daily (6:40 and 6:45 AM ET): one missed run still shows
 const CANNOT_SERVE = new Set(['NOT_ELIGIBLE', 'MISCONFIGURED']);
+// Reasons that mean a person chose the state: a pause at any level, a start or end date, a draft. Google can file a
+// campaign held only by these under Not eligible (every ad group paused), and that is never a fault.
+const CHOSEN_REASONS = new Set(['CAMPAIGN_PAUSED', 'CAMPAIGN_GROUP_PAUSED', 'AD_GROUPS_PAUSED', 'AD_GROUP_ADS_PAUSED',
+  'KEYWORDS_PAUSED', 'ASSET_GROUPS_PAUSED', 'CAMPAIGN_PENDING', 'CAMPAIGN_ENDED', 'CAMPAIGN_DRAFT', 'CAMPAIGN_REMOVED']);
 const MAX_ADS = 200; // past this many disapproved ads the set counts as one item (composeGoogle)
 const MAX_UPLOAD_ROWS = 200; // ops-digest caps itemKeys at 200
 const LIST_LIMIT = 25;
@@ -88,10 +92,14 @@ async function readGoogle() {
   return { serving, disapproved };
 }
 
-// What stops an ad from serving now: an enabled campaign Google says cannot serve, and the disapproved ads.
+// An enabled campaign Google says cannot serve for a reason nobody chose (no reason given counts as a fault).
+const cannotServe = (c) => c.status === 'ENABLED' && CANNOT_SERVE.has(c.primaryStatus)
+  && (!(c.reasons || []).length || c.reasons.some((reason) => !CHOSEN_REASONS.has(reason)));
+
+// What stops an ad from serving now: those campaigns, and the disapproved ads.
 function googleProblems({ serving, disapproved }) {
   return {
-    campaigns: (serving.campaigns || []).filter((c) => c.status === 'ENABLED' && CANNOT_SERVE.has(c.primaryStatus)),
+    campaigns: (serving.campaigns || []).filter(cannotServe),
     ads: disapproved.ads,
     adsCapped: disapproved.capped,
   };
