@@ -586,7 +586,9 @@ answered an error, or Approve was refused for a reason the page does not walk th
 customer came back to an expired estimate. It rings at most once per Eastern day (the day is the `dedupeVersion`, and
 `ringOnRefresh` rings only a new day); a second reason the same day rewrites the row without a ring. A ring also sends a
 phone banner with the New lead sound (`bell-banners.js` kind `estimate_stuck`, 7:00 AM to 9:00 PM Eastern). The category
-rings by default and the owner can silence it under Push Settings ("Customers stuck booking an estimate"). Bots, staff
+rings by default and the owner can silence it under Push Settings ("Customers stuck booking an estimate"); while it is
+silenced nothing raises or refreshes (notifyAdmin reads the mute only on a fresh insert) and the 5-minute pass closes the
+open rows. Bots, staff
 browsers and the office network never raise it. The 5-minute estimate tick closes a row once its estimate is accepted,
 declined or archived. Each date search, hold start and hold end is an `audit_log` row (`estimate_slot_search`,
 `estimate_hold_started`, `estimate_hold_ended`) for the next booking audit. It sends nothing to a customer.

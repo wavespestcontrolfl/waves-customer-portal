@@ -139,10 +139,20 @@ function composeStuck(estimate, kind, why) {
   throw failure;
 }
 
+// The owner silenced the category (Push Settings). notifyAdmin reads that override only on a fresh insert, so a
+// refresh or a reopen of a standing row would still ring and send its banner: a silenced category raises nothing,
+// and the 5-minute pass closes its open rows. Only while the bell policy itself is on, as notifyAdmin reads it (the
+// rule access-code-found-bell.js and review-low-rating-alert.js follow).
+async function categorySilenced() {
+  const bellPolicy = require('./notification-bell-policy');
+  return bellPolicy.isBellPolicyEnabled() && !(await bellPolicy.bellAllowed({ category: STUCK_CATEGORY }));
+}
+
 // Raise, or refresh, the estimate's one bell. `whyFor(row)` words the reason from the estimate read here.
 async function raiseStuck(estimateId, kind, whyFor, { now = new Date() } = {}) {
   const estimate = await openEstimate(estimateId);
   if (!estimate) return { raised: false, reason: 'not_open' };
+  if (await categorySilenced()) return { raised: false, reason: 'silenced' };
   const composed = composeStuck(estimate, kind, whyFor(estimate));
   const day = etDateString(now);
   const opts = {
@@ -331,12 +341,32 @@ function noteExpiredReturn(estimate, { offered = false, selfServe = false } = {}
   });
 }
 
+const SILENCED = 'silenced in Push Settings';
+const idOf = (key) => String(key).slice(KEY_PREFIX.length);
+const ESTIMATE_STATE = ['id', 'status', 'archived_at'];
+
+// The keys whose estimate settled, from one read of every open key's estimate. A key with no estimate row is gone.
+async function settledKeys(conn, keys) {
+  const ids = [...new Set(keys.map(idOf).filter((id) => UUID_RE.test(id)))];
+  const rows = ids.length ? await conn('estimates').whereIn('id', ids).select(...ESTIMATE_STATE) : [];
+  const byId = new Map(rows.map((row) => [String(row.id).toLowerCase(), row]));
+  return new Set(keys.filter((key) => settledReason(byId.get(idOf(key).toLowerCase()))));
+}
+
+// Why the key's bell is done, read again under its lock, or null when it stands.
+async function closeReason(trx, key, silenced) {
+  if (silenced) return SILENCED;
+  const id = idOf(key);
+  return settledReason(UUID_RE.test(id) ? await trx('estimates').where({ id }).first(...ESTIMATE_STATE) : null);
+}
+
 /**
  * Close every open stuck bell whose estimate settled (accepted, declined, archived or gone), so a booked customer's
- * alert does not stand. Each close runs under the per-key lock raiseAdminAlertWithReopen takes, after reading the
- * estimate again: a raise that wins the lock first is seen open here, and one after the close rings a fresh
- * episode. Runs only while alert episodes are live (closeAdminAlertKeys stamps autoCleared, which only the reopen
- * wrapper reads). Called from the scheduler's 5-minute estimate tick; never throws.
+ * alert does not stand, and every open one while the owner has the category silenced. Each close runs under the
+ * per-key lock raiseAdminAlertWithReopen takes, after reading the estimate again: a raise that wins the lock first is
+ * seen open here, and one after the close rings a fresh episode. Runs only while alert episodes are live
+ * (closeAdminAlertKeys stamps autoCleared, which only the reopen wrapper reads). Called from the scheduler's 5-minute
+ * estimate tick; never throws.
  */
 async function closeSettledStuckAlerts({ now = new Date(), conn = db } = {}) {
   const result = { ran: false, open: 0, closed: 0 };
@@ -345,23 +375,19 @@ async function closeSettledStuckAlerts({ now = new Date(), conn = db } = {}) {
     result.ran = true;
     const keys = await episodes.openAdminAlertKeys(conn, KEY_PREFIX);
     result.open = keys.length;
-    const idOf = (key) => String(key).slice(KEY_PREFIX.length);
-    const ids = [...new Set(keys.map(idOf).filter((id) => UUID_RE.test(id)))];
-    const rows = ids.length ? await conn('estimates').whereIn('id', ids).select('id', 'status', 'archived_at') : [];
-    const byId = new Map(rows.map((row) => [String(row.id).toLowerCase(), row]));
-    const rowOf = (key) => (UUID_RE.test(idOf(key)) ? byId.get(idOf(key).toLowerCase()) : null);
-    for (const key of keys.filter((k) => settledReason(rowOf(k)))) {
+    const silenced = await categorySilenced();
+    const settled = silenced ? null : await settledKeys(conn, keys);
+    for (const key of keys.filter((k) => silenced || settled.has(k))) {
       const closed = await conn.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
-        const id = idOf(key);
-        const why = settledReason(UUID_RE.test(id) ? await trx('estimates').where({ id }).first('id', 'status', 'archived_at') : null);
+        const why = await closeReason(trx, key, silenced);
         if (!why) return 0;
         const resolution = `${why.charAt(0).toUpperCase()}${why.slice(1)}`;
         return Number(await episodes.closeAdminAlertKeys(trx, [key], why, { now, resolution })) || 0;
       });
       if (closed > 0) result.closed += 1;
     }
-    if (result.closed) logger.info(`[estimate-stuck] closed ${result.closed} stuck alert(s) for settled estimates`);
+    if (result.closed) logger.info(`[estimate-stuck] closed ${result.closed} stuck alert(s)${silenced ? ' (category silenced)' : ' for settled estimates'}`);
     return result;
   } catch (err) {
     logger.warn(`[estimate-stuck] settle pass failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);

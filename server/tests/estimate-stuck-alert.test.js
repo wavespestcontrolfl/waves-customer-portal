@@ -24,6 +24,10 @@ jest.mock('../services/admin-alert-compose', () => ({
 }));
 jest.mock('../services/audit-log', () => ({ auditEstimateBookingStep: jest.fn(async () => undefined) }));
 jest.mock('../services/customer-page-views', () => ({ shouldRecord: jest.fn(() => true) }));
+jest.mock('../services/notification-bell-policy', () => ({
+  isBellPolicyEnabled: jest.fn(() => true),
+  bellAllowed: jest.fn(async () => true),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -32,6 +36,7 @@ const episodes = require('../services/admin-alert-episodes');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { auditEstimateBookingStep } = require('../services/audit-log');
 const { shouldRecord } = require('../services/customer-page-views');
+const bellPolicy = require('../services/notification-bell-policy');
 const { etDateString } = require('../utils/datetime-et');
 const stuck = require('../services/estimate-stuck-alert');
 
@@ -73,6 +78,8 @@ beforeEach(() => {
   db.mockImplementation((table) => chain(table));
   alertEpisodesLive.mockReturnValue(true);
   shouldRecord.mockReturnValue(true);
+  bellPolicy.isBellPolicyEnabled.mockReturnValue(true);
+  bellPolicy.bellAllowed.mockResolvedValue(true);
 });
 
 describe('the reasons, in the approved words', () => {
@@ -252,6 +259,28 @@ describe('what never raises', () => {
     expect(raised()).toEqual([]);
   });
 
+  test('a category the owner silenced in Push Settings: no raise and no refresh, though the records still land', async () => {
+    bellPolicy.bellAllowed.mockResolvedValue(false);
+    tables.audit_log = trailOf([search(true), search(true), search(true), search(true), search(true)]);
+    await stuck.noteSlotAnswer(REQ, OPEN_ROW, { date: '2026-12-01' }, { primary: [] });
+    await stuck.noteSlotListFailed(REQ, OPEN_ROW, new Error('boom'));
+    await stuck.noteExpiredReturn(OPEN_ROW, { offered: true, selfServe: true });
+    alertEpisodesLive.mockReturnValue(false);
+    await stuck.noteSlotListFailed(REQ, OPEN_ROW, new Error('boom'));
+    expect(raised()).toEqual([]);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(bellPolicy.bellAllowed).toHaveBeenCalledWith({ category: 'estimate_stuck' });
+    expect(auditEstimateBookingStep).toHaveBeenCalledWith(expect.objectContaining({ action: 'estimate_slot_search' }));
+  });
+
+  test('with the bell policy off a saved mute is not read: the alert raises', async () => {
+    bellPolicy.isBellPolicyEnabled.mockReturnValue(false);
+    bellPolicy.bellAllowed.mockResolvedValue(false);
+    await stuck.noteSlotListFailed(REQ, OPEN_ROW, new Error('boom'));
+    expect(raised()).toHaveLength(1);
+    expect(bellPolicy.bellAllowed).not.toHaveBeenCalled();
+  });
+
   test('an expired estimate still raises (the office can still help)', async () => {
     tables.estimates = estimateRow({ ...OPEN_ROW, status: 'expired' });
     await stuck.noteSlotListFailed(REQ, OPEN_ROW, new Error('boom'));
@@ -404,6 +433,21 @@ describe('closeSettledStuckAlerts', () => {
       [[key(GONE)], 'estimate gone', 'Estimate gone'],
     ]);
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key(ACCEPTED)}`]);
+  });
+
+  test('while the owner has the category silenced, closes every open bell, open estimates too, without reading them', async () => {
+    bellPolicy.bellAllowed.mockResolvedValue(false);
+    episodes.openAdminAlertKeys.mockResolvedValue([key(EST), key(ACCEPTED), key(EXPIRED)]);
+    const { conn, trx } = fakeConn();
+    expect(await stuck.closeSettledStuckAlerts({ now: NOW, conn })).toEqual({ ran: true, open: 3, closed: 3 });
+    expect(episodes.closeAdminAlertKeys.mock.calls.map(([, keys, why, opts]) => [keys, why, opts.resolution])).toEqual([
+      [[key(EST)], 'silenced in Push Settings', 'Silenced in Push Settings'],
+      [[key(ACCEPTED)], 'silenced in Push Settings', 'Silenced in Push Settings'],
+      [[key(EXPIRED)], 'silenced in Push Settings', 'Silenced in Push Settings'],
+    ]);
+    expect(conn).not.toHaveBeenCalled();
+    expect(trx).not.toHaveBeenCalled();
+    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key(EST)}`]);
   });
 
   test('does nothing while alert episodes are off, and a failure only logs', async () => {
