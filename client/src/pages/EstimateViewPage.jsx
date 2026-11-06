@@ -4720,7 +4720,7 @@ export function PropertyGroupSwitcher({ group, preview = false }) {
 // Accept-path failures land the customer back in the REVIEW phase, not just
 // configure, so both branches must render it — a review-phase 500 used to
 // show nothing at all.
-function EstimateErrorBanner({ error }) {
+export function EstimateErrorBanner({ error }) {
   if (!error) return null;
   return (
     <div style={{
@@ -4728,13 +4728,13 @@ function EstimateErrorBanner({ error }) {
       border: `1px solid ${W.red}`, marginBottom: 16,
       color: W.red, fontSize: 14,
     }}>
-      Something went wrong: {error}. Try again or call{' '}
+      Something went wrong: {String(error).replace(/\.\s*$/, '')}. Try again or call{' '}
       <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
     </div>
   );
 }
 
-function SlotIssueBanner({ kind = 'conflict', onRetry }) {
+export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   const expired = kind === 'expired';
   // 'stale_hold': the recovery could not release the old hold, so the server
   // may still be offering it and the correct options stay hidden (codex r10
@@ -4761,7 +4761,7 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
             ? 'Your time-slot hold expired — pick a time again to finish signing up.'
-            : "That slot was just taken. We've refreshed the options below — pick another."}
+            : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
       {onRetry ? (
         <button
@@ -6345,6 +6345,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a failed release left the stale contract in place with nothing to tap
   // (codex r10 P2).
   const [recoveryStuck, setRecoveryStuck] = useState(false);
+  // The server's reason for a slot_conflict recovery that is not a taken
+  // slot (a visit before the move-in date); null keeps the default copy.
+  const [deadHoldNote, setDeadHoldNote] = useState(null);
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -7038,7 +7041,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a payment method re-adopted the dead hold. Refreshing the contract is
   // what actually reopens the picker, so every caller goes through here
   // rather than repeating the reset.
-  const recoverFromDeadHold = useCallback((phase) => {
+  const recoverFromDeadHold = useCallback((phase, note = null) => {
     // Never DURING Stripe's confirmation (codex r16 P1): recovery clears the
     // reservation, unmounts payment capture and DELETEs the hold, which
     // mid-confirmSetup would cancel a hold the confirmation is about to use
@@ -7066,6 +7069,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       || pendingRecoveryHoldRef.current
       || null;
     setCtaPhase(phase);
+    setDeadHoldNote(note);
     // Remembered until the release AND the refresh both succeed (codex r4
     // P1): otherwise an adopted hold's acceptance mode stays
     // `existing_appointment`, the picker stays hidden, and the banner's
@@ -7484,7 +7488,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body?.error === 'bundled_item_would_be_charged'
           // Owner ruling: this one goes to the office rather than becoming a
           // self-serve charge on the first invoice.
-          ? 'Removing this would end an included item on your plan. Give us a call at (941) 234-8929 and we\'ll sort it out with you.'
+          ? `Removing this would end an included item on your plan. Give us a call at ${WAVES_PHONE_DISPLAY} and we'll sort it out with you.`
           : body?.error === 'service_not_removable'
             ? 'This service can\'t be removed online. Give us a call and we\'ll take care of it.'
             : body?.error === 'service_not_addable' || body?.error === 'add_unavailable'
@@ -7814,6 +7818,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         setSelectedSlotId(null);
         setSelectedSlotMeta(null);
         if (/slot no longer available/i.test(message)) {
+          // A taken slot: the default copy, never a reason an earlier accept
+          // refusal left behind.
+          setDeadHoldNote(null);
           setCtaPhase('slot_conflict');
           setSlotsRefreshSignal((v) => v + 1);
         } else if (/estimate is no longer active/i.test(message)) {
@@ -8345,6 +8352,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // Server-supplied code first (RESERVATION_EXPIRED / SLOT_UNAVAILABLE)
           // — the regex is a fallback only, for legacy 409 bodies that predate
           // the code field.
+          const slotGone = body.code === 'SLOT_UNAVAILABLE'
+            || (body.code == null && /slot no longer available/i.test(body.error || ''));
           const expired = body.code === 'RESERVATION_EXPIRED'
             || (body.code == null && /expired|no active reservation/i.test(body.error || ''));
           // The accept path returns the SAME no-booking bodies /reserve and
@@ -8363,7 +8372,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // existing_appointment, so clearing the reservation alone left the
           // customer with recovery copy and no slot picker — and choosing a
           // payment method re-adopted the dead hold.
-          recoverFromDeadHold(expired ? 'reservation_expired' : 'slot_conflict');
+          if (expired || slotGone) {
+            recoverFromDeadHold(expired ? 'reservation_expired' : 'slot_conflict');
+            return;
+          }
+          // Every other 409 is about the estimate, not the time: a discount
+          // refresh, a re-price, a retired plan option, a visit before the
+          // move-in date. Read as "That slot was just taken", it sent the
+          // customer back to pick a time into the same refusal (estimate page
+          // audit 2026-11-05). Same recovery (some of these need its reload),
+          // but the banner says the server's reason.
+          recoverFromDeadHold('slot_conflict', body.error || null);
           return;
         }
         throw new Error(body.error || `accept failed: ${r.status}`);
@@ -10635,16 +10654,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       kind="stale_hold"
       onRetry={() => recoverFromDeadHold(ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired'
         ? ctaPhase
-        : 'configure')}
+        : 'configure', ctaPhase === 'slot_conflict' ? deadHoldNote : null)}
     />
   ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
+      note={ctaPhase === 'slot_conflict' ? deadHoldNote : null}
       onRetry={() => {
         // A recovery that failed its release or refresh is what actually
         // blocks the picker (codex r4 P1) — retry THAT, not just the slots.
         if (pendingRecoveryHoldRef.current) {
-          recoverFromDeadHold(ctaPhase === 'slot_conflict' ? 'slot_conflict' : 'reservation_expired');
+          recoverFromDeadHold(ctaPhase === 'slot_conflict' ? 'slot_conflict' : 'reservation_expired',
+            ctaPhase === 'slot_conflict' ? deadHoldNote : null);
           return;
         }
         setSlotsRefreshSignal((v) => v + 1);

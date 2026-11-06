@@ -10379,7 +10379,25 @@ async function retireOrDenyDroppedCapture(estimate, setupIntentId) {
 // transaction — customer_id gets linked, reservation_expires_at cleared.
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
-router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
+// One log line for every refused accept (estimate page audit 2026-11-05): the
+// server kept no record of a refusal, so a customer stuck at Approve left no
+// trace. Every refusal goes out through res.json (sent by the handler, thrown
+// and answered by its catch, or sent by the rate limiter), so it is logged
+// there. Never the bearer token: the estimate id, once the handler read the row.
+function logAcceptRefusals(req, res, next) {
+  const send = res.json.bind(res);
+  res.json = (payload) => {
+    if (res.statusCode >= 400 && res.statusCode < 500) {
+      const code = (payload && payload.code) || 'no-code';
+      const reason = String((payload && payload.error) || '').slice(0, 160);
+      logger.info(`[estimate-accept] refused ${res.statusCode} ${code} for estimate ${res.locals.acceptEstimateId || 'unknown'}: ${reason}`);
+    }
+    return send(payload);
+  };
+  next();
+}
+
+router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req, res, next) => {
   // A captured SetupIntent a reloadable in-transaction refusal drops: retired
   // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
   // never retired by a refusal that did not end the accept).
@@ -10401,6 +10419,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    res.locals.acceptEstimateId = estimate.id;
     await reconcileFrozenMembershipSnapshot(estimate);
     // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
     // gate to still be live — acceptance bills/schedules from stored rows
@@ -32803,6 +32822,7 @@ module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBu
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
 module.exports.buildOfferTiersBlock = buildOfferTiersBlock;
 module.exports.offerTierMemberBlock = offerTierMemberBlock;
+module.exports.logAcceptRefusals = logAcceptRefusals;
 module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
 // Area add-on classification seams (GATE_AREA_ADDONS), exported for server/tests/area-addon-flow.test.js.
 module.exports.collectServiceCategories = collectServiceCategories;
