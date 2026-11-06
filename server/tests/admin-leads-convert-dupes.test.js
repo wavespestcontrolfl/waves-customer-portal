@@ -1414,11 +1414,11 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
   });
 });
 
-// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): the
+// Route check on saves (owner 2026-10-29, Route Check Everywhere 2a): the
 // booked visit also gets the arrival-window route check (a SECOND, advisory
 // probe after the insert), its warning joins the response's warnings, and its
 // technician's day is numbered inside the booking transaction. Warn only.
-describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_SAVES', () => {
+describe('POST /admin/leads/:id/schedule-appointment — route check on the saved visit', () => {
   const routeCheck = require('../services/scheduling/staff-save-route-check');
   const arrivalRoute = require('../services/scheduling/arrival-route');
   const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2094-01-15. Review the route before driving it.';
@@ -1435,7 +1435,6 @@ describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_
     warningsSpy.mockRestore();
     placeSpy.mockRestore();
     realPlaceSpy.mockRestore();
-    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
     delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
   });
 
@@ -1462,7 +1461,7 @@ describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_
     });
   });
 
-  it('gate off (the real helper): no route probe and no route number, the response is as before', async () => {
+  it('arrival-window routing off (the real helper): no route probe and no route number, the response is as before', async () => {
     warningsSpy.mockRestore();
     placeSpy.mockRestore();
     const calls = [];
@@ -1477,10 +1476,9 @@ describe('POST /admin/leads/:id/schedule-appointment — GATE_ROUTE_CHECK_STAFF_
     });
   });
 
-  it('gate on (the real helper): an unassigned booking is not route-checked or numbered', async () => {
+  it('arrival-window routing on (the real helper): an unassigned booking is not route-checked or numbered', async () => {
     warningsSpy.mockRestore();
     placeSpy.mockRestore();
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const calls = [];
     install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));

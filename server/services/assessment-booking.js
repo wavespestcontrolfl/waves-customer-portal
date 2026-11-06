@@ -18,6 +18,7 @@
  */
 
 const db = require('../models/db');
+const logger = require('./logger');
 
 const ASSESSMENT_DISPLAY_NAME = 'Waves Assessment';
 const ASSESSMENT_NAME_RE = /^waves assessment$/i;
@@ -110,7 +111,39 @@ async function isAssessmentBooking(booking, database = db) {
   return isAssessmentServiceRow(serviceRow);
 }
 
+// How far before an estimate's creation a completed Waves Assessment still counts as the look for it.
+const LOOK_WINDOW_DAYS = 30;
+
+// Did this estimate's customer complete a Waves Assessment on or after LOOK_WINDOW_DAYS before the estimate was
+// created? (`estimate` needs customer_id, created_at, id.) That visit was "the look" for the estimate even though the
+// estimate is not linked to it, so every free-assessment offer built from the estimate (the estimate page's "Book a
+// free Waves Assessment first" and its booking page, the lead-link consultation offer on the page and in the
+// gone-quiet email) is withheld. The ONE rule for it: the same assessment identity as findOpenVisit
+// (scopeToAssessmentBookings); only 'completed' counts (cancelled, skipped, no_show are no look). Legacy completions
+// carry a NULL completed_at, so the visit's ET date stands in (estimate-conversion-guard.js). The offers are optional:
+// a failed read logs a warning and answers false, so the offer stays and no page 500s. (Inside a transaction a failed
+// read aborts that transaction, which fails the booking or send rather than risking a second free visit.)
+async function hadCompletedAssessmentLook(conn, estimate) {
+  if (!estimate?.customer_id || !estimate.created_at) return false;
+  const since = new Date(new Date(estimate.created_at).getTime() - LOOK_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  if (Number.isNaN(since.getTime())) return false;
+  try {
+    const row = await scopeToAssessmentBookings(
+      conn('scheduled_services')
+        .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+        .where('scheduled_services.customer_id', estimate.customer_id)
+        .where('scheduled_services.status', 'completed')
+        .whereRaw("COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York') >= ?", [since]),
+    ).first('scheduled_services.id');
+    return Boolean(row);
+  } catch (err) {
+    logger.warn(`[assessment-booking] completed-assessment check skipped for estimate ${estimate.id}: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
 module.exports = {
+  hadCompletedAssessmentLook,
   ASSESSMENT_DISPLAY_NAME,
   ASSESSMENT_NAME_RE,
   ASSESSMENT_SERVICE_KEY,

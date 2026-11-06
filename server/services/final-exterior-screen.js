@@ -1,6 +1,6 @@
 // Customer copy screen for the pre-treat certificate's free-text
-// final-exterior fields, which print on the customer notice
-// (GATE_PRETREAT_STICKER_REPORT). One rule for the admin write guard, the
+// final-exterior fields, which print on the customer notice.
+// One rule for the admin write guard, the
 // public /data egress and the staff preview, so all three agree.
 const { customerCopyViolations, containsReportAccessCode } = require('./service-report/technician-report-copy');
 

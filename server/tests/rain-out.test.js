@@ -2312,7 +2312,7 @@ describe('rain-out service', () => {
       expect(SmartRebooker.findRescheduleOptions).toHaveBeenCalledWith(
         // travelGap: the customer-facing sheet applies GATE_SLOT_TRAVEL_GAP;
         // admin reschedule-options stay overlap-only (advisory saves).
-        // caller: GATE_ROUTE_CHECK_STAFF_LISTS buys Google road times for an
+        // caller: the route-checked day list buys Google road times for an
         // admin caller only; this tech caller stays on the estimate.
         'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' } },
       );

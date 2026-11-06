@@ -1,6 +1,6 @@
 // Shared copy screen for the pre-treat certificate's final-exterior fields:
 // the admin write guard, the public /data egress and the staff preview all
-// read this one rule (GATE_PRETREAT_STICKER_REPORT).
+// read this one rule.
 const { failingFinalExteriorKeys, screenFinalExteriorFindings } = require('../services/final-exterior-screen');
 
 describe('final exterior copy screen', () => {

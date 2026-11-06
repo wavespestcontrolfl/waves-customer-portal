@@ -45,6 +45,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'convert_lead',
   // void_invoice previews name the customer and the invoice.
   'void_invoice',
+  // switch_visit_to_annual_prepay previews name the customer, the visit and the invoices.
+  'switch_visit_to_annual_prepay',
   // schedule_sms previews name the customer, the last four digits of the number and the exact text.
   'schedule_sms',
   // The invoice edit cards name the customer and the invoice (edit_invoice also its title and notes).

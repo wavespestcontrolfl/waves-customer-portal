@@ -692,8 +692,6 @@ function customerOwnWords(ctx) {
 }
 
 const TECH_VOICE_STEP = {
-  day0: `the same-day text after the visit. Lead with something personal from THIS visit or what the customer said or did (they waited before work, booked a Sunday, mentioned their new puppies), then ONE notable finding from the report. Never list the treated areas. Mention that some activity for a couple of weeks is normal ONLY if the customer asked about results. Then ask for a Google review`,
-  day_after: `the text the day after the visit (do NOT say "today" or "just finished"). Lead with something personal from this visit or what the customer said, then ONE notable finding from the report. Never list the treated areas. Then ask for a Google review`,
   followup: `a follow-up text a few days after the visit. Take a DIFFERENT angle from every message already sent: a tip from the report, or something the customer asked or mentioned. Never ask again about the same pest or problem an earlier message raised. Then ask for a Google review`,
   email: `the opening paragraph of a review email {WHEN}. Take a DIFFERENT angle from every message already sent: something the customer asked, or a tip. 2-3 sentences, the last one asking for a Google review (e.g. "A Google review would help us a lot."). A button below carries the link, so include NO link, URL or placeholder`,
 };
@@ -1455,10 +1453,10 @@ class HeldTouch extends Error {
   }
 }
 
-// GATE_REVIEW_ASK_FIXED_DAY0 (owner 2026-10-22, "fixed line for all"): the
-// same-day review text is one fixed line, no model. The writer recited report
-// findings ("a moderate level of cockroach activity" is the activity gauge's
-// label) and booking talk, which read as lame.
+// The same-day review text is one fixed line, no model (owner 2026-10-22,
+// "fixed line for all"). The writer recited report findings ("a moderate level
+// of cockroach activity" is the activity gauge's label) and booking talk, which
+// read as lame.
 // Names are GSM-folded ("María" -> "Maria") so one letter never turns the
 // text into UCS-2 and past the two-segment limit (#6423 r3).
 // A name longer than FIXED_DAY0_NAME_MAX is dropped for the plain greeting,
@@ -1477,16 +1475,6 @@ function fixedDay0Line({ firstName, techName, stepKind }) {
   return `${hello}${who} ${thanks} A Google review would really help: {review_url}`;
 }
 
-// A body this fixed line wrote (any name / tech / day wording), so retry
-// reuse can tell it from a writer draft after the gate is rolled back.
-// Names may hold periods or commas ("A.J."), so each is matched up to its
-// fixed neighbor, never by excluding punctuation (#6423 r3). "Waves Pest Control" is the
-// wording before 2026-11-04, still on stored bodies.
-const FIXED_DAY0_RE = /^Hi(?: .+?)?, it's (?:.+? from Waves|Waves|Waves Pest Control)\. Thanks for having us out(?: today)?\. A Google review would really help: \{review_url\}$/;
-function isFixedDay0Line(body) {
-  return FIXED_DAY0_RE.test(String(body || ""));
-}
-
 // What the writer made of one touch: { outcome: 'drafted', body, sentences }
 // | { outcome: 'held', body, repeat, sentences } | { outcome: 'fallback', reason }.
 async function techVoiceOutcome({ customer, recipientFirstName, recipientName, serviceType, techName, sequenceStep, serviceDate, serviceRecordId, sequenceId, channel }) {
@@ -1501,11 +1489,11 @@ async function techVoiceOutcome({ customer, recipientFirstName, recipientName, s
     const firstName = isCompany ? "" : personFirstName(recipientFirstName || customer.first_name);
     const serviceDaysAgo = serviceDate ? etCalendarDaysBetween(serviceDate, new Date()) : null;
     const smsStepKind = resolveStepKind(sequenceStep, serviceDaysAgo);
-    if (channel !== "email" && smsStepKind !== "followup" && isEnabled("reviewAskFixedDay0")) {
+    if (channel !== "email" && smsStepKind !== "followup") {
       return { outcome: "drafted", body: fixedDay0Line({ firstName, techName, stepKind: smsStepKind }), sentences: [], reason: "fixed_day0" };
     }
     const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep, serviceDate });
-    const stepKind = channel === "email" ? "email" : resolveStepKind(sequenceStep, serviceDaysAgo);
+    const stepKind = channel === "email" ? "email" : "followup";
     const termite = isTermiteService(serviceType);
     const facts = buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo, termite, ctx });
     const check = { channel, firstName, techName, termite, corpus: facts, ownWords: customerOwnWords(ctx), serviceDate };
@@ -1570,7 +1558,6 @@ const ReviewAskDrafter = {
    * repeats an earlier touch of this cadence: send nothing for this step.
    */
   draftTechVoice,
-  isFixedDay0Line,
   HeldTouch,
 
   /**

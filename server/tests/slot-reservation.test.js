@@ -846,10 +846,10 @@ describe('slot reservation helpers', () => {
     }));
   });
 
-  // GATE_ROUTE_CHECK_ACCEPT_SAVES (owner 2026-10-29, Route Check Everywhere
+  // Route check on estimate accepts (owner 2026-10-29, Route Check Everywhere
   // follow-up item 1): a graduating hold nothing numbered (capacity mode off)
   // gets its stop number in the accept's own transaction.
-  describe('commitReservation — GATE_ROUTE_CHECK_ACCEPT_SAVES stop number', () => {
+  describe('commitReservation — route check stop number', () => {
     const arrivalRoute = require('../services/scheduling/arrival-route');
     const { etDateString, addETDays } = require('../utils/datetime-et');
     // Relative to today (AGENTS.md: near-today date literals go red): a hold well past the booking notice window.
@@ -895,22 +895,20 @@ describe('slot reservation helpers', () => {
       selectedFrequency: 'quarterly', trx,
     });
     const gateOn = () => {
-      process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES = 'true';
       process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     };
     beforeEach(() => { placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue(['scheduled-123']); });
     afterEach(() => {
       placeSpy.mockRestore();
-      delete process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES;
       delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     });
 
-    test('gate off: no placement, and the graduated row is returned as before', async () => {
+    test('arrival-window routing off: no placement, and the graduated row is returned as before', async () => {
       await expect(commit(wireCommit())).resolves.toMatchObject({ id: 'scheduled-123', customer_id: 'customer-1' });
       expect(placeSpy).not.toHaveBeenCalled();
     });
 
-    test('gate on: one placement on the accept transaction, source estimate_accept, after the graduation update', async () => {
+    test('one placement on the accept transaction, source estimate_accept, after the graduation update', async () => {
       gateOn();
       const trx = wireCommit();
       await expect(commit(trx)).resolves.toMatchObject({ id: 'scheduled-123', customer_id: 'customer-1' });
@@ -919,7 +917,7 @@ describe('slot reservation helpers', () => {
       expect(placeSpy.mock.calls[0][0].isTransaction).toBe(true);
     });
 
-    test('gate on: a throwing placement never fails the accept', async () => {
+    test('a throwing placement never fails the accept', async () => {
       gateOn();
       placeSpy.mockRejectedValueOnce(new Error('route boom'));
       await expect(commit(wireCommit())).resolves.toMatchObject({ id: 'scheduled-123' });

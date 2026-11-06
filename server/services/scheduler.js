@@ -5395,8 +5395,11 @@ function initScheduledJobs() {
   // GATE_CALLER_CALLBACK_PROMISE_CLOSE on it also closes the caller's own
   // promise when they called, texted or a person followed up. Nothing goes to
   // the caller.
+  // Minutes 5, 20, 35 and 50 as a LIST: node-cron 3 reads a stepped range such
+  // as '5-59/15' as the range values divisible by the step (15, 30, 45), which
+  // dropped one run an hour and moved the rest onto the pager's minutes.
   // =========================================================================
-  cron.schedule('0 5-59/15 8-20 * * *', async () => {
+  cron.schedule('0 5,20,35,50 8-20 * * *', async () => {
     if (!require('../config/feature-gates').callerCallbackBellLive()) return;
     try {
       await runExclusive('caller-callback-bell', async () => {
@@ -9506,6 +9509,25 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[moving-auto-apply] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — The app-sent new-home estimate (owner 2026-11-04 option A):
+  // the estimate the app made goes out once through the office's send: email
+  // and the moving text from 8 AM to 8 PM ET; at night the email, with the text
+  // from 8 AM. A draft it must not send rings the office. Gate read per tick
+  // (GATE_MOVING_AUTO_SEND), five minutes after the estimate job.
+  // =========================================================================
+  cron.schedule('8,23,38,53 * * * *', async () => {
+    if (!require('../config/feature-gates').movingAutoSendLive()) return;
+    try {
+      await runExclusive('moving-auto-send', async () => {
+        const result = await require('./moving-auto-send').runMoveAutoSendJob();
+        if (result.sent || result.texted || result.office || result.restored || result.failed) logger.info(`[moving-auto-send] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-auto-send] run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

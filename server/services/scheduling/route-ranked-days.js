@@ -1,6 +1,6 @@
 /**
- * Route-checked staff day lists (GATE_ROUTE_CHECK_STAFF_LISTS, owner
- * 2026-10-29, "Route Check Everywhere" build 1).
+ * Route-checked staff day lists (owner 2026-10-29, "Route Check Everywhere"
+ * build 1).
  *
  * The staff lists of days (the Reschedule window's suggested days, the Quick
  * Move day buttons) used to rank days by day load, same zip and city, and how
@@ -16,15 +16,14 @@
  * Any other caller, or none, gets the estimate only: `providerTravel: false`,
  * no pickerRoadCheck, no spender, no budget. A technician never buys Google.
  *
- * The helper never throws. `null` means "use today's list": the gate is off,
- * the search failed, or no day could be checked at all.
+ * The helper never throws. `null` means "use today's list": arrival routing is
+ * off, the search failed, or no day could be checked at all.
  */
 const logger = require('../logger');
 
 function routeRankedDaysLive() {
   const arrival = require('./arrival-route');
-  return typeof arrival.routeCheckStaffListsLive === 'function'
-    && arrival.routeCheckStaffListsLive() === true
+  return typeof arrival.arrivalWindowRoutingEnabled === 'function'
     && arrival.arrivalWindowRoutingEnabled() === true;
 }
 
@@ -214,8 +213,8 @@ async function rankRouteCheckedDays({ serviceId, service, candidates, durationMi
 
 /**
  * The find_available_slots (Intelligence Bar) search options for a new stop at
- * lat/lng, or null when the old gap search should run (gate off, arrival
- * routing off, or no coordinates). Same road-time rules as the day lists.
+ * lat/lng, or null when the old gap search should run (arrival routing off,
+ * or no coordinates). Same road-time rules as the day lists.
  */
 function newStopRouteOptions({ lat, lng, durationMinutes, caller }) {
   const point = { lat: Number(lat), lng: Number(lng) };

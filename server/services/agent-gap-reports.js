@@ -141,6 +141,12 @@ const DECLINE_RE = new RegExp([
   // "can't / couldn't / unable to …" only when the sentence ties it to the bar
   String.raw`\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|unable to|not able to)\b[^.!?\n]{0,80}?\b(?:from here|(?:from|in|through|with) (?:the|this) bar|directly)\b`,
   String.raw`\b(?:isn['’]t|not) (?:available|possible) (?:from here|(?:from|in|through) (?:the|this) bar)\b`,
+  // The bar naming its own limit (owner prepay ask 2026-11-05: "I couldn't make this change. The bar can only switch
+  // billing to ... It has no manual prepay option." recorded no row). A change it could not make is a decline unless
+  // the sentence asks for missing information ("... without the new address").
+  String.raw`\b(?:the|this) bar (?:can|could) only\b`,
+  String.raw`\b(?:the bar|this bar|it) (?:has|have) no\b[^.!?\n]{0,40}?\b(?:options?|tools?|way)\b`,
+  String.raw`\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|unable to|not able to) (?:make|apply|save) (?:this|that|the|these|those) changes?\b(?![^.!?\n]{0,80}\bwithout\b)`,
 ].join('|'), 'i');
 
 // The tech-bar `ask` fallback has no search behind it, so it needs a refusal
