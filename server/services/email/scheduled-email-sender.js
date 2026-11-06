@@ -1,7 +1,6 @@
 /**
  * Sends due scheduled emails (table scheduled_emails; migration
- * 20261022130000). Run every minute by scheduler.js behind
- * GATE_EMAIL_SEND_LATER. Same Gmail path as POST /api/admin/email/send.
+ * 20261022130000). Run every minute by scheduler.js. Same Gmail path as POST /api/admin/email/send.
  *
  * At most once: a row is claimed ('scheduled' -> 'sending') before Gmail is
  * called. Gmail accepted -> 'sent'. A definite refusal goes back to
@@ -13,7 +12,6 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { emailSendLaterLive } = require('../../config/feature-gates');
 
 const MAX_ATTEMPTS = 3;
 const RETRY_GAP_SECONDS = 60;
@@ -132,13 +130,6 @@ async function sourceMessageId(row, conn) {
 // settleStaleClaims cannot turn it into outcome_unknown while the request
 // runs. A claim already settled stops the send.
 async function holdClaim(row, conn) {
-  // The gate turned off during this sweep: nothing goes out, and the row
-  // waits as 'scheduled' again (this attempt does not count).
-  if (!emailSendLaterLive()) {
-    await conn('scheduled_emails').where({ id: row.id, status: 'sending' })
-      .update({ status: 'scheduled', claimed_at: null, attempts: conn.raw('greatest(attempts - 1, 0)'), updated_at: conn.fn.now() });
-    throw Object.assign(new Error('send gate is off'), { code: 'claim_lost' });
-  }
   const held = await conn('scheduled_emails').where({ id: row.id, status: 'sending' })
     .update({ claimed_at: conn.fn.now(), updated_at: conn.fn.now() });
   if (!held) throw Object.assign(new Error('claim no longer held'), { code: 'claim_lost' });
@@ -232,12 +223,7 @@ async function closeSettledAlerts(conn = db) {
 }
 
 async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
-  // Runs with the gate off too: settled emails' alerts still close.
   const alertsClosed = await closeSettledAlerts(conn);
-  if (!emailSendLaterLive()) {
-    if (!alertsClosed) throw new Error('scheduled-email sweep: settled alerts not closed');
-    return { enabled: false, settled: 0, results: [] };
-  }
   const settled = await settleStaleClaims(conn);
   const results = [];
   const tried = [];
@@ -254,7 +240,7 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
     if (group.length < SEND_CONCURRENCY) break;
   }
   const missedAlerts = await raiseMissedAlerts(conn);
-  const summary = { enabled: true, settled, results, missedAlerts };
+  const summary = { settled, results, missedAlerts };
   // Every claimed email was still tried; a run with an error reads as failed
   // in job_health (runScheduledSweep records the throw).
   // An email Gmail accepted but the sweep could not record as sent is never

@@ -1,7 +1,7 @@
 // CI's DB-gated pass runs this against PostgreSQL; the table comes from the
 // real migration (20261022130000_scheduled_emails) inside a throwaway schema.
 //
-// Schedule send (GATE_EMAIL_SEND_LATER): a queued email goes out once, when
+// Schedule send: a queued email goes out once, when
 // due; a retried schedule request queues one row; Cancel send returns the
 // draft; Gmail's possible acceptance is never retried; three definite
 // refusals end in 'failed'. Alerts run through the real composer, which
@@ -97,8 +97,8 @@ jest.setTimeout(30000);
     app.use('/api/admin/email', require('../routes/admin-email'));
     await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
   });
-  beforeEach(() => { process.env.GATE_EMAIL_SEND_LATER = 'true'; jest.clearAllMocks(); });
-  afterEach(async () => { await database('scheduled_emails').del(); await database('notifications').del(); await database('emails').del(); delete process.env.GATE_EMAIL_SEND_LATER; });
+  beforeEach(() => { jest.clearAllMocks(); });
+  afterEach(async () => { await database('scheduled_emails').del(); await database('notifications').del(); await database('emails').del(); });
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
     await database.raw('DROP SCHEMA ?? CASCADE', [schema]);
@@ -345,14 +345,6 @@ jest.setTimeout(30000);
     expect(await call('POST', `/scheduled/${unclear}/sent-check`, { inSent: false })).toMatchObject({ status: 409, body: { status: 'cancelled' } });
   });
 
-  test('with the gate off, queued emails stay listed and can be cancelled; nothing new is queued', async () => {
-    const { body } = await queue();
-    delete process.env.GATE_EMAIL_SEND_LATER;
-    expect((await call('GET', '/scheduled')).body).toMatchObject({ enabled: false, emails: [expect.objectContaining({ id: body.scheduled.id })] });
-    expect((await cancel(body.scheduled.id)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
-    expect((await queue()).status).toBe(404);
-  });
-
   test('a taken-back email that may have gone out keeps its alert until the Sent check is recorded', async () => {
     const alertOpen = async (id) => (await database('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`scheduled-email:${id}`]).first()).done_at === null;
     const { body } = await queue();
@@ -381,8 +373,7 @@ jest.setTimeout(30000);
     await database('job_health').del();
   });
 
-  test('reconcile still settles a key with the gate off (it sends nothing)', async () => {
-    delete process.env.GATE_EMAIL_SEND_LATER;
+  test('reconcile answers null for a key that was never queued', async () => {
     expect((await call('POST', '/schedule/reconcile', { clientKey: randomUUID() })).body).toEqual({ success: true, scheduled: null });
   });
 
@@ -432,21 +423,6 @@ jest.setTimeout(30000);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'outcome_unknown' });
   });
 
-  test('the gate turned off mid-sweep stops the send and puts the row back', async () => {
-    const { body } = await queue();
-    await makeDue(body.scheduled.id);
-    let requested = false;
-    gmail.sendMessage.mockImplementation(async (...args) => {
-      delete process.env.GATE_EMAIL_SEND_LATER;
-      await args[5].beforeSend();
-      requested = true;
-      return { id: 'gmail-gate-off' };
-    });
-    expect((await sendDueScheduledEmails()).results).toEqual(['claim_lost']);
-    expect(requested).toBe(false);
-    expect(await row(body.scheduled.id)).toMatchObject({ status: 'scheduled', attempts: 0, claimed_at: null });
-  });
-
   test('an accepted email that cannot be recorded as sent makes the run unhealthy, never a resend', async () => {
     const { body } = await queue();
     await makeDue(body.scheduled.id);
@@ -480,13 +456,5 @@ jest.setTimeout(30000);
     });
     expect((await sendDueScheduledEmails()).results).toEqual(Array(6).fill('sent'));
     expect(peak).toBe(5);
-  });
-
-  test('with the gate off the sender sends nothing, and queued rows wait', async () => {
-    const { body } = await queue();
-    await makeDue(body.scheduled.id);
-    delete process.env.GATE_EMAIL_SEND_LATER;
-    expect(await sendDueScheduledEmails()).toEqual({ enabled: false, settled: 0, results: [] });
-    expect(await row(body.scheduled.id)).toMatchObject({ status: 'scheduled' });
   });
 });

@@ -1176,8 +1176,7 @@ function initScheduledJobs() {
   cron.scheduleTimeout(pmGuardFirstsTick, 120 * 1000);
   cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
 
-  // EVERY MINUTE — Gmail-style scheduled emails (GATE_EMAIL_SEND_LATER; the
-  // sender returns at once with the gate off). A minute keeps "9:00 AM" at
+  // EVERY MINUTE — Gmail-style scheduled emails. A minute keeps "9:00 AM" at
   // 9:00-9:01. No cron lease: the row claim (FOR UPDATE SKIP LOCKED) makes
   // each email go out at most once across the fleet, and a lease could wait
   // or skip and send late. runScheduledSweep records job_health so that a

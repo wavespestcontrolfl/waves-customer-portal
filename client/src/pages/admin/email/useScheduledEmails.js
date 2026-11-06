@@ -4,9 +4,8 @@ import { adminFetch } from "./emailApi";
 
 export const LIST_RETRY_MS = 30 * 1000;
 
-// The Email > Scheduled list (GATE_EMAIL_SEND_LATER). `enabled` stays false
-// until the server says the gate is on, so the Send arrow and the tab stay
-// hidden with the gate off or the list unreadable.
+// The Email > Scheduled list. `enabled` stays false until the list loads, so
+// the Send arrow and the tab stay hidden while the list is unreadable.
 export default function useScheduledEmails(active) {
   const [state, setState] = useState({ enabled: false, emails: [], loading: false, error: false });
   const [pendingId, setPendingId] = useState(null);
@@ -21,10 +20,10 @@ export default function useScheduledEmails(active) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       if (seq !== latest.current) return;
-      setState({ enabled: data.enabled === true, emails: Array.isArray(data.emails) ? data.emails : [], loading: false, error: false });
+      setState({ enabled: true, emails: Array.isArray(data.emails) ? data.emails : [], loading: false, error: false });
     } catch {
       if (seq !== latest.current) return;
-      // Fail closed: an unverifiable gate hides the arrow and the tab.
+      // Fail closed: an unreadable list hides the arrow and the tab.
       setState((current) => ({ ...current, enabled: false, loading: false, error: true }));
     }
   }, []);
@@ -71,8 +70,8 @@ export default function useScheduledEmails(active) {
 // Scheduled, and the editor extended with the arrow menu's two inputs.
 export function useScheduledSection({ active, tab, editor, baseSections }) {
   const scheduled = useScheduledEmails(active);
-  // The tab shows with the gate on, and with it off while emails remain to
-  // manage (a rollback can still cancel them); the arrow needs the gate.
+  // The tab and the arrow show once the list has loaded, and the tab also
+  // shows while emails remain to manage after a failed reload.
   const tabVisible = scheduled.enabled || scheduled.emails.length > 0;
   const showScheduled = tab === "scheduled" && tabVisible;
   // Scheduled with nothing to show falls back to Inbox.
