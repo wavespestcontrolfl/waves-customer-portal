@@ -495,7 +495,7 @@ function nextServiceName(serviceType) {
   return String(serviceType || '').trim() || null;
 }
 
-function formatNextAppointmentLabel(nextAppointment) {
+export function formatNextAppointmentLabel(nextAppointment) {
   if (!nextAppointment?.scheduledDate) return null;
   // calendarDateFromDateOnlyValue instead of string-concatenating T12:00:00Z:
   // if scheduledDate ever arrives as a full timestamp, the concat produced an
@@ -508,7 +508,11 @@ function formatNextAppointmentLabel(nextAppointment) {
   if (!dateLabel) return null;
   const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
   const noWindowName = nextServiceName(nextAppointment.serviceType);
-  if (!m) return noWindowName ? `${noWindowName} · ${dateLabel}` : dateLabel;
+  if (!m) {
+    const dayLabel = noWindowName ? `${noWindowName} · ${dateLabel}` : dateLabel;
+    // GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour.
+    return nextAppointment.day_only && nextAppointment.arrival_note ? `${dayLabel} · ${nextAppointment.arrival_note}` : dayLabel;
+  }
   const fmt = (mins) => {
     const h24 = Math.floor(mins / 60) % 24;
     const h12 = h24 % 12 || 12;

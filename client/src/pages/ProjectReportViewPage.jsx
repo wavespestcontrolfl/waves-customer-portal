@@ -184,7 +184,8 @@ function formatAppointmentWindow(appt) {
   const end = endMins != null
     ? formatAppointmentTime(`${Math.floor(endMins / 60)}:${String(endMins % 60).padStart(2, '0')}`)
     : '';
-  const window = start && end ? `${start}-${end}` : start;
+  // GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour.
+  const window = start && end ? `${start}-${end}` : (start || (appt.day_only ? appt.arrival_note : ''));
   return [date, window].filter(Boolean).join(' ');
 }
 

@@ -352,3 +352,27 @@ describe('ProjectReportViewPage pre-treat sticker', () => {
     expect(getByText(/This signature covers the initial treatment only\./)).toBeInTheDocument();
   });
 });
+
+describe('ProjectReportViewPage follow-up appointment (GATE_DAY_ONLY_PROMISE)', () => {
+  it('day-only: the date and the arrival note, no hour', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('termite_treatment', {
+      upcomingAppointment: {
+        serviceType: 'Termite Follow-up', scheduledDate: '2999-01-05', windowStart: null, technicianName: 'Alex', status: 'confirmed',
+        day_only: true, arrival_note: 'Arrival window texted the day before',
+      },
+    }));
+    const rows = await findAllByText(/Arrival window texted the day before/);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].textContent).toMatch(/January 5/);
+    expect(queryByText(/\d{1,2}:\d{2} (AM|PM)/)).toBeNull();
+  });
+
+  it('an hour the server sent still shows, with no note', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('termite_treatment', {
+      upcomingAppointment: { serviceType: 'Termite Follow-up', scheduledDate: '2999-01-05', windowStart: '08:00:00', technicianName: 'Alex', status: 'confirmed' },
+    }));
+    const rows = await findAllByText(/8:00 AM-10:00 AM/);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(queryByText(/texted the day before/)).toBeNull();
+  });
+});
