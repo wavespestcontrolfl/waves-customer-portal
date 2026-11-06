@@ -1048,6 +1048,8 @@ export default function AdminInvoicesPage() {
   const [statsLoading, setStatsLoading] = useState(true);
   const [statsError, setStatsError] = useState(false);
   const [builderPending, setBuilderPending] = useState(false);
+  // True while the open create/edit form holds work that is not saved yet.
+  const [builderDirty, setBuilderDirty] = useState(false);
   const statsRequestRef = useRef(0);
   const [toast, setToast] = useState("");
   const [toastTone, setToastTone] = useState("ok");
@@ -1110,6 +1112,11 @@ export default function AdminInvoicesPage() {
           onClick: () => {
             if (builderPending) return;
             if (tab === "create") {
+              if (
+                builderDirty &&
+                !window.confirm("Discard your unsaved invoice changes?")
+              )
+                return;
               setEditInvoice(null);
               setTab("list");
             } else {
@@ -1160,6 +1167,7 @@ export default function AdminInvoicesPage() {
           showToast={showToast}
           editInvoice={editInvoice}
           onPendingChange={setBuilderPending}
+          onDirtyChange={setBuilderDirty}
           onCreated={(opts) => {
             loadStats();
             setEditInvoice(null);
@@ -6417,6 +6425,7 @@ function CreateInvoice({
   editInvoice,
   isMobile,
   onPendingChange,
+  onDirtyChange,
 }) {
   const [discountsLoading, setDiscountsLoading] = useState(true);
   const [discountsError, setDiscountsError] = useState("");
@@ -6611,6 +6620,46 @@ function CreateInvoice({
     onPendingChange(saving || aiNotesLoading || aiMessageLoading);
     return () => onPendingChange(false);
   }, [saving, aiNotesLoading, aiMessageLoading, onPendingChange]);
+  // Unsaved work = the editable fields differ from how the form looked once it
+  // finished loading. The edit prefill runs on mount, before the discount
+  // fetch can settle, so the catalog load marks the form ready. One snapshot
+  // comparison; the loads themselves never count.
+  const draftSnapshot = JSON.stringify([
+    selectedCustomer,
+    selectedService,
+    serviceDate,
+    lineItems,
+    notes,
+    emailMessage,
+    title,
+    sendTiming,
+    sendCustomAt,
+    dueTiming,
+    dueCustomDate,
+    requestReview,
+    reviewTiming,
+    reviewCustomAt,
+    queuedAttachments.map((f) => [f.name, f.size, f.lastModified]),
+  ]);
+  const draftBaselineRef = useRef(null);
+  const draftReady = !discountsLoading;
+  useEffect(() => {
+    if (!draftReady) return;
+    if (draftBaselineRef.current === null)
+      draftBaselineRef.current = draftSnapshot;
+    onDirtyChange(draftBaselineRef.current !== draftSnapshot);
+  }, [draftReady, draftSnapshot, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+  useEffect(() => {
+    if (!draftBaselineRef.current || draftBaselineRef.current === draftSnapshot)
+      return undefined;
+    const warn = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [draftSnapshot]);
   useEffect(() => {
     let alive = true;
     setDiscountsLoading(true);
