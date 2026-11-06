@@ -61,25 +61,12 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   const priorGate = process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
   const created = { customers: [], templates: [], leads: [] };
 
-  // The retry drip is the template KEY `new_lead` (RETRY_TEMPLATE_KEYS), a newsletter-group template. The seeded template keeps its row;
-  // its steps are swapped for two synthetic ones for the run and restored afterwards (every test uses its own customer).
-  let seededNewLeadSteps = [];
-  async function installNewLeadFixture() {
-    seededNewLeadSteps = await db('automation_steps').where({ template_key: 'new_lead' });
-    await db('automation_steps').where({ template_key: 'new_lead' }).del();
-    for (const order of [1, 2]) {
-      await db('automation_steps').insert({
-        template_key: 'new_lead', step_order: order, delay_hours: 0, subject: `Step ${order}`, html_body: `<p>Hello {{first_name}} ${order}</p>`, text_body: `Hello ${order}`,
-      });
-    }
-  }
-  async function restoreNewLeadFixture() {
-    await db('automation_enrollments').where({ template_key: 'new_lead' }).del();
-    await db('automation_steps').where({ template_key: 'new_lead' }).del();
-    if (seededNewLeadSteps.length) await db('automation_steps').insert(seededNewLeadSteps);
-  }
+  // The retry drip is the template KEY `new_lead` (RETRY_TEMPLATE_KEYS), a newsletter-group template. The suite never writes the
+  // shared seeded `new_lead` rows (its steps, or any enrollment it did not create): each retry drip here is the suite's own synthetic
+  // newsletter-group template, allowlisted for that one test only (allowRetryTemplate) and removed again in afterEach.
+  const allowRetryTemplate = (key) => require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.add(key);
 
-  beforeAll(async () => {
+  beforeAll(() => {
     db = require('../models/db');
     webhook = require('../routes/webhooks-sendgrid');
     runner = require('../services/automation-runner');
@@ -88,7 +75,6 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     bounceRescue = require('../services/email-bounce-rescue');
     reverify = require('../services/email-bounce-reverify');
     NotificationService = require('../services/notification-service');
-    await installNewLeadFixture();
   });
 
   async function cleanup() {
@@ -112,7 +98,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   }
 
   afterEach(async () => {
-    require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.forEach((k) => { if (k !== 'new_lead') require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.delete(k); });
+    const { RETRY_TEMPLATE_KEYS } = require('../services/call-email-spelling-retry');
+    for (const key of [...RETRY_TEMPLATE_KEYS]) if (key !== 'new_lead') RETRY_TEMPLATE_KEYS.delete(key);
     await cleanup();
   });
 
@@ -120,7 +107,6 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     if (priorGate === undefined) delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
     else process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = priorGate;
     await cleanup();
-    await restoreNewLeadFixture();
     await db.destroy();
   });
 
@@ -142,15 +128,16 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   // Two enabled steps with no delay. `sent` = how many the enrollment already passed (the runner sends, then the bounce lands).
   async function seedEnrollment({ asm = 'service', sent = 1, status = 'active', email = BOUNCED, role = null, customerId, templateKey = null, primary = false } = {}) {
-    // primary: the retry drip itself (template key `new_lead`, the fixture's two steps). templateKey: reuse another seeded template
-    // (its single enabled step) so its own pre-send checks (estimate accepted, termite bond) apply. Neither: a synthetic other
-    // template (a sibling drip of the same customer).
-    const key = templateKey || (primary ? 'new_lead' : `retry_${randomUUID().slice(0, 8)}`);
-    const reuse = !!(templateKey || primary);
+    // primary: the retry drip itself, a synthetic newsletter-group template (the stream of the seeded new_lead) put on the allowlist
+    // for this test. templateKey: reuse another seeded template (its single enabled step, read only) so its own pre-send checks
+    // (estimate accepted, termite bond) apply. Neither: a synthetic template that is NOT on the allowlist (another drip).
+    const key = templateKey || `retry_${randomUUID().slice(0, 8)}`;
+    const reuse = !!templateKey;
     const steps = [];
     if (reuse) steps.push(...await db('automation_steps').where({ template_key: key, enabled: true }).orderBy('step_order'));
-    else await db('automation_templates').insert({ key, name: 'Synthetic lead welcome', asm_group: asm, enabled: true, trigger_type: 'manual' });
+    else await db('automation_templates').insert({ key, name: 'Synthetic lead welcome', asm_group: primary ? 'newsletter' : asm, enabled: true, trigger_type: 'manual' });
     if (!reuse) created.templates.push(key);
+    if (primary && !reuse) allowRetryTemplate(key);
     for (const order of reuse ? [] : [1, 2]) {
       const [step] = await db('automation_steps').insert({
         template_key: key, step_order: order, delay_hours: 0, subject: `Step ${order}`, html_body: `<p>Hello {{first_name}} ${order}</p>`, text_body: `Hello ${order}`,
@@ -185,7 +172,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   // release, binding and verdict machinery (and the allowlist, which a stray of another template must pass to be tested at all).
   async function followingSibling() {
     const seeded = await seedEnrollment({ customerId: ctx.customerId, sent: 0, email: OTHER });
-    require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.add(seeded.key);
+    allowRetryTemplate(seeded.key);
     await db('automation_enrollments').where({ id: seeded.enrollment.id }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spelling_retry_email: OTHER })]),
     });
@@ -1041,7 +1028,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     ['not_termite_bond', 'service_renewal', async () => {}],
   ])('a pre-send check cancels the retry (%s): the bound claim is skipped with that reason and the sibling is released', async (reason, templateKey, makeCause) => {
     // These pre-send checks belong to other templates: allowlist that one for this test so the terminal-cancel chokepoint is reached.
-    require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.add(templateKey);
+    allowRetryTemplate(templateKey);
     ctx = await setup({ sent: 1, templateKey });
     await webhook.handleEvent(bounce(ctx.send));
     const sibling = await followingSibling();
@@ -1775,6 +1762,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   test('the retry drip is the template KEY new_lead (a newsletter-group template): bounce, suppression of the bounced address only, resend through the newsletter group, delivery commit; no alert, rescue or card', async () => {
     const svc = require('../services/call-email-spelling-retry');
     expect([...svc.RETRY_TEMPLATE_KEYS]).toEqual(['new_lead']);
+    // The seeded new_lead is a newsletter-group template (read only); the flow below runs on the suite's own stand-in of that stream.
+    expect(await db('automation_templates').where({ key: 'new_lead' }).first('asm_group')).toMatchObject({ asm_group: 'newsletter' });
     ctx = await setup({ sent: 1 });
     expect((await db('automation_templates').where({ key: ctx.key }).first()).asm_group).toBe('newsletter');
     await webhook.handleEvent(bounce(ctx.send));
