@@ -249,7 +249,7 @@ const DIRECT_EDIT_STAGES = [directScopeStage, directToolStage, directGroundingSt
 // object the route creates once per request (seeded from the saved history, so
 // a resumed task keeps it) and passes to the three decision functions. Scope:
 // this covers the general read, because its catalog is broad and grows by
-// review, and (GATE_IB_TARGET_RULES_V2) every read outside TRUSTED_READS below.
+// review, and every read outside TRUSTED_READS below (gate-free since audit run 3).
 const GENERAL_READ_TOOL = 'read_admin_data';
 // needs_me returns open alerts' why and detail, and those carry customer-written
 // text (the latest text on an "SMS from" row, a customer's request or email), so
@@ -264,13 +264,15 @@ function isDataAnswer(result) {
     && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
 }
 
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9): the rule is inverted. With the gate on,
-// ANY successful read result taints the request, except the tools in TRUSTED_READS.
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9): the rule is inverted. ANY successful read result
+// taints the request, except the tools in TRUSTED_READS. This read taint no longer depends on
+// the gate (audit run 3); the other taint sources below (prior text in a write result, pasted
+// text) still need it.
 // Message bodies, lead and web-form text, call transcripts, emails, reviews and
 // outside notes are all reads that can carry a stranger's instructions, and a new
 // read tool is untrusted until someone reads its result shape and lists it here.
 // A write tool's result is not a read, so it taints only when it shows a prior value as text (r45;
-// known write kinds only; a tool the policy does not know taints). Gate off: only ALWAYS_TAINTING_READS taint.
+// known write kinds only; a tool the policy does not know taints), with the gate on.
 //
 // TRUSTED_READS lists only tools whose results carry NO customer-entered string:
 // pure numbers and aggregates by service line or period, the pricing config the team
@@ -294,8 +296,10 @@ const TRUSTED_READS = new Set([
 const actionPolicy = require('./action-policy.json');
 // A read the policy knows as a read, or a tool it does not know at all.
 const isReadTool = toolName => !actionPolicy[toolName] || actionPolicy[toolName].kind === 'read';
+// Whatever GATE_IB_TARGET_RULES_V2 says: a rollback of the target rules must not reopen card-free
+// edits after lead, call, message or email text was read (audit run 3).
 const readTaints = toolName => (ALWAYS_TAINTING_READS.has(toolName)
-  || (ibTargetRulesV2Live() && isReadTool(toolName) && !TRUSTED_READS.has(toolName)));
+  || (isReadTool(toolName) && !TRUSTED_READS.has(toolName)));
 
 // A read that returned rows: an object without an error or a refusal code.
 const isReadAnswer = result => Boolean(result) && typeof result === 'object' && !result.error && !result.code;
@@ -321,9 +325,8 @@ function noteUntrustedRead(taint, toolName, result) {
   if (!taint || !readTaints(toolName)) return;
   if (!(toolName === GENERAL_READ_TOOL ? isDataAnswer(result) : isReadAnswer(result))) return;
   taint.untrustedRead = true;
-  // Which marker the reply leaves on the thread: the reads that taint with the gate off too
-  // (read_admin_data, needs_me) keep the old one, every v2-only tainting read gets the v2
-  // marker (Codex #6369 r19).
+  // Which marker the reply leaves on the thread: read_admin_data and needs_me keep the old
+  // one, every other tainting read gets the v2 marker (Codex #6369 r19).
   if (ALWAYS_TAINTING_READS.has(toolName)) taint.untrustedGeneral = true;
   else taint.untrustedV2 = true;
 }
@@ -413,9 +416,9 @@ async function loadUntrustedTaint({ history, threadId, actorId, needed = true, f
   if (taint.untrustedRead || !needed) return taint;
   const verdict = await threadTaintVerdict(actorId, threadId);
   if (verdict !== null) {
-    // The v2 marker counts only while the v2 gate is on (Codex #6369 r19).
+    // The v2 marker counts whatever the v2 gate says, as the reads that leave it now taint gate-free.
     taint.untrustedGeneral = verdict;
-    taint.untrustedV2 = !verdict && ibTargetRulesV2Live() && await threadTaintVerdict(actorId, threadId, IbThreads.UNTRUSTED_READ_V2_MARKER) === true;
+    taint.untrustedV2 = !verdict && await threadTaintVerdict(actorId, threadId, IbThreads.UNTRUSTED_READ_V2_MARKER) === true;
     taint.untrustedRead = taint.untrustedGeneral || taint.untrustedV2;
     return taint;
   }
