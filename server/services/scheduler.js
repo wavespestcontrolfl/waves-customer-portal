@@ -7669,6 +7669,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 11:30PM — Late-sent bill check (read-only). Posts one engineering
+  // FIX row to the ops digest when an open self-pay bill first sent in the
+  // last 7 days had a due date before the day it went out (a delivery path
+  // that skipped invoice-helpers.js firstDeliveryDueDate), and retires it on
+  // the first clean night. Late evening, after the day's sends. No other fixed
+  // or hourly job runs at this minute (#3208 rule). See
+  // server/services/late-sent-bill-check.js.
+  // =========================================================================
+  cron.schedule('30 23 * * *', async () => {
+    try {
+      await runExclusive('late-sent-bill-check', async () => {
+        const { runLateSentBillCheck } = require('./late-sent-bill-check');
+        const result = await runLateSentBillCheck();
+        logger.info(`[late-sent-bill] cron run: ${JSON.stringify({ found: result.found })}`);
+        // A finding that could not be delivered must read as a FAILED run in
+        // job_health: rethrow so runExclusive records it.
+        if (result.delivery && result.delivery.ok === false) {
+          throw new Error(`late-sent-bill-check: the finding was not delivered (${result.delivery.error || 'send failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Late-sent bill check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Property-lookup parser canary — daily at 10:17 AM ET, one golden parcel
   // per county through the real by-parcel pipeline; alerts when a county PAO
   // layout change silently breaks the scrape-based parsers. Day, not night:
