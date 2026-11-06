@@ -5,7 +5,9 @@
  * refused before audio is read); gate off -> availability false and POST 404 with
  * the transcriber never called; the transcriber's prompt is the one the SERVER
  * built, never client text; ids that are not UUIDs never reach the builder;
- * transcriber miss -> 502, silence -> { text: '' }; text only in the response.
+ * transcriber miss -> 502, silence -> { text: '' }; text only in the response; the
+ * greeted on-screen customer's name comes back in the record's spelling, and the log
+ * carries the count of re-spelled words, never the words.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -176,7 +178,7 @@ describe('server dictation endpoint', () => {
   });
 
   describe('customer names', () => {
-    test('admin login: names prompt and surname keywords reach the transcriber; scope is empty', async () => {
+    test('admin login: names prompt and name keywords reach the transcriber; scope is empty', async () => {
       await withServer(async (baseUrl) => {
         await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID }, fields: { keywords: 'attacker' } });
         expect(mockHints).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: null, scope: {} });
@@ -193,6 +195,25 @@ describe('server dictation endpoint', () => {
         await clip(baseUrl, { token: 'tech', query: { customer_id: CUSTOMER_ID } });
         expect(mockHints).toHaveBeenCalledWith({ customerId: null, serviceId: null, scope: { technicianId: 'tech-1' } });
       });
+    });
+
+    test("the greeted on-screen customer's name comes back in the record's spelling; the log has the count only", async () => {
+      const logger = require('../services/logger');
+      mockHints.mockResolvedValue({
+        prompt: 'SERVER-BUILT WORD LIST',
+        keywords: ['Sara', 'Exampleton'],
+        recordName: { firstName: 'Sara', lastName: 'Exampleton' },
+      });
+      mockTranscribe.mockResolvedValue({ text: 'Hey Sarah. Sarah from the office will call.' });
+      await withServer(async (baseUrl) => {
+        const res = await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID }, fields: { duration_seconds: '4' } });
+        // only the greeted name changes; the hallucination guard saw the words as heard
+        expect(await res.json()).toEqual({ text: 'Hey Sara. Sarah from the office will call.' });
+        expect(mockImplausible).toHaveBeenCalledWith('Hey Sarah. Sarah from the office will call.', 4);
+      });
+      const lines = logger.info.mock.calls.map(([line]) => line);
+      expect(lines).toContain('[server-dictation] record name respelled count=1');
+      expect(lines.join('\n')).not.toMatch(/Sara|Exampleton/);
     });
   });
 

@@ -7605,6 +7605,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 11:32PM — Text name spelling check (read-only). Posts one
+  // engineering FIX row to the ops digest when a staff text of the last 24
+  // hours spelled its customer's name differently from the record (the rules
+  // the mic re-spells with), and retires it on the first clean night. Late
+  // evening, after the day's texts. No other fixed or hourly job runs at this
+  // minute (#3208 rule). See server/services/text-name-spelling-check.js.
+  // =========================================================================
+  cron.schedule('32 23 * * *', async () => {
+    try {
+      await runExclusive('text-name-spelling-check', async () => {
+        const { runTextNameSpellingCheck } = require('./text-name-spelling-check');
+        const result = await runTextNameSpellingCheck();
+        logger.info(`[text-name-spelling] cron run: ${JSON.stringify({ checked: result.checked, found: result.findings.length })}`);
+        // A finding that could not be delivered must read as a FAILED run in
+        // job_health: rethrow so runExclusive records it.
+        if (result.delivery && result.delivery.ok === false) {
+          throw new Error(`text-name-spelling-check: the finding was not delivered (${result.delivery.error || 'send failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Text name spelling check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Property-lookup parser canary — daily at 10:17 AM ET, one golden parcel
   // per county through the real by-parcel pipeline; alerts when a county PAO
   // layout change silently breaks the scrape-based parsers. Day, not night:

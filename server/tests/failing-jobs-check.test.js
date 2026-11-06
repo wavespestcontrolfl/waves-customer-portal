@@ -216,9 +216,11 @@ describe('scheduler wiring', () => {
     expect(block).toContain("timezone: 'America/New_York'");
   });
 
-  test('the two nightly checks share no minute with another fixed or hourly job (#3208 rule)', () => {
+  test('the nightly checks share no minute with another fixed or hourly job (#3208 rule)', () => {
     expect(fixedCronsAt(src, 23, 31)).toEqual(['31 23 * * *']);
     expect(fixedCronsAt(src, 23, 21)).toEqual(['21 23 * * *']);
+    // text-name-spelling-check
+    expect(fixedCronsAt(src, 23, 32)).toEqual(['32 23 * * *']);
     // The rule check itself: three hourly jobs run at minute 20.
     expect(fixedCronsAt(src, 23, 20).length).toBeGreaterThan(1);
   });
