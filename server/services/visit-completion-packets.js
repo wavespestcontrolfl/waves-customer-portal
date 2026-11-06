@@ -1039,12 +1039,13 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
   // A STANDALONE invoice (no packet, not a renewal) whose send claim is live is the same window (Codex #6117 r8 P1): the
   // Intelligence Bar's claim judges who owes the invoice and holds the customer row only until the claim commits, so from
   // then until the delivery finalizes the claim row itself is the fence. A stale claim (10 minutes without a write) is not
-  // in flight, so a stuck row never blocks a Bill-To change for good.
+  // in flight HERE; an invoice that rides no visit is still judged by the linked rules below, which fence any claim
+  // the change would move (stale-claim recovery parks a stuck row first, keeping its delivery review).
   const linkedFence = () => require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId }, { pending });
   // A visit-scoped change reaches no invoice that rides no visit, so only the visit-linked rules apply to it.
   if (scheduledServiceId) return linkedFence();
   const standalone = database('invoices').whereNull('payer_id').whereNull('visit_completion_packet_id')
-    .where({ status: 'sending' }).where('updated_at', '>', new Date(Date.now() - require('./visit-linked-invoice-withdrawal').SEND_CLAIM_STALE_MS))
+    .where({ status: 'sending' }).where('updated_at', '>', new Date(Date.now() - 10 * 60 * 1000))
     .whereNotExists(database('annual_prepay_terms as renewal').whereRaw('renewal.prepay_invoice_id = invoices.id'))
     // An invoice that rides a visit (a direct link, or a record link whose record names a visit) is judged below by the
     // effective-owner rules, which count it only when this Bill-To change would move its owner: a visit pinned self-pay,

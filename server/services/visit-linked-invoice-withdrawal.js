@@ -40,10 +40,6 @@
 // is set, released when it is cleared, fenced and its checkout invalidated on the way. A visit-scoped
 // change (a job's own Bill-To) never reaches it.
 const TERMINAL = ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid'];
-// A send claim ('sending') with no write for this long is stale: it no longer fences a Bill-To change
-// (Codex #6117 r8 P1), so a stuck row never blocks one for good. Shared with the standalone fence in
-// visit-completion-packets.js (packetInvoiceSendInFlight).
-const SEND_CLAIM_STALE_MS = 10 * 60 * 1000;
 const NOT_WITHDRAWABLE = [...TERMINAL, 'processing'];
 
 function scopeIsEmpty({ customerId, scheduledServiceId, scheduledServiceIds, payerId, invoiceId }) {
@@ -188,7 +184,7 @@ async function ownerTransitions(database, scope = {}, { mode = 'post', pending =
     query.where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'));
   }
   const rows = await query.orderBy('id')
-    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'status', 'stripe_payment_intent_id', 'scheduled_send_error', 'updated_at');
+    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'status', 'stripe_payment_intent_id', 'scheduled_send_error');
   const plan = database.isTransaction === true ? (plans.get(database) || plans.set(database, new Map()).get(database)) : null;
   const out = [];
   for (const row of rows) {
@@ -210,7 +206,7 @@ async function ownerTransitions(database, scope = {}, { mode = 'post', pending =
     }
     out.push({
       invoiceId: row.id, customerId: row.customer_id, visitId, status: row.status,
-      stripePaymentIntentId: row.stripe_payment_intent_id, scheduledSendError: row.scheduled_send_error, updatedAt: row.updated_at,
+      stripePaymentIntentId: row.stripe_payment_intent_id, scheduledSendError: row.scheduled_send_error,
       beforeOwner, afterOwner, moved,
     });
   }
@@ -389,8 +385,6 @@ async function packetSessionInvoiceIds(database, scope, pending) {
 // saved-card claim (stripe.js claimInvoiceSavedCardCharge) both write or lock the invoice row, so
 // neither can slip in between this check and the withdrawal; one that already committed is seen here
 // as status 'sending' or an unresolved attempt.
-const sendClaimLive = (updatedAt) => updatedAt != null && new Date(updatedAt).getTime() > Date.now() - SEND_CLAIM_STALE_MS;
-
 async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = null } = {}) {
   const { isCollectionPendingFenceError } = require('./invoice-helpers');
   const locking = database.isTransaction === true;
@@ -400,13 +394,11 @@ async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = nul
     // Re-read under the invoice row lock: this is the row the claims race for.
     const invoice = locking
       ? await database('invoices').where({ id: t.invoiceId }).forUpdate()
-        .first('id', 'status', 'payer_id', 'payer_statement_id', 'scheduled_send_error', 'stripe_payment_intent_id', 'updated_at')
-      : { id: t.invoiceId, status: t.status, stripe_payment_intent_id: t.stripePaymentIntentId, scheduled_send_error: t.scheduledSendError, updated_at: t.updatedAt };
+        .first('id', 'status', 'payer_id', 'payer_statement_id', 'scheduled_send_error', 'stripe_payment_intent_id')
+      : { id: t.invoiceId, status: t.status, stripe_payment_intent_id: t.stripePaymentIntentId, scheduled_send_error: t.scheduledSendError };
     if (!invoice || invoice.payer_id || invoice.payer_statement_id || TERMINAL.includes(invoice.status)
       || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) continue;
-    // An invoice that rides no visit counts its send claim only while the claim is live, as the standalone
-    // fence judges it; a visit-linked one counts any claim.
-    if (invoice.status === 'sending' && (t.visitId || sendClaimLive(invoice.updated_at))) return true;
+    if (invoice.status === 'sending') return true;
     if (invoice.status === 'processing' && invoice.stripe_payment_intent_id) return true;
     try {
       await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
@@ -418,4 +410,4 @@ async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = nul
   return false;
 }
 
-module.exports = { liveVisitPayerOf, visitOwnerTransitions, lockLinkedOwnershipRows, recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight, SEND_CLAIM_STALE_MS };
+module.exports = { liveVisitPayerOf, visitOwnerTransitions, lockLinkedOwnershipRows, recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };
