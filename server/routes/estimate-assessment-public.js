@@ -36,6 +36,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
+const { hadCompletedAssessmentLook } = require('../services/assessment-booking');
 const { rateLimitKey } = require('../middleware/rate-limit-key');
 const { estimateAssessmentFirstLive } = require('../config/feature-gates');
 
@@ -58,8 +59,6 @@ const commitLimiter = limiter(10, 'Too many booking attempts. Please try again i
 
 const SOURCE = 'estimate_assessment_link';
 const ALERT_LABEL = '🔁 Free Waves Assessment booked from an estimate:';
-// How far before the estimate's creation a completed Waves Assessment still counts as the look for it.
-const LOOK_WINDOW_DAYS = 30;
 const ALREADY_BOOKED_ERROR = 'You already have a Waves Assessment on the books.';
 const CUSTOMER_COLUMNS = ['id', 'first_name', 'last_name', 'phone', 'email', 'account_id',
   'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'];
@@ -89,32 +88,6 @@ async function resolveEstimate(token) {
   return { estimate, data };
 }
 
-// Did this customer complete a Waves Assessment on or after LOOK_WINDOW_DAYS before the estimate was created? The same
-// assessment identity findOpenVisit uses (scopeToAssessmentBookings: service_type name or catalog row); only
-// 'completed' counts (cancelled, skipped and no_show visits are no look). Legacy completions carry a NULL completed_at,
-// so the visit's ET date stands in (estimate-conversion-guard.js). The offer is optional: a failed read logs a warning
-// and answers false, so the offer stays and the page never 500s (inside a booking transaction a failed read aborts that
-// transaction, which fails the booking rather than risking a second free visit).
-async function hadCompletedLook(conn, estimate) {
-  if (!estimate.created_at) return false;
-  const since = new Date(new Date(estimate.created_at).getTime() - LOOK_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  if (Number.isNaN(since.getTime())) return false;
-  try {
-    const { scopeToAssessmentBookings } = require('../services/assessment-booking');
-    const row = await scopeToAssessmentBookings(
-      conn('scheduled_services')
-        .leftJoin('services', 'services.id', 'scheduled_services.service_id')
-        .where('scheduled_services.customer_id', estimate.customer_id)
-        .where('scheduled_services.status', 'completed')
-        .whereRaw("COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York') >= ?", [since]),
-    ).first('scheduled_services.id');
-    return Boolean(row);
-  } catch (err) {
-    logger.warn(`[estimate-assessment] completed-assessment check skipped for estimate ${estimate.id}: ${err.code || err.name || 'error'}`);
-    return false;
-  }
-}
-
 // 'gone' (not offered for this estimate), 'already_booked' (an open Waves Assessment), else 'ok' with the customer.
 // Shared with /data's offer (assessmentFirstFor), so the page never offers what this page refuses.
 async function assessmentEligibility(estimate, data, conn = db) {
@@ -135,7 +108,7 @@ async function assessmentEligibility(estimate, data, conn = db) {
   // own check, inspection-public.js).
   const visit = await inspection().findOpenVisit(conn, customer.id, { assessmentOnly: true });
   if (visit) return { state: 'already_booked', customer, visit };
-  if (await hadCompletedLook(conn, estimate)) return { state: 'gone' };
+  if (await hadCompletedAssessmentLook(conn, estimate)) return { state: 'gone' };
   return { state: 'ok', customer };
 }
 
