@@ -104,6 +104,12 @@ describe('the snapshot a retry gets back replays the first rollover decision', (
     expect((await IbTasks.snapshot(unrolledRetry.task, 'admin-1')).threadRolledOver).toBe(true);
   });
 
+  test('a saved stuck-answer mark rides on the snapshot, because the saved reply is spread into it', async () => {
+    const started = await IbTasks.begin(args({ request: original }));
+    const task = { ...started.task, response: { response: 'No tool does that.', answerClaude: { stuck: true, gapId: 7 } } };
+    expect((await IbTasks.snapshot(task, 'admin-1')).answerClaude).toEqual({ stuck: true, gapId: 7 });
+  });
+
   test('a request that was not rolled over: the key is present but unset, so the wire body has no flag', async () => {
     const started = await IbTasks.begin(args({ request: original }));
     const snapshot = await IbTasks.snapshot(started.task, 'admin-1');

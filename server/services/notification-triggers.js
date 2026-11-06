@@ -1404,6 +1404,19 @@ function pushTagFor(triggerKey, payload = {}) {
   return `waves-${triggerKey}`;
 }
 
+// GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the labels a registry type's rule already declares,
+// in the shape a composed alert stores (area, severity, who, doneWhen, contact or promise), each kept only when the
+// composer would accept it. Never a subject: a rule names no record. {} while the gate is off, or when the reader is
+// missing (a test that mocks feature-gates) or anything throws, so the row is written exactly as before.
+function registryLabels(trigger) {
+  try {
+    const gates = require('../config/feature-gates');
+    if (!(typeof gates.alertRegistryLabelsLive === 'function' && gates.alertRegistryLabelsLive())) return {};
+    const { area, severity, who, doneWhen, contact, promise } = trigger?.rule || {};
+    return require('./admin-alert-compose').validStructuredFields({ area, severity, who, doneWhen, contact, promise });
+  } catch { return {}; }
+}
+
 /**
  * Fire a notification event. Non-blocking — never throws.
  *
@@ -1561,7 +1574,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
     // The one bell write, shared by a ring (the loop below) and a rescued Claude fault (writeRescuedFault): the
     // registry's built row under the given metadata, with the caller's dedupe and refresh options.
-    const bellMetadata = { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
+    // GATE_ALERT_REGISTRY_LABELS: the labels the type's rule declares sit under the built alert's own fields (which win).
+    const bellMetadata = { ...registryLabels(trigger), ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
     const writeBell = (metadata) => NotificationService.notifyAdmin(
       trigger.category,
       built.title,
@@ -1831,6 +1845,7 @@ module.exports = {
     pushTagFor,
     PRIORITY_VIBRATE,
     redactSensitiveText,
+    registryLabels,
     sanitizeBuiltNotification,
     sanitizeNotificationPayload,
   },
