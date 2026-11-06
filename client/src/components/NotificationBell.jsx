@@ -369,7 +369,9 @@ function FullText({ text, color, marginTop }) {
   );
 }
 
-// The customer an admin row is about (GATE_ALERT_EXPLAINER; the server reads it from the record behind the alert).
+// The customer an admin row is about (GATE_ALERT_EXPLAINER, or GATE_ALERT_CUSTOMER_LINE alone; the server reads it from the
+// record behind the alert). Only `explainable` turns on "What to do", so a row with a customer and no `explainable` keeps
+// "Show full text".
 // Shown under the title unless the title already carries the whole name.
 function customerNameFor(n, type) {
   const name = type === 'admin' && typeof n?.customer?.name === 'string' ? n.customer.name.trim() : '';
