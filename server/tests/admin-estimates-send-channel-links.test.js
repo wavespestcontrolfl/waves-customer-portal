@@ -814,8 +814,9 @@ describe('sendEstimateNow — the app-sent new-home estimate (GATE_MOVING_AUTO_S
     expect(result.sent).toBe(true);
     expect(lastTemplate()[0]).toBe('estimate_sent_move');
     expect(lastTemplate()[1]).toMatchObject({ plan_name: 'Quarterly Pest Control Service', estimate_url: 'https://short.test/sms' });
-    // The window fences this entry point (messaging-send-window.test.js).
-    expect(smsLeg()).toMatchObject({ entryPoint: 'moving_auto_send', metadata: { original_message_type: 'estimate_sent' } });
+    // The window fences this entry point (messaging-send-window.test.js). The label is the template that rendered the
+    // text, so the provider's per-template switch (services/twilio.js isTemplateActive) reads estimate_sent_move's.
+    expect(smsLeg()).toMatchObject({ entryPoint: 'moving_auto_send', metadata: { original_message_type: 'estimate_sent_move' } });
   });
 
   test("the office's send of that estimate shows the moving text but stays an office send; gate off or no plan name = the standard text", async () => {

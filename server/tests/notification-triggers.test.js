@@ -11,6 +11,8 @@ jest.mock('../services/admin-unread', () => ({
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
+// The instance notification-triggers itself holds: an earlier test resets the module registry, so a later require is another copy.
+const PushServiceHeld = require('../services/push-notifications');
 const { TRIGGER_REGISTRY, __private, triggerNotification } = require('../services/notification-triggers');
 
 function tableMock(rows) {
@@ -1502,5 +1504,163 @@ describe('bell banner triggers', () => {
     expect(out.suppressed).toBe(true);
     expect(Push.sendToAdminUsers).not.toHaveBeenCalled();
     jest.dontMock('../services/internal-test-customers');
+  });
+});
+
+// GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the bell row a registry event writes also stores the
+// labels its rule declares. Gate off = the metadata of today.
+describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
+  const LABEL_KEYS = ['area', 'severity', 'who', 'doneWhen', 'contact', 'promise', 'subject'];
+
+  const ringMetadata = async (key, payload, { gate = 'true', opts = {} } = {}) => {
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-1' });
+    if (gate) process.env.GATE_ALERT_REGISTRY_LABELS = gate; else delete process.env.GATE_ALERT_REGISTRY_LABELS;
+    try {
+      await triggerNotification(key, payload, opts);
+    } finally {
+      delete process.env.GATE_ALERT_REGISTRY_LABELS;
+    }
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    return NotificationService.notifyAdmin.mock.calls[0][3].metadata;
+  };
+  const missedCall = { customerId: null, name: 'Pat Sample', phone: '+19415550100', callLogId: 'call-1' };
+
+  // Spies are undone one by one: restoreAllMocks would also reset the module mocks above (notifyAdmin's return value).
+  const spies = [];
+  const spy = (obj, name) => { const s = jest.spyOn(obj, name); spies.push(s); return s; };
+  afterEach(() => { delete process.env.GATE_ALERT_REGISTRY_LABELS; while (spies.length) spies.pop().mockRestore(); });
+
+  test('gate off: the metadata carries no label, exactly as before', async () => {
+    const meta = await ringMetadata('customer_missed_call', missedCall, { gate: null });
+    expect(Object.keys(meta).filter((k) => LABEL_KEYS.includes(k))).toEqual([]);
+    expect(meta).toMatchObject({ triggerKey: 'customer_missed_call', priority: expect.any(String), payload: expect.any(Object) });
+    // Any value but the exact string 'true' is off.
+    const loose = await ringMetadata('customer_missed_call', missedCall, { gate: '1' });
+    expect(Object.keys(loose).filter((k) => LABEL_KEYS.includes(k))).toEqual([]);
+  });
+
+  test('gate on: a customer contact row stores area, severity, who, doneWhen and contact true, and no subject', async () => {
+    const off = await ringMetadata('customer_missed_call', missedCall, { gate: null });
+    const on = await ringMetadata('customer_missed_call', missedCall);
+    expect(on).toMatchObject({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', contact: true });
+    expect(on).not.toHaveProperty('promise');
+    expect(on).not.toHaveProperty('subject');
+    // Only the labels are added: every key the gate-off row had keeps its value.
+    for (const [k, v] of Object.entries(off)) expect(on[k]).toEqual(v);
+  });
+
+  test('gate on: a promise type stores promise true and never contact; an expiry type stores no doneWhen', async () => {
+    const promise = await ringMetadata('promise_chaser', { customerName: 'Pat Sample', phone: '+19415550100', callLogId: 'call-2' });
+    expect(promise).toMatchObject({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', promise: true });
+    expect(promise).not.toHaveProperty('contact');
+    const expiring = await ringMetadata('twilio_failure', { error: 'test', to: '+19415550100' });
+    expect(expiring).toMatchObject({ area: 'Comms', severity: 'needs-you', who: 'person' });
+    expect(expiring).not.toHaveProperty('doneWhen');
+    expect(expiring).not.toHaveProperty('contact');
+    expect(expiring).not.toHaveProperty('promise');
+  });
+
+  test('gate on: an engineering type stores who claude and severity broken', async () => {
+    const meta = await ringMetadata('seo_sync_failed', { error: 'sync failed' });
+    expect(meta).toMatchObject({ area: 'Content', severity: 'broken', who: 'claude' });
+  });
+
+  test("gate on: the built alert's own fields win over the rule's", async () => {
+    const original = TRIGGER_REGISTRY.customer_missed_call.build;
+    spy(TRIGGER_REGISTRY.customer_missed_call, 'build').mockImplementation((p) => ({
+      ...original(p), alert: { area: 'Schedule', doneWhen: 'own_done_when', who: 'either', extra: 'kept' },
+    }));
+    const meta = await ringMetadata('customer_missed_call', missedCall);
+    expect(meta).toMatchObject({ area: 'Schedule', doneWhen: 'own_done_when', who: 'either', extra: 'kept', severity: 'needs-you', contact: true });
+  });
+
+  test('registryLabels drops every value the composer would refuse, and never invents a subject', () => {
+    process.env.GATE_ALERT_REGISTRY_LABELS = 'true';
+    const { registryLabels } = __private;
+    expect(registryLabels({ rule: { area: 'Nowhere', severity: 'urgent', who: 'robot', doneWhen: 'Not Valid', contact: 'yes', promise: 1 } })).toEqual({});
+    expect(registryLabels({ rule: { area: 'Billing', severity: 'urgent', who: 'person', doneWhen: 'invoice_paid', contact: false } }))
+      .toEqual({ area: 'Billing', who: 'person', doneWhen: 'invoice_paid' });
+    // Both declarations together are refused as a pair, like the composer; one alone is kept only as true.
+    expect(registryLabels({ rule: { area: 'Comms', contact: true, promise: true } })).toEqual({ area: 'Comms' });
+    expect(registryLabels({ rule: { area: 'Comms', promise: true } })).toEqual({ area: 'Comms', promise: true });
+    expect(registryLabels({ rule: { area: 'Comms', subject: { type: 'customer', id: 'c-1' }, buttons: { kind: 'x' } } })).toEqual({ area: 'Comms' });
+    expect(registryLabels({})).toEqual({});
+    expect(registryLabels(undefined)).toEqual({});
+    expect(registryLabels({ rule: null })).toEqual({});
+  });
+
+  test('a test that mocks feature-gates without the reader reads the gate as off', () => {
+    process.env.GATE_ALERT_REGISTRY_LABELS = 'true';
+    const gates = require('../config/feature-gates');
+    const reader = gates.alertRegistryLabelsLive;
+    expect(reader()).toBe(true);
+    delete gates.alertRegistryLabelsLive;
+    try {
+      expect(__private.registryLabels(TRIGGER_REGISTRY.new_lead)).toEqual({});
+    } finally {
+      gates.alertRegistryLabelsLive = reader;
+    }
+  });
+
+  test('every registry type: gate on stores exactly the labels its rule declares, no more', () => {
+    process.env.GATE_ALERT_REGISTRY_LABELS = 'true';
+    for (const [key, trigger] of Object.entries(TRIGGER_REGISTRY)) {
+      const { area, severity, who, doneWhen, contact, promise } = trigger.rule;
+      const expected = { area, severity, who, ...(doneWhen ? { doneWhen } : {}), ...(contact ? { contact: true } : {}), ...(promise ? { promise: true } : {}) };
+      expect({ key, labels: __private.registryLabels(trigger) }).toEqual({ key, labels: expected });
+    }
+  });
+
+  test('gate on: a Claude fault the bell policy drops is rescued with its labels, still Activity-only with no push', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    spy(bellPolicy, 'bellAllowed').mockResolvedValue(false);
+    PushService.sendToAdminUsers.mockClear();
+    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
+    try {
+      const meta = await ringMetadata('property_lookup_canary_failed', { failures: ['golden_addr:Example (no parcel)'] }, { opts: { dedupeKey: 'property-lookup-canary:2026-11-05' } });
+      expect(meta).toMatchObject({ triggerKey: 'property_lookup_canary_failed', area: 'System', severity: 'broken', who: 'claude', feed: 'activity', claudeQueue: 'property_lookup_canary_failed' });
+      expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_ALERT_CLAUDE_FAULTS;
+    }
+  });
+
+  test('gate on: a customer contact row still passes the policy, keeps bell: true and still pushes', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
+    PushService.sendToAdminUsers.mockClear();
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
+    ));
+    const rungWith = async (gate) => {
+      NotificationService.notifyAdmin.mockClear();
+      NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-1' });
+      PushService.sendToAdminUsers.mockClear();
+      if (gate) process.env.GATE_ALERT_REGISTRY_LABELS = gate; else delete process.env.GATE_ALERT_REGISTRY_LABELS;
+      try {
+        const stats = await triggerNotification('bundle_quote_requested', { customerName: 'Pat Bundle', customerId: 'cust-9' });
+        return { stats, options: NotificationService.notifyAdmin.mock.calls[0]?.[3], pushes: PushService.sendToAdminUsers.mock.calls.length };
+      } finally { delete process.env.GATE_ALERT_REGISTRY_LABELS; }
+    };
+    try {
+      const off = await rungWith(null);
+      const on = await rungWith('true');
+      expect(on.options.bell).toBe(true);
+      expect(on.options.metadata).toMatchObject({ contact: true, severity: 'needs-you', who: 'person' });
+      expect(on.stats.policySilenced).toBeUndefined();
+      expect(on.pushes).toBe(off.pushes);
+      expect(on.pushes).toBe(1);
+    } finally {
+      delete process.env.GATE_CUSTOMER_ALERTS_RING;
+    }
   });
 });
