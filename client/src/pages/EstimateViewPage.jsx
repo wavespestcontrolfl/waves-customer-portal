@@ -662,6 +662,45 @@ function HeaderTailSkeleton() {
   );
 }
 
+// Short ET dates for the expired card, or null when the card should keep its
+// generic copy (not eligible, a request outcome already showing, no usable
+// expiry date). ET like every other estimate-expiry surface, never the
+// browser zone. `sent` is null when the row has no send date.
+function expiredCardDates({ extensionEligible, requestState, expiresAt, sentAt }) {
+  if (!extensionEligible || !expiresAt || !['idle', 'sending', 'failed'].includes(requestState)) return null;
+  const shortEt = (iso) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? null
+      : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+  };
+  const expired = shortEt(expiresAt);
+  if (!expired) return null;
+  return { expired, sent: sentAt ? shortEt(sentAt) : null };
+}
+
+function ExpiredCardCopy({ dates, selfServe }) {
+  return (
+    <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+      Your estimate{dates.sent ? ` from ${dates.sent}` : ''} expired on {dates.expired}.
+      {selfServe ? ' Tap below to reopen it for 7 days at the same price.' : ' Tap below to ask our office for more time.'}
+      {' '}Questions? Call us at{' '}
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>.
+    </div>
+  );
+}
+
+function notFoundHeadline({ extended, expired }) {
+  if (extended) return "You're all set";
+  return expired ? 'Your estimate expired' : 'Estimate unavailable';
+}
+
+function extensionButtonLabel({ expired, selfServe, sending }) {
+  if (!expired) return sending ? 'Extending…' : 'Request an extension';
+  if (selfServe) return sending ? 'Reopening…' : 'Reopen my estimate';
+  return sending ? 'Sending…' : 'Ask for more time';
+}
+
 // extensionEligible comes from the /data 404 body: the server only sets it
 // when the token maps to a real, published estimate that died of expiry (and
 // the GATE_ESTIMATE_EXTENSION_REQUEST gate is on) — so garbage URLs never
@@ -669,7 +708,14 @@ function HeaderTailSkeleton() {
 // extension (the server texts the refreshed link too); once the lifetime
 // auto-grant is used, later clicks just notify the office. onExtended lets
 // the parent re-fetch /data — the link is live again after an auto-grant.
-function NotFoundCard({ token = null, extensionEligible = false, onExtended = null }) {
+//
+// expiresAt / sentAt / extensionSelfServe also come from that eligible 404 body.
+// With an expiry date the card says plainly that the estimate expired (and
+// when it was sent) instead of the generic "link may have expired" copy, and
+// words the button for what it does: a self-serve reopen when the server says a
+// tap wins the lifetime auto-grant (extensionSelfServe), an office request
+// otherwise.
+function NotFoundCard({ token = null, extensionEligible = false, onExtended = null, expiresAt, sentAt, extensionSelfServe }) {
   // idle | sending | extended | requested | failed. Terminal states render
   // even if a parent re-fetch flips extensionEligible off (a successful
   // auto-grant makes the estimate viewable again, which does exactly that).
@@ -721,6 +767,12 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
   // outcome the customer just got.
   const extendedNow = requestState === 'extended';
 
+  // The expired framing shows only while the request is still open to a tap
+  // (idle / sending / failed); the extended and requested outcomes keep their
+  // own copy. Dates are ET like every other estimate-expiry surface.
+  const expiredDates = expiredCardDates({ extensionEligible, requestState, expiresAt, sentAt });
+  const expiredHeadline = Boolean(expiredDates);
+
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
       {/* An h1, not a styled div (G-07 measured h1Count === 0 here). This card
@@ -728,9 +780,11 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
           request flow and flips to a success headline, so role="alert" would
           be wrong on it. It needs the right heading element, not the card. */}
       <h1 style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
-        {extendedNow ? "You're all set" : 'Estimate unavailable'}
+        {notFoundHeadline({ extended: extendedNow, expired: expiredHeadline })}
       </h1>
-      {!extendedNow ? (
+      {expiredHeadline ? (
+        <ExpiredCardCopy dates={expiredDates} selfServe={extensionSelfServe === true} />
+      ) : !extendedNow ? (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           This link may have expired or isn't valid. Call us at{' '}
           <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
@@ -789,7 +843,7 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
                 opacity: requestState === 'sending' ? 0.8 : 1,
               }}
             >
-              {requestState === 'sending' ? 'Extending…' : 'Request an extension'}
+              {extensionButtonLabel({ expired: expiredHeadline, selfServe: extensionSelfServe === true, sending: requestState === 'sending' })}
             </button>
             {requestState === 'failed' ? (
               <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.5 }}>
@@ -5988,6 +6042,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Set from the /data 404 body — true only when the server confirms this
   // token is a real published estimate that expired (see NotFoundCard).
   const [extensionEligible, setExtensionEligible] = useState(false);
+  // Extra details the eligible-expired 404 body carries for the expired card.
+  const [expiredInfo, setExpiredInfo] = useState(null);
   // Staff draft preview (?adminPreview=1 — opened from the estimate tool's
   // "Customer View" / the estimates list's Preview). Makes the /data fetch
   // attach the staff session's Bearer token so the server will serve an
@@ -6555,6 +6611,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     if (r.status === 404) {
       const notFoundBody = await r.json().catch(() => ({}));
       setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
+      setExpiredInfo(notFoundBody?.extensionRequestEligible === true && notFoundBody?.expiresAt
+        ? { expiresAt: notFoundBody.expiresAt, sentAt: notFoundBody.sentAt || null, extensionSelfServe: notFoundBody.extensionSelfServe === true }
+        : null);
       setNotFound(true);
       setLoadError(false);
       setLoading(false);
@@ -6570,6 +6629,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // the dead-end state or the loaded data would render the NotFoundCard.
     setNotFound(false);
     setExtensionEligible(false);
+    setExpiredInfo(null);
     const body = await r.json();
     // Aborted mid-flight (the caller navigated to a different :token and this
     // instance is unmounting): stop before ANY side effect. React drops
@@ -9016,6 +9076,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         <NotFoundCard
           token={token}
           extensionEligible={extensionEligible && !readOnlyPreview}
+          expiresAt={expiredInfo?.expiresAt || null}
+          sentAt={expiredInfo?.sentAt || null}
+          extensionSelfServe={expiredInfo?.extensionSelfServe === true}
           onExtended={() => {
             // Refresh semantics, NOT a first load: the initial 404 never
             // marked the view counted, so a bare loadEstimate() would flip
