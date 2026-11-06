@@ -635,5 +635,6 @@ describe('GATE_VOICEMAIL_TEXT_CALLER_ONLY — the text goes only to the number t
     const queued = state.inserts.find((i) => i.table === 'sms_log');
     expect(queued.payload.to_phone).toBe(CALLER);
     expect(JSON.parse(queued.payload.metadata).voicemail_phone).toBe(CALLER);
+    expect(JSON.parse(queued.payload.metadata).caller_only).toBe(true);
   });
 });

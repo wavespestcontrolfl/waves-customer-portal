@@ -547,6 +547,9 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone, c
           // repeat caller can re-arm. The phone already lives in the
           // row's to_phone column — this copy just reaches the hooks.
           voicemail_phone: phone,
+          // Queued by the caller-only sender (GATE_VOICEMAIL_TEXT_CALLER_ONLY):
+          // the replay refuses rows queued while the gate was off.
+          caller_only: callerOnly === true,
           call_sid: call.twilio_call_sid || null,
           // The originating call, for the replay's hold recheck: read by id
           // (the text may go to a spoken callback number its row does not
