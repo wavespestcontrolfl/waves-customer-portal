@@ -1,15 +1,16 @@
 // Nightly check: did a staff text spell its customer's name differently from the record?
 //
-// Owner 2026-11-06: a dictated text spelled the customer's first name the
-// common way, not the record's way. The mic now puts the record's spelling
-// back on the on-screen customer's name (utils/name-spelling.js
-// respellRecordName, called by routes/tech-dictation.js). This job runs the same rules over the last 24
-// hours of staff-sent texts (sms_log outbound rows with an admin_user_id),
-// against the customer each text went to. A hit is a word the mic would have
-// re-spelled, so the text was typed, the mic had no customer on screen, or the
-// rules missed a spelling. It posts one engineering FIX row to the ops digest
-// that lists those texts, and the row retires itself on the first clean night
-// (ops-digest-fall-off.js).
+// Owner 2026-11-06: a dictated text greeted the customer by another spelling
+// of the record's first name. The mic now puts the record's spelling back on a
+// listed spelling of the on-screen customer's first name (utils/name-spelling.js
+// respellRecordName, called by routes/tech-dictation.js). This job runs the same
+// rules over the last 24 hours of staff-sent texts (sms_log outbound rows with an
+// admin_user_id), against the customer each text went to. A hit is a word the
+// mic would have re-spelled, so the text was typed, the mic had no customer on
+// screen, or the mic path failed. It posts one engineering FIX row to the ops
+// digest that lists those texts, and the row retires itself on the first clean
+// night (ops-digest-fall-off.js). It knows only the listed spellings
+// (utils/name-match.js), the same as the mic.
 //
 // Read-only: it writes no business record, texts or emails no customer, and
 // calls no paid API. Its only write is the ops digest row (or, when the in-app
@@ -20,7 +21,6 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
-const { loadKeepWords } = require('./dictation-word-list');
 const { respellRecordName } = require('../utils/name-spelling');
 const { formatETDayDate, formatETTime } = require('../utils/datetime-et');
 
@@ -49,10 +49,10 @@ function readStaffTexts(knex, since) {
 }
 
 // [{ id, at, fixes: [{ heard, spelled }] }] for each text with a word the mic would re-spell.
-function findMisspellings(rows, keep) {
+function findMisspellings(rows) {
   const findings = [];
   for (const row of rows) {
-    const { fixes } = respellRecordName(row.message_body, { firstName: row.first_name, lastName: row.last_name, keep });
+    const { fixes } = respellRecordName(row.message_body, { firstName: row.first_name, lastName: row.last_name });
     if (fixes.length) findings.push({ id: String(row.id), at: new Date(row.created_at), fixes });
   }
   return findings;
@@ -68,7 +68,7 @@ function composeDigest(findings) {
   const texts = `staff text${n === 1 ? '' : 's'}`;
   const listed = findings.slice(0, LISTED_MAX).map(findingLine);
   const more = n > LISTED_MAX ? [`… and ${n - LISTED_MAX} more.`] : [];
-  const cause = 'Each word is one the mic would re-spell (server/utils/name-spelling.js): the text was typed, the mic had no customer on screen, or the rules missed.';
+  const cause = 'Each word is one the mic would re-spell (server/utils/name-spelling.js): the text was typed, the mic had no customer on screen, or the mic path failed.';
   return {
     subject: `FIX: ${n} ${texts} spelled the customer's name off the record`,
     headline: `Texts — ${n} misspelled the customer's name`,
@@ -122,10 +122,10 @@ function postDigest(findings, mailer) {
  * failed run and the standing row stays: a check that did not run proves nothing.
  * Returns { checked, findings, delivery? }.
  */
-async function runTextNameSpellingCheck({ knex = db, now = new Date(), mailer = sendgrid, readKeepWords = () => loadKeepWords(knex) } = {}) {
+async function runTextNameSpellingCheck({ knex = db, now = new Date(), mailer = sendgrid } = {}) {
   const since = new Date(now.getTime() - WINDOW_MS);
-  const [rows, keep] = await Promise.all([readStaffTexts(knex, since), readKeepWords()]);
-  const findings = findMisspellings(rows, keep);
+  const rows = await readStaffTexts(knex, since);
+  const findings = findMisspellings(rows);
   if (!findings.length) {
     await retireIfClean(OPS_KEY);
     return { checked: rows.length, findings: [] };

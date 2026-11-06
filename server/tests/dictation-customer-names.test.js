@@ -4,7 +4,7 @@
  * who texted or called and recently updated active customers; stays under 1800 characters;
  * a technician login sees only its own stops; the list is cached 5 minutes per scope and day;
  * the on-screen customer's first name, then the surnames, come back as transcriber keywords, and
- * the on-screen record name and the keep words come back for the name respell. Synthetic names only.
+ * the on-screen record name comes back for the name respell. Synthetic names only.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -18,7 +18,7 @@ jest.mock('../services/pest-recap', () => ({
 }));
 
 const {
-  buildDictationHints, loadKeepWords, resetNameCache, PROMPT_MAX_CHARS, NAMES_SECTION_CAPS, KEYWORD_MAX,
+  buildDictationHints, resetNameCache, PROMPT_MAX_CHARS, NAMES_SECTION_CAPS, KEYWORD_MAX,
 } = require('../services/dictation-word-list');
 const { mergeTranscriptionKeywords, transcriptionKeywords } = require('../services/call-recording-processor')._test;
 
@@ -129,14 +129,9 @@ describe('buildDictationHints', () => {
     expect(keywords).toEqual(['Testa', 'Examplesmith', 'Todayman', 'Callerson', 'Updatedson']);
   });
 
-  test('the on-screen record name and the keep words come back for the respell', async () => {
-    const { recordName, keep } = await buildDictationHints({ customerId: CUSTOMER_ID, scope: {} }, makeKnex());
+  test('the on-screen record name comes back for the respell', async () => {
+    const { recordName } = await buildDictationHints({ customerId: CUSTOMER_ID, scope: {} }, makeKnex());
     expect(recordName).toEqual({ firstName: 'Testa', lastName: 'Examplesmith' });
-    // staff, services, products and the term list; never a customer name
-    for (const word of ['alex', 'samplestaff', 'quarterly', 'pest', 'examplex']) expect(keep.has(word)).toBe(true);
-    for (const word of ['testa', 'examplesmith', 'todayman', 'callerson']) expect(keep.has(word)).toBe(false);
-    // the nightly text check reads the same words without a clip
-    expect([...(await loadKeepWords(makeKnex()))].sort()).toEqual([...keep].sort());
   });
 
   test('technician fence: only its own stops, no texting or recent-customer reads', async () => {

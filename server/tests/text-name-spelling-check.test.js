@@ -1,8 +1,8 @@
 /**
  * text-name-spelling-check: the nightly read-only check over the last 24 hours of staff texts. A
- * text that greets its customer by a close spelling of the record's name (the words the mic now
- * re-spells) posts one engineering FIX row listing the texts by sms_log id; a clean night retires
- * the row. Synthetic names only.
+ * text that greets its customer by a listed spelling of the record's first name other than the
+ * record's own (the words the mic now re-spells) posts one engineering FIX row listing the texts by
+ * sms_log id; a clean night retires the row. Synthetic names only.
  */
 const fs = require('fs');
 const path = require('path');
@@ -21,7 +21,7 @@ const { retireIfClean } = require('../services/ops-digest-fall-off');
 const { runTextNameSpellingCheck, OPS_KEY, _private: { composeDigest } } = require('../services/text-name-spelling-check');
 
 const NOW = new Date('2026-11-07T04:32:00Z'); // 11:32 PM ET
-const text = (id, body, first = 'Dena', last = 'Exampleton', at = '2026-11-06T15:00:00Z') => ({
+const text = (id, body, first = 'Sara', last = 'Exampleton', at = '2026-11-06T15:00:00Z') => ({
   id, created_at: at, message_body: body, first_name: first, last_name: last,
 });
 
@@ -40,7 +40,6 @@ function fakeKnex(rows, { calls = [], error = null } = {}) {
     return chain;
   };
 }
-const noKeep = async () => new Set();
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -49,9 +48,9 @@ beforeEach(() => {
 
 describe('runTextNameSpellingCheck', () => {
   test('a clean night retires the standing row and posts nothing', async () => {
-    const rows = [text('sms-1', 'Hey Dena, we can come Tuesday.'), text('sms-2', 'Dina called about the lanai.')];
+    const rows = [text('sms-1', 'Hey Sara, we can come Tuesday.'), text('sms-2', 'Sarah called about the lanai.')];
 
-    const result = await runTextNameSpellingCheck({ knex: fakeKnex(rows), now: NOW, readKeepWords: noKeep });
+    const result = await runTextNameSpellingCheck({ knex: fakeKnex(rows), now: NOW });
 
     expect(result).toEqual({ checked: 2, findings: [] });
     expect(retireIfClean).toHaveBeenCalledWith(OPS_KEY);
@@ -60,7 +59,7 @@ describe('runTextNameSpellingCheck', () => {
 
   test('reads outbound staff texts of the 24 hours before now, with the name of the customer each went to', async () => {
     const calls = [];
-    await runTextNameSpellingCheck({ knex: fakeKnex([], { calls }), now: NOW, readKeepWords: noKeep });
+    await runTextNameSpellingCheck({ knex: fakeKnex([], { calls }), now: NOW });
 
     const [read] = calls;
     expect(read.table).toBe('sms_log as s');
@@ -71,18 +70,18 @@ describe('runTextNameSpellingCheck', () => {
     expect(read.columns).toEqual(['s.id', 's.created_at', 's.message_body', 'c.first_name', 'c.last_name']);
   });
 
-  test('a text that greets its customer by a close spelling posts one FIX row listing the text by id', async () => {
+  test('a text that greets its customer by another listed spelling posts one FIX row listing the text by id', async () => {
     const rows = [
-      text('sms-1', 'Hey Dina. We can come Tuesday at ten.'),
-      text('sms-2', 'Hi Dena, all set.'),
-      // a keep word (here a staff first name) is never a finding
-      text('sms-3', 'Hi Joe, see you then.', 'Joy', 'Sampleroe'),
+      text('sms-1', 'Hey Sarah. We can come Tuesday at ten.'),
+      text('sms-2', 'Hi Sara, all set.'),
+      // an unlisted spelling is never a finding: the mic would not change it either
+      text('sms-3', 'Hi Dina, see you then.', 'Dena', 'Sampleroe'),
     ];
 
-    const result = await runTextNameSpellingCheck({ knex: fakeKnex(rows), now: NOW, readKeepWords: async () => new Set(['joe']) });
+    const result = await runTextNameSpellingCheck({ knex: fakeKnex(rows), now: NOW });
 
     expect(result.checked).toBe(3);
-    expect(result.findings).toEqual([{ id: 'sms-1', at: new Date('2026-11-06T15:00:00Z'), fixes: [{ heard: 'Dina', spelled: 'Dena' }] }]);
+    expect(result.findings).toEqual([{ id: 'sms-1', at: new Date('2026-11-06T15:00:00Z'), fixes: [{ heard: 'Sarah', spelled: 'Sara' }] }]);
     expect(retireIfClean).not.toHaveBeenCalled();
     expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
     const sent = deliverOpsDigest.mock.calls[0][0];
@@ -98,7 +97,7 @@ describe('runTextNameSpellingCheck', () => {
     expect(sent.subject).toBe("FIX: 1 staff text spelled the customer's name off the record");
     expect(sent.headline.length).toBeLessThanOrEqual(60);
     expect(sent.summary.length).toBeLessThanOrEqual(110);
-    expect(sent.text).toContain('"Dina" for "Dena" (sms_log sms-1)');
+    expect(sent.text).toContain('"Sarah" for "Sara" (sms_log sms-1)');
     // the row names the words, never the rest of the message
     expect(sent.text).not.toContain('Tuesday');
     expect(result.delivery).toEqual({ ok: true, channel: 'in_app', id: 'n1' });
@@ -107,13 +106,13 @@ describe('runTextNameSpellingCheck', () => {
   test('a read that throws fails the run and never retires the row', async () => {
     const knex = fakeKnex([], { error: new Error('pool exhausted') });
 
-    await expect(runTextNameSpellingCheck({ knex, now: NOW, readKeepWords: noKeep })).rejects.toThrow('pool exhausted');
+    await expect(runTextNameSpellingCheck({ knex, now: NOW })).rejects.toThrow('pool exhausted');
     expect(retireIfClean).not.toHaveBeenCalled();
     expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
 
   test('the email fallback goes only to the internal ops inbox, and fails when the mailer is not set up', async () => {
-    await runTextNameSpellingCheck({ knex: fakeKnex([text('sms-1', 'Hi Dina!')]), now: NOW, readKeepWords: noKeep });
+    await runTextNameSpellingCheck({ knex: fakeKnex([text('sms-1', 'Hi Sarah!')]), now: NOW });
     const { sendEmail } = deliverOpsDigest.mock.calls[0][0];
 
     await sendEmail();
@@ -130,7 +129,7 @@ describe('runTextNameSpellingCheck', () => {
 });
 
 describe('composeDigest', () => {
-  const finding = (i) => ({ id: `sms-${i}`, at: new Date('2026-11-06T15:00:00Z'), fixes: [{ heard: 'Dina', spelled: 'Dena' }] });
+  const finding = (i) => ({ id: `sms-${i}`, at: new Date('2026-11-06T15:00:00Z'), fixes: [{ heard: 'Sarah', spelled: 'Sara' }] });
 
   test('lists at most 25 texts and counts the rest; plural wording', () => {
     const composed = composeDigest(Array.from({ length: 27 }, (_, i) => finding(i)));
@@ -138,7 +137,7 @@ describe('composeDigest', () => {
     expect(composed.text.match(/^- /gm)).toHaveLength(25);
     expect(composed.text).toContain('… and 2 more.');
     expect(composed.html).toContain('<li style="margin:0 0 6px 0;">');
-    expect(composed.html).toContain('&quot;Dina&quot; for &quot;Dena&quot;');
+    expect(composed.html).toContain('&quot;Sarah&quot; for &quot;Sara&quot;');
   });
 });
 

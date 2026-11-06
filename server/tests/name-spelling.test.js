@@ -1,117 +1,96 @@
 /**
  * respellRecordName (server/utils/name-spelling.js): the staff mic puts the record's spelling back
- * on the name the words greet the on-screen customer by, and changes nothing else. The guards keep
- * it from rewriting a name said in passing, another person's name, months, staff or place names.
- * Synthetic names only.
+ * on the first name the words greet the on-screen customer by, when the heard word is a listed
+ * spelling of that name (spokenFirstNameSpellings, utils/name-match.js). Nothing else changes: an
+ * ordinary word, an unlisted spelling, a nickname, a name said in passing or another person's name
+ * stays as heard. Synthetic names only.
  */
-const { respellRecordName, nameLetters, _private: { soundCode, spellingEdits, greeted } } = require('../utils/name-spelling');
+const { respellRecordName, _private: { greeted, endsGreeting } } = require('../utils/name-spelling');
 
-const dena = { firstName: 'Dena', lastName: 'Exampleton' };
-const say = (text, record = dena) => respellRecordName(text, record).text;
+const sara = { firstName: 'Sara', lastName: 'Exampleton' };
+const say = (text, record = sara) => respellRecordName(text, record).text;
 
 describe('respellRecordName', () => {
-  test('the greeted first name gets the record spelling', () => {
-    expect(respellRecordName('Hey Dina. We can come Tuesday.', dena)).toEqual({
-      text: 'Hey Dena. We can come Tuesday.',
-      fixes: [{ heard: 'Dina', spelled: 'Dena' }],
+  test('a greeted listed spelling of the first name gets the record spelling', () => {
+    expect(respellRecordName('Hey Sarah. We can come Tuesday.', sara)).toEqual({
+      text: 'Hey Sara. We can come Tuesday.',
+      fixes: [{ heard: 'Sarah', spelled: 'Sara' }],
     });
-    expect(say('Hi, Dina! See you then.')).toBe('Hi, Dena! See you then.');
-    expect(say('Thank you, Dina')).toBe('Thank you, Dena');
-    expect(say('Good morning Dina, see you at ten.')).toBe('Good morning Dena, see you at ten.');
-    expect(say("Hi Dina's on the list.")).toBe("Hi Dena's on the list.");
+    expect(say('Hi, Sarah! See you then.')).toBe('Hi, Sara! See you then.');
+    expect(say('Thank you, Sarah')).toBe('Thank you, Sara');
+    expect(say('Good morning Sarah, see you at ten.')).toBe('Good morning Sara, see you at ten.');
+    expect(say('Hi Sarah Exampleton!')).toBe('Hi Sara Exampleton!');
+    expect(say('Hi Miss Sarah, all done.')).toBe('Hi Miss Sara, all done.');
+    expect(say('All set!\nHey Sarah')).toBe('All set!\nHey Sara');
+    expect(say('Hi Philip.', { firstName: 'Phillip', lastName: 'Sampleroe' })).toBe('Hi Phillip.');
+    expect(say('Hello Mark, the gate was open.', { firstName: 'Marc', lastName: 'Sampleroe' })).toBe('Hello Marc, the gate was open.');
   });
 
-  test('the surname after a greeted first name, or after a greeting and a title, is fixed too', () => {
-    expect(respellRecordName('Hi Dina Exampletin!', dena).fixes).toEqual([
-      { heard: 'Dina', spelled: 'Dena' }, { heard: 'Exampletin', spelled: 'Exampleton' },
-    ]);
-    expect(say('Hi Mrs. Exampletin, all done.')).toBe('Hi Mrs. Exampleton, all done.');
+  test('only a listed spelling changes: an ordinary word, an unlisted spelling or a nickname stays', () => {
+    expect(say('Thanks, See you tomorrow.', { firstName: 'Sue', lastName: 'Sampleroe' })).toBe('Thanks, See you tomorrow.');
+    expect(say('Hi Dina.', { firstName: 'Dena', lastName: 'Sampleroe' })).toBe('Hi Dina.');
+    expect(say('Hi Erica.', { firstName: 'Eric', lastName: 'Sampleroe' })).toBe('Hi Erica.');
+    expect(say('Hi Mark.', { firstName: 'Marcus', lastName: 'Sampleroe' })).toBe('Hi Mark.');
+    expect(say('Hi Jen.', { firstName: 'Jennifer', lastName: 'Sampleroe' })).toBe('Hi Jen.');
   });
 
-  test('a name said in passing is left as heard: it may be someone else', () => {
-    expect(say('Tell Dina Exampletin hi.')).toBe('Tell Dina Exampletin hi.');
-    expect(say('Dina, we can come Tuesday.')).toBe('Dina, we can come Tuesday.');
-    expect(say('Good morning Dena, Dina called.')).toBe('Good morning Dena, Dina called.');
-    expect(say('This morning Dina called about the appointment.')).toBe('This morning Dina called about the appointment.');
-    expect(say('Yes, I said hi Dina would like that.')).toBe('Yes, I said hi Dina would like that.');
-    expect(say('Hi Tom, and Tom will be there too.', { firstName: 'Tim', lastName: 'Sampleroe' })).toBe('Hi Tim, and Tom will be there too.');
+  test('a name said in passing, mid-sentence, after a sentence end or before another surname stays', () => {
+    expect(say('Tell Sarah hi.')).toBe('Tell Sarah hi.');
+    expect(say('Sarah, we can come Tuesday.')).toBe('Sarah, we can come Tuesday.');
+    expect(say('This morning Sarah called.')).toBe('This morning Sarah called.');
+    expect(say('Sounds good, thanks Sarah!')).toBe('Sounds good, thanks Sarah!');
+    expect(say('Thanks. Sarah will call you.')).toBe('Thanks. Sarah will call you.');
+    expect(say('Good morning Sara, Sarah called.')).toBe('Good morning Sara, Sarah called.');
+    expect(say('Hi Sarah Smith!')).toBe('Hi Sarah Smith!');
+    expect(say('Hi Sarah how are you')).toBe('Hi Sarah how are you');
+    expect(say('Thanks, Mark it down.', { firstName: 'Marc', lastName: 'Sampleroe' })).toBe('Thanks, Mark it down.');
   });
 
-  test('a period ends the greeting, except after a title; a contraction is never a name', () => {
-    const dan = { firstName: 'Dan', lastName: 'Sampleroe' };
-    expect(say("Thanks. Don't worry about it.", dan)).toBe("Thanks. Don't worry about it.");
-    expect(say("Thanks, Don't worry about it.", dan)).toBe("Thanks, Don't worry about it.");
-    expect(say('Thanks, Don\u2019t worry about it.', dan)).toBe('Thanks, Don\u2019t worry about it.');
-    expect(say('Good morning. Dina called.')).toBe('Good morning. Dina called.');
-    expect(say('Thanks. Mrs. Exampletin called.')).toBe('Thanks. Mrs. Exampletin called.');
-    expect(say('Hi, Mrs. Exampletin.')).toBe('Hi, Mrs. Exampleton.');
+  test("lowercase and ALL CAPS stay; the record's own spelling stays; a flat-case record reads Title Case", () => {
+    expect(say('hi sarah')).toBe('hi sarah');
+    expect(say('Hi SARAH')).toBe('Hi SARAH');
+    expect(respellRecordName('Hey Sara.', sara)).toEqual({ text: 'Hey Sara.', fixes: [] });
+    expect(say('Hey Sarah.', { firstName: 'SARA', lastName: 'EXAMPLETON' })).toBe('Hey Sara.');
+    expect(say('Hey Sarah Exampleton.', { firstName: 'sara', lastName: 'exampleton' })).toBe('Hey Sara Exampleton.');
   });
 
-  test('a greeted first name followed by a different surname greets someone else', () => {
-    expect(say('Hi Dina Smith')).toBe('Hi Dina Smith');
-    expect(say('Hi Dina Exampleton')).toBe('Hi Dena Exampleton');
+  test('no record name or no text: unchanged', () => {
+    expect(respellRecordName('Hey Sarah.', {})).toEqual({ text: 'Hey Sarah.', fixes: [] });
+    expect(respellRecordName('Hey Sarah.')).toEqual({ text: 'Hey Sarah.', fixes: [] });
+    expect(respellRecordName('', sara)).toEqual({ text: '', fixes: [] });
   });
+});
 
-  test('adding or dropping a letter counts only for an h or a doubled letter', () => {
-    expect(say('Hi Sarah', { firstName: 'Sara', lastName: 'Sampleroe' })).toBe('Hi Sara');
-    expect(say('Hi Phillip', { firstName: 'Philip', lastName: 'Sampleroe' })).toBe('Hi Philip');
-    // another name, not another spelling
-    expect(say('Hi Erica', { firstName: 'Eric', lastName: 'Sampleroe' })).toBe('Hi Erica');
-    expect(say('Hi Paula', { firstName: 'Paul', lastName: 'Sampleroe' })).toBe('Hi Paula');
-    expect(spellingEdits('stephens', 'stevens', 2)).toBe(true);
-    expect(spellingEdits('ab', 'ba', 1)).toBe(true);
-  });
+describe('greeted', () => {
+  const greetsX = (text) => greeted(text, text.lastIndexOf('X'));
 
-  test('one edit for a short name, two for a name of 6+ letters', () => {
-    expect(say('Hi Dinna')).toBe('Hi Dinna');
-    expect(say('Hi Mrs Examplitan')).toBe('Hi Mrs Exampleton');
-  });
-
-  test('a different first letter or a different sound is left as heard', () => {
-    expect(say('Hi Tina')).toBe('Hi Tina');
-    expect(say('Hi Brian', { firstName: 'Bryant', lastName: 'Sampleroe' })).toBe('Hi Brian');
-    expect(soundCode('dena')).toBe(soundCode('dina'));
-    // the whole word is coded: a 4-character cut would make these equal
-    expect(soundCode('exampleton')).not.toBe(soundCode('example'));
-  });
-
-  test('lowercase words, ALL CAPS, months, the greeting\'s own words, group words and keep words are never changed', () => {
-    expect(say('hi dina')).toBe('hi dina');
-    expect(say('Hi DINA')).toBe('Hi DINA');
-    expect(say('Hi June', { firstName: 'Jane', lastName: 'Sampleroe' })).toBe('Hi June');
-    const moss = { firstName: 'Dena', lastName: 'Moss' };
-    expect(say('Hi Miss Moss, see you Tuesday.', moss)).toBe('Hi Miss Moss, see you Tuesday.');
-    expect(say('Hi Miss Mass, see you Tuesday.', moss)).toBe('Hi Miss Moss, see you Tuesday.');
-    expect(say('Hi All, the gate is locked.', { firstName: 'Ali', lastName: 'Sampleroe' })).toBe('Hi All, the gate is locked.');
-    const joy = { firstName: 'Joy', lastName: 'Sampleroe' };
-    expect(say('Hi Joe', joy)).toBe('Hi Joy');
-    expect(say('Hi Joe', { ...joy, keep: new Set(nameLetters('Joe Staffington')) })).toBe('Hi Joe');
-  });
-
-  test("the record's own words never change, and a flat-case record reads Title Case", () => {
-    expect(respellRecordName('Hey Dena.', dena)).toEqual({ text: 'Hey Dena.', fixes: [] });
-    expect(say('Hey Dina.', { firstName: 'DENA', lastName: 'EXAMPLETON' })).toBe('Hey Dena.');
-    expect(say('Hi Mr Mcdonnald', { firstName: 'Ann', lastName: 'McDonald' })).toBe('Hi Mr McDonald');
-  });
-
-  test('greetings open a sentence; a title may sit between; "thank you" and "good morning" count', () => {
-    const greetsX = (text) => greeted(text, text.lastIndexOf('X'));
+  test('a greeting opens a sentence; a title may sit between; "thank you" and "good morning" count', () => {
     expect(greetsX('Hi Mrs. X')).toBe(true);
     expect(greetsX('Thank you X')).toBe(true);
     expect(greetsX('Done. Good evening X')).toBe(true);
     expect(greetsX('All set!\nHey X')).toBe(true);
-    // mid-sentence, a time of day without "Good", a sentence end or a line break in between: left alone
+  });
+
+  test('mid-sentence, a time of day without "Good", a sentence end or a line break between: no greeting', () => {
     expect(greetsX('Sounds good, thanks X')).toBe(false);
     expect(greetsX('Yesterday evening X')).toBe(false);
     expect(greetsX('No thank you X')).toBe(false);
     expect(greetsX('Thanks. X')).toBe(false);
+    expect(greetsX('Thanks. Mrs. X')).toBe(false);
     expect(greetsX('Hi\nX')).toBe(false);
     expect(greetsX('X')).toBe(false);
   });
+});
 
-  test('no record name or no text: unchanged', () => {
-    expect(respellRecordName('Hey Dina.', {})).toEqual({ text: 'Hey Dina.', fixes: [] });
-    expect(respellRecordName('Hey Dina.')).toEqual({ text: 'Hey Dina.', fixes: [] });
-    expect(respellRecordName('', dena)).toEqual({ text: '', fixes: [] });
+describe('endsGreeting', () => {
+  const surnames = new Set(['exampleton']);
+  const ends = (rest) => endsGreeting(`Sarah${rest}`, 5, surnames);
+
+  test('the end, punctuation, a line break, a dash, a possessive or the record surname close the greeting', () => {
+    for (const rest of ['', ',', ' !', '.', '\n', ' — see you', "'s husband", '’s gate', ' Exampleton']) expect(ends(rest)).toBe(true);
+  });
+
+  test('another word or another surname does not', () => {
+    for (const rest of [' how are you', ' Smith', "'t worry", ' 2pm']) expect(ends(rest)).toBe(false);
   });
 });

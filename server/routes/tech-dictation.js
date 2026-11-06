@@ -27,9 +27,9 @@
  * The word list carries customer names; the on-screen customer's first name and the surnames go to
  * the transcriber's keyword hints (services/dictation-word-list.js buildDictationHints).
  *
- * One rewrite: a close spelling of the on-screen customer's name gets the record's spelling
- * ("Hey Dina." becomes "Hey Dena." for a customer the record calls Dena), under the rules in
- * utils/name-spelling.js. Nothing else in the transcript changes.
+ * One rewrite: a listed spelling of the on-screen customer's first name, in a greeting, gets the
+ * record's spelling ("Hi Sarah." becomes "Hi Sara." for a customer the record calls Sara), under the
+ * rules in utils/name-spelling.js. Nothing else in the transcript changes.
  *
  * GATE_DICTATION_MONEY_NORMALIZE reads dictated dollar amounts (utils/spoken-money.js) and adds
  * `money: { changes, ambiguous }` beside `text`. Amounts are never rewritten: a parser can misread a
@@ -103,7 +103,7 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
       // The customer-name section and surname keyword hints. A technician login's names come
       // from its OWN stops only (the word list reads req's scope from the login, never from
       // the client).
-      const { prompt, keywords, recordName, keep } = await buildDictationHints({
+      const { prompt, keywords, recordName } = await buildDictationHints({
         customerId,
         serviceId,
         scope: isTechnicianRequest(req) ? { technicianId: req.technicianId } : {},
@@ -132,9 +132,9 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
         logger.warn(`[server-dictation] implausible transcript rejected chars=${heard.length} seconds=${durationSeconds}`);
         return res.status(502).json({ error: 'Transcription looked unreliable. Try again or type.' });
       }
-      // The on-screen customer's name in the record's spelling: "Hey Dina." becomes "Hey Dena." for a
-      // customer the record calls Dena (owner 2026-11-06). The log carries the count, never the words.
-      const { text, fixes } = respellRecordName(heard, { ...recordName, keep });
+      // The on-screen customer's first name in the record's spelling: "Hi Sarah." becomes "Hi Sara." for
+      // a customer the record calls Sara (owner 2026-11-06). The log carries the count, never the words.
+      const { text, fixes } = respellRecordName(heard, recordName || {});
       if (fixes.length) logger.info(`[server-dictation] record name respelled count=${fixes.length}`);
       return res.json(dictationAnswer(text));
     } catch (err) { return next(err); }

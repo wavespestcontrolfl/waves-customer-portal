@@ -201,20 +201,19 @@ describe('server dictation endpoint', () => {
       const logger = require('../services/logger');
       mockHints.mockResolvedValue({
         prompt: 'SERVER-BUILT WORD LIST',
-        keywords: ['Dena', 'Exampleton'],
-        recordName: { firstName: 'Dena', lastName: 'Exampleton' },
-        keep: new Set(['samplestaff']),
+        keywords: ['Sara', 'Exampleton'],
+        recordName: { firstName: 'Sara', lastName: 'Exampleton' },
       });
-      mockTranscribe.mockResolvedValue({ text: 'Hey Dina. We can come Tuesday, Dina.' });
+      mockTranscribe.mockResolvedValue({ text: 'Hey Sarah. Sarah from the office will call.' });
       await withServer(async (baseUrl) => {
         const res = await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID }, fields: { duration_seconds: '4' } });
         // only the greeted name changes; the hallucination guard saw the words as heard
-        expect(await res.json()).toEqual({ text: 'Hey Dena. We can come Tuesday, Dina.' });
-        expect(mockImplausible).toHaveBeenCalledWith('Hey Dina. We can come Tuesday, Dina.', 4);
+        expect(await res.json()).toEqual({ text: 'Hey Sara. Sarah from the office will call.' });
+        expect(mockImplausible).toHaveBeenCalledWith('Hey Sarah. Sarah from the office will call.', 4);
       });
       const lines = logger.info.mock.calls.map(([line]) => line);
       expect(lines).toContain('[server-dictation] record name respelled count=1');
-      expect(lines.join('\n')).not.toMatch(/Dina|Dena|Exampleton/);
+      expect(lines.join('\n')).not.toMatch(/Sara|Exampleton/);
     });
   });
 
