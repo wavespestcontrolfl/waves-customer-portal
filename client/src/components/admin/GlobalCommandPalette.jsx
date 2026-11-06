@@ -336,9 +336,9 @@ function renderMarkdown(text, onNavigate) {
 }
 
 // The stuck-answer mark for a reply (GATE_IB_ANSWER_SEND_TO_CLAUDE): the gap id the server saved, and the owner's own
-// question for this exchange (null when it came from a tap or carried photos), with the page route and record ids of the
-// moment he pressed Ask: a thread keeps an answer on screen after he opens another record, so a send never takes the page
-// it is on now. Null when the reply is not marked.
+// typed question for this exchange (null when it came from a tap, carried photos or held pasted text), with the page route
+// and record ids of the moment he pressed Ask: a thread keeps an answer on screen after he opens another record, so a send
+// never takes the page it is on now. Null when the reply is not marked.
 function stuckAnswerFrom(data, { ask, held, taskId, exchange }) {
   if (data.answerClaude?.stuck !== true) return null;
   const source = ask || held;
@@ -379,9 +379,10 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // the way, so Ask waits for them instead of sending what was typed so far.
   const dictationPending = useDictationPending();
   const dictationPendingRef = useRef(false);
-  // GATE_IB_ANSWER_SEND_TO_CLAUDE: set from a reply's `answerClaude` ({ gapId, question, pasted, forResponse, exchange }).
-  // `question` is the owner's own composer text for that exchange, captured when he pressed Ask; null for a choice,
-  // quick action or recent (text a model or the app wrote) and for an ask with photos. The answer's text never goes in.
+  // GATE_IB_ANSWER_SEND_TO_CLAUDE: set from a reply's `answerClaude` ({ gapId, question, pasted, route, ids, forResponse,
+  // exchange }). `question` is the owner's own typed composer text for that exchange, captured when he pressed Ask; null
+  // for a choice, quick action or recent (text a model or the app wrote), for an ask with photos, and for pasted text
+  // (it may be a customer's words). The answer's text never goes in. Cleared whenever another conversation is shown.
   const [answerClaude, setAnswerClaude] = useState(null);
   const answerSeqRef = useRef(0);
   const answerClaudeRef = useRef(null);
@@ -584,6 +585,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       resumeAttemptedRef.current = false;
       setConversationHistory([]);
       setResponse(null);
+      setAnswerClaude(null);
       setPendingActions([]);
       setToolActivity([]);
       knowledgeGaps.reset();
@@ -625,6 +627,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     // A thread from History is not the open task: its card (and Confirm
     // controls) must not stay attached above another conversation.
     setActiveTask(null);
+    // The stuck-answer line or button belongs to the exchange that made it, never to a conversation opened here: two
+    // answers can have the same text (the too-many-steps fallback is fixed), and the earlier question would go.
+    setAnswerClaude(null);
     try { localStorage.removeItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
     const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
     setResponse(
@@ -813,11 +818,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       // an idle thread starts a new conversation (threadRolledOver on the reply),
       // so a retry goes out byte for byte as first sent.
       const request = queryPayloadFor(q, selectedTarget);
-      // The owner's own words, paste mark, page route and record ids for this exchange, read before the composer clears.
-      // Only the composer's text counts: a tapped choice, quick action or recent is not what he wrote for this answer, and
-      // photos can't go.
-      const ask = !text && !attachments.length
-        ? { question: q, pasted: pastedRef.current === true, route: location.pathname, ids: pickIds(ibPageData) }
+      // The owner's own typed (or dictated) words, page route and record ids for this exchange, read before the composer
+      // clears. Only the composer's text counts: a tapped choice, quick action or recent is not what he wrote for this
+      // answer, and photos can't go. Pasted text gets no answer button: it may be a customer's words, and those never
+      // reach a Claude tab that can act (owner 2026-11-05).
+      const ask = !text && !attachments.length && pastedRef.current !== true
+        ? { question: q, pasted: false, route: location.pathname, ids: pickIds(ibPageData) }
         : null;
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
@@ -1016,6 +1022,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setLoading(false);
     startNewConversation();
     setResponse(null);
+    setAnswerClaude(null);
     dictationUsedRef.current = false;
     pastedRef.current = false;
     setPrompt("");

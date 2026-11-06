@@ -210,10 +210,11 @@ export function useSendAnswerToClaude({ exchange }) {
   useEffect(() => () => clearTimeout(timerRef.current), []);
   useEffect(() => { clearTimeout(timerRef.current); setNote(null); }, [exchange]);
 
-  // `answer`: { question, pasted, route, ids, exchange } as the palette captured them at Ask. One send at a time.
+  // `answer`: { question, pasted, route, ids, exchange } as the palette captured them at Ask. One send at a time, and
+  // never a pasted question: pasted text may be a customer's words (owner 2026-11-05: only his own words reach Claude).
   const send = useCallback(async (answer) => {
     const question = answer?.question;
-    if (typeof question !== 'string' || !question.trim() || sendingRef.current !== null) return;
+    if (typeof question !== 'string' || !question.trim() || answer.pasted === true || sendingRef.current !== null) return;
     const forExchange = answer.exchange;
     const stillShown = () => exchangeRef.current === forExchange;
     sendingRef.current = forExchange;
@@ -279,7 +280,7 @@ export function SendAnswerToClaude({ answer, claude, variant = 'desktop' }) {
   if (answer.gapId !== null && answer.gapId !== undefined) {
     return <div style={{ fontSize: 14, color: look.muted, paddingTop: 10 }}>Claude has this as gap #{answer.gapId}.</div>;
   }
-  if (!answer.question) return null;
+  if (!answer.question || answer.pasted === true) return null;
   const { note } = claude;
   const showButton = !note || note.kind === 'error' || note.kind === 'cancelled';
   return (

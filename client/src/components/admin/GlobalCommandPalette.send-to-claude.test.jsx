@@ -279,11 +279,11 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
     expect(answerButton()).not.toBeInTheDocument();
   });
 
-  it('shows the button when no gap row was written, and a tap sends the question, the page and the paste mark, never the answer', async () => {
+  it('shows the button when no gap row was written, and a tap sends the typed question and the page, never the answer', async () => {
     statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     await mount({ mobile });
-    await askQuestion(QUESTION, { paste: true });
+    await askQuestion();
     expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('');
     const button = await screen.findByTestId('answer-send-to-claude');
     expect(button).toHaveTextContent('Send to Claude (free)');
@@ -295,7 +295,7 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
       text: QUESTION,
       page: { route: '/admin/customers' },
       ids: { customer_id: CUSTOMER, viewed_date: '2026-11-03' },
-      pasted: true,
+      pasted: false,
     }]);
     expect(JSON.stringify(ideaPosts())).not.toContain('manual prepay');
     expect(answerButton()).not.toBeInTheDocument();
@@ -340,14 +340,49 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
     expect(ideaPosts()).toHaveLength(1);
   });
 
-  it('a typed question is sent with pasted false', async () => {
+  it('a pasted question gets no button: pasted text may be a customer\'s words', async () => {
     statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     await mount({ mobile });
+    await askQuestion(QUESTION, { paste: true });
+    expect(answerButton()).not.toBeInTheDocument();
+    expect(screen.queryByText("Bar couldn't do it?")).not.toBeInTheDocument();
+    expect(ideaPosts()).toHaveLength(0);
+  });
+
+  it('a pasted question that saved a gap still shows the gap line', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(7));
+    await mount({ mobile });
+    await askQuestion(QUESTION, { paste: true });
+    expect(await screen.findByText('Claude has this as gap #7.')).toBeInTheDocument();
+    expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('an answer opened from History never shows the earlier exchange\'s button, even with the same text', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((url, init) => {
+      const u = String(url);
+      if (u.includes(`/threads/${THREAD}`)) {
+        return Promise.resolve(reply(200, { thread: { id: THREAD, title: 'Old chat', lastSeq: 4,
+          conversationHistory: [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: ANSWER }] } }));
+      }
+      if (u.includes('/threads') && !u.includes('/threads/latest')) return Promise.resolve(reply(200, { threads: [{ id: THREAD, title: 'Old chat' }] }));
+      return base(url, init);
+    });
+    await mount({ mobile });
     await askQuestion();
-    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
-    await screen.findByText('Sent to Claude.');
-    expect(ideaPosts()[0]).toMatchObject({ text: QUESTION, pasted: false });
+    expect(await screen.findByTestId('answer-send-to-claude')).toBeInTheDocument();
+    if (mobile) fireEvent.click(screen.getByLabelText('Conversation options'));
+    fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+    fireEvent.click(await screen.findByRole('button', { name: /Old chat/ }));
+    await waitFor(() => expect(callsTo('').some(([url]) => String(url).includes(`/threads/${THREAD}`))).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Old chat/ })).not.toBeInTheDocument());
+    await screen.findByText(ANSWER);
+    expect(answerButton()).not.toBeInTheDocument();
+    expect(ideaPosts()).toHaveLength(0);
   });
 
   it('Undo cancels with the send\'s time, says Cancelled, and brings the button back', async () => {
