@@ -1,4 +1,4 @@
-// Schedule send routes (GATE_EMAIL_SEND_LATER): the gate, admin-only access,
+// Schedule send routes: admin-only access,
 // and the send-time checks. No network or DB. The reads find no row; the only
 // write a refusal may make is the void row that settles its client key.
 const mockInsert = jest.fn((row) => {
@@ -28,7 +28,7 @@ app.use('/api/admin/email', require('../routes/admin-email'));
 let server;
 beforeAll(done => { server = app.listen(0, '127.0.0.1', done); });
 afterAll(done => { server.close(done); });
-afterEach(() => { delete process.env.GATE_EMAIL_SEND_LATER; jest.clearAllMocks(); });
+afterEach(() => { jest.clearAllMocks(); });
 
 const etIn = (minutes) => new Date(Date.now() + minutes * 60000)
   .toLocaleString('sv-SE', { timeZone: 'America/New_York' }).slice(0, 16).replace(' ', 'T');
@@ -40,11 +40,6 @@ const call = async (method, path, { role = 'admin', body } = {}) => {
   return { status: res.status, body: await res.json() };
 };
 
-test('with the gate off nothing is queued (listing and cancelling stay available: they send nothing)', async () => {
-  expect(await call('POST', '/schedule', { body: valid() })).toEqual({ status: 404, body: { enabled: false, error: 'Schedule send is off.' } });
-  expect(db).not.toHaveBeenCalled();
-});
-
 test.each([
   ['a time in the past', { sendAt: etIn(-5) }, 'Pick a time at least a minute from now.'],
   ['a time more than a year out', { sendAt: etIn(400 * 24 * 60) }, 'Pick a time within a year.'],
@@ -55,7 +50,6 @@ test.each([
   ['the repeated fall-back hour', { sendAt: '2026-11-01T01:30' }, 'That time does not exist once in Eastern time. Pick another.'],
   ['no client key', { clientKey: undefined }, 'clientKey required'],
 ])('refuses %s, queuing nothing', async (_label, change, error) => {
-  process.env.GATE_EMAIL_SEND_LATER = 'true';
   const res = await call('POST', '/schedule', { body: { ...valid(), ...change } });
   // Only a refusal made after the clientKey lookup lets the browser drop it.
   const afterLookup = !/required$/.test(error);
@@ -66,7 +60,6 @@ test.each([
 });
 
 test.each([[null, 401], ['technician', 403]])('role %s cannot schedule', async (role, status) => {
-  process.env.GATE_EMAIL_SEND_LATER = 'true';
   expect((await call('POST', '/schedule', { role, body: valid() })).status).toBe(status);
   expect(db).not.toHaveBeenCalled();
 });

@@ -34,8 +34,8 @@ export default function EmailPage({ navigation, active }) {
   const { status, statusState, actionFeedback, tab, setTab, connecting, handleConnectGmail } = mailbox;
   const { setShowCompose, hasDrafts, hasComposeDraft, storageError, recoveryNotice } = editor;
   const connected = !statusState.error && Boolean(status?.connected);
-  // Schedule send (GATE_EMAIL_SEND_LATER): the arrow menu and the Scheduled
-  // tab appear only once the server reports the gate on. The list loads even
+  // Schedule send: the arrow menu and the Scheduled tab appear once the
+  // Scheduled list has loaded. The list loads even
   // with Gmail disconnected, so queued emails can still be cancelled.
   const { scheduled, sections, pane, mailEditor } = useScheduledSection({ active, tab, editor, baseSections: EMAIL_SECTIONS });
   const action = connected ? {
