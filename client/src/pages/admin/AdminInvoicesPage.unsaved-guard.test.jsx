@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { BrowserRouter, MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { confirmLeaveIfGuarded } from "../../lib/navigation-guard";
 import AdminInvoicesPage from "./AdminInvoicesPage";
 
 const DRAFT = {
@@ -58,9 +59,11 @@ function stubFetch({ discountsGate } = {}) {
 
 const button = (name) => screen.getByRole("button", { name, exact: true });
 
-async function openCreateForm() {
+// `extra` renders next to the page inside the router (a stand-in link).
+async function openCreateForm(extra = null) {
   render(
     <MemoryRouter>
+      {extra}
       <AdminInvoicesPage />
     </MemoryRouter>,
   );
@@ -95,6 +98,8 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  // The Back test moves the real URL; the link test needs it off /admin/*.
+  window.history.replaceState(null, "", "/");
 });
 
 describe("AdminInvoicesPage unsaved invoice guard", () => {
@@ -107,6 +112,83 @@ describe("AdminInvoicesPage unsaved invoice guard", () => {
     expect(confirm).toHaveBeenCalledWith("Discard your unsaved invoice changes?");
     expect(screen.getByLabelText("Notes (optional)")).toHaveValue("Synthetic notes to keep");
     expect(screen.queryByRole("button", { name: "Create invoice", exact: true })).toBeNull();
+  });
+
+  it("asks before a link leaves the page, and keeps the notes when the operator stays", async () => {
+    stubFetch();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const linkClicks = vi.fn();
+    // Stands in for a sidebar <Link>: its own handler runs only when the
+    // capture-phase guard lets the click through (preventDefault keeps jsdom
+    // from attempting a real navigation).
+    const notes = await openCreateForm(
+      <a href="/admin/dashboard" onClick={(e) => { e.preventDefault(); linkClicks(); }}>
+        Leave to Dashboard
+      </a>,
+    );
+    const leave = () => fireEvent.click(screen.getByRole("link", { name: "Leave to Dashboard" }));
+    leave();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(linkClicks).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(notes, { target: { value: "Synthetic notes to keep" } });
+    leave();
+    expect(confirm).toHaveBeenCalledWith("Discard your unsaved invoice changes?");
+    expect(linkClicks).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("Notes (optional)")).toHaveValue("Synthetic notes to keep");
+
+    confirm.mockReturnValue(true);
+    leave();
+    expect(linkClicks).toHaveBeenCalledTimes(2);
+  });
+
+  // A real BrowserRouter: MemoryRouter never touches window.history or fires
+  // 'popstate' (same precedent as CustomersPageV2.test.jsx).
+  it("asks before browser Back leaves the page, and stays on the form when the operator cancels", async () => {
+    stubFetch();
+    window.history.replaceState({ idx: 0 }, "", "/admin/dashboard");
+    window.history.pushState({ idx: 1 }, "", "/admin/invoices");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <Routes>
+          <Route path="/admin/invoices" element={<AdminInvoicesPage />} />
+          <Route path="/admin/dashboard" element={<div>Dashboard page</div>} />
+        </Routes>
+      </BrowserRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Create invoice", exact: true }));
+    const notes = await screen.findByLabelText("Notes (optional)");
+    fireEvent.change(notes, { target: { value: "Synthetic notes to keep" } });
+
+    // jsdom dispatches 'popstate' after history.back() in a later task.
+    act(() => { window.history.back(); });
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/invoices"));
+    expect(screen.getByLabelText("Notes (optional)")).toHaveValue("Synthetic notes to keep");
+    expect(screen.queryByText("Dashboard page")).toBeNull();
+
+    confirm.mockReturnValue(true);
+    act(() => { window.history.back(); });
+    expect(await screen.findByText("Dashboard page")).toBeInTheDocument();
+    expect(confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("makes sign-out and alert taps ask through the shared leave guard only while work is unsaved", async () => {
+    stubFetch();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const notes = await openCreateForm();
+    expect(confirmLeaveIfGuarded()).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
+
+    fireEvent.change(notes, { target: { value: "Synthetic unsaved notes" } });
+    expect(confirmLeaveIfGuarded()).toBe(false);
+    expect(confirm).toHaveBeenCalledWith("Discard your unsaved invoice changes?");
+
+    cleanup();
+    confirm.mockClear();
+    expect(confirmLeaveIfGuarded()).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("protects notes typed while the discount catalog is still loading", async () => {

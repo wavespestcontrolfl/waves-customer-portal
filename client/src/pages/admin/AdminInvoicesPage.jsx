@@ -82,6 +82,7 @@ import {
 import { useState, useEffect, useCallback, useRef } from "react";
 import InvoiceAddressDialog from "../../components/admin/InvoiceAddressDialog";
 import { useSearchParams } from "react-router-dom";
+import { registerLeaveGuard } from "../../lib/navigation-guard";
 import {
   ExternalLink,
   FileText,
@@ -1042,6 +1043,10 @@ export function buildInvoiceListParams({
   }
   return params;
 }
+// One wording for every way out of a create/edit form with unsaved work.
+const confirmDiscardBuilder = () =>
+  window.confirm("Discard your unsaved invoice changes?");
+
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
@@ -1095,6 +1100,62 @@ export default function AdminInvoicesPage() {
     );
   };
   useEffect(() => () => clearTimeout(toastTimerRef.current), []);
+  // While the form holds unsaved work, every way off this page asks first,
+  // like the header's "Invoice list" button: a same-tab link (sidebar, tab
+  // bar, page finder), browser Back/Forward, sign-out and app alert taps (the
+  // shared registry in lib/navigation-guard.js), and a reload or tab close.
+  // Same capture-phase link and history pattern as EstimateToolViewV2. Another
+  // URL of this page keeps the form mounted, so it never asks; a link to
+  // another site gets only the browser's own leave prompt.
+  useEffect(() => {
+    if (!builderDirty) return undefined;
+    const pagePath = window.location.pathname;
+    const beforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const guardLink = (event) => {
+      const link = event.target.closest?.("a[href]");
+      if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (link.origin !== window.location.origin || link.pathname === pagePath) return;
+      if (confirmDiscardBuilder()) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    // BrowserRouter stamps an index on each history entry, so a declined
+    // Back/Forward steps back to this entry before the router's own popstate
+    // listener can unmount the form.
+    let entryIndex = window.history.state?.idx;
+    let restoring = false;
+    const guardHistory = (event) => {
+      if (restoring) {
+        restoring = false;
+        event.stopImmediatePropagation();
+        return;
+      }
+      const nextIndex = event.state?.idx;
+      if (!Number.isInteger(entryIndex) || !Number.isInteger(nextIndex) || entryIndex === nextIndex) return;
+      // The browser has already moved to the popped-to URL here.
+      if (window.location.pathname === pagePath || confirmDiscardBuilder()) {
+        entryIndex = nextIndex;
+        return;
+      }
+      event.stopImmediatePropagation();
+      restoring = true;
+      window.history.go(entryIndex - nextIndex);
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    window.addEventListener("popstate", guardHistory, true);
+    document.addEventListener("click", guardLink, true);
+    const unregister = registerLeaveGuard(confirmDiscardBuilder);
+    return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
+      window.removeEventListener("popstate", guardHistory, true);
+      document.removeEventListener("click", guardLink, true);
+      unregister();
+    };
+  }, [builderDirty]);
   return (
     <UiSurface
       density="comfortable"
@@ -1112,11 +1173,7 @@ export default function AdminInvoicesPage() {
           onClick: () => {
             if (builderPending) return;
             if (tab === "create") {
-              if (
-                builderDirty &&
-                !window.confirm("Discard your unsaved invoice changes?")
-              )
-                return;
+              if (builderDirty && !confirmDiscardBuilder()) return;
               setEditInvoice(null);
               setTab("list");
             } else {
@@ -6656,16 +6713,6 @@ function CreateInvoice({
     onDirtyChange(!draftSaved && draftBaselineRef.current !== draftSnapshot);
   }, [draftReady, draftSaved, draftSnapshot, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
-  useEffect(() => {
-    if (draftSaved || !draftBaselineRef.current || draftBaselineRef.current === draftSnapshot)
-      return undefined;
-    const warn = (event) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [draftSaved, draftSnapshot]);
   useEffect(() => {
     let alive = true;
     setDiscountsLoading(true);
