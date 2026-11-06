@@ -1,8 +1,10 @@
 import {
   ActionFeedback,
+  Badge,
   Button,
   Card,
   CardBody,
+  Checkbox,
   Dialog,
   DialogBody,
   DialogFooter,
@@ -16,6 +18,31 @@ import {
 import AvailabilityStrip, { stripCoversRouteWarning } from "./AvailabilityStrip";
 import SlotConflictNotice from "./SlotConflictNotice";
 import { seriesMoveSummary } from "./seriesMove";
+import { ASKED_TIME_LABEL, askedTimeHint, toldBadgeText } from "./dayOnlyPromise";
+import { formatTimeWindow } from "./timeWindow";
+
+// GATE_DAY_ONLY_PROMISE: what the customer was told (feed field `told`), shown beside the visit's name.
+function ToldBadge({ service }) {
+  const text = toldBadgeText(service.told, formatTimeWindow(service.windowStart, service.windowEnd));
+  if (!text) return null;
+  return <Badge className="ml-2 align-middle" data-testid="told-badge">{text}</Badge>;
+}
+
+// GATE_DAY_ONLY_PROMISE: "Customer asked for this time" and the phone-script line under it.
+function AskedTimeField({ checked, onChange, disabled }) {
+  return (
+    <div>
+      <Checkbox
+        id="reschedule-asked-time"
+        label={ASKED_TIME_LABEL}
+        checked={checked === true}
+        onChange={(event) => onChange?.(event.target.checked)}
+        disabled={disabled}
+      />
+      <p data-testid="asked-time-hint" className="mt-1 text-ui-body text-ink-secondary">{askedTimeHint(checked)}</p>
+    </div>
+  );
+}
 
 export default function RescheduleDialogView({
   service,
@@ -25,6 +52,10 @@ export default function RescheduleDialogView({
   setNotes,
   notificationType,
   setNotificationType,
+  // GATE_DAY_ONLY_PROMISE: the "Customer asked for this time" box (off by default: no box).
+  dayOnlyPromiseOn,
+  customerAskedTime,
+  setCustomerAskedTime,
   sending,
   seriesConfirm,
   seriesConfirmDate,
@@ -54,7 +85,10 @@ export default function RescheduleDialogView({
       <Dialog open onClose={onClose} layer={1000} aria-label="Reschedule service">
         <DialogHeader><DialogTitle>Reschedule service</DialogTitle></DialogHeader>
         <DialogBody className="space-y-4">
-          <p className="text-ui-body text-ink-secondary">{service.customerName} — {service.serviceType}</p>
+          <p className="text-ui-body text-ink-secondary">
+            {service.customerName} — {service.serviceType}
+            {dayOnlyPromiseOn && <ToldBadge service={service} />}
+          </p>
           <Field label="Reason">
             <Select value={reason} onChange={(event) => setReason(event.target.value)}>
               {reasons.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -69,6 +103,7 @@ export default function RescheduleDialogView({
               <option value="sms">Text message</option>
             </Select>
           </Field>
+          {dayOnlyPromiseOn && <AskedTimeField checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={sending} />}
           {seriesConfirm && (
             <Card data-testid="series-move-confirm"><CardBody>
               <h3 className="text-ui-body font-medium mb-2">Move to {seriesConfirmDate || seriesConfirm.body.newDate}?</h3>

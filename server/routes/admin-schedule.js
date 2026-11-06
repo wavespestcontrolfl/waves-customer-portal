@@ -1535,6 +1535,25 @@ async function recordOfficeMoveIntent(conn, ids, body) {
   return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
 }
 
+// GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
+// the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
+// edit window. ONE bulk read for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
+// no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
+async function attachOfficeToldFields(req, rows) {
+  try {
+    if (isTechnicianRequest(req) || !Array.isArray(rows) || !rows.length) return;
+    const fields = await require('../services/time-promise').loadOfficeToldFields(db, rows);
+    for (const row of rows) {
+      const found = fields.get(row.id);
+      if (!found) continue;
+      if (found.customerAskedTime !== undefined) row.customerAskedTime = found.customerAskedTime;
+      if (found.told) row.told = found.told;
+    }
+  } catch (err) {
+    logger.warn(`[admin-schedule] told fields failed (${err.code || err.name || 'error'})`);
+  }
+}
+
 // The operator's line for a reschedule text that reached nobody. The email
 // version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
 // plainly, so staff do not chase a customer who was told.
@@ -7369,6 +7388,7 @@ router.get('/', async (req, res, next) => {
       attachStopRain(enriched, date, hourlyByZone);
     } catch { /* rain outlook is optional */ }
 
+    await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
 
     res.json({
@@ -7920,6 +7940,7 @@ router.get('/week', async (req, res, next) => {
       logger.warn(`[admin-schedule] week gate waypoint lookup failed (${err.code || err.name || 'error'})`);
     }
 
+    await attachOfficeToldFields(req, days.flatMap((day) => day.services));
     stripTechOwnerOnlyMoney(req, days.flatMap((day) => day.services));
     if (isTechnicianRequest(req)) {
       // Coworker absences are the office's view; the caller's own stays.
@@ -30007,6 +30028,7 @@ module.exports.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfte
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 module.exports.recordOfficeMoveIntent = recordOfficeMoveIntent;
+module.exports.attachOfficeToldFields = attachOfficeToldFields;
 // Shared "is money already taken for this visit" guard — the plan-length
 // trim's refusal contract, consumed lazily by the admin-dispatch series
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same

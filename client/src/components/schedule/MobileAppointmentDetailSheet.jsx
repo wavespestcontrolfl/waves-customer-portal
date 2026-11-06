@@ -29,6 +29,8 @@ import CancelFeeNotice from './CancelFeeNotice';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import { formatTimeWindow } from './timeWindow';
+import { Badge } from '../ui';
+import { toldBadgeText } from './dayOnlyPromise';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import BillingLaneCard from './BillingLaneCard';
 import ConsultationOutcomeSheet from '../ConsultationOutcomeSheet';
@@ -928,6 +930,12 @@ export default function MobileAppointmentDetailSheet({
           {timeWindow && (
             <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 2 }}>
               {timeWindow}{hrs ? ` (${hrs})` : ''}
+            </div>
+          )}
+          {/* GATE_DAY_ONLY_PROMISE: what the customer was told (the feed carries `told` only with the gate on). */}
+          {toldBadgeText(service.told, timeWindow) && (
+            <div style={{ marginTop: 6 }}>
+              <Badge density="comfortable" data-testid="told-badge">{toldBadgeText(service.told, timeWindow)}</Badge>
             </div>
           )}
         </section>

@@ -14,7 +14,7 @@
 const { loadPromiseLevels, resolvePromises } = require('./auto-dispatch/told-visits');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // The 24-hour reminder takes over inside this many hours. It is the same boundary the reminder sender uses:
 // appointment-reminders.js reminder72hStillReachable (`> 24.25` hours out) and the cron branches (72-hour `hoursUntil >
@@ -494,6 +494,63 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
   return out;
 }
 
+// ── The office's view (part E): what was this customer told? ──
+
+// The admin schedule shows "Told: ..." for visits this many days out (the ones a day-only promise can still hold).
+const TOLD_HORIZON_DAYS = 14;
+
+/**
+ * What the office's visit cards and edit window need: Map<id, { customerAskedTime, told }>. Rows carry at least id,
+ * scheduled date (`scheduled_date` or `scheduledDate`) and status. Gate off: an EMPTY map and NO database read, so a
+ * payload stays byte-for-byte today's. Gate on: ONE bulk read of the CURRENT intent (`customer_asked_time` judged by currentIntent) for every row,
+ * and ONE bulk loadPromiseLevels read for the open visits of the next TOLD_HORIZON_DAYS days (never per row).
+ * `told` = { level: 'none' | 'day' | 'hour', dayOnly: level === 'day' }. A failed read leaves that field out: the office
+ * sees no badge rather than a promise nobody can prove (the fail-closed answer of loadPromiseLevels would read as "hour").
+ */
+async function loadOfficeToldFields(conn, rows, now = new Date()) {
+  const out = new Map();
+  if (!dayOnlyPromiseOn()) return out;
+  const list = Array.isArray(rows) ? rows.filter((r) => r && r.id != null) : [];
+  if (!list.length) return out;
+  const entry = (id) => {
+    if (!out.has(id)) out.set(id, {});
+    return out.get(id);
+  };
+  try {
+    // The CURRENT intent (currentIntent, the one read rule), not the raw column: an intent a later slot-changing move left
+    // behind reads as not recorded (null), so the box never pre-checks a choice the customer made for an older slot. Both
+    // facts come from this ONE query (the same filter and comparison as eligibility.loadNewestSlotRows withIntent).
+    const slotRows = (extra) => `EXISTS (SELECT 1 FROM reschedule_log WHERE reschedule_log.scheduled_service_id = scheduled_services.id
+      AND new_date IS NOT NULL AND ${require('./auto-dispatch/eligibility').SLOT_CHANGED_SQL}${extra})`;
+    const stored = await conn('scheduled_services').whereIn('id', list.map((r) => r.id)).select(
+      'id', 'customer_asked_time', 'customer_asked_time_at',
+      conn.raw(`${slotRows('')} AS has_slot_change`),
+      conn.raw(`${slotRows(' AND reschedule_log.created_at > scheduled_services.customer_asked_time_at')} AS slot_after_intent`),
+    );
+    for (const r of stored) {
+      const newest = r.has_slot_change ? { after_intent: r.slot_after_intent === true } : null;
+      const intent = currentIntent(r, newest);
+      entry(r.id).customerAskedTime = intent === true ? true : intent === false ? false : null;
+    }
+  } catch { /* no pre-fill: the box starts unchecked */ }
+  try {
+    const first = etDateString(now);
+    const last = etDateString(addETDays(now, TOLD_HORIZON_DAYS));
+    const open = list.filter((r) => {
+      const day = dayOf(r.scheduled_date !== undefined ? r.scheduled_date : r.scheduledDate);
+      return day && day >= first && day <= last && ![...ENDED_STATUSES, 'rescheduled'].includes(String(r.status || ''));
+    });
+    if (open.length) {
+      const levels = await loadPromiseLevels(conn, open.map((r) => r.id), now);
+      for (const r of open) {
+        const level = levels.get(r.id);
+        if (level) entry(r.id).told = { level, dayOnly: level === 'day' };
+      }
+    }
+  } catch { /* no badge */ }
+  return out;
+}
+
 module.exports = {
   DAY_EMAIL_TEMPLATE_KEYS,
   isDayOnlyEmail,
@@ -507,6 +564,8 @@ module.exports = {
   dayOnlyEligibility,
   dayOnlySendDecision,
   loadTimeDisplay,
+  loadOfficeToldFields,
+  TOLD_HORIZON_DAYS,
   dayOnlyMoveDecision,
   dayOnlyReplayDecision,
   officeMoveIntent,

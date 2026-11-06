@@ -53,6 +53,9 @@ import { addressAskNotice } from '../../lib/addressAsks';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
 import { formatETTime } from '../../lib/timezone';
 import InPersonCardSheet from './InPersonCardSheet';
+import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
+import { askedTimeCreateFields } from './dayOnlyPromise';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -2054,6 +2057,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // has no agreed time to open on, so the person must pick one before it can be saved. Every
   // way of setting the time (the selector, a suggested slot) counts as that choice.
   const [timeChosen, setTimeChosen] = useState(!requireTimeChoice);
+  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): with the gate on the office can mark "Customer asked for this time".
+  const dayOnlyPromiseOn = useFeatureFlag('day_only_promise');
+  const [customerAskedTime, setCustomerAskedTime] = useState(false);
   const setWindowStart = (value) => { setWindowStartValue(value); setTimeChosen(true); };
   const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
   const [techId, setTechId] = useState(defaultTechId || '');
@@ -4387,6 +4393,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
               callBookingReviewedIds: callBookingOverrides.get(key),
             }),
+            // GATE_DAY_ONLY_PROMISE: the office ticked "Customer asked for this time" (a set time). Absent unless true.
+            ...askedTimeCreateFields(dayOnlyPromiseOn, customerAskedTime),
             // Staff-saved "Customer's words": rides only the first group whose
             // primary line is a pest/lawn re-service (the server stamps the
             // primary row and decides the source itself).
@@ -5772,6 +5780,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </select>
             </div>
           </div>
+          {dayOnlyPromiseOn && !newCallerBookMode && (
+            <AskedTimeBoxLegacy id="new-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={partialCommitLocked} colors={D} />
+          )}
           {duplicateConflict && (
             <section ref={duplicateConflictRef} aria-label="Existing recurring programs" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>
               <div style={{ fontWeight: 500 }}>An active program already exists</div>
