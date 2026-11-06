@@ -284,7 +284,7 @@ function moneySummary(estimate = {}, { allowTotals = false, average = null } = {
         ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
         : `$${monthlyTotal.toFixed(2)}/mo`;
     }
-    // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): `average` is the
+    // Monthly average (owner 2026-10-20): `average` is the
     // resolved {priceLine, note} for a plan whose per-application lines
     // reconcile to the stored monthly total; absent = the line as before.
     if (average?.priceLine) return average.priceLine;
@@ -325,7 +325,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
       : (priceLine || moneySummary(estimate, { allowTotals: proposalMode })),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
-    // GATE_ESTIMATE_MONTHLY_AVERAGE: the "Averaged over the year ..." line rides
+    // Monthly average: the "Averaged over the year ..." line rides
     // in front of the next-step paragraph (the template has no block for it, and
     // a template publish is not needed). Absent average = the sentence as before.
     next_step_summary: proposalMode
@@ -1109,7 +1109,7 @@ async function buildEstimateSendPreview(estimate) {
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const proposalMode = normalizeProposal(estimate).enabled;
   const priceLine = await currentEstimateEmailPriceLine(estimate);
-  // GATE_ESTIMATE_MONTHLY_AVERAGE: null with the gate off, so the email is unchanged.
+  // Null when no average applies, so the email is unchanged.
   const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
   // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
@@ -2985,8 +2985,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // (deliveryClaimFresh in admin-estimate-persistence.js), so no marker
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
-    // GATE_ESTIMATE_MONTHLY_AVERAGE: the reviewed average copy must still be what this send would carry
-    // (a gate flip or a price edit since the review or schedule). Resolved BEFORE the claim transaction because
+    // Monthly average: the reviewed average copy must still be what this send would carry
+    // (a price edit since the review or schedule). Resolved BEFORE the claim transaction because
     // it reads billing state on other connections; a mismatch refuses the whole send below, before any channel.
     const reviewedWordingStale = await reviewedUpdatedWordingStale(options.reviewedMessages, sendMethod);
     const reviewedAverageStale = sendMethod !== 'sms'
@@ -3378,11 +3378,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
-          // GATE_ESTIMATE_MONTHLY_AVERAGE: resolved from the row read just
+          // Monthly average: resolved from the row read just
           // before this send (freshEstimate), not the row the request started
           // with, so a price edit that landed during the send never ships a
           // stale average. The review preview resolves from the row it read.
-          // Null with the gate off or for a commercial proposal.
+          // Null for a commercial proposal.
           const averageService = require('../services/estimate-monthly-average');
           const average = proposalMode ? null : await averageService.emailAverageParts(freshEstimate);
           // The early check (before the claim) stops the text too; this one covers an edit that landed between

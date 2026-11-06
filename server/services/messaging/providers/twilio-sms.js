@@ -178,6 +178,11 @@ async function sendViaTwilioOnce(input, {
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
       operatorInitiated: input.operatorInitiated === true,
+      // …unless the sender marked the notice to keep the customer's channel
+      // (metadata.useCustomerChannel, e.g. a technician's On-my-way tap): with
+      // GATE_APP_FIRST_ANY_DEVICE on, push routing then decides as for an
+      // automated send. Gate off, the operator lock stands.
+      useCustomerChannel: input.metadata?.useCustomerChannel === true,
       fromNumber: internalProviderReservation?.context?.fromNumber
         || (input.metadata && input.metadata.fromNumber),
       mediaUrls: providerMediaUrls(input),

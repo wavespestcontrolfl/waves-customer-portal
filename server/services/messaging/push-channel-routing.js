@@ -258,16 +258,22 @@ async function resolvePushDestination(presentation, messageType, { customerId, a
  * Pure routing decision — unit-tested. Everything that must force SMS is
  * decided here; subscription presence and delivery proof are runtime.
  */
-function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated, adminAttributed, bundledReview }) {
+function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated, adminAttributed, bundledReview, useCustomerChannel }) {
   if (!gateOn) return 'sms_only';
   if (!customerId) return 'sms_only';
   if (hasMedia) return 'sms_only'; // push carries no MMS media
   if (humanAuthored) return 'sms_only'; // operator-typed → reply-able SMS
-  if (operatorInitiated) return 'sms_only'; // operator chose SMS explicitly
+  // A staff tap that only TRIGGERS an automated notice (a technician's "On my
+  // way") is marked by its sender with useCustomerChannel: the notice keeps the
+  // customer's channel, the rule wantsAppFirst already applies to an explicit
+  // App choice. Under GATE_APP_FIRST_ANY_DEVICE that mark lifts the operator
+  // SMS lock; gate off, operator provenance still forces SMS.
+  const customerChannel = useCustomerChannel === true && appFirstAnyDeviceLive();
+  if (operatorInitiated && !customerChannel) return 'sms_only'; // operator chose SMS explicitly
   // Admin attribution = operator provenance even when the entry point never
   // learned the operatorInitiated flag (IB send_sms, comms composer both
   // stamp adminUserId) — staff-triggered sends stay on the channel staff chose.
-  if (adminAttributed) return 'sms_only';
+  if (adminAttributed && !customerChannel) return 'sms_only';
   // A completion text that bundles the review invite keeps its tappable link:
   // a push would count the review ask as delivered without a link to tap.
   if (bundledReview) return 'sms_only';
