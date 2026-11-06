@@ -304,6 +304,7 @@ postgres('combined-booking check through the real conversion', () => {
     const trx = await pool.transaction();
     mockPg = trx;
     process.env.GATE_ALERT_RING_BUDGET = 'true';
+    process.env.GATE_AGENT_ACTIVITY = 'true'; // the budget holds only while the Activity feed can show the held row
     try {
       const { etDateString } = require('../utils/datetime-et');
       const day = etDateString(new Date());
@@ -330,6 +331,7 @@ postgres('combined-booking check through the real conversion', () => {
       expect(after.metadata.rungAt).toBeTruthy();
     } finally {
       delete process.env.GATE_ALERT_RING_BUDGET;
+      delete process.env.GATE_AGENT_ACTIVITY;
       mockPg = pool;
       await trx.rollback();
     }
