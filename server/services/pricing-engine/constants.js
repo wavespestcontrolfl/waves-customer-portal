@@ -300,7 +300,10 @@ const LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR = 2;
 
 const LAWN_COST_PLUS_LIST_DEFAULTS = {
   listMargin: 0.45,
-  minimumPerVisit: 55,
+  // Retired (owner 2026-11-06): the $55 list-side minimum is replaced by
+  // LAWN_PRICING_V2.minimumPerVisitAfterDiscount. 0 = off; cost bases stamped
+  // before the change keep their own value, so saved quotes replay as sent.
+  minimumPerVisit: 0,
   spotMinutesPerVisit: 10,
   materialPer1000SqftPerYear: { 6: 16.33, 9: 24.5, 12: 29.84 },
 };
@@ -321,6 +324,12 @@ const LAWN_PRICING_V2 = {
   // per-input useLawnCostFloor, or set this key true on the pricing_config
   // lawn_pricing_v2 row (db-bridge resets it false when absent).
   useLawnCostFloor: false,
+  // Least a residential recurring lawn customer pays per application AFTER
+  // the WaveGuard tier % and a typed percent or dollar discount (owner 2026-11-06).
+  // Every cadence's list price is raised to minimum / (1 - discount) so the
+  // full discount still shows. 0 disables. DB-editable on the
+  // lawn_pricing_v2 row; db-bridge rebases it to 55 on every sync.
+  minimumPerVisitAfterDiscount: 55,
   // Cadence frequency-discount arm switch (codex #3274 r3 P1). Default ON —
   // the in-code grid ships discounted, so the runtime caps that keep
   // interpolated lookups on the -4%/-8% ladder are part of the same

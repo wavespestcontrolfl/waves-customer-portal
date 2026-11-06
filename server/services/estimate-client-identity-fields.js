@@ -35,6 +35,9 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   // A posted copy (here or as services.lawn.costPlusList) must never beat the gate.
   'lawnCostPlusList',
   'lawnCostPlusListBasis',
+  // The lawn minimum per visit after discounts a saved quote was priced with
+  // (owner 2026-11-06): a posted 0 must never switch the $55 minimum off.
+  'lawnMinimumPerVisitAfterDiscount',
 ]);
 
 // Deletes every server-owned field from `obj` IN PLACE (plain objects only;

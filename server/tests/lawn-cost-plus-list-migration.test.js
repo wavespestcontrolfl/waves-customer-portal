@@ -5,7 +5,11 @@
  * 20260808000002 (bermuda adder knobs) makes; Postgres only runs it in CI.
  */
 const migration = require('../models/migrations/20261009150000_lawn_cost_plus_list_knobs');
-const { LAWN_COST_PLUS_LIST_DEFAULTS } = require('../services/pricing-engine/constants');
+const { LAWN_COST_PLUS_LIST_DEFAULTS: LIVE_DEFAULTS } = require('../services/pricing-engine/constants');
+
+// What this migration seeded: the 2026-10-09 defaults, $55 list minimum
+// included (retired to 0 by 20261106150000; the in-code default followed).
+const LAWN_COST_PLUS_LIST_DEFAULTS = { ...LIVE_DEFAULTS, minimumPerVisit: 55 };
 
 function fakeKnex(db) {
   const rows = (table) => (db[table] = db[table] || []);
