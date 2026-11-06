@@ -6620,10 +6620,12 @@ function CreateInvoice({
     onPendingChange(saving || aiNotesLoading || aiMessageLoading);
     return () => onPendingChange(false);
   }, [saving, aiNotesLoading, aiMessageLoading, onPendingChange]);
-  // Unsaved work = the editable fields differ from how the form looked once it
-  // finished loading. The edit prefill runs on mount, before the discount
-  // fetch can settle, so the catalog load marks the form ready. One snapshot
-  // comparison; the loads themselves never count.
+  // Unsaved work = the editable fields differ from how the form looked right
+  // after mount. Only mount effects fill those fields without the operator
+  // (the edit prefill, the create-mode line cleanup), and their updates land in
+  // the same re-render as `draftReady`, so the baseline is taken there — before
+  // anyone can type, and never waiting on a slow fetch. Later loads (discounts,
+  // properties in edit mode, searches) do not write these fields.
   const draftSnapshot = JSON.stringify([
     selectedCustomer,
     selectedService,
@@ -6642,7 +6644,8 @@ function CreateInvoice({
     queuedAttachments.map((f) => [f.name, f.size, f.lastModified]),
   ]);
   const draftBaselineRef = useRef(null);
-  const draftReady = !discountsLoading;
+  const [draftReady, setDraftReady] = useState(false);
+  useEffect(() => { setDraftReady(true); }, []);
   // The schedule-retry panel shows only after the invoice row exists, so the
   // form holds nothing left to lose there.
   const draftSaved = !!pendingScheduleInvoice;

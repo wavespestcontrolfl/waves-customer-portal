@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AdminInvoicesPage from "./AdminInvoicesPage";
@@ -27,7 +27,9 @@ const DRAFT = {
   ],
 };
 
-function stubFetch() {
+// `discountsGate`, when given, holds the discount catalog response until it
+// resolves, so a test can type into the form while that load is still out.
+function stubFetch({ discountsGate } = {}) {
   const requests = [];
   vi.stubGlobal(
     "fetch",
@@ -41,7 +43,10 @@ function stubFetch() {
       if (url.pathname === "/api/admin/invoices/payment-notices")
         body = { notices: [] };
       if (url.pathname === "/api/admin/feature-flags") body = { flags: {} };
-      if (url.pathname === "/api/admin/discounts") body = { discounts: [] };
+      if (url.pathname === "/api/admin/discounts") {
+        if (discountsGate) await discountsGate;
+        body = { discounts: [] };
+      }
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -102,6 +107,26 @@ describe("AdminInvoicesPage unsaved invoice guard", () => {
     expect(confirm).toHaveBeenCalledWith("Discard your unsaved invoice changes?");
     expect(screen.getByLabelText("Notes (optional)")).toHaveValue("Synthetic notes to keep");
     expect(screen.queryByRole("button", { name: "Create invoice", exact: true })).toBeNull();
+  });
+
+  it("protects notes typed while the discount catalog is still loading", async () => {
+    let releaseDiscounts;
+    stubFetch({ discountsGate: new Promise((resolve) => { releaseDiscounts = resolve; }) });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <MemoryRouter>
+        <AdminInvoicesPage />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Create invoice", exact: true }));
+    const notes = await screen.findByLabelText("Notes (optional)");
+    fireEvent.change(notes, { target: { value: "Synthetic notes typed early" } });
+    fireEvent.click(button("Invoice list"));
+    expect(confirm).toHaveBeenCalledWith("Discard your unsaved invoice changes?");
+    // The late catalog must not absorb the typed notes into a clean baseline.
+    await act(async () => { releaseDiscounts(); });
+    expect(fireBeforeUnload().defaultPrevented).toBe(true);
+    expect(screen.getByLabelText("Notes (optional)")).toHaveValue("Synthetic notes typed early");
   });
 
   it("shows the list when the operator accepts the discard prompt", async () => {
