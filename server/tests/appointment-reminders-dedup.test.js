@@ -497,7 +497,7 @@ describe('appointment reminder reschedule windows', () => {
       throw new Error(`Unexpected table query: ${table}`);
     });
 
-    return { reminder, updateReminder, finalReminderUpdate };
+    return { reminder, updateReminder, finalReminderLookup, finalReminderUpdate };
   }
 
   test('silent reschedule inside the 24h window leaves the day-before reminder pending', async () => {
@@ -680,6 +680,61 @@ describe('appointment reminder reschedule windows', () => {
       reminder_24h_sent_at: null,
     }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('deferNoticeToSweep (a repeat move on the public reschedule page): no text now, the confirmation is re-armed for the sweep', async () => {
+    const { updateReminder, finalReminderLookup } = mockRescheduleRecord({
+      customer: { id: 'customer-1', first_name: 'Ada', phone: '+19415551212' },
+      sendResult: { sent: true },
+    });
+
+    const out = await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+      { deferNoticeToSweep: true },
+    );
+
+    expect(out).toMatchObject({ id: 'reminder-reschedule' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // The reminders still follow the new time...
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({ appointment_time: expect.any(Date) }));
+    // ...and the confirmation is re-armed for the new time only, on a live, non-suppressed row.
+    expect(finalReminderLookup.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'reminder-reschedule', appointment_time: expect.any(Date), suppressed_by_sibling: false, cancelled: false,
+    }));
+    expect(finalReminderLookup.update).toHaveBeenCalledWith(expect.objectContaining({
+      confirmation_sent: false, confirmation_sent_at: null,
+    }));
+  });
+
+  test('deferNoticeToSweep on a sibling-suppressed row keeps the normal path (the slot owner carries the messaging)', async () => {
+    const { finalReminderLookup } = mockRescheduleRecord({
+      reminderOverrides: { suppressed_by_sibling: true },
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+      { deferNoticeToSweep: true },
+    );
+
+    expect(finalReminderLookup.update).not.toHaveBeenCalledWith(expect.objectContaining({ confirmation_sent: false }));
+  });
+
+  test('deferNoticeToSweep whose re-arm misses (0 rows) falls through to the normal send', async () => {
+    const { finalReminderLookup } = mockRescheduleRecord({
+      customer: { id: 'customer-1', first_name: 'Ada', phone: '+19415551212' },
+      sendResult: { sent: true },
+    });
+    finalReminderLookup.update.mockResolvedValueOnce(0);
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+      { deferNoticeToSweep: true },
+    );
+
+    expect(sendCustomerMessage).toHaveBeenCalled();
   });
 
   test('sent reschedule notice inside the 24h window marks both reminder windows sent', async () => {
