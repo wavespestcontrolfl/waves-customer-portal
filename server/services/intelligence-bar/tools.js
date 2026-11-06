@@ -240,7 +240,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
-Billing type and per-application fee (only when the office has turned this on; otherwise refused): updates.billing_mode (per_application, per_visit, one_time or monthly_membership) and updates.per_application_fee (dollars per visit, e.g. 147). Send them alone, with no other field; the card shows what the next visits are charged. Annual prepay and clearing the billing type are done elsewhere.
+Billing type and per-application fee (only when the office has turned this on; otherwise refused): updates.billing_mode (per_application, per_visit, one_time or monthly_membership) and updates.per_application_fee (dollars per visit, e.g. 147). Send them alone, with no other field; the card shows what the next visits are charged. Annual prepay and clearing the billing type are done elsewhere (annual prepay from a live visit: switch_visit_to_annual_prepay, when it is in your tools).
 monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. ${PRICE_NOTICE_DISCLOSURE}
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
@@ -4082,8 +4082,8 @@ async function createAppointment(input, actionContext = {}) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
-    // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-    // when off): the booked visit's technician day is numbered first in the
+    // Route check (owner 2026-10-29; a no-op when arrival-window routing is
+    // off): the booked visit's technician day is numbered first in the
     // order the arrival-window check certifies (inside this transaction; needs
     // GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check Edit's
     // save runs, on the road times the pickers already bought. Placement
@@ -4632,8 +4632,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
         });
         overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
       }
-      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
-      // when off): the moved visit's technician day is numbered first in the
+      // Route check (owner 2026-10-29; a no-op when arrival-window routing is
+      // off): the moved visit's technician day is numbered first in the
       // order the arrival-window check certifies (inside this transaction;
       // needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check
       // Edit's save runs, on the road times the pickers already bought.

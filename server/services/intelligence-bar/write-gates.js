@@ -105,6 +105,10 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
+  // switch_visit_to_annual_prepay (owner request 2026-11-05): the Schedule on-site switch's own
+  // one-transaction switch (runPrepaySwitch), in process behind a card; voids the per-application
+  // draft and mints an UNPAID prepay invoice. Sends nothing, charges nothing.
+  'switch_visit_to_annual_prepay',
   // schedule_sms (owner ruling 2026-10-28, gap 5 and B1): the Communications page's schedule-sms handler, run through the
   // shared queue writer behind a card on every login; one plain customer text at one day and time, 8 AM to 8 PM ET only.
   'schedule_sms',

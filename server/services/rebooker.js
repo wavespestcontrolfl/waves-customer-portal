@@ -1647,10 +1647,10 @@ class SmartRebooker {
       options.push(buildOption(candidate, candidate.window));
     };
 
-    // GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29): the eligible days are
+    // Route-checked day list (owner 2026-10-29): the eligible days are
     // collected and ranked by the dispatcher's route check instead of being
-    // probed one by one. Off, or the check cannot run: the loop below is the
-    // old one, call for call.
+    // probed one by one. Arrival-window routing off, or the check cannot run:
+    // the loop below probes them one by one.
     const routeRanked = require('./scheduling/route-ranked-days').routeRankedDaysLive();
     const eligible = [];
 

@@ -1,5 +1,3 @@
-process.env.GATE_PRETREAT_STICKER_REPORT = 'true';
-
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -64,9 +62,9 @@ async function withServer(fn) {
   }
 }
 
-// GATE_PRETREAT_STICKER_REPORT on: the certificate payload carries the
-// notice flag, and a final-exterior value with a banned claim or an access
-// code (a row saved before the write guard) is blanked at egress.
+// The certificate payload keeps plain final-exterior values, and a value with
+// a banned claim or an access code (a row saved before the write guard) is
+// blanked at egress.
 describe('pre-treat sticker report payload', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -98,7 +96,7 @@ describe('pre-treat sticker report payload', () => {
     findReportFollowupAppointment.mockResolvedValue(null);
   }
 
-  test('flags the certificate and keeps plain final exterior values', async () => {
+  test('keeps plain final exterior values', async () => {
     mockCertificate({
       treatment_date: '2026-06-10',
       final_exterior_product: 'Termidor SC',
@@ -108,7 +106,7 @@ describe('pre-treat sticker report payload', () => {
       const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(body.pretreatStickerReport).toBe(true);
+      expect(body).not.toHaveProperty('pretreatStickerReport');
       expect(body.findings.final_exterior_product).toBe('Termidor SC');
       expect(body.findings.final_exterior_active_ingredient).toBe('Fipronil');
     });

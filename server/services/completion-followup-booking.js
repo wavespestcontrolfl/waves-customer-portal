@@ -519,9 +519,9 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
       trx, cols, source: { sourceAction },
     });
     const inserted = await trx('scheduled_services').insert(followupInsert).returning('*');
-    // GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29): number the follow-up's
+    // Route check on saves (owner 2026-10-29): number the follow-up's
     // technician day in the dispatcher's order, inside this transaction. Silent,
-    // never fails the booking, a no-op while the gate is off.
+    // never fails the booking, a no-op while arrival-window routing is off.
     await placeAutoSavedVisit(trx, { visit: inserted[0], source: 'completion_followup' });
     return inserted;
   });

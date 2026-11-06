@@ -54,17 +54,16 @@ describe('placeCallBookingInRoute', () => {
   });
 });
 
-// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b): the
-// umbrella places a call booking through the shared auto-save helper, once.
-describe('placeCallBookingInRoute with GATE_ROUTE_CHECK_AUTO_SAVES', () => {
+// Route check on saves (owner 2026-10-29, Route Check Everywhere 2b): the
+// shared auto-save helper places a call booking through the shared auto-save helper, once.
+describe('placeCallBookingInRoute through the shared auto-save helper', () => {
   const trx = { isTransaction: true };
   const created = { id: 'svc-1', technician_id: 'tech-1', window_start: '10:00:00' };
-  const autoOn = () => { process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true'; process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
+  const autoOn = () => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
 
   beforeEach(() => placeMovedVisit.mockClear());
   afterEach(() => {
     delete process.env.GATE_CALL_BOOKING_STOP_ORDER;
-    delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES;
     delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
   });
 
@@ -89,8 +88,7 @@ describe('placeCallBookingInRoute with GATE_ROUTE_CHECK_AUTO_SAVES', () => {
     expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 
-  test('on without the arrival-window route check: nothing is placed', async () => {
-    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+  test('without the arrival-window route check: nothing is placed', async () => {
     await expect(placeCallBookingInRoute(trx, created)).resolves.toBeNull();
     expect(placeMovedVisit).not.toHaveBeenCalled();
   });

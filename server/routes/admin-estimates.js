@@ -1031,6 +1031,20 @@ function estimateSmsPhoneProblem(estimate) {
   return problem ? `${problem} Fix the phone on the contact or the estimate, then send again. Nothing was sent.` : null;
 }
 
+// The text an estimate goes out with: the moving one, which names the plan that
+// comes along, for a new-home estimate the app made for a move
+// (services/moving-auto-estimate.js) while GATE_MOVING_AUTO_SEND is on; the
+// standard one for every other estimate. The preview and the send both read it.
+function estimateSmsTemplate(estimate) {
+  const data = parseEstimateData(estimate.estimate_data) || {};
+  const stamp = data.move && data.automation && data.automation.moveAutoEstimate;
+  const planName = stamp ? String(stamp.planName || '').trim() : '';
+  if (planName && require('../config/feature-gates').movingAutoSendLive?.() === true) {
+    return { key: 'estimate_sent_move', vars: { plan_name: planName } };
+  }
+  return { key: 'estimate_sent', vars: {} };
+}
+
 // GATE_ESTIMATE_UPDATED_WORDING: true when this send re-delivers an estimate whose priced lines, address or prices
 // changed since the customer last received it (services/estimate-updated-wording.js). A grouped send judges the row
 // it is called with (no live group sends since September). Any failure reads as the normal wording.
@@ -1063,13 +1077,17 @@ async function deliveryEmailLibrary(proposalMode, updated) {
   return { library: await EmailTemplateLibrary.loadTemplateByKey(deliveryTemplateKey(proposalMode, false)), updated: false };
 }
 
-// The estimate text for a send: estimate_updated for an update while that template is on, else estimate_sent.
-// `marker` rides in a review's messages ({ smsTemplate } only for the updated text, so a normal review is unchanged):
-// the send then checks that template is still on (its off switch), as it does for estimate_sent.
-async function deliverySms(updated, vars, context = {}, opts = {}) {
+// The estimate text for a send: estimate_updated for an update while that template is on, else the estimate's own
+// text (`own` = estimateSmsTemplate: estimate_sent, or estimate_sent_move for an app-made move estimate). `key` is the
+// template that rendered `body`. `marker` rides in a review's messages ({ smsTemplate } only for the updated text, so
+// a normal review is unchanged): the send then checks that template is still on (its off switch), as it does for
+// the estimate's own text.
+async function deliverySms(updated, own, vars, context = {}, opts = {}) {
   const updatedBody = updated ? await smsTemplatesRouter.getTemplate(updatedWording.UPDATED_SMS_TEMPLATE_KEY, vars, context, opts) : null;
-  if (updatedBody) return { body: updatedBody, marker: { smsTemplate: updatedWording.UPDATED_SMS_TEMPLATE_KEY } };
-  return { body: await smsTemplatesRouter.getTemplate('estimate_sent', vars, context, opts), marker: {} };
+  if (updatedBody) {
+    return { key: updatedWording.UPDATED_SMS_TEMPLATE_KEY, body: updatedBody, marker: { smsTemplate: updatedWording.UPDATED_SMS_TEMPLATE_KEY } };
+  }
+  return { key: own.key, body: await smsTemplatesRouter.getTemplate(own.key, { ...vars, ...own.vars }, context, opts), marker: {} };
 }
 
 // GATE_ESTIMATE_UPDATED_WORDING: a review that chose the updated wording needs it still allowed at dispatch: the gate
@@ -1100,7 +1118,7 @@ async function buildEstimateSendPreview(estimate) {
   // normal template when the updated one is off or missing, and the email carries `updated` only when it used the
   // updated template, so the send loads that same template. Gate off = the same template reads as before.
   const updated = await updatedWordingFor(estimate, proposalMode);
-  const smsChoice = await deliverySms(updated, { first_name: firstName, estimate_url: viewUrl }, {}, { noVariants: true, audit: false });
+  const smsChoice = await deliverySms(updated, estimateSmsTemplate(estimate), { first_name: firstName, estimate_url: viewUrl }, {}, { noVariants: true, audit: false });
   let email = null;
   const delivery = await deliveryEmailLibrary(proposalMode, updated);
   const library = delivery.library;
@@ -3209,19 +3227,22 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         try {
           const smsContext = { workflow: 'admin_estimate_send', entity_type: 'estimate', entity_id: estimate.id };
           const smsVars = { first_name: firstName, estimate_url: smsViewUrl };
-          // The template this text uses must be on. A reviewed send delivers the reviewed body: a normal-wording review
-          // needs estimate_sent on; an updated one had estimate_updated checked before the claim. An unreviewed update
-          // takes estimate_updated while it is on, else estimate_sent (GATE_ESTIMATE_UPDATED_WORDING).
+          // The estimate's own text: estimate_sent, or estimate_sent_move for an app-made move estimate (GATE_MOVING_AUTO_SEND).
+          const smsTemplate = estimateSmsTemplate(estimate);
+          // The template this text uses must be on. A reviewed send delivers the reviewed body: a review of the
+          // estimate's own text needs that template on; an updated one had estimate_updated checked before the claim.
+          // An unreviewed update takes estimate_updated while it is on, else the estimate's own text
+          // (GATE_ESTIMATE_UPDATED_WORDING).
           const reviewedUpdatedText = options.reviewedMessages?.smsTemplate === updatedWording.UPDATED_SMS_TEMPLATE_KEY;
-          const unreviewedSms = options.reviewedMessages ? null : await deliverySms(updatedSend, smsVars, smsContext);
+          const unreviewedSms = options.reviewedMessages ? null : await deliverySms(updatedSend, smsTemplate, smsVars, smsContext, { noVariants: false });
           const currentSmsBody = reviewedUpdatedText ? null : (options.reviewedMessages
-            ? await smsTemplatesRouter.getTemplate('estimate_sent', smsVars, smsContext, { noVariants: true })
+            ? await smsTemplatesRouter.getTemplate(smsTemplate.key, { ...smsVars, ...smsTemplate.vars }, smsContext, { noVariants: true })
             : unreviewedSms.body);
-          if (!reviewedUpdatedText && !currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
           // The template that rendered this body: the provider's per-template kill switch (services/twilio.js
-          // isTemplateActive) reads it as the messageType, so an updated text is held to estimate_updated's switch.
-          const smsTemplateKey = (reviewedUpdatedText || unreviewedSms?.marker.smsTemplate)
-            ? updatedWording.UPDATED_SMS_TEMPLATE_KEY : 'estimate_sent';
+          // isTemplateActive) reads it as the messageType, so each text is held to its own template's switch
+          // (estimate_updated, estimate_sent_move or estimate_sent), never to another template's.
+          const smsTemplateKey = reviewedUpdatedText ? updatedWording.UPDATED_SMS_TEMPLATE_KEY : (unreviewedSms?.key || smsTemplate.key);
+          if (!reviewedUpdatedText && !currentSmsBody) throw new Error(`SMS template ${smsTemplateKey} is missing or inactive`);
           const smsBody = options.reviewedMessages
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
@@ -3250,12 +3271,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               capturedAt: estimate.created_at || new Date().toISOString(),
             },
             entryPoint: 'admin_estimate_send',
+            // The app's own send of a new-home estimate (services/moving-auto-send.js)
+            // is automation, not an office click: its entry point keeps the text
+            // inside 8 AM to 8 PM ET (validators/send-window.js).
+            ...(options.movingAutoSend === true ? { entryPoint: 'moving_auto_send' } : {}),
             metadata: {
               original_message_type: smsTemplateKey,
             },
           });
           if (!result.sent) {
-            channels.sms = { ok: false, uncertain: result.code === 'PROVIDER_FAILURE' && result.terminal !== true, error: result.reason || result.code || 'SMS send blocked/failed' };
+            // The code tells the auto-send a text held for the morning from one refused.
+            channels.sms = { ok: false, uncertain: result.code === 'PROVIDER_FAILURE' && result.terminal !== true, ...(result.code ? { code: result.code } : {}), error: result.reason || result.code || 'SMS send blocked/failed' };
             logger.error(`Estimate SMS failed: ${result.reason || result.code || 'unknown'}`);
           } else {
             // Suppression is not a provider handoff and never publishes an

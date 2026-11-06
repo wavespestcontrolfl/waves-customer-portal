@@ -129,6 +129,10 @@ function parseBillingEdit(updates) {
   const fields = {};
   if ('billing_mode' in updates) {
     const mode = updates.billing_mode == null ? '' : String(updates.billing_mode);
+    if (mode === 'annual_prepay' && require('../../config/feature-gates').ibPrepaySwitchLive()) {
+      // The bar's own annual-prepay switch (GATE_IB_PREPAY_SWITCH): point the model at it instead of a dead end.
+      return refuse('Annual prepay is set by a paid annual prepay invoice, not by the billing type. To move this customer from per application to annual prepay, call switch_visit_to_annual_prepay with their live visit (appointment_id). Nothing was proposed.', 'annual_prepay_lane');
+    }
     if (MODE_REFUSALS[mode]) return refuse(...MODE_REFUSALS[mode]);
     if (!LANE_WORDS[mode]) return refuse(BillingModeRules.INVALID_BILLING_MODE, 'invalid_billing_mode');
     fields.billing_mode = mode;

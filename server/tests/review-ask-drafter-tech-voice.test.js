@@ -81,7 +81,6 @@ beforeEach(() => {
   mockRepeatCheck.mockReset().mockResolvedValue({ ok: true, json: { repeats: false, sentence: '', earlier_quote: '' } });
   mockGetRecentCalls.mockReset().mockResolvedValue([]);
   mockGates.reviewAskTechVoice = true;
-  mockGates.reviewAskFixedDay0 = false;
   Object.keys(mockTables).forEach((k) => delete mockTables[k]);
   mockTables.service_records = [{ structured_notes: JSON.stringify(REPORT) }];
   mockTables.sms_log = SMS;
@@ -95,7 +94,8 @@ const INPUT = {
   recipientFirstName: 'Marta',
   serviceType: 'Cockroach Treatment Service',
   techName: 'Adam Benetti',
-  sequenceStep: 0,
+  // A follow-up touch: the same-day and day-after texts are the fixed line, never the writer.
+  sequenceStep: 1,
   serviceDate: new Date(),
   serviceRecordId: 'rec-1',
   sequenceId: 'seq-1',
@@ -183,7 +183,7 @@ describe('draftTechVoice', () => {
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     expect(await Drafter.draftTechVoice(INPUT)).toBe(GOOD.body);
     const [args, drafted] = mockRecordDraft.mock.calls[0];
-    expect(args).toMatchObject({ sequenceId: 'seq-1', sequenceStep: 0, channel: 'sms' });
+    expect(args).toMatchObject({ sequenceId: 'seq-1', sequenceStep: 1, channel: 'sms' });
     expect(drafted).toMatchObject({ outcome: 'drafted', body: GOOD.body });
     expect(drafted.sentences.find((x) => /sink/.test(x.sentence)).quotes).toEqual(['Moisture under the kitchen sink']);
     expect(drafted.sentences.find((x) => /Google review/.test(x.sentence))).toMatchObject({ ask_only: true });
@@ -272,21 +272,21 @@ describe('draftTechVoice', () => {
 
 // Owner 2026-10-22 ("fixed line for all"): the writer recited the activity
 // gauge ("a moderate level of cockroach activity") and booking talk.
-describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', () => {
-  beforeEach(() => { mockGates.reviewAskFixedDay0 = true; });
+describe('the same-day text is one fixed line', () => {
+  const DAY0 = { ...INPUT, sequenceStep: 0 };
   const yesterday = () => new Date(Date.now() - 36 * 3600 * 1000);
 
   test('day 0: the fixed line, no model call, recorded as drafted', async () => {
-    const body = await Drafter.draftTechVoice(INPUT);
+    const body = await Drafter.draftTechVoice(DAY0);
     expect(body).toBe("Hi Marta, it's Adam from Waves. Thanks for having us out today. A Google review would really help: {review_url}");
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockRecordDraft.mock.calls[0][1]).toEqual({ outcome: 'drafted', body, sentences: [], reason: 'fixed_day0' });
   });
 
   test('the day after drops "today"; no first name or tech reads plainly', async () => {
-    expect(await Drafter.draftTechVoice({ ...INPUT, serviceDate: yesterday() }))
+    expect(await Drafter.draftTechVoice({ ...DAY0, serviceDate: yesterday() }))
       .toBe("Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}");
-    expect(await Drafter.draftTechVoice({ ...INPUT, customer: { ...INPUT.customer, first_name: 'Sunset Vacation Rentals' }, recipientFirstName: 'Sunset', techName: null }))
+    expect(await Drafter.draftTechVoice({ ...DAY0, customer: { ...INPUT.customer, first_name: 'Sunset Vacation Rentals' }, recipientFirstName: 'Sunset', techName: null }))
       .toBe("Hi, it's Waves. Thanks for having us out today. A Google review would really help: {review_url}");
   });
 
@@ -294,7 +294,7 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
   // had no arrival stamp (review-visit-day.js); a day string reads as that ET day.
   test('a visit worked on an earlier day, given as its scheduled day string, drops "today"', async () => {
     const { etCalendarDayOf } = require('../utils/datetime-et');
-    expect(await Drafter.draftTechVoice({ ...INPUT, serviceDate: etCalendarDayOf(new Date(Date.now() - 3 * 86400000)) }))
+    expect(await Drafter.draftTechVoice({ ...DAY0, serviceDate: etCalendarDayOf(new Date(Date.now() - 3 * 86400000)) }))
       .toBe("Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}");
   });
 
@@ -302,24 +302,6 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
     mockDispatch.mockResolvedValue(reply(GOOD));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBe(GOOD.body);
     expect(mockDispatch).toHaveBeenCalled();
-  });
-
-  test('isFixedDay0Line knows every fixed wording and no writer draft', () => {
-    for (const b of [
-      "Hi Marta, it's Adam from Waves. Thanks for having us out today. A Google review would really help: {review_url}",
-      "Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}",
-      "Hi, it's Waves. Thanks for having us out today. A Google review would really help: {review_url}",
-      // The wording before 2026-11-04 (owner: texts say "Waves"), still on stored bodies.
-      "Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}",
-    ]) expect(Drafter.isFixedDay0Line(b)).toBe(true);
-    // Every output of the fixed line is recognized, odd names included.
-    for (const [firstName, techName] of [['Marta', 'A.J. Smith'], ['Mary, Jo', 'Adam'], ['', null], ['María', 'Andrés Núñez']]) {
-      for (const stepKind of ['day0', 'day_after']) {
-        expect(Drafter.isFixedDay0Line(Drafter.__private.fixedDay0Line({ firstName, techName, stepKind }))).toBe(true);
-      }
-    }
-    expect(Drafter.isFixedDay0Line(GOOD.body)).toBe(false);
-    expect(Drafter.isFixedDay0Line(null)).toBe(false);
   });
 
   test('names outside the GSM table are folded so the line stays GSM-7 (two segments at most)', () => {
@@ -334,17 +316,9 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
     const long = 'A'.repeat(180);
     const body = Drafter.__private.fixedDay0Line({ firstName: long, techName: long, stepKind: 'day0' });
     expect(body).toBe("Hi, it's Waves. Thanks for having us out today. A Google review would really help: {review_url}");
-    expect(Drafter.isFixedDay0Line(body)).toBe(true);
     const atCap = Drafter.__private.fixedDay0Line({ firstName: 'B'.repeat(20), techName: 'C'.repeat(20), stepKind: 'day0' });
     expect(atCap.startsWith(`Hi ${'B'.repeat(20)}, it's ${'C'.repeat(20)} from Waves.`)).toBe(true);
     expect(countSegments(atCap.replace('{review_url}', 'portal.wavespestcontrol.com/l/abcdefghij')).segmentCount).toBeLessThanOrEqual(2);
-  });
-
-  test('gate off: day 0 still goes to the writer', async () => {
-    mockGates.reviewAskFixedDay0 = false;
-    mockDispatch.mockResolvedValueOnce(reply(GOOD));
-    await Drafter.draftTechVoice(INPUT);
-    expect(mockDispatch).toHaveBeenCalled();
   });
 });
 
@@ -557,7 +531,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
 
   test('replay 10-03: the writer is told which places a detail may come from, and a refused draft is told the rule it broke', () => {
     const { buildTechVoiceSystemPrompt, redraftNote, buildTechVoiceFacts } = Drafter.__private;
-    const system = buildTechVoiceSystemPrompt('day0', 0);
+    const system = buildTechVoiceSystemPrompt('followup', 7);
     expect(system).toContain('SOURCES (mandatory)');
     expect(system).toContain('texts marked [customer]');
     expect(system).toContain('lines that start with "Caller:" in a call transcript marked inbound');

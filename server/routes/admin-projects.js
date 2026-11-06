@@ -87,7 +87,7 @@ const InvoiceService = require('../services/invoice');
 const { acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES } = require('../services/scheduled-invoice-mint');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { isEnabled, wdoMarkSentOutsideLive } = require('../config/feature-gates');
+const { wdoMarkSentOutsideLive } = require('../config/feature-gates');
 const { recordAuditEvent } = require('../services/audit-log');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
 
@@ -121,7 +121,7 @@ const PHOTO_PREFIX = 'project-photos/';
 const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
 
 // The pre-treat certificate's final-exterior fields are free text that the
-// customer notice prints (GATE_PRETREAT_STICKER_REPORT). The shared copy
+// customer notice prints. The shared copy
 // screen runs here at write time: a claim ("pet-safe", "EPA-approved") or an
 // access code is refused, not stored. reports-public blanks the same keys at
 // egress, and the detail payload names them for the staff preview.
@@ -142,17 +142,13 @@ function pastCertificateDateProblem(value, initialDate) {
   return Boolean(initial) && raw < initial;
 }
 
-// Staff-preview fields on the project detail (preview == public): whether
-// the certificate renders as the notice (GATE_PRETREAT_STICKER_REPORT), and
-// which stored final-exterior keys the public page blanks.
+// Staff-preview field on the project detail (preview == public): which
+// stored final-exterior keys the public page blanks.
 function pretreatStickerPreviewFields(project) {
   if (project?.project_type !== 'pre_treatment_termite_certificate') {
-    return { pretreat_sticker_report: false, final_exterior_screened_keys: [] };
+    return { final_exterior_screened_keys: [] };
   }
-  return {
-    pretreat_sticker_report: isEnabled('pretreatStickerReport'),
-    final_exterior_screened_keys: failingFinalExteriorKeys(project.findings),
-  };
+  return { final_exterior_screened_keys: failingFinalExteriorKeys(project.findings) };
 }
 
 // Update-path check on what the save leaves stored: runs only when the

@@ -1,16 +1,16 @@
 /**
- * GATE_ROUTE_CHECK_ACCEPT_SAVES (owner 2026-10-29, Route Check Everywhere
+ * Route check on estimate accepts (owner 2026-10-29, Route Check Everywhere
  * follow-up item 1), the converter's same-trip standalone parent.
  *
  * Source-pattern guard (house style, as recurring-duplicate-series-guard.test.js):
  * the converter's standalone block needs a full Postgres accept to drive end to
  * end (the DATABASE_URL suites accepted-recurring-schedule-postgres and
- * combined-visit-conversion-postgres run it in CI with the gate off). Pinned
+ * combined-visit-conversion-postgres run it in CI with arrival-window routing off). Pinned
  * here: the placement sits inside runSeedingStep's transaction (`trx`, always
  * a transaction: the seeding step's own, or the accept's), right after the
  * parent insert, only for a same-trip parent (the one that copied the reserved
  * start's technician and window), and before the seeding that follows.
- * The behavior of the call itself (gate off = nothing, gate on = one placement
+ * The behavior of the call itself (arrival-window routing off = nothing, on = one placement
  * with source estimate_accept, a throw never fails the accept) is pinned in
  * staff-save-route-check.test.js.
  */
@@ -42,7 +42,7 @@ describe('estimate-converter: same-trip standalone parent is numbered in the acc
     expect(step).toContain(': fn(database)');
   });
 
-  test('the converter never calls placeMovedVisit itself: one shared placement function, one gate', () => {
+  test('the converter never calls placeMovedVisit itself: one shared placement function', () => {
     expect(src).not.toMatch(/placeMovedVisit\(/);
     expect(src.match(/placeAcceptedVisit\(/g)).toHaveLength(1);
   });

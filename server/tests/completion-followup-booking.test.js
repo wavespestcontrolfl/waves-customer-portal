@@ -35,9 +35,9 @@ jest.mock('../services/booking/create-scheduled-service', () => ({
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn() }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn() }));
-// GATE_ROUTE_CHECK_AUTO_SAVES reader stands in for arrival-route's (read at call time).
+// The arrival-window routing reader stands in for arrival-route's (read at call time).
 jest.mock('../services/scheduling/arrival-route', () => ({
-  routeCheckAutoSavesLive: () => process.env.GATE_ROUTE_CHECK_AUTO_SAVES === 'true',
+  arrivalWindowRoutingEnabled: () => process.env.GATE_ADMIN_ARRIVAL_WINDOWS === 'true',
   placeMovedVisit: jest.fn(async () => [1]),
 }));
 
@@ -321,13 +321,13 @@ test('an inherited off-hour window (legacy :15 start) refuses before preview or 
   expect(writes).toEqual([]);
 });
 
-// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b): the
+// Route check on saves (owner 2026-10-29, Route Check Everywhere 2b): the
 // follow-up is numbered in its technician's day, inside the write transaction.
-describe('GATE_ROUTE_CHECK_AUTO_SAVES', () => {
+describe('route check on saves', () => {
   const book = () => bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, isAdmin: true, actorId: 'admin-1', sourceAction: 'admin_ib' });
-  afterEach(() => { delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES; });
+  afterEach(() => { delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS; });
 
-  test('gate off (unset): no placement, same booking', async () => {
+  test('arrival-window routing off (unset): no placement, same booking', async () => {
     const { writes } = install();
     const out = await book();
     expect(out.status).toBe(200);
@@ -335,8 +335,8 @@ describe('GATE_ROUTE_CHECK_AUTO_SAVES', () => {
     expect(writes).toHaveLength(1);
   });
 
-  test('gate on: placed once, on the write transaction after the insert, with its source and cache-only roads', async () => {
-    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+  test('placed once, on the write transaction after the insert, with its source and cache-only roads', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const { writes } = install();
     const order = [];
     const transaction = db.transaction;
@@ -354,8 +354,8 @@ describe('GATE_ROUTE_CHECK_AUTO_SAVES', () => {
     expect(order).toEqual(['place:1', 'commit']);
   });
 
-  test('gate on, a throwing placement: the booking still succeeds, one warning line', async () => {
-    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
+  test('a throwing placement: the booking still succeeds, one warning line', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     install();
     placeMovedVisit.mockRejectedValueOnce(new Error('route boom'));
     const out = await book();

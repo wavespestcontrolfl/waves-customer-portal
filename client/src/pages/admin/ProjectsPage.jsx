@@ -906,13 +906,6 @@ function ProjectPreviewPhotoTile({ photo, projectId }) {
   );
 }
 
-// GATE_PRETREAT_STICKER_REPORT (detail endpoint's pretreat_sticker_report):
-// the certificate previews as the same notice + details block the public
-// page renders, so staff approve what the customer gets.
-function isStickerCertificate(project) {
-  return project.project_type === CERTIFICATE_TYPE && Boolean(project.pretreat_sticker_report);
-}
-
 // The public page blanks a stored final-exterior value the copy screen
 // fails (detail payload's final_exterior_screened_keys); the preview blanks
 // the same keys while the editor still holds that stored value. A new value
@@ -943,7 +936,6 @@ function StickerCertificatePreview({ project, findings: rawFindings, projectDate
         customerName={project.customer_name}
         technicianName={technicianName}
         projectDateLabel={projectDateLabel}
-        detailsOnly
       />
     </div>
   );
@@ -1020,9 +1012,9 @@ function CustomerProjectReportPreview({
     : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
-  // GATE_PRETREAT_STICKER_REPORT: the certificate renders as the notice +
-  // details block below, exactly like the public page, so the raw list hides.
-  const stickerCertificate = isStickerCertificate(project);
+  // The certificate previews as the same notice + details block the public
+  // page renders (so staff approve what the customer gets); the raw list hides.
+  const stickerCertificate = project.project_type === CERTIFICATE_TYPE;
   const findingsEntries = (suppressFindingsForNarrative || stickerCertificate) ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
