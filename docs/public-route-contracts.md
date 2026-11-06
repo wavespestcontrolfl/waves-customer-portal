@@ -8562,8 +8562,14 @@ digest over the row version AND the computed totals/tier, re-derived from
 the commit's own recompute — and is refused when the row, the pricing
 config, or the membership verdict moved since the preview, so the terms
 the customer confirmed are the terms that persist — restores get the same
-preview-and-confirm step, never a one-tap reprice. Confirm-panel copy is per-application only:
-no combined plan totals ("$X/mo"/"$X/yr") per the standing price-copy rule;
+preview-and-confirm step, never a one-tap reprice. Confirm-panel copy is per-application,
+with one addition (owner 2026-11-06, new-customer walk E8): for a line that joins the plan
+(an add or a restore) the sentence goes on with the year's application count and that
+service's own "$Y a month" average plus the shared context line, from the shared
+monthly-average builder the service cards use, reconciled against the plan's monthly
+total after the change; when the average does not reconcile or the count is unknown,
+the sentence ends after the per-application price as before. No combined plan totals
+("$X/mo"/"$X/yr") per the standing price-copy rule;
 the first-visit line is the invoice-preview exempt class. The write carries the same six-predicate rails +
 ms-truncated CAS as the bond/interior writes, refreshes BOTH stored result
 carriers (`result` and raw `engineResult`) from the same recompute, and
