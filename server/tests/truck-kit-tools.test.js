@@ -18,7 +18,6 @@ jest.mock('../services/truck-kit', () => {
   class TruckCheckError extends Error { constructor(code, message) { super(message); this.code = code; } }
   return {
     TruckCheckError,
-    truckKitEnabled: jest.fn(() => true),
     trucksOverview: jest.fn(async () => [{ id: 'v1', name: 'Truck 1', items: 2 }]),
     truckKitStatus: jest.fn(async () => ({
       truck: { id: 'v1', name: 'Truck 1', asset_tag: 'VEH-1' }, due: true, intervalDays: 7,
@@ -32,16 +31,10 @@ jest.mock('../services/truck-kit', () => {
 const truckKit = require('../services/truck-kit');
 const { TRUCK_KIT_TOOLS, executeTruckKitTool } = require('../services/intelligence-bar/truck-kit-tools');
 
-beforeEach(() => { jest.clearAllMocks(); truckKit.truckKitEnabled.mockReturnValue(true); techs.rows = []; });
+beforeEach(() => { jest.clearAllMocks(); techs.rows = []; });
 
-test('two read tools, no write, both refused with the gate off', async () => {
+test('two read tools, no write', async () => {
   expect(TRUCK_KIT_TOOLS.map((t) => t.name)).toEqual(['get_truck_kit', 'get_tool_issues']);
-  truckKit.truckKitEnabled.mockReturnValue(false);
-  for (const name of ['get_truck_kit', 'get_tool_issues']) {
-    expect(await executeTruckKitTool(name, {})).toEqual({ error: expect.stringMatching(/GATE_TRUCK_KIT/), code: 'integration_disabled' });
-  }
-  expect(truckKit.trucksOverview).not.toHaveBeenCalled();
-  truckKit.truckKitEnabled.mockReturnValue(true);
   expect(await executeTruckKitTool('set_truck_kit', {})).toEqual({ error: 'Unknown truck kit read' });
 });
 

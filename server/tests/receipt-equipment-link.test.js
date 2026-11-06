@@ -1,11 +1,9 @@
 /**
  * purchase-receipts/receipt-equipment-link.js — the equipment bell's body
  * and link (one matching open tool alert → that row; otherwise a new-row
- * dialog with the name filled in; gate off → null so the agent keeps its
- * plain bell) and the receipt line claim the Assets save runs under lock.
+ * dialog with the name filled in) and the receipt line claim the Assets save runs under lock.
  */
 jest.mock('../services/truck-kit', () => ({
-  truckKitEnabled: jest.fn(() => true),
   matchReceiptToOpenAlert: jest.fn(async () => null),
 }));
 const truckKit = require('../services/truck-kit');
@@ -14,15 +12,9 @@ const link = require('../services/purchase-receipts/receipt-equipment-link');
 const LINE = '44444444-2222-4333-8444-555555555555';
 const TOOL = '33333333-2222-4333-8444-555555555555';
 
-beforeEach(() => { jest.clearAllMocks(); truckKit.truckKitEnabled.mockReturnValue(true); truckKit.matchReceiptToOpenAlert.mockResolvedValue(null); });
+beforeEach(() => { jest.clearAllMocks(); truckKit.matchReceiptToOpenAlert.mockResolvedValue(null); });
 
 describe('equipmentBellFor', () => {
-  test('gate off: null (the agent keeps its plain bell)', async () => {
-    truckKit.truckKitEnabled.mockReturnValue(false);
-    expect(await link.equipmentBellFor({}, { lineId: LINE, line: { raw_title: 'Moisture Meter' } })).toBeNull();
-    expect(truckKit.matchReceiptToOpenAlert).not.toHaveBeenCalled();
-  });
-
   test('a matching open alert: names the tool and links to its row with the line id', async () => {
     truckKit.matchReceiptToOpenAlert.mockResolvedValue({ equipment_id: TOOL, name: 'Moisture meter', alert_type: 'tool_missing', vehicle_name: 'Truck 2' });
     const bell = await link.equipmentBellFor({}, { lineId: LINE, line: { raw_title: 'Extech MO55 Moisture Meter' } });

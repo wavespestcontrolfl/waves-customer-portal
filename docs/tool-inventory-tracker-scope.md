@@ -1,5 +1,9 @@
 # Tool inventory tracker (truck kit): scope
 
+> **Update 2026-11-06:** `GATE_TRUCK_KIT` is removed. The truck check, kit keys
+> and receipt link below have been live since 2026-10-23; the text that says
+> "dark" or "behind the gate" is the original plan.
+
 > **Status 2026-10-23:** owner approved the recommendation ("do whatever you
 > recommend"). PR 0, PR 1 and PR 2 below are BUILT on branch
 > `claude/tool-inventory-tracker-scope-oh0xoa` (one commit per slice, plus a

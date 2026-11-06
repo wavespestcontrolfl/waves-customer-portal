@@ -132,8 +132,8 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // review_low_rating: a new 1-4 star Google review (services/review-low-rating-alert.js,
 // owner CW-D4 2026-10-02). The dark GATE_REVIEW_ALERT is the switch; same treatment.
 // truck_kit: one bell per truck when a technician's truck check finds a tool
-// missing or damaged (services/truck-kit.js). The dark GATE_TRUCK_KIT is the
-// switch; once on, the item must reach the office, who can still silence it.
+// missing or damaged (services/truck-kit.js). The item must reach the
+// office, who can still silence it.
 // payroll: a Mercury paycheck that failed, was rejected, was returned or is stuck (services/payroll-mercury-alerts.js,
 // owner plan A 2026-10-30). The dark GATE_PAYROLL_MERCURY_STATUS is the switch; once on, the item must reach the owner,
 // who can still silence the category here.

@@ -339,9 +339,8 @@ function EquipmentTab({
   const [technicians, setTechnicians] = useState([]);
   // Kit key suggestions: the keyed checklist items and the keys already in use
   // (admin only, with the dialog). A failed read leaves plain typing.
-  // Kit keys exist only while GATE_TRUCK_KIT is on: the server says so on
-  // the vocabulary read (404 { enabled: false } when off), and the field
-  // stays away until it does (fail closed).
+  // The Kit key field shows once the vocabulary read answers; a failed read
+  // leaves the field away (fail closed).
   const [kitKeys, setKitKeys] = useState({ enabled: false, keys: [] });
   // "" = every row, a vehicle id = that truck's roster, "none" = on no truck.
   const [vehicleFilter, setVehicleFilter] = useState("");
@@ -383,7 +382,7 @@ function EquipmentTab({
     };
   }, [canEdit]);
   useEffect(() => setActionError(""), [editing?.id, !!editing]);
-  // Receipt link (inventory agent bell, GATE_TRUCK_KIT): ?receipt_line=<id>
+  // Receipt link (inventory agent bell): ?receipt_line=<id>
   // with new=1&name=… opens a new-row dialog with the name filled in, or
   // with edit=<row id> opens that row; the save carries receipt_line_id so
   // the purchase is filed under the row. Opened once per link, admin only.
@@ -424,7 +423,7 @@ function EquipmentTab({
           if (payload[k] === "" || payload[k] == null) payload[k] = null;
         });
         if (!payload.purchase_date) payload.purchase_date = null;
-        // No Kit key field without the gate: never send the column back.
+        // No Kit key field without the vocabulary read: never send the column back.
         if (!kitKeys.enabled) delete payload.kit_key;
         if (!payload.receipt_line_id) delete payload.receipt_line_id;
         if (editing.id) {

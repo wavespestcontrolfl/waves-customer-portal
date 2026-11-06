@@ -16,11 +16,11 @@ beforeEach(() => {
 });
 afterEach(() => { answers.length = 0; vi.unstubAllGlobals(); localStorage.clear(); });
 
-it('an actionable error keeps the entry reachable: enabled stays true with the message', async () => {
+it('an actionable error keeps the entry reachable: the data stays set with the message', async () => {
   const { result } = renderHook(() => useTruckKit());
   await act(async () => { answers[0].resolve({ error: 'More than one truck is assigned to you. Ask the office to fix the assignment.', code: 'ambiguous_truck' }, 409); });
   await waitFor(() => expect(result.current.loading).toBe(false));
-  expect(result.current.data).toEqual(expect.objectContaining({ enabled: true, errorCode: 'ambiguous_truck', kit: [] }));
+  expect(result.current.data).toEqual(expect.objectContaining({ errorCode: 'ambiguous_truck', kit: [] }));
   expect(result.current.error).toMatch(/More than one truck/);
 });
 

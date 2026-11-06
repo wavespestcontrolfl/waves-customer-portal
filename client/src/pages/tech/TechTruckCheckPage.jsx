@@ -1,4 +1,4 @@
-// The truck check (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md PR 1):
+// The truck check (docs/tool-inventory-tracker-scope.md PR 1):
 // every item on the signed-in technician's truck, each Here by default (or
 // Missing / Damaged when a previous check already reported it), one tap per
 // problem, one save. Under a minute when nothing is wrong: "Everything's here".
@@ -99,7 +99,6 @@ export default function TechTruckCheckPage() {
       <div role="alert" className="tf-alert tf-error">{error}<div><button type="button" className="tf-button" onClick={() => reload()}><RefreshCw aria-hidden="true" />Retry</button></div></div>
     </div>
   );
-  if (!data?.enabled) return <div className="tf-page">{heading}<div className="tf-card tf-card-main"><p>Truck checks are not turned on yet.</p></div></div>;
   if (!data.truck) return (
     <div className="tf-page">{heading}
       <div className="tf-card tf-card-main"><h2>No truck assigned to you</h2><p className="tf-muted">Ask the office to put you on a truck under Equipment, then come back here.</p></div>
