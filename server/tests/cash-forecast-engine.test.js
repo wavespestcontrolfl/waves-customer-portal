@@ -5,8 +5,12 @@
 const { computeForecast, _private } = require('../services/cash-forecast/engine');
 
 const {
-  buildWeeks, weekOf, collectionCurve, spread, lander, seasonRatios, classifySpend, occurrences, hireCosts, addBusinessDays,
+  buildWeeks, weekOf, collectionCurve, spread, lander, seasonRatios, occurrences, hireCosts, addBusinessDays,
+  classifyLines, spendTotals, findRepeating, merchantKey, monthlyAfter,
 } = _private;
+
+// Debit totals per money-out line over the trailing window, the way the engine's context reads them.
+const classifySpend = (lines, opts) => spendTotals(classifyLines(lines, opts), opts);
 
 const TODAY = '2026-11-05';
 
@@ -178,6 +182,133 @@ describe('bank lines -> money out', () => {
       line({ account: 'checking-a', amount: 7, direction: 'credit', description: 'ZELLE FROM SOMEONE' }),
     ], opts);
     expect(totals).toEqual({ products_fuel: 180, ai_software: 210, card_payments_off_feed: 0, other_spending: 0 });
+  });
+});
+
+// Step 2c (decision 2 A): a bill the feed shows about once a month, 3 times or more at a steady amount,
+// counts on its own day instead of inside the trailing average. Synthetic merchants and amounts only.
+describe('repeating bills', () => {
+  const pool = ['checking-a', 'checking-b'];
+  const feedCards = ['card-f'];
+  const WINDOW_END = '2027-01-31';
+  let id = 0;
+  const debit = (day, amount, description, over = {}) => {
+    id += 1;
+    return { id: `r${id}`, day, account: 'checking-a', direction: 'debit', amount, description, category: null, modeled: false, ...over };
+  };
+  const bills = (lines, marks) => findRepeating(classifyLines(lines, { pool, feedCards }), { today: TODAY, windowEnd: WINDOW_END, marks });
+
+  test('the merchant key: the first two words without digits, punctuation, scraps or payment words', () => {
+    expect(merchantKey('Cloud Docs_team')).toBe('CLOUD DOCS');
+    expect(merchantKey('CLOUD DOCS TEAM 4471')).toBe('CLOUD DOCS');
+    expect(merchantKey('ACH DEBIT ACME LOAN PAYMT 0091 WEB ID 77')).toBe('ACME LOAN');
+    expect(merchantKey('SQ* B 2210')).toBe('SQ');
+    expect(merchantKey('#4410 *')).toBe('');
+  });
+
+  test('a monthly bill counts on the same day each month at its usual amount (median of the last 3)', () => {
+    const [bill, ...rest] = bills([
+      debit('2026-08-07', 360, 'ACME LOAN 1'), debit('2026-09-08', 366, 'ACME LOAN 2'), debit('2026-10-07', 366.5, 'ACME LOAN 3'),
+    ]);
+    expect(rest).toHaveLength(0);
+    expect(bill).toMatchObject({
+      key: 'ACME LOAN', label: 'ACME LOAN 3', line: 'other_spending', amount_usd: 366, day_of_month: 7,
+      last_day: '2026-10-07', count: 3, days: ['2026-11-07', '2026-12-07', '2027-01-07'], mark: null,
+    });
+  });
+
+  test('a bill on the 31st lands on the last day of a shorter month', () => {
+    expect(monthlyAfter('2026-10-31', WINDOW_END)).toEqual(['2026-11-30', '2026-12-31', '2027-01-31']);
+  });
+
+  test('usage charges days apart and weekly fuel at one price are never bills; two debits are not enough', () => {
+    const usage = [];
+    for (const d of ['2026-08-03', '2026-08-04', '2026-08-09', '2026-09-02', '2026-09-03', '2026-09-08', '2026-10-02', '2026-10-05', '2026-10-06']) usage.push(debit(d, 10, 'MODEL API'));
+    const fuel = ['2026-09-07', '2026-09-14', '2026-09-21', '2026-09-28', '2026-10-05', '2026-10-12', '2026-10-19', '2026-10-26']
+      .map((d) => debit(d, 40, 'CORNER FUEL 12'));
+    expect(bills([...usage, ...fuel, debit('2026-09-15', 25, 'NEW APP'), debit('2026-10-15', 25, 'NEW APP')])).toEqual([]);
+  });
+
+  test('two plans from one merchant stay two bills; a bill that grows a little stays one', () => {
+    const found = bills([
+      debit('2026-08-05', 20, 'TEAM CHAT'), debit('2026-08-20', 60, 'TEAM CHAT'),
+      debit('2026-09-05', 20, 'TEAM CHAT'), debit('2026-09-20', 60, 'TEAM CHAT'),
+      debit('2026-10-05', 20, 'TEAM CHAT'), debit('2026-10-20', 60, 'TEAM CHAT'),
+      debit('2026-08-02', 17, 'CLOUD DOCS'), debit('2026-09-02', 21, 'CLOUD DOCS'), debit('2026-10-02', 24, 'CLOUD DOCS'),
+    ]);
+    expect(found.map((b) => [b.key, b.amount_usd, b.day_of_month])).toEqual([
+      ['CLOUD DOCS', 21, 2], ['TEAM CHAT', 20, 5], ['TEAM CHAT', 60, 20],
+    ]);
+  });
+
+  test('the latest monthly run counts: an older one-off or a missed month ends it, and leaves those debits out', () => {
+    const [bill] = bills([
+      debit('2026-07-30', 200, 'AI STUDIO SUB'), debit('2026-07-30', 200, 'AI STUDIO SUB', { id: 'old-twin' }),
+      debit('2026-08-21', 200, 'AI STUDIO SUB'), debit('2026-09-21', 200, 'AI STUDIO SUB'), debit('2026-10-21', 200, 'AI STUDIO SUB'),
+    ]);
+    expect(bill).toMatchObject({ key: 'AI STUDIO', count: 3, days: ['2026-11-21', '2026-12-21', '2027-01-21'] });
+    expect(bill.memberIds).not.toContain('old-twin');
+    // a missed month (61 days) leaves only two debits after it: no bill, though the merchant is still billing
+    expect(bills([debit('2026-07-05', 80, 'NET HOME'), debit('2026-08-05', 80, 'NET HOME'), debit('2026-10-05', 80, 'NET HOME'),
+      debit('2026-11-04', 80, 'NET HOME')])).toEqual([]);
+  });
+
+  test('a bill due up to 5 days ago that the feed does not show yet counts today; later than that it stopped', () => {
+    const [due] = bills([debit('2026-08-02', 30, 'DESK APP'), debit('2026-09-02', 30, 'DESK APP'), debit('2026-10-02', 30, 'DESK APP')]);
+    expect(due.days).toEqual(['2026-11-05', '2026-12-02', '2027-01-02']); // Nov 2 is 3 days ago
+    expect(bills([debit('2026-07-25', 30, 'OLD APP'), debit('2026-08-25', 30, 'OLD APP'), debit('2026-09-25', 30, 'OLD APP')])).toEqual([]);
+  });
+
+  test('card payments, payroll funding, transfers between the pool accounts and modeled lines are never bills', () => {
+    const monthly = (description, amount, over = {}) => ['2026-08-10', '2026-09-10', '2026-10-10'].map((d) => debit(d, amount, description, over));
+    expect(bills([
+      ...monthly('CAPITAL ONE MOBILE PYMT', 510),
+      ...monthly('MERCURY TRANSFER PAYROLL', 520),
+      ...monthly('IRS USATAXPYMT', 530, { modeled: true }),
+      ...monthly('TRANSFER WITHDRAWAL To ....2222', 540),
+      ...monthly('TRANSFER DEPOSIT From ....1111', 540, { account: 'checking-b', direction: 'credit' }),
+    ])).toEqual([]);
+  });
+
+  test('a mark is a label on the bill; the numbers are the same with or without it', () => {
+    const lines = () => [debit('2026-08-07', 300, 'ACME LOAN'), debit('2026-09-08', 300, 'ACME LOAN'), debit('2026-10-07', 300, 'ACME LOAN')];
+    const marked = computeForecast(base({ bankLines: lines(), marks: { 'ACME LOAN': 'household' } }));
+    const plain = computeForecast(base({ bankLines: lines() }));
+    expect(marked.repeating[0].mark).toBe('household');
+    expect(marked.weeks[0].bills[0].mark).toBe('household');
+    expect(marked.weeks.map((w) => w.end_booked)).toEqual(plain.weeks.map((w) => w.end_booked));
+  });
+
+  test('a bill leaves the trailing average and counts once, on its own day, with its own line', () => {
+    const r = computeForecast(base({
+      bankLines: [
+        debit('2026-08-10', 300, 'ACME LOAN'), debit('2026-09-10', 300, 'ACME LOAN'), debit('2026-10-10', 300, 'ACME LOAN'),
+        debit('2026-10-01', 800, 'POWER CO'),
+      ],
+    }));
+    expect(r.method.weekly_usd.other_spending).toBe(100); // the $800 only: the bill's two trailing debits are out
+    expect(r.weeks[1].money_out).toMatchObject({ other_spending: 100, repeating_bills: 300 }); // Nov 9-15 holds Nov 10
+    expect(r.weeks[2].money_out.repeating_bills).toBe(0);
+    expect(r.weeks[1].bills).toEqual([{ key: 'ACME LOAN', label: 'ACME LOAN', day: '2026-11-10', amount_usd: 300, mark: null }]);
+    expect(r.repeating).toEqual([expect.objectContaining({ key: 'ACME LOAN', next_day: '2026-11-10', count: 3 })]);
+    expect(r.repeating[0]).not.toHaveProperty('memberIds');
+    expect(r.method.repeating_bills).toBe(1);
+    // over the window: 3 bill days at $300, and the $800 line at $100 a week
+    const out = r.weeks.reduce((sum, w) => sum + w.money_out.repeating_bills + w.money_out.other_spending, 0);
+    expect(out).toBeCloseTo(900 + 100 * (4 / 7) + 100 * 12, 1); // week rows are rounded to cents
+  });
+
+  test('a fixed monthly vehicle bill leaves products per visit and counts on its day', () => {
+    const r = computeForecast(base({
+      trailing: { visits: 40, workValueUsd: 0, prepaySalesUsd3m: 0 },
+      bankLines: [
+        debit('2026-08-12', 450, 'VAN LEASE', { category: 'Vehicle Expenses' }), debit('2026-09-12', 450, 'VAN LEASE', { category: 'Vehicle Expenses' }),
+        debit('2026-10-12', 450, 'VAN LEASE', { category: 'Vehicle Expenses' }),
+        debit('2026-10-02', 400, 'X', { account: 'card-f', category: 'Supplies' }),
+      ],
+    }));
+    expect(r.method.products_fuel_per_visit_usd).toBe(10); // $400 / 40 visits; the lease is out
+    expect(r.repeating.map((b) => [b.key, b.line, b.next_day])).toEqual([['VAN LEASE', 'products_fuel', '2026-11-12']]);
   });
 });
 
