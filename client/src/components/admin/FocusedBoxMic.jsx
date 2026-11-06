@@ -131,7 +131,7 @@ function actionScope(box) {
 /**
  * While words are on the way (recording or transcribing), a button in the
  * box's own form, dialog or page area that would act on its text waits, and so
- * does a form submit. Most Send / Ask buttons already read `useDictationPending`;
+ * does a form submit or an Enter key. Most Send / Ask buttons already read `useDictationPending`;
  * this covers the boxes that gain the mic here without that wiring.
  */
 function useHoldActions(box, active, onHeld) {
@@ -153,11 +153,21 @@ function useHoldActions(box, active, onHeld) {
       event.stopImmediatePropagation();
       onHeld();
     };
+    // Enter (and Ctrl/Cmd+Enter) sends from a key handler in some boxes, with no click or submit.
+    const onKey = (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+      if (!(event.target instanceof Element) || !scope.contains(event.target)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      onHeld();
+    };
     document.addEventListener("click", onClick, true);
     document.addEventListener("submit", onSubmit, true);
+    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("submit", onSubmit, true);
+      document.removeEventListener("keydown", onKey, true);
     };
   }, [box, active, onHeld]);
 }

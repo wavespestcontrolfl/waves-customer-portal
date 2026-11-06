@@ -188,7 +188,7 @@ describe("FocusedBoxMic", () => {
     const cancel = vi.fn();
     await mount(
       <div role="dialog" aria-label="Follow up">
-        <textarea aria-label="notes" defaultValue="Hello" />
+        <textarea aria-label="notes" defaultValue="Hello" onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }} />
         <button type="button" onClick={send}>Send follow-up</button>
         <button type="button" onClick={cancel}>Cancel</button>
       </div>,
@@ -200,6 +200,8 @@ describe("FocusedBoxMic", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
 
     await act(async () => { fireEvent.click(screen.getByText("Send follow-up")); });
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.keyDown(screen.getByLabelText("notes"), { key: "Enter", metaKey: true }); });
     expect(send).not.toHaveBeenCalled();
     expect(await screen.findByRole("status")).toHaveTextContent(/wait for the words/);
     await act(async () => { fireEvent.click(screen.getByText("Cancel")); });
