@@ -2764,13 +2764,12 @@ const gates = {
   // transcription spend; bounces then behave as before: domain-corrector
   // recovery + admin alert only).
   callBounceReverify: process.env.GATE_CALL_BOUNCE_REVERIFY !== 'false',
-  // Bounce resend to the other spelling (owner 2026-11-04): when a call-saved email
-  // hard-bounces and the call's two extraction passes disagreed until the spelled
-  // letters settled it (call_log.ai_extraction.email_spelling_settled), re-send the
-  // same email to the other pass's address through the normal bounce-recovery rail
-  // (same ownership / suppression / on-file checks; the record changes only once
-  // the re-send DELIVERS). Boot-log entry only; the call-time reader is
-  // callBounceOtherSpellingLive(). Sends customer email — owner-flip only. Ships DARK.
+  // Resend of the first email a new lead gets (the drip, automation_step_sends) to the other spelling (owner 2026-11-04/05): when a
+  // call-saved email hard-bounces and the call's two extraction passes disagreed until the spelled letters settled it
+  // (call_log.ai_extraction.email_spelling_settled), the bounced drip step is sent again to the other pass's address; the profile takes
+  // that address only once a send to it DELIVERS. No read-back card. Drip path only: tracked email_messages bounces keep their
+  // existing path. Boot-log entry only; the call-time reader is callBounceOtherSpellingLive(). Sends customer email — owner-flip
+  // only. Ships DARK.
   callBounceOtherSpelling: process.env.GATE_CALL_BOUNCE_OTHER_SPELLING === 'true',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
@@ -10235,8 +10234,8 @@ function callEmailChecksLive() {
 }
 
 // GATE_CALL_BOUNCE_OTHER_SPELLING read at CALL time, strict `=== 'true'`, dark by default (owner 2026-11-04).
-// Off: a bounce is recovered exactly as before (domain corrector only). On: email-bounce-recovery.js also
-// tries the other spelling the call's settled-spelling record names. Kill: unset.
+// Off: a drip bounce is handled exactly as before. On: services/call-email-spelling-retry.js also tries the other spelling the
+// call's settled-spelling record names (drip path only). Kill: unset.
 function callBounceOtherSpellingLive() {
   return process.env.GATE_CALL_BOUNCE_OTHER_SPELLING === 'true';
 }

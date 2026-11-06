@@ -132,8 +132,12 @@ async function retryStopVerdict(enrollment, recipient) {
   return require('./call-email-spelling-retry').retrySendVerdict({ customerId: enrollment.customer_id, retryEmail: recipient });
 }
 
-async function blockStoppedRetry({ enrollment, sendId, recipient, verdict }) {
-  await require('./call-email-spelling-retry').stopRetry({ customerId: enrollment.customer_id, retryEmail: recipient, reason: verdict });
+// null = the live state (claim, customer, enrollments, re-read in the transaction of the stop) says the send is fine after all, e.g.
+// a delivery committed the claim since this runner read the enrollment: the caller then sends normally and nothing is cancelled.
+async function blockStoppedRetry({ enrollment, sendId, recipient, verdict: asked }) {
+  const stop = await require('./call-email-spelling-retry').stopRetry({ customerId: enrollment.customer_id, retryEmail: recipient, reason: asked });
+  if (!stop.stopped) return null;
+  const verdict = stop.reason;
   if (verdict === 'email_changed') {
     // Staff set a different primary email: the enrollments were retargeted to it, so this step stays due for that address.
     await db('automation_step_sends').where({ id: sendId }).update({
@@ -206,7 +210,10 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
   if (testRecipient) return null;
   if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
   const retryVerdict = await retryStopVerdict(enrollment, recipient);
-  if (retryVerdict) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: retryVerdict });
+  if (retryVerdict) {
+    const stopped = await blockStoppedRetry({ enrollment, sendId, recipient, verdict: retryVerdict });
+    if (stopped) return stopped;
+  }
   // A billing send checks suppression for the CURRENT billing recipient,
   // inside the shared billing email authority under its recipient lock; the
   // address snapshotted at enrollment may no longer be the one it goes to.
@@ -923,7 +930,13 @@ async function dispatchUnderContactBoundary({ dispatch, enrollment, step, recipi
   try {
     return await dispatch(contactRecipientBoundaryCheck(enrollment, recipient, testRecipient));
   } catch (err) {
-    if (err.code === RETRY_STOPPED) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: err.retryVerdict });
+    if (err.code === RETRY_STOPPED) {
+      const stopped = await blockStoppedRetry({ enrollment, sendId, recipient, verdict: err.retryVerdict });
+      if (stopped) return stopped;
+      // The live state says go after all (a delivery committed the claim meanwhile): nothing was sent, the step stays due.
+      await db('automation_step_sends').where({ id: sendId }).del();
+      return { sent: false, deferred: true, reason: err.message };
+    }
     if (err.code !== CONTACT_RECIPIENT_CHANGED) throw err;
     logger.info(`[automation-runner] enrollment ${enrollment.id} step ${step.step_order} held at the provider boundary: ${err.message}`);
     await db('automation_step_sends').where({ id: sendId }).del();
