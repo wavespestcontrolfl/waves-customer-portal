@@ -7213,83 +7213,89 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('30 7 * * *', async () => {
     try {
-      // Window opens at ET midnight yesterday. The previous computation
-      // used setHours(0,0,0,0) in server-local time — Railway runs UTC, so
-      // the "overnight" window opened at UTC midnight (= 7–8 PM ET two days
-      // prior) and the 7:30 AM digest counted ~35 hours of email.
-      const windowStart = parseETDateTime(`${etDateString(addETDays(new Date(), -1))}T00:00:00`);
+      // runExclusive: a deploy overlap at 7:30 must not post the digest twice
+      // (and job_health now records this job). The dedupeKey below is the second line of defense.
+      await runExclusive('email-digest-daily', async () => {
+        // Window opens at ET midnight yesterday. The previous computation
+        // used setHours(0,0,0,0) in server-local time — Railway runs UTC, so
+        // the "overnight" window opened at UTC midnight (= 7–8 PM ET two days
+        // prior) and the 7:30 AM digest counted ~35 hours of email.
+        const windowStart = parseETDateTime(`${etDateString(addETDays(new Date(), -1))}T00:00:00`);
 
-      const emails = await db('emails').where('received_at', '>=', windowStart);
-      const unread = await db('emails')
-        .where({ is_read: false, is_archived: false })
-        .count('* as c').first();
+        const emails = await db('emails').where('received_at', '>=', windowStart);
+        const unread = await db('emails')
+          .where({ is_read: false, is_archived: false })
+          .count('* as c').first();
 
-      const leads = emails.filter(e => e.auto_action && e.auto_action.includes('lead_created')).length;
-      const invoices = emails.filter(e => e.classification === 'vendor_invoice').length;
-      // Actual quarantine-lane outcomes only — a known-sender skip or a
-      // failed quarantine left the message available and must not be
-      // digested as handled.
-      const spam = emails.filter(e => /^spam_(quarantined|trashing|trashed|blocked)/.test(e.auto_action || '')).length;
-      const invoiceAmounts = emails
-        .filter(e => e.classification === 'vendor_invoice' && e.extracted_data)
-        .reduce((sum, e) => {
-          const data = typeof e.extracted_data === 'string' ? JSON.parse(e.extracted_data) : e.extracted_data;
-          return sum + (parseFloat(data.invoice_amount) || 0);
-        }, 0);
+        const leads = emails.filter(e => e.auto_action && e.auto_action.includes('lead_created')).length;
+        const invoices = emails.filter(e => e.classification === 'vendor_invoice').length;
+        // Actual quarantine-lane outcomes only — a known-sender skip or a
+        // failed quarantine left the message available and must not be
+        // digested as handled.
+        const spam = emails.filter(e => /^spam_(quarantined|trashing|trashed|blocked)/.test(e.auto_action || '')).length;
+        const invoiceAmounts = emails
+          .filter(e => e.classification === 'vendor_invoice' && e.extracted_data)
+          .reduce((sum, e) => {
+            const data = typeof e.extracted_data === 'string' ? JSON.parse(e.extracted_data) : e.extracted_data;
+            return sum + (parseFloat(data.invoice_amount) || 0);
+          }, 0);
 
-      const parts = [`${parseInt(unread?.c || 0)} unread`];
-      if (leads > 0) parts.push(`${leads} leads created`);
-      // Only claim a dollar figure when extraction actually produced one —
-      // "4 invoices ($0.00 logged)" was a fabricated total, not a real zero.
-      if (invoices > 0) {
-        parts.push(invoiceAmounts > 0
-          ? `${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`
-          : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
-      }
-      if (spam > 0) parts.push(`${spam} spam quarantined`);
-      // Exception surface: quarantine attempts that FAILED left classified
-      // spam sitting in the inbox — that's exactly what the digest exists
-      // to flag.
-      const quarantineIssues = emails.filter(e => ['spam_quarantine_failed', 'spam_quarantine_ambiguous'].includes(e.auto_action)).length;
-      if (quarantineIssues > 0) parts.push(`${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
-      const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
-      if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
-      // Real Gmail draft ids only — 'pending' claims and reconciliation
-      // sentinels (reconciled_replied / reconciled_existing_draft) are not
-      // drafts this agent created.
-      const drafted = emails.filter(e => e.draft_gmail_id
-        && !['pending', 'reconciled_existing_draft', 'reconciled_replied'].includes(e.draft_gmail_id)).length;
-      if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
-
-      // Follow-up nudges: inbound conversation mail nobody has answered.
-      // Failure here must not kill the digest \u2014 nudges degrade to absent.
-      let nudgeLines = '';
-      try {
-        const { collectUnansweredNudges } = require('./email/inbox-hygiene');
-        const nudges = await collectUnansweredNudges();
-        if (nudges.length) {
-          nudgeLines = ` Awaiting your reply: ${nudges
-            .map((n) => `${n.from_name || n.from_address} ("${(n.subject || '(no subject)').slice(0, 40)}")`)
-            .join('; ')}.`;
+        const parts = [`${parseInt(unread?.c || 0)} unread`];
+        if (leads > 0) parts.push(`${leads} leads created`);
+        // Only claim a dollar figure when extraction actually produced one —
+        // "4 invoices ($0.00 logged)" was a fabricated total, not a real zero.
+        if (invoices > 0) {
+          parts.push(invoiceAmounts > 0
+            ? `${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`
+            : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
         }
-      } catch (e) {
-        logger.warn(`[email-digest] nudge collection failed: ${e.message}`);
-      }
+        if (spam > 0) parts.push(`${spam} spam quarantined`);
+        // Exception surface: quarantine attempts that FAILED left classified
+        // spam sitting in the inbox — that's exactly what the digest exists
+        // to flag.
+        const quarantineIssues = emails.filter(e => ['spam_quarantine_failed', 'spam_quarantine_ambiguous'].includes(e.auto_action)).length;
+        if (quarantineIssues > 0) parts.push(`${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
+        const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
+        if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
+        // Real Gmail draft ids only — 'pending' claims and reconciliation
+        // sentinels (reconciled_replied / reconciled_existing_draft) are not
+        // drafts this agent created.
+        const drafted = emails.filter(e => e.draft_gmail_id
+          && !['pending', 'reconciled_existing_draft', 'reconciled_replied'].includes(e.draft_gmail_id)).length;
+        if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
 
-      // Through NotificationService (not a raw insert) so the admin bell
-      // policy chokepoint covers the digest; notifyAdmin never throws.
-      await require('./notification-service').notifyAdmin(
-        'email_digest',
-        'Morning Email Digest',
-        `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
-        {
-          icon: '\uD83D\uDCE7',
-          link: '/admin/email',
-          metadata: { severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' },
-        },
-      );
+        // Follow-up nudges: inbound conversation mail nobody has answered.
+        // Failure here must not kill the digest \u2014 nudges degrade to absent.
+        let nudgeLines = '';
+        try {
+          const { collectUnansweredNudges } = require('./email/inbox-hygiene');
+          const nudges = await collectUnansweredNudges();
+          if (nudges.length) {
+            nudgeLines = ` Awaiting your reply: ${nudges
+              .map((n) => `${n.from_name || n.from_address} ("${(n.subject || '(no subject)').slice(0, 40)}")`)
+              .join('; ')}.`;
+          }
+        } catch (e) {
+          logger.warn(`[email-digest] nudge collection failed: ${e.message}`);
+        }
 
-      logger.info(`[email-digest] Morning digest: ${emails.length} emails, ${leads} leads, ${spam} spam`);
+        // Through NotificationService (not a raw insert) so the admin bell
+        // policy chokepoint covers the digest; notifyAdmin never throws.
+        await require('./notification-service').notifyAdmin(
+          'email_digest',
+          'Morning Email Digest',
+          `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
+          {
+            icon: '\uD83D\uDCE7',
+            link: '/admin/email',
+            // One digest per ET morning, even if the tick runs twice.
+            dedupeKey: `email-digest:${etDateString()}`,
+            metadata: { severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' },
+          },
+        );
+
+        logger.info(`[email-digest] Morning digest: ${emails.length} emails, ${leads} leads, ${spam} spam`);
+      });
     } catch (err) {
       logger.error(`[email-digest] Cron failed: ${err.message}`);
     }
@@ -7456,11 +7462,22 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const { runDashboardAlertsCheck } = require('./dashboard-alerts-cron');
-      const result = await runDashboardAlertsCheck();
-      if (result.fired > 0 || result.cleared > 0) {
-        logger.info(`[dashboard-alerts] fired=${result.fired} cleared=${result.cleared} active=${result.current}`);
-      }
+      // runExclusive records a failure only when the body throws: an alert
+      // whose read failed (result.failedIds) fails the tick AFTER the state
+      // write, so job_health shows it. Its state row was kept, so nothing
+      // re-fires. The job name differs from the service's own advisory-lock
+      // key ('cron:' prefix), so the two locks never collide.
+      await runExclusive('dashboard-alerts-cron', async () => {
+        const { runDashboardAlertsCheck } = require('./dashboard-alerts-cron');
+        const result = await runDashboardAlertsCheck();
+        if (result.fired > 0 || result.cleared > 0) {
+          logger.info(`[dashboard-alerts] fired=${result.fired} cleared=${result.cleared} active=${result.current}`);
+        }
+        if (result.error) throw new Error('dashboard-alerts-cron: the alert check or its state write failed');
+        if (result.failedIds?.length) {
+          throw new Error(`dashboard-alerts-cron: ${result.failedIds.length} alert read(s) failed (${result.failedIds.join(', ')})`);
+        }
+      });
     } catch (err) {
       logger.error(`Dashboard alerts cron failed: ${err.message}`);
     }
@@ -7589,10 +7606,14 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 7 * * 0', async () => {
     try {
-      const TaxAdvisor = require('./tax-advisor');
-      const advisor = new TaxAdvisor();
-      await advisor.generateWeeklyReport();
-      logger.info('Tax Advisor weekly report generated');
+      // runExclusive: a deploy overlap must not run the paid model call twice
+      // and store two reports.
+      await runExclusive('tax-advisor-weekly', async () => {
+        const TaxAdvisor = require('./tax-advisor');
+        const advisor = new TaxAdvisor();
+        await advisor.generateWeeklyReport();
+        logger.info('Tax Advisor weekly report generated');
+      });
     } catch (err) {
       logger.error(`Tax Advisor failed: ${err.message}`);
     }
@@ -8594,8 +8615,11 @@ function initScheduledJobs() {
   cron.schedule('0 7 * * 1', async () => {
     logger.info('Running: Weekly SEO Advisor');
     try {
-      const SEOAdvisor = require('./seo/seo-advisor');
-      await SEOAdvisor.generateWeeklyReport();
+      // runExclusive: a deploy overlap must not run the paid analysis twice.
+      await runExclusive('seo-advisor-weekly', async () => {
+        const SEOAdvisor = require('./seo/seo-advisor');
+        await SEOAdvisor.generateWeeklyReport();
+      });
     } catch (err) {
       logger.error(`SEO Advisor failed: ${err.message}`);
     }

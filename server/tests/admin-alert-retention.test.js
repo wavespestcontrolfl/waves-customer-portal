@@ -111,6 +111,7 @@ describe('re-ring list', () => {
     expect(retention.ringRiskFor(keyed('payroll-mercury-key')).kind).toBe('periodic');
     expect(retention.ringRiskFor(keyed('payroll-mercury-key-send')).emitter).toBe('payroll-mercury-key-send');
     expect(retention.ringRiskFor(keyed('portal-message:thread-1')).emitter).toBe('portal-message');
+    expect(retention.ringRiskFor(keyed('booking-funnel-canary:fast')).kind).toBe('periodic');
     expect(retention.ringRiskFor(keyed('something-else:1'))).toBeNull();
     expect(retention.ringRiskFor(row())).toBeNull();
   });
