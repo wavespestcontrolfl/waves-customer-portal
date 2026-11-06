@@ -220,6 +220,25 @@ function settleSpellingOutcome(spelling, ev) {
   return true;
 }
 
+/**
+ * The automation branch's event transaction. A DELIVERED event that worked on a retry claim (spelling.touched) must be redelivered
+ * when its transaction fails for ANY reason, the COMMIT included: the route answers non-2xx for err.retryWebhook, the event ledger row
+ * rolled back with the transaction and the claim is still `resending`, so the redelivery commits once (a second delivery after a
+ * commit finds no `resending` claim and is a no-op). Bounce / dropped / blocked events are already redelivered on any failure.
+ */
+async function processAutomationEvent(ev, messageId, email, automationSend) {
+  let spelling = null;
+  try {
+    const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
+      spelling = await handleAutomationEvent(ev, automationSend, trx);
+    });
+    return { processedNew, spelling };
+  } catch (err) {
+    if (spelling?.touched && err && typeof err === 'object') err.retryWebhook = true;
+    throw err;
+  }
+}
+
 async function handleEvent(ev) {
   const messageId = ev.sg_message_id ? ev.sg_message_id.split('.')[0] : null;
   if (!messageId) return;
@@ -380,10 +399,7 @@ async function handleEvent(ev) {
     return;
   }
   if (automationSend) {
-    let spelling = null;
-    const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
-      spelling = await handleAutomationEvent(ev, automationSend, trx);
-    });
+    const { processedNew, spelling } = await processAutomationEvent(ev, messageId, email, automationSend);
     if (processedNew && settleSpellingOutcome(spelling, ev)) return;
     if (processedNew) {
       // Automations span both streams: newsletter-group templates
@@ -1096,8 +1112,8 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
       }
       // A send to the other spelling of a call-captured address delivered: that address replaces the bounced one on
       // the customer (owner 2026-11-05). Nothing happens for any other send.
-      await require('../services/call-email-spelling-retry').onAutomationDelivered({ sendRow }, client);
-      break;
+      // `touched` (a claim was found) is returned so the route can request redelivery if the transaction then fails.
+      return require('../services/call-email-spelling-retry').onAutomationDelivered({ sendRow }, client);
 
     case 'open':
       if (!sendRow.opened_at) {

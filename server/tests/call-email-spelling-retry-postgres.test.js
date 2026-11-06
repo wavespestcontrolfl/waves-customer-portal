@@ -10,6 +10,12 @@
  * Self-skips without DATABASE_URL (run after `knex migrate:latest`).
  */
 const { randomUUID } = require('node:crypto');
+const cryptoLib = require('crypto');
+const express = require('express');
+
+// The route verifies a signed body: a throwaway key pair for the HTTP-level tests below.
+const sgKeys = cryptoLib.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+process.env.SENDGRID_WEBHOOK_PUBLIC_KEY = sgKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),
@@ -1109,5 +1115,140 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     await flush();
     expect(await ledger(ctx.customerId)).toEqual([]);
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
+  });
+
+  // ── A failed delivery transaction asks SendGrid to redeliver (P1-O) ──────────────────────────────────────────────────────
+  async function post(events) {
+    const app = express();
+    app.use('/api/webhooks/sendgrid', webhook);
+    const server = app.listen(0, '127.0.0.1');
+    try {
+      if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
+      const body = JSON.stringify(events);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const signature = cryptoLib.sign('sha256', Buffer.concat([Buffer.from(ts), Buffer.from(body)]), sgKeys.privateKey).toString('base64');
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/api/webhooks/sendgrid/events`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-twilio-email-event-webhook-signature': signature, 'x-twilio-email-event-webhook-timestamp': ts },
+        body,
+      });
+      return res.status;
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+  // A REAL COMMIT failure: a deferred constraint trigger raises when the transaction commits, after every statement succeeded.
+  async function failCommitWhen(table, whenSql) {
+    await db.raw("CREATE OR REPLACE FUNCTION test_fail_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$");
+    await db.raw(`CREATE CONSTRAINT TRIGGER test_fail_at_commit AFTER INSERT OR UPDATE ON ${table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (${whenSql}) EXECUTE FUNCTION test_fail_at_commit()`);
+    return () => db.raw(`DROP TRIGGER IF EXISTS test_fail_at_commit ON ${table}`);
+  }
+  const deliveredEvent = (messageId, eventId) => ({ event: 'delivered', email: OTHER, sg_event_id: eventId, sg_message_id: `${messageId}.f` });
+  const eventLedger = (eventId) => db('sendgrid_webhook_events').where({ event_id: eventId });
+
+  async function boundRetryDelivery(messageId) {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, messageId);
+  }
+  async function expectNothingHalfWritten(eventId) {
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    expect(await db('audit_log').where({ resource_id: ctx.customerId, action: 'customer.email_replaced_after_bounce_retry' })).toEqual([]);
+    expect(await eventLedger(eventId)).toEqual([]); // the event ledger row went with the rollback
+  }
+  async function expectCommittedOnce(eventId) {
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(OTHER);
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    expect(await db('audit_log').where({ resource_id: ctx.customerId, action: 'customer.email_replaced_after_bounce_retry' })).toHaveLength(1);
+    expect(await eventLedger(eventId)).toHaveLength(1);
+  }
+
+  test('HTTP: a fanout failure while committing the delivered retry answers 500, writes nothing, and the redelivery commits exactly once', async () => {
+    await boundRetryDelivery('http-1');
+    const fanout = require('../services/customer-email-fanout');
+    const spy = jest.spyOn(fanout, 'propagateCustomerEmailChange').mockRejectedValueOnce(new Error('fanout down'));
+    try {
+      expect(await post([deliveredEvent('http-1', 'ev-http-1')])).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+    await expectNothingHalfWritten('ev-http-1');
+    expect(await post([deliveredEvent('http-1', 'ev-http-1')])).toBe(200); // the redelivery
+    await expectCommittedOnce('ev-http-1');
+    expect(await post([deliveredEvent('http-1', 'ev-http-1')])).toBe(200); // a further delivery is a no-op
+    await expectCommittedOnce('ev-http-1');
+  });
+
+  test('HTTP: an audit-insert failure answers 500 and the redelivery commits once', async () => {
+    await boundRetryDelivery('http-2');
+    const audit = require('../services/audit-log');
+    const spy = jest.spyOn(audit, 'recordAuditEvent').mockRejectedValueOnce(new Error('audit down'));
+    try {
+      expect(await post([deliveredEvent('http-2', 'ev-http-2')])).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+    await expectNothingHalfWritten('ev-http-2');
+    expect(await post([deliveredEvent('http-2', 'ev-http-2')])).toBe(200);
+    await expectCommittedOnce('ev-http-2');
+  });
+
+  test('HTTP: a COMMIT failure after the retry commit work answers 500, writes nothing, and the redelivery commits exactly once', async () => {
+    await boundRetryDelivery('http-3');
+    const undo = await failCommitWhen('call_email_spelling_retries', "NEW.status = 'committed'");
+    try {
+      expect(await post([deliveredEvent('http-3', 'ev-http-3')])).toBe(500);
+    } finally {
+      await undo();
+    }
+    await expectNothingHalfWritten('ev-http-3');
+    expect(await post([deliveredEvent('http-3', 'ev-http-3')])).toBe(200);
+    await expectCommittedOnce('ev-http-3');
+  });
+
+  test('HTTP, unchanged: a commit failure on a delivered event that touched no retry claim still answers 200 (today\'s contract)', async () => {
+    ctx = await setup({ sent: 1 });
+    const plain = await db('automation_step_sends').where({ id: ctx.send.id }).first();
+    await db('automation_step_sends').where({ id: plain.id }).update({ sendgrid_message_id: 'http-4' });
+    const undo = await failCommitWhen('automation_step_sends', "NEW.sendgrid_message_id = 'http-4' AND NEW.status = 'delivered'");
+    try {
+      expect(await post([{ event: 'delivered', email: BOUNCED, sg_event_id: 'ev-http-4', sg_message_id: 'http-4.f' }])).toBe(200);
+    } finally {
+      await undo();
+    }
+  });
+
+  test('HTTP: a failure failing the claim of a bounced retry send is redelivered (bounce class) and nothing is half-written', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'http-5');
+    const undo = await failCommitWhen('call_email_spelling_retries', "NEW.status = 'failed'");
+    const event = { event: 'bounce', type: 'bounce', email: OTHER, reason: '550 5.1.1', sg_event_id: 'ev-http-5', sg_message_id: 'http-5.f' };
+    try {
+      expect(await post([event])).toBe(500);
+    } finally {
+      await undo();
+    }
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    expect(await eventLedger('ev-http-5')).toEqual([]);
+    expect(await post([event])).toBe(200);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+  });
+
+  test('a failure while STARTING a retry is swallowed in its savepoint: no claim is left behind and the bounce is handled as today', async () => {
+    ctx = await setup({ sent: 1 });
+    const spy = jest.spyOn(runner, 'rewindEnrollmentToStep').mockRejectedValueOnce(new Error('rewind down'));
+    try {
+      await webhook.handleEvent(bounce(ctx.send));
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+    expect(await ledger(ctx.customerId)).toEqual([]);
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
+    expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
   });
 });

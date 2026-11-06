@@ -449,18 +449,18 @@ async function onAutomationHardBounce({ ev, sendRow }, client = db) {
   if (!callBounceOtherSpellingLive()) return NO_RETRY;
   const bounced = norm(ev?.email || sendRow?.email);
   if (!bounced || !sendRow?.enrollment_id || norm(sendRow.email) !== bounced) return NO_RETRY;
+  // An EXISTING claim is being acted on here (failed, or found in flight): a database failure propagates, the event transaction
+  // rolls back, and the route answers non-2xx for a bounce, so SendGrid redelivers it. Only the START of a new retry below is
+  // best-effort: it runs in a savepoint, any error rolls the attempt back whole and the bounce is handled as before.
+  const customerId = await enrollmentCustomerId(sendRow, client);
+  const failed = await settleRetryBounce({ sendRow, customerId }, client);
+  if (failed) return failed;
+  // The claim for this customer + address is still in flight: that retry owns this bounce (a duplicate event, a sibling's
+  // send to the same address). Nothing is retried again and no alert, rescue or read-back card is raised; a settled claim
+  // (failed, committed, skipped) is today's path.
+  if (customerId && await claimInFlight({ customerId, bounced }, client) === 'fresh') return RETRY_OWNED;
   try {
-    // One savepoint: any error rolls the attempt back whole and the bounce is handled as before.
-    return await client.transaction(async (sp) => {
-      const customerId = await enrollmentCustomerId(sendRow, sp);
-      const failed = await settleRetryBounce({ sendRow, customerId }, sp);
-      if (failed) return failed;
-      // The claim for this customer + address is still in flight: that retry owns this bounce (a duplicate event, a sibling's
-      // send to the same address). Nothing is retried again and no alert, rescue or read-back card is raised; a settled claim
-      // (failed, committed, skipped) is today's path.
-      if (customerId && await claimInFlight({ customerId, bounced }, sp) === 'fresh') return RETRY_OWNED;
-      return startRetry({ sendRow, bounced }, sp);
-    });
+    return await client.transaction((sp) => startRetry({ sendRow, bounced }, sp));
   } catch (err) {
     logger.warn(`[call-email-spelling-retry] failed closed: ${err.code || err.name}`);
     return NO_RETRY;
@@ -476,14 +476,8 @@ async function onAutomationHardBounce({ ev, sendRow }, client = db) {
 async function onAutomationDeadDomain({ ev, sendRow }, client = db) {
   if (!gateLive() || !sendRow?.enrollment_id) return NO_RETRY;
   if (!require('./email-bounce-recovery').isNoMailServerEvent(ev)) return NO_RETRY;
-  try {
-    return await client.transaction(async (sp) => (
-      await settleRetryBounce({ sendRow, customerId: await enrollmentCustomerId(sendRow, sp), reason: 'retry_address_no_mail_server' }, sp) || NO_RETRY
-    ));
-  } catch (err) {
-    logger.warn(`[call-email-spelling-retry] dead-domain settle failed closed: ${err.code || err.name}`);
-    return NO_RETRY;
-  }
+  // Failing an existing claim: a database failure propagates (a blocked event is redelivered by the route), never swallowed.
+  return (await settleRetryBounce({ sendRow, customerId: await enrollmentCustomerId(sendRow, client), reason: 'retry_address_no_mail_server' }, client)) || NO_RETRY;
 }
 
 /**
@@ -492,27 +486,41 @@ async function onAutomationDeadDomain({ ev, sendRow }, client = db) {
  * scope, so an automated correction never settles a read-back card. Runs in the event transaction; an error rolls
  * the event back and SendGrid redelivers it. Gated like the start: unsetting the gate stops the commit too.
  */
-async function onAutomationDelivered({ sendRow }, client = db) {
+async function onAutomationDelivered(args, client = db) {
+  try {
+    return await commitDeliveredRetry(args, client);
+  } catch (err) {
+    // Any failure of the retry-commit work (claim lock, customer update, fanout, audit, settlement) rolls the event transaction
+    // back, and the route must answer non-2xx so SendGrid redelivers the delivery: the event ledger row went with the rollback and
+    // the claim is still `resending`, so the redelivery runs the commit once. (A COMMIT failure surfaces from the route's
+    // transaction; the route marks it the same way when `touched` was returned.)
+    if (err && typeof err === 'object') err.retryWebhook = true;
+    throw err;
+  }
+}
+
+async function commitDeliveredRetry({ sendRow }, client) {
   if (!callBounceOtherSpellingLive()) return { committed: false }; // gate off = today's behavior (the kill switch stops the commit too)
   const address = norm(sendRow?.email);
   if (!address || !sendRow?.enrollment_id) return { committed: false };
   // Customer first, then the claim bound to THIS send: a delivery of any other send to this address settles nothing.
   const row = await claimForSend({ sendId: sendRow.id, customerId: await enrollmentCustomerId(sendRow, client) }, client);
   if (!row || norm(row.retry_email) !== address) return { committed: false };
+  // From here this delivery works on a claim: `touched` tells the route a failure of the transaction (even its COMMIT) must be redelivered.
 
   const settle = (status, reason) => applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status, reason }, client);
   const before = await liveCustomer(client, row.customer_id).forUpdate().first();
-  if (!before) { await settle('skipped', 'customer_gone'); return { committed: false }; }
+  if (!before) { await settle('skipped', 'customer_gone'); return { committed: false, touched: true }; }
   const { lockCustomerEmail } = require('../utils/customer-comms-lock');
   await lockCustomerEmail(client, address);
   // Re-judged at commit: the address may have been claimed since the send. The mail already delivered, but no record moves.
   if (await require('./email-bounce-recovery').correctedAddressOwnedByOther(address, row.customer_id, client)) {
     await settle('skipped', 'owned_by_other');
-    return { committed: false };
+    return { committed: false, touched: true };
   }
   const updated = await liveCustomer(client, row.customer_id).whereRaw('LOWER(email) = ?', [norm(row.bounced_email)])
     .update({ email: address, updated_at: new Date() });
-  if (Number(updated) !== 1) { await settle('skipped', 'email_changed'); return { committed: false }; }
+  if (Number(updated) !== 1) { await settle('skipped', 'email_changed'); return { committed: false, touched: true }; }
 
   await require('./customer-email-fanout').propagateCustomerEmailChange({
     before: { ...before, email: norm(row.bounced_email) },
@@ -534,7 +542,7 @@ async function onAutomationDelivered({ sendRow }, client = db) {
     },
   });
   logger.info(`[call-email-spelling-retry] customer ${row.customer_id} email replaced after the other spelling delivered`);
-  return { committed: true };
+  return { committed: true, touched: true };
 }
 
 module.exports = {
