@@ -58,6 +58,12 @@ const RETRY_STEP_KEY = 'spelling_retry_step';
 const SEND_ID_ARG = 'automation_step_send_id';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// The EXACT drip the other-spelling retry may resend: the call-created lead's intro drip. Decided by the template KEY, never by its
+// asm_group (new_lead is a newsletter-group template in the seed; the treatment, renewal and pricing drips are service-group, and
+// a call-captured address that bounced must never be re-mailed through any of them). One entry, one place: candidate selection
+// and the send-boundary verdict both read this set.
+const RETRY_TEMPLATE_KEYS = new Set(['new_lead']);
+
 const norm = (value) => String(value || '').trim().toLowerCase();
 
 /**
@@ -322,9 +328,8 @@ async function eligibleOtherSpelling({ enrollment, bounced }, client) {
   if (!enrollment?.customer_id || !['active', 'completed'].includes(enrollment.status)) return null;
   // A step addressed to an on-location contact follows that contact's own address rules; the holder's address only.
   if (norm(enrollment.email) !== bounced || enrollmentRole(enrollment)) return null;
-  const template = await client('automation_templates').where({ key: enrollment.template_key }).first('asm_group');
-  // Marketing-stream bounces belong to the suppression ledger and never rewrite a contact's email.
-  if (!template || String(template.asm_group || 'service').trim().toLowerCase() === 'newsletter') return null;
+  // Exact allowlist by template KEY (RETRY_TEMPLATE_KEYS), whatever the template's stream: every other automation is today's path.
+  if (!RETRY_TEMPLATE_KEYS.has(enrollment.template_key)) return null;
   const customer = await liveCustomer(client, enrollment.customer_id).first('id', 'email');
   if (!customer || norm(customer.email) !== bounced) return null;
 
@@ -335,9 +340,31 @@ async function eligibleOtherSpelling({ enrollment, bounced }, client) {
   if (!call || String(call.customer_id || '') !== String(customer.id)) return null;
   const other = settledOtherSpelling(call.ai_extraction, bounced);
   if (!other) return null;
+  // The enrollment must be this call's own episode, not an older or unrelated enrollment of the same template.
+  if (!(await inCallEpisode({ enrollmentId: enrollment.id, callId: call.id }, client))) return null;
 
   if (await retryAddressProblem(other, customer.id, client)) return null;
   return { other, sourceCallId: call.id, customerId: customer.id };
+}
+
+/**
+ * Is this enrollment the episode of that call? Two DB-to-DB facts, one read: the enrollment was (re)started at or after the call's
+ * `created_at` (`enrolled_at`, which a reactivation resets), and, when the enrollment names a lead (`metadata.lead_id`) that
+ * carries a call SID and the call has one, the two SIDs are the same call. A lead with no call SID (a form lead) says nothing and
+ * the time rule alone decides.
+ */
+async function inCallEpisode({ enrollmentId, callId }, client) {
+  if (!enrollmentId || !callId) return false;
+  const res = await client.raw(
+    `SELECT 1
+       FROM automation_enrollments e, call_log cl
+      WHERE e.id = ? AND cl.id = ? AND e.enrolled_at >= cl.created_at
+        AND NOT EXISTS (SELECT 1 FROM leads l
+                         WHERE l.id::text = e.metadata->>'lead_id' AND l.twilio_call_sid IS NOT NULL
+                           AND cl.twilio_call_sid IS NOT NULL AND l.twilio_call_sid <> cl.twilio_call_sid)`,
+    [enrollmentId, callId],
+  );
+  return res.rows.length === 1;
 }
 
 /** Why the retry address may not be mailed right now: 'suppressed', 'owned_by_other' (another customer, lead or estimate), or null. */
@@ -356,23 +383,31 @@ async function retryAddressProblem(address, customerId, client) {
  * the customer's primary email is no longer the bounced address (staff changed it); or the retry address is now suppressed or
  * belongs to someone else.
  */
-async function verdictFor({ claim, customerId, retryEmail }, client) {
+async function verdictFor({ claim, customerId, retryEmail, enrollment = null }, client) {
   const address = norm(retryEmail);
   const customer = await liveCustomer(client, customerId).first('email');
   if (claim && claim.status === 'committed' && customer && norm(customer.email) === address) return null;
   if (!gateLive()) return 'gate_off';
   if (!claim || claim.status !== 'resending') return 'claim_settled';
   if (isStale(claim)) return 'stale';
+  // The enrollment about to send must itself be the allowlisted drip of the call's episode (only the retried enrollment carries provenance).
+  if (enrollment && !(await enrollmentMayRetry({ enrollment, claim }, client))) return 'template_not_allowed';
   if (!customer || norm(customer.email) !== norm(claim.bounced_email)) return 'email_changed';
   return retryAddressProblem(address, customerId, client);
+}
+
+/** The same allowlist + episode rule candidate selection applies, for an enrollment about to SEND to the retry address. */
+async function enrollmentMayRetry({ enrollment, claim }, client) {
+  if (!RETRY_TEMPLATE_KEYS.has(enrollment.template_key)) return false;
+  return inCallEpisode({ enrollmentId: enrollment.id, callId: claim.source_call_id }, client);
 }
 
 const latestClaim = (client, customerId, retryEmail) => client(TABLE)
   .where({ customer_id: customerId, retry_email: norm(retryEmail), channel: CHANNEL }).orderBy('created_at', 'desc');
 
 /** The send-boundary verdict (automation-runner.js: before the queued retry step and again at the provider boundary). */
-async function retrySendVerdict({ customerId, retryEmail }, client = db) {
-  return verdictFor({ claim: await latestClaim(client, customerId, retryEmail).first(), customerId, retryEmail }, client);
+async function retrySendVerdict({ customerId, retryEmail, enrollment = null }, client = db) {
+  return verdictFor({ claim: await latestClaim(client, customerId, retryEmail).first(), customerId, retryEmail, enrollment }, client);
 }
 
 /**
@@ -382,10 +417,10 @@ async function retrySendVerdict({ customerId, retryEmail }, client = db) {
  * verdict. Returns { stopped: false } when the live state says the send is fine (the caller then sends it), else
  * { stopped: true, reason }.
  */
-async function stopRetry({ customerId, retryEmail, reason }, client = db) {
+async function stopRetry({ customerId, retryEmail, reason, enrollment = null }, client = db) {
   return client.transaction(async (trx) => {
     const claim = await latestClaim(trx, customerId, retryEmail).forUpdate().first();
-    const live = reason === 'not_bound' ? reason : await verdictFor({ claim, customerId, retryEmail }, trx);
+    const live = reason === 'not_bound' ? reason : await verdictFor({ claim, customerId, retryEmail, enrollment }, trx);
     if (!live) return { stopped: false };
     if (claim && claim.status === 'resending') {
       // A queued row the claim was bound to but never dispatched (reason not_bound) is closed with it.
@@ -461,15 +496,18 @@ async function startRetry({ sendRow, bounced }, client) {
     await applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status: 'skipped', reason: 'sequence_cursor_moved' }, client);
     return NO_RETRY;
   }
-  // The customer's other live enrollments to the same address follow it (no step is re-sent for them).
+  // Only the allowlisted drip follows the address. EVERY other active enrollment to the bounced address (another template of this
+  // customer, anyone else's) is ended exactly as the webhook's hard-bounce cancel would end it: a retry does not skip that cancel
+  // for them, so a service drip is never repointed to an address the extractor rejected.
   await client('automation_enrollments')
-    .where({ customer_id: found.customerId, status: 'active' })
+    .where({ status: 'active' })
     .whereNot({ id: enrollment.id })
     .whereRaw('LOWER(email) = ?', [bounced])
-    .whereRaw("COALESCE(metadata->>'recipient_role', '') = ''")
     .update({
-      email: found.other,
-      metadata: client.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [RETRY_PROVENANCE_KEY]: found.other })]),
+      status: 'cancelled',
+      next_send_at: null,
+      completed_at: new Date(),
+      metadata: client.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('hard_bounce')]),
       updated_at: new Date(),
     });
   logger.info(`[call-email-spelling-retry] automation step re-queued for customer ${found.customerId} to the other spelling`);
@@ -501,7 +539,7 @@ async function claimInFlight({ customerId, bounced }, client) {
 
 /**
  * A terminal cancel of a send (automation-runner.js blockSendAndCancelEnrollment) for an enrollment carrying this retry address:
- * the still-`resending` claim is skipped with the cancel reason, claim row locked first, which releases the sibling enrollments
+ * the still-`resending` claim is skipped with the cancel reason, claim row locked first, which releases every provenance enrollment
  * and the provenance. A claim already settled is left alone.
  */
 async function abandonRetry({ customerId, retryEmail, reason }, client = db) {
@@ -627,5 +665,5 @@ async function commitDeliveredRetry({ sendRow }, client) {
 
 module.exports = {
   onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, gateLive,
-  findRetrySendByCustomArg, adoptRetrySendMessageId, handedOffRetrySend, SEND_ID_ARG, retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY, RETRY_STEP_KEY,
+  findRetrySendByCustomArg, adoptRetrySendMessageId, handedOffRetrySend, SEND_ID_ARG, retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY, RETRY_STEP_KEY, RETRY_TEMPLATE_KEYS, inCallEpisode,
 };

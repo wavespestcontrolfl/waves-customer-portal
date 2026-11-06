@@ -129,13 +129,13 @@ async function activeAutomationSuppressionFor(template, email, database = db) {
 async function retryStopVerdict(enrollment, recipient) {
   const marked = String(enrollmentMetadata(enrollment).spelling_retry_email || '').trim().toLowerCase();
   if (!marked || String(recipient || '').trim().toLowerCase() !== marked) return null;
-  return require('./call-email-spelling-retry').retrySendVerdict({ customerId: enrollment.customer_id, retryEmail: recipient });
+  return require('./call-email-spelling-retry').retrySendVerdict({ customerId: enrollment.customer_id, retryEmail: recipient, enrollment });
 }
 
 // null = the live state (claim, customer, enrollments, re-read in the transaction of the stop) says the send is fine after all, e.g.
 // a delivery committed the claim since this runner read the enrollment: the caller then sends normally and nothing is cancelled.
 async function blockStoppedRetry({ enrollment, sendId, recipient, verdict: asked }) {
-  const stop = await require('./call-email-spelling-retry').stopRetry({ customerId: enrollment.customer_id, retryEmail: recipient, reason: asked });
+  const stop = await require('./call-email-spelling-retry').stopRetry({ customerId: enrollment.customer_id, retryEmail: recipient, reason: asked, enrollment });
   if (!stop.stopped) return null;
   const verdict = stop.reason;
   if (verdict === 'email_changed') {
@@ -151,7 +151,7 @@ async function blockStoppedRetry({ enrollment, sendId, recipient, verdict: asked
 // THE terminal cancel of a send in the runner: every pre-send check that ends an enrollment (a suppressed address, no termite
 // bond, an accepted estimate, a contact with email off and no holder address, a refused payment-failed step, a stopped call-spelling
 // retry) funnels here. An enrollment carrying call-spelling retry provenance is the retry's: its still-`resending` claim is settled
-// `skipped` with the cancel reason first (applySettlement releases the sibling enrollments and the provenance), so a blocked send
+// `skipped` with the cancel reason first (applySettlement releases every provenance enrollment and the provenance), so a blocked send
 // never leaves the claim in flight. Genuinely deferred sends (holds, quiet hours, lock skips, not due) never reach this function.
 async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason }) {
   await db('automation_step_sends').where({ id: sendId }).update({

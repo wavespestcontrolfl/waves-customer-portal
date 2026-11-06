@@ -59,9 +59,27 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   let NotificationService;
   let ctx;
   const priorGate = process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
-  const created = { customers: [], templates: [] };
+  const created = { customers: [], templates: [], leads: [] };
 
-  beforeAll(() => {
+  // The retry drip is the template KEY `new_lead` (RETRY_TEMPLATE_KEYS), a newsletter-group template. The seeded template keeps its row;
+  // its steps are swapped for two synthetic ones for the run and restored afterwards (every test uses its own customer).
+  let seededNewLeadSteps = [];
+  async function installNewLeadFixture() {
+    seededNewLeadSteps = await db('automation_steps').where({ template_key: 'new_lead' });
+    await db('automation_steps').where({ template_key: 'new_lead' }).del();
+    for (const order of [1, 2]) {
+      await db('automation_steps').insert({
+        template_key: 'new_lead', step_order: order, delay_hours: 0, subject: `Step ${order}`, html_body: `<p>Hello {{first_name}} ${order}</p>`, text_body: `Hello ${order}`,
+      });
+    }
+  }
+  async function restoreNewLeadFixture() {
+    await db('automation_enrollments').where({ template_key: 'new_lead' }).del();
+    await db('automation_steps').where({ template_key: 'new_lead' }).del();
+    if (seededNewLeadSteps.length) await db('automation_steps').insert(seededNewLeadSteps);
+  }
+
+  beforeAll(async () => {
     db = require('../models/db');
     webhook = require('../routes/webhooks-sendgrid');
     runner = require('../services/automation-runner');
@@ -70,6 +88,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     bounceRescue = require('../services/email-bounce-rescue');
     reverify = require('../services/email-bounce-reverify');
     NotificationService = require('../services/notification-service');
+    await installNewLeadFixture();
   });
 
   async function cleanup() {
@@ -84,18 +103,24 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
       await db('customers').where({ id }).del();
     }
     for (const key of created.templates) await db('automation_templates').where({ key }).del();
+    for (const id of created.leads) await db('leads').where({ id }).del();
+    created.leads = [];
     created.customers = [];
     created.templates = [];
     await db('email_suppressions').whereIn('email', [BOUNCED, OTHER, 'jon.doe@gmail.com', 'jondoe@gmail.com']).del();
     await db('sendgrid_webhook_events').where('event_id', 'like', 'ev-%').del();
   }
 
-  afterEach(cleanup);
+  afterEach(async () => {
+    require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.forEach((k) => { if (k !== 'new_lead') require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.delete(k); });
+    await cleanup();
+  });
 
   afterAll(async () => {
     if (priorGate === undefined) delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
     else process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = priorGate;
     await cleanup();
+    await restoreNewLeadFixture();
     await db.destroy();
   });
 
@@ -116,14 +141,17 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   }
 
   // Two enabled steps with no delay. `sent` = how many the enrollment already passed (the runner sends, then the bounce lands).
-  async function seedEnrollment({ asm = 'service', sent = 1, status = 'active', email = BOUNCED, role = null, customerId, templateKey = null } = {}) {
-    // templateKey: reuse a seeded template (its single enabled step) so its own pre-send checks (estimate accepted, termite bond) apply.
-    const key = templateKey || `retry_${randomUUID().slice(0, 8)}`;
+  async function seedEnrollment({ asm = 'service', sent = 1, status = 'active', email = BOUNCED, role = null, customerId, templateKey = null, primary = false } = {}) {
+    // primary: the retry drip itself (template key `new_lead`, the fixture's two steps). templateKey: reuse another seeded template
+    // (its single enabled step) so its own pre-send checks (estimate accepted, termite bond) apply. Neither: a synthetic other
+    // template (a sibling drip of the same customer).
+    const key = templateKey || (primary ? 'new_lead' : `retry_${randomUUID().slice(0, 8)}`);
+    const reuse = !!(templateKey || primary);
     const steps = [];
-    if (templateKey) steps.push(...await db('automation_steps').where({ template_key: key, enabled: true }).orderBy('step_order'));
+    if (reuse) steps.push(...await db('automation_steps').where({ template_key: key, enabled: true }).orderBy('step_order'));
     else await db('automation_templates').insert({ key, name: 'Synthetic lead welcome', asm_group: asm, enabled: true, trigger_type: 'manual' });
-    if (!templateKey) created.templates.push(key);
-    for (const order of templateKey ? [] : [1, 2]) {
+    if (!reuse) created.templates.push(key);
+    for (const order of reuse ? [] : [1, 2]) {
       const [step] = await db('automation_steps').insert({
         template_key: key, step_order: order, delay_hours: 0, subject: `Step ${order}`, html_body: `<p>Hello {{first_name}} ${order}</p>`, text_body: `Hello ${order}`,
       }).returning('*');
@@ -152,10 +180,22 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     return { key, steps, enrollment, send, last };
   }
 
+  // A stray enrollment of the same customer that carries retry provenance (the way the old sibling-follow left one). The webhook now
+  // ends every other enrollment at the bounced address instead, so these are built AFTER the bounce on purpose: they exercise the
+  // release, binding and verdict machinery (and the allowlist, which a stray of another template must pass to be tested at all).
+  async function followingSibling() {
+    const seeded = await seedEnrollment({ customerId: ctx.customerId, sent: 0, email: OTHER });
+    require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.add(seeded.key);
+    await db('automation_enrollments').where({ id: seeded.enrollment.id }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spelling_retry_email: OTHER })]),
+    });
+    return seeded;
+  }
+
   async function setup(opts = {}) {
     const customerId = await seedCustomer(opts.customerEmail || BOUNCED);
     const callId = opts.call === false ? null : await seedCall(opts.callCustomerId || customerId, opts.call || {});
-    const seeded = await seedEnrollment({ ...opts, customerId });
+    const seeded = await seedEnrollment({ ...opts, customerId, primary: !opts.templateKey && opts.primary !== false });
     return { customerId, callId, ...seeded };
   }
 
@@ -180,7 +220,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
     expect(await ledger(ctx.customerId)).toEqual([]);
     expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
-    expect(bounceRescue.rescueBouncedAddress).toHaveBeenCalledTimes(1);
+    // new_lead is a newsletter-group template: today's path never runs the contact-rewriting rescue for it.
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
   });
 
   test('a settled other spelling: the enrollment is repointed and the same step is sent again once; no cancel, no alert, no rescue, no card', async () => {
@@ -228,12 +269,19 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'completed' });
   });
 
-  test('the customer\'s other live enrollment to the same address follows it (no step re-sent for it)', async () => {
+  test('any OTHER active enrollment to the bounced address is ended as a hard bounce would end it (a service drip is never repointed)', async () => {
     ctx = await setup({ sent: 1 });
     const second = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    const strangers = await seedCustomer(BOUNCED);
+    const third = await seedEnrollment({ customerId: strangers, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
     await flush();
-    expect(await enrollmentRow(second.enrollment.id)).toMatchObject({ status: 'active', email: OTHER, current_step: 0 });
+    for (const other of [second, third]) {
+      expect(await enrollmentRow(other.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
+      expect((await enrollmentRow(other.enrollment.id)).metadata.cancel_reason).toBe('hard_bounce');
+      expect((await enrollmentRow(other.enrollment.id)).metadata.spelling_retry_email).toBeUndefined();
+    }
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'active', email: OTHER });
   });
 
   test('delivered to the other spelling: the customer email is replaced through the fanout, the row is committed, one audit row is written, no bell', async () => {
@@ -320,7 +368,10 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     ['the call belongs to another customer', { callOther: true }],
     ['the other spelling is suppressed', { suppressOther: true }],
     ['another customer already holds the other spelling', { ownedByOther: true }],
-    ['the template is a marketing-stream (newsletter) automation', { asm: 'newsletter' }],
+    ['the template is not the allowlisted drip (a service-group treatment / renewal template)', { primary: false, asm: 'service' }],
+    ['the template is not the allowlisted drip (another newsletter-group template)', { primary: false, asm: 'newsletter' }],
+    ['the new_lead enrollment is older than the call', { olderEnrollment: true }],
+    ['the new_lead enrollment\'s lead belongs to another call', { leadOtherCall: true }],
     ['the step is addressed to an on-location contact', { role: 'service_contact_1' }],
     ['the customer no longer has the bounced address as primary email', { customerEmail: 'jonny.doe@example.com' }],
     ['the enrollment is not linked to a customer', { unlinked: true }],
@@ -337,13 +388,24 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     }
     if (opts.ownedByOther) await seedCustomer(OTHER);
     if (opts.unlinked) await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ customer_id: null });
+    if (opts.olderEnrollment) {
+      await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ enrolled_at: new Date(Date.now() - 2 * 86400 * 1000) });
+    }
+    if (opts.leadOtherCall) {
+      const [lead] = await db('leads').insert({ twilio_call_sid: `CA-other-${randomUUID().slice(0, 8)}` }).returning('id');
+      created.leads.push(lead.id);
+      await db('call_log').where({ id: ctx.callId }).update({ twilio_call_sid: `CA-this-${randomUUID().slice(0, 8)}` });
+      await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ lead_id: lead.id })]),
+      });
+    }
     await webhook.handleEvent(bounce(ctx.send));
     await flush();
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email });
     expect(await ledger(ctx.customerId)).toEqual([]);
     expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
-    // The rescue stays withheld for marketing-stream automations, as before.
-    expect(bounceRescue.rescueBouncedAddress).toHaveBeenCalledTimes(opts.asm === 'newsletter' ? 0 : 1);
+    // The rescue runs only for a service-group template; new_lead and every marketing-stream template never rescue (as before).
+    expect(bounceRescue.rescueBouncedAddress).toHaveBeenCalledTimes(opts.primary === false && (opts.asm || 'service') === 'service' ? 1 : 0);
   });
 
   test('never twice: a second bounce of the same customer + address starts nothing', async () => {
@@ -392,8 +454,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('gate switched off: a repointed sibling enrollment is stopped too (whichever is reached first ends both)', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'active', email: OTHER });
     delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
 
@@ -554,8 +616,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('a sibling repointed without a re-send never binds or settles the claim', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await runner.sendStep(sibling.enrollment.id); // the sibling sends ITS first step to the retry address
     expect((await ledger(ctx.customerId))[0].retry_send_id).toBeNull();
     const siblingSend = await retrySendOf(sibling.enrollment.id, 'sibling-send-1');
@@ -594,8 +656,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('automation: a provider failure of a send that is NOT the bound retry send leaves the claim alone', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     sendgrid.sendOne.mockRejectedValueOnce(new Error('provider down'));
     await runner.sendStep(sibling.enrollment.id); // the sibling's own first step, never bound
     expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: null });
@@ -606,8 +668,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('email changed by hand before the queued retry step: enrollments are retargeted to the new email, provenance cleared, nothing goes to the retry address', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await db('customers').where({ id: ctx.customerId }).update({ email: 'jonny.doe@example.com' });
 
     const first = await runner.sendStep(ctx.enrollment.id);
@@ -627,8 +689,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('email changed by hand between the retry send and its delivery: the commit is rejected and the sibling follows the new email', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await runner.sendStep(ctx.enrollment.id);
     await retrySendOf(ctx.enrollment.id, 'changed-1');
     await db('customers').where({ id: ctx.customerId }).update({ email: 'jonny.doe@example.com' });
@@ -644,8 +706,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('owned by another customer at the commit: the commit is rejected and every provenance enrollment is cancelled like a hard bounce', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await runner.sendStep(ctx.enrollment.id);
     await retrySendOf(ctx.enrollment.id, 'owned-1');
     await seedCustomer(OTHER); // someone else claimed the address after the send
@@ -666,8 +728,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     ['suppressed', async () => { await db('email_suppressions').insert({ email: OTHER, status: 'active', suppression_type: 'bounce', source: 'test', suppressed_at: new Date() }); }],
   ])('%s found right before the queued retry send: nothing is sent, the claim is skipped, every provenance enrollment is cancelled', async (reason, makeProblem) => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await makeProblem();
 
     await runner.sendStep(ctx.enrollment.id);
@@ -693,8 +755,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('the other spelling bounces too: a sibling still pointed at it is cancelled and loses its provenance', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await runner.sendStep(ctx.enrollment.id);
     await retrySendOf(ctx.enrollment.id, 'retry-bounced-2');
     await webhook.handleEvent(bounce({ sendgrid_message_id: 'retry-bounced-2' }, OTHER));
@@ -707,8 +769,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   // ── A failed bind never dispatches (P1-F) ─────────────────────────────────────────────────────────────────────────────
   test('the process stopped after the bind committed and before the dispatch: the next tick sends nothing unbound, the claim and enrollments end cleanly', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     // Simulate the dead process: the first retry send row exists, bound to the claim, queued, never dispatched.
     const [orphan] = await db('automation_step_sends').insert({
       enrollment_id: ctx.enrollment.id, step_id: ctx.last.id, step_order: 1, email: OTHER, status: 'queued',
@@ -753,8 +815,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     process.env.GATE_CALL_EMAIL_CHECKS = 'true';
     try {
       ctx = await setup({ sent: 1 });
-      const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
       await webhook.handleEvent(bounce(ctx.send));
+      const sibling = await followingSibling();
       await runner.sendStep(ctx.enrollment.id);
       await retrySendOf(ctx.enrollment.id, 'dead-domain-1');
       jest.clearAllMocks();
@@ -970,7 +1032,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     await webhook.handleEvent(bounce(stray, BOUNCED));
     await flush();
     expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
-    expect(bounceRescue.rescueBouncedAddress).toHaveBeenCalledTimes(1);
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled(); // new_lead is newsletter-group: no rescue, as before
   });
 
   // ── A terminal cancel of a provenance send settles its claim; a defer keeps it; a stale claim stops owning anything (P1-M) ──────
@@ -978,9 +1040,11 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     ['estimate_accepted', 'estimate_sent', async (id) => { await db('estimates').insert({ customer_id: id, customer_email: BOUNCED, accepted_at: new Date(Date.now() + 5000) }); }],
     ['not_termite_bond', 'service_renewal', async () => {}],
   ])('a pre-send check cancels the retry (%s): the bound claim is skipped with that reason and the sibling is released', async (reason, templateKey, makeCause) => {
+    // These pre-send checks belong to other templates: allowlist that one for this test so the terminal-cancel chokepoint is reached.
+    require('../services/call-email-spelling-retry').RETRY_TEMPLATE_KEYS.add(templateKey);
     ctx = await setup({ sent: 1, templateKey });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await makeCause(ctx.customerId);
 
     await runner.sendStep(ctx.enrollment.id);
@@ -1004,8 +1068,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('a genuinely deferred retry send (held at the provider boundary) keeps its claim resending and the enrollments live, then sends on the next tick', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     const prefs = require('../services/contact-notification-prefs');
     const spy = jest.spyOn(prefs, 'rerouteForContactEmailOptOut')
       .mockImplementationOnce(async (_c, email) => ({ email, rerouted: false })) // the early check
@@ -1033,8 +1097,8 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
 
   test('a stale claim (older than 72 h, still resending) no longer owns a bounce: today\'s path, and the claim fails as stale', async () => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await ageClaim(ctx.customerId, 80);
     const stray = await strayAutomationSend(sibling.enrollment.id, sibling.steps[0].id, 'stale-1', BOUNCED);
     jest.clearAllMocks();
@@ -1077,9 +1141,9 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     }],
   ])('delivery after the customer was %s: nothing is written, the claim is skipped as customer_gone, the enrollments are released', async (_label, retire) => {
     ctx = await setup({ sent: 1 });
-    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
     await db('estimates').insert({ customer_id: ctx.customerId, customer_email: BOUNCED });
     await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
     await runner.sendStep(ctx.enrollment.id);
     await retrySendOf(ctx.enrollment.id, 'gone-1');
     await retire(ctx.customerId);
@@ -1705,6 +1769,71 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(row).toMatchObject({ status: 'active' });
     expect(row.metadata[STEP_MARKER]).toBeUndefined();
     expect(row.metadata.spelling_retry_email).toBeUndefined();
+  });
+
+  // ── Exact template allowlist + the call's episode (security review P2) ─────────────────────────────────────────────────
+  test('the retry drip is the template KEY new_lead (a newsletter-group template): bounce, suppression of the bounced address only, resend through the newsletter group, delivery commit; no alert, rescue or card', async () => {
+    const svc = require('../services/call-email-spelling-retry');
+    expect([...svc.RETRY_TEMPLATE_KEYS]).toEqual(['new_lead']);
+    ctx = await setup({ sent: 1 });
+    expect((await db('automation_templates').where({ key: ctx.key }).first()).asm_group).toBe('newsletter');
+    await webhook.handleEvent(bounce(ctx.send));
+    await flush();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending' });
+    expect(bounceRecovery.alertBouncedContactAddress).not.toHaveBeenCalled();
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    // The bounce suppresses the bounced address (as today); the retry address stays mailable.
+    expect(await db('email_suppressions').whereRaw('LOWER(email) = ?', [BOUNCED]).where({ status: 'active' })).not.toHaveLength(0);
+    expect(await db('email_suppressions').whereRaw('LOWER(email) = ?', [OTHER]).where({ status: 'active' })).toHaveLength(0);
+    await runner.sendStep(ctx.enrollment.id);
+    const newsletterTemplate = await db('automation_templates').where({ key: ctx.key }).first();
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: OTHER, subject: 'Step 1', asmGroupId: runner.automationAsmGroupId(newsletterTemplate) }));
+    const row = await retryRow();
+    expect(await post([argEvent(row.id, 'ev-nl-1', { sg_message_id: `${row.sendgrid_message_id}.f` })])).toBe(200);
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(OTHER);
+  });
+
+  test('a seeded SERVICE-group template (service_renewal) with a settled spelling gets no retry: today\'s path', async () => {
+    ctx = await setup({ sent: 1, templateKey: 'service_renewal' });
+    expect((await db('automation_templates').where({ key: 'service_renewal' }).first()).asm_group).not.toBe('newsletter');
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ status: 'active', completed_at: null });
+    await webhook.handleEvent(bounce(ctx.send));
+    await flush();
+    expect(await ledger(ctx.customerId)).toEqual([]);
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
+    expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
+  });
+
+  test('send boundary: an enrollment that is not the allowlisted drip of the call\'s episode is stopped, whatever carries the provenance', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    // A stray enrollment of another template pointed at the retry address with provenance: never mailed.
+    const stray = await seedEnrollment({ customerId: ctx.customerId, sent: 0, email: OTHER });
+    await db('automation_enrollments').where({ id: stray.enrollment.id }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spelling_retry_email: OTHER })]),
+    });
+    await runner.sendStep(stray.enrollment.id);
+    expect(sendgrid.sendOne.mock.calls.filter(([a]) => a.to === OTHER)).toHaveLength(0);
+    expect(await enrollmentRow(stray.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'template_not_allowed' });
+  });
+
+  test('send boundary: the allowlisted drip, once it is no longer the call\'s episode, is stopped too', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ enrolled_at: new Date(Date.now() - 2 * 86400 * 1000) });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'template_not_allowed' });
+  });
+
+  test('a reactivated new_lead enrollment (enrolled_at reset) after the call IS the call\'s episode', async () => {
+    ctx = await setup({ sent: 1 });
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ enrolled_at: new Date(Date.now() + 1000) });
+    await webhook.handleEvent(bounce(ctx.send));
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending' });
   });
 
   test('a send sendOne RETURNED (accepted) is never a failure, whatever failed after it', async () => {
