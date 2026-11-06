@@ -3,8 +3,8 @@
 // first one (follow-ups, engagement nudges, extension notices).
 //
 // Owner ask 2026-10-19: attach the estimate PDF to outgoing estimate emails
-// "for customers who can't open the estimate". Gate GATE_ESTIMATE_EMAIL_PDF
-// (plus GATE_ESTIMATE_DOC_PDF). The delivery email builds its own PDF in
+// "for customers who can't open the estimate". Needs GATE_ESTIMATE_DOC_PDF
+// (the attachment is the browser document). The delivery email builds its own PDF in
 // admin-estimates.js (it needs the pre-persist valid-through date); every
 // other estimate email goes through openEstimateEmailPdf below.
 //
@@ -297,8 +297,10 @@ async function estimateInMultiPropertyGroup(estimate, database = db) {
   return !!other;
 }
 
+// The PDF copy is the browser-rendered work-order document, so it rides along
+// only while GATE_ESTIMATE_DOC_PDF is on.
 function pdfGatesOn() {
-  return featureGates.isEnabled('estimateEmailPdf') && featureGates.isEnabled('estimateDocPdf');
+  return featureGates.isEnabled('estimateDocPdf');
 }
 
 // A PDF goes only on an estimate that is open right now: has its link token,
@@ -525,7 +527,7 @@ async function prepareDeliveryPdfCopy({ freshEstimate, sendTo, validThrough = nu
   }
 }
 
-// Whether THIS delivery email carries the PDF copy: both gates on, not a
+// Whether THIS delivery email carries the PDF copy: the document gate on, not a
 // commercial proposal (it keeps its own PDF path), and not a multi-property
 // group (the shared link renders the whole group; the document is one
 // property's). The review preview, the schedule and the send all use this one
